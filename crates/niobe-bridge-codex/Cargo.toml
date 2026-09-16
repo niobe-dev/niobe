@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+[package]
+name = "niobe-bridge-codex"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Drives the official `codex` CLI as a subprocess and translates its output into the shared event model."
+
+[dependencies]
+niobe-core.workspace = true
+
+[lints]
+workspace = true

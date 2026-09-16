@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+[package]
+name = "niobe-ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Token and cost accounting derived from the event stream."
+
+[dependencies]
+niobe-core.workspace = true
+
+[lints]
+workspace = true

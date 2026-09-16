@@ -1,0 +1,30 @@
+ Niobe  Session  Files  Tools  Cost  Options  Help                                no backend attached  theme:CLASSIC F9
+╔════════════════════════ Session ─ niobe ═════════════════════════╗ ╔═════════════════════ Cost ══════════════════════╗
+║                                                                  ║ ║session     tokens in    tokens out  cache read  ║
+║  niobe                                                           ║ ║—           0            0           0           ║
+║  A terminal coding agent that shows you the bill.                ║ ║no tool calls yet                                ║
+║                                                                  ║ ║0 calls · 0 failed · 0 denied · 0 B out          ║
+║  Every token, every decision and every minute of agent time is   ║ ║                                                 ║
+║  visible while it happens, and nothing on screen is a guess.     ║ ║                                                 ║
+║                                                                  ║ ║                                                 ║
+║  No backend is attached yet.                                     ║ ║                                                 ║
+║                                                                  ║ ╚═════════════════════════════════════════════════╝
+║                                                                  ║ ╔═════════════ Parallel ─ 0 running ══════════════╗
+║                                                                  ║ ║no sub-agents                                    ║
+║                                                                  ║ ║0 spawned · peak 0 · 0 done · 0 failed           ║
+║                                                                  ║ ║                                                 ║
+║                                                                  ║ ║                                                 ║
+║                                                                  ║ ╚═════════════════════════════════════════════════╝
+║                                                                  ║ ╔════════════════════ Changes ════════════════════╗
+║                                                                  ║ ║Files                                            ║
+║                                                                  ║ ║—  file attribution not implemented yet          ║
+║                                                                  ║ ║                                                 ║
+║                                                                  ║ ║Decisions ─ 0                                    ║
+║                                                                  ║ ║none recorded                                    ║
+║                                                                  ║ ║                                                 ║
+║──────────────────────────────────────────────────────────────────║ ║                                                 ║
+║>  Ask for a change, or press F1 for help                         ║ ║                                                 ║
+╚══════════════════════════════════════════════════════════════════╝ ╚═════════════════════════════════════════════════╝
+niobe │ no backend attached │ ⎇ main │ 0 tokens
+Enter send · Alt+Enter newline · PgUp/PgDn scrollback · F10 quit
+1Help       2Plan       3Diff       4Undo       5Cost       6Files      7Tools      8Model      9Theme      10Quit

@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/niobe-core",
+    "crates/niobe-ledger",
+    "crates/niobe-tui",
+    "crates/niobe-bridge-claude",
+    "crates/niobe-bridge-codex",
+    "crates/niobe-cli",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/niobe-dev/niobe"
+authors = ["Viacheslav Shynkarenko"]
+
+[workspace.dependencies]
+niobe-core = { path = "crates/niobe-core", version = "0.0.0" }
+niobe-ledger = { path = "crates/niobe-ledger", version = "0.0.0" }
+niobe-tui = { path = "crates/niobe-tui", version = "0.0.0" }
+niobe-bridge-claude = { path = "crates/niobe-bridge-claude", version = "0.0.0" }
+niobe-bridge-codex = { path = "crates/niobe-bridge-codex", version = "0.0.0" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# The TUI stack. `ratatui-textarea` is the composer widget: it is the same
+# editor as `tui-textarea`, maintained by the ratatui org against ratatui 0.30,
+# whereas the upstream crate's latest release still pins ratatui 0.29.
+ratatui = "0.30"
+ratatui-textarea = "0.9"
+unicode-width = "0.2"
+signal-hook = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# Denied in CI with `-D warnings`; kept as warnings locally so a work in
+# progress still compiles.
+todo = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+# Library and binary code propagates errors; `clippy.toml` allows both in
+# tests, where a failed expectation is the point.
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+# The release binary has a 20 MB budget (`cargo xtask size`), so the release
+# profile carries the size settings from the start rather than being tuned
+# once the binary is already too big.
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+# `panic = "abort"` is deliberately NOT set: the terminal must be restored on
+# a panic, and the restore guard is a Drop impl, which only runs while panics
+# unwind.
+panic = "unwind"

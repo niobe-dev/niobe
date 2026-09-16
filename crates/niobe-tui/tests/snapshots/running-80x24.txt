@@ -1,0 +1,24 @@
+ Niobe  Session  Files  Tools  Cost  Options  Help             theme:CLASSIC F9
+╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
+║  manifests                                                                   ║
+║                                                                              ║
+║◆ claude                                                                      ║
+║  Reading catalog/fetch.ts and its callers first. Two call sites, one test    ║
+║  file.                                                                       ║
+║                                                                              ║
+║⚙ Read  catalog/fetch.ts · 7.2 kB out                                         ║
+║                                                                              ║
+║⚙ Edit  catalog/fetch.ts · 640 B out                                          ║
+║                                                                              ║
+║! Bash  npm test -- fetch · failed · 2.0 kB out                               ║
+║                                                                              ║
+║◆ claude                                                                      ║
+║  Etags cached in the LRU; 304s short-circuit. One test still red — the 304   ║
+║  path asserts a body that is no longer sent.                                 ║
+║                                                                              ║
+║──────────────────────────────────────────────────────────────────────────────║
+║>  Ask for a change, or press F1 for help                                     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+example-app │ ⚡  claude · opus-5 │ ⎇ main │ 49k tokens
+Enter send · Alt+Enter newline · PgUp/PgDn scrollback · F10 quit
+1Help   2Plan   3Diff   4Undo   5Cost   6Files  7Tools  8Model  9Theme  10Quit

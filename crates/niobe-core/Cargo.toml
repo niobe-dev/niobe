@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+[package]
+name = "niobe-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The event model, session state and config every backend and every consumer shares."
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+# Only the tests parse a recorded log: the crate itself stays free of a wire
+# format, so whatever persists events can choose its own.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

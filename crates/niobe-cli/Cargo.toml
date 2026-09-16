@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+[package]
+name = "niobe-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Niobe — a terminal coding agent that shows you the bill."
+
+[[bin]]
+name = "niobe"
+path = "src/main.rs"
+
+[dependencies]
+niobe-core.workspace = true
+niobe-ledger.workspace = true
+niobe-tui.workspace = true
+niobe-bridge-claude.workspace = true
+niobe-bridge-codex.workspace = true
+
+[lints]
+workspace = true

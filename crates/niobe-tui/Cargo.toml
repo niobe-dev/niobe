@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+[package]
+name = "niobe-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The terminal UI. Consumes the shared event model and nothing backend-specific."
+
+[dependencies]
+niobe-core.workspace = true
+ratatui.workspace = true
+ratatui-textarea.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
+
+[lints]
+workspace = true
