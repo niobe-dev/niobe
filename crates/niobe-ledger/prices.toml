@@ -1,0 +1,561 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+# The prices Niobe computes API-equivalent costs from.
+#
+# Every rate is in USD per million tokens, as the provider publishes it:
+#
+#   input           input tokens neither read from nor written to the cache
+#   output          output tokens; reasoning tokens are billed at this rate
+#   cache_read      input tokens read from the prompt cache
+#   cache_write     input tokens written to the cache for the default lifetime
+#   cache_write_1h  input tokens written to the cache for an hour, where the
+#                   provider offers it; without it, a record with one-hour
+#                   writes is unpriced
+#
+# A `[model.price.long_context]` table replaces all of those rates for a
+# request whose prompt, cached tokens included, is longer than `above` tokens.
+#
+# `ids` are matched exactly against the model a backend reports. An id that is
+# not listed is unpriced; nothing is inferred from a near match.
+#
+# Each price is in force from its `from` date (UTC) until the next one. That is
+# what lets a session be priced at the rates of the day it ran. A date is the
+# day the price is first known to have applied: the model's release, or the
+# day a change was announced to take effect. A session from before a model's
+# first date is unpriced.
+#
+# To override, put a file of the same shape at ~/.config/niobe/prices.toml
+# ($XDG_CONFIG_HOME/niobe/prices.toml when that is set). Every id it lists
+# replaces that id's whole schedule here.
+
+# Anthropic, the Claude API.
+#
+# https://platform.claude.com/docs/en/about-claude/pricing for the rates,
+# https://platform.claude.com/docs/en/release-notes/overview for the dates they
+# changed on, and each model's page for its release date. The `[1m]` ids are
+# the spelling Claude Code uses for a model with its 1M-token window selected;
+# they are listed only for models whose window is billed at standard rates, or
+# where the long-context rates say what it costs.
+
+# Claude Fable 5.1
+[[model]]
+ids = [
+    "claude-fable-5-1",
+    "claude-fable-5-1[1m]",
+]
+
+[[model.price]]
+from = 2026-09-01
+input = 10.00
+output = 50.00
+cache_read = 0.25
+cache_write = 12.50
+cache_write_1h = 20.00
+
+# Claude Fable 5
+[[model]]
+ids = [
+    "claude-fable-5",
+    "claude-fable-5[1m]",
+]
+
+[[model.price]]
+from = 2026-06-09
+input = 10.00
+output = 50.00
+cache_read = 1.00
+cache_write = 12.50
+cache_write_1h = 20.00
+
+# Claude Opus 5
+[[model]]
+ids = [
+    "claude-opus-5",
+    "claude-opus-5[1m]",
+]
+
+[[model.price]]
+from = 2026-07-24
+input = 5.00
+output = 25.00
+cache_read = 0.50
+cache_write = 6.25
+cache_write_1h = 10.00
+
+# Claude Opus 4.8
+[[model]]
+ids = [
+    "claude-opus-4-8",
+    "claude-opus-4-8[1m]",
+]
+
+[[model.price]]
+from = 2026-05-28
+input = 5.00
+output = 25.00
+cache_read = 0.50
+cache_write = 6.25
+cache_write_1h = 10.00
+
+# Claude Opus 4.7
+[[model]]
+ids = [
+    "claude-opus-4-7",
+    "claude-opus-4-7[1m]",
+]
+
+[[model.price]]
+from = 2026-04-16
+input = 5.00
+output = 25.00
+cache_read = 0.50
+cache_write = 6.25
+cache_write_1h = 10.00
+
+# Claude Opus 4.6. A prompt over 200K tokens was billed at long-context rates until its 1M
+# window came out of beta, at standard pricing, on 13 March 2026.
+[[model]]
+ids = [
+    "claude-opus-4-6",
+    "claude-opus-4-6[1m]",
+]
+
+[[model.price]]
+from = 2026-02-05
+input = 5.00
+output = 25.00
+cache_read = 0.50
+cache_write = 6.25
+cache_write_1h = 10.00
+
+[model.price.long_context]
+above = 200_000
+input = 10.00
+output = 37.50
+cache_read = 1.00
+cache_write = 12.50
+cache_write_1h = 20.00
+
+[[model.price]]
+from = 2026-03-13
+input = 5.00
+output = 25.00
+cache_read = 0.50
+cache_write = 6.25
+cache_write_1h = 10.00
+
+# Claude Opus 4.5
+[[model]]
+ids = [
+    "claude-opus-4-5-20251101",
+    "claude-opus-4-5",
+]
+
+[[model.price]]
+from = 2025-11-24
+input = 5.00
+output = 25.00
+cache_read = 0.50
+cache_write = 6.25
+cache_write_1h = 10.00
+
+# Claude Sonnet 5
+[[model]]
+ids = [
+    "claude-sonnet-5",
+    "claude-sonnet-5[1m]",
+]
+
+[[model.price]]
+from = 2026-06-30
+input = 2.00
+output = 10.00
+cache_read = 0.20
+cache_write = 2.50
+cache_write_1h = 4.00
+
+# Claude Sonnet 4.6. Long-context rates over 200K tokens until 13 March 2026, as for Opus 4.6.
+[[model]]
+ids = [
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-6[1m]",
+]
+
+[[model.price]]
+from = 2026-02-17
+input = 3.00
+output = 15.00
+cache_read = 0.30
+cache_write = 3.75
+cache_write_1h = 6.00
+
+[model.price.long_context]
+above = 200_000
+input = 6.00
+output = 22.50
+cache_read = 0.60
+cache_write = 7.50
+cache_write_1h = 12.00
+
+[[model.price]]
+from = 2026-03-13
+input = 3.00
+output = 15.00
+cache_read = 0.30
+cache_write = 3.75
+cache_write_1h = 6.00
+
+# Claude Sonnet 4.5. A prompt over 200K tokens was possible only in its 1M-context beta, which
+# billed it at long-context rates.
+[[model]]
+ids = [
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-4-5",
+]
+
+[[model.price]]
+from = 2025-09-29
+input = 3.00
+output = 15.00
+cache_read = 0.30
+cache_write = 3.75
+cache_write_1h = 6.00
+
+[model.price.long_context]
+above = 200_000
+input = 6.00
+output = 22.50
+cache_read = 0.60
+cache_write = 7.50
+cache_write_1h = 12.00
+
+# Claude Haiku 4.5
+[[model]]
+ids = [
+    "claude-haiku-4-5-20251001",
+    "claude-haiku-4-5",
+]
+
+[[model.price]]
+from = 2025-10-15
+input = 1.00
+output = 5.00
+cache_read = 0.10
+cache_write = 1.25
+cache_write_1h = 2.00
+
+# Amazon Bedrock, Anthropic models.
+#
+# https://aws.amazon.com/bedrock/pricing/ for the rates, read from AWS's price
+# list for EU (Ireland) and US East (N. Virginia), which agree. A geographic
+# profile (`eu.`, `us.`) routes within a region group and is billed at the
+# global rate plus 10%; a `global.` profile is billed at the global rate. A bare
+# `anthropic.` id is not listed: whether it is billed at the global or the
+# regional rate depends on the endpoint it is sent to, which the id does not
+# say. Profile ids are documented at
+# https://platform.claude.com/docs/en/build-with-claude/claude-on-amazon-bedrock-legacy
+# for models on the InvokeModel integration.
+#
+# The rates of every model below were unchanged in each copy of AWS's price
+# list on record between the model's first appearance in it and September
+# 2026. Opus 4.6 and Sonnet 4.6 start at 13 March 2026, when their 1M window
+# came to standard pricing: what Bedrock billed a long prompt before that is
+# not on record here. Claude Fable 5.1 is not listed: its only regional
+# endpoint is in us-east-1, and no profile id for it is documented.
+
+# Claude Fable 5, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-fable-5",
+    "eu.anthropic.claude-fable-5[1m]",
+    "us.anthropic.claude-fable-5",
+    "us.anthropic.claude-fable-5[1m]",
+]
+
+[[model.price]]
+from = 2026-06-09
+input = 11.00
+output = 55.00
+cache_read = 1.10
+cache_write = 13.75
+cache_write_1h = 22.00
+
+# Claude Opus 5, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-opus-5",
+    "eu.anthropic.claude-opus-5[1m]",
+    "us.anthropic.claude-opus-5",
+    "us.anthropic.claude-opus-5[1m]",
+]
+
+[[model.price]]
+from = 2026-07-24
+input = 5.50
+output = 27.50
+cache_read = 0.55
+cache_write = 6.875
+cache_write_1h = 11.00
+
+# Claude Opus 4.8, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-opus-4-8",
+    "eu.anthropic.claude-opus-4-8[1m]",
+    "us.anthropic.claude-opus-4-8",
+    "us.anthropic.claude-opus-4-8[1m]",
+]
+
+[[model.price]]
+from = 2026-05-28
+input = 5.50
+output = 27.50
+cache_read = 0.55
+cache_write = 6.875
+cache_write_1h = 11.00
+
+# Claude Opus 4.7, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-opus-4-7",
+    "eu.anthropic.claude-opus-4-7[1m]",
+    "us.anthropic.claude-opus-4-7",
+    "us.anthropic.claude-opus-4-7[1m]",
+]
+
+[[model.price]]
+from = 2026-04-16
+input = 5.50
+output = 27.50
+cache_read = 0.55
+cache_write = 6.875
+cache_write_1h = 11.00
+
+# Claude Sonnet 5, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-sonnet-5",
+    "eu.anthropic.claude-sonnet-5[1m]",
+    "us.anthropic.claude-sonnet-5",
+    "us.anthropic.claude-sonnet-5[1m]",
+]
+
+[[model.price]]
+from = 2026-06-30
+input = 2.20
+output = 11.00
+cache_read = 0.22
+cache_write = 2.75
+cache_write_1h = 4.40
+
+# Claude Opus 4.6, global profile
+[[model]]
+ids = [
+    "global.anthropic.claude-opus-4-6-v1",
+    "global.anthropic.claude-opus-4-6-v1[1m]",
+]
+
+[[model.price]]
+from = 2026-03-13
+input = 5.00
+output = 25.00
+cache_read = 0.50
+cache_write = 6.25
+cache_write_1h = 10.00
+
+# Claude Opus 4.6, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-opus-4-6-v1",
+    "eu.anthropic.claude-opus-4-6-v1[1m]",
+    "us.anthropic.claude-opus-4-6-v1",
+    "us.anthropic.claude-opus-4-6-v1[1m]",
+]
+
+[[model.price]]
+from = 2026-03-13
+input = 5.50
+output = 27.50
+cache_read = 0.55
+cache_write = 6.875
+cache_write_1h = 11.00
+
+# Claude Sonnet 4.6, global profile
+[[model]]
+ids = [
+    "global.anthropic.claude-sonnet-4-6",
+    "global.anthropic.claude-sonnet-4-6[1m]",
+]
+
+[[model.price]]
+from = 2026-03-13
+input = 3.00
+output = 15.00
+cache_read = 0.30
+cache_write = 3.75
+cache_write_1h = 6.00
+
+# Claude Sonnet 4.6, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-sonnet-4-6",
+    "eu.anthropic.claude-sonnet-4-6[1m]",
+    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-sonnet-4-6[1m]",
+]
+
+[[model.price]]
+from = 2026-03-13
+input = 3.30
+output = 16.50
+cache_read = 0.33
+cache_write = 4.125
+cache_write_1h = 6.60
+
+# Claude Haiku 4.5, global profile
+[[model]]
+ids = ["global.anthropic.claude-haiku-4-5-20251001-v1:0"]
+
+[[model.price]]
+from = 2025-10-15
+input = 1.00
+output = 5.00
+cache_read = 0.10
+cache_write = 1.25
+cache_write_1h = 2.00
+
+# Claude Haiku 4.5, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "eu.anthropic.claude-haiku-4-5",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.anthropic.claude-haiku-4-5",
+]
+
+[[model.price]]
+from = 2025-10-15
+input = 1.10
+output = 5.50
+cache_read = 0.11
+cache_write = 1.375
+cache_write_1h = 2.20
+
+# OpenAI.
+#
+# https://developers.openai.com/api/docs/pricing for the rates and
+# https://developers.openai.com/api/docs/changelog for the dates they changed on.
+# GPT-5.6 bills a prompt of more than 272K tokens at long-context rates for the
+# whole request, and has no one-hour cache lifetime.
+
+# GPT-5.6 Sol. `gpt-5.6` is the alias that routes to it.
+[[model]]
+ids = [
+    "gpt-5.6-sol",
+    "gpt-5.6",
+]
+
+[[model.price]]
+from = 2026-07-09
+input = 5.00
+output = 30.00
+cache_read = 0.50
+cache_write = 6.25
+
+[model.price.long_context]
+above = 272_000
+input = 10.00
+output = 45.00
+cache_read = 1.00
+cache_write = 12.50
+
+[[model.price]]
+from = 2026-08-21
+input = 4.00
+output = 20.00
+cache_read = 0.40
+cache_write = 5.00
+
+[model.price.long_context]
+above = 272_000
+input = 8.00
+output = 30.00
+cache_read = 0.80
+cache_write = 10.00
+
+# GPT-5.6 Terra
+[[model]]
+ids = ["gpt-5.6-terra"]
+
+[[model.price]]
+from = 2026-07-09
+input = 2.50
+output = 15.00
+cache_read = 0.25
+cache_write = 3.125
+
+[model.price.long_context]
+above = 272_000
+input = 5.00
+output = 22.50
+cache_read = 0.50
+cache_write = 6.25
+
+[[model.price]]
+from = 2026-07-30
+input = 2.00
+output = 12.00
+cache_read = 0.20
+cache_write = 2.50
+
+[model.price.long_context]
+above = 272_000
+input = 4.00
+output = 18.00
+cache_read = 0.40
+cache_write = 5.00
+
+# GPT-5.6 Luna
+[[model]]
+ids = ["gpt-5.6-luna"]
+
+[[model.price]]
+from = 2026-07-09
+input = 1.00
+output = 6.00
+cache_read = 0.10
+cache_write = 1.25
+
+[model.price.long_context]
+above = 272_000
+input = 2.00
+output = 9.00
+cache_read = 0.20
+cache_write = 2.50
+
+[[model.price]]
+from = 2026-07-30
+input = 0.20
+output = 1.20
+cache_read = 0.02
+cache_write = 0.25
+
+[model.price.long_context]
+above = 272_000
+input = 0.40
+output = 1.80
+cache_read = 0.04
+cache_write = 0.50
+
+# GPT-5.3-Codex. Cache writes are not billed apart from input, so they are listed at the
+# input rate. Its prompt is capped at 272K tokens, so it has no long-context rates.
+[[model]]
+ids = ["gpt-5.3-codex"]
+
+[[model.price]]
+from = 2026-02-24
+input = 1.75
+output = 14.00
+cache_read = 0.175
+cache_write = 1.75

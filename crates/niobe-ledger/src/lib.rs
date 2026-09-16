@@ -4,11 +4,24 @@
 //! Token and cost accounting.
 //!
 //! Every number this crate produces is either derived from a `usage` field
-//! reported by a backend or is labelled an estimate. An unknown model is
-//! reported as `unpriced`, never guessed at.
+//! reported by a backend or is labelled with how it was arrived at. An unknown
+//! model is reported as `unpriced`, never guessed at.
 //!
-//! Only [`Provenance`] exists so far: the label every figure will carry. Pricing
-//! and per-call attribution are not implemented yet.
+//! What exists so far is the price table: per-model rates with the date each
+//! came into force, bundled into the binary as `prices.toml` and overridable
+//! by the user, and the API-equivalent cost of a usage record priced against
+//! it. Attributing costs to calls, files and sessions is not implemented yet.
+
+mod date;
+mod error;
+mod parse;
+mod price;
+mod table;
+
+pub use date::Date;
+pub use error::PriceError;
+pub use price::{LongContext, Price, Rate, Rates};
+pub use table::{Cost, FILE_NAME, Origin, PriceTable, Schedule};
 
 /// How a cost figure was arrived at. Carried alongside every number the ledger
 /// reports so that the UI can never present a guess as a measurement.

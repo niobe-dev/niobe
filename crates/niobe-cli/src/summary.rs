@@ -100,6 +100,7 @@ mod tests {
             output: 300,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd,

@@ -141,8 +141,15 @@ pub struct Usage {
     pub output: u64,
     /// Input tokens served from the prompt cache.
     pub cache_read: u64,
-    /// Input tokens written into the prompt cache.
+    /// Input tokens written into the prompt cache, whatever their lifetime.
     pub cache_write: u64,
+    /// Of [`Usage::cache_write`], the tokens written to live for an hour
+    /// rather than the default five minutes. A provider that offers both bills
+    /// the hour at a higher rate, so a cost derived from the total alone would
+    /// be wrong in whichever direction it guessed. Zero where the backend does
+    /// not report the split, and in records written before it was kept.
+    #[serde(default)]
+    pub cache_write_1h: u64,
     /// Reasoning tokens, where the backend reports them separately.
     pub reasoning: u64,
     /// The model these counts were billed against.
@@ -351,11 +358,38 @@ mod tests {
             output: 20,
             cache_read: 30,
             cache_write: 40,
+            cache_write_1h: 0,
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
         };
         assert_eq!(usage.tokens(), 150);
+    }
+
+    #[test]
+    fn one_hour_cache_writes_are_a_share_of_cache_write_not_more_tokens() {
+        let usage = Usage {
+            input: 10,
+            output: 20,
+            cache_read: 30,
+            cache_write: 40,
+            cache_write_1h: 25,
+            reasoning: 50,
+            model: "opus-5".to_owned(),
+            cost_usd: None,
+        };
+        assert_eq!(usage.tokens(), 150);
+    }
+
+    #[test]
+    fn a_usage_record_without_one_hour_writes_reads_them_as_zero() {
+        let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":null}"#;
+        let event: Event = serde_json::from_str(json).expect("a record from before the field");
+        let Event::Usage(usage) = event else {
+            panic!("the record is a usage record: {event:?}");
+        };
+        assert_eq!(usage.cache_write, 4);
+        assert_eq!(usage.cache_write_1h, 0);
     }
 
     #[test]
@@ -365,6 +399,7 @@ mod tests {
             output: 1,
             cache_read: 0,
             cache_write: 0,
+            cache_write_1h: 0,
             reasoning: 0,
             model: "gpt-5-codex".to_owned(),
             cost_usd: None,

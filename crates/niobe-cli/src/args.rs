@@ -21,6 +21,8 @@ pub enum Command {
     Sessions,
     /// List the profiles the config defines, marking the selected one.
     Profiles,
+    /// List the prices in force today, or every price one model has had.
+    Prices(Option<String>),
     /// Fold a JSON Lines event log, for development.
     Replay(PathBuf),
     /// Print the help.
@@ -54,7 +56,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
         | Command::Profiles
         | Command::Help
         | Command::Version => true,
-        Command::Sessions | Command::Replay(_) => false,
+        Command::Sessions | Command::Prices(_) | Command::Replay(_) => false,
     };
     if profile.is_some() && !applies {
         return Err(
@@ -117,6 +119,11 @@ fn command(args: &[&str]) -> Result<Command, String> {
         ["profiles", rest @ ..] => {
             no_more(rest)?;
             Command::Profiles
+        }
+        ["prices"] => Command::Prices(None),
+        ["prices", model, rest @ ..] => {
+            no_more(rest)?;
+            Command::Prices(Some((*model).to_owned()))
         }
         ["replay"] => return Err("`replay` needs a log file".to_owned()),
         ["replay", file, rest @ ..] => {
@@ -186,6 +193,20 @@ mod tests {
             Ok(Command::Replay(PathBuf::from("log.jsonl")))
         );
         assert!(parsed(&["replay"]).is_err());
+    }
+
+    #[test]
+    fn prices_takes_an_optional_model() {
+        assert_eq!(parsed(&["prices"]), Ok(Command::Prices(None)));
+        assert_eq!(
+            parsed(&["prices", "claude-opus-5"]),
+            Ok(Command::Prices(Some("claude-opus-5".to_owned())))
+        );
+        assert_eq!(
+            parsed(&["prices", "a", "b"]),
+            Err("unexpected argument `b`".to_owned())
+        );
+        assert!(invocation(&["prices", "--profile", "work"]).is_err());
     }
 
     #[test]

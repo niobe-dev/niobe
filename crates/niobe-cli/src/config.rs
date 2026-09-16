@@ -51,11 +51,21 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
 }
 
 /// The user's config file, from the values of `XDG_CONFIG_HOME` and `HOME`.
+pub fn user_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    user_file(xdg_config_home, home, FILE_NAME)
+}
+
+/// The file `name` in the user's Niobe config directory, from the values of
+/// `XDG_CONFIG_HOME` and `HOME`.
 ///
 /// `XDG_CONFIG_HOME` counts only when it is an absolute path, as the XDG base
 /// directory specification says; a relative one would name a different file
-/// in every directory. With neither variable usable there is no user config.
-pub fn user_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+/// in every directory. With neither variable usable there is no user file.
+pub fn user_file(
+    xdg_config_home: Option<OsString>,
+    home: Option<OsString>,
+    name: &str,
+) -> Option<PathBuf> {
     let base = xdg_config_home
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
@@ -64,7 +74,7 @@ pub fn user_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -> O
                 .filter(|dir| dir.is_absolute())
                 .map(|home| home.join(".config"))
         })?;
-    Some(base.join(niobe_core::APP_NAME).join(FILE_NAME))
+    Some(base.join(niobe_core::APP_NAME).join(name))
 }
 
 #[cfg(test)]
@@ -84,6 +94,14 @@ mod tests {
         assert_eq!(
             user_path(None, os("/home/me")),
             Some(PathBuf::from("/home/me/.config/niobe/config.toml"))
+        );
+    }
+
+    #[test]
+    fn other_user_files_sit_beside_the_config() {
+        assert_eq!(
+            user_file(os("/xdg"), None, "prices.toml"),
+            Some(PathBuf::from("/xdg/niobe/prices.toml"))
         );
     }
 

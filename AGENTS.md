@@ -38,7 +38,11 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   every backend produces into; `session.rs` is `SessionState`, the fold every consumer derives its
   numbers from. Depends on no other workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
-  carries (`Measured`, `ApiEquivalent`, `Unpriced`).
+  carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
+  per-model rates, each dated from the day it took effect, with the published source of every
+  number in its comments; `parse.rs` walks it by hand like the config, `table.rs` looks a model
+  up by exact id on a day and prices a usage record against it. `tests/prices.rs` checks the
+  table against costs computed by hand.
 - **`crates/niobe-config/`** — the config: profiles, each a backend plus the environment,
   arguments and credential refresh it runs with. `parse.rs` walks the spanned TOML document by
   hand so that an invalid file is reported as its key and line; `lib.rs` layers a repository's

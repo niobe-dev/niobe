@@ -408,3 +408,168 @@ fn where_no_config_defines_a_profile_the_list_says_where_it_looked() {
         "{out}"
     );
 }
+
+/// A user config directory holding `prices` as its price file.
+fn with_user_prices(prices: &str) -> Configured {
+    let setup = Configured::new("", "");
+    std::fs::create_dir(setup.user.path().join("niobe")).expect("a niobe config directory");
+    std::fs::write(user_prices(&setup), prices).expect("the price file is written");
+    setup
+}
+
+fn user_prices(setup: &Configured) -> PathBuf {
+    setup.user.path().join("niobe").join("prices.toml")
+}
+
+/// The whitespace-separated fields of the row of `niobe prices` for `model`.
+fn price_row<'a>(listing: &'a str, model: &str) -> Vec<&'a str> {
+    listing
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .find(|fields| fields.first() == Some(&model))
+        .unwrap_or_else(|| panic!("no row for {model}: {listing}"))
+}
+
+#[test]
+fn the_price_list_shows_the_bundled_rates_in_force_today() {
+    let setup = Configured::new("", "");
+    let output = setup.run(&["prices"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        out.starts_with("USD per million tokens, in force on "),
+        "{out}"
+    );
+    assert_eq!(
+        price_row(&out, "eu.anthropic.claude-sonnet-5[1m]"),
+        [
+            "eu.anthropic.claude-sonnet-5[1m]",
+            "2.20",
+            "11.00",
+            "0.22",
+            "2.75",
+            "4.40",
+            "2026-06-30",
+            "bundled",
+            "prices.toml"
+        ]
+    );
+    assert_eq!(
+        price_row(&out, "gpt-5.3-codex"),
+        [
+            "gpt-5.3-codex",
+            "1.75",
+            "14.00",
+            "0.175",
+            "1.75",
+            "—",
+            "2026-02-24",
+            "bundled",
+            "prices.toml"
+        ]
+    );
+}
+
+#[test]
+fn a_models_price_history_is_listed_with_the_date_each_price_took_effect() {
+    let setup = Configured::new("", "");
+    let output = setup.run(&["prices", "gpt-5.6-terra"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "\
+gpt-5.6-terra, USD per million tokens, from bundled prices.toml
+SINCE                        INPUT  OUTPUT  CACHE READ  CACHE WRITE  1H WRITE
+2026-07-09                    2.50   15.00        0.25        3.125         —
+  prompt over 272000 tokens   5.00   22.50        0.50         6.25         —
+2026-07-30                    2.00   12.00        0.20         2.50         —
+  prompt over 272000 tokens   4.00   18.00        0.40         5.00         —
+"
+    );
+}
+
+#[test]
+fn a_model_no_price_table_lists_is_unpriced() {
+    let setup = Configured::new("", "");
+    let output = setup.run(&["prices", "codex-auto-review"]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "niobe: `codex-auto-review` is unpriced: neither the bundled price table nor {} lists it\n",
+            user_prices(&setup).display()
+        )
+    );
+}
+
+#[test]
+fn a_user_price_file_replaces_the_schedule_of_each_model_it_lists() {
+    let setup = with_user_prices(
+        "[[model]]\nids = [\"claude-opus-5\", \"my-proxy-model\"]\n\n[[model.price]]\nfrom = 2026-01-01\ninput = 4\noutput = 20\ncache_read = 0.4\ncache_write = 5\n",
+    );
+    let path = user_prices(&setup).display().to_string();
+
+    let output = setup.run(&["prices", "claude-opus-5"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "\
+claude-opus-5, USD per million tokens, from {path}
+SINCE       INPUT  OUTPUT  CACHE READ  CACHE WRITE  1H WRITE
+2026-01-01   4.00   20.00        0.40         5.00         —
+"
+        )
+    );
+
+    let listing = stdout(&setup.run(&["prices"]));
+    assert_eq!(
+        price_row(&listing, "my-proxy-model"),
+        [
+            "my-proxy-model",
+            "4.00",
+            "20.00",
+            "0.40",
+            "5.00",
+            "—",
+            "2026-01-01",
+            path.as_str()
+        ]
+    );
+    assert_eq!(
+        price_row(&listing, "claude-opus-5[1m]")[1..],
+        [
+            "5.00",
+            "25.00",
+            "0.50",
+            "6.25",
+            "10.00",
+            "2026-07-24",
+            "bundled",
+            "prices.toml"
+        ],
+        "an id the file does not list keeps the bundled price"
+    );
+}
+
+#[test]
+fn an_invalid_price_file_errors_with_the_key_and_the_line() {
+    let setup = with_user_prices(
+        "[[model]]\nids = [\"m\"]\n\n[[model.price]]\nfrom = 2026-01-01\ninput = \"4\"\noutput = 20\ncache_read = 0.4\ncache_write = 5\n",
+    );
+    for args in [&["prices"][..], &["prices", "m"]] {
+        let output = setup.run(args);
+        assert!(!output.status.success(), "{args:?}");
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "niobe: {}:6: model[0].price[0].input: expected a number, found a string\n",
+                user_prices(&setup).display()
+            ),
+            "{args:?}"
+        );
+    }
+}

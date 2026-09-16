@@ -4,10 +4,10 @@
 //! The `niobe` binary.
 //!
 //! Opens the shell on a new or a recorded session under a profile from the
-//! config, lists the sessions recorded in a repository and the profiles defined
-//! for it, and folds a JSON Lines event log for development. It is the only
-//! crate that names the shell, the config and the session store together, so it
-//! is where they are joined.
+//! config, lists the sessions recorded in a repository, the profiles defined for
+//! it and the prices costs are computed from, and folds a JSON Lines event log
+//! for development. It is the only crate that names the shell, the config, the
+//! ledger and the session store together, so it is where they are joined.
 
 // The CLI is the one place in the workspace that writes to the terminal
 // directly rather than through the TUI.
@@ -16,6 +16,7 @@
 mod args;
 mod config;
 mod journal;
+mod prices;
 mod profiles;
 mod repo;
 mod sessions;
@@ -24,8 +25,9 @@ mod summary;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
@@ -58,6 +60,7 @@ fn run(Invocation { command, profile }: Invocation) -> Result<(), String> {
         Command::Resume(session) => resume(session, profile),
         Command::Sessions => list_sessions(),
         Command::Profiles => list_profiles(profile),
+        Command::Prices(model) => list_prices(model.as_deref()),
         Command::Replay(log) => replay(&log),
         Command::Help => {
             print_help();
@@ -170,6 +173,22 @@ fn list_profiles(profile: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Prints the prices in force today, or every price `model` has had.
+fn list_prices(model: Option<&str>) -> Result<(), String> {
+    let loaded = prices::load()?;
+    let lines = match model {
+        None => prices::table(&loaded.table, Date::of(SystemTime::now())),
+        Some(model) => match loaded.table.schedule(model) {
+            Some(schedule) => prices::schedule(model, schedule),
+            None => return Err(loaded.unpriced(model)),
+        },
+    };
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 /// An empty shell for `cwd`, under the profile `requested` names or the
 /// config's default.
 fn new_app(cwd: &Path, root: &Path, requested: Option<&str>) -> Result<App, String> {
@@ -236,6 +255,7 @@ USAGE:
     niobe --resume <id>    Open the shell on a recorded session and continue it
     niobe sessions         List the sessions recorded in this repository
     niobe profiles         List the profiles the config defines, the selected one marked
+    niobe prices [model]   List the prices in force today, or every price a model has had
     niobe replay <file>    Fold a JSON Lines event log into the shell (development)
 
 OPTIONS:
@@ -261,6 +281,14 @@ PROFILES:
     when that is set); a repository's is .niobe/config.toml at its root, and
     overrides the user's, replacing any profile of the same name whole. The
     env of a profile is passed on exactly as written.
+
+PRICES:
+    Costs are computed from a price table bundled into niobe: USD per million
+    tokens for each model id, each price dated from the day it took effect, so
+    a session is priced at the rates of the day it ran. A model id the table
+    does not list is unpriced; nothing is guessed from a similar id.
+    ~/.config/niobe/prices.toml ($XDG_CONFIG_HOME/niobe when that is set) has
+    the same shape and replaces the whole price history of every id it lists.
 
 SESSIONS:
     Every session is recorded, append-only, into .niobe/sessions.db at the root
