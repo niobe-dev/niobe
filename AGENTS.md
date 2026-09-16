@@ -205,7 +205,10 @@ Where tests live:
   - `niobe-tui/tests/shell.rs` draws the shell into a `TestBackend` and compares it with the
     pictures in `tests/snapshots/`. After an intentional layout change, regenerate with
     `UPDATE_SNAPSHOTS=1 cargo test -p niobe-tui --test shell` and **read the diff** of the
-    snapshot files before accepting it.
+    snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
+  - `niobe-tui/tests/frame_budget.rs` times a 200×60 redraw against a 16 ms budget. It is a
+    test binary of its own so that no parallel test shares its cores, and it asserts the median
+    of 31 frames so that a frame the scheduler interrupted cannot fail it.
 - **Terminal restoration** cannot be fully proven in a unit test. After touching `terminal.rs` or
   `run.rs`, check a clean quit, a SIGTERM and a panic in a real pty (for example with `script`).
 
@@ -293,4 +296,5 @@ green, and the real mismatch surfaces a round later. Before editing a line to fi
   `cargo tree -p niobe-cli -e normal` before tuning the profile.
 - **Timing tests flake**: the replay and frame budgets are generous for debug builds; a failure
   on a loaded machine should be re-run once before being treated as a regression, then
-  investigated.
+  investigated. A timing test that shares a binary with tests that draw or replay is timing them
+  too: give it a binary of its own, as `frame_budget.rs` has.
