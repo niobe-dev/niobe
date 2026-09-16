@@ -3,98 +3,191 @@
 
 //! The `niobe` binary.
 //!
-//! The entry point that opens the shell. It understands `--help` and
-//! `--version` and nothing else.
+//! Opens the shell on a new or a recorded session, lists the sessions recorded
+//! in a repository, and folds a JSON Lines event log for development. It is the
+//! only crate that names both the shell and the session store, so it is where
+//! the two are joined.
 
 // The CLI is the one place in the workspace that writes to the terminal
 // directly rather than through the TUI.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use std::io::IsTerminal;
-use std::path::Path;
-use std::process::ExitCode;
+mod args;
+mod journal;
+mod repo;
+mod sessions;
+mod summary;
 
-use niobe_tui::app::Repo;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
+
+use niobe_store::{Recorder, SessionId, read_log};
+use niobe_tui::app::App;
+use niobe_tui::journal::Unrecorded;
+
+use crate::args::Command;
+use crate::journal::StoreJournal;
 
 fn main() -> ExitCode {
-    let arg = std::env::args().nth(1);
-    match arg.as_deref() {
-        Some("--version" | "-V") => {
-            println!("{} {}", niobe_core::APP_NAME, niobe_core::VERSION);
-            ExitCode::SUCCESS
-        }
-        Some("--help" | "-h") => {
-            print_help();
-            ExitCode::SUCCESS
-        }
-        None => shell(),
-        Some(other) => {
-            eprintln!("niobe: unknown argument `{other}`");
-            print_help();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args::parse(&args) {
+        Ok(command) => run(command),
+        Err(usage) => Err(format!("{usage}\nRun `niobe --help` for usage.")),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            // The TUI restores the terminal before returning, so this reaches a
+            // usable screen.
+            eprintln!("niobe: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
-/// Opens the shell.
+fn run(command: Command) -> Result<(), String> {
+    match command {
+        Command::Shell => shell(),
+        Command::Resume(session) => resume(session),
+        Command::Sessions => list_sessions(),
+        Command::Replay(log) => replay(&log),
+        Command::Help => {
+            print_help();
+            Ok(())
+        }
+        Command::Version => {
+            println!("{} {}", niobe_core::APP_NAME, niobe_core::VERSION);
+            Ok(())
+        }
+    }
+}
+
+/// Opens the shell on a new session, recorded into this repository's store.
 ///
 /// Without a terminal there is nothing to draw into and raw mode would fail, so
 /// a piped or redirected run prints the help instead of an errno.
-fn shell() -> ExitCode {
+fn shell() -> Result<(), String> {
     if !std::io::stdout().is_terminal() {
         print_help();
-        return ExitCode::SUCCESS;
+        return Ok(());
     }
 
-    match niobe_tui::run(repo()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            // The TUI restores the terminal before returning, so this reaches a
-            // usable screen.
-            eprintln!("niobe: {e}");
-            ExitCode::FAILURE
-        }
+    let cwd = cwd()?;
+    let root = repo::root(&cwd);
+    let mut journal = StoreJournal::Pending(root.clone());
+    niobe_tui::run(App::new(repo::describe(&cwd)), &mut journal).map_err(|e| e.to_string())?;
+
+    if let Some(session) = journal.session() {
+        println!(
+            "session {session} saved in {} — `niobe --resume {session}` continues it",
+            repo::store_path(&root).display()
+        );
+    }
+    Ok(())
+}
+
+/// Opens the shell on a recorded session and keeps recording into it. Without
+/// a terminal, prints what the session folds to.
+fn resume(session: SessionId) -> Result<(), String> {
+    let cwd = cwd()?;
+    let root = repo::root(&cwd);
+
+    let started = Instant::now();
+    let store = repo::open_existing_store(&root)?.ok_or_else(|| {
+        format!(
+            "no session {session}: nothing has been recorded in {}",
+            root.display()
+        )
+    })?;
+    let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
+    let stored = recorder
+        .store()
+        .events(session)
+        .map_err(|e| e.to_string())?;
+    let mut app = App::new(repo::describe(&cwd));
+    app.extend(stored.iter().map(|s| &s.event));
+    let elapsed = started.elapsed();
+
+    if !std::io::stdout().is_terminal() {
+        print_summary(
+            &format!(
+                "session {session} · {} events · loaded and folded in {}",
+                stored.len(),
+                millis(elapsed)
+            ),
+            &app,
+        );
+        return Ok(());
+    }
+
+    let mut journal = StoreJournal::Open(recorder);
+    niobe_tui::run(app, &mut journal).map_err(|e| e.to_string())
+}
+
+/// Prints the sessions recorded in this repository, newest first.
+fn list_sessions() -> Result<(), String> {
+    let root = repo::root(&cwd()?);
+    let sessions = match repo::open_existing_store(&root)? {
+        Some(store) => store.sessions().map_err(|e| e.to_string())?,
+        None => Vec::new(),
+    };
+
+    if sessions.is_empty() {
+        println!("no sessions recorded in {}", root.display());
+        return Ok(());
+    }
+    for line in sessions::table(&sessions) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Folds a JSON Lines event log into the shell, for development. Nothing typed
+/// into a replayed log is recorded. Without a terminal, prints the fold.
+fn replay(log: &Path) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(log).map_err(|e| format!("cannot read {}: {e}", log.display()))?;
+
+    let started = Instant::now();
+    let events = read_log(&text).map_err(|e| format!("{}: {e}", log.display()))?;
+    let mut app = App::new(repo::describe(&cwd()?));
+    app.extend(&events);
+    let elapsed = started.elapsed();
+
+    if !std::io::stdout().is_terminal() {
+        print_summary(
+            &format!(
+                "replayed {} events from {} in {}",
+                events.len(),
+                log.display(),
+                millis(elapsed)
+            ),
+            &app,
+        );
+        return Ok(());
+    }
+
+    niobe_tui::run(app, &mut Unrecorded).map_err(|e| e.to_string())
+}
+
+fn print_summary(header: &str, app: &App) {
+    println!("{header}");
+    for line in summary::lines(app) {
+        println!("{line}");
     }
 }
 
-/// Where the session is running: the directory it was started in, and the
-/// branch checked out there.
-///
-/// Read here rather than in the TUI, which has no business touching the
-/// filesystem.
-fn repo() -> Repo {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let name = cwd
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "niobe".to_owned());
-
-    Repo {
-        name,
-        branch: git_branch(&cwd),
-    }
+fn cwd() -> Result<PathBuf, String> {
+    std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))
 }
 
-/// The checked-out branch, read from `.git/HEAD` in the nearest repository.
-///
-/// Parsed rather than shelled out to: `git` may not be installed, and a
-/// subprocess for one line of a file is a subprocess the operator pays for.
-fn git_branch(from: &Path) -> Option<String> {
-    let mut dir = Some(from);
-    while let Some(current) = dir {
-        let head = current.join(".git").join("HEAD");
-        if let Ok(contents) = std::fs::read_to_string(&head) {
-            let head = contents.trim();
-            return match head.strip_prefix("ref: refs/heads/") {
-                Some(branch) => Some(branch.to_owned()),
-                // A detached HEAD is the commit itself, shortened the way git
-                // shortens it.
-                None => Some(head.chars().take(7).collect()),
-            };
-        }
-        dir = current.parent();
-    }
-    None
+/// A duration the way the summary header prints it: milliseconds, to two
+/// decimals, which is the resolution a 50 ms replay budget is read at.
+fn millis(elapsed: Duration) -> String {
+    format!("{:.2} ms", elapsed.as_secs_f64() * 1_000.0)
 }
 
 fn print_help() {
@@ -104,18 +197,26 @@ fn print_help() {
 A terminal coding agent that shows you the bill.
 
 USAGE:
-    niobe            Open the shell in the current directory
-    niobe [OPTIONS]
+    niobe                  Open the shell on a new session
+    niobe --resume <id>    Open the shell on a recorded session and continue it
+    niobe sessions         List the sessions recorded in this repository
+    niobe replay <file>    Fold a JSON Lines event log into the shell (development)
 
 OPTIONS:
-    -h, --help       Print this help
-    -V, --version    Print the version
+    -h, --help             Print this help
+    -V, --version          Print the version
+
+SESSIONS:
+    Every session is recorded, append-only, into .niobe/sessions.db at the root
+    of the repository it runs in, or of the working directory outside one.
+    With standard output redirected, --resume and replay print what the session
+    folds to instead of opening the shell.
 
 IN THE SHELL:
-    Enter            Send what is in the composer
-    Alt+Enter        Open a new line in the composer
-    PgUp / PgDn      Scroll the transcript
-    F10, Ctrl+Q      Quit
+    Enter                  Send what is in the composer
+    Alt+Enter              Open a new line in the composer
+    PgUp / PgDn            Scroll the transcript
+    F10, Ctrl+Q            Quit
 
 No backend is attached yet: the claude and codex bridges are not implemented.",
         name = niobe_core::APP_NAME,
@@ -128,14 +229,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_branch_is_read_from_the_repository_this_test_runs_in() {
-        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let branch = git_branch(here).expect("the workspace is a git repository");
-        assert!(!branch.is_empty());
-    }
-
-    #[test]
-    fn a_directory_outside_a_repository_has_no_branch() {
-        assert_eq!(git_branch(Path::new("/")), None);
+    fn durations_print_in_milliseconds_to_two_decimals() {
+        assert_eq!(millis(Duration::from_micros(412)), "0.41 ms");
+        assert_eq!(millis(Duration::from_millis(50)), "50.00 ms");
     }
 }

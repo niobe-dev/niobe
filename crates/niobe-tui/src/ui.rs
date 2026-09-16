@@ -597,7 +597,9 @@ fn backend_label(session: &SessionState) -> String {
 ///
 /// A backend that reported no cost for some of its usage records leaves the sum
 /// a floor, and the figure says `≥` rather than pretending to be the bill.
-fn session_cost(session: &SessionState) -> String {
+/// Public so that anything else printing a session's cost prints the same
+/// label the cost pane does.
+pub fn session_cost(session: &SessionState) -> String {
     let totals = session.totals();
     if totals.records == 0 {
         return "—".to_owned();

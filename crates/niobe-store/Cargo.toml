@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+[package]
+name = "niobe-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The session store: every event of every session, append-only, in SQLite."
+
+[dependencies]
+niobe-core.workspace = true
+rusqlite.workspace = true
+# `float_roundtrip` because a reported cost is written as JSON text and read
+# back: without it serde_json parses some doubles to a neighbouring value (158
+# of 2,000 in `reported_costs_come_back_bit_for_bit`), and a resumed session
+# would total a different number than the one that ran.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

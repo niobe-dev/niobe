@@ -29,6 +29,7 @@ const MAX_BINARY_BYTES: u64 = 20 * 1024 * 1024;
 const ALLOWED_WORKSPACE_DEPS: &[(&str, &[&str])] = &[
     ("niobe-core", &[]),
     ("niobe-ledger", &["niobe-core"]),
+    ("niobe-store", &["niobe-core"]),
     ("niobe-tui", &["niobe-core"]),
     ("niobe-bridge-claude", &["niobe-core"]),
     ("niobe-bridge-codex", &["niobe-core"]),
@@ -37,6 +38,7 @@ const ALLOWED_WORKSPACE_DEPS: &[(&str, &[&str])] = &[
         &[
             "niobe-core",
             "niobe-ledger",
+            "niobe-store",
             "niobe-tui",
             "niobe-bridge-claude",
             "niobe-bridge-codex",

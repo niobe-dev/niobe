@@ -18,9 +18,15 @@ path = "src/main.rs"
 [dependencies]
 niobe-core.workspace = true
 niobe-ledger.workspace = true
+niobe-store.workspace = true
 niobe-tui.workspace = true
 niobe-bridge-claude.workspace = true
 niobe-bridge-codex.workspace = true
+
+[dev-dependencies]
+# The shell's key events are ratatui's; the tests drive the shell with them.
+ratatui.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -13,6 +13,12 @@ The session — an agent adding etag support to a catalog fetcher — is
 exists so that the fold in `niobe_core::session` can be asserted against
 numbers this crate did not produce.
 
+It is also read by `niobe-store`'s tests, which record it into a session store
+and fold what comes back, and by `niobe-cli`'s, which replay and resume it
+through the binary. Those tests compare the stored copy with the log rather
+than with fixed numbers, except for the totals `tests/cli.rs` checks in the
+printed summary (`122,554` tokens, `≥$2.47`, 4 of 14 records without a cost).
+
 It deliberately carries the awkward cases a real recording has:
 
 - usage records with `cost_usd: null` — the backend reported tokens and no

@@ -18,6 +18,7 @@
 //!   handler cover the three ways out; see [`terminal`].
 
 pub mod app;
+pub mod journal;
 pub mod run;
 pub mod terminal;
 mod text;
@@ -25,10 +26,11 @@ pub mod theme;
 pub mod ui;
 
 pub use app::{App, Entry, EntryKind, Repo};
+pub use journal::{Journal, JournalError, Unrecorded};
 pub use run::run;
 pub use terminal::{Shutdown, TerminalGuard, install_panic_hook};
 pub use theme::{CLASSIC, Theme};
-pub use ui::{MIN_SIZE, WIDE_COLUMNS, draw};
+pub use ui::{MIN_SIZE, WIDE_COLUMNS, draw, session_cost};
 
 #[cfg(test)]
 mod tests {

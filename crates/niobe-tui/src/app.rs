@@ -7,6 +7,12 @@
 //! [`App`] holds no backend handle and no wire format. Events arrive through
 //! [`App::apply`] and are the only way session content gets in, which is what
 //! lets the same shell be driven by a bridge, by a recorded log or by a test.
+//!
+//! Events the operator produces in the shell go the other way: they are folded
+//! in like any other and queued for [`App::take_produced`], which the event
+//! loop drains into a [`crate::journal::Journal`] so a restart can show them
+//! again. The transcript's notices are the shell talking, not the session, and
+//! are neither queued nor shown again after a restart.
 
 use std::collections::BTreeMap;
 
@@ -106,6 +112,8 @@ pub struct App {
     transcript_lines: usize,
     viewport_lines: usize,
     hint: Option<String>,
+    /// Events the operator produced that have not been handed out to be kept.
+    produced: Vec<Event>,
     should_quit: bool,
 }
 
@@ -136,6 +144,7 @@ impl App {
             transcript_lines: 0,
             viewport_lines: 0,
             hint: None,
+            produced: Vec::new(),
             should_quit: false,
         }
     }
@@ -269,6 +278,35 @@ impl App {
 
     fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
+    }
+
+    /// Folds in an event the operator produced here and queues it to be kept.
+    fn produce(&mut self, event: Event) {
+        self.apply(&event);
+        self.produced.push(event);
+    }
+
+    /// The events the operator produced since the last call, oldest first.
+    ///
+    /// Events folded in through [`App::apply`] came from somewhere that already
+    /// has them, and are never handed out.
+    pub fn take_produced(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.produced)
+    }
+
+    /// Says in the transcript that an event could not be kept, so the operator
+    /// does not find out from a resumed session that is missing it.
+    pub fn not_kept(&mut self, error: &str) {
+        self.push(Entry {
+            kind: EntryKind::Failure,
+            head: "not saved".to_owned(),
+            meta: String::new(),
+            body: format!(
+                "What you just did is on screen but not in the session store, so a \
+                 resumed session will not show it: {error}"
+            ),
+            streaming: false,
+        });
     }
 
     fn streaming_agent_entry(&mut self) -> Option<&mut Entry> {
@@ -426,9 +464,9 @@ impl App {
 
     /// Sends what is in the composer.
     ///
-    /// No backend is attached yet, so the prompt is recorded in the transcript
-    /// and the shell says plainly that nothing is listening — rather than
-    /// showing a reply nobody produced.
+    /// No backend is attached yet, so the prompt goes into the transcript and
+    /// the shell says plainly that nothing is listening — rather than showing a
+    /// reply nobody produced.
     pub fn submit(&mut self) {
         let text = self.composed();
         if text.trim().is_empty() {
@@ -437,13 +475,13 @@ impl App {
 
         self.composer.clear();
 
-        self.apply(&Event::UserMessage { text });
+        self.produce(Event::UserMessage { text });
         self.push(Entry {
             kind: EntryKind::Notice,
             head: "no backend".to_owned(),
             meta: "not sent".to_owned(),
             body: "Nothing is attached to this session yet: the claude and codex bridges \
-                   are not implemented. The prompt above was recorded, not sent."
+                   are not implemented. The prompt above was not sent."
                 .to_owned(),
             streaming: false,
         });
@@ -628,6 +666,44 @@ mod tests {
         assert_eq!(app.session().user_messages(), 1);
         assert_eq!(app.entries()[0].kind, EntryKind::User);
         assert_eq!(app.entries()[1].kind, EntryKind::Notice);
+    }
+
+    #[test]
+    fn a_submitted_prompt_is_handed_out_once_to_be_kept() {
+        let mut app = app();
+        app.type_into_composer(Input {
+            key: Key::Char('h'),
+            ..Default::default()
+        });
+        app.submit();
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "h".to_owned()
+            }]
+        );
+        assert!(app.take_produced().is_empty());
+    }
+
+    #[test]
+    fn events_folded_in_from_elsewhere_are_not_handed_out_again() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "from the store".to_owned(),
+        });
+        assert!(app.take_produced().is_empty());
+    }
+
+    #[test]
+    fn an_event_that_could_not_be_kept_says_so_in_the_transcript() {
+        let mut app = app();
+        app.not_kept("disk full");
+
+        let entry = app.entries().last().expect("an entry was pushed");
+        assert_eq!(entry.kind, EntryKind::Failure);
+        assert_eq!(entry.head, "not saved");
+        assert!(entry.body.ends_with("disk full"), "{}", entry.body);
     }
 
     #[test]
