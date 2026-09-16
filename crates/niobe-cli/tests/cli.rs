@@ -27,10 +27,18 @@ fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE)
 }
 
+/// Runs the binary with no user config: the operator's own would otherwise
+/// change what these tests see.
 fn niobe(cwd: &Path, args: &[&str]) -> Output {
+    niobe_with_user_config(cwd, &cwd.join("no-user-config-here"), args)
+}
+
+/// Runs the binary with `config_home` as the user's config directory.
+fn niobe_with_user_config(cwd: &Path, config_home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_niobe"))
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", config_home)
         .output()
         .expect("the niobe binary runs")
 }
@@ -177,4 +185,226 @@ fn a_log_with_a_bad_line_names_the_line() {
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains("line 2"), "{}", stderr(&output));
+}
+
+/// A repository and a user config directory, each with the config given.
+struct Configured {
+    repo: tempfile::TempDir,
+    user: tempfile::TempDir,
+}
+
+impl Configured {
+    fn new(user_config: &str, repo_config: &str) -> Self {
+        let repo = tempfile::tempdir().expect("a temporary directory can be created");
+        std::fs::create_dir(repo.path().join(".git")).expect("a .git directory can be made");
+        if !repo_config.is_empty() {
+            std::fs::create_dir(repo.path().join(".niobe")).expect("a .niobe directory");
+            std::fs::write(self::repo_config(repo.path()), repo_config)
+                .expect("the repo config is written");
+        }
+
+        let user = tempfile::tempdir().expect("a temporary directory can be created");
+        if !user_config.is_empty() {
+            std::fs::create_dir(user.path().join("niobe")).expect("a niobe config directory");
+            std::fs::write(user.path().join("niobe").join("config.toml"), user_config)
+                .expect("the user config is written");
+        }
+        Self { repo, user }
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        niobe_with_user_config(self.repo.path(), self.user.path(), args)
+    }
+
+    fn user_config(&self) -> PathBuf {
+        self.user.path().join("niobe").join("config.toml")
+    }
+}
+
+fn repo_config(repo: &Path) -> PathBuf {
+    repo.join(".niobe").join("config.toml")
+}
+
+const USER_CONFIG: &str = r#"
+default_profile = "personal"
+
+[profiles.personal]
+backend = "claude"
+
+[profiles.work]
+backend = "claude"
+env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "account-value" }
+auth_refresh = "aws sso login --profile example-sso"
+"#;
+
+/// The line of `niobe profiles` output that lists `name`.
+fn profile_row<'a>(listing: &'a str, name: &str) -> &'a str {
+    listing
+        .lines()
+        .find(|line| {
+            line.get(2..)
+                .is_some_and(|rest| rest.starts_with(&format!("{name} ")))
+        })
+        .unwrap_or_else(|| panic!("no row for {name}: {listing}"))
+}
+
+#[test]
+fn the_profile_list_shows_each_profile_its_backend_and_where_it_was_defined() {
+    let setup = Configured::new(USER_CONFIG, "");
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let work = profile_row(&out, "work");
+    assert!(work.contains(" claude "), "{out}");
+    assert!(
+        work.ends_with(&setup.user_config().display().to_string()),
+        "{out}"
+    );
+    assert!(
+        out.contains("AWS_PROFILE, CLAUDE_CODE_USE_BEDROCK"),
+        "variable names are listed: {out}"
+    );
+    assert!(!out.contains("account-value"), "no variable's value: {out}");
+    assert!(profile_row(&out, "personal").starts_with("* "), "{out}");
+    assert!(profile_row(&out, "work").starts_with("  "), "{out}");
+}
+
+#[test]
+fn repo_config_overrides_user_config() {
+    let setup = Configured::new(
+        USER_CONFIG,
+        "default_profile = \"work\"\n\n[profiles.work]\nbackend = \"codex\"\n",
+    );
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let work = profile_row(&out, "work");
+    assert!(work.starts_with("* "), "the repo's default wins: {out}");
+    assert!(work.contains(" codex "), "{out}");
+    assert!(
+        work.ends_with(&repo_config(setup.repo.path()).display().to_string()),
+        "{out}"
+    );
+    assert!(
+        !out.contains("AWS_PROFILE"),
+        "the repo's profile replaces the user's whole: {out}"
+    );
+    assert!(profile_row(&out, "personal").contains(" claude "), "{out}");
+}
+
+#[test]
+fn the_profile_flag_selects_the_profile() {
+    let setup = Configured::new(USER_CONFIG, "");
+    for args in [
+        &["--profile", "work", "profiles"][..],
+        &["profiles", "--profile=work"],
+    ] {
+        let output = setup.run(args);
+        let out = stdout(&output);
+
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        assert!(
+            profile_row(&out, "work").starts_with("* "),
+            "{args:?}: {out}"
+        );
+        assert!(
+            profile_row(&out, "personal").starts_with("  "),
+            "{args:?}: {out}"
+        );
+    }
+}
+
+#[test]
+fn a_profile_no_config_defines_is_an_error_that_lists_the_ones_there_are() {
+    let setup = Configured::new(USER_CONFIG, "");
+    for args in [
+        &["--profile", "wrok", "profiles"][..],
+        &["--profile", "wrok"],
+    ] {
+        let output = setup.run(args);
+
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            stderr(&output)
+                .contains("no profile named `wrok`; the profiles defined are `personal`, `work`"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn an_invalid_config_errors_with_the_key_and_the_line() {
+    let setup = Configured::new(
+        USER_CONFIG,
+        "[profiles.work]\nbackend = \"codex\"\nargs = \"--verbose\"\n",
+    );
+    // The binary finds the repository from its working directory, which the
+    // operating system reports with symbolic links resolved.
+    let repo = std::fs::canonicalize(setup.repo.path()).expect("the repository exists");
+    let expected = format!(
+        "niobe: {}:3: profiles.work.args: expected an array of strings, found a string\n",
+        repo_config(&repo).display()
+    );
+
+    for args in [
+        &["profiles"][..],
+        &[],
+        &["--resume", "1"],
+        &["--profile", "work"],
+    ] {
+        let output = setup.run(args);
+        assert!(!output.status.success(), "{args:?}");
+        assert_eq!(stderr(&output), expected, "{args:?}");
+    }
+}
+
+#[test]
+fn a_config_that_is_not_toml_names_the_line() {
+    let setup = Configured::new(
+        "[profiles.work]\nbackend = \"claude\"\nenv = { A = \"1\"\n",
+        "",
+    );
+    let output = setup.run(&["profiles"]);
+    let err = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(
+        err.starts_with(&format!("niobe: {}:3: ", setup.user_config().display())),
+        "{err}"
+    );
+    assert_eq!(
+        err.lines().count(),
+        1,
+        "one line, no rendered source: {err}"
+    );
+}
+
+#[test]
+fn commands_that_run_no_session_do_not_read_the_config() {
+    let setup = Configured::new("this is not toml", "");
+    for args in [&["sessions"][..], &["--help"], &["--version"]] {
+        let output = setup.run(args);
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+    }
+}
+
+#[test]
+fn where_no_config_defines_a_profile_the_list_says_where_it_looked() {
+    let setup = Configured::new("", "");
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(out.starts_with("no profiles defined"), "{out}");
+    assert!(
+        out.contains(&setup.user_config().display().to_string()),
+        "{out}"
+    );
+    assert!(
+        out.contains(&repo_config(setup.repo.path()).display().to_string()),
+        "{out}"
+    );
 }

@@ -9,7 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The event model, session state and config every backend and every consumer shares."
+description = "The event model and session state every backend and every consumer shares."
 
 [dependencies]
 serde = { workspace = true }

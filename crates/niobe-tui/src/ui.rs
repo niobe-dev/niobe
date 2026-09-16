@@ -22,7 +22,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 
 use niobe_core::session::SessionState;
 
-use crate::app::{App, Entry};
+use crate::app::{App, Entry, SelectedProfile};
 use crate::text;
 use crate::theme::Theme;
 
@@ -124,7 +124,7 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut right = Vec::new();
     if area.width >= WIDE_COLUMNS {
         right.push(Span::styled(
-            format!("{}  ", backend_label(app.session())),
+            format!("{}  ", backend_label(app.session(), app.profile())),
             Style::new().fg(theme.menu_fg),
         ));
     }
@@ -518,7 +518,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     )];
     top.push(separator.clone());
     top.push(Span::styled(
-        backend_label(session),
+        backend_label(session, app.profile()),
         Style::new().fg(theme.agent),
     ));
     if let Some(branch) = &app.repo().branch {
@@ -585,11 +585,13 @@ fn draw_fkeys(frame: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
-/// What is running, or what is not running yet.
-fn backend_label(session: &SessionState) -> String {
-    match session.meta() {
-        Some(meta) => format!("⚡ {} · {}", meta.backend, meta.model),
-        None => "no backend attached".to_owned(),
+/// What is running, or what is not running yet. A backend's own report of what
+/// it runs wins over the profile that was selected to start it.
+fn backend_label(session: &SessionState, profile: Option<&SelectedProfile>) -> String {
+    match (session.meta(), profile) {
+        (Some(meta), _) => format!("⚡ {} · {}", meta.backend, meta.model),
+        (None, Some(profile)) => format!("{} · {}, not attached", profile.name, profile.backend),
+        (None, None) => "no backend attached".to_owned(),
     }
 }
 
@@ -659,14 +661,36 @@ mod tests {
 
     #[test]
     fn an_unstarted_session_says_no_backend_is_attached() {
-        assert_eq!(backend_label(&SessionState::new()), "no backend attached");
+        assert_eq!(
+            backend_label(&SessionState::new(), None),
+            "no backend attached"
+        );
 
         let running = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
             backend: Backend::Codex,
             profile: "default".to_owned(),
             model: "gpt-5-codex".to_owned(),
         })]);
-        assert_eq!(backend_label(&running), "⚡ codex · gpt-5-codex");
+        assert_eq!(backend_label(&running, None), "⚡ codex · gpt-5-codex");
+    }
+
+    #[test]
+    fn a_selected_profile_is_named_until_a_backend_says_what_it_runs() {
+        let work = SelectedProfile {
+            name: "work".to_owned(),
+            backend: Backend::Claude,
+        };
+        assert_eq!(
+            backend_label(&SessionState::new(), Some(&work)),
+            "work · claude, not attached"
+        );
+
+        let running = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "work".to_owned(),
+            model: "opus-5".to_owned(),
+        })]);
+        assert_eq!(backend_label(&running, Some(&work)), "⚡ claude · opus-5");
     }
 
     #[test]

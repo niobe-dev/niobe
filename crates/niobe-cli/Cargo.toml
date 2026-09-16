@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 niobe-core.workspace = true
 niobe-ledger.workspace = true
+niobe-config.workspace = true
 niobe-store.workspace = true
 niobe-tui.workspace = true
 niobe-bridge-claude.workspace = true

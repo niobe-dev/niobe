@@ -50,6 +50,13 @@ pub fn root(cwd: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+/// Where the config of the repository rooted at `root` is, whether or not it
+/// exists. It sits beside the session store but is not ignored with it: a
+/// repository's profiles are meant to be committed and shared.
+pub fn config_path(root: &Path) -> PathBuf {
+    root.join(DIR).join(niobe_config::FILE_NAME)
+}
+
 /// Where the session store of `root` is, whether or not it exists yet.
 pub fn store_path(root: &Path) -> PathBuf {
     root.join(DIR).join(STORE_FILE)

@@ -23,7 +23,7 @@ use std::time::Instant;
 use niobe_core::event::{
     AgentOutcome, Backend, Event, PermissionDecision, SessionMeta, ToolOutcome, Usage,
 };
-use niobe_tui::app::{App, Repo};
+use niobe_tui::app::{App, Repo, SelectedProfile};
 use niobe_tui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -225,6 +225,23 @@ fn the_shell_renders_at_two_hundred_by_sixty() {
 fn an_empty_session_renders_at_both_sizes() {
     assert_snapshot("empty-80x24", &screen(&mut empty_session(), 80, 24));
     assert_snapshot("empty-120x30", &screen(&mut empty_session(), 120, 30));
+}
+
+#[test]
+fn a_selected_profile_is_named_in_the_status_line_and_the_menu_bar() {
+    let mut app = empty_session().with_profile(SelectedProfile {
+        name: "work".to_owned(),
+        backend: Backend::Claude,
+    });
+    let label = "work · claude, not attached";
+
+    let narrow = screen(&mut app, 80, 24);
+    let status = narrow.lines().nth(21).unwrap_or_default();
+    assert!(status.contains(label), "{narrow}");
+
+    let wide = screen(&mut app, 120, 30);
+    let menu = wide.lines().next().unwrap_or_default();
+    assert!(menu.contains(label), "{wide}");
 }
 
 #[test]

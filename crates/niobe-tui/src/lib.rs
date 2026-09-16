@@ -25,7 +25,7 @@ mod text;
 pub mod theme;
 pub mod ui;
 
-pub use app::{App, Entry, EntryKind, Repo};
+pub use app::{App, Entry, EntryKind, Repo, SelectedProfile};
 pub use journal::{Journal, JournalError, Unrecorded};
 pub use run::run;
 pub use terminal::{Shutdown, TerminalGuard, install_panic_hook};

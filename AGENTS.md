@@ -39,6 +39,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   numbers from. Depends on no other workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`).
+- **`crates/niobe-config/`** — the config: profiles, each a backend plus the environment,
+  arguments and credential refresh it runs with. `parse.rs` walks the spanned TOML document by
+  hand so that an invalid file is reported as its key and line; `lib.rs` layers a repository's
+  file over the user's and selects the profile a session runs under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
   SQLite (`store.rs`; the triggers in its schema refuse an update or a delete). `recorder.rs` is
   the write side a running session holds; `jsonl.rs` reads a JSON Lines event log.
@@ -49,8 +53,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
-  the TUI, and the only one that wires the others together: it opens the shell with the session
-  store as its journal. `tests/cli.rs` runs the binary.
+  the TUI, and the only one that wires the others together: it finds the config files and opens
+  the shell under the selected profile, with the session store as its journal. `tests/cli.rs`
+  runs the binary.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
 
 ### 1.1 Layering (BINDING)
@@ -59,7 +64,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 `cargo xtask layering`:
 
 - `niobe-core` depends on nothing in the workspace.
-- `niobe-ledger`, `niobe-store`, `niobe-tui` and each bridge depend on `niobe-core` only.
+- `niobe-ledger`, `niobe-config`, `niobe-store`, `niobe-tui` and each bridge depend on
+  `niobe-core` only.
 - `niobe-cli` may depend on everything.
 
 A type cannot leak out of a bridge into the TUI if the TUI cannot name the bridge. Widen the table

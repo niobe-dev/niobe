@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use niobe_core::event::{AgentId, Event, ToolCallId, ToolOutcome};
+use niobe_core::event::{AgentId, Backend, Event, ToolCallId, ToolOutcome};
 use niobe_core::session::SessionState;
 use ratatui_textarea::{Input, TextArea, WrapMode};
 
@@ -34,6 +34,18 @@ pub struct Repo {
     pub name: String,
     /// The checked-out branch, where there is one.
     pub branch: Option<String>,
+}
+
+/// The profile the operator selected, for the status line to name until a
+/// backend reports what the session is running.
+///
+/// Plain data, filled in by the caller: the config is read by the CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedProfile {
+    /// The profile's name, as the config spells it.
+    pub name: String,
+    /// The backend the profile runs.
+    pub backend: Backend,
 }
 
 /// What a transcript entry is, which decides its glyph and its colour.
@@ -94,6 +106,7 @@ pub struct Entry {
 #[derive(Debug)]
 pub struct App {
     repo: Repo,
+    profile: Option<SelectedProfile>,
     theme: Theme,
     session: SessionState,
     entries: Vec<Entry>,
@@ -133,6 +146,7 @@ impl App {
 
         Self {
             repo,
+            profile: None,
             theme,
             session: SessionState::new(),
             entries: Vec::new(),
@@ -323,9 +337,21 @@ impl App {
             .unwrap_or_else(|| "agent".to_owned())
     }
 
+    /// The same shell, under the profile the operator selected.
+    #[must_use]
+    pub fn with_profile(mut self, profile: SelectedProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
     /// Where the session is running.
     pub fn repo(&self) -> &Repo {
         &self.repo
+    }
+
+    /// The profile the operator selected, if any.
+    pub fn profile(&self) -> Option<&SelectedProfile> {
+        self.profile.as_ref()
     }
 
     /// The palette the shell draws in.

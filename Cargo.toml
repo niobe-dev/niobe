@@ -6,6 +6,7 @@ resolver = "3"
 members = [
     "crates/niobe-core",
     "crates/niobe-ledger",
+    "crates/niobe-config",
     "crates/niobe-store",
     "crates/niobe-tui",
     "crates/niobe-bridge-claude",
@@ -25,6 +26,7 @@ authors = ["Viacheslav Shynkarenko"]
 [workspace.dependencies]
 niobe-core = { path = "crates/niobe-core", version = "0.0.0" }
 niobe-ledger = { path = "crates/niobe-ledger", version = "0.0.0" }
+niobe-config = { path = "crates/niobe-config", version = "0.0.0" }
 niobe-store = { path = "crates/niobe-store", version = "0.0.0" }
 niobe-tui = { path = "crates/niobe-tui", version = "0.0.0" }
 niobe-bridge-claude = { path = "crates/niobe-bridge-claude", version = "0.0.0" }
@@ -38,6 +40,12 @@ serde_json = "1.0"
 # system ships, and a Linux build needs no -dev package.
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 tempfile = "3"
+
+# The config file. Only the parser: the config is walked by hand from the
+# spanned document rather than deserialized, so an invalid file is reported as
+# the key and the line it is on instead of as a serde error, and serde's
+# TOML deserializer is not compiled in.
+toml = { version = "1.1", default-features = false, features = ["std", "parse"] }
 
 # The TUI stack. `ratatui-textarea` is the composer widget: it is the same
 # editor as `tui-textarea`, maintained by the ratatui org against ratatui 0.30,

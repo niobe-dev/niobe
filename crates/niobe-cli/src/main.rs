@@ -3,17 +3,20 @@
 
 //! The `niobe` binary.
 //!
-//! Opens the shell on a new or a recorded session, lists the sessions recorded
-//! in a repository, and folds a JSON Lines event log for development. It is the
-//! only crate that names both the shell and the session store, so it is where
-//! the two are joined.
+//! Opens the shell on a new or a recorded session under a profile from the
+//! config, lists the sessions recorded in a repository and the profiles defined
+//! for it, and folds a JSON Lines event log for development. It is the only
+//! crate that names the shell, the config and the session store together, so it
+//! is where they are joined.
 
 // The CLI is the one place in the workspace that writes to the terminal
 // directly rather than through the TUI.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod args;
+mod config;
 mod journal;
+mod profiles;
 mod repo;
 mod sessions;
 mod summary;
@@ -27,13 +30,13 @@ use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
 
-use crate::args::Command;
+use crate::args::{Command, Invocation};
 use crate::journal::StoreJournal;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args::parse(&args) {
-        Ok(command) => run(command),
+        Ok(invocation) => run(invocation),
         Err(usage) => Err(format!("{usage}\nRun `niobe --help` for usage.")),
     };
 
@@ -48,11 +51,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(command: Command) -> Result<(), String> {
+fn run(Invocation { command, profile }: Invocation) -> Result<(), String> {
+    let profile = profile.as_deref();
     match command {
-        Command::Shell => shell(),
-        Command::Resume(session) => resume(session),
+        Command::Shell => shell(profile),
+        Command::Resume(session) => resume(session, profile),
         Command::Sessions => list_sessions(),
+        Command::Profiles => list_profiles(profile),
         Command::Replay(log) => replay(&log),
         Command::Help => {
             print_help();
@@ -68,17 +73,21 @@ fn run(command: Command) -> Result<(), String> {
 /// Opens the shell on a new session, recorded into this repository's store.
 ///
 /// Without a terminal there is nothing to draw into and raw mode would fail, so
-/// a piped or redirected run prints the help instead of an errno.
-fn shell() -> Result<(), String> {
+/// a piped or redirected run prints the help instead of an errno. The config is
+/// read first either way, so a config that cannot be used is reported rather
+/// than hidden behind the help.
+fn shell(profile: Option<&str>) -> Result<(), String> {
+    let cwd = cwd()?;
+    let root = repo::root(&cwd);
+    let app = new_app(&cwd, &root, profile)?;
+
     if !std::io::stdout().is_terminal() {
         print_help();
         return Ok(());
     }
 
-    let cwd = cwd()?;
-    let root = repo::root(&cwd);
     let mut journal = StoreJournal::Pending(root.clone());
-    niobe_tui::run(App::new(repo::describe(&cwd)), &mut journal).map_err(|e| e.to_string())?;
+    niobe_tui::run(app, &mut journal).map_err(|e| e.to_string())?;
 
     if let Some(session) = journal.session() {
         println!(
@@ -91,9 +100,10 @@ fn shell() -> Result<(), String> {
 
 /// Opens the shell on a recorded session and keeps recording into it. Without
 /// a terminal, prints what the session folds to.
-fn resume(session: SessionId) -> Result<(), String> {
+fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
+    let mut app = new_app(&cwd, &root, profile)?;
 
     let started = Instant::now();
     let store = repo::open_existing_store(&root)?.ok_or_else(|| {
@@ -107,7 +117,6 @@ fn resume(session: SessionId) -> Result<(), String> {
         .store()
         .events(session)
         .map_err(|e| e.to_string())?;
-    let mut app = App::new(repo::describe(&cwd));
     app.extend(stored.iter().map(|s| &s.event));
     let elapsed = started.elapsed();
 
@@ -143,6 +152,32 @@ fn list_sessions() -> Result<(), String> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// Prints the profiles the config defines for this repository, the selected one
+/// marked.
+fn list_profiles(profile: Option<&str>) -> Result<(), String> {
+    let loaded = config::load(&repo::root(&cwd()?))?;
+    let selected = loaded.selected(profile)?;
+
+    if loaded.config.profiles().is_empty() {
+        println!("{}", profiles::none_defined(&loaded.searched));
+        return Ok(());
+    }
+    for line in profiles::table(&loaded.config, selected.as_ref().map(|s| s.name.as_str())) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// An empty shell for `cwd`, under the profile `requested` names or the
+/// config's default.
+fn new_app(cwd: &Path, root: &Path, requested: Option<&str>) -> Result<App, String> {
+    let app = App::new(repo::describe(cwd));
+    Ok(match config::load(root)?.selected(requested)? {
+        Some(profile) => app.with_profile(profile),
+        None => app,
+    })
 }
 
 /// Folds a JSON Lines event log into the shell, for development. Nothing typed
@@ -200,11 +235,32 @@ USAGE:
     niobe                  Open the shell on a new session
     niobe --resume <id>    Open the shell on a recorded session and continue it
     niobe sessions         List the sessions recorded in this repository
+    niobe profiles         List the profiles the config defines, the selected one marked
     niobe replay <file>    Fold a JSON Lines event log into the shell (development)
 
 OPTIONS:
+    --profile <name>       Run under this profile instead of the default one
     -h, --help             Print this help
     -V, --version          Print the version
+
+PROFILES:
+    A profile is a backend plus the environment and arguments it runs with,
+    defined in TOML:
+
+        default_profile = \"personal\"
+
+        [profiles.personal]
+        backend = \"claude\"
+
+        [profiles.work]
+        backend = \"claude\"
+        env = {{ CLAUDE_CODE_USE_BEDROCK = \"1\", AWS_PROFILE = \"work-sso\" }}
+        auth_refresh = \"aws sso login --profile work-sso\"
+
+    The user's config is ~/.config/niobe/config.toml ($XDG_CONFIG_HOME/niobe
+    when that is set); a repository's is .niobe/config.toml at its root, and
+    overrides the user's, replacing any profile of the same name whole. The
+    env of a profile is passed on exactly as written.
 
 SESSIONS:
     Every session is recorded, append-only, into .niobe/sessions.db at the root
