@@ -18,6 +18,11 @@
 //! A terminal can also go away without any of that: no signal is sent when the
 //! process is not in the session that owns it. The event loop's own wait for
 //! input sees the hangup and quits, which is the first path above.
+//!
+//! Each path is proven against the binary on a real terminal in the CLI's
+//! `tests/pty.rs`. Nothing less can: the hook writes to the process's own
+//! standard output, and the signal disposition belongs to the process, so the
+//! unit tests below reach the guard and the flag but not the way out.
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};

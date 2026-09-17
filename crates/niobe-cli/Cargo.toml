@@ -30,8 +30,9 @@ ratatui.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
-# A pty to run the binary on, for the tests that take its terminal away.
-rustix = { workspace = true, features = ["event", "pty", "termios"] }
+# A pty to run the binary on, for the tests that take its terminal away, and
+# `kill` for the one that asks it to stop.
+rustix = { workspace = true, features = ["event", "process", "pty", "termios"] }
 
 [lints]
 workspace = true

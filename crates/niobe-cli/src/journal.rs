@@ -37,6 +37,7 @@ impl StoreJournal {
 
 impl Journal for StoreJournal {
     fn append(&mut self, event: &Event) -> Result<(), JournalError> {
+        panic_if_the_environment_asks();
         // A store that failed to open stays pending, so the next event tries
         // again rather than the whole session going unrecorded.
         if let Self::Pending(root) = self {
@@ -49,6 +50,32 @@ impl Journal for StoreJournal {
         Ok(())
     }
 }
+
+/// The variable that asks for the panic below.
+#[cfg(debug_assertions)]
+const PANIC_ON_RECORD: &str = "NIOBE_TEST_PANIC_ON_RECORD";
+
+/// Panics while the shell holds the terminal, when the environment asks for it.
+///
+/// A panic is the one way out of the shell that no test reaches on its own: the
+/// terminal is put back by the panic hook rather than by the guard, the hook
+/// writes to the process's own standard output, and nothing in the shell
+/// panics on purpose. Proving that path needs the binary running on a real
+/// terminal and something inside the event loop that panics, and the journal is
+/// the only code of this crate the loop calls. `tests/pty.rs` sets the variable
+/// and reads the sequences that came back.
+///
+/// Compiled out without debug assertions, so the released binary carries no
+/// such switch.
+#[cfg(debug_assertions)]
+fn panic_if_the_environment_asks() {
+    if std::env::var_os(PANIC_ON_RECORD).is_some() {
+        panic!("{PANIC_ON_RECORD} asked for a panic while the shell held the terminal");
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn panic_if_the_environment_asks() {}
 
 #[cfg(test)]
 mod tests {

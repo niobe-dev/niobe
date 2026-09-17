@@ -59,7 +59,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
   the TUI, and the only one that wires the others together: it finds the config files and opens
   the shell under the selected profile, with the session store as its journal. `tests/cli.rs`
-  runs the binary.
+  runs the binary; `tests/pty.rs` runs it on a real terminal.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
 
 ### 1.1 Layering (BINDING)
@@ -209,8 +209,11 @@ Where tests live:
   - `niobe-tui/tests/frame_budget.rs` times a 200×60 redraw against a 16 ms budget. It is a
     test binary of its own so that no parallel test shares its cores, and it asserts the median
     of 31 frames so that a frame the scheduler interrupted cannot fail it.
-- **Terminal restoration** cannot be fully proven in a unit test. After touching `terminal.rs` or
-  `run.rs`, check a clean quit, a SIGTERM and a panic in a real pty (for example with `script`).
+  - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached
+    the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM and
+    a panic; a unit test cannot, because the panic hook writes to the process's own standard
+    output and the signal disposition belongs to the process. Watch it after touching
+    `terminal.rs` or `run.rs`.
 
 ### 6.1 The gate
 
