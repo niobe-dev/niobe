@@ -18,6 +18,13 @@ use niobe_core::session::SessionState;
 const FIXTURE: &str = include_str!("fixtures/session-200.jsonl");
 
 /// The 200-event fixture must replay in under this many milliseconds.
+///
+/// This test stays in the binary it shares with the ones around it, where the
+/// shell redraw needed one of its own. Timed on four two-vCPU CI runners, the
+/// fold took a median of 0.05 ms with those siblings running in parallel and
+/// 0.06 ms alone, and the slowest single fold of the 80 timed was 0.18 ms. A
+/// budget this far above the measurement cannot be reached by a scheduler
+/// taking the core away.
 const REPLAY_BUDGET_MS: u128 = 50;
 
 fn recorded_events() -> Vec<Event> {

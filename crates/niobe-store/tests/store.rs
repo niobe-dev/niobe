@@ -24,6 +24,14 @@ const FIXTURE: &str = include_str!("../../niobe-core/tests/fixtures/session-200.
 
 /// A stored 200-event session must load and replay in under this many
 /// milliseconds.
+///
+/// This test stays in the binary it shares with the ones around it, where the
+/// shell redraw needed one of its own. Timed on four two-vCPU CI runners,
+/// opening, loading and folding took a median of 2.0 to 2.8 ms with those
+/// siblings running in parallel and 1.3 to 1.7 ms alone, and the slowest
+/// single run of the 80 timed was 4.8 ms. The siblings cost it about 1.7
+/// times, which is the factor that broke the shell redraw — it survives here
+/// because it starts with thirty times the headroom, not two.
 const REPLAY_BUDGET_MS: u128 = 50;
 
 fn fixture() -> Vec<Event> {
