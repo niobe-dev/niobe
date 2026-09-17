@@ -23,6 +23,12 @@
 //! the session out of the store instead, and the exit status — a session that
 //! lost its terminal ended; it did not fail, and a wrapper reads that here.
 //!
+//! The last case needs no shell at all: a failure reported onto a terminal that
+//! has already gone. Standard error is where `niobe` says what went wrong, and
+//! a write to a terminal that has closed fails, so what reporting does with
+//! that failure is what decides whether the operator is left with a reason, a
+//! status, or a crash.
+//!
 //! A test binary of its own, because it measures how long the shell takes to
 //! notice; tests that draw or replay in the same binary would be measured
 //! with it.
@@ -93,6 +99,10 @@ const PANIC_ON_RECORD: &str = "NIOBE_TEST_PANIC_ON_RECORD";
 
 /// What a Rust process that panicked exits with.
 const PANICKED: i32 = 101;
+
+/// What the binary exits with when a failure could not be written to standard
+/// error: the reason is lost, and the status is what is left to say so.
+const FAILED_UNREPORTED: i32 = 2;
 
 /// The size the pty reports. A pty starts at no size at all, and there is
 /// nothing to draw into nothing.
@@ -487,5 +497,44 @@ fn a_shell_whose_terminal_went_away_ends_the_session_rather_than_failing() {
         status.success(),
         "a session that ended because its terminal went away exited with {status}, \
          which tells whatever started niobe that the session failed"
+    );
+}
+
+/// A failure reported onto a terminal that has already gone.
+///
+/// The shell draws at the top of every tick, so a terminal closing under a
+/// session can raise an error and take away the stream that error is reported
+/// on in the same instant. That instant cannot be arranged from outside the
+/// process — and a terminal closed before the process starts leaves the
+/// descriptor in the same state, because every write on the slave of a pty
+/// whose master has gone fails with the same hangup, for as long as it is held.
+/// Which error is being reported does not matter here; what reporting it onto a
+/// stream that has gone does is what this reads.
+#[test]
+fn a_failure_that_cannot_be_reported_ends_as_a_failure_rather_than_a_crash() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    terminal.close();
+
+    // Resuming a session that was never recorded fails before the shell would
+    // open, so nothing here needs a terminal to draw on — only a standard
+    // error to be reported on, which is the one that has gone.
+    let mut shell = shell_command(&slave, repo.path())
+        .args(["--resume", "9"])
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    assert_ne!(
+        status.code(),
+        Some(PANICKED),
+        "reporting the failure panicked, which leaves a terminal that closed under a session \
+         indistinguishable from a bug in niobe"
+    );
+    assert_eq!(
+        status.code(),
+        Some(FAILED_UNREPORTED),
+        "a failure whose reason could not be written ended as {status}, which does not say that \
+         the reason is missing"
     );
 }

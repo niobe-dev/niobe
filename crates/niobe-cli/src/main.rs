@@ -22,7 +22,7 @@ mod repo;
 mod sessions;
 mod summary;
 
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
@@ -45,12 +45,41 @@ fn main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            // The TUI restores the terminal before returning, so this reaches a
-            // usable screen.
-            eprintln!("niobe: {message}");
-            ExitCode::FAILURE
-        }
+        Err(message) => ExitCode::from(report(&message, &mut io::stderr())),
+    }
+}
+
+/// What the process exits with when a failure was written where it can be read.
+const FAILED: u8 = 1;
+
+/// What it exits with when the failure could not be written.
+///
+/// The reason is lost, so the status is all that is left to carry it: whatever
+/// started `niobe` can tell a failure whose reason is on standard error from
+/// one whose reason went nowhere, and go looking for the session in the store
+/// rather than for the message.
+const FAILED_UNREPORTED: u8 = 2;
+
+/// Writes a failure's reason to standard error, and says what the process is to
+/// exit with.
+///
+/// The TUI restores the terminal before returning, so this reaches a usable
+/// screen — unless the terminal itself is what went. Written with `writeln!`
+/// rather than `eprintln!` because the macro panics when the write fails, and
+/// the write fails exactly when the terminal the message would go to has gone:
+/// the shell draws at the top of every tick, so a terminal closing under a
+/// session can raise an error and take away the stream that error is reported
+/// on in the same instant. Reported by a macro that panics, that session ends
+/// as exit 101 with nothing on either stream, which reads as a bug in `niobe`.
+///
+/// The failure is not swallowed either way. It is reported where it can be
+/// read, or in the exit status where it cannot — never dropped, which is what
+/// ignoring the write would do to every other reason a write to standard error
+/// fails.
+fn report(message: &str, stderr: &mut dyn Write) -> u8 {
+    match writeln!(stderr, "niobe: {message}") {
+        Ok(()) => FAILED,
+        Err(_) => FAILED_UNREPORTED,
     }
 }
 
@@ -275,6 +304,11 @@ OPTIONS:
     -h, --help             Print this help
     -V, --version          Print the version
 
+EXIT STATUS:
+    0   The session ended, including because the terminal it drew on went away
+    1   Something failed; the reason is on standard error
+    2   Something failed and the reason could not be written to standard error
+
 PROFILES:
     A profile is a backend plus the environment and arguments it runs with,
     defined in TOML:
@@ -323,6 +357,44 @@ No backend is attached yet: the claude and codex bridges are not implemented.",
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A standard error that cannot be written to, the way the terminal a
+    /// session drew on cannot once it has gone.
+    struct Gone;
+
+    impl Write for Gone {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("the terminal went away"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("the terminal went away"))
+        }
+    }
+
+    #[test]
+    fn a_failure_is_written_to_standard_error_and_fails() {
+        let mut written = Vec::new();
+
+        let status = report(
+            "no session 9: nothing has been recorded in /tmp",
+            &mut written,
+        );
+
+        assert_eq!(status, FAILED);
+        assert_eq!(
+            String::from_utf8(written).expect("what was written is UTF-8"),
+            "niobe: no session 9: nothing has been recorded in /tmp\n"
+        );
+    }
+
+    #[test]
+    fn a_failure_that_could_not_be_written_fails_with_a_status_of_its_own() {
+        let status = report("no session 9", &mut Gone);
+
+        assert_eq!(status, FAILED_UNREPORTED);
+        assert_ne!(FAILED_UNREPORTED, FAILED);
+    }
 
     #[test]
     fn durations_print_in_milliseconds_to_two_decimals() {
