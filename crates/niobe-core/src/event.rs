@@ -125,6 +125,28 @@ pub struct SessionMeta {
     /// The model the session starts on. A routing decision may move it, in
     /// which case the backend produces a fresh `SessionMeta`.
     pub model: String,
+    /// The id the backend calls this session by, where it has one of its own.
+    /// A bridge drives a CLI that keeps its own transcript under its own id,
+    /// and only that id can hand the transcript back; Niobe's session id names
+    /// the recording, not the conversation.
+    #[serde(default)]
+    pub backend_session: Option<String>,
+}
+
+/// Where a cost a backend reported came from.
+///
+/// A subscription plan bills a flat fee, so a per-session figure a plan
+/// backend prints is what the same work would have cost on the provider's API
+/// — not money that moved. Showing it as though it were measured spend is the
+/// difference between a bill and a guess, so the stream carries which one it
+/// is rather than leaving every consumer to infer it from the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostBasis {
+    /// The provider billed this amount for this work.
+    Measured,
+    /// The backend derived it from published list prices.
+    ApiEquivalent,
 }
 
 /// Token counts and, when the backend reports one, the billed cost of a single
@@ -157,6 +179,13 @@ pub struct Usage {
     /// The cost the backend reported, in USD. `None` means "not reported",
     /// never "zero".
     pub cost_usd: Option<f64>,
+    /// What [`Usage::cost_usd`] is: money the provider billed, or a figure the
+    /// backend derived from list prices. `None` wherever there is no cost, and
+    /// wherever a producer did not say — an unlabelled cost is never read as a
+    /// measured one, so a record from a producer that says nothing cannot be
+    /// promoted to a measurement by being stored.
+    #[serde(default)]
+    pub cost_basis: Option<CostBasis>,
 }
 
 impl Usage {
@@ -338,6 +367,16 @@ pub enum Event {
         outcome: AgentOutcome,
     },
 
+    /// Something happened in the session that is neither a message nor a
+    /// failure: a context compaction, a retried request, a backend saying what
+    /// it is doing. Kept in the stream rather than shown and forgotten,
+    /// because a turn whose numbers jump is explained by the notice that ran
+    /// between them.
+    Notice {
+        /// The line, as it will be shown.
+        message: String,
+    },
+
     /// Something went wrong.
     Error {
         /// The message, as it will be shown.
@@ -362,6 +401,7 @@ mod tests {
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
+            cost_basis: None,
         };
         assert_eq!(usage.tokens(), 150);
     }
@@ -377,6 +417,7 @@ mod tests {
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
+            cost_basis: None,
         };
         assert_eq!(usage.tokens(), 150);
     }
@@ -393,6 +434,58 @@ mod tests {
     }
 
     #[test]
+    fn a_record_from_before_the_basis_field_reads_as_unlabelled() {
+        let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":0.25}"#;
+        let event: Event = serde_json::from_str(json).expect("a record from before the field");
+        let Event::Usage(usage) = event else {
+            panic!("the record is a usage record: {event:?}");
+        };
+        assert_eq!(usage.cost_usd, Some(0.25));
+        assert_eq!(
+            usage.cost_basis, None,
+            "a cost whose producer said nothing about it was read as a measurement"
+        );
+    }
+
+    #[test]
+    fn a_plan_backends_cost_survives_the_round_trip_labelled() {
+        let usage = Usage {
+            input: 6,
+            output: 305,
+            cache_read: 84_805,
+            cache_write: 16_178,
+            cache_write_1h: 16_178,
+            reasoning: 0,
+            model: "claude-sonnet-5".to_owned(),
+            cost_usd: Some(0.084_735),
+            cost_basis: Some(CostBasis::ApiEquivalent),
+        };
+
+        let line = serde_json::to_string(&Event::Usage(usage.clone())).expect("a usage record");
+        let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+
+        assert_eq!(read, Event::Usage(usage));
+        assert!(line.contains(r#""cost_basis":"api_equivalent""#), "{line}");
+    }
+
+    #[test]
+    fn a_session_whose_backend_has_no_id_of_its_own_reads_as_none() {
+        let json =
+            r#"{"type":"session_meta","backend":"claude","profile":"default","model":"opus-5"}"#;
+        let event: Event = serde_json::from_str(json).expect("a record from before the field");
+
+        assert_eq!(
+            event,
+            Event::SessionMeta(SessionMeta {
+                backend: Backend::Claude,
+                profile: "default".to_owned(),
+                model: "opus-5".to_owned(),
+                backend_session: None,
+            })
+        );
+    }
+
+    #[test]
     fn an_unreported_cost_is_none_not_zero() {
         let usage = Usage {
             input: 1,
@@ -403,6 +496,7 @@ mod tests {
             reasoning: 0,
             model: "gpt-5-codex".to_owned(),
             cost_usd: None,
+            cost_basis: None,
         };
         assert!(usage.cost_usd.is_none());
     }

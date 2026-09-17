@@ -252,6 +252,10 @@ impl SessionState {
                     self.fatal_error = Some(message.clone());
                 }
             }
+
+            // A notice changes nothing that is counted: it explains the
+            // numbers around it, and the transcript is where it is read.
+            Event::Notice { .. } => {}
         }
     }
 
@@ -377,6 +381,7 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: cost,
+            cost_basis: None,
         })
     }
 
@@ -512,11 +517,13 @@ mod tests {
             backend: Backend::Claude,
             profile: "default".to_owned(),
             model: "opus-5".to_owned(),
+            backend_session: None,
         }));
         state.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
             model: "sonnet-5".to_owned(),
+            backend_session: None,
         }));
 
         let meta = state.meta().expect("the stream carried session meta");

@@ -207,6 +207,7 @@ mod tests {
             reasoning: 0,
             model: "m".to_owned(),
             cost_usd: None,
+            cost_basis: None,
         }
     }
 

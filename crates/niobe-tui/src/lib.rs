@@ -22,6 +22,7 @@
 //!   that went wrong.
 
 pub mod app;
+pub mod bridge;
 mod input;
 pub mod journal;
 pub mod run;
@@ -31,6 +32,7 @@ pub mod theme;
 pub mod ui;
 
 pub use app::{App, Entry, EntryKind, Repo, SelectedProfile};
+pub use bridge::{Bridge, BridgeError, Detached};
 pub use journal::{Journal, JournalError, Unrecorded};
 pub use run::{Ended, run};
 pub use terminal::{Shutdown, TerminalGuard, install_panic_hook};

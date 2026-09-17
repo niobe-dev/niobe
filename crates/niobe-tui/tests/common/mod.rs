@@ -26,6 +26,7 @@ fn session_events() -> Vec<Event> {
             backend: Backend::Claude,
             profile: "default".to_owned(),
             model: "opus-5".to_owned(),
+            backend_session: None,
         }),
         Event::UserMessage {
             text: "add etag support to the catalog fetcher so we stop re-downloading \
@@ -59,6 +60,7 @@ fn session_events() -> Vec<Event> {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.04),
+            cost_basis: None,
         }),
         Event::Decision {
             summary: "Reuse the existing LRU instead of a new Map — avoids a second \
@@ -120,6 +122,7 @@ fn session_events() -> Vec<Event> {
             reasoning: 1_200,
             model: "opus-5".to_owned(),
             cost_usd: None,
+            cost_basis: None,
         }),
         Event::AssistantMessage {
             text: "Etags cached in the LRU; 304s short-circuit. One test still red — the \

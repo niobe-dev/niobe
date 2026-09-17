@@ -14,6 +14,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod args;
+mod backend;
 mod config;
 mod journal;
 mod prices;
@@ -29,9 +30,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
-use niobe_tui::Ended;
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
+use niobe_tui::{Detached, Ended};
 
 use crate::args::{Command, Invocation};
 use crate::journal::StoreJournal;
@@ -121,15 +122,31 @@ fn run(Invocation { command, profile }: Invocation) -> Result<(), String> {
 fn shell(profile: Option<&str>) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
-    let app = new_app(&cwd, &root, profile)?;
+    let loaded = config::load(&root)?;
+    let selected = loaded.select(profile)?;
+    let app = App::new(repo::describe(&cwd));
+    let app = match &selected {
+        Some(selected) => app.with_profile(config::named(*selected)),
+        None => app,
+    };
 
     if !std::io::stdout().is_terminal() {
         print_help();
         return Ok(());
     }
 
+    // Spawned after the terminal check and before the shell takes the screen:
+    // a piped run starts no subprocess, and a backend that will not start says
+    // why on a screen that is still the operator's.
+    let mut backend = backend::attach(&root, selected.as_ref(), None)?;
+    let app = if backend.attached() {
+        app.attached()
+    } else {
+        app
+    };
+
     let mut journal = StoreJournal::Pending(root.clone());
-    let ended = niobe_tui::run(app, &mut journal).map_err(|e| e.to_string())?;
+    let ended = niobe_tui::run(app, &mut journal, backend.bridge()).map_err(|e| e.to_string())?;
 
     match ended {
         // There is nothing left to print on: the terminal the shell drew on is
@@ -152,7 +169,12 @@ fn shell(profile: Option<&str>) -> Result<(), String> {
 fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
-    let mut app = new_app(&cwd, &root, profile)?;
+    let loaded = config::load(&root)?;
+    let selected = loaded.select(profile)?;
+    let mut app = App::new(repo::describe(&cwd));
+    if let Some(selected) = &selected {
+        app = app.with_profile(config::named(*selected));
+    }
 
     let started = Instant::now();
     let store = repo::open_existing_store(&root)?.ok_or_else(|| {
@@ -181,8 +203,22 @@ fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
 
+    // The recorded session says what the backend called it, which is the only
+    // id that can hand its transcript back: Niobe's session id names the
+    // recording, not the conversation.
+    let continuing = app
+        .session()
+        .meta()
+        .and_then(|meta| meta.backend_session.clone());
+    let mut backend = backend::attach(&root, selected.as_ref(), continuing)?;
+    let app = if backend.attached() {
+        app.attached()
+    } else {
+        app
+    };
+
     let mut journal = StoreJournal::Open(recorder);
-    niobe_tui::run(app, &mut journal)
+    niobe_tui::run(app, &mut journal, backend.bridge())
         .map_err(|e| e.to_string())
         .map(|_| ())
 }
@@ -237,16 +273,6 @@ fn list_prices(model: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// An empty shell for `cwd`, under the profile `requested` names or the
-/// config's default.
-fn new_app(cwd: &Path, root: &Path, requested: Option<&str>) -> Result<App, String> {
-    let app = App::new(repo::describe(cwd));
-    Ok(match config::load(root)?.selected(requested)? {
-        Some(profile) => app.with_profile(profile),
-        None => app,
-    })
-}
-
 /// Folds a JSON Lines event log into the shell, for development. Nothing typed
 /// into a replayed log is recorded. Without a terminal, prints the fold.
 fn replay(log: &Path) -> Result<(), String> {
@@ -272,7 +298,9 @@ fn replay(log: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    niobe_tui::run(app, &mut Unrecorded)
+    // A recorded log is being looked at, not continued: nothing is attached
+    // and nothing is kept.
+    niobe_tui::run(app, &mut Unrecorded, &mut Detached)
         .map_err(|e| e.to_string())
         .map(|_| ())
 }
@@ -358,7 +386,17 @@ IN THE SHELL:
     PgUp / PgDn            Scroll the transcript
     F10, Ctrl+Q            Quit
 
-No backend is attached yet: the claude and codex bridges are not implemented.",
+BACKENDS:
+    A claude profile drives the official `claude` CLI as a subprocess, with the
+    profile's environment and arguments and the repository as its working
+    directory. Niobe never reads the CLI's credential files and never sets its
+    user agent: whatever that binary is signed in as is what the session runs
+    on. Every cost the CLI reports is one it computed from published prices, so
+    Niobe stores it as API-equivalent and never as money that moved.
+
+    Not implemented yet: the codex bridge and the native agent loop spawn
+    nothing, so a session under one of those profiles has nowhere to send a
+    prompt and says so.",
         name = niobe_core::APP_NAME,
         version = niobe_core::VERSION,
     );

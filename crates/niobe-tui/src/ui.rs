@@ -124,7 +124,10 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut right = Vec::new();
     if area.width >= WIDE_COLUMNS {
         right.push(Span::styled(
-            format!("{}  ", backend_label(app.session(), app.profile())),
+            format!(
+                "{}  ",
+                backend_label(app.session(), app.profile(), app.is_attached())
+            ),
             Style::new().fg(theme.menu_fg),
         ));
     }
@@ -243,7 +246,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
     let height = usize::from(area.height);
 
     let lines = if app.entries().is_empty() {
-        empty_transcript(theme)
+        empty_transcript(app.is_attached(), theme)
     } else {
         app.entries()
             .iter()
@@ -262,7 +265,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
 }
 
 /// What the session pane says before anything has happened in it.
-fn empty_transcript(theme: &Theme) -> Vec<Line<'static>> {
+fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::from(""),
         Line::from("  niobe").style(Style::new().fg(theme.hot).bold()),
@@ -274,7 +277,11 @@ fn empty_transcript(theme: &Theme) -> Vec<Line<'static>> {
         Line::from("  visible while it happens, and nothing on screen is a guess.")
             .style(Style::new().fg(theme.dim)),
         Line::from(""),
-        Line::from("  No backend is attached yet.").style(Style::new().fg(theme.dim)),
+        Line::from(match attached {
+            true => "  Ask for a change; the bill is on the right.",
+            false => "  No backend is attached: `niobe profiles` shows what is defined.",
+        })
+        .style(Style::new().fg(theme.dim)),
     ]
 }
 
@@ -518,7 +525,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     )];
     top.push(separator.clone());
     top.push(Span::styled(
-        backend_label(session, app.profile()),
+        backend_label(session, app.profile(), app.is_attached()),
         Style::new().fg(theme.agent),
     ));
     if let Some(branch) = &app.repo().branch {
@@ -585,13 +592,25 @@ fn draw_fkeys(frame: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
-/// What is running, or what is not running yet. A backend's own report of what
-/// it runs wins over the profile that was selected to start it.
-fn backend_label(session: &SessionState, profile: Option<&SelectedProfile>) -> String {
-    match (session.meta(), profile) {
-        (Some(meta), _) => format!("⚡ {} · {}", meta.backend, meta.model),
-        (None, Some(profile)) => format!("{} · {}, not attached", profile.name, profile.backend),
-        (None, None) => "no backend attached".to_owned(),
+/// What is running, or what is not running yet.
+///
+/// A backend's own report of what it runs wins over the profile that was
+/// selected to start it: the profile asks for a backend and the backend says
+/// which model it ended up on. Between the two — a subprocess started and not
+/// yet heard from — the line says it is starting rather than that nothing is
+/// attached, which would be read as a session that is not going to answer.
+fn backend_label(
+    session: &SessionState,
+    profile: Option<&SelectedProfile>,
+    attached: bool,
+) -> String {
+    match (session.meta(), profile, attached) {
+        (Some(meta), _, _) => format!("⚡ {} · {}", meta.backend, meta.model),
+        (None, Some(profile), true) => format!("{} · {}, starting", profile.name, profile.backend),
+        (None, Some(profile), false) => {
+            format!("{} · {}, not attached", profile.name, profile.backend)
+        }
+        (None, None, _) => "no backend attached".to_owned(),
     }
 }
 
@@ -639,6 +658,7 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: cost,
+            cost_basis: None,
         })
     }
 
@@ -663,7 +683,7 @@ mod tests {
     #[test]
     fn an_unstarted_session_says_no_backend_is_attached() {
         assert_eq!(
-            backend_label(&SessionState::new(), None),
+            backend_label(&SessionState::new(), None, false),
             "no backend attached"
         );
 
@@ -671,8 +691,12 @@ mod tests {
             backend: Backend::Codex,
             profile: "default".to_owned(),
             model: "gpt-5-codex".to_owned(),
+            backend_session: None,
         })]);
-        assert_eq!(backend_label(&running, None), "⚡ codex · gpt-5-codex");
+        assert_eq!(
+            backend_label(&running, None, false),
+            "⚡ codex · gpt-5-codex"
+        );
     }
 
     #[test]
@@ -682,7 +706,7 @@ mod tests {
             backend: Backend::Claude,
         };
         assert_eq!(
-            backend_label(&SessionState::new(), Some(&work)),
+            backend_label(&SessionState::new(), Some(&work), false),
             "work · claude, not attached"
         );
 
@@ -690,8 +714,29 @@ mod tests {
             backend: Backend::Claude,
             profile: "work".to_owned(),
             model: "opus-5".to_owned(),
+            backend_session: None,
         })]);
-        assert_eq!(backend_label(&running, Some(&work)), "⚡ claude · opus-5");
+        assert_eq!(
+            backend_label(&running, Some(&work), false),
+            "⚡ claude · opus-5"
+        );
+    }
+
+    #[test]
+    fn a_backend_that_has_started_and_not_yet_spoken_is_starting_not_absent() {
+        let max = SelectedProfile {
+            name: "max".to_owned(),
+            backend: Backend::Claude,
+        };
+
+        assert_eq!(
+            backend_label(&SessionState::new(), Some(&max), true),
+            "max · claude, starting"
+        );
+        assert_eq!(
+            backend_label(&SessionState::new(), Some(&max), false),
+            "max · claude, not attached"
+        );
     }
 
     #[test]

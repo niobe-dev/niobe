@@ -127,6 +127,10 @@ pub struct App {
     hint: Option<String>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
+    /// Whether a backend is listening. The shell holds no backend handle; this
+    /// is the one bit of it the transcript needs, so that a prompt with nowhere
+    /// to go says so instead of looking sent.
+    attached: bool,
     should_quit: bool,
 }
 
@@ -159,6 +163,7 @@ impl App {
             viewport_lines: 0,
             hint: None,
             produced: Vec::new(),
+            attached: false,
             should_quit: false,
         }
     }
@@ -265,6 +270,14 @@ impl App {
                 streaming: false,
             }),
 
+            Event::Notice { message } => self.push(Entry {
+                kind: EntryKind::Notice,
+                head: self.agent_name(),
+                meta: String::new(),
+                body: message.clone(),
+                streaming: false,
+            }),
+
             // Everything else is a number or a list a pane reads off the
             // session fold, not a line in the transcript.
             Event::SessionMeta(_)
@@ -342,6 +355,18 @@ impl App {
     pub fn with_profile(mut self, profile: SelectedProfile) -> Self {
         self.profile = Some(profile);
         self
+    }
+
+    /// The same shell, with a backend listening for what the operator sends.
+    #[must_use]
+    pub fn attached(mut self) -> Self {
+        self.attached = true;
+        self
+    }
+
+    /// Whether a backend is listening.
+    pub fn is_attached(&self) -> bool {
+        self.attached
     }
 
     /// Where the session is running.
@@ -490,9 +515,10 @@ impl App {
 
     /// Sends what is in the composer.
     ///
-    /// No backend is attached yet, so the prompt goes into the transcript and
-    /// the shell says plainly that nothing is listening — rather than showing a
-    /// reply nobody produced.
+    /// The prompt is folded in and queued: the event loop takes it from
+    /// [`App::take_produced`] and hands it to the backend and to the journal.
+    /// With nothing attached, the shell says so plainly rather than leaving a
+    /// prompt on screen that looks sent.
     pub fn submit(&mut self) {
         let text = self.composed();
         if text.trim().is_empty() {
@@ -500,15 +526,33 @@ impl App {
         }
 
         self.composer.clear();
-
         self.produce(Event::UserMessage { text });
+        if !self.attached {
+            self.push(Entry {
+                kind: EntryKind::Notice,
+                head: "no backend".to_owned(),
+                meta: "not sent".to_owned(),
+                body: "This session is not attached to a backend, so the prompt above was \
+                       not sent. `niobe profiles` shows which profiles are defined and which \
+                       backend each one runs."
+                    .to_owned(),
+                streaming: false,
+            });
+        }
+        self.scroll_to_tail();
+    }
+
+    /// Says in the transcript that a turn never reached the backend, so that a
+    /// prompt with no reply is not read as a backend thinking about it.
+    pub fn not_sent(&mut self, error: &str) {
         self.push(Entry {
-            kind: EntryKind::Notice,
-            head: "no backend".to_owned(),
-            meta: "not sent".to_owned(),
-            body: "Nothing is attached to this session yet: the claude and codex bridges \
-                   are not implemented. The prompt above was not sent."
-                .to_owned(),
+            kind: EntryKind::Failure,
+            head: "not sent".to_owned(),
+            meta: String::new(),
+            body: format!(
+                "What you just typed did not reach the backend, so nothing is working on \
+                 it: {error}"
+            ),
             streaming: false,
         });
         self.scroll_to_tail();
@@ -580,6 +624,7 @@ mod tests {
             backend: Backend::Claude,
             profile: "default".to_owned(),
             model: "opus-5".to_owned(),
+            backend_session: None,
         }));
         app.apply(&Event::AssistantDelta {
             text: "Reading ".to_owned(),

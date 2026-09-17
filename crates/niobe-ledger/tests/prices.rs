@@ -33,6 +33,7 @@ fn usage(model: &str) -> Usage {
         reasoning: 0,
         model: model.to_owned(),
         cost_usd: None,
+        cost_basis: None,
     }
 }
 

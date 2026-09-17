@@ -15,7 +15,10 @@ use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::prelude::CrosstermBackend;
 
+use niobe_core::event::Event as SessionEvent;
+
 use crate::app::App;
+use crate::bridge::Bridge;
 use crate::input::{Input, Wait};
 use crate::journal::Journal;
 use crate::terminal::{Shutdown, TerminalGuard, install_panic_hook};
@@ -27,6 +30,16 @@ use crate::ui;
 /// a SIGTERM and the terminal being handed back, and between the terminal going
 /// away and the session ending.
 const TICK: Duration = Duration::from_millis(100);
+
+/// How long it waits while a backend is producing.
+///
+/// A reply arrives as fragments on a channel the terminal's `poll(2)` cannot
+/// see, so the loop finds them by looking — at `TICK` that is ten redraws a
+/// second and text that arrives in visible steps. Thirty is smooth to read and
+/// half the wakeups of a frame rate, and it is paid only while something is
+/// actually arriving: a tick that drained nothing goes back to `TICK`, so an
+/// idle shell and a session waiting on a tool call cost what they did before.
+const BUSY_TICK: Duration = Duration::from_millis(33);
 
 /// How a session ended.
 ///
@@ -43,7 +56,7 @@ pub enum Ended {
 
 /// Runs the shell on `app` until the operator quits, the process is asked to
 /// stop or the terminal goes away, handing every event the operator produces to
-/// `journal`.
+/// `backend` and to `journal`, and folding in everything `backend` produces.
 ///
 /// `app` may already hold a session: a resumed one is folded in by the caller
 /// before the shell opens.
@@ -51,7 +64,7 @@ pub enum Ended {
 /// Installs the panic hook and the signal handlers first, so that every way out
 /// of the function — including the ways that do not return from it — puts the
 /// terminal back.
-pub fn run(mut app: App, journal: &mut dyn Journal) -> io::Result<Ended> {
+pub fn run(mut app: App, journal: &mut dyn Journal, backend: &mut dyn Bridge) -> io::Result<Ended> {
     install_panic_hook();
     let shutdown = Shutdown::install()?;
     let wait = Wait::on_the_terminal();
@@ -62,7 +75,7 @@ pub fn run(mut app: App, journal: &mut dyn Journal) -> io::Result<Ended> {
     // and waits for the reply, which never comes when stdin is a pipe.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    let ended = event_loop(&mut terminal, &mut app, journal, &shutdown, &wait)?;
+    let ended = event_loop(&mut terminal, &mut app, journal, backend, &shutdown, &wait)?;
 
     match ended {
         Ended::Quit => {}
@@ -102,18 +115,21 @@ fn event_loop<B: Backend<Error = io::Error>>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     journal: &mut dyn Journal,
+    backend: &mut dyn Bridge,
     shutdown: &Shutdown,
     wait: &Wait,
 ) -> io::Result<Ended> {
     let mut ended = Ended::Quit;
 
     while !app.should_quit() {
+        let producing = fold_backend(app, journal, backend);
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        match wait.input(TICK)? {
+        let tick = if producing { BUSY_TICK } else { TICK };
+        match wait.input(tick)? {
             Input::Ready => {
                 read_input(app)?;
-                keep_produced(app, journal);
+                send_produced(app, journal, backend);
             }
             Input::Idle => {}
             // The terminal is gone: there is no one left to type and nothing
@@ -160,23 +176,57 @@ fn read_input(app: &mut App) -> io::Result<()> {
     }
 }
 
-/// Hands what the operator produced to the journal, and puts a failure on
-/// screen for anything it could not keep. A store that stops writing does not
-/// end the session: the operator decides whether to go on without it.
-fn keep_produced(app: &mut App, journal: &mut dyn Journal) {
+/// Hands what the operator produced to the backend and to the journal, and
+/// puts a failure on screen for anything either of them refused.
+///
+/// Neither failure ends the session. A store that stops writing leaves the
+/// operator to decide whether to go on without it; a backend that will not take
+/// a turn leaves the prompt on screen, said to be unsent rather than left
+/// looking as though something were working on it.
+fn send_produced(app: &mut App, journal: &mut dyn Journal, backend: &mut dyn Bridge) {
     for event in app.take_produced() {
         if let Err(error) = journal.append(&event) {
             app.not_kept(&error.to_string());
         }
+        // Only the operator's own turns are sent on. Everything else the shell
+        // produces is a record of what happened here, and the backend has no
+        // use for what it did not ask for.
+        if let SessionEvent::UserMessage { text } = &event
+            && app.is_attached()
+            && let Err(error) = backend.send(text)
+        {
+            app.not_sent(&error.to_string());
+        }
     }
+}
+
+/// Folds in everything the backend has produced and keeps it, and says whether
+/// there was any so that the loop can look again sooner while a reply arrives.
+///
+/// The backend's events go to the journal as the operator's do: a resumed
+/// session shows the whole conversation or it shows half of one. They do not go
+/// through `take_produced`, which is the queue of what was done *here* and is
+/// what gets sent back to the backend.
+fn fold_backend(app: &mut App, journal: &mut dyn Journal, backend: &mut dyn Bridge) -> bool {
+    let events = backend.drain();
+    if events.is_empty() {
+        return false;
+    }
+    for event in &events {
+        app.apply(event);
+        if let Err(error) = journal.append(event) {
+            app.not_kept(&error.to_string());
+        }
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::Repo;
+    use crate::bridge::{BridgeError, Detached};
     use crate::journal::JournalError;
-    use niobe_core::event::Event as SessionEvent;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// Keeps everything, or refuses everything.
@@ -196,8 +246,31 @@ mod tests {
         }
     }
 
+    /// A backend that takes every turn, or refuses every turn, and hands back
+    /// whatever it was given to produce.
+    #[derive(Debug, Default)]
+    struct Attached {
+        sent: Vec<String>,
+        produces: Vec<SessionEvent>,
+        refuse: bool,
+    }
+
+    impl Bridge for Attached {
+        fn send(&mut self, prompt: &str) -> Result<(), BridgeError> {
+            if self.refuse {
+                return Err("the subprocess has gone".into());
+            }
+            self.sent.push(prompt.to_owned());
+            Ok(())
+        }
+
+        fn drain(&mut self) -> Vec<SessionEvent> {
+            std::mem::take(&mut self.produces)
+        }
+    }
+
     fn app_with_a_sent_prompt() -> App {
-        let mut app = App::new(Repo::default());
+        let mut app = App::new(Repo::default()).attached();
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         app
@@ -234,11 +307,12 @@ mod tests {
     }
 
     #[test]
-    fn a_sent_prompt_reaches_the_journal() {
+    fn a_sent_prompt_reaches_the_journal_and_the_backend() {
         let mut app = app_with_a_sent_prompt();
         let mut journal = Kept::default();
+        let mut backend = Attached::default();
 
-        keep_produced(&mut app, &mut journal);
+        send_produced(&mut app, &mut journal, &mut backend);
 
         assert_eq!(
             journal.events,
@@ -246,6 +320,7 @@ mod tests {
                 text: "x".to_owned()
             }]
         );
+        assert_eq!(backend.sent, ["x"]);
     }
 
     #[test]
@@ -256,10 +331,109 @@ mod tests {
             ..Kept::default()
         };
 
-        keep_produced(&mut app, &mut journal);
+        send_produced(&mut app, &mut journal, &mut Detached);
+
+        let saved = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "not saved")
+            .expect("the failure is on screen");
+        assert!(saved.body.ends_with("the store is read-only"));
+    }
+
+    #[test]
+    fn a_backend_that_will_not_take_a_turn_says_so_rather_than_looking_busy() {
+        let mut app = app_with_a_sent_prompt();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+
+        send_produced(&mut app, &mut Kept::default(), &mut backend);
 
         let last = app.entries().last().expect("an entry was pushed");
-        assert_eq!(last.head, "not saved");
-        assert!(last.body.ends_with("the store is read-only"));
+        assert_eq!(last.head, "not sent");
+        assert!(
+            last.body.ends_with("the subprocess has gone"),
+            "{}",
+            last.body
+        );
+    }
+
+    #[test]
+    fn a_session_with_nothing_attached_does_not_try_to_send() {
+        let mut app = App::new(Repo::default());
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut journal = Kept::default();
+
+        send_produced(&mut app, &mut journal, &mut Detached);
+
+        // The turn is still recorded — it is what the operator did — and the
+        // transcript says plainly that nothing received it.
+        assert_eq!(journal.events.len(), 1);
+        let notice = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "no backend")
+            .expect("the shell said nothing is listening");
+        assert_eq!(notice.meta, "not sent");
+        assert!(
+            !app.entries().iter().any(|entry| entry.head == "not sent"),
+            "a session with nothing attached reported a send that was never tried"
+        );
+    }
+
+    #[test]
+    fn what_the_backend_produces_is_folded_in_and_kept() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            produces: vec![
+                SessionEvent::AssistantDelta {
+                    text: "read".to_owned(),
+                },
+                SessionEvent::AssistantMessage {
+                    text: "reading".to_owned(),
+                },
+            ],
+            ..Attached::default()
+        };
+
+        let producing = fold_backend(&mut app, &mut journal, &mut backend);
+
+        assert!(producing, "the loop did not notice a reply arriving");
+        assert_eq!(
+            journal.events.len(),
+            2,
+            "a resumed session would show half a reply"
+        );
+        assert_eq!(app.session().assistant_messages(), 1);
+        assert_eq!(app.session().last_assistant(), Some("reading"));
+        assert!(
+            app.take_produced().is_empty(),
+            "the backend's own events were queued to be sent back to it"
+        );
+    }
+
+    #[test]
+    fn a_tick_that_drained_nothing_is_not_a_backend_producing() {
+        let mut app = App::new(Repo::default()).attached();
+
+        assert!(!fold_backend(
+            &mut app,
+            &mut Kept::default(),
+            &mut Attached::default()
+        ));
+        assert!(!fold_backend(&mut app, &mut Kept::default(), &mut Detached));
+    }
+
+    #[test]
+    fn a_reply_is_looked_for_often_enough_to_read_as_it_arrives() {
+        assert!(BUSY_TICK < TICK);
+        assert!(
+            BUSY_TICK.as_millis() >= 16,
+            "looking more often than the frame budget would spend the time drawing"
+        );
     }
 }

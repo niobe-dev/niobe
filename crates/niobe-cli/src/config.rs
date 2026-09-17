@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use niobe_config::{Config, FILE_NAME};
+use niobe_config::{Config, FILE_NAME, Selected};
 use niobe_tui::app::SelectedProfile;
 
 use crate::repo;
@@ -25,13 +25,24 @@ pub struct Loaded {
 }
 
 impl Loaded {
+    /// The profile a session runs under: the backend it runs and everything it
+    /// runs with.
+    pub fn select(&self, requested: Option<&str>) -> Result<Option<Selected<'_>>, String> {
+        self.config.select(requested).map_err(|e| e.to_string())
+    }
+
     /// The profile a session runs under, as the shell names it.
     pub fn selected(&self, requested: Option<&str>) -> Result<Option<SelectedProfile>, String> {
-        let selected = self.config.select(requested).map_err(|e| e.to_string())?;
-        Ok(selected.map(|s| SelectedProfile {
-            name: s.name.to_owned(),
-            backend: s.profile.backend(),
-        }))
+        Ok(self.select(requested)?.map(named))
+    }
+}
+
+/// A selected profile as the shell names it: the name, and the backend it
+/// runs. The shell is given no more, because it can use no more.
+pub fn named(selected: Selected<'_>) -> SelectedProfile {
+    SelectedProfile {
+        name: selected.name.to_owned(),
+        backend: selected.profile.backend(),
     }
 }
 

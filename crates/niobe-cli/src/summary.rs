@@ -104,6 +104,7 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd,
+            cost_basis: None,
         })
     }
 

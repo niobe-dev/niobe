@@ -711,6 +711,8 @@ name = "niobe-bridge-claude"
 version = "0.0.0"
 dependencies = [
  "niobe-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

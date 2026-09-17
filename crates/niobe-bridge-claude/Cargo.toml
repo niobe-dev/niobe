@@ -13,6 +13,8 @@ description = "Drives the official `claude` CLI as a subprocess and translates i
 
 [dependencies]
 niobe-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

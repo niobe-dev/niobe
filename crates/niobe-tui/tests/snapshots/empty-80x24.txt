@@ -7,7 +7,7 @@
 ║  Every token, every decision and every minute of agent time is               ║
 ║  visible while it happens, and nothing on screen is a guess.                 ║
 ║                                                                              ║
-║  No backend is attached yet.                                                 ║
+║  No backend is attached: `niobe profiles` shows what is defined.             ║
 ║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║
