@@ -14,6 +14,10 @@
 //!
 //! All three are idempotent, so overlapping paths — a panic while a SIGTERM is
 //! pending — restore once and do not fight each other.
+//!
+//! A terminal can also go away without any of that: no signal is sent when the
+//! process is not in the session that owns it. The event loop's own wait for
+//! input sees the hangup and quits, which is the first path above.
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};

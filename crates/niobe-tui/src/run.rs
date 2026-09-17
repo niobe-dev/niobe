@@ -16,6 +16,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::prelude::CrosstermBackend;
 
 use crate::app::App;
+use crate::input::{Input, Wait};
 use crate::journal::Journal;
 use crate::terminal::{Shutdown, TerminalGuard, install_panic_hook};
 use crate::ui;
@@ -23,7 +24,8 @@ use crate::ui;
 /// How long the loop waits for a key before looking at the shutdown flag.
 ///
 /// A signal is noticed within one tick, so this is also the worst case between
-/// a SIGTERM and the terminal being handed back.
+/// a SIGTERM and the terminal being handed back, and between the terminal going
+/// away and the session ending.
 const TICK: Duration = Duration::from_millis(100);
 
 /// Runs the shell on `app` until the operator quits or the process is asked to
@@ -38,6 +40,7 @@ const TICK: Duration = Duration::from_millis(100);
 pub fn run(mut app: App, journal: &mut dyn Journal) -> io::Result<()> {
     install_panic_hook();
     let shutdown = Shutdown::install()?;
+    let wait = Wait::on_the_terminal();
 
     let mut guard = TerminalGuard::enter(io::stdout())?;
     // No `Terminal::clear` here: the alternate screen starts blank and the
@@ -45,7 +48,7 @@ pub fn run(mut app: App, journal: &mut dyn Journal) -> io::Result<()> {
     // and waits for the reply, which never comes when stdin is a pipe.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    let result = event_loop(&mut terminal, &mut app, journal, &shutdown);
+    let result = event_loop(&mut terminal, &mut app, journal, &shutdown, &wait);
 
     // Explicit, so that a restore failure is reported rather than swallowed by
     // `Drop`. Dropping the guard afterwards is a no-op.
@@ -60,20 +63,21 @@ fn event_loop<B: Backend<Error = io::Error>>(
     app: &mut App,
     journal: &mut dyn Journal,
     shutdown: &Shutdown,
+    wait: &Wait,
 ) -> io::Result<()> {
     while !app.should_quit() {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if event::poll(TICK)? {
-            match event::read()? {
-                // Windows reports a press and a release; acting on both would
-                // send every prompt twice.
-                Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
-                // The next draw reads the new size; nothing to do here.
-                Event::Resize(_, _) => {}
-                _ => {}
+        match wait.input(TICK)? {
+            Input::Ready => {
+                read_input(app)?;
+                keep_produced(app, journal);
             }
-            keep_produced(app, journal);
+            Input::Idle => {}
+            // The terminal is gone: there is no one left to type and nothing
+            // left to draw on, so the session ends the way a quit does and the
+            // guard hands back what there is to hand back.
+            Input::HungUp => app.quit(),
         }
 
         if shutdown.requested() {
@@ -82,6 +86,33 @@ fn event_loop<B: Backend<Error = io::Error>>(
     }
 
     Ok(())
+}
+
+/// Hands the app everything the terminal has for it.
+///
+/// crossterm parses a read into a queue and gives out one event at a time — a
+/// paste is one read and many keys — so the queue is emptied here. Were it not,
+/// the rest of a paste would sit there until the next keystroke woke the wait,
+/// which only looks at the terminal.
+///
+/// The zero-timeout check is the one place a hangup can still catch the loop,
+/// in the instant between the wait and this call; crossterm offers no way to
+/// ask what it has already parsed without also reading the terminal.
+fn read_input(app: &mut App) -> io::Result<()> {
+    loop {
+        match event::read()? {
+            // Windows reports a press and a release; acting on both would
+            // send every prompt twice.
+            Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+            // The next draw reads the new size; nothing to do here.
+            Event::Resize(_, _) => {}
+            _ => {}
+        }
+
+        if !event::poll(Duration::ZERO)? {
+            return Ok(());
+        }
+    }
 }
 
 /// Hands what the operator produced to the journal, and puts a failure on

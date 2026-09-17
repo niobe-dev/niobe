@@ -732,6 +732,7 @@ dependencies = [
  "niobe-store",
  "niobe-tui",
  "ratatui",
+ "rustix",
  "tempfile",
 ]
 
@@ -778,6 +779,7 @@ dependencies = [
  "niobe-core",
  "ratatui",
  "ratatui-textarea",
+ "rustix",
  "signal-hook 0.4.4",
  "unicode-width",
 ]

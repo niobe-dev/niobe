@@ -55,6 +55,11 @@ ratatui-textarea = "0.9"
 unicode-width = "0.2"
 signal-hook = "0.4"
 
+# Safe wrappers for the POSIX calls the workspace needs — `unsafe` is denied,
+# so the raw ones are not an option. The event loop waits with `poll(2)`, and
+# the CLI's tests drive the binary through a pty.
+rustix = "1.1"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

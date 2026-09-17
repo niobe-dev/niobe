@@ -29,5 +29,9 @@ niobe-bridge-codex.workspace = true
 ratatui.workspace = true
 tempfile.workspace = true
 
+[target.'cfg(unix)'.dev-dependencies]
+# A pty to run the binary on, for the tests that take its terminal away.
+rustix = { workspace = true, features = ["event", "pty", "termios"] }
+
 [lints]
 workspace = true

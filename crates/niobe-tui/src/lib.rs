@@ -15,9 +15,12 @@
 //! * **Nothing on screen is invented.** Where the fold has no number the pane
 //!   draws an em dash, and says what is not wired up where that is not obvious.
 //! * **The terminal is always handed back.** A guard, a panic hook and a signal
-//!   handler cover the three ways out; see [`terminal`].
+//!   handler cover the three ways out; see [`terminal`]. A fourth — a terminal
+//!   that goes away without a signal — is noticed by the event loop's own wait
+//!   for input.
 
 pub mod app;
+mod input;
 pub mod journal;
 pub mod run;
 pub mod terminal;
