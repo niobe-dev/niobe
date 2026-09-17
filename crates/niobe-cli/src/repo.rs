@@ -91,13 +91,31 @@ pub fn open_existing_store(root: &Path) -> Result<Option<Store>, String> {
         .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))
 }
 
-/// The checked-out branch, read from `.git/HEAD` in the nearest repository.
+/// Where git keeps the state of the checkout whose `.git` is `dot_git`: that
+/// directory itself in an ordinary clone, and the directory its `gitdir:` line
+/// names where `.git` is a file instead — which is what a linked worktree
+/// (`git worktree add`) and a submodule have.
+fn git_dir(dot_git: &Path) -> Option<PathBuf> {
+    if dot_git.is_dir() {
+        return Some(dot_git.to_path_buf());
+    }
+    let pointer = std::fs::read_to_string(dot_git).ok()?;
+    let target = Path::new(pointer.trim().strip_prefix("gitdir:")?.trim());
+    if target.is_absolute() {
+        return Some(target.to_path_buf());
+    }
+    // A submodule's pointer is relative to the file that holds it.
+    Some(dot_git.parent()?.join(target))
+}
+
+/// The checked-out branch, read from the `HEAD` of the nearest repository.
 ///
 /// Parsed rather than shelled out to: `git` may not be installed, and a
 /// subprocess for one line of a file is a subprocess the operator pays for.
 fn git_branch(from: &Path) -> Option<String> {
     from.ancestors().find_map(|dir| {
-        let contents = std::fs::read_to_string(dir.join(".git").join("HEAD")).ok()?;
+        let head = git_dir(&dir.join(".git"))?.join("HEAD");
+        let contents = std::fs::read_to_string(head).ok()?;
         let head = contents.trim();
         Some(match head.strip_prefix("ref: refs/heads/") {
             Some(branch) => branch.to_owned(),
@@ -122,6 +140,58 @@ mod tests {
     #[test]
     fn a_directory_outside_a_repository_has_no_branch() {
         assert_eq!(git_branch(Path::new("/")), None);
+    }
+
+    /// The layout `git worktree add` leaves behind: the checkout's `.git` is a
+    /// file naming a directory under the main repository's `.git/worktrees`,
+    /// and that directory holds the `HEAD` of this checkout.
+    fn worktree(root: &Path, pointer: &str, head: &str) -> PathBuf {
+        let gitdir = root.join("main").join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(&gitdir).expect("the worktree state directory can be made");
+        std::fs::write(gitdir.join("HEAD"), head).expect("the worktree HEAD is written");
+
+        let checkout = root.join("wt");
+        std::fs::create_dir_all(&checkout).expect("the checkout can be made");
+        std::fs::write(checkout.join(".git"), pointer).expect("the pointer file is written");
+        checkout
+    }
+
+    #[test]
+    fn a_worktrees_branch_is_read_through_its_gitdir_pointer() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let gitdir = dir
+            .path()
+            .join("main")
+            .join(".git")
+            .join("worktrees")
+            .join("wt");
+        let checkout = worktree(
+            dir.path(),
+            &format!("gitdir: {}\n", gitdir.display()),
+            "ref: refs/heads/feature\n",
+        );
+
+        assert_eq!(git_branch(&checkout), Some("feature".to_owned()));
+    }
+
+    #[test]
+    fn a_gitdir_pointer_is_resolved_against_the_file_that_holds_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let checkout = worktree(
+            dir.path(),
+            "gitdir: ../main/.git/worktrees/wt\n",
+            "ref: refs/heads/feature\n",
+        );
+
+        assert_eq!(git_branch(&checkout), Some("feature".to_owned()));
+    }
+
+    #[test]
+    fn a_git_file_that_names_no_gitdir_leaves_the_branch_unknown() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        std::fs::write(dir.path().join(".git"), "not a pointer\n").expect("the file is written");
+
+        assert_eq!(git_branch(dir.path()), None);
     }
 
     #[test]
