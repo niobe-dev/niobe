@@ -17,7 +17,9 @@
 //!
 //! A terminal can also go away without any of that: no signal is sent when the
 //! process is not in the session that owns it. The event loop's own wait for
-//! input sees the hangup and quits, which is the first path above.
+//! input sees the hangup and quits, which is the first path above — except that
+//! the sequences written here cannot reach a terminal that has gone, so the
+//! failure to write them is not what [`crate::run`] reports.
 //!
 //! Each path is proven against the binary on a real terminal in the CLI's
 //! `tests/pty.rs`. Nothing less can: the hook writes to the process's own

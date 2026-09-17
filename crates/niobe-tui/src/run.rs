@@ -28,8 +28,22 @@ use crate::ui;
 /// away and the session ending.
 const TICK: Duration = Duration::from_millis(100);
 
-/// Runs the shell on `app` until the operator quits or the process is asked to
-/// stop, handing every event the operator produces to `journal`.
+/// How a session ended.
+///
+/// The caller needs the difference to know whether there is still a terminal
+/// to write to: a line printed after the shell closes goes to whatever the
+/// shell was drawing on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// The operator quit, or the process was asked to stop.
+    Quit,
+    /// The terminal the shell drew on went away.
+    TerminalGone,
+}
+
+/// Runs the shell on `app` until the operator quits, the process is asked to
+/// stop or the terminal goes away, handing every event the operator produces to
+/// `journal`.
 ///
 /// `app` may already hold a session: a resumed one is folded in by the caller
 /// before the shell opens.
@@ -37,7 +51,7 @@ const TICK: Duration = Duration::from_millis(100);
 /// Installs the panic hook and the signal handlers first, so that every way out
 /// of the function — including the ways that do not return from it — puts the
 /// terminal back.
-pub fn run(mut app: App, journal: &mut dyn Journal) -> io::Result<()> {
+pub fn run(mut app: App, journal: &mut dyn Journal) -> io::Result<Ended> {
     install_panic_hook();
     let shutdown = Shutdown::install()?;
     let wait = Wait::on_the_terminal();
@@ -48,12 +62,38 @@ pub fn run(mut app: App, journal: &mut dyn Journal) -> io::Result<()> {
     // and waits for the reply, which never comes when stdin is a pipe.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    let result = event_loop(&mut terminal, &mut app, journal, &shutdown, &wait);
+    let ended = event_loop(&mut terminal, &mut app, journal, &shutdown, &wait)?;
+
+    match ended {
+        Ended::Quit => {}
+        // The drawing surface is abandoned rather than dropped: ratatui's
+        // `Terminal` shows the cursor again as it drops and, when it cannot,
+        // prints that failure to standard error. Standard error is the terminal
+        // that has just gone, so the print fails too — and an `eprintln!` that
+        // fails panics, which would end a session that merely lost its terminal
+        // as a crash.
+        Ended::TerminalGone => std::mem::forget(terminal),
+    }
 
     // Explicit, so that a restore failure is reported rather than swallowed by
     // `Drop`. Dropping the guard afterwards is a no-op.
-    guard.restore()?;
-    result
+    outcome(ended, guard.restore())
+}
+
+/// What the session ended as, from how the loop ended and whether the terminal
+/// could be handed back.
+///
+/// A terminal that has gone cannot be handed back: the sequences that would do
+/// it fail with the same hangup that ended the session, and a session that
+/// ended because its terminal closed did not fail — whatever started `niobe`
+/// reads that from the exit status. Any other failure to restore is reported
+/// with its error: a terminal left in raw mode on the alternate screen is the
+/// operator's to fix by hand, and they are owed the reason.
+fn outcome(ended: Ended, restored: io::Result<()>) -> io::Result<Ended> {
+    match ended {
+        Ended::Quit => restored.map(|()| Ended::Quit),
+        Ended::TerminalGone => Ok(Ended::TerminalGone),
+    }
 }
 
 // `Backend::Error` is associated, so the loop names the one it propagates
@@ -64,7 +104,9 @@ fn event_loop<B: Backend<Error = io::Error>>(
     journal: &mut dyn Journal,
     shutdown: &Shutdown,
     wait: &Wait,
-) -> io::Result<()> {
+) -> io::Result<Ended> {
+    let mut ended = Ended::Quit;
+
     while !app.should_quit() {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -77,7 +119,10 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // The terminal is gone: there is no one left to type and nothing
             // left to draw on, so the session ends the way a quit does and the
             // guard hands back what there is to hand back.
-            Input::HungUp => app.quit(),
+            Input::HungUp => {
+                ended = Ended::TerminalGone;
+                app.quit();
+            }
         }
 
         if shutdown.requested() {
@@ -85,7 +130,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         }
     }
 
-    Ok(())
+    Ok(ended)
 }
 
 /// Hands the app everything the terminal has for it.
@@ -156,6 +201,36 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         app
+    }
+
+    /// A restore that could not write, the way handing back a terminal that has
+    /// gone fails.
+    fn restore_failed() -> io::Result<()> {
+        Err(io::Error::other("the terminal went away"))
+    }
+
+    #[test]
+    fn a_terminal_that_could_not_be_handed_back_is_reported_with_its_error() {
+        let error = outcome(Ended::Quit, restore_failed()).expect_err("the restore failed");
+
+        assert_eq!(error.to_string(), "the terminal went away");
+    }
+
+    #[test]
+    fn a_session_whose_terminal_went_away_did_not_fail() {
+        // The restore fails because the terminal is gone, which is the same
+        // thing that ended the session.
+        let ended = outcome(Ended::TerminalGone, restore_failed())
+            .expect("a terminal that went away is not a failed session");
+
+        assert_eq!(ended, Ended::TerminalGone);
+    }
+
+    #[test]
+    fn a_clean_quit_that_handed_the_terminal_back_is_a_quit() {
+        let ended = outcome(Ended::Quit, Ok(())).expect("nothing failed");
+
+        assert_eq!(ended, Ended::Quit);
     }
 
     #[test]

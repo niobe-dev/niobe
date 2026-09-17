@@ -17,7 +17,9 @@
 //! * **The terminal is always handed back.** A guard, a panic hook and a signal
 //!   handler cover the three ways out; see [`terminal`]. A fourth — a terminal
 //!   that goes away without a signal — is noticed by the event loop's own wait
-//!   for input.
+//!   for input, and ends the session rather than failing it: there is nothing
+//!   left to hand the terminal back to, and losing a terminal is not a session
+//!   that went wrong.
 
 pub mod app;
 mod input;
@@ -30,7 +32,7 @@ pub mod ui;
 
 pub use app::{App, Entry, EntryKind, Repo, SelectedProfile};
 pub use journal::{Journal, JournalError, Unrecorded};
-pub use run::run;
+pub use run::{Ended, run};
 pub use terminal::{Shutdown, TerminalGuard, install_panic_hook};
 pub use theme::{CLASSIC, Theme};
 pub use ui::{MIN_SIZE, WIDE_COLUMNS, draw, session_cost};

@@ -29,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
+use niobe_tui::Ended;
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
 
@@ -90,8 +91,15 @@ fn shell(profile: Option<&str>) -> Result<(), String> {
     }
 
     let mut journal = StoreJournal::Pending(root.clone());
-    niobe_tui::run(app, &mut journal).map_err(|e| e.to_string())?;
+    let ended = niobe_tui::run(app, &mut journal).map_err(|e| e.to_string())?;
 
+    match ended {
+        // There is nothing left to print on: the terminal the shell drew on is
+        // the one this line would go to, and writing to it now fails. The
+        // session is recorded either way, and `niobe sessions` lists it.
+        Ended::TerminalGone => return Ok(()),
+        Ended::Quit => {}
+    }
     if let Some(session) = journal.session() {
         println!(
             "session {session} saved in {} — `niobe --resume {session}` continues it",
@@ -136,7 +144,9 @@ fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
     }
 
     let mut journal = StoreJournal::Open(recorder);
-    niobe_tui::run(app, &mut journal).map_err(|e| e.to_string())
+    niobe_tui::run(app, &mut journal)
+        .map_err(|e| e.to_string())
+        .map(|_| ())
 }
 
 /// Prints the sessions recorded in this repository, newest first.
@@ -224,7 +234,9 @@ fn replay(log: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    niobe_tui::run(app, &mut Unrecorded).map_err(|e| e.to_string())
+    niobe_tui::run(app, &mut Unrecorded)
+        .map_err(|e| e.to_string())
+        .map(|_| ())
 }
 
 fn print_summary(header: &str, app: &App) {

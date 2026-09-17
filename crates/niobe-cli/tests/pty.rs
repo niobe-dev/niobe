@@ -19,7 +19,9 @@
 //! The fourth case is the terminal closing under the shell, which no signal
 //! reports: a process outside the session that owns a terminal is not sent
 //! SIGHUP when it goes, and the hangup on the descriptor is the only thing that
-//! says so.
+//! says so. What the shell draws cannot be read after that, so those tests read
+//! the session out of the store instead, and the exit status — a session that
+//! lost its terminal ended; it did not fail, and a wrapper reads that here.
 //!
 //! A test binary of its own, because it measures how long the shell takes to
 //! notice; tests that draw or replay in the same binary would be measured
@@ -463,4 +465,27 @@ fn a_session_whose_terminal_went_away_is_still_there_to_resume() {
     let listed = niobe(repo.path(), &["sessions"]);
     let listed = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
     assert!(listed.contains("etags please"), "{listed}");
+}
+
+#[test]
+fn a_shell_whose_terminal_went_away_ends_the_session_rather_than_failing() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    // A session with something in it, so that the shell has the line it prints
+    // on the way out to print — to a terminal that is no longer there.
+    terminal.typed(b"etags please\r");
+    recorded(repo.path(), 1);
+
+    drop(slave);
+    terminal.close();
+
+    let (_, status) = ended(&mut shell);
+    assert!(
+        status.success(),
+        "a session that ended because its terminal went away exited with {status}, \
+         which tells whatever started niobe that the session failed"
+    );
 }
