@@ -49,7 +49,16 @@ fn main() -> ExitCode {
     }
 }
 
-/// What the process exits with when a failure was written where it can be read.
+/// What the process exits with when a failure's reason was written to standard
+/// error.
+///
+/// Written, not read: where standard error points is the operator's
+/// arrangement, and a write that reported every byte proves nothing about what
+/// is at the other end. `/dev/null` takes the message and drops it; a
+/// descriptor closed before the process started takes it too, because the
+/// standard library turns the `EBADF` such a write raises into a write that
+/// reported every byte. Neither is distinguishable from a terminal, so this
+/// status promises only what `niobe` did.
 const FAILED: u8 = 1;
 
 /// What it exits with when the failure could not be written.
@@ -306,7 +315,8 @@ OPTIONS:
 
 EXIT STATUS:
     0   The session ended, including because the terminal it drew on went away
-    1   Something failed; the reason is on standard error
+    1   Something failed; the reason was written to standard error, which
+        discards it when standard error is closed or /dev/null
     2   Something failed and the reason could not be written to standard error
 
 PROFILES:

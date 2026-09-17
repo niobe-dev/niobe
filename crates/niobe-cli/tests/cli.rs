@@ -30,6 +30,14 @@ const FIXTURE: &str = "../niobe-core/tests/fixtures/session-200.jsonl";
 /// the slowest single run of the 80 timed was 4.2 ms.
 const REPLAY_BUDGET_MS: f64 = 50.0;
 
+/// What the binary exits with when a failure's reason was written to standard
+/// error, whatever standard error pointed at.
+const FAILED: i32 = 1;
+
+/// What it exits with when the reason could not be written at all, which is
+/// what `crates/niobe-cli/tests/pty.rs` reads on a terminal that has gone.
+const FAILED_UNREPORTED: i32 = 2;
+
 fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE)
 }
@@ -46,6 +54,23 @@ fn niobe_with_user_config(cwd: &Path, config_home: &Path, args: &[&str]) -> Outp
         .args(args)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", config_home)
+        .output()
+        .expect("the niobe binary runs")
+}
+
+/// Runs the binary with descriptor 2 closed, the way `niobe 2>&-` does.
+///
+/// A closed descriptor cannot be arranged with `Command` alone — every
+/// `Stdio` it offers hands the child an open one — so the run goes through a
+/// shell, which closes the descriptor after the fork and before the exec.
+fn niobe_with_standard_error_closed(cwd: &Path, args: &[&str]) -> Output {
+    Command::new("sh")
+        .arg("-c")
+        .arg("exec \"$0\" \"$@\" 2>&-")
+        .arg(env!("CARGO_BIN_EXE_niobe"))
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
         .output()
         .expect("the niobe binary runs")
 }
@@ -154,10 +179,40 @@ fn resuming_a_session_that_does_not_exist_says_which_and_fails() {
     let repo = repo_with_the_fixture_recorded();
     let output = niobe(repo.path(), &["--resume", "9"]);
 
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(FAILED));
     assert!(
         stderr(&output).contains("no session 9"),
         "{}",
+        stderr(&output)
+    );
+}
+
+/// A failure reported onto a standard error that was closed before the process
+/// started.
+///
+/// A closed descriptor is not a failed write: the standard library turns the
+/// `EBADF` a write to it raises into a write that reported every byte, so the
+/// reason is discarded and the status is the one that says it was written.
+/// That is what `niobe --help` claims of exit 1 and no more — the run whose
+/// reason nobody can read ends the same way as the run whose reason reached a
+/// terminal, and only exit 2 says the reason is missing.
+#[test]
+fn a_failure_reported_onto_a_closed_standard_error_ends_as_a_reported_failure() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::create_dir(dir.path().join(".git")).expect("a .git directory can be made");
+
+    let output = niobe_with_standard_error_closed(dir.path(), &["--resume", "9"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(FAILED),
+        "a failure reported onto a closed standard error ended with {}",
+        output.status
+    );
+    assert_ne!(FAILED, FAILED_UNREPORTED);
+    assert!(
+        stderr(&output).is_empty(),
+        "a closed standard error carried {:?}",
         stderr(&output)
     );
 }
