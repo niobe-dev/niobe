@@ -8,27 +8,27 @@
 ║                                                                                                                ║ ║3 calls · 1 failed · 0 denied · 9.9 kB out                                         ║
 ║⚙ Read  catalog/fetch.ts · 7.2 kB out                                                                           ║ ║                                                                                   ║
 ║                                                                                                                ║ ║                                                                                   ║
-║⚙ Edit  catalog/fetch.ts · 640 B out                                                                            ║ ╚═══════════════════════════════════════════════════════════════════════════════════╝
-║                                                                                                                ║ ╔══════════════════════════════ Parallel ─ 1 running ═══════════════════════════════╗
-║! Bash  npm test -- fetch · failed · 2.0 kB out                                                                 ║ ║◆ test-writer → tests/fetch.test.ts                                                ║
-║                                                                                                                ║ ║2 spawned · peak 2 · 1 done · 0 failed                                             ║
+║◆ claude                                                                                                        ║ ╚═══════════════════════════════════════════════════════════════════════════════════╝
+║  Caching the etag beside the body so a 304 can be answered from the LRU.                                       ║ ╔══════════════════════════════ Parallel ─ 1 running ═══════════════════════════════╗
+║                                                                                                                ║ ║◆ test-writer → tests/fetch.test.ts                                                ║
+║⚙ Edit  catalog/fetch.ts · 640 B out                                                                            ║ ║2 spawned · peak 2 · 1 done · 0 failed                                             ║
+║                                                                                                                ║ ║                                                                                   ║
 ║◆ claude                                                                                                        ║ ║                                                                                   ║
-║  Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no      ║ ║                                                                                   ║
-║  longer sent.                                                                                                  ║ ╚═══════════════════════════════════════════════════════════════════════════════════╝
+║  Rewriting the 304 test around the cached body.                                                                ║ ╚═══════════════════════════════════════════════════════════════════════════════════╝
 ║                                                                                                                ║ ╔═════════════════════════════════════ Changes ═════════════════════════════════════╗
-║                                                                                                                ║ ║Files                                                                              ║
-║                                                                                                                ║ ║—  file attribution not implemented yet                                            ║
-║                                                                                                                ║ ║                                                                                   ║
-║                                                                                                                ║ ║Decisions ─ 1                                                                      ║
-║                                                                                                                ║ ║· Reuse the existing LRU instead of a new Map — avoids a second eviction policy.   ║
-║                                                                                                                ║ ║                                                                                   ║
-║                                                                                                                ║ ║Tools                                                                              ║
-║                                                               ╔═════════════════════════════ Permission ═════════════════════════════╗ad 1                                                           ║
+║◆ claude                                                                                                        ║ ║Files ─ 3                                                                          ║
+║  The notebook that demonstrates the fetcher needs the new call shape.                                          ║ ║▸ catalog/fetch.ts                                                          +38 −9 ║
+║                                                                                                                ║ ║  “Caching the etag beside the body so a 304 can be answered from the LRU.”        ║
+║! Bash  npm test -- fetch · failed · 2.0 kB out                                                                 ║ ║▸ catalog/etag.test.ts                                                       +24 — ║
+║                                                                                                                ║ ║  “Rewriting the 304 test around the cached body.”                                 ║
+║◆ claude                                                                                                        ║ ║▸ docs/notebooks/catalog.ipynb                                                 — — ║
+║  Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no      ║ ║  “The notebook that demonstrates the fetcher needs the new call shape.”           ║
+║  longer sent.                                                 ╔═════════════════════════════ Permission ═════════════════════════════╗                                                               ║
 ║                                                               ║ Read wants to run                                                    ║                                                               ║
-║                                                               ║ /repo/notes.txt                                                      ║                                                               ║
+║                                                               ║ /repo/notes.txt                                                      ║ LRU instead of a new Map — avoids a second eviction policy.   ║
 ║                                                               ║                                                                      ║                                                               ║
 ║                                                               ║ {"file_path":"/repo/notes.txt"}                                      ║                                                               ║
-║                                                               ║                                                                      ║                                                               ║
+║                                                               ║                                                                      ║ad 1                                                           ║
 ║                                                               ║ y allow once    n deny                                               ║                                                               ║
 ║                                                               ║ a always Read   p always Read(/repo/notes.txt)                       ║                                                               ║
 ║                                                               ╚═════════════════════ the turn is waiting on you ═════════════════════╝                                                               ║

@@ -8,6 +8,7 @@
 //! is the one type every backend produces into and [`SessionState`] is the
 //! fold every consumer derives from.
 
+pub mod diff;
 pub mod event;
 pub mod permission;
 pub mod session;
@@ -17,7 +18,9 @@ pub use event::{
     ToolCallId, ToolOutcome, Usage,
 };
 pub use permission::{Allowlist, Rule, RuleError};
-pub use session::{CheckpointRecord, DecisionRecord, SessionState, ToolTotals, Totals};
+pub use session::{
+    CheckpointRecord, DecisionRecord, FileChanges, SessionState, ToolTotals, Totals,
+};
 
 /// The name the binary is installed as, and the directory name used under
 /// `~/.config` and in a repo.

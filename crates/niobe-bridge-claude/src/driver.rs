@@ -286,7 +286,7 @@ impl Session {
         };
 
         let (sender, events) = mpsc::channel();
-        let mut translator = Translator::new(options.profile.clone());
+        let mut translator = Translator::new(options.profile.clone()).in_dir(options.cwd.clone());
         let waiting: Waiting = Arc::new(Mutex::new(BTreeMap::new()));
         let asked = Arc::clone(&waiting);
         let refusals: Refusals = Arc::new(Mutex::new(Vec::new()));

@@ -20,7 +20,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget};
 
-use niobe_core::session::SessionState;
+use niobe_core::session::{FileChanges, SessionState};
 
 use crate::app::{App, Ask, Entry, Picker, SelectedProfile};
 use crate::text;
@@ -36,6 +36,17 @@ pub const WIDE_COLUMNS: u16 = 100;
 
 /// Columns the transcript gives to an entry's glyph.
 const GUTTER: usize = 2;
+
+/// What a changed file's row opens with, and the columns it costs.
+const MARKER: &str = "\u{25b8} ";
+
+/// Files the changes pane lists before it says how many more there are.
+///
+/// Six with their explanations is about half the pane, which leaves the
+/// decisions and the tool mix under them visible. A session that touched more
+/// files than this is one whose whole diff belongs somewhere with room for it,
+/// not in a corner of the shell.
+const FILES_SHOWN: usize = 6;
 
 /// Widest the permission modal is drawn, in columns. Wide enough for a shell
 /// command that has a path in it, and narrow enough to leave the transcript
@@ -648,13 +659,36 @@ fn draw_changes(frame: &mut Frame, area: Rect, session: &SessionState, theme: &T
     let width = usize::from(inner.width);
     let mut lines: Vec<Line> = Vec::new();
 
-    lines.push(Line::from("Files").style(Style::new().fg(theme.title).bold()));
-    // Which files a session touched, and by how much, needs checkpoints and
-    // diffs, which are not recorded yet. An invented list here would be the one
-    // thing this pane must never be.
     lines.push(
-        Line::from("—  file attribution not implemented yet").style(Style::new().fg(theme.dim)),
+        Line::from(format!("Files ─ {}", session.files().len()))
+            .style(Style::new().fg(theme.title).bold()),
     );
+    if session.files().is_empty() {
+        lines.push(Line::from("nothing changed yet").style(Style::new().fg(theme.dim)));
+    } else {
+        for file in session.files().iter().take(FILES_SHOWN) {
+            // One column short of the pane, so the counts do not sit
+            // against the border they are read beside.
+            lines.push(file_line(file, width.saturating_sub(1), theme));
+            if let Some(why) = &file.why {
+                lines.push(
+                    Line::from(format!(
+                        "  “{}”",
+                        text::truncate(why, width.saturating_sub(5))
+                    ))
+                    .style(Style::new().fg(theme.dim).italic()),
+                );
+            }
+        }
+        if let Some(rest) = session
+            .files()
+            .len()
+            .checked_sub(FILES_SHOWN)
+            .filter(|n| *n > 0)
+        {
+            lines.push(Line::from(format!("  and {rest} more")).style(Style::new().fg(theme.dim)));
+        }
+    }
 
     lines.push(Line::from(""));
     lines.push(
@@ -695,6 +729,48 @@ fn draw_changes(frame: &mut Frame, area: Rect, session: &SessionState, theme: &T
 
     lines.truncate(usize::from(inner.height));
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// One file's row: what changed, and by how much, with the path given whatever
+/// the counts leave.
+fn file_line(file: &FileChanges, width: usize, theme: &Theme) -> Line<'static> {
+    let added = count('+', file.added, file.added_stated());
+    let removed = count('−', file.removed, file.removed_stated());
+
+    // The counts are what the row is for, so they keep their columns and the
+    // path gives way: a path cut at the front still names the file, while a
+    // count cut anywhere is a different number. One column of gap is kept
+    // whatever the width, so the two never run together into a third figure.
+    let counts = text::width(&added) + 1 + text::width(&removed);
+    let room = width.saturating_sub(text::width(MARKER) + counts + 1);
+    let path = text::truncate_start(&file.path, room);
+    let gap = width
+        .saturating_sub(text::width(MARKER) + counts)
+        .saturating_sub(text::width(&path));
+
+    Line::from(vec![
+        Span::styled(MARKER, Style::new().fg(theme.dim)),
+        Span::styled(path, Style::new().fg(theme.fg)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(added, Style::new().fg(theme.add)),
+        Span::raw(" "),
+        Span::styled(removed, Style::new().fg(theme.del)),
+    ])
+}
+
+/// One side of a file's counts: `+38`, `+≥38` where a call that changed the
+/// file did not say how much it added, or an em dash where none of them did.
+///
+/// The three readings are the cost pane's: a bare figure is the whole of it,
+/// `≥` means at least this much, and an em dash means nothing was reported. A
+/// zero here would say the session left that side of the file alone, which is
+/// a different claim from not knowing.
+fn count(sign: char, lines: u64, stated: bool) -> String {
+    match (stated, lines) {
+        (true, lines) => format!("{sign}{lines}"),
+        (false, 0) => "—".to_owned(),
+        (false, lines) => format!("{sign}≥{lines}"),
+    }
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -950,6 +1026,73 @@ mod tests {
             backend_label(&SessionState::new(), Some(&max), false),
             "max · claude, not attached"
         );
+    }
+
+    fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> niobe_core::Event {
+        niobe_core::Event::FileChange {
+            path: path.to_owned(),
+            added,
+            removed,
+        }
+    }
+
+    /// What one row reads as, counts and all.
+    fn row(file: &FileChanges, width: usize) -> String {
+        file_line(file, width, &Theme::default())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn a_count_no_call_stated_is_an_em_dash_and_never_a_zero() {
+        assert_eq!(count('+', 0, true), "+0");
+        assert_eq!(count('−', 9, true), "−9");
+        assert_eq!(count('+', 0, false), "—");
+        assert_eq!(
+            count('+', 38, false),
+            "+≥38",
+            "a figure some calls did not add to was shown as the whole of it"
+        );
+    }
+
+    #[test]
+    fn a_file_row_reads_as_the_counts_the_session_can_defend() {
+        let mut state = SessionState::new();
+        state.apply(&changed("catalog/fetch.ts", Some(38), Some(9)));
+        state.apply(&changed("notes.md", Some(1), None));
+        state.apply(&changed("run.ipynb", None, None));
+
+        assert_eq!(
+            row(&state.files()[0], 40),
+            "▸ catalog/fetch.ts                +38 −9"
+        );
+        assert_eq!(
+            row(&state.files()[1], 40),
+            "▸ notes.md                          +1 —"
+        );
+        assert_eq!(
+            row(&state.files()[2], 40),
+            "▸ run.ipynb                          — —"
+        );
+    }
+
+    /// The counts are what the row is for. A path cut at the front still names
+    /// the file; a count cut anywhere is a different number.
+    #[test]
+    fn a_path_too_long_for_the_pane_gives_way_to_its_counts() {
+        let mut state = SessionState::new();
+        state.apply(&changed(
+            "crates/niobe-bridge-claude/src/translate.rs",
+            Some(120),
+            Some(44),
+        ));
+
+        let row = row(&state.files()[0], 32);
+        assert!(row.ends_with(" +120 −44"), "{row:?}");
+        assert!(row.contains("translate.rs"), "{row:?}");
+        assert_eq!(text::width(&row), 32, "{row:?}");
     }
 
     #[test]

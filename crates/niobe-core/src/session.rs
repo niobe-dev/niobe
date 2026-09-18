@@ -104,6 +104,54 @@ pub struct DecisionRecord {
     pub rejected: Vec<String>,
 }
 
+/// What a session did to one file: how much of it changed, and the model's own
+/// words about why.
+///
+/// [`FileChanges::added`] and [`FileChanges::removed`] sum the calls that said
+/// how many lines they changed. Where a call did not say,
+/// [`FileChanges::added_unstated`] or [`FileChanges::removed_unstated`] counts
+/// it and that side of the figure is a floor — the file changed by at least
+/// this much, and by how much more the backend did not report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChanges {
+    /// The file, as the backend named it.
+    pub path: String,
+    /// Lines added by the calls that said how many.
+    pub added: u64,
+    /// Lines removed by the calls that said how many.
+    pub removed: u64,
+    /// Calls that changed this file without saying how many lines they added.
+    pub added_unstated: u64,
+    /// Calls that changed this file without saying how many they removed.
+    pub removed_unstated: u64,
+    /// How many calls changed this file.
+    pub changes: u64,
+    /// What the model said just before the last change to this file, lifted
+    /// from its own prose.
+    ///
+    /// A heuristic, and shown as one: it is the sentence that happened to
+    /// precede the call, not a claim about intent. The most recent one rather
+    /// than the first, because the pane redraws as the session runs and the
+    /// line beside a file that has just changed should explain the change the
+    /// operator watched, not one from ten turns ago.
+    pub why: Option<String>,
+}
+
+impl FileChanges {
+    /// Whether every call that changed this file said how many lines it added,
+    /// i.e. whether [`FileChanges::added`] is the whole figure rather than a
+    /// floor.
+    pub fn added_stated(&self) -> bool {
+        self.added_unstated == 0
+    }
+
+    /// Whether every call that changed this file said how many lines it
+    /// removed.
+    pub fn removed_stated(&self) -> bool {
+        self.removed_unstated == 0
+    }
+}
+
 /// A restore point the undo list can return to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointRecord {
@@ -134,6 +182,11 @@ pub struct SessionState {
     permission_requests: u64,
     permissions_denied: u64,
     pending_permissions: BTreeSet<ToolCallId>,
+    /// One entry per file changed, in the order the session first changed
+    /// them. Stable rather than sorted: the pane redraws on every event, and a
+    /// list that reorders itself under the operator is a list nobody can read.
+    files: Vec<FileChanges>,
+    files_at: BTreeMap<String, usize>,
     decisions: Vec<DecisionRecord>,
     checkpoints: Vec<CheckpointRecord>,
     agents_spawned: u64,
@@ -230,6 +283,12 @@ impl SessionState {
                 }
             }
 
+            Event::FileChange {
+                path,
+                added,
+                removed,
+            } => self.change_file(path, *added, *removed),
+
             Event::Decision {
                 summary,
                 rationale,
@@ -272,6 +331,62 @@ impl SessionState {
             // numbers around it, and the transcript is where it is read.
             Event::Notice { .. } => {}
         }
+    }
+
+    /// Folds one file change in, against the file's running totals.
+    ///
+    /// The "why" is taken here rather than carried on the event: the fold is
+    /// what knows the order the stream arrived in, and every backend gets the
+    /// same rule for free — the last thing the model said before this call is
+    /// the last [`Event::AssistantMessage`] the fold saw, because nothing else
+    /// speaks between a call and its result.
+    fn change_file(&mut self, path: &str, added: Option<u64>, removed: Option<u64>) {
+        let why = self
+            .last_assistant
+            .as_deref()
+            .and_then(first_line)
+            .map(str::to_owned);
+
+        let at = match self.files_at.get(path) {
+            Some(at) => *at,
+            None => {
+                self.files_at.insert(path.to_owned(), self.files.len());
+                self.files.push(FileChanges {
+                    path: path.to_owned(),
+                    added: 0,
+                    removed: 0,
+                    added_unstated: 0,
+                    removed_unstated: 0,
+                    changes: 0,
+                    why: None,
+                });
+                self.files.len() - 1
+            }
+        };
+
+        let Some(file) = self.files.get_mut(at) else {
+            return;
+        };
+        file.changes += 1;
+        match added {
+            Some(lines) => file.added = file.added.saturating_add(lines),
+            None => file.added_unstated += 1,
+        }
+        match removed {
+            Some(lines) => file.removed = file.removed.saturating_add(lines),
+            None => file.removed_unstated += 1,
+        }
+        // A change the model said nothing before keeps whatever it said before
+        // the last one: an explanation that disappeared on the second edit to
+        // the same file would read as the file having no reason to be there.
+        if why.is_some() {
+            file.why = why;
+        }
+    }
+
+    /// The files the session changed, in the order it first changed them.
+    pub fn files(&self) -> &[FileChanges] {
+        &self.files
     }
 
     /// What is running, once the backend has said.
@@ -390,6 +505,15 @@ impl SessionState {
     pub fn fatal_error(&self) -> Option<&str> {
         self.fatal_error.as_deref()
     }
+}
+
+/// The first line of a message that has anything on it.
+///
+/// A model opens a turn with a sentence and then goes on; that sentence is the
+/// whole of what the pane has room for, and cutting it anywhere else would put
+/// half a thought beside a file.
+fn first_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
 #[cfg(test)]
@@ -609,6 +733,111 @@ mod tests {
             backend_session: None,
         }));
         assert_eq!(state.model(), Some("claude-haiku-4-5-20251001"));
+    }
+
+    fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> Event {
+        Event::FileChange {
+            path: path.to_owned(),
+            added,
+            removed,
+        }
+    }
+
+    #[test]
+    fn a_files_changes_add_up_across_the_calls_that_made_them() {
+        let state = SessionState::replay(&[
+            changed("src/fetch.rs", Some(12), Some(3)),
+            changed("src/cache.rs", Some(4), Some(0)),
+            changed("src/fetch.rs", Some(1), Some(7)),
+        ]);
+
+        let files = state.files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "src/fetch.rs", "files lost their order");
+        assert_eq!((files[0].added, files[0].removed), (13, 10));
+        assert_eq!(files[0].changes, 2);
+        assert!(files[0].added_stated() && files[0].removed_stated());
+        assert_eq!((files[1].added, files[1].removed), (4, 0));
+    }
+
+    #[test]
+    fn a_change_that_did_not_say_how_much_it_removed_leaves_that_side_a_floor() {
+        let state = SessionState::replay(&[
+            changed("doomed.txt", Some(1), None),
+            changed("doomed.txt", Some(2), Some(2)),
+        ]);
+
+        let file = &state.files()[0];
+        assert_eq!(file.added, 3);
+        assert_eq!(file.removed, 2, "an unstated removal was counted as lines");
+        assert!(file.added_stated());
+        assert!(
+            !file.removed_stated(),
+            "a figure the backend never gave was shown as the whole of it"
+        );
+        assert_eq!(file.removed_unstated, 1);
+    }
+
+    #[test]
+    fn a_change_of_wholly_unstated_size_is_still_a_file_the_session_changed() {
+        let state = SessionState::replay(&[changed("notes.ipynb", None, None)]);
+
+        let file = &state.files()[0];
+        assert_eq!((file.added, file.removed), (0, 0));
+        assert_eq!(file.changes, 1);
+        assert!(!file.added_stated() && !file.removed_stated());
+    }
+
+    #[test]
+    fn the_why_beside_a_file_is_the_last_thing_the_model_said_before_changing_it() {
+        let state = SessionState::replay(&[
+            Event::AssistantMessage {
+                text: "Adding the etag header.\nThen the cache lookup.".to_owned(),
+            },
+            changed("src/fetch.rs", Some(9), Some(0)),
+            Event::AssistantMessage {
+                text: "  Short-circuiting the 304 path.  ".to_owned(),
+            },
+            changed("src/cache.rs", Some(2), Some(0)),
+        ]);
+
+        assert_eq!(
+            state.files()[1].why.as_deref(),
+            Some("Short-circuiting the 304 path."),
+            "the sentence beside a file was neither its first line nor trimmed"
+        );
+        assert_eq!(
+            state.files()[0].why.as_deref(),
+            Some("Adding the etag header."),
+            "only the first line of a message belongs on one line beside a file"
+        );
+    }
+
+    /// The pane redraws as the session runs, so a file changed twice carries
+    /// the explanation of the change the operator has just watched.
+    #[test]
+    fn a_file_changed_again_takes_the_newer_explanation() {
+        let state = SessionState::replay(&[
+            Event::AssistantMessage {
+                text: "Adding the etag header.".to_owned(),
+            },
+            changed("src/fetch.rs", Some(9), Some(0)),
+            Event::AssistantMessage {
+                text: "Short-circuiting the 304 path.".to_owned(),
+            },
+            changed("src/fetch.rs", Some(4), Some(1)),
+        ]);
+
+        assert_eq!(
+            state.files()[0].why.as_deref(),
+            Some("Short-circuiting the 304 path.")
+        );
+    }
+
+    #[test]
+    fn a_file_changed_before_the_model_said_anything_has_no_why_invented_for_it() {
+        let state = SessionState::replay(&[changed("src/fetch.rs", Some(1), Some(1))]);
+        assert_eq!(state.files()[0].why, None);
     }
 
     #[test]

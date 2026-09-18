@@ -398,6 +398,33 @@ pub enum Event {
         model: String,
     },
 
+    /// A tool call changed a file, and by how many lines.
+    ///
+    /// Produced only for a call that succeeded: a refused or broken edit
+    /// changed nothing, and counting it would put a file in the change set
+    /// that is not in the diff.
+    ///
+    /// `added` and `removed` are `None` where the call did not carry enough to
+    /// count them — an overwrite whose previous contents the backend never
+    /// showed, a replacement it applied an unreported number of times, a file
+    /// whose edits are not lines at all. `None` is "not stated", never zero:
+    /// a zero here would claim the call left that side of the file alone,
+    /// which is the difference between a count and a guess. Whatever shows
+    /// these reads the session's figure as a floor while any are `None`.
+    ///
+    /// Counted with [`crate::diff::lines_changed`] by whichever backend
+    /// produced it, so that two backends cannot disagree about what a changed
+    /// line is.
+    FileChange {
+        /// The file, as the backend named it: relative to where the session
+        /// runs where the backend could say, and absolute where it could not.
+        path: String,
+        /// Lines added, where the call said enough to count them.
+        added: Option<u64>,
+        /// Lines removed, where the call said enough to count them.
+        removed: Option<u64>,
+    },
+
     /// A structured `decide` record: why a plan, a model, a file or a declined
     /// scope was chosen. Surfaced in the changes pane and exported into commit
     /// and PR bodies.

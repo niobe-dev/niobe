@@ -37,8 +37,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-core/`** — the shared vocabulary. `event.rs` is the event model, the one type
   every backend produces into; `session.rs` is `SessionState`, the fold every consumer derives its
   numbers from; `permission.rs` is the standing answer to a permission prompt (`Rule`,
-  `Allowlist`), which the shell matches and the config stores. Depends on no other workspace
-  crate and on no wire format.
+  `Allowlist`), which the shell matches and the config stores; `diff.rs` is the line arithmetic
+  every backend counts a file change with, so two bridges cannot disagree about what a changed
+  line is. Depends on no other workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
@@ -65,7 +66,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `translate.rs` turns one line of it into events and owns no process, `driver.rs` spawns the
   binary, keeps its standard input open for the life of the session and answers the permission
   prompts the CLI stops turns on. `tests/stream.rs` folds
-  the recorded stream in `tests/fixtures/`, whose README carries the arithmetic the tests assert.
+  the recorded streams in `tests/fixtures/`, whose README carries the arithmetic the tests assert
+  — including the `git diff --numstat` figures the per-file `+`/`−` counts are checked against.
   The codex bridge names its binary and does not spawn it yet.
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
   the TUI, and the only one that wires the others together: it finds the config files and opens

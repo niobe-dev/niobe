@@ -1,14 +1,14 @@
  Niobe  Session  Files  Tools  Cost  Options  Help             theme:CLASSIC F9
 ╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
-║  manifests                                                                   ║
+║  Caching the etag beside the body so a 304 can be answered from the LRU.     ║
+║                                                                              ║
+║⚙ Edit  catalog/fetch.ts · 640 B out                                          ║
 ║                                                                              ║
 ║◆ claude                                                                      ║
-║  Reading catalog/fetch.ts and its callers first. Two call sites, one test    ║
-║  file.                                                                       ║
-║   ╔═════════════════════════════ Permission ═════════════════════════════╗   ║
-║⚙ R║ Read wants to run                                                    ║   ║
-║   ║ /repo/notes.txt                                                      ║   ║
-║⚙ E║                                                                      ║   ║
+║  R╔═════════════════════════════ Permission ═════════════════════════════╗   ║
+║   ║ Read wants to run                                                    ║   ║
+║◆ c║ /repo/notes.txt                                                      ║   ║
+║  T║                                                                      ║   ║
 ║   ║ {"file_path":"/repo/notes.txt"}                                      ║   ║
 ║! B║                                                                      ║   ║
 ║   ║ y allow once    n deny                                               ║   ║

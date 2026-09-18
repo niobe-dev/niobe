@@ -51,7 +51,9 @@
 //!   agent that wrote it needs a pane that can show two agents at once.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
+use niobe_core::diff;
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, CostBasis, Event, Mode, PermissionDecision, SessionMeta,
     ToolCallId, ToolOutcome, Usage,
@@ -135,6 +137,9 @@ struct Call {
     name: String,
     input: String,
     target: Option<String>,
+    /// The arguments as the CLI sent them. The rendered `input` is for a
+    /// human; counting what an edit changed needs the fields themselves.
+    arguments: serde_json::Value,
 }
 
 /// A permission prompt the CLI is waiting on an answer to.
@@ -165,6 +170,12 @@ struct Reported {
 #[derive(Debug)]
 pub struct Translator {
     profile: String,
+    /// Where the session runs, so that a file it changed is named the way the
+    /// operator and `git` name it rather than by its absolute path. `None`
+    /// where the caller did not say, and a path is then left as the CLI gave
+    /// it: a prefix guessed here would shorten a path to something that is not
+    /// the file.
+    cwd: Option<PathBuf>,
     model: Option<String>,
     backend_session: Option<String>,
     /// The model of the message in flight, per stream: the main session is
@@ -195,6 +206,7 @@ impl Translator {
     pub fn new(profile: impl Into<String>) -> Self {
         Self {
             profile: profile.into(),
+            cwd: None,
             model: None,
             backend_session: None,
             in_flight: BTreeMap::new(),
@@ -205,6 +217,14 @@ impl Translator {
             turn: Counts::default(),
             reported: BTreeMap::new(),
         }
+    }
+
+    /// The same translator, told where the session runs, so that the files it
+    /// reports changed are named relative to it.
+    #[must_use]
+    pub fn in_dir(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
     }
 
     /// The id the CLI calls this session by, once it has said.
@@ -427,6 +447,7 @@ impl Translator {
                             name: name.clone(),
                             input: rendered.clone(),
                             target: target_of(&input),
+                            arguments: input.clone(),
                         },
                     );
                     if name == TASK_TOOL {
@@ -481,14 +502,14 @@ impl Translator {
 
             let output = content.map(render_content).unwrap_or_default();
             let bytes = output.len() as u64;
-            let (name, input) = match self.tool_calls.remove(&tool_use_id) {
-                Some(call) => (call.name, call.input),
+            let (name, input, arguments) = match self.tool_calls.remove(&tool_use_id) {
+                Some(call) => (call.name, call.input, call.arguments),
                 None => {
                     out.push(warn(format!(
                         "the CLI returned a result for tool call `{tool_use_id}`, which it never \
                          announced. The call is counted; what it was called with is lost."
                     )));
-                    (String::new(), String::new())
+                    (String::new(), String::new(), serde_json::Value::Null)
                 }
             };
             // A refusal reaches the model as an error, so the result alone
@@ -514,6 +535,14 @@ impl Translator {
                 });
             }
 
+            // Only a call that ran changed anything: a refused or broken edit
+            // would otherwise put a file in the change set that is not in the
+            // diff.
+            let change = match outcome {
+                ToolOutcome::Ok => self.file_change(&name, &arguments, &output),
+                ToolOutcome::Failed | ToolOutcome::Denied => None,
+            };
+
             out.push(Event::ToolCallEnd {
                 id: ToolCallId::new(tool_use_id),
                 name,
@@ -522,7 +551,90 @@ impl Translator {
                 bytes,
                 outcome,
             });
+            out.extend(change);
         }
+    }
+
+    /// What a finished call did to a file, where it was a call that edits one.
+    ///
+    /// The counts come from the call's own arguments and from nothing else.
+    /// Two cases the arguments do not settle are reported as unstated rather
+    /// than filled in:
+    ///
+    /// * **A replacement the CLI applied everywhere.** `replace_all` says the
+    ///   CLI matched `old_string` as many times as it appears in the file, and
+    ///   the file is not in the stream. Counting one occurrence would under-
+    ///   report every further one: measured on this machine, a `replace_all`
+    ///   of three occurrences shows as `3 3` in `git diff --numstat` while the
+    ///   call describes one.
+    /// * **A `Write` over a file that already existed.** The call carries what
+    ///   the file becomes and never what it was, so the lines it dropped are
+    ///   not in the stream at all.
+    fn file_change(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+        output: &str,
+    ) -> Option<Event> {
+        let (path, added, removed) = match name {
+            EDIT_TOOL => {
+                let path = string_at(arguments, "file_path")?;
+                let counts = match arguments
+                    .get("replace_all")
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    Some(true) => None,
+                    Some(false) | None => diff::lines_changed(
+                        string_at(arguments, "old_string").unwrap_or_default(),
+                        string_at(arguments, "new_string").unwrap_or_default(),
+                    ),
+                };
+                match counts {
+                    Some((added, removed)) => (path, Some(added), Some(removed)),
+                    None => (path, None, None),
+                }
+            }
+
+            WRITE_TOOL => {
+                let path = string_at(arguments, "file_path")?;
+                let written = string_at(arguments, "content").unwrap_or_default();
+                let added = written.lines().count() as u64;
+                // The CLI says which of the two it did, and its answer is read
+                // narrowly on purpose: a wording it no longer uses leaves the
+                // removal unstated, which is a figure the pane marks, where
+                // guessing "nothing was there" would be a zero that is wrong.
+                let removed = output.starts_with(CREATED_PREFIX).then_some(0);
+                (path, Some(added), removed)
+            }
+
+            // A notebook is edited by cell, so the call says which cell and
+            // never how many lines. That the file changed is still worth
+            // showing; how much it changed, this call cannot say.
+            NOTEBOOK_TOOL => (string_at(arguments, "notebook_path")?, None, None),
+
+            _ => return None,
+        };
+
+        Some(Event::FileChange {
+            path: self.relative(path),
+            added,
+            removed,
+        })
+    }
+
+    /// A path as the operator reads it: relative to where the session runs,
+    /// which is how `git` names the same file, and left as the CLI gave it
+    /// where it is somewhere else entirely.
+    fn relative(&self, path: &str) -> String {
+        let Some(cwd) = self.cwd.as_deref() else {
+            return path.to_owned();
+        };
+        Path::new(path)
+            .strip_prefix(cwd)
+            .ok()
+            .and_then(Path::to_str)
+            .unwrap_or(path)
+            .to_owned()
     }
 
     fn stream(&mut self, event: wire::StreamEvent, out: &mut Vec<Event>) {
@@ -827,6 +939,26 @@ fn render(input: &serde_json::Value) -> String {
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// The CLI's tools that change a file, as its `init` message lists them.
+///
+/// Read off the tool list of Claude Code 2.1.277 on 18 September 2026: `Edit`,
+/// `Write` and `NotebookEdit` are all of them. A tool that is not here changes
+/// no file as far as the changes pane is concerned — a `Bash` call that runs
+/// `sed` does change one, and nothing in the stream says which or by how much,
+/// so nothing is claimed about it.
+const EDIT_TOOL: &str = "Edit";
+const WRITE_TOOL: &str = "Write";
+const NOTEBOOK_TOOL: &str = "NotebookEdit";
+
+/// How the CLI opens the result of a `Write` that made a file that was not
+/// there, as against one that replaced a file that was.
+const CREATED_PREFIX: &str = "File created successfully at:";
+
+/// A string argument, where the arguments are an object that carries it.
+fn string_at<'a>(arguments: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    arguments.get(key).and_then(serde_json::Value::as_str)
 }
 
 /// Keys a tool's arguments name the thing it acts on by, in the order they
@@ -1427,5 +1559,193 @@ mod tests {
             .line(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#);
 
         assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// The shapes are those the CLI printed on 18 September 2026 (Claude Code
+    /// 2.1.277): an `Edit` carries `old_string`, `new_string` and
+    /// `replace_all`, a `Write` carries `content`, and the result of each is
+    /// one line of the CLI's own prose.
+    fn call(id: &str, name: &str, arguments: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{arguments}}}]}}}}"#
+        )
+    }
+
+    fn result(id: &str, content: &str, is_error: bool) -> String {
+        let content = serde_json::Value::String(content.to_owned());
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","is_error":{is_error},"content":{content}}}]}}}}"#
+        )
+    }
+
+    const UPDATED: &str = "The file /repo/notes.txt has been updated successfully. \
+                           (file state is current in your context — no need to Read it back)";
+
+    /// Everything the events say about files that changed.
+    fn changes(events: &[Event]) -> Vec<(String, Option<u64>, Option<u64>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::FileChange {
+                    path,
+                    added,
+                    removed,
+                } => Some((path.clone(), *added, *removed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_edit_is_counted_from_the_text_it_replaced_and_the_text_it_wrote() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/notes.txt","old_string":"gamma","new_string":"gamma one\ngamma two","replace_all":false}"#,
+        ));
+
+        let events = translator.line(&result("t1", UPDATED, false));
+
+        assert_eq!(
+            changes(&events),
+            vec![("notes.txt".to_owned(), Some(2), Some(1))],
+            "{events:?}"
+        );
+    }
+
+    /// Measured on this machine: replacing three occurrences of one line shows
+    /// as `3 3` in `git diff --numstat`, and the call describes one of them.
+    /// Reporting that one would under-report the other two.
+    #[test]
+    fn a_replacement_the_cli_applied_everywhere_states_no_count() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/rep.txt","old_string":"foo","new_string":"bar","replace_all":true}"#,
+        ));
+
+        let events = translator.line(&result(
+            "t1",
+            "The file /repo/rep.txt has been updated. All occurrences were successfully replaced.",
+            false,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("rep.txt".to_owned(), None, None)],
+            "a count the call cannot support was reported: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_written_file_that_was_not_there_removed_nothing() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Write",
+            r##"{"file_path":"/repo/fresh.py","content":"# comment\ndef foo():\n    return None\n"}"##,
+        ));
+
+        let events = translator.line(&result(
+            "t1",
+            "File created successfully at: /repo/fresh.py (file state is current in your context)",
+            false,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("fresh.py".to_owned(), Some(3), Some(0))],
+            "{events:?}"
+        );
+    }
+
+    /// A `Write` carries what the file becomes and never what it was, so the
+    /// lines it dropped are not in the stream. Measured: overwriting a
+    /// three-line file with one line shows as `1 3`, and the call says `1`.
+    #[test]
+    fn a_written_file_that_was_already_there_states_no_removal() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Write",
+            r#"{"file_path":"/repo/doomed.txt","content":"gone"}"#,
+        ));
+
+        let events = translator.line(&result(
+            "t1",
+            "The file /repo/doomed.txt has been updated successfully.",
+            false,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("doomed.txt".to_owned(), Some(1), None)],
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_notebook_changed_by_cell_says_it_changed_and_not_by_how_much() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "NotebookEdit",
+            r#"{"notebook_path":"/repo/run.ipynb","cell_id":"c2","new_source":"import io"}"#,
+        ));
+
+        let events = translator.line(&result("t1", "Updated cell c2", false));
+
+        assert_eq!(changes(&events), vec![("run.ipynb".to_owned(), None, None)]);
+    }
+
+    #[test]
+    fn an_edit_that_did_not_run_changed_no_file() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Write",
+            r#"{"file_path":"/repo/doomed.txt","content":"gone"}"#,
+        ));
+
+        let events = translator.line(&result(
+            "t1",
+            "<tool_use_error>File has not been read yet. Read it first before writing to it.\
+             </tool_use_error>",
+            true,
+        ));
+
+        assert!(
+            changes(&events).is_empty(),
+            "a call that failed put a file in the change set: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_that_edits_nothing_changes_no_file() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call("t1", "Read", r#"{"file_path":"/repo/notes.txt"}"#));
+
+        let events = translator.line(&result("t1", "1\tline one", false));
+
+        assert!(changes(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_file_outside_the_session_directory_keeps_the_path_the_cli_gave() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/etc/hosts","old_string":"a","new_string":"b"}"#,
+        ));
+
+        let events = translator.line(&result("t1", UPDATED, false));
+
+        assert_eq!(
+            changes(&events),
+            vec![("/etc/hosts".to_owned(), Some(1), Some(1))]
+        );
     }
 }

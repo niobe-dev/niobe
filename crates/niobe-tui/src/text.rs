@@ -126,6 +126,35 @@ pub fn truncate(text: &str, columns: usize) -> String {
     out
 }
 
+/// Shortens `text` to `columns` cells by cutting the **front**, starting in
+/// `…` when anything was cut.
+///
+/// For a path, which is what this is for: the file's own name and the
+/// directory it sits in are what tell two rows apart, and they are at the end.
+pub fn truncate_start(text: &str, columns: usize) -> String {
+    if width(text) <= columns {
+        return text.to_owned();
+    }
+    if columns == 0 {
+        return String::new();
+    }
+    if columns == 1 {
+        return "…".to_owned();
+    }
+
+    let mut kept: Vec<char> = Vec::new();
+    let mut kept_width = 0;
+    for c in text.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if kept_width + w > columns - 1 {
+            break;
+        }
+        kept.push(c);
+        kept_width += w;
+    }
+    std::iter::once('…').chain(kept.into_iter().rev()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +206,16 @@ mod tests {
         assert_eq!(truncate("catalog/fetch.ts", 8), "catalog…");
         assert_eq!(width(&truncate("catalog/fetch.ts", 8)), 8);
         assert_eq!(truncate("catalog/fetch.ts", 1), "…");
+    }
+
+    #[test]
+    fn a_path_too_long_for_its_row_keeps_its_end() {
+        assert_eq!(
+            truncate_start("crates/niobe-tui/src/ui.rs", 12),
+            "…i/src/ui.rs"
+        );
+        assert_eq!(truncate_start("ui.rs", 12), "ui.rs");
+        assert_eq!(truncate_start("ui.rs", 1), "…");
+        assert_eq!(truncate_start("ui.rs", 0), "");
     }
 }

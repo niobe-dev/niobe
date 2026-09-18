@@ -16,8 +16,8 @@
 ║                                                                  ║ ║                                                 ║
 ║                                                                  ║ ╚═════════════════════════════════════════════════╝
 ║                                                                  ║ ╔════════════════════ Changes ════════════════════╗
-║                                                                  ║ ║Files                                            ║
-║                                                                  ║ ║—  file attribution not implemented yet          ║
+║                                                                  ║ ║Files ─ 0                                        ║
+║                                                                  ║ ║nothing changed yet                              ║
 ║                                                                  ║ ║                                                 ║
 ║                                                                  ║ ║Decisions ─ 0                                    ║
 ║                                                                  ║ ║none recorded                                    ║

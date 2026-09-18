@@ -84,6 +84,10 @@ fn session_events() -> Vec<Event> {
             id: "a2".into(),
             outcome: AgentOutcome::Completed,
         },
+        Event::AssistantMessage {
+            text: "Caching the etag beside the body so a 304 can be answered from the LRU."
+                .to_owned(),
+        },
         Event::ToolCallStart {
             id: "t2".into(),
             name: "Edit".to_owned(),
@@ -106,6 +110,30 @@ fn session_events() -> Vec<Event> {
             output: "+38 −9".to_owned(),
             bytes: 640,
             outcome: ToolOutcome::Ok,
+        },
+        Event::FileChange {
+            path: "catalog/fetch.ts".to_owned(),
+            added: Some(38),
+            removed: Some(9),
+        },
+        // The two readings a count can have besides a figure: a rewrite whose
+        // previous contents the backend never showed, and a change it stated
+        // no size for at all.
+        Event::AssistantMessage {
+            text: "Rewriting the 304 test around the cached body.".to_owned(),
+        },
+        Event::FileChange {
+            path: "catalog/etag.test.ts".to_owned(),
+            added: Some(24),
+            removed: None,
+        },
+        Event::AssistantMessage {
+            text: "The notebook that demonstrates the fetcher needs the new call shape.".to_owned(),
+        },
+        Event::FileChange {
+            path: "docs/notebooks/catalog.ipynb".to_owned(),
+            added: None,
+            removed: None,
         },
         Event::ToolCallEnd {
             id: "t3".into(),

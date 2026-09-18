@@ -415,11 +415,14 @@ impl App {
             // Everything else is a number or a list a pane reads off the
             // session fold, not a line in the transcript. The mode and the
             // model are on the status line, which is where a session says what
-            // it is running as.
+            // it is running as; a file's counts are in the changes pane, and
+            // repeating them under the call that made them would say the same
+            // thing twice in the place with the least room for it.
             Event::SessionMeta(_)
             | Event::Usage(_)
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
+            | Event::FileChange { .. }
             | Event::Decision { .. }
             | Event::Checkpoint { .. } => {}
 

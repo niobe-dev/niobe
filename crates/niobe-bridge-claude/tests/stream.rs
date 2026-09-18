@@ -364,3 +364,119 @@ fn the_transcript_reads_as_the_session_happened() {
     );
     assert_eq!(state.fatal_error(), None);
 }
+
+/// A session that edits files, translated and folded.
+///
+/// The counts the fold ends with are checked against the ones
+/// `git diff --numstat` printed for the same edits applied to the same files.
+/// Both are in `tests/fixtures/README.md`; they were measured, not derived
+/// from this crate, so a bug in the counting cannot agree with itself.
+mod edits {
+    use super::*;
+
+    const EDITS: &str = include_str!("fixtures/edits.jsonl");
+
+    fn folded() -> SessionState {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        let events: Vec<Event> = EDITS
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .collect();
+        assert!(
+            warnings(&events).is_empty(),
+            "the fixture is not a stream this bridge reads: {:?}",
+            warnings(&events)
+        );
+        SessionState::replay(&events)
+    }
+
+    /// `git diff --numstat` for the same edits: `catalog/fetch.ts` two edits
+    /// deep, `catalog/conditional.ts` written new.
+    #[test]
+    fn the_files_a_session_edited_are_counted_the_way_git_counts_them() {
+        let state = folded();
+        let files = state.files();
+
+        assert_eq!(
+            files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec![
+                "catalog/fetch.ts",
+                "catalog/conditional.ts",
+                "notes.md",
+                "catalog/cache.ts",
+            ],
+            "the pane would list the files in an order the session did not touch them in"
+        );
+
+        // `4  2  catalog/fetch.ts` — one line replaced by three, then one by
+        // one, and the path is the one `git` prints rather than the absolute
+        // one the CLI sent.
+        let fetch = &files[0];
+        assert_eq!((fetch.added, fetch.removed), (4, 2));
+        assert_eq!(fetch.changes, 2);
+        assert!(fetch.added_stated() && fetch.removed_stated());
+
+        // `3  0  catalog/conditional.ts` — a file that was not there before.
+        let conditional = &files[1];
+        assert_eq!((conditional.added, conditional.removed), (3, 0));
+        assert!(conditional.added_stated() && conditional.removed_stated());
+    }
+
+    /// The two counts the stream cannot support, each marked rather than
+    /// guessed. Both would be wrong if they were filled in, and both are
+    /// under the truth rather than over it, which is what a floor means.
+    #[test]
+    fn a_count_the_stream_does_not_carry_is_marked_rather_than_filled_in() {
+        let state = folded();
+
+        // `1  4  notes.md`: the overwrite says what the file becomes and never
+        // what it was, so the four lines it dropped are nowhere in the stream.
+        let notes = &state.files()[2];
+        assert_eq!(notes.added, 1);
+        assert!(notes.added_stated());
+        assert_eq!(notes.removed, 0);
+        assert!(
+            !notes.removed_stated(),
+            "a removal the stream never carried was shown as the whole figure"
+        );
+
+        // `2  2  catalog/cache.ts`: the CLI replaced both occurrences and the
+        // call describes one, so neither side is a count this can defend.
+        let cache = &state.files()[3];
+        assert_eq!((cache.added, cache.removed), (0, 0));
+        assert_eq!(cache.changes, 1);
+        assert!(!cache.added_stated() && !cache.removed_stated());
+    }
+
+    /// The CLI refuses a `Write` to a file nothing has read, and that refusal
+    /// arrives as an ordinary tool result. A file the session failed to write
+    /// is not a file the session changed.
+    #[test]
+    fn a_write_the_cli_refused_put_nothing_in_the_change_set() {
+        let state = folded();
+
+        assert_eq!(state.files().len(), 4, "{:?}", state.files());
+        assert_eq!(
+            state.files()[2].changes,
+            1,
+            "the write that failed was counted alongside the one that ran"
+        );
+        assert_eq!(state.tools().failed, 1);
+    }
+
+    #[test]
+    fn each_file_carries_the_models_own_words_from_just_before_it_changed() {
+        let state = folded();
+
+        assert_eq!(
+            state.files()[1].why.as_deref(),
+            Some("A helper module for the conditional-request checks.")
+        );
+        assert_eq!(
+            state.files()[0].why.as_deref(),
+            Some("Returning the cached body on a 304."),
+            "the second edit did not bring its own explanation with it"
+        );
+    }
+}

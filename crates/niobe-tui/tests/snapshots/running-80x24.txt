@@ -1,14 +1,14 @@
  Niobe  Session  Files  Tools  Cost  Options  Help             theme:CLASSIC F9
 ╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
-║  manifests                                                                   ║
-║                                                                              ║
-║◆ claude                                                                      ║
-║  Reading catalog/fetch.ts and its callers first. Two call sites, one test    ║
-║  file.                                                                       ║
-║                                                                              ║
-║⚙ Read  catalog/fetch.ts · 7.2 kB out                                         ║
+║  Caching the etag beside the body so a 304 can be answered from the LRU.     ║
 ║                                                                              ║
 ║⚙ Edit  catalog/fetch.ts · 640 B out                                          ║
+║                                                                              ║
+║◆ claude                                                                      ║
+║  Rewriting the 304 test around the cached body.                              ║
+║                                                                              ║
+║◆ claude                                                                      ║
+║  The notebook that demonstrates the fetcher needs the new call shape.        ║
 ║                                                                              ║
 ║! Bash  npm test -- fetch · failed · 2.0 kB out                               ║
 ║                                                                              ║
