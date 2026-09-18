@@ -23,11 +23,11 @@
 //! the session out of the store instead, and the exit status — a session that
 //! lost its terminal ended; it did not fail, and a wrapper reads that here.
 //!
-//! The last case needs no shell at all: a failure reported onto a terminal that
-//! has already gone. Standard error is where `niobe` says what went wrong, and
-//! a write to a terminal that has closed fails, so what reporting does with
-//! that failure is what decides whether the operator is left with a reason, a
-//! status, or a crash.
+//! The last case needs no shell, and no terminal either: a failure reported
+//! onto a standard error that cannot be written. That is what a terminal
+//! closing under a session leaves behind, and what reporting does with it
+//! decides whether the operator is left with a reason, a status, or a crash.
+//! The stream it is arranged on is not a pty, for a reason that test carries.
 //!
 //! A test binary of its own, because it measures how long the shell takes to
 //! notice; tests that draw or replay in the same binary would be measured
@@ -41,8 +41,10 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
+use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -500,27 +502,53 @@ fn a_shell_whose_terminal_went_away_ends_the_session_rather_than_failing() {
     );
 }
 
-/// A failure reported onto a terminal that has already gone.
+/// A failure reported onto a standard error that cannot be written.
 ///
 /// The shell draws at the top of every tick, so a terminal closing under a
 /// session can raise an error and take away the stream that error is reported
 /// on in the same instant. That instant cannot be arranged from outside the
-/// process — and a terminal closed before the process starts leaves the
-/// descriptor in the same state, because every write on the slave of a pty
-/// whose master has gone fails with the same hangup, for as long as it is held.
-/// Which error is being reported does not matter here; what reporting it onto a
-/// stream that has gone does is what this reads.
+/// process, and what stands in for it has to be a stream that refuses writes
+/// every time it is asked.
+///
+/// A pty whose master has been closed is not one, however it looks. A process
+/// that spawns children cannot keep any descriptor of its own to itself: a
+/// child takes a copy of the whole table when it forks and drops the
+/// close-on-exec ones only when it execs, so for that moment the master this
+/// test closed is still open somewhere and the pty is still connected. A write
+/// on the slave then succeeds, the reason is reported after all, and this reads
+/// exit 1 where it asked for 2 — a few runs in every hundred with several of
+/// these binaries running at once. It is the pty that is unreliable there and
+/// not the reporting, which is the worst way for a test on this path to fail.
+/// The device is not what is unreliable about it: a pty whose slave is still
+/// open is never handed out again, so nothing recycles underneath this.
+///
+/// A socket shut down for writing refuses every write instead, and refuses it
+/// on the strength of its own state rather than of a peer that something else
+/// might hold open. Copies inherit the shutdown with the descriptor, so no
+/// child can undo it. Which error the write fails with does not matter; what
+/// reporting a failure onto a stream that refuses it does is what this reads.
 #[test]
 fn a_failure_that_cannot_be_reported_ends_as_a_failure_rather_than_a_crash() {
     let repo = repo();
-    let (terminal, slave) = Terminal::open();
-    terminal.close();
+    let (ours, theirs) = UnixStream::pair().expect("a socket pair can be made");
+    theirs
+        .shutdown(Shutdown::Write)
+        .expect("the socket can be shut down for writing");
+    // Not what makes the writes fail — the shutdown is, and that travels with
+    // the descriptor wherever it is copied. This end is dropped only because
+    // the test has no use for it.
+    drop(ours);
 
     // Resuming a session that was never recorded fails before the shell would
     // open, so nothing here needs a terminal to draw on — only a standard
-    // error to be reported on, which is the one that has gone.
-    let mut shell = shell_command(&slave, repo.path())
+    // error to be reported on, which is the one that refuses.
+    let mut shell = Command::new(env!("CARGO_BIN_EXE_niobe"))
         .args(["--resume", "9"])
+        .current_dir(repo.path())
+        .env("XDG_CONFIG_HOME", repo.path().join("no-user-config-here"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(OwnedFd::from(theirs)))
         .spawn()
         .expect("the niobe binary runs");
 
