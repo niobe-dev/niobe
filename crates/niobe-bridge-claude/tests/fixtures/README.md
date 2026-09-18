@@ -5,6 +5,39 @@ Copyright (c) Viacheslav Shynkarenko
 
 # Recorded streams
 
+## Which release each recording is of, and what that is for
+
+Nothing here is written against a published schema: every shape in this
+directory is one the `claude` CLI was recorded printing, and the release it was
+recorded from is part of what the recording says. Each recording names its own
+release the way its carrier does — `claude_code_version` on a live
+`system`/`init`, which is the key the shipped CLI's init schema uses, and
+`version` on a transcript record — and `conformance::RECORDED` in the crate
+names the set.
+
+Two things are checked against that, in `tests/conformance.rs`:
+
+- **Every shape in every recording is one the bridge was written for.** The
+  test builds the inventory — message types, `system` subtypes, stream events,
+  content blocks, deltas — and compares it with a list that is checked in. This
+  is the half no other test can do: a message type the bridge does not know
+  announces itself at runtime, but a content block it has no place for, or a
+  count that moved to a different stream event, arrives in silence. Here a new
+  shape is a red test naming it.
+- **The installed CLI is a release these recordings cover**, by `major.minor`.
+  A patch bump is not held against the operator: the twenty-eight 2.1.x
+  releases whose transcripts were on the machine this was written on carry the
+  same record types and the same message shapes. The check is skipped, out
+  loud, where no `claude` is installed — which is every CI runner.
+
+A session driving a release outside that set says so once, in the timeline,
+and goes on. So does an imported transcript written by one.
+
+**After upgrading `claude`**: record a session with the flags below, replace or
+add the recording, run `cargo test -p niobe-bridge-claude`, read what the shape
+inventory says changed, decide what the bridge does with each new shape, and
+only then add the release to `conformance::RECORDED`.
+
 ## `stream-json.jsonl`
 
 A two-turn `claude` session as the CLI prints it under
@@ -149,8 +182,13 @@ It carries what the transcript does differently from the live stream:
 - a model that never produced a message of its own (`claude-haiku-4-5`) and
   whose tokens and cost therefore arrive only in `modelUsage`;
 - the CLI's own furniture — `mode`, `permission-mode`, `ai-title`,
-  `last-prompt`, `attachment`, `file-history-snapshot`, `system` — which is
-  read for nothing and must not be reported as records Niobe cannot read;
+  `agent-name`, `last-prompt`, `pr-link`, `attachment`,
+  `file-history-snapshot`, `bridge-session`, `system` — which is read for
+  nothing and must not be reported as records Niobe cannot read. The last three
+  of those were missing when the shape inventory was first taken across every
+  transcript on the machine this was written on: `bridge-session` alone stood
+  in fifteen thousand records, each of which had been a warning entry in front
+  of the operator saying the record could not be read;
 - a record type this bridge does not know, and a line that is not JSON at all.
 
 ### The arithmetic the tests assert

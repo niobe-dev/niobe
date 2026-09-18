@@ -20,6 +20,10 @@
 //!   a session started in plain Claude Code can be shown and continued here.
 //!   It writes nothing back.
 //!
+//! [`conformance`] names the CLI releases those shapes were recorded from. It
+//! is what a session says when it is driving a release nobody recorded, and
+//! what the tests over `tests/fixtures/` are checked against.
+//!
 //! The CLI's own types stay in this crate — they are not public anywhere — so
 //! nothing vendor-shaped can reach the TUI or the ledger.
 //!
@@ -40,6 +44,7 @@ mod driver;
 mod translate;
 mod wire;
 
+pub mod conformance;
 pub mod transcript;
 
 pub use driver::{BINARY, Options, Session, SpawnError};

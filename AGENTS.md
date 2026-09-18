@@ -67,10 +67,14 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   binary, keeps its standard input open for the life of the session and answers the permission
   prompts the CLI stops turns on; `transcript.rs` reads the session files the CLI keeps for
   itself, so a session started in plain Claude Code can be listed and carried on — it writes
-  nothing back, and folds through the same `translate.rs` as the live stream. `tests/stream.rs`
-  and `tests/transcript.rs` fold the recordings in `tests/fixtures/`, whose README carries the
-  arithmetic the tests assert — including the `git diff --numstat` figures the per-file `+`/`−`
-  counts are checked against.
+  nothing back, and folds through the same `translate.rs` as the live stream; `conformance.rs`
+  names the CLI releases every shape in the crate was recorded from, which is what a session says
+  once when it is driving a release nobody recorded. `tests/stream.rs` and `tests/transcript.rs`
+  fold the recordings in `tests/fixtures/`, whose README carries the arithmetic the tests assert —
+  including the `git diff --numstat` figures the per-file `+`/`−` counts are checked against;
+  `tests/conformance.rs` asserts those recordings' shape inventory — message types, `system`
+  subtypes, stream events, content blocks, deltas — against a checked-in list, so a shape the
+  bridge silently passes over cannot arrive with a new CLI release unnoticed.
   The codex bridge names its binary and does not spawn it yet.
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
   the TUI, and the only one that wires the others together: it finds the config files and opens

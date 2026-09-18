@@ -59,6 +59,7 @@ use niobe_core::event::{
     ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
+use crate::conformance;
 use crate::wire;
 
 /// The tool whose call is a sub-agent rather than an action.
@@ -199,6 +200,10 @@ pub struct Translator {
     turn: Counts,
     /// Per model, everything reported for it so far this session.
     reported: BTreeMap<String, Reported>,
+    /// Whether the CLI's release has been read off the first `init`. The CLI
+    /// writes `init` again whenever the session moves model, and the release
+    /// it reports there has not changed.
+    checked_release: bool,
 }
 
 impl Translator {
@@ -216,6 +221,7 @@ impl Translator {
             denied: BTreeMap::new(),
             turn: Counts::default(),
             reported: BTreeMap::new(),
+            checked_release: false,
         }
     }
 
@@ -333,6 +339,7 @@ impl Translator {
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
         match system.subtype.as_deref() {
             Some("init") => {
+                self.check_release(system.claude_code_version.as_deref(), out);
                 if let Some(id) = system.session_id {
                     self.backend_session = Some(id);
                 }
@@ -389,6 +396,32 @@ impl Translator {
                 other.unwrap_or("(none)")
             ))),
         }
+    }
+
+    /// Says, once a session, when the CLI on the other end is a release these
+    /// recordings do not cover.
+    ///
+    /// The warning is for what a version check can catch and a message-by-
+    /// message check cannot: a type the bridge does not know announces itself
+    /// when it arrives, but a count that moved to another message, or a field
+    /// that kept its name and changed its meaning, arrives looking exactly
+    /// like one that did not — and would be folded into a total the product
+    /// promises is measured. A release that says nothing about itself is left
+    /// alone: a warning that named no version would say nothing the operator
+    /// could act on.
+    ///
+    /// The CLI writes `init` again whenever the session moves model, so this
+    /// reports the first one and nothing after it.
+    fn check_release(&mut self, version: Option<&str>, out: &mut Vec<Event>) {
+        if self.checked_release {
+            return;
+        }
+        self.checked_release = true;
+        let Some(version) = version else { return };
+        if conformance::recorded(version) {
+            return;
+        }
+        out.push(warn(conformance::unrecorded(version)));
     }
 
     /// Records a call the CLI refused, at the moment it refuses it.
@@ -1289,6 +1322,54 @@ mod tests {
             .line(r#"{"type":"user","message":{"role":"user","content":"do the thing"}}"#);
 
         assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_session_on_a_cli_release_nobody_recorded_says_so_once() {
+        let mut translator = Translator::new("max");
+
+        let events = translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","claude_code_version":"9.9.9"}"#,
+        );
+
+        let said = warnings(&events);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("9.9.9"), "{said:?}");
+
+        // The CLI writes `init` again whenever the session moves model, and a
+        // release it already reported has not become news.
+        let again = translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"haiku-4-5","claude_code_version":"9.9.9"}"#,
+        );
+        assert!(warnings(&again).is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn a_session_on_a_recorded_cli_release_says_nothing_about_it() {
+        let mut translator = Translator::new("max");
+
+        let version = crate::conformance::RECORDED
+            .last()
+            .expect("a recorded release");
+        let events = translator.line(&format!(
+            r#"{{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","claude_code_version":"{version}"}}"#
+        ));
+
+        assert!(warnings(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_cli_that_does_not_say_which_release_it_is_is_taken_at_its_word() {
+        let mut translator = Translator::new("max");
+
+        // Every release recorded so far names itself on `init`. One that does
+        // not is a release this bridge can say nothing about, and a warning
+        // that named no version would tell the operator nothing they could
+        // act on.
+        let events = translator
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+
+        assert!(warnings(&events).is_empty(), "{events:?}");
     }
 
     #[test]

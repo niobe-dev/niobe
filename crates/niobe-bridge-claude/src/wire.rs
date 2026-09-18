@@ -58,6 +58,10 @@ pub(crate) struct Tag {
 pub(crate) struct System {
     pub(crate) subtype: Option<String>,
     pub(crate) model: Option<String>,
+    /// On `init`: which release of the CLI is on the other end. Optional
+    /// because a release that stopped naming itself is a release Niobe can say
+    /// nothing about, not one to refuse.
+    pub(crate) claude_code_version: Option<String>,
     /// On `init`: how the CLI is gating tool calls, in its own spelling.
     #[serde(rename = "permissionMode")]
     pub(crate) permission_mode: Option<String>,

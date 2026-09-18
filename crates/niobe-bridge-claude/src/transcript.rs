@@ -54,6 +54,7 @@ use serde::Deserialize;
 
 use niobe_core::event::Event;
 
+use crate::conformance;
 use crate::translate::{self, Translator};
 use crate::wire;
 
@@ -252,10 +253,35 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         .any(|(_, record)| matches!(record, Ok(Line::CostState(_))));
 
     let mut fold = Fold::new(profile, cwd, id, priced);
+    // Before anything is folded: what was recorded by a release nobody has
+    // read is read at the operator's own risk, and a session imported from one
+    // is read without anyone watching it happen.
+    if let Some(version) = release_of(&text)
+        && !conformance::recorded(&version)
+    {
+        fold.out
+            .push(translate::warn(conformance::unrecorded(&version)));
+    }
     for (line, record) in read {
         fold.record(line, record);
     }
     Ok(fold.out)
+}
+
+/// The CLI release a transcript was written by, off the first record that says.
+///
+/// The CLI stamps `version` on every record it writes during a turn, and on
+/// none of the furniture it writes between them; a transcript that names no
+/// release at all is one this bridge can say nothing about.
+fn release_of(text: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Stamp {
+        version: Option<String>,
+    }
+
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Stamp>(line).ok())
+        .find_map(|stamp| stamp.version)
 }
 
 /// The first turn of the transcript at `path` that the CLI did not write
@@ -501,23 +527,36 @@ enum Line {
     #[serde(rename = "permission-mode")]
     PermissionMode(PermissionMode),
     /// Records that say nothing about what the session did, changed or cost:
-    /// the CLI's own title for the session (`ai-title`), the prompt it offers
-    /// to repeat (`last-prompt`), the context it attached to a turn
-    /// (`attachment`), the file snapshots a rewind would restore
-    /// (`file-history-snapshot`, `file-history-delta`), its queue
-    /// (`queue-operation`), its editing mode (`mode`, which is not the
-    /// permission mode), its own notes to the screen (`system`) and its
-    /// latched status line (`atis-latch`).
+    /// the CLI's own title for the session (`ai-title`) and the name it gives
+    /// a sub-agent's session (`agent-name`), the prompt it offers to repeat
+    /// (`last-prompt`), the context it attached to a turn (`attachment`), the
+    /// file snapshots a rewind would restore (`file-history-snapshot`,
+    /// `file-history-delta`), its queue (`queue-operation`), its editing mode
+    /// (`mode`, which is not the permission mode), its own notes to the screen
+    /// (`system`), its latched status line (`atis-latch`), the pull request it
+    /// opened from the session (`pr-link`) and the handle its own service
+    /// holds the session under (`bridge-session`).
+    ///
+    /// Read off every record type present across the transcripts on the
+    /// machine this was written on — sixteen in all — rather than off the
+    /// types one session happened to produce. Four of them are read
+    /// (`assistant`, `user`, `cost-state`, `permission-mode`) and the other
+    /// twelve are here. A type left out is a warning entry per record in front
+    /// of the operator, for a record that says nothing: `bridge-session` alone
+    /// stood in fifteen thousand of them.
     #[serde(
         rename = "system",
+        alias = "agent-name",
         alias = "ai-title",
-        alias = "last-prompt",
+        alias = "atis-latch",
         alias = "attachment",
-        alias = "file-history-snapshot",
+        alias = "bridge-session",
         alias = "file-history-delta",
-        alias = "queue-operation",
+        alias = "file-history-snapshot",
+        alias = "last-prompt",
         alias = "mode",
-        alias = "atis-latch"
+        alias = "pr-link",
+        alias = "queue-operation"
     )]
     Aside,
     #[serde(other)]
@@ -768,6 +807,51 @@ mod tests {
         ]);
 
         assert_eq!(events, []);
+    }
+
+    /// Folds the transcript `lines` through the whole of [`events`], which is
+    /// where a file is read as a file rather than as records already parsed.
+    fn imported(lines: &[&str]) -> Vec<Event> {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = transcript(dir.path(), "s-1", Duration::ZERO, &lines.join("\n"));
+        events(&path, "max", Path::new("/repo")).expect("the transcript reads")
+    }
+
+    #[test]
+    fn a_session_recorded_by_a_cli_release_nobody_recorded_says_so_once() {
+        let events = imported(&[
+            r#"{"type":"mode","mode":"normal","version":"9.9.9"}"#,
+            r#"{"type":"mode","mode":"normal","version":"9.9.9"}"#,
+            &prompt("what did this cost?"),
+        ]);
+
+        let said: Vec<&String> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Error { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said.len(), 1, "{events:?}");
+        assert!(said[0].contains("9.9.9"), "{said:?}");
+    }
+
+    #[test]
+    fn a_session_recorded_by_a_recorded_cli_release_says_nothing_about_it() {
+        let version = crate::conformance::RECORDED
+            .last()
+            .expect("a recorded release");
+        let events = imported(&[
+            &format!(r#"{{"type":"mode","mode":"normal","version":"{version}"}}"#),
+            &prompt("what did this cost?"),
+        ]);
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "{events:?}"
+        );
     }
 
     #[test]
