@@ -16,10 +16,14 @@
 //! proves the last two — the hook writes to the process's own standard output,
 //! and the signal disposition belongs to the process.
 //!
-//! The fourth case is the terminal closing under the shell, which no signal
-//! reports: a process outside the session that owns a terminal is not sent
-//! SIGHUP when it goes, and the hangup on the descriptor is the only thing that
-//! says so. What the shell draws cannot be read after that, so those tests read
+//! The fourth case is the terminal closing under the shell, and the shell has
+//! three ways of finding out. A process outside the session that owns a
+//! terminal is not sent SIGHUP when it goes, so for these tests the hangup on
+//! the descriptor is what says so; the draw at the top of the next tick failing
+//! is the other side of that race, arranged by drawing on a terminal that is
+//! not the one being waited on; and SIGHUP is the way an operator's own shell
+//! hears it, sent here on a terminal that is still there to be read. What the
+//! shell draws cannot be read once the terminal has gone, so the first two read
 //! the session out of the store instead, and the exit status — a session that
 //! lost its terminal ended; it did not fail, and a wrapper reads that here.
 //!
@@ -270,6 +274,26 @@ fn shell_command(slave: &File, cwd: &Path) -> Command {
 /// Opens the shell on `slave`.
 fn shell_on(slave: &File, cwd: &Path) -> Child {
     shell_command(slave, cwd)
+        .spawn()
+        .expect("the niobe binary runs")
+}
+
+/// Opens the shell reading from one terminal and drawing on another.
+///
+/// The shell treats them as one: it waits on standard input and draws on
+/// standard output, and for an operator those are the same device. Two ptys
+/// separate the two ways the shell can find out that device has gone, so that
+/// a test can close one of them and leave the other with nothing to report.
+fn shell_reading_from(input: &File, screen: &File, cwd: &Path) -> Child {
+    let stdin = input.try_clone().expect("the slave can be duplicated");
+    let stdout = screen.try_clone().expect("the slave can be duplicated");
+    let stderr = screen.try_clone().expect("the slave can be duplicated");
+    Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .spawn()
         .expect("the niobe binary runs")
 }
@@ -564,5 +588,101 @@ fn a_failure_that_cannot_be_reported_ends_as_a_failure_rather_than_a_crash() {
         Some(FAILED_UNREPORTED),
         "a failure whose reason could not be written ended as {status}, which does not say that \
          the reason is missing"
+    );
+}
+
+/// The terminal closing while the shell is drawing on it, rather than while it
+/// waits to be typed into.
+///
+/// Both are the same closed terminal, and the loop has two ways of finding out:
+/// the wait it spends the tick in reports the hangup, and the draw at the top
+/// of the next tick fails. The wait wins almost every time, because that is
+/// where the tick is spent; the draw finding out first is the other side of a
+/// race, a run in a hundred under load, and nothing outside the process can
+/// choose which side a close lands on when both ends are one device.
+///
+/// So the device is split: the shell reads from one pty and draws on another,
+/// and only the one it draws on is closed. The wait has nothing to report, the
+/// draw is the only thing that can notice, and the side of the race that is
+/// otherwise reached by chance is the only side there is. What the session
+/// exits with is what this reads — losing the screen it drew on ended the
+/// session; it did not fail, and it is not a bug in `niobe` either, whichever
+/// way the shell found out.
+#[test]
+fn a_terminal_that_goes_away_while_the_shell_draws_ends_the_session_rather_than_failing() {
+    let repo = repo();
+    let (keyboard, typed_into) = Terminal::open();
+    let (screen, drawn_on) = Terminal::open();
+    let mut shell = shell_reading_from(&typed_into, &drawn_on, repo.path());
+    screen.shows(OPENING_FRAME);
+
+    // Only the drawing surface goes. The shell's wait is on the other pty,
+    // which is still open and has nothing to say.
+    drop(drawn_on);
+    screen.close();
+
+    let (took, status) = ended(&mut shell);
+    drop(typed_into);
+    keyboard.close();
+
+    assert!(
+        took < DEADLINE,
+        "the shell took {took:?} to notice that the terminal it drew on had gone, \
+         over the {DEADLINE:?} it has"
+    );
+    assert_ne!(
+        status.code(),
+        Some(PANICKED),
+        "the terminal going away mid-draw ended the shell in a panic, which reads as a bug in \
+         niobe rather than as a window that closed"
+    );
+    assert!(
+        status.success(),
+        "a session that ended because the terminal it drew on went away exited with {status}, \
+         which tells whatever started niobe that the session failed"
+    );
+}
+
+/// A hangup, which is the kernel saying the terminal went away.
+///
+/// A session that runs in the session owning its terminal is told twice when
+/// that terminal closes — SIGHUP from the kernel, and the hangup on the
+/// descriptor the wait is in — and which telling arrives first is not something
+/// either end chooses. Sent on its own, with the terminal still there to read
+/// what happens next, it is that ending arranged where it can be watched.
+///
+/// The session ends without failing, and the terminal comes back. The line a
+/// quit prints afterwards does not, because a hangup names a terminal there is
+/// nothing left to print on: read as an ordinary stop, that line is written to
+/// a window that has closed, and it is written by a macro that panics when the
+/// write fails.
+#[test]
+fn a_hangup_ends_the_session_as_a_terminal_that_went_away_rather_than_as_a_quit() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    // A session with something in it, so that a quit would have the line to
+    // print that a hangup must not.
+    terminal.typed(b"etags please\r");
+    recorded(repo.path(), 1);
+
+    signal(&shell, Signal::HUP);
+
+    let (took, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert!(
+        took < DEADLINE,
+        "the shell took {took:?} to act on a hangup, over the {DEADLINE:?} it has"
+    );
+    assert!(status.success(), "a hangup ended the shell with {status}");
+    assert_handed_back(&drawn, "a hangup");
+    assert!(
+        !drawn.contains("niobe --resume"),
+        "a hangup printed the line a quit prints, onto the terminal the hangup says has gone: \
+         {drawn:?}"
     );
 }

@@ -16,10 +16,12 @@
 //!   draws an em dash, and says what is not wired up where that is not obvious.
 //! * **The terminal is always handed back.** A guard, a panic hook and a signal
 //!   handler cover the three ways out; see [`terminal`]. A fourth — a terminal
-//!   that goes away without a signal — is noticed by the event loop's own wait
-//!   for input, and ends the session rather than failing it: there is nothing
+//!   that goes away — ends the session rather than failing it: there is nothing
 //!   left to hand the terminal back to, and losing a terminal is not a session
-//!   that went wrong.
+//!   that went wrong. The event loop can find that out three ways, and they all
+//!   end the session the same: a hangup on the descriptor it waits on, SIGHUP
+//!   from the kernel, and the draw at the top of a tick failing on a terminal
+//!   that went in the moment before it.
 
 pub mod app;
 pub mod bridge;
@@ -35,7 +37,7 @@ pub use app::{App, Entry, EntryKind, Repo, SelectedProfile};
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use journal::{Journal, JournalError, Unrecorded};
 pub use run::{Ended, run};
-pub use terminal::{Shutdown, TerminalGuard, install_panic_hook};
+pub use terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 pub use theme::{CLASSIC, Theme};
 pub use ui::{MIN_SIZE, WIDE_COLUMNS, draw, session_cost};
 

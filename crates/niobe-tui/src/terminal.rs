@@ -10,7 +10,9 @@
 //! * a panic — the hook [`install_panic_hook`] installs, which runs before the
 //!   guard unwinds (this is why the release profile keeps `panic = "unwind"`),
 //! * SIGTERM and SIGHUP — [`Shutdown`], which flips a flag the event loop reads
-//!   so the guard drops normally.
+//!   so the guard drops normally. It keeps the two apart: SIGTERM asks the
+//!   process to stop, SIGHUP says the terminal it ran on has gone, and the
+//!   session ended for different reasons.
 //!
 //! All three are idempotent, so overlapping paths — a panic while a SIGTERM is
 //! pending — restore once and do not fight each other.
@@ -19,7 +21,11 @@
 //! process is not in the session that owns it. The event loop's own wait for
 //! input sees the hangup and quits, which is the first path above — except that
 //! the sequences written here cannot reach a terminal that has gone, so the
-//! failure to write them is not what [`crate::run`] reports.
+//! failure to write them is not what [`crate::run`] reports. It is read instead:
+//! a loop that failed on a terminal these sequences then cannot reach failed
+//! because that terminal went, which is the hangup the wait would have reported
+//! had the close landed while the tick was being spent there rather than in the
+//! draw at the top of the next one.
 //!
 //! Each path is proven against the binary on a real terminal in the CLI's
 //! `tests/pty.rs`. Nothing less can: the hook writes to the process's own
@@ -148,27 +154,48 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// A flag set when the process is asked to stop.
+/// Why a signal is ending the session.
+///
+/// The two are not the same ending. A process asked to stop ran on a terminal
+/// that is still there to be handed back and to be printed on; a process whose
+/// terminal hung up has neither, and its session did not fail — it lost the
+/// screen it was drawn on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// The process was asked to stop.
+    Requested,
+    /// The terminal the session ran on went away.
+    TerminalGone,
+}
+
+/// Flags set when a signal ends the session.
 ///
 /// The default disposition for SIGTERM kills the process outright, which leaves
-/// the terminal in raw mode on the alternate screen. Catching it costs one
-/// atomic read per tick and turns the signal into an ordinary quit.
+/// the terminal in raw mode on the alternate screen. Catching it costs two
+/// atomic reads per tick and turns the signal into an ordinary quit. SIGHUP is
+/// caught for the same reason and kept apart from it, because it carries more:
+/// the terminal is gone.
 #[derive(Debug, Clone)]
 pub struct Shutdown {
     #[cfg(unix)]
     requested: std::sync::Arc<AtomicBool>,
+    #[cfg(unix)]
+    hung_up: std::sync::Arc<AtomicBool>,
 }
 
 impl Shutdown {
-    /// Registers the handlers. On a platform without POSIX signals this is a
-    /// flag that is never set, and the guard still covers every other path.
+    /// Registers the handlers. On a platform without POSIX signals these are
+    /// flags that are never set, and the guard still covers every other path.
     #[cfg(unix)]
     pub fn install() -> io::Result<Self> {
         let requested = std::sync::Arc::new(AtomicBool::new(false));
-        for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
-            signal_hook::flag::register(signal, std::sync::Arc::clone(&requested))?;
-        }
-        Ok(Self { requested })
+        let hung_up = std::sync::Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(
+            signal_hook::consts::SIGTERM,
+            std::sync::Arc::clone(&requested),
+        )?;
+        signal_hook::flag::register(signal_hook::consts::SIGHUP, std::sync::Arc::clone(&hung_up))?;
+        Ok(Self { requested, hung_up })
     }
 
     /// Registers the handlers.
@@ -177,16 +204,26 @@ impl Shutdown {
         Ok(Self {})
     }
 
-    /// Whether a stop has been asked for.
+    /// What a signal has asked of the session, if one has.
+    ///
+    /// A hangup is answered first when both have arrived: SIGTERM asks for an
+    /// ending the terminal will be there to see, and a terminal that has gone
+    /// is the truer of the two answers.
     #[cfg(unix)]
-    pub fn requested(&self) -> bool {
-        self.requested.load(Ordering::SeqCst)
+    pub fn requested(&self) -> Option<Stop> {
+        if self.hung_up.load(Ordering::SeqCst) {
+            Some(Stop::TerminalGone)
+        } else if self.requested.load(Ordering::SeqCst) {
+            Some(Stop::Requested)
+        } else {
+            None
+        }
     }
 
-    /// Whether a stop has been asked for.
+    /// What a signal has asked of the session, if one has.
     #[cfg(not(unix))]
-    pub fn requested(&self) -> bool {
-        false
+    pub fn requested(&self) -> Option<Stop> {
+        None
     }
 }
 
@@ -262,23 +299,51 @@ mod tests {
         assert!(out.contains(SHOW_CURSOR), "a panic left the cursor hidden");
     }
 
+    /// A signal is delivered to the process, not to the `Shutdown` that asked
+    /// for it: a raise sets the flag of every `Shutdown` any test installed. So
+    /// the tests that install and the tests that raise take this in turn, and
+    /// each one sees only the signals it sent itself.
+    static SIGNALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn a_shutdown_starts_unrequested() {
-        let shutdown = Shutdown::install().expect("registering SIGTERM cannot fail here");
-        assert!(!shutdown.requested());
+        let _turn = SIGNALLING.lock().expect("no test panics holding this");
+
+        let shutdown = Shutdown::install().expect("registering the signals cannot fail here");
+
+        assert_eq!(shutdown.requested(), None);
     }
 
     #[cfg(unix)]
     #[test]
-    fn sigterm_sets_the_flag_the_event_loop_reads() {
-        let shutdown = Shutdown::install().expect("registering SIGTERM cannot fail here");
-        assert!(!shutdown.requested());
+    fn sigterm_asks_the_event_loop_to_stop() {
+        let _turn = SIGNALLING.lock().expect("no test panics holding this");
+        let shutdown = Shutdown::install().expect("registering the signals cannot fail here");
 
         // Sent to this process: the handler registered above catches it instead
         // of the default disposition killing the test.
         signal_hook::low_level::raise(signal_hook::consts::SIGTERM)
             .expect("raising a signal we handle cannot fail");
 
-        assert!(shutdown.requested(), "SIGTERM did not reach the flag");
+        assert_eq!(
+            shutdown.requested(),
+            Some(Stop::Requested),
+            "SIGTERM did not reach the flag"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sighup_says_the_terminal_went_away_rather_than_that_a_stop_was_asked_for() {
+        let _turn = SIGNALLING.lock().expect("no test panics holding this");
+        let shutdown = Shutdown::install().expect("registering the signals cannot fail here");
+
+        signal_hook::low_level::raise(signal_hook::consts::SIGHUP)
+            .expect("raising a signal we handle cannot fail");
+
+        // Read as a stop, a session whose terminal hung up ends as a quit: the
+        // shell then tries to hand that terminal back and to print on it, and
+        // reports failing at both as a session that failed.
+        assert_eq!(shutdown.requested(), Some(Stop::TerminalGone));
     }
 }

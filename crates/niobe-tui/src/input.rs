@@ -55,8 +55,8 @@ impl Wait {
     /// terminal, and `/dev/tty` otherwise. Only the first can go away without a
     /// signal: `/dev/tty` is the controlling terminal by definition, and losing
     /// that arrives as SIGHUP, which [`crate::terminal::Shutdown`] already
-    /// turns into an ordinary quit. So this wait covers standard input and
-    /// leaves the rest to crossterm.
+    /// reports as the terminal going away. So this wait covers standard input
+    /// and leaves the rest to crossterm.
     pub(crate) fn on_the_terminal() -> Self {
         Self {
             #[cfg(unix)]

@@ -21,7 +21,7 @@ use crate::app::App;
 use crate::bridge::Bridge;
 use crate::input::{Input, Wait};
 use crate::journal::Journal;
-use crate::terminal::{Shutdown, TerminalGuard, install_panic_hook};
+use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 use crate::ui;
 
 /// How long the loop waits for a key before looking at the shutdown flag.
@@ -75,17 +75,19 @@ pub fn run(mut app: App, journal: &mut dyn Journal, backend: &mut dyn Bridge) ->
     // and waits for the reply, which never comes when stdin is a pipe.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    let ended = event_loop(&mut terminal, &mut app, journal, backend, &shutdown, &wait)?;
+    let ended = event_loop(&mut terminal, &mut app, journal, backend, &shutdown, &wait);
 
-    match ended {
-        Ended::Quit => {}
+    match &ended {
+        Ok(Ended::Quit) => {}
         // The drawing surface is abandoned rather than dropped: ratatui's
         // `Terminal` shows the cursor again as it drops and, when it cannot,
         // prints that failure to standard error. Standard error is the terminal
         // that has just gone, so the print fails too — and an `eprintln!` that
         // fails panics, which would end a session that merely lost its terminal
-        // as a crash.
-        Ended::TerminalGone => std::mem::forget(terminal),
+        // as a crash. A loop that failed is abandoned too, because every error
+        // it produces is the terminal refusing it. Nothing is lost by never
+        // dropping the surface: the guard below writes the same sequence.
+        Ok(Ended::TerminalGone) | Err(_) => std::mem::forget(terminal),
     }
 
     // Explicit, so that a restore failure is reported rather than swallowed by
@@ -102,10 +104,22 @@ pub fn run(mut app: App, journal: &mut dyn Journal, backend: &mut dyn Bridge) ->
 /// reads that from the exit status. Any other failure to restore is reported
 /// with its error: a terminal left in raw mode on the alternate screen is the
 /// operator's to fix by hand, and they are owed the reason.
-fn outcome(ended: Ended, restored: io::Result<()>) -> io::Result<Ended> {
+///
+/// The loop can fail rather than end, and everything it can fail at is the
+/// terminal: it draws on it, waits on it and reads from it, and touches nothing
+/// else. Which of those notices a terminal closing is a race — the wait reports
+/// the hangup only if the close lands while the tick is being spent there, and
+/// the draw at the top of the next tick fails otherwise. So a loop that failed
+/// on a terminal that then could not be handed back either lost that terminal,
+/// and ended the way the wait would have said it did. A loop that failed on a
+/// terminal still there to take the sequences failed at something else, and the
+/// operator is owed that error.
+fn outcome(ended: io::Result<Ended>, restored: io::Result<()>) -> io::Result<Ended> {
     match ended {
-        Ended::Quit => restored.map(|()| Ended::Quit),
-        Ended::TerminalGone => Ok(Ended::TerminalGone),
+        Ok(Ended::Quit) => restored.map(|()| Ended::Quit),
+        Ok(Ended::TerminalGone) => Ok(Ended::TerminalGone),
+        Err(_) if restored.is_err() => Ok(Ended::TerminalGone),
+        Err(error) => Err(error),
     }
 }
 
@@ -141,8 +155,17 @@ fn event_loop<B: Backend<Error = io::Error>>(
             }
         }
 
-        if shutdown.requested() {
-            app.quit();
+        match shutdown.requested() {
+            None => {}
+            Some(Stop::Requested) => app.quit(),
+            // SIGHUP is the terminal going away, reported by the kernel rather
+            // than by the wait: a session in the session that owns the terminal
+            // is told twice, and whichever telling arrives first is the one that
+            // says what this session ended as.
+            Some(Stop::TerminalGone) => {
+                ended = Ended::TerminalGone;
+                app.quit();
+            }
         }
     }
 
@@ -284,7 +307,7 @@ mod tests {
 
     #[test]
     fn a_terminal_that_could_not_be_handed_back_is_reported_with_its_error() {
-        let error = outcome(Ended::Quit, restore_failed()).expect_err("the restore failed");
+        let error = outcome(Ok(Ended::Quit), restore_failed()).expect_err("the restore failed");
 
         assert_eq!(error.to_string(), "the terminal went away");
     }
@@ -293,7 +316,7 @@ mod tests {
     fn a_session_whose_terminal_went_away_did_not_fail() {
         // The restore fails because the terminal is gone, which is the same
         // thing that ended the session.
-        let ended = outcome(Ended::TerminalGone, restore_failed())
+        let ended = outcome(Ok(Ended::TerminalGone), restore_failed())
             .expect("a terminal that went away is not a failed session");
 
         assert_eq!(ended, Ended::TerminalGone);
@@ -301,9 +324,30 @@ mod tests {
 
     #[test]
     fn a_clean_quit_that_handed_the_terminal_back_is_a_quit() {
-        let ended = outcome(Ended::Quit, Ok(())).expect("nothing failed");
+        let ended = outcome(Ok(Ended::Quit), Ok(())).expect("nothing failed");
 
         assert_eq!(ended, Ended::Quit);
+    }
+
+    #[test]
+    fn a_loop_that_failed_on_a_terminal_that_is_gone_lost_its_terminal() {
+        // The draw at the top of a tick is the other way the loop finds out,
+        // and it finds out as an error rather than as a hangup.
+        let ended = outcome(
+            Err(io::Error::other("the terminal went away")),
+            restore_failed(),
+        )
+        .expect("a terminal that went away is not a failed session");
+
+        assert_eq!(ended, Ended::TerminalGone);
+    }
+
+    #[test]
+    fn a_loop_that_failed_on_a_terminal_that_is_still_there_is_reported_with_its_error() {
+        let error = outcome(Err(io::Error::other("the draw was refused")), Ok(()))
+            .expect_err("the loop failed");
+
+        assert_eq!(error.to_string(), "the draw was refused");
     }
 
     #[test]
