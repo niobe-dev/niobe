@@ -95,11 +95,17 @@ fn report(message: &str, stderr: &mut dyn Write) -> u8 {
     }
 }
 
-fn run(Invocation { command, profile }: Invocation) -> Result<(), String> {
+fn run(
+    Invocation {
+        command,
+        profile,
+        budget,
+    }: Invocation,
+) -> Result<(), String> {
     let profile = profile.as_deref();
     match command {
-        Command::Shell => shell(profile),
-        Command::Resume(session) => resume(session, profile),
+        Command::Shell => shell(profile, budget),
+        Command::Resume(session) => resume(session, profile, budget),
         Command::Sessions => list_sessions(),
         Command::Profiles => list_profiles(profile),
         Command::Prices(model) => list_prices(model.as_deref()),
@@ -121,7 +127,7 @@ fn run(Invocation { command, profile }: Invocation) -> Result<(), String> {
 /// a piped or redirected run prints the help instead of an errno. The config is
 /// read first either way, so a config that cannot be used is reported rather
 /// than hidden behind the help.
-fn shell(profile: Option<&str>) -> Result<(), String> {
+fn shell(profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
@@ -129,6 +135,10 @@ fn shell(profile: Option<&str>) -> Result<(), String> {
     let app = App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone());
     let app = match &selected {
         Some(selected) => app.with_profile(config::named(*selected)),
+        None => app,
+    };
+    let app = match budget {
+        Some(budget) => app.with_budget(budget),
         None => app,
     };
 
@@ -140,7 +150,14 @@ fn shell(profile: Option<&str>) -> Result<(), String> {
     // Spawned after the terminal check and before the shell takes the screen:
     // a piped run starts no subprocess, and a backend that will not start says
     // why on a screen that is still the operator's.
-    let mut backend = backend::attach(&root, selected.as_ref(), None)?;
+    let mut backend = backend::attach(
+        &root,
+        selected.as_ref(),
+        &backend::Attach {
+            budget_usd: budget,
+            ..backend::Attach::default()
+        },
+    )?;
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -170,7 +187,7 @@ fn shell(profile: Option<&str>) -> Result<(), String> {
 
 /// Opens the shell on a recorded session and keeps recording into it. Without
 /// a terminal, prints what the session folds to.
-fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
+fn resume(session: SessionId, profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
@@ -178,6 +195,9 @@ fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
     let mut app = App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone());
     if let Some(selected) = &selected {
         app = app.with_profile(config::named(*selected));
+    }
+    if let Some(budget) = budget {
+        app = app.with_budget(budget);
     }
 
     let started = Instant::now();
@@ -214,7 +234,19 @@ fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
         .session()
         .meta()
         .and_then(|meta| meta.backend_session.clone());
-    let mut backend = backend::attach(&root, selected.as_ref(), continuing)?;
+    // The recorded session also says how it was gating tool calls when it
+    // stopped, and the backend is started that way: a session that came back
+    // asking about everything it had been told to stop asking about would have
+    // lost a decision the operator made.
+    let mut backend = backend::attach(
+        &root,
+        selected.as_ref(),
+        &backend::Attach {
+            resume: continuing,
+            mode: app.session().mode(),
+            budget_usd: budget,
+        },
+    )?;
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -343,6 +375,7 @@ USAGE:
 
 OPTIONS:
     --profile <name>       Run under this profile instead of the default one
+    --budget <amount>      Stop the session once it has cost this many dollars
     -h, --help             Print this help
     -V, --version          Print the version
 
@@ -363,13 +396,17 @@ PROFILES:
 
         [profiles.work]
         backend = \"claude\"
+        models = [\"opus\", \"sonnet\", \"haiku\"]
         env = {{ CLAUDE_CODE_USE_BEDROCK = \"1\", AWS_PROFILE = \"work-sso\" }}
         auth_refresh = \"aws sso login --profile work-sso\"
 
     The user's config is ~/.config/niobe/config.toml ($XDG_CONFIG_HOME/niobe
     when that is set); a repository's is .niobe/config.toml at its root, and
     overrides the user's, replacing any profile of the same name whole. The
-    env of a profile is passed on exactly as written.
+    env of a profile is passed on exactly as written. The models of a profile
+    are the ones F8 offers in the shell, named the way its backend takes them;
+    a profile that names none has nothing to switch between, because niobe
+    never invents a model id.
 
 PRICES:
     Costs are computed from a price table bundled into niobe: USD per million
@@ -389,6 +426,8 @@ IN THE SHELL:
     Enter                  Send what is in the composer
     Alt+Enter              Open a new line in the composer
     PgUp / PgDn            Scroll the transcript
+    Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
+    F8                     Pick a model from the ones the profile names
     F10, Ctrl+Q            Quit
 
     When a backend stops for permission, the turn waits on a prompt that takes
@@ -399,6 +438,28 @@ IN THE SHELL:
     a                      Allow it, and every call to that tool from now on
     p                      Allow it, and every call to that tool on the same
                            target from now on
+
+MODE AND MODEL:
+    Shift+Tab cycles the mode the session runs in — plan changes nothing, ask
+    stops for every call no rule already allows, auto leaves the decision to
+    the backend — and the status line names the one in force. A mode a backend
+    reports that niobe has no word for is named rather than shown as one of
+    these three.
+
+    F8 picks a model from the ones the profile names. The switch applies from
+    the next turn and keeps everything said so far: the running session is told
+    to change, not replaced. The backend resolves the name it is given and says
+    what it ended up on, which may be spelt differently from the way it was
+    asked for.
+
+BUDGET:
+    --budget <amount> caps what a session may spend, in dollars, and niobe says
+    so in the transcript once most of it is gone. The backend enforces the cap
+    and checks it between turns rather than inside one, so a session can finish
+    above the figure by what the turn that crosses the line costs. On a
+    subscription plan the figure the backend reports is what the same work
+    would have cost on the provider's API, so the cap is on that and not on
+    money that moved.
 
 PERMISSIONS:
     An \"always\" answer is written into this repository's .niobe/config.toml as

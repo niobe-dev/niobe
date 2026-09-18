@@ -21,7 +21,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::{running_session, screen};
-use niobe_core::event::{Backend, Event};
+use niobe_core::event::{Backend, Event, Mode};
 use niobe_tui::app::{App, Repo, SelectedProfile};
 
 /// The same session, stopped on a permission prompt it is waiting on.
@@ -147,6 +147,7 @@ fn a_selected_profile_is_named_in_the_status_line_and_the_menu_bar() {
     let mut app = empty_session().with_profile(SelectedProfile {
         name: "work".to_owned(),
         backend: Backend::Claude,
+        models: Vec::new(),
     });
     let label = "work · claude, not attached";
 
@@ -157,6 +158,87 @@ fn a_selected_profile_is_named_in_the_status_line_and_the_menu_bar() {
     let wide = screen(&mut app, 120, 30);
     let menu = wide.lines().next().unwrap_or_default();
     assert!(menu.contains(label), "{wide}");
+}
+
+#[test]
+fn the_status_line_says_how_tool_calls_are_gated_and_which_key_changes_it() {
+    let mut app = running_session();
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("▸▸ ask mode"), "{frame}");
+    assert!(frame.contains("Shift+Tab cycles"), "{frame}");
+
+    // A session nothing has reported a mode for claims none.
+    let empty = screen(&mut empty_session(), 120, 30);
+    assert!(!empty.contains("mode"), "{empty}");
+}
+
+#[test]
+fn a_model_the_operator_moved_to_is_what_the_status_line_names() {
+    let mut app = running_session();
+    assert!(screen(&mut app, 120, 30).contains("claude · opus-5"));
+
+    app.apply(&Event::ModelSelected {
+        model: "haiku".to_owned(),
+    });
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("claude · haiku"),
+        "the status line named the model the session moved off:\n{frame}"
+    );
+}
+
+#[test]
+fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
+    let mut app = running_session().with_profile(SelectedProfile {
+        name: "max".to_owned(),
+        backend: Backend::Claude,
+        models: vec!["opus-5".to_owned(), "sonnet-5".to_owned()],
+    });
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::F(8),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("═ Model ═"), "{frame}");
+    assert!(frame.contains("opus-5"), "{frame}");
+    assert!(frame.contains("sonnet-5"), "{frame}");
+    assert!(
+        frame.contains("applied from the next turn"),
+        "the list did not say when a choice takes effect:\n{frame}"
+    );
+}
+
+#[test]
+fn a_budget_is_on_the_status_line_with_what_has_been_spent_against_it() {
+    let mut app = running_session().with_budget(0.50);
+
+    let frame = screen(&mut app, 120, 30);
+
+    // The fixture reports $0.04 of cost and one record without any, so the
+    // figure beside the budget is what was actually reported and no more.
+    assert!(frame.contains("budget $0.04/$0.50"), "{frame}");
+    assert!(
+        !screen(&mut running_session(), 120, 30).contains("budget"),
+        "a session with no budget was given one"
+    );
+}
+
+#[test]
+fn a_cycled_mode_is_on_the_status_line_and_a_denied_key_is_not() {
+    let mut app = running_session();
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::BackTab,
+        ratatui::crossterm::event::KeyModifiers::SHIFT,
+    ));
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("▸▸ auto mode"), "{frame}");
+    assert_eq!(
+        app.take_produced(),
+        [Event::ModeSelected { mode: Mode::Auto }]
+    );
 }
 
 #[test]

@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use niobe_core::event::{Event, PermissionDecision, ToolCallId};
+use niobe_core::event::{Event, Mode, PermissionDecision, ToolCallId};
 
 use crate::translate::Translator;
 
@@ -63,28 +63,18 @@ type Waiting = Arc<Mutex<BTreeMap<String, (String, serde_json::Value)>>>;
 /// and drained before every line, which is what puts it there first.
 type Refusals = Arc<Mutex<Vec<ToolCallId>>>;
 
-/// How the CLI decides whether a tool call may run.
+/// How the CLI spells a mode, on the command line and over the control
+/// channel.
 ///
-/// Spelled as the CLI spells it on the command line; the names are the vendor's
-/// and are passed through unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionMode {
-    /// Ask about anything not already allowed.
-    Default,
-    /// Edits to files in the working directory go through without asking.
-    AcceptEdits,
-    /// Plan first, change nothing.
-    Plan,
-}
-
-impl PermissionMode {
-    /// The value for `--permission-mode`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::AcceptEdits => "acceptEdits",
-            Self::Plan => "plan",
-        }
+/// The CLI takes `acceptEdits`, `auto`, `bypassPermissions`, `default`,
+/// `dontAsk` and `plan`, and refuses anything else with an error naming the
+/// list. Niobe models three of them and sends nothing outside this function,
+/// so a mode the shell offers is always one the CLI takes.
+fn spelt(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Plan => "plan",
+        Mode::Ask => "default",
+        Mode::Auto => "auto",
     }
 }
 
@@ -106,7 +96,11 @@ pub struct Options {
     /// The model to ask for. `None` leaves the choice to the CLI.
     pub model: Option<String>,
     /// How tool calls are gated.
-    pub permission_mode: PermissionMode,
+    pub mode: Mode,
+    /// The most the CLI may spend on this session, in USD. `None` leaves it
+    /// unlimited. The CLI checks it between turns, so a session can finish
+    /// above the figure by the cost of the turn that crossed it.
+    pub budget_usd: Option<f64>,
     /// A session of the CLI's own to continue, rather than starting a new one.
     pub resume: Option<String>,
     /// Settings to run under, as the JSON document `--settings` takes or the
@@ -131,7 +125,8 @@ impl Options {
             args: Vec::new(),
             profile: profile.into(),
             model: None,
-            permission_mode: PermissionMode::Default,
+            mode: Mode::Ask,
+            budget_usd: None,
             resume: None,
             settings: None,
             ask_over_stdio: false,
@@ -156,8 +151,12 @@ impl Options {
             "--verbose".to_owned(),
             "--include-partial-messages".to_owned(),
             "--permission-mode".to_owned(),
-            self.permission_mode.as_str().to_owned(),
+            spelt(self.mode).to_owned(),
         ];
+        if let Some(budget) = self.budget_usd {
+            argv.push("--max-budget-usd".to_owned());
+            argv.push(budget.to_string());
+        }
         if self.ask_over_stdio {
             argv.push("--permission-prompt-tool".to_owned());
             argv.push("stdio".to_owned());
@@ -235,6 +234,11 @@ pub struct Session {
     refusals: Refusals,
     stderr: Arc<Mutex<String>>,
     readers: Vec<JoinHandle<()>>,
+    /// How many requests this side has made, which is what the next one is
+    /// addressed by. The CLI numbers its own requests, so Niobe's carry a
+    /// prefix of their own: two requests answered by the same id would have
+    /// each other's answers.
+    control_requests: u64,
     /// Whether the child's exit has already been turned into an event, so that
     /// a session that has ended says so once rather than on every drain.
     reported: bool,
@@ -336,6 +340,7 @@ impl Session {
             refusals,
             stderr: kept,
             readers: vec![reader, errors],
+            control_requests: 0,
             reported: false,
         })
     }
@@ -401,6 +406,52 @@ impl Session {
         stdin.flush()
     }
 
+    /// Asks the CLI to gate tool calls a different way, from now on.
+    ///
+    /// The CLI applies it to the turn after the request, and answers on the
+    /// control channel; a refusal comes back as a `control_response` the
+    /// reading thread turns into a visible entry, so nothing here waits for
+    /// one. A mode the CLI would refuse cannot be reached: [`spelt`] maps the
+    /// three modes Niobe models onto spellings the CLI takes.
+    pub fn set_mode(&mut self, mode: Mode) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "set_permission_mode", "mode": spelt(mode) }),
+        ))
+    }
+
+    /// Asks the CLI to answer with a different model from its next turn.
+    ///
+    /// The conversation is kept: this is the running session being told to
+    /// change, not a new one, so nothing of what has been said is lost. The
+    /// CLI resolves the name — an alias such as `haiku`, or a full model id —
+    /// and announces what it ended up on with the next message it starts.
+    pub fn set_model(&mut self, model: &str) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "set_model", "model": model }),
+        ))
+    }
+
+    /// Writes one control request to the CLI's standard input.
+    fn ask(&mut self, request: &serde_json::Value) -> std::io::Result<()> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(std::io::Error::other(
+                "the session has ended; its standard input is closed",
+            ));
+        };
+        writeln!(stdin, "{request}")?;
+        stdin.flush()
+    }
+
+    /// The id the next request this side makes is addressed by.
+    fn next_request_id(&mut self) -> String {
+        self.control_requests = self.control_requests.saturating_add(1);
+        format!("niobe-{}", self.control_requests)
+    }
+
     /// Everything the CLI has produced since the last call.
     ///
     /// Never blocks. A session whose subprocess has gone reports that once,
@@ -457,6 +508,19 @@ impl Session {
             fatal: true,
         })
     }
+}
+
+/// The line that asks the CLI to change something about the running session.
+///
+/// Written as its own function for the same reason as [`control_response`]:
+/// what reaches the CLI's standard input is the whole of the protocol on this
+/// side, and it can be checked without a subprocess.
+fn control_request(request_id: &str, body: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": body,
+    })
 }
 
 /// The line that answers one permission prompt.
@@ -701,6 +765,87 @@ mod tests {
         let said = error.to_string();
         assert!(said.contains("not waiting on a decision"), "{said}");
         assert!(said.contains("toolu_1"), "{said}");
+    }
+
+    #[test]
+    fn the_spawn_line_carries_the_mode_and_the_budget_the_session_runs_under() {
+        let mut options = options();
+        options.mode = Mode::Plan;
+        options.budget_usd = Some(0.5);
+
+        let argv = options.argv();
+
+        let mode = argv
+            .iter()
+            .position(|a| a == "--permission-mode")
+            .expect("the mode");
+        assert_eq!(argv[mode + 1], "plan");
+        let budget = argv
+            .iter()
+            .position(|a| a == "--max-budget-usd")
+            .expect("the budget");
+        assert_eq!(argv[budget + 1], "0.5");
+    }
+
+    #[test]
+    fn a_session_with_no_budget_passes_no_budget_flag() {
+        assert!(!options().argv().iter().any(|a| a == "--max-budget-usd"));
+    }
+
+    #[test]
+    fn every_mode_the_shell_offers_is_spelt_the_way_the_cli_takes_it() {
+        // The CLI accepts `acceptEdits`, `auto`, `bypassPermissions`,
+        // `default`, `dontAsk` and `plan`; these three are the ones Niobe
+        // models, and it never sends a spelling the CLI would refuse.
+        assert_eq!(spelt(Mode::Plan), "plan");
+        assert_eq!(spelt(Mode::Ask), "default");
+        assert_eq!(spelt(Mode::Auto), "auto");
+    }
+
+    #[test]
+    fn changing_the_mode_and_the_model_are_requests_the_cli_answers_by_id() {
+        let mode = control_request(
+            "niobe-1",
+            serde_json::json!({
+                "subtype": "set_permission_mode",
+                "mode": spelt(Mode::Plan),
+            }),
+        );
+        let model = control_request(
+            "niobe-2",
+            serde_json::json!({
+                "subtype": "set_model",
+                "model": "haiku",
+            }),
+        );
+
+        assert_eq!(
+            mode,
+            serde_json::json!({
+                "type": "control_request",
+                "request_id": "niobe-1",
+                "request": { "subtype": "set_permission_mode", "mode": "plan" },
+            })
+        );
+        assert_eq!(model["request"]["model"], "haiku");
+        assert_eq!(model["request_id"], "niobe-2");
+    }
+
+    #[test]
+    fn each_request_is_addressed_by_an_id_of_its_own() {
+        let mut options = options();
+        options.binary = PathBuf::from("/bin/echo");
+        options.cwd = std::env::temp_dir();
+        let mut session = Session::spawn(&options).expect("`/bin/echo` is on every unix");
+
+        // `/bin/echo` reads nothing, so what matters here is only that two
+        // requests are never addressed the same way: an answer to one would
+        // otherwise be read as the answer to the other.
+        let first = session.next_request_id();
+        let second = session.next_request_id();
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("niobe-"), "{first}");
     }
 
     #[test]

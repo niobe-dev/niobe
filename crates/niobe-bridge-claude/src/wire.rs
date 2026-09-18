@@ -35,7 +35,7 @@ pub(crate) enum Message {
     /// The CLI asking Niobe something over the stdio control channel.
     ControlRequest(ControlRequest),
     /// The CLI answering something Niobe asked it.
-    ControlResponse(Ignored),
+    ControlResponse(ControlResponse),
     /// How much of the plan's usage windows is gone.
     RateLimitEvent(Ignored),
     /// The end of a turn, with the turn's totals.
@@ -62,6 +62,9 @@ pub(crate) struct Tag {
 pub(crate) struct System {
     pub(crate) subtype: Option<String>,
     pub(crate) model: Option<String>,
+    /// On `init`: how the CLI is gating tool calls, in its own spelling.
+    #[serde(rename = "permissionMode")]
+    pub(crate) permission_mode: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) compact_metadata: Option<CompactMetadata>,
     /// On `permission_denied`: the call that was refused.
@@ -222,6 +225,23 @@ pub(crate) struct ControlBody {
     pub(crate) input: Option<serde_json::Value>,
 }
 
+/// A `control_response`: the CLI answering a request Niobe made.
+///
+/// Every one of these answers something this side asked — the CLI's own
+/// questions arrive as `control_request` and are answered the other way — so a
+/// failure here is a request of Niobe's that did not take effect.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControlResponse {
+    pub(crate) response: Option<ControlOutcome>,
+}
+
+/// How a request Niobe made ended.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControlOutcome {
+    pub(crate) subtype: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
 /// The `result` line that closes a turn.
 ///
 /// Its numbers are the CLI's own running totals for the session, not the
@@ -238,6 +258,10 @@ pub(crate) struct Outcome {
     #[serde(default)]
     pub(crate) permission_denials: Vec<Denial>,
     pub(crate) result: Option<String>,
+    /// Why the turn ended, where the CLI says so apart from `result` — a
+    /// budget it stopped on says it here and leaves `result` out.
+    #[serde(default)]
+    pub(crate) errors: Vec<String>,
 }
 
 /// What one model has cost the session so far.

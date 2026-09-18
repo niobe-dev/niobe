@@ -16,7 +16,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use niobe_core::event::{AgentId, Backend, Event, PermissionDecision, ToolCallId, ToolOutcome};
+use niobe_core::event::{
+    AgentId, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome,
+};
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::SessionState;
 use ratatui_textarea::{Input, TextArea, WrapMode};
@@ -47,6 +49,10 @@ pub struct SelectedProfile {
     pub name: String,
     /// The backend the profile runs.
     pub backend: Backend,
+    /// The models the profile offers, in the order it names them. Empty where
+    /// it names none, and the shell then has nothing to offer: a model id
+    /// invented here would be one the backend never heard of.
+    pub models: Vec<String>,
 }
 
 /// A permission prompt the shell is waiting on the operator to answer.
@@ -93,6 +99,19 @@ pub enum Answer {
     AlwaysTarget,
     /// Refused.
     No,
+}
+
+/// The models the operator is choosing between.
+///
+/// The list is the profile's, in the order it names them: the shell knows no
+/// backend and so knows no models of its own, and offering an id the backend
+/// would refuse is worse than offering nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picker {
+    /// The models offered.
+    pub models: Vec<String>,
+    /// Which one the cursor is on.
+    pub at: usize,
 }
 
 /// What a transcript entry is, which decides its glyph and its colour.
@@ -184,12 +203,25 @@ pub struct App {
     learned: Vec<Rule>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
+    /// The model list the operator opened, while it is open.
+    picking: Option<Picker>,
+    /// The most this session may spend, where the operator set a budget.
+    budget_usd: Option<f64>,
+    /// Whether the budget warning has already been given, so that it is said
+    /// once rather than on every usage record after the line is crossed.
+    budget_warned: bool,
     /// Whether a backend is listening. The shell holds no backend handle; this
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
     attached: bool,
     should_quit: bool,
 }
+
+/// The share of a budget at which the shell says so.
+///
+/// Four fifths: far enough in that the warning means something, and far enough
+/// from the end that a turn can still be started on purpose.
+const BUDGET_WARNING: f64 = 0.8;
 
 impl App {
     /// An empty session in the given repo.
@@ -223,6 +255,9 @@ impl App {
             allowed: Allowlist::new(),
             learned: Vec::new(),
             produced: Vec::new(),
+            picking: None,
+            budget_usd: None,
+            budget_warned: false,
             attached: false,
             should_quit: false,
         }
@@ -378,9 +413,13 @@ impl App {
             }
 
             // Everything else is a number or a list a pane reads off the
-            // session fold, not a line in the transcript.
+            // session fold, not a line in the transcript. The mode and the
+            // model are on the status line, which is where a session says what
+            // it is running as.
             Event::SessionMeta(_)
             | Event::Usage(_)
+            | Event::ModeSelected { .. }
+            | Event::ModelSelected { .. }
             | Event::Decision { .. }
             | Event::Checkpoint { .. } => {}
 
@@ -549,6 +588,133 @@ impl App {
             ),
             streaming: false,
         });
+    }
+
+    /// Says in the transcript that a change the operator made never reached the
+    /// backend, so a session that is still running as it was is not read as one
+    /// that moved.
+    pub fn not_changed(&mut self, what: &str, error: &str) {
+        self.push(Entry {
+            kind: EntryKind::Failure,
+            head: "not changed".to_owned(),
+            meta: what.to_owned(),
+            body: format!(
+                "The backend did not take that change, so the session is still running as \
+                 it was: {error}"
+            ),
+            streaming: false,
+        });
+        self.scroll_to_tail();
+    }
+
+    /// The same shell, with a ceiling on what the session may spend.
+    #[must_use]
+    pub fn with_budget(mut self, budget_usd: f64) -> Self {
+        self.budget_usd = Some(budget_usd);
+        self
+    }
+
+    /// The most this session may spend, where the operator set a budget.
+    pub fn budget(&self) -> Option<f64> {
+        self.budget_usd
+    }
+
+    /// Says once when the session has spent most of its budget.
+    ///
+    /// Called by the event loop and never by [`App::apply`], for the reason
+    /// [`App::settle_rules`] is: folding a recorded session would warn about
+    /// money that was spent under a budget this run knows nothing about.
+    pub fn settle_budget(&mut self) {
+        let Some(budget) = self.budget_usd else {
+            return;
+        };
+        if self.budget_warned || budget <= 0.0 {
+            return;
+        }
+        let spent = self.session.totals().reported_cost_usd;
+        if spent < budget * BUDGET_WARNING {
+            return;
+        }
+
+        self.budget_warned = true;
+        self.push(Entry {
+            kind: EntryKind::Notice,
+            head: "budget".to_owned(),
+            meta: format!("${spent:.2} of ${budget:.2}"),
+            body: "Most of this session's budget is spent. The backend stops the session \
+                   when the budget is reached, and it checks between turns rather than \
+                   inside one, so the session can finish above the figure by what the turn \
+                   that crosses the line costs."
+                .to_owned(),
+            streaming: false,
+        });
+        self.scroll_to_tail();
+    }
+
+    /// The model list the operator opened, while it is open.
+    pub fn picking(&self) -> Option<&Picker> {
+        self.picking.as_ref()
+    }
+
+    /// Opens the model list, or says why there is none to open.
+    fn pick_model(&mut self) {
+        let models = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.models.clone())
+            .unwrap_or_default();
+        if models.is_empty() {
+            self.hint = Some(
+                "F8 Model — this profile names no models; add `models = [\"…\"]` to it in \
+                 the config"
+                    .to_owned(),
+            );
+            return;
+        }
+
+        let at = self
+            .session
+            .model()
+            .and_then(|current| models.iter().position(|model| model == current))
+            .unwrap_or(0);
+        self.picking = Some(Picker { models, at });
+    }
+
+    /// One key, while the model list is up.
+    ///
+    /// Anything that is not a move, a choice or a way out is swallowed: the
+    /// list is a question, and a key that typed into the composer behind it
+    /// would be a key nobody meant.
+    fn on_pick_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+
+        let Some(picker) = self.picking.as_mut() else {
+            return;
+        };
+        let last = picker.models.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => picker.at = picker.at.saturating_sub(1),
+            KeyCode::Down => picker.at = picker.at.saturating_add(1).min(last),
+            KeyCode::Esc | KeyCode::F(8) => self.picking = None,
+            KeyCode::Enter => {
+                let model = picker.models.get(picker.at).cloned();
+                self.picking = None;
+                if let Some(model) = model {
+                    self.produce(Event::ModelSelected { model });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Moves the session to the next mode in the cycle.
+    ///
+    /// A session no backend has reported a mode for cycles from `ask`, which is
+    /// what the bridge spawns the CLI in: one keypress then lands where it
+    /// would have from a mode that had been reported.
+    fn cycle_mode(&mut self) {
+        let mode = self.session.mode().unwrap_or(Mode::Ask).next();
+        self.produce(Event::ModeSelected { mode });
     }
 
     fn streaming_agent_entry(&mut self) -> Option<&mut Entry> {
@@ -721,6 +887,13 @@ impl App {
             self.on_ask_key(key);
             return;
         }
+        // The model list takes the keyboard the same way, and for the same
+        // reason: an arrow key that scrolled the transcript behind an open
+        // list would move something the operator was not looking at.
+        if self.picking().is_some() {
+            self.on_pick_key(key);
+            return;
+        }
 
         match (key.code, key.modifiers) {
             // Alt+Enter opens a line; Enter sends. The other way round would
@@ -735,6 +908,10 @@ impl App {
             (KeyCode::Home, KeyModifiers::CONTROL) => self.scroll_to_head(),
             (KeyCode::End, KeyModifiers::CONTROL) => self.scroll_to_tail(),
 
+            // Shift+Tab reaches crossterm as its own code rather than as Tab
+            // with a modifier, which is why it is matched on the code alone.
+            (KeyCode::BackTab, _) => self.cycle_mode(),
+            (KeyCode::F(8), _) => self.pick_model(),
             (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
 
             _ => {
@@ -812,17 +989,23 @@ impl App {
     }
 }
 
-/// What an F-key does. Only F10 does anything so far; the others say so.
+/// What an F-key does, for the ones that do nothing yet.
+///
+/// F8 and F10 are handled before this is reached, so nothing here names them.
 fn fkey_hint(n: u8) -> &'static str {
     match n {
         1 => "F1 Help — the help browser is not implemented yet",
-        2 => "F2 Plan — plan mode is not implemented yet",
+        2 => {
+            "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \
+              session in plan mode"
+        }
         3 => "F3 Diff — the diff viewer is not implemented yet",
         4 => "F4 Undo — checkpoints and rewind are not implemented yet",
         5 => "F5 Cost — the cost breakdown is not implemented yet",
         6 => "F6 Files — file attribution is not implemented yet",
         7 => "F7 Tools — tool detail is not implemented yet",
-        8 => "F8 Model — model switching is not implemented yet",
+        // F8 opens the model list rather than saying anything, so nothing here
+        // names it.
         9 => "F9 Theme — classic is the only theme",
         _ => "F10 Quit",
     }
@@ -855,7 +1038,7 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use niobe_core::event::{Backend, SessionMeta};
+    use niobe_core::event::{Backend, SessionMeta, Usage};
     use niobe_core::permission::Rule;
     use ratatui_textarea::Key;
 
@@ -1024,6 +1207,21 @@ mod tests {
         assert_eq!(entry.kind, EntryKind::Failure);
         assert_eq!(entry.head, "not saved");
         assert!(entry.body.ends_with("disk full"), "{}", entry.body);
+    }
+
+    /// A usage record carrying a cost the backend reported.
+    fn priced(cost_usd: f64) -> Event {
+        Event::Usage(Usage {
+            input: 10,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: "opus-5".to_owned(),
+            cost_usd: Some(cost_usd),
+            cost_basis: None,
+        })
     }
 
     /// A prompt as the bridge produces one.
@@ -1200,6 +1398,154 @@ mod tests {
             }],
             "the call was let through without the backend being told"
         );
+    }
+
+    fn under_a_profile(models: &[&str]) -> App {
+        app().with_profile(SelectedProfile {
+            name: "max".to_owned(),
+            backend: Backend::Claude,
+            models: models.iter().map(|m| (*m).to_owned()).collect(),
+        })
+    }
+
+    fn back_tab() -> ratatui::crossterm::event::KeyEvent {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn shift_tab_cycles_the_mode_and_hands_the_change_out_to_be_kept() {
+        let mut app = app();
+        app.apply(&Event::ModeSelected { mode: Mode::Ask });
+
+        app.on_key(back_tab());
+
+        assert_eq!(app.session().mode(), Some(Mode::Auto));
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModeSelected { mode: Mode::Auto }]
+        );
+
+        app.on_key(back_tab());
+        assert_eq!(app.session().mode(), Some(Mode::Plan));
+    }
+
+    #[test]
+    fn a_session_no_backend_has_reported_a_mode_for_cycles_from_asking() {
+        let mut app = app();
+        assert_eq!(app.session().mode(), None);
+
+        app.on_key(back_tab());
+
+        assert_eq!(
+            app.session().mode(),
+            Some(Mode::Auto),
+            "cycling from nowhere landed somewhere other than one step past `ask`"
+        );
+    }
+
+    #[test]
+    fn f8_offers_the_models_the_profile_names_and_picking_one_asks_for_it() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&["opus", "sonnet", "haiku"]);
+
+        app.on_key(key(KeyCode::F(8)));
+        let picker = app.picking().expect("the model list is on screen");
+        assert_eq!(picker.models, ["opus", "sonnet", "haiku"]);
+        assert_eq!(picker.at, 0);
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert!(app.picking().is_none(), "the list stayed on screen");
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModelSelected {
+                model: "sonnet".to_owned()
+            }]
+        );
+        assert_eq!(
+            app.session().model(),
+            Some("sonnet"),
+            "the status line would still name the model the session moved off"
+        );
+    }
+
+    #[test]
+    fn a_model_list_the_operator_left_asks_for_nothing() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.on_key(key(KeyCode::F(8)));
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.picking().is_none());
+        assert!(app.take_produced().is_empty());
+    }
+
+    #[test]
+    fn f8_under_a_profile_that_names_no_model_says_so_rather_than_opening_an_empty_list() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&[]);
+
+        app.on_key(key(KeyCode::F(8)));
+
+        assert!(app.picking().is_none());
+        let hint = app.hint().unwrap_or_default();
+        assert!(hint.contains("models"), "{hint}");
+    }
+
+    #[test]
+    fn a_prompt_keeps_the_keyboard_from_the_model_list() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&["opus"]);
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::F(8)));
+
+        assert!(
+            app.picking().is_none(),
+            "a list opened over the question the turn is waiting on"
+        );
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn four_fifths_of_a_budget_is_warned_about_once_and_says_the_stop_can_overshoot() {
+        let mut app = app().with_budget(1.0);
+
+        app.apply(&priced(0.79));
+        app.settle_budget();
+        assert!(
+            !app.entries().iter().any(|entry| entry.head == "budget"),
+            "a session under four fifths of its budget was warned"
+        );
+
+        app.apply(&priced(0.02));
+        app.settle_budget();
+        app.settle_budget();
+
+        let warnings: Vec<&Entry> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "budget")
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].meta, "$0.81 of $1.00");
+        assert!(
+            warnings[0].body.contains("between turns"),
+            "the warning let the budget read as a hard ceiling: {}",
+            warnings[0].body
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_budget_is_never_warned_about_one() {
+        let mut app = app();
+        app.apply(&priced(99.0));
+        app.settle_budget();
+
+        assert!(app.entries().iter().all(|entry| entry.head != "budget"));
     }
 
     #[test]

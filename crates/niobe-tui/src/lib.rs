@@ -34,7 +34,7 @@ mod text;
 pub mod theme;
 pub mod ui;
 
-pub use app::{Answer, App, Ask, Entry, EntryKind, Repo, SelectedProfile};
+pub use app::{Answer, App, Ask, Entry, EntryKind, Picker, Repo, SelectedProfile};
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use journal::{Journal, JournalError, Unrecorded};
 pub use rules::{Forgotten, Rules, RulesError};

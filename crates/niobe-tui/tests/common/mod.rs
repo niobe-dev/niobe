@@ -12,7 +12,7 @@
 //! the pictures drift with it.
 
 use niobe_core::event::{
-    AgentOutcome, Backend, Event, PermissionDecision, SessionMeta, ToolOutcome, Usage,
+    AgentOutcome, Backend, Event, Mode, PermissionDecision, SessionMeta, ToolOutcome, Usage,
 };
 use niobe_tui::app::{App, Repo};
 use niobe_tui::ui;
@@ -28,6 +28,7 @@ fn session_events() -> Vec<Event> {
             model: "opus-5".to_owned(),
             backend_session: None,
         }),
+        Event::ModeSelected { mode: Mode::Ask },
         Event::UserMessage {
             text: "add etag support to the catalog fetcher so we stop re-downloading \
                    unchanged manifests"

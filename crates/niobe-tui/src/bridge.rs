@@ -13,7 +13,7 @@
 //! draw and a signal flag to read on every tick, so it can never be inside a
 //! backend waiting for a reply.
 
-use niobe_core::event::{Event, PermissionDecision, ToolCallId};
+use niobe_core::event::{Event, Mode, PermissionDecision, ToolCallId};
 
 /// Why a turn could not be sent. Shown to the operator as it reads.
 pub type BridgeError = Box<dyn std::error::Error + Send + Sync>;
@@ -37,6 +37,25 @@ pub trait Bridge: std::fmt::Debug {
     fn answer(&mut self, id: &ToolCallId, decision: PermissionDecision) -> Result<(), BridgeError> {
         let _ = decision;
         Err(format!("nothing is waiting on a decision about tool call `{id}`").into())
+    }
+
+    /// Asks the backend to gate tool calls a different way, from here on.
+    ///
+    /// Returns once the backend has the request, not once it has applied it: a
+    /// backend that refuses says so on its own stream. The default refuses,
+    /// for the reason [`Bridge::answer`] does — a change nobody took must be
+    /// reported, or the status line shows a session that is not the one
+    /// running.
+    fn set_mode(&mut self, mode: Mode) -> Result<(), BridgeError> {
+        let _ = mode;
+        Err("this backend cannot be asked to gate tool calls differently".into())
+    }
+
+    /// Asks the backend to answer with a different model from its next turn,
+    /// keeping everything said so far.
+    fn set_model(&mut self, model: &str) -> Result<(), BridgeError> {
+        let _ = model;
+        Err("this backend cannot be asked to change model".into())
     }
 
     /// Everything the backend has produced since the last call, oldest first.

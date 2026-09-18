@@ -47,6 +47,9 @@ pub fn table(config: &Config, selected: Option<&str>) -> Vec<String> {
         if !profile.args().is_empty() {
             lines.push(detail("args", profile.args().join(" ")));
         }
+        if !profile.models().is_empty() {
+            lines.push(detail("models", profile.models().join(", ")));
+        }
         if let Some(command) = profile.auth_refresh() {
             lines.push(detail("auth_refresh", command.to_owned()));
         }
@@ -95,6 +98,24 @@ auth_refresh = "aws sso login"
                 "            env          AWS_PROFILE, SECRET_TOKEN",
                 "            args         --model opus",
                 "            auth_refresh aws sso login",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_models_a_profile_offers_are_listed_so_the_shell_key_has_something_to_show() {
+        let config = Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nmodels = [\"opus\", \"haiku\"]\n",
+            Path::new("/u/config.toml"),
+        )
+        .expect("the config is valid");
+
+        assert_eq!(
+            table(&config, None),
+            [
+                "  PROFILE  BACKEND  DEFINED IN",
+                "  max      claude   /u/config.toml",
+                "           models       opus, haiku",
             ]
         );
     }

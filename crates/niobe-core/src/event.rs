@@ -234,6 +234,51 @@ impl PermissionDecision {
     }
 }
 
+/// How a session gates tool calls.
+///
+/// Three, because three is what an operator cycles through without a menu:
+/// plan and change nothing, be asked about every call no standing rule already
+/// allows, or leave the decision to the backend. Each backend spells these its
+/// own way and the bridge translates; nothing vendor-shaped travels with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Plan first, change nothing.
+    Plan,
+    /// Ask before any call a standing rule does not already allow.
+    Ask,
+    /// The backend decides which calls need asking about.
+    Auto,
+}
+
+impl Mode {
+    /// The name shown in the status line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// The next mode in the cycle, which is the order the status line lists
+    /// them: least permissive first, so one keypress from `plan` never lands
+    /// on the mode that asks about the least.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Plan => Self::Ask,
+            Self::Ask => Self::Auto,
+            Self::Auto => Self::Plan,
+        }
+    }
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How a sub-agent finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -333,6 +378,24 @@ pub enum Event {
         id: ToolCallId,
         /// What was decided.
         decision: PermissionDecision,
+    },
+
+    /// How tool calls are gated: the mode a session started under, or the one
+    /// the operator moved it to.
+    ModeSelected {
+        /// The mode from here on.
+        mode: Mode,
+    },
+
+    /// The model the operator asked the session to answer with.
+    ///
+    /// A backend applies it from its next turn and says what it ended up on
+    /// with a fresh [`Event::SessionMeta`], which may name the model
+    /// differently from the way it was asked for — an alias resolves to an id.
+    /// Until then this is the honest answer to what the session is on.
+    ModelSelected {
+        /// The model, as the operator named it.
+        model: String,
     },
 
     /// A structured `decide` record: why a plan, a model, a file or a declined
@@ -514,6 +577,34 @@ mod tests {
         assert_eq!(id.as_str(), "toolu_01");
         assert_eq!(id.to_string(), "toolu_01");
         assert_eq!(id, ToolCallId::new(String::from("toolu_01")));
+    }
+
+    #[test]
+    fn modes_cycle_in_the_order_the_shell_shows_them() {
+        assert_eq!(Mode::Plan.next(), Mode::Ask);
+        assert_eq!(Mode::Ask.next(), Mode::Auto);
+        assert_eq!(Mode::Auto.next(), Mode::Plan);
+        assert_eq!(Mode::Plan.as_str(), "plan");
+        assert_eq!(Mode::Auto.to_string(), "auto");
+    }
+
+    #[test]
+    fn a_chosen_mode_and_model_survive_the_round_trip() {
+        for event in [
+            Event::ModeSelected { mode: Mode::Plan },
+            Event::ModelSelected {
+                model: "haiku".to_owned(),
+            },
+        ] {
+            let line = serde_json::to_string(&event).expect("an event serializes");
+            let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+            assert_eq!(read, event, "{line}");
+        }
+        assert!(
+            serde_json::to_string(&Event::ModeSelected { mode: Mode::Ask })
+                .expect("an event serializes")
+                .contains(r#""mode":"ask""#)
+        );
     }
 
     #[test]

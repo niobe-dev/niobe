@@ -23,6 +23,10 @@
 //! args = ["--model", "gpt-5-codex"]
 //! ```
 //!
+//! A profile may also name the models it offers, which is what the shell lists
+//! when the operator asks to switch. The names are passed to the backend as
+//! written, so they are whatever that backend takes — an alias or a full id.
+//!
 //! A config also carries the standing answers to permission prompts — the
 //! rules a session made by answering "always" — which add up across files
 //! rather than replacing one another:
@@ -69,6 +73,7 @@ pub struct Profile {
     backend: Backend,
     env: BTreeMap<String, String>,
     args: Vec<String>,
+    models: Vec<String>,
     auth_refresh: Option<String>,
     source: PathBuf,
 }
@@ -89,6 +94,13 @@ impl Profile {
     /// Arguments passed to the backend after the ones Niobe passes itself.
     pub fn args(&self) -> &[String] {
         &self.args
+    }
+
+    /// The models this profile offers, in the order the shell lists them for
+    /// picking. Empty where the config names none, which is a profile whose
+    /// model is whatever the backend chooses: Niobe never invents a model id.
+    pub fn models(&self) -> &[String] {
+        &self.models
     }
 
     /// A shell command that renews the backend's credentials when they have
@@ -311,6 +323,34 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     }
 
     #[test]
+    fn the_models_a_profile_offers_are_kept_in_the_order_they_were_written() {
+        let config = parsed(
+            "[profiles.max]\nbackend = \"claude\"\nmodels = [\"opus\", \"sonnet\", \"haiku\"]\n",
+        );
+
+        assert_eq!(
+            config.profiles()["max"].models(),
+            ["opus", "sonnet", "haiku"]
+        );
+        assert!(
+            parsed(EXAMPLE).profiles()["personal"].models().is_empty(),
+            "a profile that names no model was given one"
+        );
+    }
+
+    #[test]
+    fn a_models_list_that_is_not_a_list_of_names_is_reported_at_its_line() {
+        assert_eq!(
+            invalid("[profiles.max]\nbackend = \"claude\"\nmodels = \"opus\"\n"),
+            "/configs/user/config.toml:3: profiles.max.models: expected an array of strings, found a string"
+        );
+        assert_eq!(
+            invalid("[profiles.max]\nbackend = \"claude\"\nmodels = [\"opus\", \"  \"]\n"),
+            "/configs/user/config.toml:3: profiles.max.models[1]: is empty"
+        );
+    }
+
+    #[test]
     fn an_empty_file_is_a_config_with_nothing_in_it() {
         assert_eq!(parsed(""), Config::default());
         assert_eq!(parsed("# only a comment\n"), Config::default());
@@ -520,7 +560,7 @@ backend = "codex"
         assert_eq!(
             invalid("[profiles.work]\nbackend = \"claude\"\nenviron = { AWS_PROFILE = \"x\" }\n"),
             "/configs/user/config.toml:3: profiles.work.environ: unknown key; \
-             expected `backend`, `env`, `args` or `auth_refresh`"
+             expected `backend`, `env`, `args`, `models` or `auth_refresh`"
         );
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),

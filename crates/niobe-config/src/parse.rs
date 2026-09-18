@@ -122,6 +122,7 @@ impl File<'_> {
         let mut backend = None;
         let mut env = BTreeMap::new();
         let mut args = Vec::new();
+        let mut models = Vec::new();
         let mut auth_refresh = None;
 
         for (key, value) in in_file_order(self.table(value, at)?) {
@@ -130,6 +131,7 @@ impl File<'_> {
                 "backend" => backend = Some(self.backend(value, &at)?),
                 "env" => env = self.env(value, &at)?,
                 "args" => args = self.strings(value, &at)?,
+                "models" => models = self.non_empty_strings(value, &at)?,
                 "auth_refresh" => {
                     auth_refresh = Some(self.non_empty_string(value, &at)?.to_owned());
                 }
@@ -137,7 +139,8 @@ impl File<'_> {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        "unknown key; expected `backend`, `env`, `args` or `auth_refresh`",
+                        "unknown key; expected `backend`, `env`, `args`, `models` or \
+                         `auth_refresh`",
                     ));
                 }
             }
@@ -154,6 +157,7 @@ impl File<'_> {
             backend,
             env,
             args,
+            models,
             auth_refresh,
             source: self.path.to_path_buf(),
         })
@@ -218,6 +222,26 @@ impl File<'_> {
             .iter()
             .enumerate()
             .map(|(index, item)| self.string(item, &at.index(index)).map(str::to_owned))
+            .collect()
+    }
+
+    /// An array of strings, each of which has to say something: a model named
+    /// as blank space is a mistake in the file, not a model.
+    fn non_empty_strings(
+        &self,
+        value: &Spanned<DeValue<'_>>,
+        at: &Key,
+    ) -> Result<Vec<String>, ConfigError> {
+        let DeValue::Array(items) = value.get_ref() else {
+            return Err(self.wrong_type(value, at, "an array of strings"));
+        };
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                self.non_empty_string(item, &at.index(index))
+                    .map(str::to_owned)
+            })
             .collect()
     }
 

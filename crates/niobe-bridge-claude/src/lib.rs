@@ -37,7 +37,7 @@ mod driver;
 mod translate;
 mod wire;
 
-pub use driver::{BINARY, Options, PermissionMode, Session, SpawnError};
+pub use driver::{BINARY, Options, Session, SpawnError};
 pub use translate::{Asked, Translator};
 
 #[cfg(test)]

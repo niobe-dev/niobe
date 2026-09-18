@@ -156,6 +156,10 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // Before the draw, so that a prompt a standing rule already answers is
         // never on screen for the frame it takes to answer it.
         app.settle_rules();
+        // After the fold and never inside it: the warning is about what this
+        // session has spent under the budget this run was given, not about
+        // what a recording being read back spent under one it knew nothing of.
+        app.settle_budget();
         send_produced(app, journal, backend, rules);
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -254,6 +258,16 @@ fn send_produced(
                     app.not_answered(&error.to_string());
                 }
             }
+            SessionEvent::ModeSelected { mode } => {
+                if let Err(error) = backend.set_mode(*mode) {
+                    app.not_changed("mode", &error.to_string());
+                }
+            }
+            SessionEvent::ModelSelected { model } => {
+                if let Err(error) = backend.set_model(model) {
+                    app.not_changed("model", &error.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -295,7 +309,7 @@ mod tests {
     use crate::bridge::{BridgeError, Detached};
     use crate::journal::JournalError;
     use crate::rules::{Forgotten, RulesError};
-    use niobe_core::event::{PermissionDecision, ToolCallId};
+    use niobe_core::event::{Mode, PermissionDecision, ToolCallId};
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -322,6 +336,8 @@ mod tests {
     struct Attached {
         sent: Vec<String>,
         answered: Vec<(ToolCallId, PermissionDecision)>,
+        modes: Vec<Mode>,
+        models: Vec<String>,
         produces: Vec<SessionEvent>,
         refuse: bool,
     }
@@ -344,6 +360,22 @@ mod tests {
                 return Err("the subprocess has gone".into());
             }
             self.answered.push((id.clone(), decision));
+            Ok(())
+        }
+
+        fn set_mode(&mut self, mode: Mode) -> Result<(), BridgeError> {
+            if self.refuse {
+                return Err("the subprocess has gone".into());
+            }
+            self.modes.push(mode);
+            Ok(())
+        }
+
+        fn set_model(&mut self, model: &str) -> Result<(), BridgeError> {
+            if self.refuse {
+                return Err("the subprocess has gone".into());
+            }
+            self.models.push(model.to_owned());
             Ok(())
         }
 
@@ -679,6 +711,44 @@ mod tests {
 
         assert!(app.take_produced().is_empty());
         assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn a_mode_and_a_model_the_operator_chose_reach_the_backend_and_the_journal() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached::default();
+
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Ask });
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(backend.modes, [Mode::Auto]);
+        assert_eq!(
+            journal.events,
+            [SessionEvent::ModeSelected { mode: Mode::Auto }],
+            "a resumed session would start the backend in the mode it was moved off"
+        );
+    }
+
+    #[test]
+    fn a_change_the_backend_would_not_take_says_the_session_is_running_as_it_was() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        let entry = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "not changed")
+            .expect("the failure is on screen");
+        assert_eq!(entry.meta, "mode");
+        assert!(entry.body.ends_with("the subprocess has gone"), "{entry:?}");
     }
 
     #[test]

@@ -13,7 +13,7 @@ pub mod permission;
 pub mod session;
 
 pub use event::{
-    AgentId, AgentOutcome, Backend, CheckpointId, Event, PermissionDecision, SessionMeta,
+    AgentId, AgentOutcome, Backend, CheckpointId, Event, Mode, PermissionDecision, SessionMeta,
     ToolCallId, ToolOutcome, Usage,
 };
 pub use permission::{Allowlist, Rule, RuleError};

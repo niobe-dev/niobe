@@ -31,69 +31,103 @@ pub enum Command {
     Version,
 }
 
-/// A command, and the profile it was asked to run under.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A command, and what it was asked to run under.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Invocation {
     /// What to do.
     pub command: Command,
     /// The profile `--profile` named, if it was given.
     pub profile: Option<String>,
+    /// The most the session may spend, in USD, if `--budget` was given.
+    pub budget: Option<f64>,
 }
 
 /// Parses the arguments after the program name. The error is a sentence for
 /// the operator.
 ///
-/// `--profile <name>` may stand anywhere on the line, since it qualifies the
-/// command rather than being one.
+/// `--profile <name>` and `--budget <amount>` may stand anywhere on the line,
+/// since they qualify the command rather than being one.
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
+    const NO_PROFILE: &str = "`--profile` needs a profile name; `niobe profiles` lists them";
+    const NO_BUDGET: &str = "`--budget` needs an amount in dollars, as in `--budget 0.50`";
+
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (profile, rest) = take_profile(&args)?;
+    let (profile, rest) = take_flag(&args, "--profile", NO_PROFILE)?;
+    let (budget, rest) = take_flag(&rest, "--budget", NO_BUDGET)?;
     let command = command(&rest)?;
 
-    let applies = match command {
-        Command::Shell
-        | Command::Resume(_)
-        | Command::Profiles
-        | Command::Help
-        | Command::Version => true,
-        Command::Sessions | Command::Prices(_) | Command::Replay(_) => false,
-    };
-    if profile.is_some() && !applies {
+    let runs_a_session = matches!(command, Command::Shell | Command::Resume(_));
+    let names_a_profile = runs_a_session
+        || matches!(
+            command,
+            Command::Profiles | Command::Help | Command::Version
+        );
+    if profile.is_some() && !names_a_profile {
         return Err(
             "`--profile` applies to the shell, `--resume` and `profiles`, and to nothing else"
                 .to_owned(),
         );
     }
-    Ok(Invocation { command, profile })
+    if budget.is_some() && !runs_a_session {
+        return Err(
+            "`--budget` applies to the shell and `--resume`, and to nothing else".to_owned(),
+        );
+    }
+
+    Ok(Invocation {
+        command,
+        profile: profile.map(str::to_owned),
+        budget: budget.map(budget_usd).transpose()?,
+    })
 }
 
-/// Removes `--profile <name>` or `--profile=<name>` from `args`.
-fn take_profile<'a>(args: &[&'a str]) -> Result<(Option<String>, Vec<&'a str>), String> {
-    const MISSING: &str = "`--profile` needs a profile name; `niobe profiles` lists them";
+/// The amount `--budget` was given, as a ceiling on what a session may spend.
+///
+/// Zero and less are refused rather than taken as "spend nothing": a session
+/// that could not make a single request is not what anyone asked for, and a
+/// negative budget is a typo. So is an amount that is not a number.
+fn budget_usd(amount: &str) -> Result<f64, String> {
+    let refused =
+        || format!("`--budget` needs a positive amount in dollars; `{amount}` is not one");
+    let budget: f64 = amount.parse().map_err(|_| refused())?;
+    if !budget.is_finite() || budget <= 0.0 {
+        return Err(refused());
+    }
+    Ok(budget)
+}
 
-    let mut profile = None;
+/// Removes `<flag> <value>` or `<flag>=<value>` from `args`.
+///
+/// `missing` is what to say when the flag is there without a value, which is
+/// also what a value that looks like a flag means: the next flag, with the
+/// value left out before it.
+fn take_flag<'a>(
+    args: &[&'a str],
+    flag: &str,
+    missing: &str,
+) -> Result<(Option<&'a str>, Vec<&'a str>), String> {
+    let equals = format!("{flag}=");
+    let mut found = None;
     let mut rest = Vec::with_capacity(args.len());
     let mut args = args.iter();
     while let Some(&arg) = args.next() {
-        let name = if arg == "--profile" {
-            args.next().copied().ok_or(MISSING)?
-        } else if let Some(name) = arg.strip_prefix("--profile=") {
-            name
+        let value = if arg == flag {
+            args.next().copied().ok_or_else(|| missing.to_owned())?
+        } else if let Some(value) = arg.strip_prefix(&equals) {
+            value
         } else {
             rest.push(arg);
             continue;
         };
 
-        // A name that looks like a flag is the next flag, with the name left
-        // out before it.
-        if name.is_empty() || name.starts_with('-') {
-            return Err(MISSING.to_owned());
+        if value.is_empty() || value.starts_with('-') {
+            return Err(missing.to_owned());
         }
-        if profile.replace(name.to_owned()).is_some() {
-            return Err("`--profile` is given more than once".to_owned());
+        if found.replace(value).is_some() {
+            return Err(format!("`{flag}` is given more than once"));
         }
     }
-    Ok((profile, rest))
+    Ok((found, rest))
 }
 
 fn command(args: &[&str]) -> Result<Command, String> {
@@ -226,7 +260,8 @@ mod tests {
             invocation(&["--profile", "work"]),
             Ok(Invocation {
                 command: Command::Shell,
-                profile: Some("work".to_owned())
+                profile: Some("work".to_owned()),
+                budget: None,
             })
         );
         assert_eq!(profile(&["--profile=work"]), Ok(Some("work".to_owned())));
@@ -234,7 +269,8 @@ mod tests {
             invocation(&["--resume", "3", "--profile", "work"]),
             Ok(Invocation {
                 command: Command::Resume(id("3")),
-                profile: Some("work".to_owned())
+                profile: Some("work".to_owned()),
+                budget: None,
             })
         );
         assert_eq!(
@@ -270,6 +306,50 @@ mod tests {
             parsed(&["profiles", "extra"]),
             Err("unexpected argument `extra`".to_owned())
         );
+    }
+
+    #[test]
+    fn the_budget_flag_takes_an_amount_either_way_round() {
+        assert_eq!(
+            invocation(&["--budget", "0.50"]).map(|i| i.budget),
+            Ok(Some(0.5))
+        );
+        assert_eq!(invocation(&["--budget=2"]).map(|i| i.budget), Ok(Some(2.0)));
+        assert_eq!(
+            invocation(&["--resume", "3", "--budget", "1.25"]),
+            Ok(Invocation {
+                command: Command::Resume(id("3")),
+                profile: None,
+                budget: Some(1.25),
+            })
+        );
+        assert_eq!(invocation(&[]).map(|i| i.budget), Ok(None));
+    }
+
+    #[test]
+    fn a_budget_that_is_not_an_amount_to_spend_is_refused() {
+        for args in [
+            &["--budget"][..],
+            &["--budget", "lots"],
+            &["--budget", "-1"],
+            &["--budget", "0"],
+            &["--budget="],
+        ] {
+            let error = invocation(args).expect_err("not an amount");
+            assert!(error.contains("--budget"), "{args:?}: {error}");
+        }
+        assert!(invocation(&["--budget", "1", "--budget=2"]).is_err());
+    }
+
+    #[test]
+    fn a_budget_applies_only_where_a_session_runs() {
+        for args in [
+            &["--budget", "1", "sessions"][..],
+            &["prices", "--budget=1"],
+        ] {
+            let error = invocation(args).expect_err("does not apply");
+            assert!(error.contains("applies to"), "{args:?}: {error}");
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, CheckpointId, Event, SessionMeta, ToolCallId, ToolOutcome, Usage,
+    AgentId, AgentOutcome, CheckpointId, Event, Mode, SessionMeta, ToolCallId, ToolOutcome, Usage,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -120,6 +120,10 @@ pub struct CheckpointRecord {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionState {
     meta: Option<SessionMeta>,
+    mode: Option<Mode>,
+    /// What the session is on: what the backend last said it was running, or
+    /// the model the operator has since chosen and it has not yet confirmed.
+    model: Option<String>,
     totals: Totals,
     tools: ToolTotals,
     in_flight_tools: BTreeMap<ToolCallId, String>,
@@ -164,7 +168,18 @@ impl SessionState {
     /// a silently ignored event is a total that cannot be defended.
     pub fn apply(&mut self, event: &Event) {
         match event {
-            Event::SessionMeta(meta) => self.meta = Some(meta.clone()),
+            Event::SessionMeta(meta) => {
+                self.model = Some(meta.model.clone());
+                self.meta = Some(meta.clone());
+            }
+
+            Event::ModeSelected { mode } => self.mode = Some(*mode),
+
+            // The operator's choice stands until the backend says what it
+            // resolved that to, which is the next `SessionMeta`. Showing the
+            // model it has moved off instead would tell the operator their
+            // choice did not land.
+            Event::ModelSelected { model } => self.model = Some(model.clone()),
 
             Event::UserMessage { .. } => self.user_messages += 1,
 
@@ -262,6 +277,17 @@ impl SessionState {
     /// What is running, once the backend has said.
     pub fn meta(&self) -> Option<&SessionMeta> {
         self.meta.as_ref()
+    }
+
+    /// How tool calls are gated, once something has said.
+    pub fn mode(&self) -> Option<Mode> {
+        self.mode
+    }
+
+    /// The model the session is on: what the backend last reported, or the one
+    /// the operator has since chosen and it has not yet confirmed.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     /// Token and cost totals.
@@ -369,7 +395,7 @@ impl SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Backend, PermissionDecision};
+    use crate::event::{Backend, Mode, PermissionDecision};
 
     fn usage(input: u64, output: u64, cost: Option<f64>) -> Event {
         Event::Usage(Usage {
@@ -545,6 +571,44 @@ mod tests {
         });
         assert_eq!(state.errors(), 2);
         assert_eq!(state.fatal_error(), Some("backend exited"));
+    }
+
+    #[test]
+    fn the_mode_a_session_is_in_is_the_last_one_chosen() {
+        let mut state = SessionState::new();
+        assert_eq!(state.mode(), None, "a session invented a mode nobody set");
+
+        state.apply(&Event::ModeSelected { mode: Mode::Ask });
+        state.apply(&Event::ModeSelected { mode: Mode::Plan });
+
+        assert_eq!(state.mode(), Some(Mode::Plan));
+    }
+
+    #[test]
+    fn the_model_the_operator_chose_stands_until_the_backend_says_what_it_ran() {
+        let mut state = SessionState::new();
+        state.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+        assert_eq!(state.model(), Some("claude-opus-5"));
+
+        // The operator asks for one by the alias the backend takes; the
+        // backend answers later with whatever id it resolved that to.
+        state.apply(&Event::ModelSelected {
+            model: "haiku".to_owned(),
+        });
+        assert_eq!(state.model(), Some("haiku"));
+
+        state.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-haiku-4-5-20251001".to_owned(),
+            backend_session: None,
+        }));
+        assert_eq!(state.model(), Some("claude-haiku-4-5-20251001"));
     }
 
     #[test]

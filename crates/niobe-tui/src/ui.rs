@@ -22,7 +22,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget};
 
 use niobe_core::session::SessionState;
 
-use crate::app::{App, Ask, Entry, SelectedProfile};
+use crate::app::{App, Ask, Entry, Picker, SelectedProfile};
 use crate::text;
 use crate::theme::Theme;
 
@@ -42,8 +42,21 @@ const GUTTER: usize = 2;
 /// around it readable, so the operator can see what led to the prompt.
 const ASK_COLUMNS: u16 = 72;
 
-/// Columns of margin the modal leaves on each side of a narrow screen.
+/// Columns of margin a modal leaves on each side of a narrow screen.
 const ASK_MARGIN: u16 = 4;
+
+/// Widest the model list is drawn, in columns. A model id is a word or two, so
+/// the list is narrow enough to read as a list rather than as a pane.
+const PICK_COLUMNS: u16 = 44;
+
+/// What marks the model the session is on, and the one the cursor is over.
+const PICK_CURSOR: &str = "› ";
+const PICK_CURRENT: &str = "· ";
+
+/// The share of a budget at which the status line starts saying so in the
+/// colour it uses for anything waiting on the operator. The same fraction the
+/// transcript warning uses, so the line and the warning agree.
+const BUDGET_SHOWN_HOT: f64 = 0.8;
 
 /// The F-key bar, which is also the list of what the shell can be asked to do.
 const FKEYS: [(&str, &str); 10] = [
@@ -93,10 +106,76 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_fkeys(frame, fkeys, &theme);
 
     // Last, and over the body: a prompt is what the session is waiting on, so
-    // nothing drawn afterwards may cover it.
+    // nothing drawn afterwards may cover it. The model list is drawn under the
+    // same rule and never beside it — the shell hands the keyboard to one
+    // question at a time.
     if let Some(ask) = app.asking() {
         draw_ask(frame, body, ask, app.asks_waiting(), &theme);
+    } else if let Some(picker) = app.picking() {
+        draw_pick(frame, body, picker, app.session().model(), &theme);
     }
+}
+
+/// The model list: what the profile offers, which one the session is on, and
+/// the three keys that work.
+///
+/// The footer says when a choice takes effect. A switch applies from the next
+/// turn, and a list that did not say so would read as though the reply being
+/// written were already coming from the new model.
+fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&str>, theme: &Theme) {
+    let width = PICK_COLUMNS.min(body.width.saturating_sub(ASK_MARGIN * 2));
+    if width < 20 {
+        return;
+    }
+
+    let block = pane("Model", theme)
+        .border_style(Style::new().fg(theme.hot))
+        .padding(Padding::horizontal(1))
+        .title_bottom(
+            Line::from(" applied from the next turn ")
+                .style(Style::new().fg(theme.dim))
+                .centered(),
+        );
+
+    let text_width = usize::from(width).saturating_sub(4);
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, model) in picker.models.iter().enumerate() {
+        let on_it = i == picker.at;
+        let marker = match (on_it, current == Some(model.as_str())) {
+            (true, _) => PICK_CURSOR,
+            (false, true) => PICK_CURRENT,
+            (false, false) => "  ",
+        };
+        let style = match on_it {
+            true => Style::new().fg(theme.hot).bold(),
+            false => Style::new().fg(theme.fg),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::new().fg(theme.hot).bold()),
+            Span::styled(text::truncate(model, text_width.saturating_sub(2)), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(choice("↑↓", "choose", "⏎", "switch", theme));
+    lines.push(choice("Esc", "keep this one", "", "", theme));
+
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(body.height);
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(body);
+    let [area] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(area);
+
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
+        inner,
+    );
 }
 
 /// The permission modal: what would run, and the four ways to answer.
@@ -651,6 +730,17 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Style::new().fg(theme.hot).bold(),
         ));
     }
+    if let Some(budget) = app.budget() {
+        let spent = session.totals().reported_cost_usd;
+        top.push(separator.clone());
+        top.push(Span::styled(
+            format!("budget ${spent:.2}/${budget:.2}"),
+            match spent >= budget * BUDGET_SHOWN_HOT {
+                true => Style::new().fg(theme.hot).bold(),
+                false => Style::new().fg(theme.fg),
+            },
+        ));
+    }
     if session.errors() > 0 {
         top.push(separator);
         top.push(Span::styled(
@@ -659,9 +749,18 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ));
     }
 
-    let bottom = match app.hint() {
-        Some(hint) => Line::from(hint.to_owned()).style(Style::new().fg(theme.hot)),
-        None => Line::from(
+    let bottom = match (app.hint(), session.mode()) {
+        (Some(hint), _) => Line::from(hint.to_owned()).style(Style::new().fg(theme.hot)),
+        (None, Some(mode)) => Line::from(vec![
+            Span::styled(format!("▸▸ {mode} mode"), Style::new().fg(theme.hot).bold()),
+            Span::styled(
+                " · Shift+Tab cycles · F8 model · Enter send · F10 quit".to_owned(),
+                Style::new().fg(theme.status_fg),
+            ),
+        ]),
+        // Nothing has said how this session gates tool calls, so nothing
+        // claims to know: the keys are what is left to say.
+        (None, None) => Line::from(
             "Enter send · Alt+Enter newline · PgUp/PgDn scrollback · F10 quit".to_owned(),
         )
         .style(Style::new().fg(theme.status_fg)),
@@ -709,7 +808,15 @@ fn backend_label(
     attached: bool,
 ) -> String {
     match (session.meta(), profile, attached) {
-        (Some(meta), _, _) => format!("⚡ {} · {}", meta.backend, meta.model),
+        // The model comes off the fold rather than off the meta: a model the
+        // operator has just chosen is what the session is on from its next
+        // turn, and naming the one it is moving off would read as a switch
+        // that did not land.
+        (Some(meta), _, _) => format!(
+            "⚡ {} · {}",
+            meta.backend,
+            session.model().unwrap_or(&meta.model)
+        ),
         (None, Some(profile), true) => format!("{} · {}, starting", profile.name, profile.backend),
         (None, Some(profile), false) => {
             format!("{} · {}, not attached", profile.name, profile.backend)
@@ -808,6 +915,7 @@ mod tests {
         let work = SelectedProfile {
             name: "work".to_owned(),
             backend: Backend::Claude,
+            models: Vec::new(),
         };
         assert_eq!(
             backend_label(&SessionState::new(), Some(&work), false),
@@ -831,6 +939,7 @@ mod tests {
         let max = SelectedProfile {
             name: "max".to_owned(),
             backend: Backend::Claude,
+            models: Vec::new(),
         };
 
         assert_eq!(

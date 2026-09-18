@@ -37,12 +37,14 @@ impl Loaded {
     }
 }
 
-/// A selected profile as the shell names it: the name, and the backend it
-/// runs. The shell is given no more, because it can use no more.
+/// A selected profile as the shell names it: the name, the backend it runs and
+/// the models it offers. The shell is given no more, because it can use no
+/// more.
 pub fn named(selected: Selected<'_>) -> SelectedProfile {
     SelectedProfile {
         name: selected.name.to_owned(),
         backend: selected.profile.backend(),
+        models: selected.profile.models().to_vec(),
     }
 }
 
@@ -91,6 +93,21 @@ pub fn user_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shell_is_told_which_models_the_selected_profile_offers() {
+        let config = niobe_config::Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nmodels = [\"opus\", \"haiku\"]\n",
+            Path::new("/u/config.toml"),
+        )
+        .expect("the config is valid");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        assert_eq!(named(selected).models, ["opus", "haiku"]);
+    }
 
     fn os(value: &str) -> Option<OsString> {
         Some(OsString::from(value))

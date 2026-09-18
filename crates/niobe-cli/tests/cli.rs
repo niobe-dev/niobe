@@ -445,6 +445,36 @@ fn a_config_that_is_not_toml_names_the_line() {
 }
 
 #[test]
+fn the_help_says_how_the_mode_the_model_and_the_budget_are_changed() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    for said in [
+        "--budget <amount>",
+        "Shift+Tab",
+        "F8",
+        "between turns",
+        "models = [",
+    ] {
+        assert!(
+            out.contains(said),
+            "the help does not mention {said}:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn a_budget_that_is_not_an_amount_is_refused_before_anything_is_started() {
+    let setup = Configured::new("", "");
+    let output = setup.run(&["--budget", "lots"]);
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(err.contains("--budget"), "{err}");
+    assert!(err.contains("niobe --help"), "{err}");
+}
+
+#[test]
 fn commands_that_run_no_session_do_not_read_the_config() {
     let setup = Configured::new("this is not toml", "");
     for args in [&["sessions"][..], &["--help"], &["--version"]] {

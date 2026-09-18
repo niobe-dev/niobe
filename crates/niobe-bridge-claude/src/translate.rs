@@ -42,9 +42,9 @@
 //!   exists. It is recognised so that it is not reported as unknown.
 //! * `system`/`init` carries the CLI's version, its tool list and the state of
 //!   each MCP server. [`SessionMeta`] carries the model and the CLI's own
-//!   session id; the rest is not surfaced, because no pane reads it and
-//!   widening the shared vocabulary for figures nothing draws would be a
-//!   change nobody could see.
+//!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
+//!   rest is not surfaced, because no pane reads it and widening the shared
+//!   vocabulary for figures nothing draws would be a change nobody could see.
 //! * A sub-agent's `parent_tool_use_id` says which `Task` call a message
 //!   belongs to. Its tool calls and its tokens are folded in — they are work
 //!   done and money spent — but attributing each line of the transcript to the
@@ -53,8 +53,8 @@
 use std::collections::BTreeMap;
 
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, CostBasis, Event, PermissionDecision, SessionMeta, ToolCallId,
-    ToolOutcome, Usage,
+    AgentId, AgentOutcome, Backend, CostBasis, Event, Mode, PermissionDecision, SessionMeta,
+    ToolCallId, ToolOutcome, Usage,
 };
 
 use crate::wire;
@@ -248,9 +248,10 @@ impl Translator {
             Ok(wire::Message::StreamEvent(event)) => self.stream(event, &mut out),
             Ok(wire::Message::ControlRequest(request)) => self.control(request, &mut out),
             Ok(wire::Message::Result(outcome)) => self.result(outcome, &mut out),
+            Ok(wire::Message::ControlResponse(response)) => self.answered(response, &mut out),
             // Recognised, and carried by nothing in the event model yet; see
             // the module documentation.
-            Ok(wire::Message::ControlResponse(_) | wire::Message::RateLimitEvent(_)) => {}
+            Ok(wire::Message::RateLimitEvent(_)) => {}
             Ok(wire::Message::Unknown) => out.push(warn(format!(
                 "the CLI sent a message of type `{}`, which this version of Niobe does not \
                  know how to read. It was not counted.",
@@ -265,6 +266,25 @@ impl Translator {
         out
     }
 
+    /// Reports a request of Niobe's own that the CLI refused.
+    ///
+    /// Only this side asks the CLI anything, so every `control_response` is an
+    /// answer to a request made here — a mode or a model the session was asked
+    /// to move to. A refusal left unreported would leave the status line
+    /// showing a change that never happened.
+    fn answered(&mut self, response: wire::ControlResponse, out: &mut Vec<Event>) {
+        let Some(outcome) = response.response else {
+            return;
+        };
+        if outcome.subtype.as_deref() == Some("success") {
+            return;
+        }
+        out.push(warn(format!(
+            "the CLI refused a change Niobe asked for, so the session is running as it was: {}",
+            outcome.error.as_deref().unwrap_or("the CLI gave no reason")
+        )));
+    }
+
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
         match system.subtype.as_deref() {
             Some("init") => {
@@ -273,6 +293,20 @@ impl Translator {
                 }
                 if let Some(model) = system.model {
                     self.set_model(model, out);
+                }
+                if let Some(mode) = system.permission_mode {
+                    match read_mode(&mode) {
+                        Some(mode) => out.push(Event::ModeSelected { mode }),
+                        // The CLI gates calls in ways Niobe has no word for —
+                        // `acceptEdits`, `bypassPermissions`, `dontAsk` — and
+                        // a profile can ask for one through its own arguments.
+                        // Naming it beats showing a mode the session is not in.
+                        None => out.push(warn(format!(
+                            "the CLI is gating tool calls as `{mode}`, which this version of \
+                             Niobe does not model. The status line shows no mode until the \
+                             session is moved to one it does."
+                        ))),
+                    }
                 }
             }
             Some("compact_boundary") => {
@@ -602,14 +636,19 @@ impl Translator {
         }
 
         if outcome.is_error || outcome.subtype.as_deref() != Some("success") {
+            // `result` carries the reason for most failures and `errors` for
+            // the rest — a budget the CLI stopped on says why only there — so
+            // both are reported rather than whichever one was looked at first.
+            let mut said: Vec<String> = outcome.result.into_iter().collect();
+            said.extend(outcome.errors);
             out.push(Event::Error {
                 message: format!(
                     "the turn ended as `{}`: {}",
                     outcome.subtype.as_deref().unwrap_or("(no subtype)"),
-                    outcome
-                        .result
-                        .as_deref()
-                        .unwrap_or("the CLI gave no reason")
+                    match said.is_empty() {
+                        true => "the CLI gave no reason".to_owned(),
+                        false => said.join(" · "),
+                    }
                 ),
                 // The subprocess is still there with its stdin open, so the
                 // session goes on; it is this turn that failed.
@@ -625,11 +664,21 @@ impl Translator {
     /// records are what every pane and every price is derived from, so a
     /// difference between them and the CLI's own figure is something the
     /// operator has to be able to see.
+    ///
+    /// A turn the CLI gave no total for is not a disagreement. It closes a
+    /// turn it stopped on a budget with an all-zero `usage` block, which says
+    /// the same as leaving it out: there is nothing on the other side to
+    /// compare the per-message records against, and reporting that as a
+    /// mismatch would put a warning in front of the operator on every budget
+    /// stop for numbers nobody contradicted.
     fn reconcile_turn(&mut self, usage: Option<&wire::Usage>, out: &mut Vec<Event>) {
         let summed = std::mem::take(&mut self.turn);
         let Some(reported) = usage.map(Counts::from) else {
             return;
         };
+        if reported.is_empty() {
+            return;
+        }
         if reported != summed {
             out.push(warn(format!(
                 "the turn's per-message tokens do not add up to what the CLI reported for the \
@@ -732,6 +781,21 @@ impl Translator {
             cost_usd: (spent > 0.0).then_some(spent),
             cost_basis: (spent > 0.0).then_some(CostBasis::ApiEquivalent),
         })
+    }
+}
+
+/// The mode the CLI reports, as one of the three Niobe models.
+///
+/// The CLI's `default` and `manual` both mean "stop and ask about anything a
+/// standing rule does not already allow", which is Niobe's `ask`. The rest —
+/// `acceptEdits`, `bypassPermissions`, `dontAsk` — are modes the shell has no
+/// word for, and a wrong word for one is worse than none.
+fn read_mode(mode: &str) -> Option<Mode> {
+    match mode {
+        "plan" => Some(Mode::Plan),
+        "default" | "manual" => Some(Mode::Ask),
+        "auto" => Some(Mode::Auto),
+        _ => None,
     }
 }
 
@@ -1245,6 +1309,114 @@ mod tests {
         };
         assert_eq!(tool, "Write");
         assert_eq!(input, r#"{"file_path":"/etc/hosts"}"#);
+    }
+
+    #[test]
+    fn the_mode_the_cli_started_in_reaches_the_session() {
+        let mut translator = Translator::new("max");
+
+        let events = translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","permissionMode":"default"}"#,
+        );
+
+        assert!(
+            events.contains(&Event::ModeSelected { mode: Mode::Ask }),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn every_mode_niobe_models_is_read_back_from_the_cli_spelling() {
+        for (spelt, mode) in [
+            ("plan", Mode::Plan),
+            ("default", Mode::Ask),
+            ("manual", Mode::Ask),
+            ("auto", Mode::Auto),
+        ] {
+            let mut translator = Translator::new("max");
+            let events = translator.line(&format!(
+                r#"{{"type":"system","subtype":"init","permissionMode":"{spelt}"}}"#
+            ));
+            assert_eq!(
+                events,
+                [Event::ModeSelected { mode }],
+                "`{spelt}` did not read as {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_permission_mode_niobe_does_not_model_is_reported_rather_than_guessed_at() {
+        let mut translator = Translator::new("max");
+
+        let events = translator
+            .line(r#"{"type":"system","subtype":"init","permissionMode":"bypassPermissions"}"#);
+
+        let said = warnings(&events);
+        assert_eq!(said.len(), 1, "{events:?}");
+        assert!(said[0].contains("`bypassPermissions`"), "{said:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::ModeSelected { .. })),
+            "a mode the shell cannot show was shown anyway: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_request_niobe_made_that_the_cli_refused_is_reported_rather_than_dropped() {
+        let mut translator = translator();
+
+        let refused = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"Cannot set permission mode: must be one of acceptEdits, auto, bypassPermissions, default, dontAsk, plan"}}"#,
+        );
+        let accepted = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1"}}"#,
+        );
+
+        let said = warnings(&refused);
+        assert_eq!(said.len(), 1, "{refused:?}");
+        assert!(said[0].contains("Cannot set permission mode"), "{said:?}");
+        assert!(
+            accepted.is_empty(),
+            "a request the CLI took was reported: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_the_cli_gave_no_total_for_is_not_reported_as_one_that_does_not_add_up() {
+        let mut translator = translator();
+        translator.line(&delta(2, 10));
+
+        // What a budget stop closes a turn with: the per-model figures are
+        // there, and the turn's own `usage` block is all zeros.
+        let events = translator.line(
+            r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.02)"],"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+        );
+
+        let said = warnings(&events);
+        assert!(
+            !said.iter().any(|line| line.contains("do not add up")),
+            "a turn the CLI totalled nothing for was reported as a mismatch: {said:?}"
+        );
+        assert_eq!(said.len(), 1, "{said:?}");
+    }
+
+    #[test]
+    fn a_turn_the_budget_stopped_is_reported_in_the_clis_own_words() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.02)"]}"#,
+        );
+
+        let said = warnings(&events);
+        assert_eq!(said.len(), 1, "{events:?}");
+        assert!(said[0].contains("error_max_budget_usd"), "{said:?}");
+        assert!(
+            said[0].contains("Reached maximum budget ($0.02)"),
+            "the operator was not told why the session stopped: {said:?}"
+        );
     }
 
     #[test]

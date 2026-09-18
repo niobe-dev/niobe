@@ -56,5 +56,5 @@
 ║>  Ask for a change, or press F1 for help                                                                       ║ ║                                                                                   ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════════════════════════════════════════════════╝
 example-app │ ⚡  claude · opus-5 │ ⎇ main │ 49k tokens
-Enter send · Alt+Enter newline · PgUp/PgDn scrollback · F10 quit
+▸▸ ask mode · Shift+Tab cycles · F8 model · Enter send · F10 quit
 1Help               2Plan               3Diff               4Undo               5Cost               6Files              7Tools              8Model              9Theme              10Quit
