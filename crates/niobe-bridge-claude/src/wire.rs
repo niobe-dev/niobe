@@ -37,17 +37,13 @@ pub(crate) enum Message {
     /// The CLI answering something Niobe asked it.
     ControlResponse(ControlResponse),
     /// How much of the plan's usage windows is gone.
-    RateLimitEvent(Ignored),
+    RateLimitEvent(RateLimit),
     /// The end of a turn, with the turn's totals.
     Result(Outcome),
     /// A `type` this bridge does not know.
     #[serde(other)]
     Unknown,
 }
-
-/// A message whose shape this bridge does not read.
-#[derive(Debug, Deserialize)]
-pub(crate) struct Ignored {}
 
 /// The `type` of a line, read on its own so that an unrecognised or unparsable
 /// message can be named in the warning it becomes.
@@ -205,6 +201,47 @@ pub(crate) struct CacheCreation {
     pub(crate) ephemeral_1h_input_tokens: u64,
 }
 
+/// A `rate_limit_event`: how much of the plan's metered windows is gone.
+///
+/// The message also carries `status`, `rateLimitType`, `resetsAt`,
+/// `overageStatus` and `overageDisabledReason`. Only the windows and the
+/// overage flag are read: the rest restates the window the CLI happens to be
+/// closest to, and a status word nothing draws would widen the shared
+/// vocabulary for a figure no pane shows.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RateLimit {
+    pub(crate) rate_limit_info: Option<RateLimitInfo>,
+}
+
+/// The body of a `rate_limit_event`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RateLimitInfo {
+    #[serde(rename = "unifiedWindows")]
+    pub(crate) unified_windows: Option<UnifiedWindows>,
+    /// Whether the plan has started spending beyond its flat fee. Absent on a
+    /// CLI version that does not report it, which is read as "did not say"
+    /// rather than as a promise that nothing extra is being charged.
+    #[serde(rename = "isUsingOverage", default)]
+    pub(crate) is_using_overage: bool,
+}
+
+/// The two windows a plan is metered against.
+#[derive(Debug, Deserialize)]
+pub(crate) struct UnifiedWindows {
+    pub(crate) five_hour: Option<Window>,
+    pub(crate) seven_day: Option<Window>,
+}
+
+/// One window: how much of it is gone, and when it starts over.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Window {
+    /// The share used, 0–1. Absent from a window the CLI named without
+    /// measuring, which is a window this bridge reports nothing for.
+    pub(crate) utilization: Option<f64>,
+    #[serde(rename = "resetsAt")]
+    pub(crate) resets_at: Option<u64>,
+}
+
 /// A `control_request`: the CLI asking Niobe to decide something.
 ///
 /// `request_id` is what an answer is addressed to, and it is the CLI's own id
@@ -340,6 +377,25 @@ mod tests {
 
         assert_eq!(usage.cache_creation_input_tokens, 99);
         assert_eq!(usage.cache_write_1h(), 0);
+    }
+
+    #[test]
+    fn a_window_the_cli_named_without_measuring_carries_no_share() {
+        let message: Message = serde_json::from_str(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"resetsAt":1789779600}}}}"#,
+        )
+        .expect("a rate limit event");
+
+        let Message::RateLimitEvent(event) = message else {
+            panic!("a rate limit event");
+        };
+        let info = event.rate_limit_info.expect("the event carries a body");
+        let windows = info.unified_windows.expect("the body carries its windows");
+        let five_hour = windows.five_hour.expect("the five-hour window is named");
+        assert_eq!(five_hour.utilization, None);
+        assert_eq!(five_hour.resets_at, Some(1_789_779_600));
+        assert!(windows.seven_day.is_none());
+        assert!(!info.is_using_overage);
     }
 
     #[test]

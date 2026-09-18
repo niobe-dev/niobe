@@ -20,6 +20,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget};
 
+use niobe_core::event::UsageWindows;
 use niobe_core::session::{FileChanges, SessionState};
 
 use crate::app::{App, Ask, Entry, Picker, SelectedProfile};
@@ -67,6 +68,10 @@ const PICK_CURRENT: &str = "· ";
 /// The share of a budget at which the status line starts saying so in the
 /// colour it uses for anything waiting on the operator. The same fraction the
 /// transcript warning uses, so the line and the warning agree.
+///
+/// A plan's usage window is read against the same fraction, because on a
+/// flat-rate plan the window is the budget: what runs out is the hours, not
+/// the money.
 const BUDGET_SHOWN_HOT: f64 = 0.8;
 
 /// The F-key bar, which is also the list of what the shell can be asked to do.
@@ -806,6 +811,22 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Style::new().fg(theme.hot).bold(),
         ));
     }
+    // On a flat-rate plan the windows are the budget, so they sit where the
+    // budget does. Absent, not zeroed, until a backend reports one: a metered
+    // profile has no windows and a `0%/5h` would be a figure nobody measured.
+    if let Some(windows) = session.usage_windows() {
+        if let Some(label) = crate::app::windows_label(windows) {
+            top.push(separator.clone());
+            top.push(Span::styled(label, window_style(windows, theme)));
+        }
+        if windows.using_overage {
+            top.push(separator.clone());
+            top.push(Span::styled(
+                "overage".to_owned(),
+                Style::new().fg(theme.hot).bold(),
+            ));
+        }
+    }
     if let Some(budget) = app.budget() {
         let spent = session.totals().reported_cost_usd;
         top.push(separator.clone());
@@ -846,6 +867,20 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Paragraph::new(vec![Line::from(top), bottom]).style(bar),
         area,
     );
+}
+
+/// How the windows segment is coloured: the same threshold and the same colour
+/// as a budget nearly spent, because on a flat-rate plan that is what a window
+/// nearly gone is.
+fn window_style(windows: &UsageWindows, theme: &Theme) -> Style {
+    let hot = [windows.five_hour, windows.seven_day]
+        .into_iter()
+        .flatten()
+        .any(|window| window.utilization >= BUDGET_SHOWN_HOT);
+    match hot {
+        true => Style::new().fg(theme.hot).bold(),
+        false => Style::new().fg(theme.fg),
+    }
 }
 
 fn draw_fkeys(frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -933,7 +968,7 @@ fn compact(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use niobe_core::event::{Backend, SessionMeta, Usage};
+    use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindow};
 
     fn priced(cost: Option<f64>) -> niobe_core::event::Event {
         niobe_core::event::Event::Usage(Usage {
@@ -1101,5 +1136,38 @@ mod tests {
         assert_eq!(compact(9_999), "9999");
         assert_eq!(compact(25_500), "26k");
         assert_eq!(compact(1_260_000), "1.3M");
+    }
+
+    fn windows(five_hour: f64, seven_day: f64) -> UsageWindows {
+        UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: five_hour,
+                resets_at: None,
+            }),
+            seven_day: Some(UsageWindow {
+                utilization: seven_day,
+                resets_at: None,
+            }),
+            using_overage: false,
+        }
+    }
+
+    /// Either window nearly gone is the plan nearly gone: on a flat-rate plan
+    /// the seven-day window running out stops the session just as surely as
+    /// the five-hour one, so neither may be marked at the other's expense.
+    #[test]
+    fn a_window_nearly_gone_is_marked_the_way_a_budget_nearly_spent_is() {
+        let theme = crate::theme::CLASSIC;
+        let hot = Style::new().fg(theme.hot).bold();
+        let plain = Style::new().fg(theme.fg);
+
+        assert_eq!(window_style(&windows(0.62, 0.18), &theme), plain);
+        assert_eq!(window_style(&windows(0.80, 0.18), &theme), hot);
+        assert_eq!(window_style(&windows(0.10, 0.95), &theme), hot);
+        assert_eq!(
+            window_style(&UsageWindows::default(), &theme),
+            plain,
+            "a plan with no window reported was marked as one nearly gone"
+        );
     }
 }

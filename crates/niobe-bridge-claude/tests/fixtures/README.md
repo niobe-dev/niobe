@@ -42,6 +42,10 @@ did not produce, and it carries the cases that are easy to get wrong:
   the closing `result`'s `permission_denials`. Counting both would double every
   denial; the first is also what tells a call that was not allowed to run from
   one that broke.
+- a `rate_limit_event`, which is how much of the plan's five-hour and seven-day
+  windows is gone. On a flat-rate plan that is the budget, and it is the one
+  figure in the stream that is a level rather than a total: the CLI reports it
+  several times a session, each report replacing the last;
 - `system`/`thinking_tokens`, the CLI's running *estimate* of the thinking
   tokens of the message in flight — a guess, and already a share of the output
   tokens the turn is billed for, so it is counted nowhere;

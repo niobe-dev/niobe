@@ -9,7 +9,9 @@
 //! itself.
 
 use niobe_bridge_claude::Translator;
-use niobe_core::event::{AgentOutcome, Backend, CostBasis, Event, PermissionDecision, ToolOutcome};
+use niobe_core::event::{
+    AgentOutcome, Backend, CostBasis, Event, PermissionDecision, ToolOutcome, UsageWindow,
+};
 use niobe_core::session::SessionState;
 
 /// A two-turn session as the CLI prints it.
@@ -49,6 +51,33 @@ fn warnings(events: &[Event]) -> Vec<&str> {
             _ => None,
         })
         .collect()
+}
+
+#[test]
+fn the_recorded_usage_windows_are_what_the_session_is_metered_against() {
+    let state = SessionState::replay(&translated());
+    let windows = state
+        .usage_windows()
+        .expect("the recording carries a rate_limit_event");
+
+    assert_eq!(
+        windows.five_hour,
+        Some(UsageWindow {
+            utilization: 0.68,
+            resets_at: Some(1_789_689_600),
+        })
+    );
+    assert_eq!(
+        windows.seven_day,
+        Some(UsageWindow {
+            utilization: 0.27,
+            resets_at: Some(1_790_118_000),
+        })
+    );
+    assert!(
+        !windows.using_overage,
+        "the recording is of a plan inside its windows"
+    );
 }
 
 #[test]

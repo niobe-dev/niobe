@@ -21,7 +21,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::{running_session, screen};
-use niobe_core::event::{Backend, Event, Mode};
+use niobe_core::event::{Backend, Event, Mode, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Repo, SelectedProfile};
 
 /// The same session, stopped on a permission prompt it is waiting on.
@@ -238,6 +238,78 @@ fn a_cycled_mode_is_on_the_status_line_and_a_denied_key_is_not() {
     assert_eq!(
         app.take_produced(),
         [Event::ModeSelected { mode: Mode::Auto }]
+    );
+}
+
+#[test]
+fn the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back() {
+    let mut app = running_session();
+    let frame = screen(&mut app, 120, 30);
+
+    // The fixture reports 0.62 and 0.18, which is what the line says and all
+    // it says: no window is rounded into another's place.
+    assert!(frame.contains("62%/5h · 18%/7d"), "{frame}");
+    assert!(!frame.contains("overage"), "{frame}");
+
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::F(5),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+    let pressed = screen(&mut app, 120, 30);
+    // The fixture's windows came back long ago, so the line says so rather
+    // than counting down from nothing. What it says while one is still running
+    // is asserted against a fixed clock in `app`'s own tests.
+    assert!(
+        pressed.contains("5h window 62%, already reset"),
+        "{pressed}"
+    );
+    assert!(
+        pressed.contains("7d window 18%, already reset"),
+        "{pressed}"
+    );
+}
+
+/// A metered profile reports no window, and a CLI version that does not emit
+/// them reports none either. Both must leave the segment off the line: a
+/// `0%/5h` would read as a plan nobody had touched.
+#[test]
+fn a_session_no_backend_reported_a_window_for_shows_no_window_at_all() {
+    let mut app = empty_session();
+    let frame = screen(&mut app, 120, 30);
+    assert!(!frame.contains("/5h"), "{frame}");
+    assert!(!frame.contains("/7d"), "{frame}");
+
+    // And F5 says what the key does not do yet rather than reading out a
+    // window nobody reported.
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::F(5),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+    let pressed = screen(&mut app, 120, 30);
+    assert!(pressed.contains("not implemented yet"), "{pressed}");
+    assert!(!pressed.contains("window 0%"), "{pressed}");
+}
+
+#[test]
+fn a_plan_spending_beyond_its_flat_fee_is_marked_on_the_status_line() {
+    let mut app = running_session();
+    app.apply(&Event::UsageWindows(UsageWindows {
+        five_hour: Some(UsageWindow {
+            utilization: 1.0,
+            resets_at: Some(1_789_779_600),
+        }),
+        seven_day: Some(UsageWindow {
+            utilization: 0.91,
+            resets_at: Some(1_790_118_000),
+        }),
+        using_overage: true,
+    }));
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("100%/5h · 91%/7d"), "{frame}");
+    assert!(
+        frame.contains("overage"),
+        "the plan is spending real money and the line did not say so:\n{frame}"
     );
 }
 

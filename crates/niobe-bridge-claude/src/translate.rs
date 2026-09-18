@@ -37,9 +37,9 @@
 //! # What is recognised and not yet translated
 //!
 //! * `rate_limit_event` carries how much of the five-hour and seven-day
-//!   windows is gone. Nothing in the event model holds a usage window, and a
-//!   shape invented here would be fixed before the status line that reads it
-//!   exists. It is recognised so that it is not reported as unknown.
+//!   windows is gone, which is the budget on a flat-rate plan; it becomes
+//!   [`Event::UsageWindows`]. Its `status`, `rateLimitType` and `resetsAt`
+//!   restate whichever window the CLI is closest to and are not read.
 //! * `system`/`init` carries the CLI's version, its tool list and the state of
 //!   each MCP server. [`SessionMeta`] carries the model and the CLI's own
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 use niobe_core::diff;
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, CostBasis, Event, Mode, PermissionDecision, SessionMeta,
-    ToolCallId, ToolOutcome, Usage,
+    ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
 use crate::wire;
@@ -303,9 +303,7 @@ impl Translator {
             wire::Message::ControlRequest(request) => self.control(request, &mut out),
             wire::Message::Result(outcome) => self.result(outcome, &mut out),
             wire::Message::ControlResponse(response) => self.answered(response, &mut out),
-            // Recognised, and carried by nothing in the event model yet; see
-            // the module documentation.
-            wire::Message::RateLimitEvent(_) => {}
+            wire::Message::RateLimitEvent(event) => rate_limit(event, &mut out),
             // Only the line a message arrived on says what type it was, so
             // whoever read that line is the one that can report it.
             wire::Message::Unknown => {}
@@ -1041,6 +1039,41 @@ fn label_of(input: &serde_json::Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The windows one `rate_limit_event` reported.
+///
+/// A free function rather than a method: the message says what is left of the
+/// plan, which is a level the CLI measured and not something the translator
+/// accumulates, so there is no state for it to touch. A message with no window
+/// in it produces nothing — a window reported as zero would claim an untouched
+/// plan, which is a different thing from a CLI that said nothing.
+fn rate_limit(event: wire::RateLimit, out: &mut Vec<Event>) {
+    let Some(info) = event.rate_limit_info else {
+        return;
+    };
+    let windows = info.unified_windows.unwrap_or(wire::UnifiedWindows {
+        five_hour: None,
+        seven_day: None,
+    });
+    let windows = UsageWindows {
+        five_hour: read_window(windows.five_hour),
+        seven_day: read_window(windows.seven_day),
+        using_overage: info.is_using_overage,
+    };
+    if windows.is_empty() {
+        return;
+    }
+    out.push(Event::UsageWindows(windows));
+}
+
+/// One window, kept only where the CLI measured it.
+fn read_window(window: Option<wire::Window>) -> Option<UsageWindow> {
+    let window = window?;
+    Some(UsageWindow {
+        utilization: window.utilization?,
+        resets_at: window.resets_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1578,14 +1611,93 @@ mod tests {
         );
     }
 
+    /// The shape is the one the CLI printed on 17 September 2026 (Claude Code
+    /// 2.1.274); the figures are the fixture's.
     #[test]
-    fn a_usage_window_is_recognised_rather_than_reported_as_unknown() {
+    fn a_rate_limit_event_becomes_the_windows_it_reported() {
         let mut translator = translator();
 
-        let events = translator
-            .line(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#);
+        let events = translator.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1789779600,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.62,"resetsAt":1789779600},"seven_day":{"utilization":0.18,"resetsAt":1790118000}}}}"#,
+        );
 
-        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(
+            events,
+            [Event::UsageWindows(UsageWindows {
+                five_hour: Some(UsageWindow {
+                    utilization: 0.62,
+                    resets_at: Some(1_789_779_600),
+                }),
+                seven_day: Some(UsageWindow {
+                    utilization: 0.18,
+                    resets_at: Some(1_790_118_000),
+                }),
+                using_overage: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn a_plan_spending_beyond_its_flat_fee_says_so() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","isUsingOverage":true,"unifiedWindows":{"five_hour":{"utilization":1.0,"resetsAt":1789779600},"seven_day":{"utilization":0.91,"resetsAt":1790118000}}}}"#,
+        );
+
+        let [Event::UsageWindows(windows)] = events.as_slice() else {
+            panic!("one usage-windows event: {events:?}");
+        };
+        assert!(
+            windows.using_overage,
+            "the plan is spending real money and nothing said so"
+        );
+    }
+
+    /// The windows are the only part of the message Niobe reads. A version
+    /// that reports a rate limit without them has nothing to show, and showing
+    /// nothing is not the same as reporting a window at zero.
+    #[test]
+    fn a_rate_limit_with_no_windows_in_it_reports_nothing() {
+        let mut translator = translator();
+
+        for line in [
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#,
+            r#"{"type":"rate_limit_event"}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{}}}"#,
+        ] {
+            assert!(translator.line(line).is_empty(), "{line}");
+        }
+    }
+
+    /// The CLI reports the windows several times a turn, each a fresh level
+    /// rather than an increment, so every report is passed on and the fold is
+    /// what keeps only the last.
+    #[test]
+    fn every_report_of_a_window_is_passed_on() {
+        let mut translator = translator();
+        let line = |used: &str| {
+            format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"unifiedWindows":{{"five_hour":{{"utilization":{used}}}}}}}}}"#
+            )
+        };
+
+        let first = translator.line(&line("0.14"));
+        let second = translator.line(&line("0.15"));
+
+        assert_eq!(
+            first,
+            [Event::UsageWindows(UsageWindows {
+                five_hour: Some(UsageWindow {
+                    utilization: 0.14,
+                    resets_at: None,
+                }),
+                seven_day: None,
+                using_overage: false,
+            })],
+            "a window without a reset time was dropped or given one"
+        );
+        assert_eq!(second.len(), 1, "{second:?}");
     }
 
     /// The shapes are those the CLI printed on 18 September 2026 (Claude Code

@@ -13,6 +13,7 @@
 
 use niobe_core::event::{
     AgentOutcome, Backend, Event, Mode, PermissionDecision, SessionMeta, ToolOutcome, Usage,
+    UsageWindow, UsageWindows,
 };
 use niobe_tui::app::{App, Repo};
 use niobe_tui::ui;
@@ -62,6 +63,22 @@ fn session_events() -> Vec<Event> {
             model: "opus-5".to_owned(),
             cost_usd: Some(0.04),
             cost_basis: None,
+        }),
+        // A plan profile: the windows are what this session is metered
+        // against, so they are on the status line where a budget would be.
+        // The reset times are fixed instants in the past — the session is a
+        // recording, and a reset in the future would make what the shell draws
+        // for it depend on the day the test ran.
+        Event::UsageWindows(UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: 0.62,
+                resets_at: Some(1_767_225_600),
+            }),
+            seven_day: Some(UsageWindow {
+                utilization: 0.18,
+                resets_at: Some(1_767_830_400),
+            }),
+            using_overage: false,
         }),
         Event::Decision {
             summary: "Reuse the existing LRU instead of a new Map — avoids a second \

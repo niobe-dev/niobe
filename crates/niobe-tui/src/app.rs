@@ -17,7 +17,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use niobe_core::event::{
-    AgentId, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome,
+    AgentId, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome, UsageWindow,
+    UsageWindows,
 };
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::SessionState;
@@ -422,6 +423,7 @@ impl App {
             | Event::Usage(_)
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
+            | Event::UsageWindows(_)
             | Event::FileChange { .. }
             | Event::Decision { .. }
             | Event::Checkpoint { .. } => {}
@@ -914,6 +916,10 @@ impl App {
             // Shift+Tab reaches crossterm as its own code rather than as Tab
             // with a modifier, which is why it is matched on the code alone.
             (KeyCode::BackTab, _) => self.cycle_mode(),
+            // F5 has no cost breakdown behind it, but on a flat-rate plan the
+            // question it is pressed for is when the windows come back, and
+            // the session fold knows that.
+            (KeyCode::F(5), _) => self.hint = Some(self.cost_hint(now_secs())),
             (KeyCode::F(8), _) => self.pick_model(),
             (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
 
@@ -986,15 +992,99 @@ impl App {
         self.scroll_to_tail();
     }
 
+    /// What F5 says: the plan's windows and when they come back, where a
+    /// backend has reported them, and otherwise that the breakdown behind the
+    /// key is not implemented yet.
+    ///
+    /// `now` is seconds since the Unix epoch, taken by the caller so that the
+    /// wording can be asserted against a fixed clock.
+    pub fn cost_hint(&self, now: u64) -> String {
+        let Some(windows) = self.session.usage_windows() else {
+            return "F5 Cost — the cost breakdown is not implemented yet".to_owned();
+        };
+        let mut parts = Vec::new();
+        if let Some(window) = windows.five_hour {
+            parts.push(window_hint("5h", window, now));
+        }
+        if let Some(window) = windows.seven_day {
+            parts.push(window_hint("7d", window, now));
+        }
+        if windows.using_overage {
+            parts.push("spending beyond the plan".to_owned());
+        }
+        format!("F5 Cost — {}", parts.join(" · "))
+    }
+
     /// Feeds a key straight to the composer, for tests and for a paste.
     pub fn type_into_composer(&mut self, input: impl Into<Input>) {
         self.composer.input(input);
     }
 }
 
+/// Now, in seconds since the Unix epoch. Zero on a clock set before it, which
+/// makes every reset read as still to come rather than panicking on a machine
+/// whose clock is wrong.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// One window, as F5 reads it out: `5h window 62%, resets in 2h 14m`.
+///
+/// The reset is shown as the time left rather than as a wall clock, because
+/// what the operator is deciding is whether to wait, and a clock time would
+/// have to pick a time zone to be read in. A window whose reset has passed
+/// says so instead of counting down from nothing: a replayed session is read
+/// long after the window it recorded came back.
+fn window_hint(label: &str, window: UsageWindow, now: u64) -> String {
+    let used = percent(window.utilization);
+    match window.resets_at {
+        None => format!("{label} window {used}%, no reset time reported"),
+        Some(at) if at <= now => format!("{label} window {used}%, already reset"),
+        Some(at) => format!("{label} window {used}%, resets in {}", left(at - now)),
+    }
+}
+
+/// How long is left, in the two coarsest units that say anything: `4d 6h`,
+/// `2h 14m`, `47m`. Seconds are left out — a window is hours wide, and a
+/// countdown to the second on a status line is a number that redraws for
+/// nothing.
+fn left(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    match (minutes / 1_440, (minutes / 60) % 24, minutes % 60) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
+/// A share of a window as whole percent. Not clamped: a backend reporting more
+/// than the whole window is reporting something the operator has to see.
+fn percent(utilization: f64) -> u64 {
+    (utilization * 100.0).round() as u64
+}
+
+/// The plan's windows as the status line shows them — `62%/5h · 18%/7d` — and
+/// `None` where no backend has reported any, so the segment is absent rather
+/// than zeroed.
+pub fn windows_label(windows: &UsageWindows) -> Option<String> {
+    let parts: Vec<String> = [("5h", windows.five_hour), ("7d", windows.seven_day)]
+        .into_iter()
+        .filter_map(|(label, window)| {
+            window.map(|window| format!("{}%/{label}", percent(window.utilization)))
+        })
+        .collect();
+    match parts.is_empty() {
+        true => None,
+        false => Some(parts.join(" · ")),
+    }
+}
+
 /// What an F-key does, for the ones that do nothing yet.
 ///
-/// F8 and F10 are handled before this is reached, so nothing here names them.
+/// F5, F8 and F10 are handled before this is reached, so nothing here names
+/// them.
 fn fkey_hint(n: u8) -> &'static str {
     match n {
         1 => "F1 Help — the help browser is not implemented yet",
@@ -1004,7 +1094,6 @@ fn fkey_hint(n: u8) -> &'static str {
         }
         3 => "F3 Diff — the diff viewer is not implemented yet",
         4 => "F4 Undo — checkpoints and rewind are not implemented yet",
-        5 => "F5 Cost — the cost breakdown is not implemented yet",
         6 => "F6 Files — file attribution is not implemented yet",
         7 => "F7 Tools — tool detail is not implemented yet",
         // F8 opens the model list rather than saying anything, so nothing here
@@ -1043,6 +1132,7 @@ mod tests {
     use super::*;
     use niobe_core::event::{Backend, SessionMeta, Usage};
     use niobe_core::permission::Rule;
+    use ratatui::crossterm::event::KeyCode;
     use ratatui_textarea::Key;
 
     fn app() -> App {
@@ -1584,6 +1674,116 @@ mod tests {
         assert_eq!(app.scroll(), 0);
         app.scroll_down(20);
         assert_eq!(app.scroll(), 0);
+    }
+
+    /// A five-hour window a third gone with an hour and a half to run, and a
+    /// seven-day window a fifth gone with four days left.
+    fn windows(now: u64) -> UsageWindows {
+        UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: 0.33,
+                resets_at: Some(now + 5_400),
+            }),
+            seven_day: Some(UsageWindow {
+                utilization: 0.23,
+                resets_at: Some(now + 367_200),
+            }),
+            using_overage: false,
+        }
+    }
+
+    #[test]
+    fn f5_reads_out_both_windows_and_when_each_comes_back() {
+        const NOW: u64 = 1_789_000_000;
+
+        let mut app = app();
+        app.apply(&Event::UsageWindows(windows(NOW)));
+
+        assert_eq!(
+            app.cost_hint(NOW),
+            "F5 Cost — 5h window 33%, resets in 1h 30m · 7d window 23%, resets in 4d 6h"
+        );
+    }
+
+    #[test]
+    fn f5_on_a_session_with_no_windows_says_what_the_key_does_not_do_yet() {
+        let mut app = app();
+        assert!(
+            app.cost_hint(0)
+                .contains("the cost breakdown is not implemented yet")
+        );
+
+        // Pressing it is what puts the line on the status bar.
+        app.apply(&Event::UsageWindows(windows(1_789_000_000)));
+        app.on_key(key(KeyCode::F(5)));
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("5h window 33%")),
+            "{:?}",
+            app.hint()
+        );
+    }
+
+    #[test]
+    fn a_window_that_has_since_come_back_is_not_counted_down_from_nothing() {
+        const NOW: u64 = 1_789_000_000;
+
+        let mut app = app();
+        app.apply(&Event::UsageWindows(UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: 0.9,
+                resets_at: Some(NOW - 1),
+            }),
+            seven_day: Some(UsageWindow {
+                utilization: 0.4,
+                resets_at: None,
+            }),
+            using_overage: true,
+        }));
+
+        assert_eq!(
+            app.cost_hint(NOW),
+            "F5 Cost — 5h window 90%, already reset · 7d window 40%, no reset time \
+             reported · spending beyond the plan"
+        );
+    }
+
+    #[test]
+    fn a_window_reads_as_the_share_the_backend_reported_and_no_other() {
+        assert_eq!(percent(0.0), 0);
+        assert_eq!(percent(0.334), 33);
+        assert_eq!(percent(0.336), 34);
+        // Over the window is a thing the operator has to be able to see.
+        assert_eq!(percent(1.04), 104);
+    }
+
+    #[test]
+    fn the_status_label_names_only_the_windows_that_were_reported() {
+        assert_eq!(
+            windows_label(&windows(0)).as_deref(),
+            Some("33%/5h · 23%/7d")
+        );
+        assert_eq!(
+            windows_label(&UsageWindows {
+                seven_day: None,
+                ..windows(0)
+            })
+            .as_deref(),
+            Some("33%/5h")
+        );
+        assert_eq!(
+            windows_label(&UsageWindows::default()),
+            None,
+            "a plan with no window reported was given one"
+        );
+    }
+
+    #[test]
+    fn time_left_reads_in_the_two_units_that_say_anything() {
+        assert_eq!(left(0), "0m");
+        assert_eq!(left(59), "0m");
+        assert_eq!(left(2 * 3_600 + 14 * 60), "2h 14m");
+        assert_eq!(left(4 * 86_400 + 6 * 3_600 + 30 * 60), "4d 6h");
     }
 
     #[test]

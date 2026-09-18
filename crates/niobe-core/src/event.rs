@@ -199,6 +199,51 @@ impl Usage {
     }
 }
 
+/// How much of one of a plan's usage windows is gone, and when it starts over.
+///
+/// A subscription plan meters rolling windows rather than money, so on such a
+/// profile this is the budget — the figure the operator checks, and the one a
+/// session runs out of. Both fields are what the backend reported and nothing
+/// else: a window inferred from token counts would be a fabricated number on
+/// the one figure a plan user reads most often.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// The share of the window used, as the backend reported it: `0.33` is a
+    /// third of it gone. Not clamped — a backend that reports more than the
+    /// whole window is reporting something the operator needs to see.
+    pub utilization: f64,
+    /// When the window starts over, in seconds since the Unix epoch. `None`
+    /// where the backend gave a share without a reset.
+    pub resets_at: Option<u64>,
+}
+
+/// The usage windows a plan meters, as a backend last reported them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindows {
+    /// The rolling five-hour window. `None` where the backend reported none,
+    /// never a zero: a zero would claim the window is untouched.
+    #[serde(default)]
+    pub five_hour: Option<UsageWindow>,
+    /// The rolling seven-day window, read the same way.
+    #[serde(default)]
+    pub seven_day: Option<UsageWindow>,
+    /// Whether the plan has started spending beyond its flat fee.
+    ///
+    /// `false` is "not spending extra, or the backend did not say". It is only
+    /// ever read as a reason to show the marker, never as a promise that
+    /// nothing further is being charged.
+    #[serde(default)]
+    pub using_overage: bool,
+}
+
+impl UsageWindows {
+    /// Whether any window was reported at all. A record with neither is a
+    /// backend that said nothing, and nothing is what a consumer shows for it.
+    pub fn is_empty(&self) -> bool {
+        self.five_hour.is_none() && self.seven_day.is_none()
+    }
+}
+
 /// How a tool call ended. Drives waste accounting: a failed call is spend with
 /// nothing to show for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -354,6 +399,14 @@ pub enum Event {
 
     /// Tokens and, when reported, money.
     Usage(Usage),
+
+    /// How much of the plan's usage windows is gone.
+    ///
+    /// Carried as an event rather than read off a backend handle so that a
+    /// replayed session shows what the live one showed. A window Niobe worked
+    /// out for itself would be a guess, and on a flat-rate plan it is the
+    /// figure the operator steers by.
+    UsageWindows(UsageWindows),
 
     /// A tool call is waiting on the operator.
     PermissionRequest {
@@ -580,6 +633,49 @@ mod tests {
                 backend_session: None,
             })
         );
+    }
+
+    #[test]
+    fn usage_windows_survive_the_round_trip_with_their_reset_times() {
+        let event = Event::UsageWindows(UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: 0.33,
+                resets_at: Some(1_789_779_600),
+            }),
+            seven_day: Some(UsageWindow {
+                utilization: 0.23,
+                resets_at: Some(1_790_118_000),
+            }),
+            using_overage: false,
+        });
+
+        let line = serde_json::to_string(&event).expect("an event serializes");
+        let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+
+        assert_eq!(read, event, "{line}");
+        assert!(line.contains(r#""type":"usage_windows""#), "{line}");
+    }
+
+    #[test]
+    fn a_window_the_backend_did_not_report_is_absent_rather_than_untouched() {
+        let json = r#"{"type":"usage_windows","five_hour":{"utilization":0.5,"resets_at":null}}"#;
+        let event: Event = serde_json::from_str(json).expect("a record with one window");
+        let Event::UsageWindows(windows) = event else {
+            panic!("the record is a usage-windows record: {event:?}");
+        };
+
+        assert_eq!(
+            windows.five_hour.map(|w| w.utilization),
+            Some(0.5),
+            "the window that was reported was lost"
+        );
+        assert_eq!(
+            windows.seven_day, None,
+            "a window nobody reported was read as an untouched one"
+        );
+        assert!(!windows.using_overage);
+        assert!(!windows.is_empty());
+        assert!(UsageWindows::default().is_empty());
     }
 
     #[test]

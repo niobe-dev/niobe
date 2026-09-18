@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
     AgentId, AgentOutcome, CheckpointId, Event, Mode, SessionMeta, ToolCallId, ToolOutcome, Usage,
+    UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -173,6 +174,10 @@ pub struct SessionState {
     /// the model the operator has since chosen and it has not yet confirmed.
     model: Option<String>,
     totals: Totals,
+    /// What the backend last said was left of the plan's usage windows.
+    /// `None` until one has said: a metered profile never reports these, and
+    /// neither does a backend version that does not emit them.
+    usage_windows: Option<UsageWindows>,
     tools: ToolTotals,
     in_flight_tools: BTreeMap<ToolCallId, String>,
     user_messages: u64,
@@ -270,6 +275,10 @@ impl SessionState {
             }
 
             Event::Usage(usage) => self.totals.add(usage),
+
+            // The last report replaces the one before it: a window is a level,
+            // not a quantity, so summing two reports of it would be nonsense.
+            Event::UsageWindows(windows) => self.usage_windows = Some(*windows),
 
             Event::PermissionRequest { id, .. } => {
                 self.permission_requests += 1;
@@ -408,6 +417,15 @@ impl SessionState {
     /// Token and cost totals.
     pub fn totals(&self) -> &Totals {
         &self.totals
+    }
+
+    /// What is left of the plan's usage windows, once a backend has said.
+    ///
+    /// `None` means nothing reported any — a metered profile, or a backend
+    /// that does not emit them — and whatever shows these shows nothing at
+    /// all rather than a zero, which would read as a window untouched.
+    pub fn usage_windows(&self) -> Option<&UsageWindows> {
+        self.usage_windows.as_ref()
     }
 
     /// Tool call counters.
@@ -838,6 +856,44 @@ mod tests {
     fn a_file_changed_before_the_model_said_anything_has_no_why_invented_for_it() {
         let state = SessionState::replay(&[changed("src/fetch.rs", Some(1), Some(1))]);
         assert_eq!(state.files()[0].why, None);
+    }
+
+    #[test]
+    fn the_usage_windows_a_session_shows_are_the_last_ones_reported() {
+        use crate::event::{UsageWindow, UsageWindows};
+
+        let mut state = SessionState::new();
+        assert_eq!(
+            state.usage_windows(),
+            None,
+            "a session invented a usage window nobody reported"
+        );
+
+        for used in [0.14, 0.15] {
+            state.apply(&Event::UsageWindows(UsageWindows {
+                five_hour: Some(UsageWindow {
+                    utilization: used,
+                    resets_at: Some(1_789_779_600),
+                }),
+                seven_day: Some(UsageWindow {
+                    utilization: 0.36,
+                    resets_at: Some(1_790_118_000),
+                }),
+                using_overage: false,
+            }));
+        }
+
+        let windows = state.usage_windows().expect("two reports arrived");
+        assert_eq!(
+            windows.five_hour.map(|w| w.utilization),
+            Some(0.15),
+            "two reports of the same window were added together"
+        );
+        assert_eq!(
+            windows.five_hour.and_then(|w| w.resets_at),
+            Some(1_789_779_600)
+        );
+        assert!(!windows.using_overage);
     }
 
     #[test]
