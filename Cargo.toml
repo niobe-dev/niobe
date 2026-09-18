@@ -47,6 +47,13 @@ tempfile = "3"
 # TOML deserializer is not compiled in.
 toml = { version = "1.1", default-features = false, features = ["std", "parse"] }
 
+# The digest a trust record is kept by. A repository's config arrives with a
+# clone, so the operator's decision to trust one has to be attached to the
+# bytes they read: an attacker who can rewrite that file picks both contents,
+# which is exactly what a cryptographic hash is needed for and what a checksum
+# would not survive.
+sha2 = { version = "0.10", default-features = false }
+
 # The TUI stack. `ratatui-textarea` is the composer widget: it is the same
 # editor as `tui-textarea`, maintained by the ratatui org against ratatui 0.30,
 # whereas the upstream crate's latest release still pins ratatui 0.29.

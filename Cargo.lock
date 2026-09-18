@@ -744,6 +744,7 @@ name = "niobe-config"
 version = "0.0.0"
 dependencies = [
  "niobe-core",
+ "sha2",
  "tempfile",
  "toml",
 ]

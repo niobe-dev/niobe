@@ -22,6 +22,11 @@ pub enum Command {
     Sessions,
     /// List the profiles the config defines, marking the selected one.
     Profiles,
+    /// Record this repository's config as one whose profiles may start a
+    /// backend with the environment, arguments and refresh command they name.
+    Trust,
+    /// Take that back, for this repository's config.
+    Untrust,
     /// List the prices in force today, or every price one model has had.
     Prices(Option<String>),
     /// Fold a JSON Lines event log, for development.
@@ -169,6 +174,14 @@ fn command(args: &[&str]) -> Result<Command, String> {
             no_more(rest)?;
             Command::Profiles
         }
+        ["trust", rest @ ..] => {
+            no_more(rest)?;
+            Command::Trust
+        }
+        ["untrust", rest @ ..] => {
+            no_more(rest)?;
+            Command::Untrust
+        }
         ["prices"] => Command::Prices(None),
         ["prices", model, rest @ ..] => {
             no_more(rest)?;
@@ -284,6 +297,25 @@ mod tests {
             Err("unexpected argument `b`".to_owned())
         );
         assert!(invocation(&["prices", "--profile", "work"]).is_err());
+    }
+
+    #[test]
+    fn trust_and_untrust_name_this_repositorys_config_and_nothing_else() {
+        assert_eq!(parsed(&["trust"]), Ok(Command::Trust));
+        assert_eq!(parsed(&["untrust"]), Ok(Command::Untrust));
+        assert_eq!(
+            parsed(&["trust", "/elsewhere/.niobe/config.toml"]),
+            Err("unexpected argument `/elsewhere/.niobe/config.toml`".to_owned()),
+            "the file trusted is the one in front of the operator"
+        );
+        // A profile is a thing inside the file; trust is about the file.
+        for args in [
+            &["trust", "--profile=work"][..],
+            &["untrust", "--profile=w"],
+        ] {
+            let error = invocation(args).expect_err("does not apply");
+            assert!(error.contains("applies to"), "{args:?}: {error}");
+        }
     }
 
     #[test]

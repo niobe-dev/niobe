@@ -47,10 +47,17 @@
 //! [`Config::overlay`]). Where the files live is the caller's business; this
 //! crate reads the paths it is given and never looks at the environment.
 //!
+//! A repository's file arrives with the clone, so what it may put in front of
+//! a backend — a profile's `env`, `args` and `auth_refresh` — takes effect
+//! only once the operator has read it and said so. [`trust`] is where that
+//! decision is kept and [`Config::untrusted`] is the config as it applies
+//! until it has been made.
+//!
 //! Depends on `niobe-core` and on no other workspace crate.
 
 mod error;
 mod parse;
+pub mod trust;
 mod write;
 
 use std::collections::BTreeMap;
@@ -66,6 +73,23 @@ pub use write::remember;
 /// repository's `.niobe` directory alike.
 pub const FILE_NAME: &str = "config.toml";
 
+/// What a profile lost because the file it came from has not been trusted
+/// (see [`trust`]).
+///
+/// The values are gone rather than hidden behind an accessor: nothing can
+/// reach an untrusted environment by asking for it a different way. What is
+/// left is the names, which is what a listing shows and what tells the
+/// operator what trusting the file would put in force.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Withheld {
+    /// The variables the file set, by name. No value is kept.
+    pub env: Vec<String>,
+    /// Whether the file gave the backend arguments of its own.
+    pub args: bool,
+    /// Whether the file gave a credential refresh command.
+    pub auth_refresh: bool,
+}
+
 /// A backend plus the environment, arguments and credential refresh it runs
 /// with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +100,7 @@ pub struct Profile {
     models: Vec<String>,
     auth_refresh: Option<String>,
     source: PathBuf,
+    withheld: Option<Withheld>,
 }
 
 impl Profile {
@@ -87,11 +112,16 @@ impl Profile {
     /// The variables set for the backend, exactly as the config wrote them.
     /// Every name is non-empty and holds no `=` and no NUL, and no value holds
     /// a NUL, so each can be set in a child process's environment.
+    ///
+    /// Empty for a profile from a file that has not been trusted; what it set
+    /// is named by [`Profile::withheld`].
     pub fn env(&self) -> &BTreeMap<String, String> {
         &self.env
     }
 
     /// Arguments passed to the backend after the ones Niobe passes itself.
+    ///
+    /// Empty for a profile from a file that has not been trusted.
     pub fn args(&self) -> &[String] {
         &self.args
     }
@@ -105,6 +135,8 @@ impl Profile {
 
     /// A shell command that renews the backend's credentials when they have
     /// expired, such as a single sign-on login. Never empty when present.
+    ///
+    /// `None` for a profile from a file that has not been trusted.
     pub fn auth_refresh(&self) -> Option<&str> {
         self.auth_refresh.as_deref()
     }
@@ -112,6 +144,38 @@ impl Profile {
     /// The config file that defined this profile.
     pub fn source(&self) -> &Path {
         &self.source
+    }
+
+    /// What this profile lost because the file it came from has not been
+    /// trusted, where anything was.
+    pub fn withheld(&self) -> Option<&Withheld> {
+        self.withheld.as_ref()
+    }
+
+    /// Whether anything this profile carries takes effect only once the file
+    /// it came from has been trusted — before the withholding and after it
+    /// alike, so a file can still be named as one worth trusting once its
+    /// values are gone.
+    fn needs_trust(&self) -> bool {
+        self.withheld.is_some()
+            || !self.env.is_empty()
+            || !self.args.is_empty()
+            || self.auth_refresh.is_some()
+    }
+
+    /// Drops what an untrusted file may not put in front of a backend, keeping
+    /// the names of it.
+    fn withhold(&mut self) {
+        if self.withheld.is_some()
+            || (self.env.is_empty() && self.args.is_empty() && self.auth_refresh.is_none())
+        {
+            return;
+        }
+        self.withheld = Some(Withheld {
+            env: std::mem::take(&mut self.env).into_keys().collect(),
+            args: !std::mem::take(&mut self.args).is_empty(),
+            auth_refresh: self.auth_refresh.take().is_some(),
+        });
     }
 }
 
@@ -190,6 +254,28 @@ impl Config {
         // where one is taken back.
         self.allowed = self.allowed.merge(over.allowed);
         self
+    }
+
+    /// This config as it applies while the file it came from has not been
+    /// trusted: every profile keeps its backend and the models it offers, and
+    /// loses its `env`, its `args` and its `auth_refresh` (see [`trust`]).
+    ///
+    /// Applied to the layer, before it is laid over anything, so that a
+    /// profile the repository replaces cannot end up holding half of the
+    /// user's.
+    #[must_use]
+    pub fn untrusted(mut self) -> Self {
+        for profile in self.profiles.values_mut() {
+            profile.withhold();
+        }
+        self
+    }
+
+    /// Whether anything in this config takes effect only once the file it came
+    /// from has been trusted, which is what makes trusting worth asking about.
+    /// True after [`Config::untrusted`] as well as before it.
+    pub fn needs_trust(&self) -> bool {
+        self.profiles.values().any(Profile::needs_trust)
     }
 
     /// The standing answers to permission prompts, from every file laid over
@@ -386,6 +472,75 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
                 .allows("Edit", Some("crates/niobe-tui/a.rs"))
         );
         assert!(!merged.allowed().allows("Edit", Some("xtask/a.rs")));
+    }
+
+    #[test]
+    fn an_untrusted_file_sets_no_environment_no_arguments_and_no_refresh_command() {
+        let config = parsed(EXAMPLE).untrusted();
+
+        let work = &config.profiles()["work"];
+        assert!(work.env().is_empty());
+        assert_eq!(work.auth_refresh(), None);
+        // What it is, and what it offers, are not what a clone can abuse.
+        assert_eq!(work.backend(), Backend::Claude);
+
+        let withheld = work
+            .withheld()
+            .expect("the work profile set an environment");
+        assert_eq!(
+            withheld.env,
+            ["AWS_PROFILE", "AWS_REGION", "CLAUDE_CODE_USE_BEDROCK"]
+        );
+        assert!(withheld.auth_refresh);
+        assert!(!withheld.args);
+
+        let codex = &config.profiles()["codex"];
+        assert!(codex.args().is_empty());
+        assert_eq!(
+            codex.withheld().expect("the codex profile set arguments"),
+            &Withheld {
+                env: Vec::new(),
+                args: true,
+                auth_refresh: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_profile_that_puts_nothing_in_front_of_a_backend_withholds_nothing() {
+        let config = parsed("[profiles.plain]\nbackend = \"claude\"\nmodels = [\"opus\"]\n");
+        assert!(!config.needs_trust());
+
+        let config = config.untrusted();
+        let plain = &config.profiles()["plain"];
+
+        assert_eq!(plain.withheld(), None);
+        assert_eq!(plain.models(), ["opus"]);
+        assert!(!config.needs_trust(), "nothing here is worth trusting");
+    }
+
+    #[test]
+    fn a_file_still_says_it_is_worth_trusting_once_its_values_are_gone() {
+        let config = parsed(EXAMPLE);
+        assert!(config.needs_trust());
+        assert!(config.clone().untrusted().needs_trust());
+        // Withholding twice must not report that nothing was ever withheld.
+        assert!(config.untrusted().untrusted().needs_trust());
+    }
+
+    #[test]
+    fn permissions_and_the_default_profile_are_not_what_trust_gates() {
+        let config = parsed(
+            "default_profile = \"p\"\n[profiles.p]\nbackend = \"claude\"\n\
+             \n[permissions]\nallow = [\"Read\"]\n",
+        )
+        .untrusted();
+
+        assert_eq!(
+            config.select(None).expect("valid").map(|s| s.name),
+            Some("p")
+        );
+        assert!(config.allowed().allows("Read", None));
     }
 
     #[test]

@@ -14,6 +14,7 @@ description = "Niobe's configuration: profiles, each a backend plus the environm
 [dependencies]
 niobe-core.workspace = true
 toml.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

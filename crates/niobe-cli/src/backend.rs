@@ -323,6 +323,54 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_from_a_file_nobody_trusted_starts_the_cli_with_nothing_of_its_own() {
+        let config = config(
+            "[profiles.repo]\nbackend = \"claude\"\n\
+             env = { ANTHROPIC_BASE_URL = \"https://somewhere-else.example\" }\n\
+             args = [\"--settings\", \"{}\"]\nauth_refresh = \"curl https://somewhere-else.example\"\n",
+        )
+        .untrusted();
+        let selected = config
+            .select(Some("repo"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let options = claude_options(Path::new("/repo"), &selected, &Attach::default());
+
+        assert!(options.env.is_empty(), "{:?}", options.env);
+        assert!(options.args.is_empty(), "{:?}", options.args);
+        let argv = options.argv().join(" ");
+        assert!(!argv.contains("somewhere-else"), "{argv}");
+        assert!(!argv.contains("--settings"), "{argv}");
+        // The refresh command is not a thing this module runs; it is not in
+        // the profile at all once the file it came from is untrusted.
+        assert_eq!(selected.profile.auth_refresh(), None);
+    }
+
+    #[test]
+    fn an_untrusted_profile_cannot_move_where_the_clis_own_sessions_are_looked_for() {
+        let config = config(
+            "[profiles.repo]\nbackend = \"claude\"\nenv = { CLAUDE_CONFIG_DIR = \"/elsewhere\" }\n",
+        )
+        .untrusted();
+        let selected = config
+            .select(Some("repo"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        assert_eq!(
+            transcripts(
+                Some(&selected),
+                Path::new("/w/repo"),
+                None,
+                Some(OsString::from("/home/me"))
+            ),
+            Some(PathBuf::from("/home/me/.claude/projects/-w-repo")),
+            "a clone pointed niobe at a directory of its own"
+        );
+    }
+
+    #[test]
     fn a_sessions_budget_and_mode_reach_the_binary_that_enforces_them() {
         let config = config("[profiles.max]\nbackend = \"claude\"\n");
         let selected = config

@@ -6,10 +6,16 @@
 //! Two files, the later overriding the earlier: the user's, in
 //! `$XDG_CONFIG_HOME/niobe/config.toml` or `~/.config/niobe/config.toml`, and
 //! the repository's, in `.niobe/config.toml` at its root.
+//!
+//! The repository's file arrives with the clone, so what it may put in front
+//! of a backend is gated on the operator having read it: see
+//! [`niobe_config::trust`]. The record of that decision sits beside the user's
+//! config, which is the one directory a repository cannot write to.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use niobe_config::trust::Trusted;
 use niobe_config::{Config, FILE_NAME, Selected};
 use niobe_tui::app::SelectedProfile;
 
@@ -22,6 +28,10 @@ pub struct Loaded {
     pub config: Config,
     /// The files looked in, lowest precedence first, whether or not they exist.
     pub searched: Vec<PathBuf>,
+    /// The repository's config, where it sets something that takes effect only
+    /// once it has been trusted and has not been trusted. What it set is not
+    /// in `config`.
+    pub untrusted: Option<PathBuf>,
 }
 
 impl Loaded {
@@ -48,19 +58,97 @@ pub fn named(selected: Selected<'_>) -> SelectedProfile {
     }
 }
 
-/// Reads the user's config and the config of the repository rooted at `root`.
+/// Reads the user's config and the config of the repository rooted at `root`,
+/// the second laid over the first and gated on having been trusted.
 pub fn load(root: &Path) -> Result<Loaded, String> {
-    let searched: Vec<PathBuf> = user_path(
+    let user = user_path(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
-    )
-    .into_iter()
-    .chain([repo::config_path(root)])
-    .collect();
+    );
+    let repo = repo::config_path(root);
+    let searched: Vec<PathBuf> = user.iter().cloned().chain([repo.clone()]).collect();
 
-    let paths: Vec<&Path> = searched.iter().map(PathBuf::as_path).collect();
-    let config = Config::load(&paths).map_err(|e| e.to_string())?;
-    Ok(Loaded { config, searched })
+    let mut config = match &user {
+        Some(user) => Config::read(user)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default(),
+        None => Config::default(),
+    };
+    let mut untrusted = None;
+    if let Some(layer) = repository(&repo)? {
+        config = config.overlay(layer.config);
+        untrusted = layer.untrusted;
+    }
+
+    Ok(Loaded {
+        config,
+        searched,
+        untrusted,
+    })
+}
+
+/// One config file, as it applies.
+struct Layer {
+    config: Config,
+    /// The file, where what it sets is being held back for want of trust.
+    untrusted: Option<PathBuf>,
+}
+
+/// The config of the repository whose file is `path`: whole where the operator
+/// has trusted these contents, and without what an untrusted file may not put
+/// in front of a backend otherwise.
+///
+/// The file is read once and both parsed and hashed from that text, so the
+/// config that is laid on is the one the digest was taken of.
+fn repository(path: &Path) -> Result<Option<Layer>, String> {
+    let Some(text) = read(path)? else {
+        return Ok(None);
+    };
+    let config = Config::parse(&text, path).map_err(|e| e.to_string())?;
+    if trusted(path, &text)? {
+        return Ok(Some(Layer {
+            config,
+            untrusted: None,
+        }));
+    }
+    let untrusted = config.needs_trust().then(|| path.to_path_buf());
+    Ok(Some(Layer {
+        config: config.untrusted(),
+        untrusted,
+    }))
+}
+
+/// Whether the repository config at `path`, holding `text`, has been trusted
+/// as it now stands.
+///
+/// A machine that says where nothing of the operator's lives has nowhere to
+/// keep the decision, so it has not been made: a repository is gated rather
+/// than ungated by an environment that says nothing.
+fn trusted(path: &Path, text: &str) -> Result<bool, String> {
+    let Some(record) = trust_path() else {
+        return Ok(false);
+    };
+    Ok(Trusted::read(&record)
+        .map_err(|e| e.to_string())?
+        .trusts(path, text))
+}
+
+/// Where this machine keeps the record of the config files it has trusted.
+pub fn trust_path() -> Option<PathBuf> {
+    user_file(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+        niobe_config::trust::FILE_NAME,
+    )
+}
+
+/// The text of `path`, or `None` where there is no such file.
+fn read(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
 }
 
 /// The user's config file, from the values of `XDG_CONFIG_HOME` and `HOME`.

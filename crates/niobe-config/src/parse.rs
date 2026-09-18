@@ -160,6 +160,7 @@ impl File<'_> {
             models,
             auth_refresh,
             source: self.path.to_path_buf(),
+            withheld: None,
         })
     }
 

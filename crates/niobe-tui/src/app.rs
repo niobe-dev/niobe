@@ -743,6 +743,25 @@ impl App {
         self
     }
 
+    /// The same shell, opening on a line from the shell itself.
+    ///
+    /// For what the operator has to know before the first prompt and would
+    /// never see printed: the shell draws on the alternate screen, so anything
+    /// said before it takes the terminal is gone the moment it does. Not
+    /// session content, so nothing produced here is recorded — it describes
+    /// the run, not the conversation.
+    #[must_use]
+    pub fn with_notice(mut self, head: &str, meta: &str, body: &str) -> Self {
+        self.push(Entry {
+            kind: EntryKind::Notice,
+            head: head.to_owned(),
+            meta: meta.to_owned(),
+            body: body.to_owned(),
+            streaming: false,
+        });
+        self
+    }
+
     /// The same shell, with a backend listening for what the operator sends.
     #[must_use]
     pub fn attached(mut self) -> Self {

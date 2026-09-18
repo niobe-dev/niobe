@@ -51,8 +51,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   prompts with before asking. `parse.rs` walks the spanned TOML document by hand so that an
   invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`
   array at the byte range the parser gives it, so the operator's comments and ordering survive;
-  `lib.rs` layers a repository's file over the user's and selects the profile a session runs
-  under.
+  `trust.rs` records which config files may put an `env`, `args` or an `auth_refresh` in front of
+  a backend, as each file's SHA-256 under the user's own config directory, because a repository's
+  file arrives with the clone; `lib.rs` layers a repository's file over the user's, withholds
+  what an untrusted file may not set, and selects the profile a session runs under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
   SQLite (`store.rs`; the triggers in its schema refuse an update or a delete). `recorder.rs` is
   the write side a running session holds; `jsonl.rs` reads a JSON Lines event log.
@@ -79,7 +81,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
   the TUI, and the only one that wires the others together: it finds the config files and opens
   the shell under the selected profile, with the session store as its journal and the
-  repository's config as the place a standing answer is kept. `backend.rs` is the only module
+  repository's config as the place a standing answer is kept, and where `niobe trust` records
+  that a repository's config may start a backend with what it names. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
   `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal; `tests/permission.rs` walks a recorded permission
@@ -116,7 +119,9 @@ These hold for every change. Breaking one is a bug even when the feature ships g
 
 1. **Only the official `claude` and `codex` binaries touch subscription credentials.** Niobe never
    reads their token files and never sets their user agents. No token extraction, no header
-   spoofing — this is the line the whole bridge-first design stands on.
+   spoofing — this is the line the whole bridge-first design stands on. A repository's config
+   is not where that line is crossed either: a profile it defines does not set an `env`, pass
+   `args` or run an `auth_refresh` until the operator has trusted that file's contents.
 2. **No telemetry.** Network calls go only to configured providers and the CLIs.
 3. **The terminal is restored on every exit path**, including panics and SIGTERM. This is why the
    release profile keeps `panic = "unwind"`.

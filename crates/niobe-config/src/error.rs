@@ -35,6 +35,14 @@ pub enum ConfigError {
         /// What is wrong, as a sentence fragment.
         message: String,
     },
+    /// A config file whose trust could not be recorded, so the operator's
+    /// decision about it could not be kept.
+    Untrustable {
+        /// The file.
+        path: PathBuf,
+        /// Why, as a sentence fragment.
+        message: String,
+    },
     /// `--profile` named a profile that no config defines.
     UnknownProfile {
         /// The name asked for.
@@ -60,6 +68,9 @@ impl fmt::Display for ConfigError {
                 key: None,
                 message,
             } => write!(f, "{}:{line}: {message}", path.display()),
+            Self::Untrustable { path, message } => {
+                write!(f, "cannot record trust for {}: {message}", path.display())
+            }
             Self::UnknownProfile { name, defined } if defined.is_empty() => {
                 write!(f, "no profile named `{name}`: no config defines a profile")
             }
@@ -80,7 +91,7 @@ impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Read { error, .. } => Some(error),
-            Self::Invalid { .. } | Self::UnknownProfile { .. } => None,
+            Self::Invalid { .. } | Self::Untrustable { .. } | Self::UnknownProfile { .. } => None,
         }
     }
 }

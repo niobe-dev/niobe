@@ -110,6 +110,8 @@ fn run(
         Command::Resume(Resume::Imported(session)) => import(&session, profile, budget),
         Command::Sessions => list_sessions(),
         Command::Profiles => list_profiles(profile),
+        Command::Trust => trust(),
+        Command::Untrust => untrust(),
         Command::Prices(model) => list_prices(model.as_deref()),
         Command::Replay(log) => replay(&log),
         Command::Help => {
@@ -134,7 +136,10 @@ fn shell(profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
-    let app = App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone());
+    let app = say_untrusted(
+        App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone()),
+        &loaded,
+    );
     let app = match &selected {
         Some(selected) => app.with_profile(config::named(*selected)),
         None => app,
@@ -194,7 +199,10 @@ fn resume(session: SessionId, profile: Option<&str>, budget: Option<f64>) -> Res
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
-    let mut app = App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone());
+    let mut app = say_untrusted(
+        App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone()),
+        &loaded,
+    );
     if let Some(selected) = &selected {
         app = app.with_profile(config::named(*selected));
     }
@@ -283,7 +291,10 @@ fn import(session: &str, profile: Option<&str>, budget: Option<f64>) -> Result<(
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     )?;
-    let mut app = App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone());
+    let mut app = say_untrusted(
+        App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone()),
+        &loaded,
+    );
     if let Some(selected) = &selected {
         app = app.with_profile(config::named(*selected));
     }
@@ -394,6 +405,89 @@ fn list_sessions() -> Result<(), String> {
     Ok(())
 }
 
+/// What the shell opens on when this repository's config has not been trusted.
+///
+/// Said in the transcript rather than printed: the shell draws on the
+/// alternate screen, and a line printed before it takes the terminal is gone
+/// before anyone reads it. Said at all because a session running without the
+/// environment its profile names is a session whose behaviour has no other
+/// explanation on screen.
+const UNTRUSTED: &str = "\
+This repository's config sets what a backend is started with — a profile's \
+`env`, `args` or `auth_refresh`. A config arrives with a clone, and those are \
+how the official CLI would be pointed at somewhere other than where it is \
+signed in, so they are not in force until you have read the file. \
+`niobe profiles` shows what it sets; `niobe trust` puts it in force as it now \
+stands, and editing it afterwards asks again.";
+
+/// The shell, saying so when this repository's config has not been trusted.
+fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
+    match &loaded.untrusted {
+        None => app,
+        Some(path) => app.with_notice("config not trusted", &path.display().to_string(), UNTRUSTED),
+    }
+}
+
+/// Records this repository's config as one the operator has read, so that the
+/// `env`, `args` and `auth_refresh` of the profiles it defines take effect.
+fn trust() -> Result<(), String> {
+    let (path, text) = repo_config()?;
+    let record = trust_record()?;
+    let mut trusted = niobe_config::trust::Trusted::read(&record).map_err(|e| e.to_string())?;
+    trusted.trust(&path, &text).map_err(|e| e.to_string())?;
+    trusted.write(&record).map_err(|e| e.to_string())?;
+
+    println!("trusted {}", path.display());
+    println!(
+        "the env, args and auth_refresh of the profiles it defines are in force here; \
+         `niobe profiles` lists them, and editing the file asks again"
+    );
+    Ok(())
+}
+
+/// Takes that back. The file stays where it is; what it may start a backend
+/// with is what goes.
+fn untrust() -> Result<(), String> {
+    let path = repo::config_path(&repo::root(&cwd()?));
+    let record = trust_record()?;
+    let mut trusted = niobe_config::trust::Trusted::read(&record).map_err(|e| e.to_string())?;
+
+    if !trusted.forget(&path) {
+        println!("{} was not trusted", path.display());
+        return Ok(());
+    }
+    trusted.write(&record).map_err(|e| e.to_string())?;
+    println!(
+        "{} is no longer trusted; the env, args and auth_refresh of the profiles it defines \
+         are not in force",
+        path.display()
+    );
+    Ok(())
+}
+
+/// This repository's config and what is in it, for a command that acts on the
+/// file rather than on what it parses to.
+fn repo_config() -> Result<(PathBuf, String), String> {
+    let path = repo::config_path(&repo::root(&cwd()?));
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok((path, text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "no config to trust: {} does not exist",
+            path.display()
+        )),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+/// Where the record of what this machine has trusted is kept.
+fn trust_record() -> Result<PathBuf, String> {
+    config::trust_path().ok_or_else(|| {
+        "nowhere to keep the record: neither XDG_CONFIG_HOME nor HOME names a directory of \
+         your own"
+            .to_owned()
+    })
+}
+
 /// Prints the profiles the config defines for this repository, the selected one
 /// marked.
 fn list_profiles(profile: Option<&str>) -> Result<(), String> {
@@ -486,6 +580,8 @@ USAGE:
     niobe --resume <id>    Open the shell on an earlier session and continue it
     niobe sessions         List the sessions this repository can carry on
     niobe profiles         List the profiles the config defines, the selected one marked
+    niobe trust            Let this repository's config start a backend with what it names
+    niobe untrust          Take that back
     niobe prices [model]   List the prices in force today, or every price a model has had
     niobe replay <file>    Fold a JSON Lines event log into the shell (development)
 
@@ -523,6 +619,25 @@ PROFILES:
     are the ones F8 offers in the shell, named the way its backend takes them;
     a profile that names none has nothing to switch between, because niobe
     never invents a model id.
+
+TRUST:
+    A repository's config arrives with the clone, and env, args and
+    auth_refresh are what a backend is started with — enough to point the
+    official CLI at a host the repository chose, or to run a command of its
+    own. So those three do nothing until you have read the file and said so:
+
+        niobe trust        this repository's config, as it now stands
+        niobe untrust      take it back
+
+    The user's own config is never gated; it is the file you write. What was
+    trusted is recorded as the config's SHA-256 in
+    ~/.config/niobe/trusted.list, so editing the file — a pull, a rebase, your
+    own edit — asks again. Until then the profiles it defines keep their
+    backend and their models and lose the rest, the shell says so in the
+    transcript, and niobe profiles names what trusting would put in force.
+    Answering \"always\" in the shell adds a rule to the repository's config.
+    That write is niobe's own and can add no env, no args and no auth_refresh,
+    so a file you had trusted stays trusted across it.
 
 PRICES:
     Costs are computed from a price table bundled into niobe: USD per million
@@ -666,6 +781,44 @@ mod tests {
 
         assert_eq!(status, FAILED_UNREPORTED);
         assert_ne!(FAILED_UNREPORTED, FAILED);
+    }
+
+    #[test]
+    fn the_shell_opens_saying_why_an_untrusted_config_is_not_in_force_and_how_to_trust_it() {
+        let path = PathBuf::from("/r/.niobe/config.toml");
+        let loaded = config::Loaded {
+            config: niobe_config::Config::default(),
+            searched: vec![path.clone()],
+            untrusted: Some(path.clone()),
+        };
+
+        let app = say_untrusted(App::new(niobe_tui::app::Repo::default()), &loaded);
+
+        let entry = app
+            .entries()
+            .first()
+            .expect("the shell opens on the notice");
+        assert_eq!(entry.kind, niobe_tui::app::EntryKind::Notice);
+        assert_eq!(entry.meta, path.display().to_string());
+        assert!(entry.body.contains("niobe trust"), "{}", entry.body);
+        assert!(
+            entry.body.contains("arrives with a clone"),
+            "{}",
+            entry.body
+        );
+    }
+
+    #[test]
+    fn a_shell_whose_config_needs_no_trust_opens_on_nothing() {
+        let loaded = config::Loaded {
+            config: niobe_config::Config::default(),
+            searched: Vec::new(),
+            untrusted: None,
+        };
+
+        let app = say_untrusted(App::new(niobe_tui::app::Repo::default()), &loaded);
+
+        assert!(app.entries().is_empty());
     }
 
     #[test]
