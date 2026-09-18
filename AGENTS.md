@@ -63,16 +63,21 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
-  `translate.rs` turns one line of it into events and owns no process, `driver.rs` spawns the
+  `translate.rs` turns one message of it into events and owns no process, `driver.rs` spawns the
   binary, keeps its standard input open for the life of the session and answers the permission
-  prompts the CLI stops turns on. `tests/stream.rs` folds
-  the recorded streams in `tests/fixtures/`, whose README carries the arithmetic the tests assert
-  — including the `git diff --numstat` figures the per-file `+`/`−` counts are checked against.
+  prompts the CLI stops turns on; `transcript.rs` reads the session files the CLI keeps for
+  itself, so a session started in plain Claude Code can be listed and carried on — it writes
+  nothing back, and folds through the same `translate.rs` as the live stream. `tests/stream.rs`
+  and `tests/transcript.rs` fold the recordings in `tests/fixtures/`, whose README carries the
+  arithmetic the tests assert — including the `git diff --numstat` figures the per-file `+`/`−`
+  counts are checked against.
   The codex bridge names its binary and does not spawn it yet.
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
   the TUI, and the only one that wires the others together: it finds the config files and opens
   the shell under the selected profile, with the session store as its journal and the
-  repository's config as the place a standing answer is kept. `tests/cli.rs` runs the binary;
+  repository's config as the place a standing answer is kept. `backend.rs` is the only module
+  that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
+  `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal; `tests/permission.rs` walks a recorded permission
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.

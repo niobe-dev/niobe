@@ -363,12 +363,87 @@ fn recorded(root: &Path, count: usize) {
 /// Runs the binary in `cwd` with standard output on a pipe, which is what makes
 /// `--resume` print the fold instead of opening the shell.
 fn niobe(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_niobe"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_niobe"));
+    command
         .args(args)
         .current_dir(cwd)
-        .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
-        .output()
-        .expect("the niobe binary runs")
+        .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"));
+    command.output().expect("the niobe binary runs")
+}
+
+/// The transcript fixture the bridge folds, and the id the CLI calls it by.
+const TRANSCRIPT: &str = "../niobe-bridge-claude/tests/fixtures/transcripts/\
+                          2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42.jsonl";
+const TRANSCRIPT_SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
+
+/// A configuration directory for the `claude` CLI holding that transcript as a
+/// session it recorded in `cwd`, in the layout the CLI writes.
+///
+/// The name is made from the working directory as a process sees it, which is
+/// the resolved one: a temporary directory on macOS is reached through a
+/// symlink, and both binaries run in the directory behind it.
+fn claude_config_with_the_transcript(cwd: &Path) -> tempfile::TempDir {
+    let config = tempfile::tempdir().expect("a temporary directory can be created");
+    let cwd = std::fs::canonicalize(cwd).expect("the working directory resolves");
+    let flattened: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| match c {
+            '/' | '.' => '-',
+            other => other,
+        })
+        .collect();
+    let dir = config.path().join("projects").join(flattened);
+    std::fs::create_dir_all(&dir).expect("the project directory can be made");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(TRANSCRIPT),
+        dir.join(format!("{TRANSCRIPT_SESSION}.jsonl")),
+    )
+    .expect("the transcript is copied");
+    config
+}
+
+#[test]
+fn a_claude_session_read_in_is_a_niobe_session_from_then_on() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+
+    // The last thing the CLI said, drawn in the shell's own transcript: the
+    // history came in, and the shell opened at the end of it.
+    terminal.shows("Done: the catalog response carries an etag.");
+    // The thirteen events the transcript folds to, in the store.
+    recorded(repo.path(), 13);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert!(status.success(), "the imported session ended with {status}");
+    assert!(
+        drawn.contains("niobe session 1"),
+        "the shell did not say which session it became:\n{drawn}"
+    );
+    // From here on it is Niobe's, resumed by its number, and folds to what the
+    // transcript did.
+    let resumed = niobe(repo.path(), &["--resume", "1"]);
+    let out = String::from_utf8(resumed.stdout).expect("stdout is UTF-8");
+    assert!(resumed.status.success());
+    assert!(
+        out.contains("905 in · 75 out · 2,100 cache read · 150 cache write"),
+        "{out}"
+    );
+    assert!(
+        out.contains("2 from you · 2 from the agent"),
+        "the operator's own turns came in with the rest:\n{out}"
+    );
+    assert!(out.contains("1 changed — +3 −1"), "{out}");
 }
 
 #[test]

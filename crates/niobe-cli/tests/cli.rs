@@ -50,10 +50,22 @@ fn niobe(cwd: &Path, args: &[&str]) -> Output {
 
 /// Runs the binary with `config_home` as the user's config directory.
 fn niobe_with_user_config(cwd: &Path, config_home: &Path, args: &[&str]) -> Output {
+    niobe_with(cwd, config_home, &cwd.join("no-claude-sessions-here"), args)
+}
+
+/// Runs the binary with `config_home` as the user's config directory and
+/// `claude_config` as the one the `claude` CLI would keep its own sessions in.
+///
+/// Both are pointed at directories of the test's own, and `HOME` is cleared:
+/// the operator's real sessions would otherwise be listed by every test that
+/// runs `niobe sessions` on this machine.
+fn niobe_with(cwd: &Path, config_home: &Path, claude_config: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_niobe"))
         .args(args)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", config_home)
+        .env("CLAUDE_CONFIG_DIR", claude_config)
+        .env_remove("HOME")
         .output()
         .expect("the niobe binary runs")
 }
@@ -233,6 +245,107 @@ fn listing_sessions_where_nothing_was_recorded_creates_nothing() {
     assert!(!dir.path().join(".niobe").exists());
 }
 
+/// The transcript fixture the bridge folds, and the id the CLI calls it by.
+const TRANSCRIPT: &str = "../niobe-bridge-claude/tests/fixtures/transcripts/\
+                          2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42.jsonl";
+const TRANSCRIPT_SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
+
+/// A configuration directory for the `claude` CLI holding that transcript as a
+/// session recorded in `cwd`, in the layout the CLI writes.
+fn claude_config_with_the_transcript(cwd: &Path) -> tempfile::TempDir {
+    let config = tempfile::tempdir().expect("a temporary directory can be created");
+    // The name is made from the working directory as a process sees it, which
+    // is the resolved one: a temporary directory on macOS is reached through a
+    // symlink, and both binaries run in the directory behind it.
+    let cwd = std::fs::canonicalize(cwd).expect("the working directory resolves");
+    let flattened: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| match c {
+            '/' | '.' => '-',
+            other => other,
+        })
+        .collect();
+    let dir = config.path().join("projects").join(flattened);
+    std::fs::create_dir_all(&dir).expect("the project directory can be made");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(TRANSCRIPT),
+        dir.join(format!("{TRANSCRIPT_SESSION}.jsonl")),
+    )
+    .expect("the transcript is copied");
+    config
+}
+
+#[test]
+fn the_session_list_names_the_claude_sessions_this_repository_can_carry_on() {
+    let setup = Configured::new("", "");
+    let claude = claude_config_with_the_transcript(setup.repo.path());
+
+    let output = setup.run_with_claude_sessions(claude.path(), &["sessions"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(out.contains("nothing recorded by niobe"), "{out}");
+    assert!(out.contains(TRANSCRIPT_SESSION), "{out}");
+    assert!(out.contains("add an etag to the catalog response"), "{out}");
+    assert!(
+        out.contains("niobe --resume <id>"),
+        "the list does not say how to carry one on:\n{out}"
+    );
+}
+
+#[test]
+fn a_claude_session_folds_into_the_history_and_the_bill_the_cli_recorded() {
+    let setup = Configured::new("", "");
+    let claude = claude_config_with_the_transcript(setup.repo.path());
+
+    let output = setup.run_with_claude_sessions(claude.path(), &["--resume", TRANSCRIPT_SESSION]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(out.contains(TRANSCRIPT_SESSION), "{out}");
+    // The numbers the bridge's fixture README derives from the transcript.
+    assert!(
+        out.contains("905 in · 75 out · 2,100 cache read · 150 cache write"),
+        "the tokens the CLI recorded:\n{out}"
+    );
+    assert!(
+        out.contains("2 from you · 2 from the agent"),
+        "the turns of both sides:\n{out}"
+    );
+    assert!(
+        out.contains("1 changed — +3 −1"),
+        "what the session changed:\n{out}"
+    );
+    // The CLI closed the session with what it had cost, so the figure is what
+    // it recorded and not a floor.
+    assert!(
+        out.contains("cost        $0.05"),
+        "the cost the CLI recorded:\n{out}"
+    );
+    assert!(
+        !out.contains("≥$"),
+        "a recorded cost was shown as a floor:\n{out}"
+    );
+    // Reading a transcript writes nothing: a look at one leaves the repository
+    // as it was, and the CLI's own directory is never written to at all.
+    assert!(!setup.repo.path().join(".niobe").exists());
+}
+
+#[test]
+fn a_claude_session_this_repository_does_not_have_names_where_it_was_looked_for() {
+    let setup = Configured::new("", "");
+    let claude = claude_config_with_the_transcript(setup.repo.path());
+
+    let output = setup.run_with_claude_sessions(claude.path(), &["--resume", "no-such-session"]);
+    let err = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(err.contains("no claude session no-such-session"), "{err}");
+    assert!(err.contains("projects"), "{err}");
+    assert!(err.contains("niobe sessions"), "{err}");
+}
+
 #[test]
 fn a_log_with_a_bad_line_names_the_line() {
     let dir = tempfile::tempdir().expect("a temporary directory can be created");
@@ -276,6 +389,11 @@ impl Configured {
 
     fn run(&self, args: &[&str]) -> Output {
         niobe_with_user_config(self.repo.path(), self.user.path(), args)
+    }
+
+    /// Runs the binary with the `claude` CLI's own sessions in `claude`.
+    fn run_with_claude_sessions(&self, claude: &Path, args: &[&str]) -> Output {
+        niobe_with(self.repo.path(), self.user.path(), claude, args)
     }
 
     fn user_config(&self) -> PathBuf {

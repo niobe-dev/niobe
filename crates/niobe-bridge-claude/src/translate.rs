@@ -227,6 +227,18 @@ impl Translator {
         self
     }
 
+    /// The same translator, told what the CLI calls the session before it has
+    /// said so itself.
+    ///
+    /// A live session learns the id from the `init` message the CLI opens
+    /// with; a transcript read off disk is named by the file it is in, and
+    /// there is no `init` in it.
+    #[must_use]
+    pub fn of_session(mut self, id: impl Into<String>) -> Self {
+        self.backend_session = Some(id.into());
+        self
+    }
+
     /// The id the CLI calls this session by, once it has said.
     pub fn backend_session(&self) -> Option<&str> {
         self.backend_session.as_deref()
@@ -260,28 +272,43 @@ impl Translator {
     /// know, become a warning entry: the CLI ships new shapes with new
     /// versions, and a bridge that dies on one takes the session with it.
     pub fn line(&mut self, line: &str) -> Vec<Event> {
-        let mut out = Vec::new();
         match serde_json::from_str::<wire::Message>(line) {
-            Ok(wire::Message::System(system)) => self.system(system, &mut out),
-            Ok(wire::Message::Assistant(envelope)) => self.assistant(envelope, &mut out),
-            Ok(wire::Message::User(envelope)) => self.user(envelope, &mut out),
-            Ok(wire::Message::StreamEvent(event)) => self.stream(event, &mut out),
-            Ok(wire::Message::ControlRequest(request)) => self.control(request, &mut out),
-            Ok(wire::Message::Result(outcome)) => self.result(outcome, &mut out),
-            Ok(wire::Message::ControlResponse(response)) => self.answered(response, &mut out),
-            // Recognised, and carried by nothing in the event model yet; see
-            // the module documentation.
-            Ok(wire::Message::RateLimitEvent(_)) => {}
-            Ok(wire::Message::Unknown) => out.push(warn(format!(
+            Ok(wire::Message::Unknown) => vec![warn(format!(
                 "the CLI sent a message of type `{}`, which this version of Niobe does not \
                  know how to read. It was not counted.",
                 kind_of(line)
-            ))),
-            Err(error) => out.push(warn(format!(
+            ))],
+            Ok(message) => self.message(message),
+            Err(error) => vec![warn(format!(
                 "the CLI sent a `{}` message this version of Niobe could not read, so it was \
                  not counted: {error}",
                 kind_of(line)
-            ))),
+            ))],
+        }
+    }
+
+    /// The events one of the CLI's messages produced.
+    ///
+    /// Split from [`Translator::line`] because a message reaches Niobe two
+    /// ways: off the live stream, a line at a time, and out of the transcript
+    /// the CLI keeps for itself, which carries the same messages in envelopes
+    /// of its own. Both fold through here, so the two cannot drift.
+    pub(crate) fn message(&mut self, message: wire::Message) -> Vec<Event> {
+        let mut out = Vec::new();
+        match message {
+            wire::Message::System(system) => self.system(system, &mut out),
+            wire::Message::Assistant(envelope) => self.assistant(envelope, &mut out),
+            wire::Message::User(envelope) => self.user(envelope, &mut out),
+            wire::Message::StreamEvent(event) => self.stream(event, &mut out),
+            wire::Message::ControlRequest(request) => self.control(request, &mut out),
+            wire::Message::Result(outcome) => self.result(outcome, &mut out),
+            wire::Message::ControlResponse(response) => self.answered(response, &mut out),
+            // Recognised, and carried by nothing in the event model yet; see
+            // the module documentation.
+            wire::Message::RateLimitEvent(_) => {}
+            // Only the line a message arrived on says what type it was, so
+            // whoever read that line is the one that can report it.
+            wire::Message::Unknown => {}
         }
         out
     }
@@ -902,7 +929,7 @@ impl Translator {
 /// standing rule does not already allow", which is Niobe's `ask`. The rest —
 /// `acceptEdits`, `bypassPermissions`, `dontAsk` — are modes the shell has no
 /// word for, and a wrong word for one is worse than none.
-fn read_mode(mode: &str) -> Option<Mode> {
+pub(crate) fn read_mode(mode: &str) -> Option<Mode> {
     match mode {
         "plan" => Some(Mode::Plan),
         "default" | "manual" => Some(Mode::Ask),
@@ -912,7 +939,7 @@ fn read_mode(mode: &str) -> Option<Mode> {
 }
 
 /// A non-fatal entry: something the session should show and go on from.
-fn warn(message: String) -> Event {
+pub(crate) fn warn(message: String) -> Event {
     Event::Error {
         message,
         fatal: false,
@@ -921,7 +948,7 @@ fn warn(message: String) -> Event {
 
 /// The `type` of a line, for a message that could not be read as one. Read
 /// separately and only on this path, so that the common case parses once.
-fn kind_of(line: &str) -> String {
+pub(crate) fn kind_of(line: &str) -> String {
     serde_json::from_str::<wire::Tag>(line)
         .ok()
         .and_then(|tag| tag.kind)

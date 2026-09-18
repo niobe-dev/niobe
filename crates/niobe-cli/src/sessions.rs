@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! The session list `niobe sessions` prints.
+//! The session lists `niobe sessions` prints: Niobe's own, and the ones the
+//! `claude` CLI recorded for this repository and Niobe can carry on.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use niobe_store::SessionSummary;
 
+use crate::backend::Recorded;
+
 /// How much of a first prompt fits on a list line.
 const PROMPT_CHARS: usize = 60;
+
+/// What stands where a session has no prompt to be named by.
+const NOTHING: &str = "—";
 
 /// The list, one session per line under a header, newest first.
 pub fn table(sessions: &[SessionSummary]) -> Vec<String> {
@@ -31,7 +37,42 @@ pub fn table(sessions: &[SessionSummary]) -> Vec<String> {
             s.events,
             s.first_prompt
                 .as_deref()
-                .map_or_else(|| "—".to_owned(), prompt_line)
+                .map_or_else(|| NOTHING.to_owned(), prompt_line)
+        )
+    }));
+    lines
+}
+
+/// The sessions the `claude` CLI recorded, one per line under a header of
+/// their own, newest first.
+///
+/// Kept apart from Niobe's own rather than merged into one table: the two are
+/// named in different id spaces and only one of them has been folded, and a
+/// single list would have to pretend they are the same thing.
+pub fn recorded(sessions: &[Recorded]) -> Vec<String> {
+    let id_width = sessions
+        .iter()
+        .map(|s| s.id.len())
+        .max()
+        .unwrap_or(0)
+        .max("ID".len());
+
+    let mut lines = vec![
+        "claude sessions in this repository — `niobe --resume <id>` reads one in and \
+         carries it on:"
+            .to_owned(),
+        format!("{:<id_width$}  {:<16}  FIRST PROMPT", "ID", "LAST (UTC)"),
+    ];
+    lines.extend(sessions.iter().map(|s| {
+        format!(
+            "{:<id_width$}  {:<16}  {}",
+            s.id,
+            // A transcript the filesystem gave no time for says so, rather
+            // than being dated to the epoch.
+            s.last_at.map_or_else(|| NOTHING.to_owned(), utc_minute),
+            s.first_prompt
+                .as_deref()
+                .map_or_else(|| NOTHING.to_owned(), prompt_line)
         )
     }));
     lines
@@ -105,6 +146,36 @@ mod tests {
         let cut = prompt_line(&long);
         assert_eq!(cut.chars().count(), PROMPT_CHARS);
         assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn the_claude_list_says_how_to_carry_one_on_and_marks_what_it_was_not_told() {
+        let sessions = [
+            Recorded {
+                id: "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42".to_owned(),
+                last_at: Some(at(1_789_000_000)),
+                first_prompt: Some("add an etag".to_owned()),
+            },
+            Recorded {
+                id: "short".to_owned(),
+                last_at: None,
+                first_prompt: None,
+            },
+        ];
+
+        let lines = recorded(&sessions);
+
+        assert!(lines[0].contains("niobe --resume <id>"), "{lines:?}");
+        assert_eq!(
+            &lines[1..],
+            [
+                "ID                                    LAST (UTC)        FIRST PROMPT",
+                "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42  2026-09-10 00:26  add an etag",
+                // Neither is a zero and neither is the epoch: a transcript the
+                // filesystem gave no time for and one that said nothing.
+                "short                                 —                 —",
+            ]
+        );
     }
 
     #[test]

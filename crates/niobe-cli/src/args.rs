@@ -15,9 +15,10 @@ use niobe_store::SessionId;
 pub enum Command {
     /// Open the shell on a new session.
     Shell,
-    /// Open the shell on a recorded session and keep recording into it.
-    Resume(SessionId),
-    /// List the sessions recorded in this repository.
+    /// Open the shell on an earlier session and keep recording into it.
+    Resume(Resume),
+    /// List the sessions recorded in this repository, Niobe's own and the
+    /// `claude` CLI's.
     Sessions,
     /// List the profiles the config defines, marking the selected one.
     Profiles,
@@ -29,6 +30,20 @@ pub enum Command {
     Help,
     /// Print the version.
     Version,
+}
+
+/// Which session `--resume` names.
+///
+/// Two lists answer to one flag because the operator has one question — what
+/// can I carry on with? — and `niobe sessions` prints both answers under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resume {
+    /// One Niobe recorded, by the number `niobe sessions` prints.
+    Recorded(SessionId),
+    /// One the `claude` CLI recorded for this repository, by the id it calls
+    /// it by. Its history is read into a session of Niobe's own and the CLI is
+    /// asked to continue the conversation.
+    Imported(String),
 }
 
 /// A command, and what it was asked to run under.
@@ -140,11 +155,11 @@ fn command(args: &[&str]) -> Result<Command, String> {
         }
         ["--resume", id, rest @ ..] => {
             no_more(rest)?;
-            Command::Resume(session_id(id)?)
+            Command::Resume(resume(id)?)
         }
         [flag, rest @ ..] if flag.starts_with("--resume=") => {
             no_more(rest)?;
-            Command::Resume(session_id(&flag["--resume=".len()..])?)
+            Command::Resume(resume(&flag["--resume=".len()..])?)
         }
         ["sessions", rest @ ..] => {
             no_more(rest)?;
@@ -169,9 +184,21 @@ fn command(args: &[&str]) -> Result<Command, String> {
     Ok(command)
 }
 
-fn session_id(id: &str) -> Result<SessionId, String> {
-    id.parse()
-        .map_err(|_| format!("`{id}` is not a session id; `niobe sessions` lists them"))
+/// The session an id names.
+///
+/// A number is one of Niobe's own, because that is what the store allocates
+/// and what the session list prints. Anything else is taken as an id the
+/// `claude` CLI calls a session of its own by: whether there is such a session
+/// is a question for this repository's transcripts, not for the command line,
+/// and refusing an id here on its shape would refuse one the CLI is holding.
+fn resume(id: &str) -> Result<Resume, String> {
+    if id.trim().is_empty() {
+        return Err("`--resume` needs a session id; `niobe sessions` lists them".to_owned());
+    }
+    Ok(match id.parse::<SessionId>() {
+        Ok(recorded) => Resume::Recorded(recorded),
+        Err(_) => Resume::Imported(id.to_owned()),
+    })
 }
 
 fn no_more(rest: &[&str]) -> Result<(), String> {
@@ -197,8 +224,8 @@ mod tests {
         invocation(args).map(|i| i.profile)
     }
 
-    fn id(n: &str) -> SessionId {
-        n.parse().expect("a number is a session id")
+    fn id(n: &str) -> Resume {
+        Resume::Recorded(n.parse().expect("a number is a session id"))
     }
 
     #[test]
@@ -213,11 +240,27 @@ mod tests {
     }
 
     #[test]
-    fn resume_without_a_usable_id_points_at_the_session_list() {
-        for args in [&["--resume"][..], &["--resume", "latest"], &["--resume="]] {
-            let error = parsed(args).expect_err("no usable id");
+    fn resume_without_an_id_at_all_points_at_the_session_list() {
+        for args in [&["--resume"][..], &["--resume="], &["--resume", " "]] {
+            let error = parsed(args).expect_err("no id");
             assert!(error.contains("niobe sessions"), "{args:?}: {error}");
         }
+    }
+
+    #[test]
+    fn an_id_that_is_not_one_of_niobes_numbers_is_one_the_claude_cli_holds() {
+        assert_eq!(
+            parsed(&["--resume", "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42"]),
+            Ok(Command::Resume(Resume::Imported(
+                "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42".to_owned()
+            )))
+        );
+        // Which of the two lists holds it is not the command line's to say:
+        // an id that names neither is reported when it is looked for.
+        assert_eq!(
+            parsed(&["--resume=latest"]),
+            Ok(Command::Resume(Resume::Imported("latest".to_owned())))
+        );
     }
 
     #[test]

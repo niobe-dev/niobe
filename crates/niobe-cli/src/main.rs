@@ -3,10 +3,11 @@
 
 //! The `niobe` binary.
 //!
-//! Opens the shell on a new or a recorded session under a profile from the
-//! config, lists the sessions recorded in a repository, the profiles defined for
-//! it and the prices costs are computed from, and folds a JSON Lines event log
-//! for development. It is the only crate that names the shell, the config, the
+//! Opens the shell on a new session, on one it recorded earlier or on one the
+//! `claude` CLI recorded for itself, under a profile from the config; lists the
+//! sessions a repository can carry on, the profiles defined for it and the
+//! prices costs are computed from; and folds a JSON Lines event log for
+//! development. It is the only crate that names the shell, the config, the
 //! ledger and the session store together, so it is where they are joined.
 
 // The CLI is the one place in the workspace that writes to the terminal
@@ -35,7 +36,7 @@ use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
 use niobe_tui::{Detached, Ended, Forgotten};
 
-use crate::args::{Command, Invocation};
+use crate::args::{Command, Invocation, Resume};
 use crate::journal::StoreJournal;
 use crate::rules::ConfigRules;
 
@@ -105,7 +106,8 @@ fn run(
     let profile = profile.as_deref();
     match command {
         Command::Shell => shell(profile, budget),
-        Command::Resume(session) => resume(session, profile, budget),
+        Command::Resume(Resume::Recorded(session)) => resume(session, profile, budget),
+        Command::Resume(Resume::Imported(session)) => import(&session, profile, budget),
         Command::Sessions => list_sessions(),
         Command::Profiles => list_profiles(profile),
         Command::Prices(model) => list_prices(model.as_deref()),
@@ -260,19 +262,133 @@ fn resume(session: SessionId, profile: Option<&str>, budget: Option<f64>) -> Res
         .map(|_| ())
 }
 
-/// Prints the sessions recorded in this repository, newest first.
+/// Opens the shell on a session the `claude` CLI recorded, reading its history
+/// into a session of Niobe's own and asking the CLI to carry the conversation
+/// on. Without a terminal, prints what the transcript folds to.
+///
+/// Nothing is written back to the CLI's own store. What is read becomes a
+/// Niobe session like any other, so from here on `niobe --resume <number>`
+/// continues it and every total on screen is a fold over the same events.
+fn import(session: &str, profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
+    let cwd = cwd()?;
+    let root = repo::root(&cwd);
+    let loaded = config::load(&root)?;
+    let selected = loaded.select(profile)?;
+
+    let started = Instant::now();
+    let events = backend::history(
+        selected.as_ref(),
+        &root,
+        session,
+        std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
+        std::env::var_os("HOME"),
+    )?;
+    let mut app = App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone());
+    if let Some(selected) = &selected {
+        app = app.with_profile(config::named(*selected));
+    }
+    if let Some(budget) = budget {
+        app = app.with_budget(budget);
+    }
+    app.extend(&events);
+    let elapsed = started.elapsed();
+
+    if !std::io::stdout().is_terminal() {
+        print_summary(
+            &format!(
+                "claude session {session} · {} events · read and folded in {}",
+                events.len(),
+                millis(elapsed)
+            ),
+            &app,
+        );
+        return Ok(());
+    }
+
+    // Recorded only once there is a terminal to continue it on: a piped run is
+    // a look at the transcript, and leaving a session behind for one would put
+    // a conversation in the list that nobody carried on.
+    let mut recorder = Recorder::new(repo::open_or_create_store(&root)?);
+    for event in &events {
+        recorder.record(event).map_err(|e| e.to_string())?;
+    }
+
+    let mut backend = backend::attach(
+        &root,
+        selected.as_ref(),
+        &backend::Attach {
+            // The CLI's own id, which is the only thing that can hand the
+            // conversation back.
+            resume: Some(session.to_owned()),
+            mode: app.session().mode(),
+            budget_usd: budget,
+        },
+    )?;
+    let app = if backend.attached() {
+        app.attached()
+    } else {
+        app
+    };
+
+    let mut journal = StoreJournal::Open(recorder);
+    let mut rules = ConfigRules::at(&root);
+    let ended = niobe_tui::run(app, &mut journal, backend.bridge(), &mut rules)
+        .map_err(|e| e.to_string())?;
+
+    match ended {
+        Ended::TerminalGone => return Ok(()),
+        Ended::Quit => {}
+    }
+    if let Some(recorded) = journal.session() {
+        println!(
+            "claude session {session} is niobe session {recorded} in {} — \
+             `niobe --resume {recorded}` continues it",
+            repo::store_path(&root).display()
+        );
+    }
+    Ok(())
+}
+
+/// Prints the sessions this repository can carry on, newest first: the ones
+/// Niobe recorded, and the ones the `claude` CLI recorded for itself.
+///
+/// The config is read because a profile can point the CLI at another
+/// configuration directory, which is where its own sessions would then be —
+/// but a config that cannot be read does not stop the list. What a repository
+/// can be carried on with is the one question that has to have an answer while
+/// the config is being fixed, and where the CLI keeps its sessions is then read
+/// from this process's own environment alone.
 fn list_sessions() -> Result<(), String> {
     let root = repo::root(&cwd()?);
-    let sessions = match repo::open_existing_store(&root)? {
+    let loaded = config::load(&root).ok();
+    let selected = loaded
+        .as_ref()
+        .and_then(|loaded| loaded.select(None).ok().flatten());
+
+    let recorded = match repo::open_existing_store(&root)? {
         Some(store) => store.sessions().map_err(|e| e.to_string())?,
         None => Vec::new(),
     };
+    let imported = backend::recorded(
+        selected.as_ref(),
+        &root,
+        std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
+        std::env::var_os("HOME"),
+    )?;
 
-    if sessions.is_empty() {
+    if recorded.is_empty() && imported.is_empty() {
         println!("no sessions recorded in {}", root.display());
         return Ok(());
     }
-    for line in sessions::table(&sessions) {
+    let mut lines = match recorded.is_empty() {
+        true => vec![format!("nothing recorded by niobe in {}", root.display())],
+        false => sessions::table(&recorded),
+    };
+    if !imported.is_empty() {
+        lines.push(String::new());
+        lines.extend(sessions::recorded(&imported));
+    }
+    for line in lines {
         println!("{line}");
     }
     Ok(())
@@ -367,8 +483,8 @@ A terminal coding agent that shows you the bill.
 
 USAGE:
     niobe                  Open the shell on a new session
-    niobe --resume <id>    Open the shell on a recorded session and continue it
-    niobe sessions         List the sessions recorded in this repository
+    niobe --resume <id>    Open the shell on an earlier session and continue it
+    niobe sessions         List the sessions this repository can carry on
     niobe profiles         List the profiles the config defines, the selected one marked
     niobe prices [model]   List the prices in force today, or every price a model has had
     niobe replay <file>    Fold a JSON Lines event log into the shell (development)
@@ -421,6 +537,26 @@ SESSIONS:
     of the repository it runs in, or of the working directory outside one.
     With standard output redirected, --resume and replay print what the session
     folds to instead of opening the shell.
+
+    niobe sessions lists two kinds. The first is niobe's own, by the number the
+    store gave them. The second is the sessions the claude CLI recorded for
+    this repository, by the id it calls them by: --resume with one of those
+    reads the CLI's own transcript in as the history of a new niobe session and
+    asks the CLI to carry the conversation on, so a session started in plain
+    Claude Code continues here. From then on it is a niobe session like any
+    other and its number resumes it.
+
+    Nothing is ever written back into the CLI's own store. Its transcripts are
+    under ~/.claude/projects (CLAUDE_CONFIG_DIR/projects when that is set), one
+    directory per working directory it has run in; niobe reads the transcripts
+    there and nothing else in that directory.
+
+    The history an import brings in is the transcript's, so it carries what the
+    CLI wrote down: the turns, the tool calls, the files they changed, the
+    tokens each message was billed and what the session had cost when the CLI
+    last closed it. A session the CLI has not closed yet has no cost recorded
+    in it, and niobe shows what it can count rather than a figure nobody
+    reported.
 
 IN THE SHELL:
     Enter                  Send what is in the composer

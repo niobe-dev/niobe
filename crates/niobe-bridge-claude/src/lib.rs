@@ -9,13 +9,16 @@
 //! touches subscription credentials, and everything this bridge knows it
 //! learned from documented flags and the messages the CLI prints.
 //!
-//! Two halves, and they are separable on purpose:
+//! Three parts, and they are separable on purpose:
 //!
 //! * [`Translator`] turns one line of stream-json into [`Event`]s. It owns no
 //!   process and does no I/O, so a recorded log exercises exactly the code a
 //!   live session runs.
 //! * [`Session`] spawns the CLI, keeps its standard input open for the life of
 //!   the session, and reads its output through a [`Translator`] on a thread.
+//! * [`transcript`] reads the session files the CLI keeps for itself, so that
+//!   a session started in plain Claude Code can be shown and continued here.
+//!   It writes nothing back.
 //!
 //! The CLI's own types stay in this crate — they are not public anywhere — so
 //! nothing vendor-shaped can reach the TUI or the ledger.
@@ -36,6 +39,8 @@
 mod driver;
 mod translate;
 mod wire;
+
+pub mod transcript;
 
 pub use driver::{BINARY, Options, Session, SpawnError};
 pub use translate::{Asked, Translator};

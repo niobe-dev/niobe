@@ -7,8 +7,11 @@
 //! that implements [`Bridge`] and never learns which one, which is what keeps
 //! a second backend a file here rather than a change everywhere.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use niobe_bridge_claude::transcript;
 use niobe_bridge_claude::{Options, Session, SpawnError};
 use niobe_config::Selected;
 use niobe_core::event::{Backend, Event, Mode, PermissionDecision, ToolCallId};
@@ -85,6 +88,104 @@ pub fn attach(
         // and no backend. The shell says which it is when a prompt is sent.
         Backend::Codex | Backend::Native => Ok(detached()),
     }
+}
+
+/// One session a backend recorded for itself, as the session list shows it.
+///
+/// The bridge's own type does not leave this module. A session list is drawn
+/// from what any backend can say about a session of its own — what it calls
+/// it, when it last wrote to it, and what it was asked — and not from what the
+/// `claude` CLI happens to write down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded {
+    /// The id the backend calls the session by, which is what `--resume`
+    /// takes.
+    pub id: String,
+    /// When the backend last wrote to it, where it could say.
+    pub last_at: Option<SystemTime>,
+    /// The first thing the operator asked it, where there is one.
+    pub first_prompt: Option<String>,
+}
+
+/// Where the `claude` CLI keeps the transcripts of the sessions it has run in
+/// `cwd`, from the values of `CLAUDE_CONFIG_DIR` and `HOME`.
+///
+/// The profile's own environment is read first, because it is the environment
+/// the CLI would be started with: a profile that points the binary at another
+/// configuration directory points its transcripts there too.
+///
+/// `None` where nothing says which directory that is, which is a machine with
+/// neither variable set.
+pub fn transcripts(
+    profile: Option<&Selected<'_>>,
+    cwd: &Path,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    let configured = profile
+        .and_then(|selected| selected.profile.env().get(transcript::CONFIG_DIR_VAR))
+        .map(OsString::from)
+        .or(config_dir);
+    let config = transcript::config_dir(configured.as_deref(), home.as_deref())?;
+    Some(transcript::directory(&config, cwd))
+}
+
+/// The sessions the `claude` CLI has recorded for `cwd`, newest first.
+///
+/// A machine that says nothing about where the CLI keeps its state has no such
+/// sessions to offer, which is an empty list and not a failure: Niobe's own
+/// sessions are still there to list.
+pub fn recorded(
+    profile: Option<&Selected<'_>>,
+    cwd: &Path,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<Vec<Recorded>, String> {
+    let Some(dir) = transcripts(profile, cwd, config_dir, home) else {
+        return Ok(Vec::new());
+    };
+    let listed = transcript::list(&dir).map_err(|e| e.to_string())?;
+    Ok(listed
+        .into_iter()
+        .map(|transcript| Recorded {
+            id: transcript.id,
+            last_at: transcript.last_at,
+            first_prompt: transcript.first_prompt,
+        })
+        .collect())
+}
+
+/// Everything one of those sessions says happened, as events.
+///
+/// The transcript is read and nothing is written back: the CLI's store stays
+/// the CLI's, and the id is handed to its own `--resume` to carry the
+/// conversation on.
+pub fn history(
+    profile: Option<&Selected<'_>>,
+    cwd: &Path,
+    session: &str,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<Vec<Event>, String> {
+    let dir = transcripts(profile, cwd, config_dir, home).ok_or_else(|| {
+        format!(
+            "cannot look for claude session {session}: neither {} nor HOME says where the \
+             claude CLI keeps its sessions",
+            transcript::CONFIG_DIR_VAR
+        )
+    })?;
+    let path = dir.join(format!("{session}.jsonl"));
+    if !path.exists() {
+        return Err(format!(
+            "no claude session {session} in {}; `niobe sessions` lists the ones there are",
+            dir.display()
+        ));
+    }
+    // The transcript says nothing about the profile it was recorded under, so
+    // what goes on the session is the profile it is being continued under —
+    // and nothing, where none was selected.
+    let name = profile.map_or("", |selected| selected.name);
+    transcript::events(&path, name, cwd).map_err(|e| e.to_string())
 }
 
 /// What the `claude` bridge is spawned with under `profile`.
@@ -257,6 +358,51 @@ mod tests {
         // session that starts anywhere else would move on the first keypress.
         assert_eq!(options.mode, Mode::Ask);
         assert_eq!(options.budget_usd, None);
+    }
+
+    #[test]
+    fn a_profile_that_moves_the_clis_configuration_directory_moves_its_sessions_with_it() {
+        let config = config(
+            "[profiles.max]\nbackend = \"claude\"\nenv = { CLAUDE_CONFIG_DIR = \"/elsewhere\" }\n",
+        );
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let home = Some(OsString::from("/home/me"));
+
+        assert_eq!(
+            transcripts(
+                Some(&selected),
+                Path::new("/w/repo"),
+                Some(OsString::from("/ignored")),
+                home.clone()
+            ),
+            Some(PathBuf::from("/elsewhere/projects/-w-repo"))
+        );
+        // With no profile saying otherwise, where this process was told.
+        assert_eq!(
+            transcripts(
+                None,
+                Path::new("/w/repo"),
+                Some(OsString::from("/elsewhere")),
+                home.clone()
+            ),
+            Some(PathBuf::from("/elsewhere/projects/-w-repo"))
+        );
+        assert_eq!(
+            transcripts(None, Path::new("/w/repo"), None, home),
+            Some(PathBuf::from("/home/me/.claude/projects/-w-repo"))
+        );
+    }
+
+    #[test]
+    fn a_machine_that_says_nothing_about_the_cli_has_no_sessions_of_its_own_to_offer() {
+        assert_eq!(transcripts(None, Path::new("/w/repo"), None, None), None);
+        assert_eq!(
+            recorded(None, Path::new("/w/repo"), None, None),
+            Ok(Vec::new())
+        );
     }
 
     #[test]
