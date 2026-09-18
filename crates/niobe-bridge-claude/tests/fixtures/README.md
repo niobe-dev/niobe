@@ -33,6 +33,10 @@ did not produce, and it carries the cases that are easy to get wrong:
   the CLI uses for its own small jobs) and whose tokens and cost therefore
   arrive only in `modelUsage`;
 - a `Task` call, which is a sub-agent rather than an action;
+- a `control_request` of subtype `can_use_tool`, which is the CLI stopping the
+  turn until something answers on its standard input. The recording is of what
+  the CLI printed, so the answer is not in it: folding the fixture leaves that
+  prompt pending, which is what an unanswered prompt is;
 - a call the CLI refused, which the stream reports **twice** — once as
   `system`/`permission_denied` between the call and its result, and again in
   the closing `result`'s `permission_denials`. Counting both would double every

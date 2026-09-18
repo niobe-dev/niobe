@@ -14,9 +14,10 @@
 //! again. The transcript's notices are the shell talking, not the session, and
 //! are neither queued nor shown again after a restart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
-use niobe_core::event::{AgentId, Backend, Event, ToolCallId, ToolOutcome};
+use niobe_core::event::{AgentId, Backend, Event, PermissionDecision, ToolCallId, ToolOutcome};
+use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::SessionState;
 use ratatui_textarea::{Input, TextArea, WrapMode};
 
@@ -46,6 +47,52 @@ pub struct SelectedProfile {
     pub name: String,
     /// The backend the profile runs.
     pub backend: Backend,
+}
+
+/// A permission prompt the shell is waiting on the operator to answer.
+///
+/// What the backend said, and nothing derived: the modal shows the tool, what
+/// it would run on and the whole of its arguments, because approving a call
+/// whose arguments were summarised away is approving something else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    /// The call being gated, which the answer is addressed by.
+    pub id: ToolCallId,
+    /// Tool name, as the backend spells it.
+    pub tool: String,
+    /// The whole of the arguments, as the backend rendered them.
+    pub input: String,
+    /// The one thing the call acts on, where the backend could name it. A
+    /// prompt without one can only be answered for the whole tool.
+    pub target: Option<String>,
+}
+
+impl Ask {
+    /// The standing rule "always this tool".
+    pub fn tool_rule(&self) -> Rule {
+        Rule::tool(self.tool.clone())
+    }
+
+    /// The standing rule "always this tool, on this target", where the prompt
+    /// has a target to write one about.
+    pub fn target_rule(&self) -> Option<Rule> {
+        self.target
+            .as_ref()
+            .map(|target| Rule::targeted(self.tool.clone(), target.clone()))
+    }
+}
+
+/// What the operator chose in the permission modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// Allowed, this call only.
+    Once,
+    /// Allowed, and every call to this tool from now on.
+    AlwaysTool,
+    /// Allowed, and every call to this tool on this target from now on.
+    AlwaysTarget,
+    /// Refused.
+    No,
 }
 
 /// What a transcript entry is, which decides its glyph and its colour.
@@ -125,6 +172,16 @@ pub struct App {
     transcript_lines: usize,
     viewport_lines: usize,
     hint: Option<String>,
+    /// Prompts waiting on the operator, oldest first. The modal shows the
+    /// front one; the rest wait behind it, because a backend can gate two
+    /// calls of the same turn and answering them out of order would put the
+    /// wrong arguments in front of the operator.
+    asks: VecDeque<Ask>,
+    /// The standing answers this session starts with, plus the ones made in
+    /// it.
+    allowed: Allowlist,
+    /// Rules made here that have not been handed out to be kept.
+    learned: Vec<Rule>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
     /// Whether a backend is listening. The shell holds no backend handle; this
@@ -162,6 +219,9 @@ impl App {
             transcript_lines: 0,
             viewport_lines: 0,
             hint: None,
+            asks: VecDeque::new(),
+            allowed: Allowlist::new(),
+            learned: Vec::new(),
             produced: Vec::new(),
             attached: false,
             should_quit: false,
@@ -278,12 +338,49 @@ impl App {
                 streaming: false,
             }),
 
+            Event::PermissionRequest {
+                id,
+                tool,
+                input,
+                target,
+            } => self.asks.push_back(Ask {
+                id: id.clone(),
+                tool: tool.clone(),
+                input: input.clone(),
+                target: target.clone(),
+            }),
+
+            // A refusal is shown as its own entry rather than left to the tool
+            // result that carries it back: a backend that reports nothing
+            // further about a call it was not allowed to make would leave a
+            // denial indistinguishable from the agent deciding not to act.
+            Event::PermissionResponse { id, decision } => {
+                let asked = self.forget_ask(id);
+                if *decision == PermissionDecision::Deny {
+                    let (tool, what) = match &asked {
+                        Some(ask) => (
+                            ask.tool.clone(),
+                            ask.target.clone().unwrap_or_else(|| one_line(&ask.input)),
+                        ),
+                        None => (id.to_string(), String::new()),
+                    };
+                    self.push(Entry {
+                        kind: EntryKind::Failure,
+                        head: "denied".to_owned(),
+                        meta: match what.is_empty() {
+                            true => tool.clone(),
+                            false => format!("{tool} · {what}"),
+                        },
+                        body: String::new(),
+                        streaming: false,
+                    });
+                }
+            }
+
             // Everything else is a number or a list a pane reads off the
             // session fold, not a line in the transcript.
             Event::SessionMeta(_)
             | Event::Usage(_)
-            | Event::PermissionRequest { .. }
-            | Event::PermissionResponse { .. }
             | Event::Decision { .. }
             | Event::Checkpoint { .. } => {}
 
@@ -319,6 +416,124 @@ impl App {
     /// has them, and are never handed out.
     pub fn take_produced(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.produced)
+    }
+
+    /// Drops a prompt from the queue, and gives it back.
+    fn forget_ask(&mut self, id: &ToolCallId) -> Option<Ask> {
+        let at = self.asks.iter().position(|ask| &ask.id == id)?;
+        self.asks.remove(at)
+    }
+
+    /// The prompt the modal is showing, if any.
+    pub fn asking(&self) -> Option<&Ask> {
+        self.asks.front()
+    }
+
+    /// How many prompts are waiting behind the one on screen.
+    pub fn asks_waiting(&self) -> usize {
+        self.asks.len().saturating_sub(1)
+    }
+
+    /// The same shell, with the standing answers a config already holds.
+    #[must_use]
+    pub fn with_rules(mut self, allowed: Allowlist) -> Self {
+        self.allowed = allowed;
+        self
+    }
+
+    /// The standing answers this session is running with.
+    pub fn allowed(&self) -> &Allowlist {
+        &self.allowed
+    }
+
+    /// Answers every waiting prompt a standing rule already covers.
+    ///
+    /// Called by the event loop and never by [`App::apply`], which is also how
+    /// a recorded session is folded: a rule that answered prompts again while
+    /// a recording was being read would write decisions into a session that
+    /// had already made its own.
+    pub fn settle_rules(&mut self) {
+        while let Some(ask) = self.asks.front() {
+            if !self.allowed.allows(&ask.tool, ask.target.as_deref()) {
+                return;
+            }
+            let id = ask.id.clone();
+            self.produce(Event::PermissionResponse {
+                id,
+                decision: PermissionDecision::Allow,
+            });
+        }
+    }
+
+    /// Answers the prompt the modal is showing.
+    ///
+    /// "Always" stores the rule as well as answering, so that the same prompt
+    /// does not come back. [`Answer::AlwaysTarget`] on a prompt the backend
+    /// named no target for allows this call and stores nothing: there is no
+    /// target to write a rule about, and widening it to the whole tool would
+    /// grant more than was asked for.
+    pub fn answer(&mut self, answer: Answer) {
+        let Some(ask) = self.asks.front().cloned() else {
+            return;
+        };
+
+        let rule = match answer {
+            Answer::Once | Answer::No => None,
+            Answer::AlwaysTool => Some(ask.tool_rule()),
+            Answer::AlwaysTarget => ask.target_rule(),
+        };
+        if let Some(rule) = rule.clone()
+            && self.allowed.insert(rule.clone())
+        {
+            self.learned.push(rule);
+        }
+
+        let decision = match (answer, rule.is_some()) {
+            (Answer::No, _) => PermissionDecision::Deny,
+            (_, true) => PermissionDecision::AllowAlways,
+            (_, false) => PermissionDecision::Allow,
+        };
+        self.produce(Event::PermissionResponse {
+            id: ask.id,
+            decision,
+        });
+        self.scroll_to_tail();
+    }
+
+    /// The rules the operator made since the last call, oldest first.
+    pub fn take_rules(&mut self) -> Vec<Rule> {
+        std::mem::take(&mut self.learned)
+    }
+
+    /// Says in the transcript that a standing answer will not outlive the
+    /// session, so the operator is not surprised by the prompt returning.
+    pub fn not_remembered(&mut self, rule: &Rule, error: &str) {
+        self.push(Entry {
+            kind: EntryKind::Failure,
+            head: "not saved".to_owned(),
+            meta: rule.to_string(),
+            body: format!(
+                "The rule holds for this session and was not written to the config, so \
+                 the prompt comes back next time: {error}"
+            ),
+            streaming: false,
+        });
+    }
+
+    /// Says in the transcript that a decision never reached the backend, so a
+    /// turn that is still waiting is not read as one that was answered.
+    pub fn not_answered(&mut self, error: &str) {
+        self.push(Entry {
+            kind: EntryKind::Failure,
+            head: "not answered".to_owned(),
+            meta: String::new(),
+            body: format!(
+                "What you just decided did not reach the backend, so the call it gates is \
+                 still waiting there: {error}"
+            ),
+            streaming: false,
+        });
+        self.scroll_to_tail();
     }
 
     /// Says in the transcript that an event could not be kept, so the operator
@@ -490,9 +705,24 @@ impl App {
         self.hint = None;
         let page = self.viewport_lines.max(1);
 
-        match (key.code, key.modifiers) {
-            (KeyCode::F(10), _) | (KeyCode::Char('q' | 'c'), KeyModifiers::CONTROL) => self.quit(),
+        // Quitting is always available: a session with a prompt up is still a
+        // session the operator may need to leave, and the backend is told the
+        // same way it is told about any other way out.
+        if let (KeyCode::F(10), _) | (KeyCode::Char('q' | 'c'), KeyModifiers::CONTROL) =
+            (key.code, key.modifiers)
+        {
+            self.quit();
+            return;
+        }
+        // A prompt takes the keyboard whole. Typing into the composer behind a
+        // modal would put the answer to a question the operator is still being
+        // asked into the next turn.
+        if self.asking().is_some() {
+            self.on_ask_key(key);
+            return;
+        }
 
+        match (key.code, key.modifiers) {
             // Alt+Enter opens a line; Enter sends. The other way round would
             // make the common action the awkward one.
             (KeyCode::Enter, KeyModifiers::ALT) => self.composer.insert_newline(),
@@ -510,6 +740,24 @@ impl App {
             _ => {
                 self.composer.input(Input::from(key));
             }
+        }
+    }
+
+    /// One key, while the permission modal is up.
+    ///
+    /// Anything that is not an answer is swallowed rather than passed on: the
+    /// operator is being asked a question, and a key that did something else
+    /// under a modal would be a key nobody meant.
+    fn on_ask_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+
+        let has_target = self.asking().is_some_and(|ask| ask.target.is_some());
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.answer(Answer::Once),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer(Answer::No),
+            KeyCode::Char('a' | 'A') => self.answer(Answer::AlwaysTool),
+            KeyCode::Char('p' | 'P') if has_target => self.answer(Answer::AlwaysTarget),
+            _ => {}
         }
     }
 
@@ -608,6 +856,7 @@ pub fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use niobe_core::event::{Backend, SessionMeta};
+    use niobe_core::permission::Rule;
     use ratatui_textarea::Key;
 
     fn app() -> App {
@@ -775,6 +1024,182 @@ mod tests {
         assert_eq!(entry.kind, EntryKind::Failure);
         assert_eq!(entry.head, "not saved");
         assert!(entry.body.ends_with("disk full"), "{}", entry.body);
+    }
+
+    /// A prompt as the bridge produces one.
+    fn prompt(target: Option<&str>) -> Event {
+        Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"rm -rf build"}"#.to_owned(),
+            target: target.map(str::to_owned),
+        }
+    }
+
+    fn key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::event::KeyEvent {
+        ratatui::crossterm::event::KeyEvent::new(
+            code,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    #[test]
+    fn a_prompt_waits_on_the_operator_and_is_answered_once() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        let ask = app.asking().expect("the modal has a prompt");
+        assert_eq!(ask.tool, "Bash");
+        assert_eq!(ask.target.as_deref(), Some("rm -rf build"));
+        assert_eq!(app.asks_waiting(), 0);
+
+        app.on_key(key(KeyCode::Char('y')));
+
+        assert!(app.asking().is_none());
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+            }]
+        );
+        assert!(
+            app.allowed().is_empty(),
+            "allowing once left a standing rule behind"
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_visible_in_the_transcript() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Char('n')));
+
+        let entry = app.entries().last().expect("an entry was pushed");
+        assert_eq!(entry.kind, EntryKind::Failure);
+        assert_eq!(entry.head, "denied");
+        assert_eq!(entry.meta, "Bash · rm -rf build");
+        assert_eq!(app.session().permissions_denied(), 1);
+    }
+
+    #[test]
+    fn always_this_tool_and_always_this_target_store_the_rule_they_name() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut by_target = app();
+        by_target.apply(&prompt(Some("rm -rf build")));
+        by_target.on_key(key(KeyCode::Char('p')));
+        assert_eq!(
+            by_target.take_rules(),
+            [Rule::targeted("Bash", "rm -rf build")]
+        );
+        assert!(!by_target.allowed().allows("Bash", Some("rm -rf dist")));
+
+        let mut by_tool = app();
+        by_tool.apply(&prompt(Some("rm -rf build")));
+        by_tool.on_key(key(KeyCode::Char('a')));
+        assert_eq!(by_tool.take_rules(), [Rule::tool("Bash")]);
+        assert!(by_tool.allowed().allows("Bash", Some("anything at all")));
+
+        // Both are allowed as well as remembered, and the stream says the
+        // answer was a standing one.
+        for mut app in [by_target, by_tool] {
+            assert_eq!(
+                app.take_produced(),
+                [Event::PermissionResponse {
+                    id: "t1".into(),
+                    decision: PermissionDecision::AllowAlways,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn a_prompt_with_no_target_cannot_be_answered_for_one() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(None));
+
+        app.on_key(key(KeyCode::Char('p')));
+
+        assert!(
+            app.asking().is_some(),
+            "the prompt was answered by a key it does not offer"
+        );
+        assert!(app.take_rules().is_empty());
+        assert!(app.take_produced().is_empty());
+    }
+
+    #[test]
+    fn a_prompt_takes_the_keyboard_from_the_composer() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        // `x` is neither an answer nor a quit: under a modal it is nothing.
+        app.on_key(key(KeyCode::Char('x')));
+
+        assert_eq!(app.composed(), "");
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn quitting_works_with_a_prompt_on_screen() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn prompts_are_answered_in_the_order_they_arrived() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+        app.apply(&Event::PermissionRequest {
+            id: "t2".into(),
+            tool: "Write".to_owned(),
+            input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
+            target: Some("/repo/a.rs".to_owned()),
+        });
+
+        assert_eq!(app.asks_waiting(), 1);
+        app.on_key(key(KeyCode::Char('y')));
+
+        assert_eq!(
+            app.asking().map(|ask| ask.tool.clone()),
+            Some("Write".to_owned())
+        );
+        assert_eq!(app.asks_waiting(), 0);
+    }
+
+    #[test]
+    fn a_standing_rule_answers_a_prompt_without_showing_it() {
+        let mut app = app().with_rules([Rule::tool("Read")].into_iter().collect());
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Read".to_owned(),
+            input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
+            target: Some("/repo/a.rs".to_owned()),
+        });
+
+        app.settle_rules();
+
+        assert!(app.asking().is_none());
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+            }],
+            "the call was let through without the backend being told"
+        );
     }
 
     #[test]

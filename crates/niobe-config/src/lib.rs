@@ -23,6 +23,15 @@
 //! args = ["--model", "gpt-5-codex"]
 //! ```
 //!
+//! A config also carries the standing answers to permission prompts — the
+//! rules a session made by answering "always" — which add up across files
+//! rather than replacing one another:
+//!
+//! ```toml
+//! [permissions]
+//! allow = ["Read", "Bash(cargo test)"]
+//! ```
+//!
 //! Profiles are what keep several real backends — a personal login, a company
 //! cloud account, a second vendor's CLI — as lines of config rather than code
 //! paths. The `env` of a profile is kept exactly as written: no variable is
@@ -38,13 +47,16 @@
 
 mod error;
 mod parse;
+mod write;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use niobe_core::Backend;
+use niobe_core::permission::Allowlist;
 
 pub use error::ConfigError;
+pub use write::remember;
 
 /// The file name of a config, in the user's config directory and in a
 /// repository's `.niobe` directory alike.
@@ -105,6 +117,7 @@ struct DefaultProfile {
 pub struct Config {
     profiles: BTreeMap<String, Profile>,
     default_profile: Option<DefaultProfile>,
+    allowed: Allowlist,
 }
 
 /// The profile a session runs under, with the name it was selected by.
@@ -160,7 +173,17 @@ impl Config {
         if over.default_profile.is_some() {
             self.default_profile = over.default_profile;
         }
+        // Permissions add up rather than replacing one another: a rule is a
+        // permission the operator granted, and a repository's file is not
+        // where one is taken back.
+        self.allowed = self.allowed.merge(over.allowed);
         self
+    }
+
+    /// The standing answers to permission prompts, from every file laid over
+    /// the ones before it.
+    pub fn allowed(&self) -> &Allowlist {
+        &self.allowed
     }
 
     /// Every profile, by name.
@@ -291,6 +314,52 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     fn an_empty_file_is_a_config_with_nothing_in_it() {
         assert_eq!(parsed(""), Config::default());
         assert_eq!(parsed("# only a comment\n"), Config::default());
+    }
+
+    #[test]
+    fn standing_answers_are_read_as_rules_and_add_up_across_files() {
+        let user = Config::parse(
+            "[permissions]\nallow = [\"Read\", \"Bash(cargo test)\"]\n",
+            &path("user"),
+        )
+        .expect("the config is valid");
+        let repo = Config::parse(
+            "[permissions]\nallow = [\"Bash(cargo test)\", \"Edit(crates/*)\"]\n",
+            &path("repo"),
+        )
+        .expect("the config is valid");
+
+        let merged = user.overlay(repo);
+
+        assert_eq!(
+            merged
+                .allowed()
+                .rules()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["Read", "Bash(cargo test)", "Edit(crates/*)"]
+        );
+        assert!(
+            merged
+                .allowed()
+                .allows("Edit", Some("crates/niobe-tui/a.rs"))
+        );
+        assert!(!merged.allowed().allows("Edit", Some("xtask/a.rs")));
+    }
+
+    #[test]
+    fn a_rule_that_is_not_one_is_reported_at_its_line() {
+        let said = invalid("[permissions]\nallow = [\n  \"Read\",\n  \"Bash(\",\n]\n");
+
+        assert!(said.starts_with("/configs/user/config.toml:4:"), "{said}");
+        assert!(said.contains("permissions.allow[1]"), "{said}");
+        assert!(said.contains("is not a permission rule"), "{said}");
+    }
+
+    #[test]
+    fn a_config_with_no_permissions_allows_nothing_by_itself() {
+        assert!(parsed(EXAMPLE).allowed().is_empty());
     }
 
     #[test]
@@ -456,7 +525,7 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile` or `profiles`"
+             expected `default_profile`, `profiles` or `permissions`"
         );
     }
 

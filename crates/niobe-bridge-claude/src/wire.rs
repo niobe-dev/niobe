@@ -203,8 +203,13 @@ pub(crate) struct CacheCreation {
 }
 
 /// A `control_request`: the CLI asking Niobe to decide something.
+///
+/// `request_id` is what an answer is addressed to, and it is the CLI's own id
+/// rather than the tool call's: the two are carried separately because one
+/// call can be asked about more than once across a resumed session.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ControlRequest {
+    pub(crate) request_id: Option<String>,
     pub(crate) request: Option<ControlBody>,
 }
 
@@ -323,6 +328,7 @@ mod tests {
         let Message::ControlRequest(request) = message else {
             panic!("a control request");
         };
+        assert_eq!(request.request_id.as_deref(), Some("c1"));
         let body = request.request.expect("the request carries a body");
         assert_eq!(body.subtype.as_deref(), Some("can_use_tool"));
         assert_eq!(body.tool_name.as_deref(), Some("Bash"));

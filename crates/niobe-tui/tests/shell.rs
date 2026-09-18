@@ -21,8 +21,26 @@ mod common;
 use std::path::PathBuf;
 
 use common::{running_session, screen};
-use niobe_core::event::Backend;
+use niobe_core::event::{Backend, Event};
 use niobe_tui::app::{App, Repo, SelectedProfile};
+
+/// The same session, stopped on a permission prompt it is waiting on.
+///
+/// The prompt is the `control_request` of
+/// `niobe-bridge-claude/tests/fixtures/stream-json.jsonl`, translated: the
+/// bridge's own tests assert that the recorded line becomes exactly this
+/// event, so the modal is driven by a recording without this crate being able
+/// to name a bridge.
+pub fn session_waiting_on_a_prompt() -> App {
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_read".into(),
+        tool: "Read".to_owned(),
+        input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
+        target: Some("/repo/notes.txt".to_owned()),
+    });
+    app
+}
 
 fn empty_session() -> App {
     App::new(Repo {
@@ -77,6 +95,51 @@ fn the_shell_renders_at_two_hundred_by_sixty() {
 fn an_empty_session_renders_at_both_sizes() {
     assert_snapshot("empty-80x24", &screen(&mut empty_session(), 80, 24));
     assert_snapshot("empty-120x30", &screen(&mut empty_session(), 120, 30));
+}
+
+#[test]
+fn a_recorded_prompt_puts_the_modal_on_screen_at_both_sizes() {
+    assert_snapshot(
+        "asking-80x24",
+        &screen(&mut session_waiting_on_a_prompt(), 80, 24),
+    );
+    assert_snapshot(
+        "asking-200x60",
+        &screen(&mut session_waiting_on_a_prompt(), 200, 60),
+    );
+}
+
+#[test]
+fn the_modal_shows_what_would_run_and_every_way_to_answer_it() {
+    use niobe_tui::app::Answer;
+
+    let mut app = session_waiting_on_a_prompt();
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(frame.contains("Permission"), "{frame}");
+    assert!(frame.contains("Read wants to run"), "{frame}");
+    assert!(frame.contains("/repo/notes.txt"), "{frame}");
+    // The whole of the arguments, not a summary of them.
+    assert!(
+        frame.contains(r#"{"file_path":"/repo/notes.txt"}"#),
+        "{frame}"
+    );
+    assert!(frame.contains("y allow once"), "{frame}");
+    assert!(frame.contains("n deny"), "{frame}");
+    assert!(frame.contains("a always Read"), "{frame}");
+    assert!(
+        frame.contains("p always Read(/repo/notes.txt)"),
+        "the standing answer does not say what it would allow:\n{frame}"
+    );
+    assert!(frame.contains("waiting on you"), "{frame}");
+
+    // Answered, the modal goes and the session is drawn as it was.
+    app.answer(Answer::Once);
+    assert_eq!(
+        screen(&mut app, 120, 30),
+        screen(&mut running_session(), 120, 30),
+        "the modal left something behind on the frame"
+    );
 }
 
 #[test]

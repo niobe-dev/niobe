@@ -15,14 +15,14 @@
 //! measured one instead.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget};
 
 use niobe_core::session::SessionState;
 
-use crate::app::{App, Entry, SelectedProfile};
+use crate::app::{App, Ask, Entry, SelectedProfile};
 use crate::text;
 use crate::theme::Theme;
 
@@ -36,6 +36,14 @@ pub const WIDE_COLUMNS: u16 = 100;
 
 /// Columns the transcript gives to an entry's glyph.
 const GUTTER: usize = 2;
+
+/// Widest the permission modal is drawn, in columns. Wide enough for a shell
+/// command that has a path in it, and narrow enough to leave the transcript
+/// around it readable, so the operator can see what led to the prompt.
+const ASK_COLUMNS: u16 = 72;
+
+/// Columns of margin the modal leaves on each side of a narrow screen.
+const ASK_MARGIN: u16 = 4;
 
 /// The F-key bar, which is also the list of what the shell can be asked to do.
 const FKEYS: [(&str, &str); 10] = [
@@ -83,6 +91,102 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_body(frame, body, app, &theme);
     draw_status(frame, status, app, &theme);
     draw_fkeys(frame, fkeys, &theme);
+
+    // Last, and over the body: a prompt is what the session is waiting on, so
+    // nothing drawn afterwards may cover it.
+    if let Some(ask) = app.asking() {
+        draw_ask(frame, body, ask, app.asks_waiting(), &theme);
+    }
+}
+
+/// The permission modal: what would run, and the four ways to answer.
+///
+/// The whole of the arguments is shown under the target, wrapped rather than
+/// truncated. Approving a call whose arguments were cut off at the pane edge
+/// is approving something the operator did not read.
+fn draw_ask(frame: &mut Frame, body: Rect, ask: &Ask, waiting: usize, theme: &Theme) {
+    let width = ASK_COLUMNS.min(body.width.saturating_sub(ASK_MARGIN * 2));
+    if width < 20 {
+        return;
+    }
+
+    let block = pane("Permission", theme)
+        .border_style(Style::new().fg(theme.hot))
+        .padding(Padding::horizontal(1))
+        .title_bottom(
+            Line::from(match waiting {
+                0 => " the turn is waiting on you ".to_owned(),
+                1 => " 1 more prompt behind this one ".to_owned(),
+                n => format!(" {n} more prompts behind this one "),
+            })
+            .style(Style::new().fg(theme.dim))
+            .centered(),
+        );
+
+    // The two border columns and the padding inside them.
+    let text_width = usize::from(width).saturating_sub(4);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(ask.tool.clone(), Style::new().fg(theme.tool).bold()),
+        Span::styled(" wants to run", Style::new().fg(theme.fg)),
+    ])];
+    for wrapped in text::wrap(ask.target.as_deref().unwrap_or(&ask.input), text_width) {
+        lines.push(Line::from(wrapped).style(Style::new().fg(theme.hot).bold()));
+    }
+    if ask.target.is_some() {
+        lines.push(Line::from(""));
+        for wrapped in text::wrap(&ask.input, text_width) {
+            lines.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(choice("y", "allow once", "n", "deny", theme));
+    lines.push(choice(
+        "a",
+        &format!("always {}", ask.tool),
+        "p",
+        &match ask.target_rule() {
+            Some(rule) => format!("always {rule}"),
+            None => "always this call — no target to save".to_owned(),
+        },
+        theme,
+    ));
+
+    // The lines, and the two rows of border they sit inside.
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(body.height);
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(body);
+    let [area] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(area);
+
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
+        inner,
+    );
+}
+
+/// One row of the modal's two-column key list.
+fn choice(
+    left: &str,
+    left_label: &str,
+    right: &str,
+    right_label: &str,
+    theme: &Theme,
+) -> Line<'static> {
+    let key = Style::new().fg(theme.hot).bold();
+    let label = Style::new().fg(theme.fg);
+    Line::from(vec![
+        Span::styled(format!("{left} "), key),
+        Span::styled(format!("{left_label:<14}"), label),
+        Span::styled(format!("{right} "), key),
+        Span::styled(right_label.to_owned(), label),
+    ])
 }
 
 /// What the shell says when it has fewer than eighty by twenty-four to draw in.

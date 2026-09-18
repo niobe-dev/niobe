@@ -125,6 +125,35 @@ impl From<&wire::ModelUsage> for Counts {
     }
 }
 
+/// What a `tool_use` id was called, called with, and acts on.
+///
+/// Kept whole so that the `tool_result` can repeat it without the consumer
+/// holding state, and so that a refusal the CLI announces after the call can
+/// be reported with the same arguments the call was made with.
+#[derive(Debug, Clone)]
+struct Call {
+    name: String,
+    input: String,
+    target: Option<String>,
+}
+
+/// A permission prompt the CLI is waiting on an answer to.
+///
+/// The tool call is what the shell shows and answers about; `request_id` is
+/// what the CLI addresses the answer by, and `input` is echoed back with an
+/// approval because the protocol carries the approved arguments rather than a
+/// bare yes. Niobe approves a call, it never rewrites one, so what goes back
+/// is exactly what came.
+#[derive(Debug, Clone)]
+pub struct Asked {
+    /// The call the CLI is asking about.
+    pub id: ToolCallId,
+    /// The id an answer is addressed to.
+    pub request_id: String,
+    /// The arguments the call would run with, as the CLI sent them.
+    pub input: serde_json::Value,
+}
+
 /// What has been reported for one model so far in this session.
 #[derive(Debug, Clone, Copy, Default)]
 struct Reported {
@@ -145,7 +174,10 @@ pub struct Translator {
     in_flight: BTreeMap<Option<String>, String>,
     /// What each outstanding `tool_use` id was called and called with, so that
     /// the `tool_result` can repeat both without the consumer holding state.
-    tool_calls: BTreeMap<String, (String, String)>,
+    tool_calls: BTreeMap<String, Call>,
+    /// The permission prompts read since the last drain, for whatever owns the
+    /// CLI's standard input to answer.
+    asked: Vec<Asked>,
     /// The `tool_use` ids that are sub-agents rather than actions.
     agents: BTreeMap<String, ()>,
     /// The `tool_use` ids the CLI refused and this bridge has already
@@ -167,6 +199,7 @@ impl Translator {
             backend_session: None,
             in_flight: BTreeMap::new(),
             tool_calls: BTreeMap::new(),
+            asked: Vec::new(),
             agents: BTreeMap::new(),
             denied: BTreeMap::new(),
             turn: Counts::default(),
@@ -177,6 +210,28 @@ impl Translator {
     /// The id the CLI calls this session by, once it has said.
     pub fn backend_session(&self) -> Option<&str> {
         self.backend_session.as_deref()
+    }
+
+    /// Records that a call was refused here, over the control channel.
+    ///
+    /// The CLI feeds a refusal back to the model as a tool result with an
+    /// error on it, which is indistinguishable from a tool that broke, and it
+    /// lists the refusal again only in the turn's closing `result` — by which
+    /// time the call has already been shown as failed. Told at the moment the
+    /// answer goes out, the translator reads that result as the denial it is,
+    /// and does not report the closing list as a second refusal.
+    pub fn refused(&mut self, id: &ToolCallId) {
+        self.denied.insert(id.as_str().to_owned(), ());
+    }
+
+    /// The permission prompts read since the last call, oldest first.
+    ///
+    /// Separate from the events because an answer is addressed by an id the
+    /// event model has no room for and no use for: the shell answers about a
+    /// tool call, and only whatever holds the CLI's standard input needs to
+    /// know what the CLI calls the question.
+    pub fn take_asked(&mut self) -> Vec<Asked> {
+        std::mem::take(&mut self.asked)
     }
 
     /// The events one line of the CLI's standard output produced.
@@ -267,15 +322,18 @@ impl Translator {
     /// reads this to know which it has already reported.
     fn denied(&mut self, system: wire::System, out: &mut Vec<Event>) {
         let Some(id) = system.tool_use_id else { return };
+        // Already reported: the operator refused it here, or the CLI has said
+        // so once. A second report would count the refusal twice.
+        if self.denied.contains_key(&id) {
+            return;
+        }
+        let call = self.tool_calls.get(&id);
         let tool = system
             .tool_name
-            .or_else(|| self.tool_calls.get(&id).map(|(name, _)| name.clone()))
+            .or_else(|| call.map(|call| call.name.clone()))
             .unwrap_or_default();
-        let input = self
-            .tool_calls
-            .get(&id)
-            .map(|(_, input)| input.clone())
-            .unwrap_or_default();
+        let input = call.map(|call| call.input.clone()).unwrap_or_default();
+        let target = call.and_then(|call| call.target.clone());
 
         self.denied.insert(id.clone(), ());
         let id = ToolCallId::new(id);
@@ -283,6 +341,7 @@ impl Translator {
             id: id.clone(),
             tool,
             input,
+            target,
         });
         out.push(Event::PermissionResponse {
             id,
@@ -328,8 +387,14 @@ impl Translator {
                 }
                 wire::Block::ToolUse { id, name, input } => {
                     let rendered = render(&input);
-                    self.tool_calls
-                        .insert(id.clone(), (name.clone(), rendered.clone()));
+                    self.tool_calls.insert(
+                        id.clone(),
+                        Call {
+                            name: name.clone(),
+                            input: rendered.clone(),
+                            target: target_of(&input),
+                        },
+                    );
                     if name == TASK_TOOL {
                         self.agents.insert(id.clone(), ());
                         calls.push(Event::AgentSpawn {
@@ -383,7 +448,7 @@ impl Translator {
             let output = content.map(render_content).unwrap_or_default();
             let bytes = output.len() as u64;
             let (name, input) = match self.tool_calls.remove(&tool_use_id) {
-                Some(call) => call,
+                Some(call) => (call.name, call.input),
                 None => {
                     out.push(warn(format!(
                         "the CLI returned a result for tool call `{tool_use_id}`, which it never \
@@ -482,16 +547,32 @@ impl Translator {
         }
     }
 
+    /// Records a prompt the CLI is waiting on, and asks the session it.
+    ///
+    /// A request with no `request_id` is reported as a prompt and never
+    /// queued to be answered: there is nothing to address an answer to, and
+    /// queueing it would leave the shell waiting on a modal whose reply goes
+    /// nowhere. A `can_use_tool` is the only subtype this bridge answers;
+    /// anything else the CLI asks is left alone rather than guessed at, and
+    /// the CLI falls back to its own handling.
     fn control(&mut self, request: wire::ControlRequest, out: &mut Vec<Event>) {
         let Some(body) = request.request else { return };
         if body.subtype.as_deref() != Some("can_use_tool") {
             return;
         }
-        let id = body.tool_use_id.unwrap_or_default();
+        let id = ToolCallId::new(body.tool_use_id.unwrap_or_default());
+        if let Some(request_id) = request.request_id {
+            self.asked.push(Asked {
+                id: id.clone(),
+                request_id,
+                input: body.input.clone().unwrap_or(serde_json::Value::Null),
+            });
+        }
         out.push(Event::PermissionRequest {
-            id: ToolCallId::new(id),
+            id,
             tool: body.tool_name.unwrap_or_default(),
             input: body.input.as_ref().map(render).unwrap_or_default(),
+            target: body.input.as_ref().and_then(target_of),
         });
     }
 
@@ -512,6 +593,7 @@ impl Translator {
                 id: id.clone(),
                 tool: denial.tool_name.unwrap_or_default(),
                 input: denial.tool_input.as_ref().map(render).unwrap_or_default(),
+                target: denial.tool_input.as_ref().and_then(target_of),
             });
             out.push(Event::PermissionResponse {
                 id,
@@ -681,6 +763,35 @@ fn render(input: &serde_json::Value) -> String {
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// Keys a tool's arguments name the thing it acts on by, in the order they
+/// are looked for.
+///
+/// The list is the vendor's, read off the tools the CLI ships: a shell command
+/// runs `command`, the file tools take `file_path` or `notebook_path`, the
+/// search tools a `pattern` and a `path`, the web tools a `url`. Where none of
+/// them is there the call has no target, and a standing answer about it can
+/// only be about the whole tool — which is the honest answer, because a target
+/// invented here would be one the operator never approved.
+const TARGET_KEYS: [&str; 6] = [
+    "command",
+    "file_path",
+    "notebook_path",
+    "path",
+    "url",
+    "pattern",
+];
+
+/// The one thing a call acts on, where its arguments name it.
+fn target_of(input: &serde_json::Value) -> Option<String> {
+    if let serde_json::Value::String(text) = input {
+        return Some(text.clone());
+    }
+    TARGET_KEYS
+        .iter()
+        .find_map(|key| input.get(key).and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
 }
 
 /// The text of a tool result, which the CLI writes either as a string or as
@@ -951,6 +1062,66 @@ mod tests {
     }
 
     #[test]
+    fn a_calls_target_is_whichever_argument_names_what_it_acts_on() {
+        let target =
+            |json: &str| target_of(&serde_json::from_str(json).expect("the arguments parse"));
+
+        assert_eq!(
+            target(r#"{"command":"cargo test"}"#).as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            target(r#"{"file_path":"/repo/a.rs"}"#).as_deref(),
+            Some("/repo/a.rs")
+        );
+        assert_eq!(
+            target(r#"{"url":"https://example.test"}"#).as_deref(),
+            Some("https://example.test")
+        );
+        assert_eq!(target(r#""ls -la""#).as_deref(), Some("ls -la"));
+        // The command wins over the path a shell call also carries, so a
+        // standing answer is about what ran rather than where it ran.
+        assert_eq!(
+            target(r#"{"path":"/repo","command":"cargo test"}"#).as_deref(),
+            Some("cargo test")
+        );
+        // Nothing here names a thing the call acts on, and inventing one
+        // would put a target in front of the operator that they never saw.
+        assert_eq!(target(r#"{"todos":[]}"#), None);
+        assert_eq!(target("null"), None);
+    }
+
+    #[test]
+    fn a_prompt_with_nothing_to_address_an_answer_to_is_shown_and_not_queued() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#,
+        );
+
+        assert!(
+            matches!(events.as_slice(), [Event::PermissionRequest { .. }]),
+            "{events:?}"
+        );
+        assert!(
+            translator.take_asked().is_empty(),
+            "the shell would have waited on a modal whose answer goes nowhere"
+        );
+    }
+
+    #[test]
+    fn a_control_request_this_bridge_does_not_answer_is_left_to_the_cli() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"control_request","request_id":"c9","request":{"subtype":"initialize"}}"#,
+        );
+
+        assert!(events.is_empty(), "{events:?}");
+        assert!(translator.take_asked().is_empty());
+    }
+
+    #[test]
     fn a_refusal_is_recorded_when_it_happens_and_not_again_at_the_end_of_the_turn() {
         let mut translator = translator();
         translator.line(
@@ -965,7 +1136,12 @@ mod tests {
         );
 
         let [
-            Event::PermissionRequest { id, tool, input },
+            Event::PermissionRequest {
+                id,
+                tool,
+                input,
+                target,
+            },
             Event::PermissionResponse { decision, .. },
         ] = announced.as_slice()
         else {
@@ -977,10 +1153,56 @@ mod tests {
             input, r#"{"command":"rm -rf build"}"#,
             "the call it refused"
         );
+        assert_eq!(
+            target.as_deref(),
+            Some("rm -rf build"),
+            "a refusal the operator may want a standing answer about lost its target"
+        );
         assert_eq!(*decision, PermissionDecision::Deny);
         assert!(
             result.is_empty(),
             "the closing result reported the same refusal again: {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_refused_here_reads_as_denied_and_is_not_reported_twice() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"rm -rf build"}}]}}"#,
+        );
+
+        // The operator refused it over the control channel. The CLI knows
+        // nothing of that yet; it just hands the model an error.
+        translator.refused(&ToolCallId::new("toolu_1"));
+        let back = translator.line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"The operator denied this call in Niobe."}]}}"#,
+        );
+
+        let [Event::ToolCallEnd { outcome, .. }] = back.as_slice() else {
+            panic!("the call ended: {back:?}");
+        };
+        assert_eq!(
+            *outcome,
+            ToolOutcome::Denied,
+            "a call that was not allowed to run read as a tool that broke"
+        );
+
+        // The closing `result` lists it, and the CLI may announce it too;
+        // neither is a second refusal.
+        assert!(
+            translator
+                .line(
+                    r#"{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"toolu_1"}"#
+                )
+                .is_empty()
+        );
+        assert!(
+            translator
+                .line(
+                    r#"{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_1"}]}"#
+                )
+                .is_empty()
         );
     }
 

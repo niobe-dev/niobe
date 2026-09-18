@@ -20,6 +20,7 @@ mod journal;
 mod prices;
 mod profiles;
 mod repo;
+mod rules;
 mod sessions;
 mod summary;
 
@@ -32,10 +33,11 @@ use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
-use niobe_tui::{Detached, Ended};
+use niobe_tui::{Detached, Ended, Forgotten};
 
 use crate::args::{Command, Invocation};
 use crate::journal::StoreJournal;
+use crate::rules::ConfigRules;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -124,7 +126,7 @@ fn shell(profile: Option<&str>) -> Result<(), String> {
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
-    let app = App::new(repo::describe(&cwd));
+    let app = App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone());
     let app = match &selected {
         Some(selected) => app.with_profile(config::named(*selected)),
         None => app,
@@ -146,7 +148,9 @@ fn shell(profile: Option<&str>) -> Result<(), String> {
     };
 
     let mut journal = StoreJournal::Pending(root.clone());
-    let ended = niobe_tui::run(app, &mut journal, backend.bridge()).map_err(|e| e.to_string())?;
+    let mut rules = ConfigRules::at(&root);
+    let ended = niobe_tui::run(app, &mut journal, backend.bridge(), &mut rules)
+        .map_err(|e| e.to_string())?;
 
     match ended {
         // There is nothing left to print on: the terminal the shell drew on is
@@ -171,7 +175,7 @@ fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
-    let mut app = App::new(repo::describe(&cwd));
+    let mut app = App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone());
     if let Some(selected) = &selected {
         app = app.with_profile(config::named(*selected));
     }
@@ -218,7 +222,8 @@ fn resume(session: SessionId, profile: Option<&str>) -> Result<(), String> {
     };
 
     let mut journal = StoreJournal::Open(recorder);
-    niobe_tui::run(app, &mut journal, backend.bridge())
+    let mut rules = ConfigRules::at(&root);
+    niobe_tui::run(app, &mut journal, backend.bridge(), &mut rules)
         .map_err(|e| e.to_string())
         .map(|_| ())
 }
@@ -300,7 +305,7 @@ fn replay(log: &Path) -> Result<(), String> {
 
     // A recorded log is being looked at, not continued: nothing is attached
     // and nothing is kept.
-    niobe_tui::run(app, &mut Unrecorded, &mut Detached)
+    niobe_tui::run(app, &mut Unrecorded, &mut Detached, &mut Forgotten)
         .map_err(|e| e.to_string())
         .map(|_| ())
 }
@@ -385,6 +390,28 @@ IN THE SHELL:
     Alt+Enter              Open a new line in the composer
     PgUp / PgDn            Scroll the transcript
     F10, Ctrl+Q            Quit
+
+    When a backend stops for permission, the turn waits on a prompt that takes
+    the keyboard:
+
+    y, Enter               Allow this call
+    n, Esc                 Deny it; the denial is shown in the timeline
+    a                      Allow it, and every call to that tool from now on
+    p                      Allow it, and every call to that tool on the same
+                           target from now on
+
+PERMISSIONS:
+    An \"always\" answer is written into this repository's .niobe/config.toml as
+    a rule, and answers the same prompt in every later session:
+
+        [permissions]
+        allow = [\"Read\", \"Bash(cargo test)\"]
+
+    A bare tool name allows every call to it; a name and a target allow that
+    target alone. A target ending in * matches by prefix — Bash(cargo *) — and
+    only you write one: Niobe stores the target as it stood, never a guess at
+    what else you meant. The user's config and the repository's both apply; a
+    rule in either allows the call.
 
 BACKENDS:
     A claude profile drives the official `claude` CLI as a subprocess, with the

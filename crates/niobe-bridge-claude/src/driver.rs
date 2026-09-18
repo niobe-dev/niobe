@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use niobe_core::event::Event;
+use niobe_core::event::{Event, PermissionDecision, ToolCallId};
 
 use crate::translate::Translator;
 
@@ -37,6 +37,31 @@ pub const BINARY: &str = "claude";
 /// The CLI has a session of its own to write out. Long enough for that on a
 /// loaded machine, short enough that quitting the shell stays instant.
 const GOODBYE: Duration = Duration::from_millis(500);
+
+/// What the CLI is told when the operator refuses a call.
+///
+/// The CLI hands it to the model as the refused call's result, where it is
+/// otherwise indistinguishable from a tool that broke, so it names who
+/// refused.
+const REFUSED: &str = "The operator denied this call in Niobe.";
+
+/// What the CLI is waiting on an answer to: the tool call it asked about, and
+/// the id the answer is addressed to, with the arguments to approve.
+///
+/// Written by the thread that reads the CLI and read by whoever answers, so
+/// it is shared: the reader records a prompt before it hands out the event
+/// that announces it, which is what stops an answer arriving for a request
+/// this side cannot yet address.
+type Waiting = Arc<Mutex<BTreeMap<String, (String, serde_json::Value)>>>;
+
+/// Calls refused here that the thread reading the CLI has not been told about
+/// yet.
+///
+/// The refusal comes back from the CLI as an ordinary tool result with an
+/// error on it, so the translator has to be told before that result arrives or
+/// it reads the call as a tool that broke. Written before the answer goes out
+/// and drained before every line, which is what puts it there first.
+type Refusals = Arc<Mutex<Vec<ToolCallId>>>;
 
 /// How the CLI decides whether a tool call may run.
 ///
@@ -206,6 +231,8 @@ pub struct Session {
     child: Child,
     stdin: Option<ChildStdin>,
     events: Receiver<Event>,
+    waiting: Waiting,
+    refusals: Refusals,
     stderr: Arc<Mutex<String>>,
     readers: Vec<JoinHandle<()>>,
     /// Whether the child's exit has already been turned into an event, so that
@@ -256,12 +283,31 @@ impl Session {
 
         let (sender, events) = mpsc::channel();
         let mut translator = Translator::new(options.profile.clone());
+        let waiting: Waiting = Arc::new(Mutex::new(BTreeMap::new()));
+        let asked = Arc::clone(&waiting);
+        let refusals: Refusals = Arc::new(Mutex::new(Vec::new()));
+        let refused = Arc::clone(&refusals);
         let reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
                     continue;
                 }
-                for event in translator.line(&line) {
+                if let Ok(mut refused) = refused.lock() {
+                    for id in refused.drain(..) {
+                        translator.refused(&id);
+                    }
+                }
+                let events = translator.line(&line);
+                // Recorded before the events go out, never after: the shell
+                // learns of a prompt by draining the events, and an answer to
+                // one this side had not yet written down would be refused for
+                // a request that is in fact waiting.
+                if let Ok(mut waiting) = asked.lock() {
+                    for ask in translator.take_asked() {
+                        waiting.insert(ask.id.as_str().to_owned(), (ask.request_id, ask.input));
+                    }
+                }
+                for event in events {
                     // The receiver is gone: the session was dropped, and there
                     // is no one left to tell.
                     if sender.send(event).is_err() {
@@ -286,6 +332,8 @@ impl Session {
             child,
             stdin: Some(stdin),
             events,
+            waiting,
+            refusals,
             stderr: kept,
             readers: vec![reader, errors],
             reported: false,
@@ -308,6 +356,48 @@ impl Session {
             "message": { "role": "user", "content": prompt },
         });
         writeln!(stdin, "{line}")?;
+        stdin.flush()
+    }
+
+    /// Answers a permission prompt the CLI is waiting on.
+    ///
+    /// The CLI stops the turn on a gated call and goes on the moment an answer
+    /// for its `request_id` arrives, so this is a write and a flush and
+    /// nothing else. An answer for a call the CLI is not waiting on is refused
+    /// rather than written: the protocol would ignore it, and a session that
+    /// silently dropped a decision would look as though the call had been
+    /// allowed.
+    ///
+    /// An approval carries the arguments back as they came. The protocol sends
+    /// the approved arguments rather than a bare yes, and Niobe approves a
+    /// call without ever rewriting one, so what goes back is what was shown.
+    pub fn answer(&mut self, id: &ToolCallId, decision: PermissionDecision) -> std::io::Result<()> {
+        let asked = self
+            .waiting
+            .lock()
+            .ok()
+            .and_then(|mut waiting| waiting.remove(id.as_str()));
+        let Some((request_id, input)) = asked else {
+            return Err(std::io::Error::other(format!(
+                "the `claude` session is not waiting on a decision about tool call `{id}`"
+            )));
+        };
+
+        // Before the answer goes out, never after: the refusal comes back as
+        // an ordinary tool result with an error on it, and the thread reading
+        // the CLI has to know which it is before it reads that result.
+        if !decision.allowed()
+            && let Ok(mut refusals) = self.refusals.lock()
+        {
+            refusals.push(id.clone());
+        }
+
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(std::io::Error::other(
+                "the session has ended; its standard input is closed",
+            ));
+        };
+        writeln!(stdin, "{}", control_response(&request_id, &input, decision))?;
         stdin.flush()
     }
 
@@ -367,6 +457,30 @@ impl Session {
             fatal: true,
         })
     }
+}
+
+/// The line that answers one permission prompt.
+///
+/// Written as its own function because it is the half of answering that can be
+/// checked without a subprocess: what reaches the CLI's standard input is the
+/// whole of the protocol on this side.
+fn control_response(
+    request_id: &str,
+    input: &serde_json::Value,
+    decision: PermissionDecision,
+) -> serde_json::Value {
+    let response = match decision.allowed() {
+        true => serde_json::json!({ "behavior": "allow", "updatedInput": input }),
+        false => serde_json::json!({ "behavior": "deny", "message": REFUSED }),
+    };
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": response,
+        },
+    })
 }
 
 /// What to say about a session whose CLI left.
@@ -527,6 +641,66 @@ mod tests {
         let said = error.to_string();
         assert!(said.contains("is not on PATH"), "{said}");
         assert!(said.contains("/login"), "{said}");
+    }
+
+    #[test]
+    fn an_approval_sends_back_the_arguments_that_were_shown() {
+        let input = serde_json::json!({ "file_path": "/repo/notes.txt" });
+
+        let allowed = control_response("c1", &input, PermissionDecision::Allow);
+        let always = control_response("c1", &input, PermissionDecision::AllowAlways);
+
+        assert_eq!(
+            allowed,
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": "c1",
+                    "response": { "behavior": "allow", "updatedInput": input },
+                },
+            })
+        );
+        // A rule stored beside the answer changes what Niobe asks next time,
+        // never what this call is allowed to do.
+        assert_eq!(always, allowed);
+    }
+
+    #[test]
+    fn a_refusal_says_who_refused_because_the_model_is_told_it_as_an_error() {
+        let refused = control_response(
+            "c2",
+            &serde_json::json!({ "command": "rm -rf build" }),
+            PermissionDecision::Deny,
+        );
+
+        let response = &refused["response"]["response"];
+        assert_eq!(response["behavior"], "deny");
+        assert_eq!(response["message"], REFUSED);
+        assert!(
+            response.get("updatedInput").is_none(),
+            "a refusal sent arguments to run: {refused}"
+        );
+    }
+
+    #[test]
+    fn an_answer_to_a_call_the_cli_never_asked_about_is_refused_rather_than_written() {
+        // `/bin/echo` stands in for the CLI: it takes the arguments, prints
+        // them and leaves. Nothing about this path talks to the process — the
+        // point is that an answer with no request to address is refused before
+        // anything is written, so a decision cannot be dropped in silence.
+        let mut options = options();
+        options.binary = PathBuf::from("/bin/echo");
+        options.cwd = std::env::temp_dir();
+        let mut session = Session::spawn(&options).expect("`/bin/echo` is on every unix");
+
+        let error = session
+            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow)
+            .expect_err("the CLI was never asked about this call");
+
+        let said = error.to_string();
+        assert!(said.contains("not waiting on a decision"), "{said}");
+        assert!(said.contains("toolu_1"), "{said}");
     }
 
     #[test]

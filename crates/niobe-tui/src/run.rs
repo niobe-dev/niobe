@@ -21,6 +21,7 @@ use crate::app::App;
 use crate::bridge::Bridge;
 use crate::input::{Input, Wait};
 use crate::journal::Journal;
+use crate::rules::Rules;
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 use crate::ui;
 
@@ -56,7 +57,8 @@ pub enum Ended {
 
 /// Runs the shell on `app` until the operator quits, the process is asked to
 /// stop or the terminal goes away, handing every event the operator produces to
-/// `backend` and to `journal`, and folding in everything `backend` produces.
+/// `backend` and to `journal`, the standing answers they make to `rules`, and
+/// folding in everything `backend` produces.
 ///
 /// `app` may already hold a session: a resumed one is folded in by the caller
 /// before the shell opens.
@@ -64,7 +66,12 @@ pub enum Ended {
 /// Installs the panic hook and the signal handlers first, so that every way out
 /// of the function — including the ways that do not return from it — puts the
 /// terminal back.
-pub fn run(mut app: App, journal: &mut dyn Journal, backend: &mut dyn Bridge) -> io::Result<Ended> {
+pub fn run(
+    mut app: App,
+    journal: &mut dyn Journal,
+    backend: &mut dyn Bridge,
+    rules: &mut dyn Rules,
+) -> io::Result<Ended> {
     install_panic_hook();
     let shutdown = Shutdown::install()?;
     let wait = Wait::on_the_terminal();
@@ -75,7 +82,15 @@ pub fn run(mut app: App, journal: &mut dyn Journal, backend: &mut dyn Bridge) ->
     // and waits for the reply, which never comes when stdin is a pipe.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    let ended = event_loop(&mut terminal, &mut app, journal, backend, &shutdown, &wait);
+    let ended = event_loop(
+        &mut terminal,
+        &mut app,
+        journal,
+        backend,
+        rules,
+        &shutdown,
+        &wait,
+    );
 
     match &ended {
         Ok(Ended::Quit) => {}
@@ -130,6 +145,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
     app: &mut App,
     journal: &mut dyn Journal,
     backend: &mut dyn Bridge,
+    rules: &mut dyn Rules,
     shutdown: &Shutdown,
     wait: &Wait,
 ) -> io::Result<Ended> {
@@ -137,13 +153,17 @@ fn event_loop<B: Backend<Error = io::Error>>(
 
     while !app.should_quit() {
         let producing = fold_backend(app, journal, backend);
+        // Before the draw, so that a prompt a standing rule already answers is
+        // never on screen for the frame it takes to answer it.
+        app.settle_rules();
+        send_produced(app, journal, backend, rules);
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         let tick = if producing { BUSY_TICK } else { TICK };
         match wait.input(tick)? {
             Input::Ready => {
                 read_input(app)?;
-                send_produced(app, journal, backend);
+                send_produced(app, journal, backend, rules);
             }
             Input::Idle => {}
             // The terminal is gone: there is no one left to type and nothing
@@ -206,19 +226,43 @@ fn read_input(app: &mut App) -> io::Result<()> {
 /// operator to decide whether to go on without it; a backend that will not take
 /// a turn leaves the prompt on screen, said to be unsent rather than left
 /// looking as though something were working on it.
-fn send_produced(app: &mut App, journal: &mut dyn Journal, backend: &mut dyn Bridge) {
+fn send_produced(
+    app: &mut App,
+    journal: &mut dyn Journal,
+    backend: &mut dyn Bridge,
+    rules: &mut dyn Rules,
+) {
     for event in app.take_produced() {
         if let Err(error) = journal.append(&event) {
             app.not_kept(&error.to_string());
         }
-        // Only the operator's own turns are sent on. Everything else the shell
+        if !app.is_attached() {
+            continue;
+        }
+        // Only what the backend is waiting on is sent on: a turn, and a
+        // decision about a call it has stopped for. Everything else the shell
         // produces is a record of what happened here, and the backend has no
         // use for what it did not ask for.
-        if let SessionEvent::UserMessage { text } = &event
-            && app.is_attached()
-            && let Err(error) = backend.send(text)
-        {
-            app.not_sent(&error.to_string());
+        match &event {
+            SessionEvent::UserMessage { text } => {
+                if let Err(error) = backend.send(text) {
+                    app.not_sent(&error.to_string());
+                }
+            }
+            SessionEvent::PermissionResponse { id, decision } => {
+                if let Err(error) = backend.answer(id, *decision) {
+                    app.not_answered(&error.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // After the answers, because a rule is made by answering: a rule that
+    // could not be kept is reported under the decision it came from.
+    for rule in app.take_rules() {
+        if let Err(error) = rules.remember(&rule) {
+            app.not_remembered(&rule, &error.to_string());
         }
     }
 }
@@ -247,9 +291,12 @@ fn fold_backend(app: &mut App, journal: &mut dyn Journal, backend: &mut dyn Brid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Repo;
+    use crate::app::{Answer, Repo};
     use crate::bridge::{BridgeError, Detached};
     use crate::journal::JournalError;
+    use crate::rules::{Forgotten, RulesError};
+    use niobe_core::event::{PermissionDecision, ToolCallId};
+    use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// Keeps everything, or refuses everything.
@@ -274,6 +321,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct Attached {
         sent: Vec<String>,
+        answered: Vec<(ToolCallId, PermissionDecision)>,
         produces: Vec<SessionEvent>,
         refuse: bool,
     }
@@ -287,9 +335,50 @@ mod tests {
             Ok(())
         }
 
+        fn answer(
+            &mut self,
+            id: &ToolCallId,
+            decision: PermissionDecision,
+        ) -> Result<(), BridgeError> {
+            if self.refuse {
+                return Err("the subprocess has gone".into());
+            }
+            self.answered.push((id.clone(), decision));
+            Ok(())
+        }
+
         fn drain(&mut self) -> Vec<SessionEvent> {
             std::mem::take(&mut self.produces)
         }
+    }
+
+    /// Keeps every rule, or refuses every rule.
+    #[derive(Debug, Default)]
+    struct Remembered {
+        rules: Vec<Rule>,
+        refuse: bool,
+    }
+
+    impl Rules for Remembered {
+        fn remember(&mut self, rule: &Rule) -> Result<(), RulesError> {
+            if self.refuse {
+                return Err("the config is read-only".into());
+            }
+            self.rules.push(rule.clone());
+            Ok(())
+        }
+    }
+
+    /// A session stopped on a prompt the operator has not answered.
+    fn app_with_a_prompt(target: Option<&str>) -> App {
+        let mut app = App::new(Repo::default()).attached();
+        app.apply(&SessionEvent::PermissionRequest {
+            id: "t1".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"cargo test"}"#.to_owned(),
+            target: target.map(str::to_owned),
+        });
+        app
     }
 
     fn app_with_a_sent_prompt() -> App {
@@ -356,7 +445,7 @@ mod tests {
         let mut journal = Kept::default();
         let mut backend = Attached::default();
 
-        send_produced(&mut app, &mut journal, &mut backend);
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
 
         assert_eq!(
             journal.events,
@@ -375,7 +464,7 @@ mod tests {
             ..Kept::default()
         };
 
-        send_produced(&mut app, &mut journal, &mut Detached);
+        send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
 
         let saved = app
             .entries()
@@ -393,7 +482,7 @@ mod tests {
             ..Attached::default()
         };
 
-        send_produced(&mut app, &mut Kept::default(), &mut backend);
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
 
         let last = app.entries().last().expect("an entry was pushed");
         assert_eq!(last.head, "not sent");
@@ -411,7 +500,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let mut journal = Kept::default();
 
-        send_produced(&mut app, &mut journal, &mut Detached);
+        send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
 
         // The turn is still recorded — it is what the operator did — and the
         // transcript says plainly that nothing received it.
@@ -458,6 +547,138 @@ mod tests {
             app.take_produced().is_empty(),
             "the backend's own events were queued to be sent back to it"
         );
+    }
+
+    #[test]
+    fn a_decision_reaches_the_backend_the_call_is_waiting_in() {
+        let mut app = app_with_a_prompt(Some("cargo test"));
+        let mut journal = Kept::default();
+        let mut backend = Attached::default();
+
+        app.answer(Answer::Once);
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(
+            backend.answered,
+            [(ToolCallId::new("t1"), PermissionDecision::Allow)]
+        );
+        assert_eq!(
+            journal.events,
+            [SessionEvent::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+            }],
+            "a resumed session would not know the call was allowed"
+        );
+        assert!(app.asking().is_none(), "the prompt stayed on screen");
+    }
+
+    #[test]
+    fn a_decision_the_backend_would_not_take_says_the_call_is_still_waiting() {
+        let mut app = app_with_a_prompt(Some("cargo test"));
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+
+        app.answer(Answer::No);
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        let entry = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "not answered")
+            .expect("the failure is on screen");
+        assert!(entry.body.ends_with("the subprocess has gone"), "{entry:?}");
+    }
+
+    #[test]
+    fn an_always_answer_is_kept_so_the_prompt_does_not_come_back() {
+        let mut app = app_with_a_prompt(Some("cargo test"));
+        let mut remembered = Remembered::default();
+
+        app.answer(Answer::AlwaysTarget);
+        send_produced(
+            &mut app,
+            &mut Kept::default(),
+            &mut Attached::default(),
+            &mut remembered,
+        );
+
+        assert_eq!(remembered.rules, [Rule::targeted("Bash", "cargo test")]);
+        assert!(app.allowed().allows("Bash", Some("cargo test")));
+    }
+
+    #[test]
+    fn a_rule_that_could_not_be_kept_says_it_will_not_outlive_the_session() {
+        let mut app = app_with_a_prompt(None);
+        let mut remembered = Remembered {
+            refuse: true,
+            ..Remembered::default()
+        };
+
+        app.answer(Answer::AlwaysTool);
+        send_produced(
+            &mut app,
+            &mut Kept::default(),
+            &mut Attached::default(),
+            &mut remembered,
+        );
+
+        let entry = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "not saved" && entry.meta == "Bash")
+            .expect("the failure names the rule that was not kept");
+        assert!(entry.body.contains("comes back next time"), "{entry:?}");
+        // The answer still stands for this session; only the keeping failed.
+        assert!(app.allowed().allows("Bash", Some("anything")));
+    }
+
+    #[test]
+    fn a_prompt_a_rule_already_answers_is_never_put_in_front_of_the_operator() {
+        let mut app = App::new(Repo::default())
+            .attached()
+            .with_rules([Rule::targeted("Bash", "cargo test")].into_iter().collect());
+        let mut backend = Attached {
+            produces: vec![SessionEvent::PermissionRequest {
+                id: "t1".into(),
+                tool: "Bash".to_owned(),
+                input: r#"{"command":"cargo test"}"#.to_owned(),
+                target: Some("cargo test".to_owned()),
+            }],
+            ..Attached::default()
+        };
+
+        fold_backend(&mut app, &mut Kept::default(), &mut backend);
+        app.settle_rules();
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        assert!(app.asking().is_none(), "the modal asked what was decided");
+        assert_eq!(
+            backend.answered,
+            [(ToolCallId::new("t1"), PermissionDecision::Allow)]
+        );
+    }
+
+    #[test]
+    fn folding_a_recorded_session_answers_nothing_by_itself() {
+        // `apply` is how a resumed session is read back. A rule that answered
+        // prompts there would write decisions into a session that already
+        // made its own.
+        let mut app = App::new(Repo::default())
+            .attached()
+            .with_rules([Rule::tool("Bash")].into_iter().collect());
+
+        app.apply(&SessionEvent::PermissionRequest {
+            id: "t1".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"cargo test"}"#.to_owned(),
+            target: Some("cargo test".to_owned()),
+        });
+
+        assert!(app.take_produced().is_empty());
+        assert!(app.asking().is_some());
     }
 
     #[test]

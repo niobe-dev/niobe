@@ -27,15 +27,17 @@ pub mod app;
 pub mod bridge;
 mod input;
 pub mod journal;
+pub mod rules;
 pub mod run;
 pub mod terminal;
 mod text;
 pub mod theme;
 pub mod ui;
 
-pub use app::{App, Entry, EntryKind, Repo, SelectedProfile};
+pub use app::{Answer, App, Ask, Entry, EntryKind, Repo, SelectedProfile};
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use journal::{Journal, JournalError, Unrecorded};
+pub use rules::{Forgotten, Rules, RulesError};
 pub use run::{Ended, run};
 pub use terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 pub use theme::{CLASSIC, Theme};

@@ -36,7 +36,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 
 - **`crates/niobe-core/`** — the shared vocabulary. `event.rs` is the event model, the one type
   every backend produces into; `session.rs` is `SessionState`, the fold every consumer derives its
-  numbers from. Depends on no other workspace crate and on no wire format.
+  numbers from; `permission.rs` is the standing answer to a permission prompt (`Rule`,
+  `Allowlist`), which the shell matches and the config stores. Depends on no other workspace
+  crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
@@ -44,27 +46,34 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   up by exact id on a day and prices a usage record against it. `tests/prices.rs` checks the
   table against costs computed by hand.
 - **`crates/niobe-config/`** — the config: profiles, each a backend plus the environment,
-  arguments and credential refresh it runs with. `parse.rs` walks the spanned TOML document by
-  hand so that an invalid file is reported as its key and line; `lib.rs` layers a repository's
-  file over the user's and selects the profile a session runs under.
+  arguments and credential refresh it runs with, and the `[permissions]` rules a session answers
+  prompts with before asking. `parse.rs` walks the spanned TOML document by hand so that an
+  invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`
+  array at the byte range the parser gives it, so the operator's comments and ordering survive;
+  `lib.rs` layers a repository's file over the user's and selects the profile a session runs
+  under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
   SQLite (`store.rs`; the triggers in its schema refuse an update or a delete). `recorder.rs` is
   the write side a running session holds; `jsonl.rs` reads a JSON Lines event log.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
-  operator's events to, `terminal.rs` enters and restores the terminal, `theme.rs` is the palette,
-  `text.rs` wraps and truncates. Snapshot pictures of the screen live in `tests/snapshots/`.
+  operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
+  enters and restores the terminal, `theme.rs` is the palette, `text.rs` wraps and truncates. Snapshot pictures of the screen live in `tests/snapshots/`.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
   `translate.rs` turns one line of it into events and owns no process, `driver.rs` spawns the
-  binary and keeps its standard input open for the life of the session. `tests/stream.rs` folds
+  binary, keeps its standard input open for the life of the session and answers the permission
+  prompts the CLI stops turns on. `tests/stream.rs` folds
   the recorded stream in `tests/fixtures/`, whose README carries the arithmetic the tests assert.
   The codex bridge names its binary and does not spawn it yet.
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
   the TUI, and the only one that wires the others together: it finds the config files and opens
-  the shell under the selected profile, with the session store as its journal. `tests/cli.rs`
-  runs the binary; `tests/pty.rs` runs it on a real terminal.
+  the shell under the selected profile, with the session store as its journal and the
+  repository's config as the place a standing answer is kept. `tests/cli.rs` runs the binary;
+  `tests/pty.rs` runs it on a real terminal; `tests/permission.rs` walks a recorded permission
+  prompt from the bridge's translation to the rule in the config, which is the one path only this
+  crate may name both ends of.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
 
 ### 1.1 Layering (BINDING)

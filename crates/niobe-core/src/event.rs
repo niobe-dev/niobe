@@ -318,6 +318,13 @@ pub enum Event {
         tool: String,
         /// The arguments the operator is approving.
         input: String,
+        /// The one thing the call acts on — a shell command, a path, a URL —
+        /// where the backend can name it. This is what a standing answer is
+        /// written about, so a call with no target can only be answered for
+        /// the whole tool. `None` means the backend did not say, never that
+        /// the call acts on nothing.
+        #[serde(default)]
+        target: Option<String>,
     },
 
     /// The operator answered a permission request.

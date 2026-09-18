@@ -9,12 +9,14 @@
 //! fold every consumer derives from.
 
 pub mod event;
+pub mod permission;
 pub mod session;
 
 pub use event::{
     AgentId, AgentOutcome, Backend, CheckpointId, Event, PermissionDecision, SessionMeta,
     ToolCallId, ToolOutcome, Usage,
 };
+pub use permission::{Allowlist, Rule, RuleError};
 pub use session::{CheckpointRecord, DecisionRecord, SessionState, ToolTotals, Totals};
 
 /// The name the binary is installed as, and the directory name used under

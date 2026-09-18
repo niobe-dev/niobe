@@ -469,7 +469,8 @@ mod tests {
         state.apply(&Event::PermissionRequest {
             id: "t1".into(),
             tool: "Bash".to_owned(),
-            input: "rm -rf build".to_owned(),
+            input: r#"{"command":"rm -rf build"}"#.to_owned(),
+            target: Some("rm -rf build".to_owned()),
         });
         assert_eq!(state.pending_permissions().len(), 1);
 

@@ -13,6 +13,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use niobe_core::Backend;
+use niobe_core::permission::{Allowlist, Rule};
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
@@ -50,6 +51,7 @@ impl File<'_> {
                         line: self.line(&value.span()),
                     });
                 }
+                "permissions" => config.allowed = self.permissions(value, &at)?,
                 "profiles" => {
                     for (name, profile) in in_file_order(self.table(value, &at)?) {
                         let at = at.child(name.get_ref());
@@ -68,12 +70,47 @@ impl File<'_> {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        "unknown key; expected `default_profile` or `profiles`",
+                        "unknown key; expected `default_profile`, `profiles` or `permissions`",
                     ));
                 }
             }
         }
         Ok(config)
+    }
+
+    /// The standing answers to permission prompts, as the shell will match
+    /// them.
+    ///
+    /// A rule that is not one is reported at its line: a config that silently
+    /// dropped one would leave the operator expecting a prompt not to come
+    /// back when it will.
+    fn permissions(
+        &self,
+        value: &Spanned<DeValue<'_>>,
+        at: &Key,
+    ) -> Result<Allowlist, ConfigError> {
+        let mut allowed = Allowlist::new();
+        for (key, value) in in_file_order(self.table(value, at)?) {
+            let at = at.child(key.get_ref());
+            match key.get_ref().as_ref() {
+                "allow" => {
+                    let DeValue::Array(items) = value.get_ref() else {
+                        return Err(self.wrong_type(value, &at, "an array of rules"));
+                    };
+                    for (index, item) in items.iter().enumerate() {
+                        let at = at.index(index);
+                        let text = self.string(item, &at)?;
+                        let rule = Rule::parse(text)
+                            .map_err(|error| self.invalid(&item.span(), &at, &error.to_string()))?;
+                        allowed.insert(rule);
+                    }
+                }
+                _ => {
+                    return Err(self.invalid(&key.span(), &at, "unknown key; expected `allow`"));
+                }
+            }
+        }
+        Ok(allowed)
     }
 
     fn profile(

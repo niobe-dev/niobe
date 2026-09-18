@@ -261,12 +261,77 @@ fn a_call_the_cli_refused_is_recorded_once_though_it_is_reported_twice() {
     let events = translated();
     let state = SessionState::replay(&events);
 
-    assert_eq!(state.permission_requests(), 1);
     assert_eq!(state.permissions_denied(), 1);
     assert!(events.iter().any(|event| matches!(
         event,
         Event::PermissionResponse { decision, .. } if *decision == PermissionDecision::Deny
     )));
+}
+
+#[test]
+fn a_prompt_the_cli_is_waiting_on_is_asked_and_kept_to_be_answered() {
+    let mut translator = Translator::new("max");
+    let events: Vec<Event> = FIXTURE
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect();
+
+    let asked: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::PermissionRequest { .. }))
+        .collect();
+    let Some(Event::PermissionRequest {
+        id,
+        tool,
+        input,
+        target,
+    }) = asked.first().copied()
+    else {
+        panic!("the CLI asked before it read the file: {asked:?}");
+    };
+
+    assert_eq!(id.as_str(), "toolu_read");
+    assert_eq!(tool, "Read");
+    assert_eq!(input, r#"{"file_path":"/repo/notes.txt"}"#);
+    assert_eq!(
+        target.as_deref(),
+        Some("/repo/notes.txt"),
+        "a standing answer could not be written about this call"
+    );
+
+    // The event says what to show; this says what to address the answer to.
+    let waiting = translator.take_asked();
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0].id.as_str(), "toolu_read");
+    assert_eq!(waiting[0].request_id, "req_1");
+    assert_eq!(
+        waiting[0].input,
+        serde_json::json!({ "file_path": "/repo/notes.txt" }),
+        "an approval would have sent back arguments the operator never saw"
+    );
+    assert!(
+        translator.take_asked().is_empty(),
+        "the same prompt would be answered twice"
+    );
+}
+
+#[test]
+fn a_prompt_with_no_answer_in_the_recording_stays_pending() {
+    // The fixture is what the CLI printed; Niobe's answer goes the other way,
+    // on standard input, so folding the recording alone leaves the prompt up.
+    let state = SessionState::replay(&translated());
+
+    assert_eq!(state.permission_requests(), 2);
+    assert_eq!(state.permissions_denied(), 1);
+    assert_eq!(
+        state
+            .pending_permissions()
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        ["toolu_read"]
+    );
 }
 
 #[test]

@@ -91,7 +91,8 @@ fn session_events() -> Vec<Event> {
         Event::PermissionRequest {
             id: "t2".into(),
             tool: "Edit".to_owned(),
-            input: "catalog/fetch.ts".to_owned(),
+            input: r#"{"file_path":"catalog/fetch.ts"}"#.to_owned(),
+            target: Some("catalog/fetch.ts".to_owned()),
         },
         Event::PermissionResponse {
             id: "t2".into(),

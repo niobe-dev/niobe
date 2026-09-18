@@ -11,7 +11,7 @@ use std::path::Path;
 
 use niobe_bridge_claude::{Options, Session, SpawnError};
 use niobe_config::Selected;
-use niobe_core::event::{Backend, Event};
+use niobe_core::event::{Backend, Event, PermissionDecision, ToolCallId};
 use niobe_tui::bridge::{Bridge, BridgeError, Detached};
 
 /// What a session is attached to.
@@ -57,11 +57,8 @@ pub fn attach(
 
     match selected.profile.backend() {
         Backend::Claude => {
-            let mut options = Options::new(root, selected.name);
-            options.env = selected.profile.env().clone();
-            options.args = selected.profile.args().to_vec();
-            options.resume = resume;
-            let session = Session::spawn(&options).map_err(describe)?;
+            let session =
+                Session::spawn(&claude_options(root, selected, resume)).map_err(describe)?;
             Ok(Attachment {
                 bridge: Box::new(Claude(session)),
                 attached: true,
@@ -72,6 +69,23 @@ pub fn attach(
         // and no backend. The shell says which it is when a prompt is sent.
         Backend::Codex | Backend::Native => Ok(detached()),
     }
+}
+
+/// What the `claude` bridge is spawned with under `profile`.
+///
+/// Written apart from the spawn so that what a profile turns into can be
+/// checked without starting a real session on the operator's own
+/// subscription.
+fn claude_options(root: &Path, profile: &Selected<'_>, resume: Option<String>) -> Options {
+    let mut options = Options::new(root, profile.name);
+    options.env = profile.profile.env().clone();
+    options.args = profile.profile.args().to_vec();
+    options.resume = resume;
+    // The shell answers permission prompts, so the CLI is told to ask. The
+    // flag is not set for a backend with nothing answering: the CLI stops the
+    // turn on every gated call and waits for an answer that would never come.
+    options.ask_over_stdio = true;
+    options
 }
 
 fn detached() -> Attachment {
@@ -96,6 +110,10 @@ struct Claude(Session);
 impl Bridge for Claude {
     fn send(&mut self, prompt: &str) -> Result<(), BridgeError> {
         self.0.send(prompt).map_err(BridgeError::from)
+    }
+
+    fn answer(&mut self, id: &ToolCallId, decision: PermissionDecision) -> Result<(), BridgeError> {
+        self.0.answer(id, decision).map_err(BridgeError::from)
     }
 
     fn drain(&mut self) -> Vec<Event> {
@@ -134,6 +152,34 @@ mod tests {
             attach(Path::new("/repo"), Some(&selected), None).expect("nothing to start");
 
         assert!(!attachment.attached());
+    }
+
+    #[test]
+    fn a_claude_session_is_told_to_ask_because_the_shell_answers() {
+        let config = config(
+            "[profiles.max]\nbackend = \"claude\"\nenv = { A = \"1\" }\nargs = [\"--add-dir\", \"/other\"]\n",
+        );
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let options = claude_options(Path::new("/repo"), &selected, Some("s-1".to_owned()));
+
+        assert!(
+            options.ask_over_stdio,
+            "the CLI would decide for itself what the operator is meant to be asked"
+        );
+        let argv = options.argv();
+        let flag = argv
+            .iter()
+            .position(|a| a == "--permission-prompt-tool")
+            .expect("the prompt tool");
+        assert_eq!(argv[flag + 1], "stdio");
+        assert_eq!(options.profile, "max");
+        assert_eq!(options.env["A"], "1");
+        assert_eq!(options.args, ["--add-dir", "/other"]);
+        assert_eq!(options.resume.as_deref(), Some("s-1"));
     }
 
     #[test]
