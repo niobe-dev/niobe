@@ -65,9 +65,13 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
   enters and restores the terminal and the mouse it takes for the wheel, `theme.rs` is the
-  palette, `text.rs` wraps and truncates, `markdown.rs` draws the assistant's replies from their
-  markdown and wraps the styled text itself, so the transcript's line count stays exact. Snapshot
-  pictures of the screen live in `tests/snapshots/`.
+  palette — one table entry per theme, every colour one of the sixteen ANSI names so a user's own
+  scheme is honoured — `text.rs` wraps and truncates, `markdown.rs` draws the assistant's replies
+  from their markdown and wraps the styled text itself, so the transcript's line count stays
+  exact, and `fx.rs` is what the desktop between the panes does while a turn is running: a pure
+  function of the theme, the strip's height and how long the turn has run, so a frame of it can
+  be asserted rather than merely observed to move. Snapshot pictures of the screen live in
+  `tests/snapshots/`.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,

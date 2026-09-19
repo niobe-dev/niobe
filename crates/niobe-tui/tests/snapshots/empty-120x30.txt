@@ -1,29 +1,29 @@
- Niobe  Session  Files  Tools  Cost  Options  Help                                no backend attached  theme:CLASSIC F9
+ Niobe  Session  Files  Tools  Cost  Options  Help                                  no backend attached  theme:CYBER F9
 ╔════════════════════════ Session ─ niobe ═════════════════════════╗ ╔═════════════════════ Cost ══════════════════════╗
-║                                                                  ║ ║session     tokens in    tokens out  cache read  ║
-║  niobe                                                           ║ ║—           0            0           0           ║
-║  A terminal coding agent that keeps you aware of what is         ║ ║no tool calls yet                                ║
-║  being built and how.                                            ║ ║0 calls · 0 failed · 0 denied · 0 B out          ║
 ║                                                                  ║ ║                                                 ║
-║  What the agent did, decided and touched, what it is doing now   ║ ║                                                 ║
-║  and what it cost, visible while it happens and never a guess.   ║ ║                                                 ║
-║  You stay on the loop instead of in it.                          ║ ║                                                 ║
-║                                                                  ║ ╚═════════════════════════════════════════════════╝
-║  No backend is attached: `niobe profiles` shows what is defined. ║ ╔═════════════ Parallel ─ 0 running ══════════════╗
-║                                                                  ║ ║no sub-agents                                    ║
-║                                                                  ║ ║0 spawned · peak 0 · 0 done · 0 failed           ║
+║                                                                  ║ ║ session     tokens in   tokens out cache read   ║
+║   niobe                                                          ║ ║ —           0           0          0            ║
+║   A terminal coding agent that keeps you aware of what is        ║ ║ no tool calls yet                               ║
+║   being built and how.                                           ║ ║ 0 calls · 0 failed · 0 denied · 0 B out         ║
 ║                                                                  ║ ║                                                 ║
+║   What the agent did, decided and touched, what it is doing now  ║ ║                                                 ║
+║   and what it cost, visible while it happens and never a guess.  ║ ║                                                 ║
+║   You stay on the loop instead of in it.                         ║ ╚═════════════════════════════════════════════════╝
+║                                                                  ║ ╔═════════════ Parallel ─ 0 running ══════════════╗
+║   No backend attached. `niobe profiles` shows what is defined.   ║ ║                                                 ║
+║                                                                  ║ ║ no sub-agents                                   ║
+║                                                                  ║ ║ 0 spawned · peak 0 · 0 done · 0 failed          ║
 ║                                                                  ║ ║                                                 ║
 ║                                                                  ║ ╚═════════════════════════════════════════════════╝
 ║                                                                  ║ ╔════════════════════ Changes ════════════════════╗
-║                                                                  ║ ║Files ─ 0                                        ║
-║                                                                  ║ ║nothing changed yet                              ║
 ║                                                                  ║ ║                                                 ║
-║                                                                  ║ ║Decisions ─ 0                                    ║
-║                                                                  ║ ║none recorded                                    ║
+║                                                                  ║ ║ Files ─ 0                                       ║
+║                                                                  ║ ║ nothing changed yet                             ║
 ║                                                                  ║ ║                                                 ║
-║──────────────────────────────────────────────────────────────────║ ║                                                 ║
-║>  Ask for a change, or press F1 for help                         ║ ║                                                 ║
+║                                                                  ║ ║ Decisions ─ 0                                   ║
+║                                                                  ║ ║ none recorded                                   ║
+║ ──────────────────────────────────────────────────────────────── ║ ║                                                 ║
+║ >  Ask for a change, or press F1 for help                        ║ ║                                                 ║
 ╚══════════════════════════════════════════════════════════════════╝ ╚═════════════════════════════════════════════════╝
 niobe │ no backend attached │ ⎇ main │ 0 tokens
 Enter send · Alt+Enter newline · PgUp/PgDn scrollback · F10 quit

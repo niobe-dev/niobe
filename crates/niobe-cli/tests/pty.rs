@@ -519,8 +519,8 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
         .expect("the niobe binary runs");
     terminal.shows("NEO");
     terminal.typed(F9);
-    // Two themes, so the next one round is the default again.
-    terminal.shows("CLASSIC");
+    // F9 cycles the table in order, and `neo` is not the last of it.
+    terminal.shows("MODERN");
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
     assert!(status.success(), "the shell ended with {status}");

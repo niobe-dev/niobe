@@ -19,6 +19,26 @@
 
 use ratatui::style::Color;
 
+/// What the desktop does behind the panes while a turn is running.
+///
+/// The panes are opaque, so the only cells this reaches are the ones between
+/// them: the column that separates the session pane from the right-hand stack.
+/// A strip one column wide is what a terminal has to spare, and it is enough
+/// to answer "is it still going?" from across the room without the operator
+/// having to read anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Motion {
+    /// Nothing moves. A DOS screen did not animate, and the spinner under the
+    /// transcript already says the session is at work.
+    Still,
+    /// Glyphs fall down the gutter in a trail, brightest at the head.
+    Rain,
+    /// Words drift down the gutter, with a mark that travels through them.
+    Drift,
+    /// One mote travels down the gutter, trailing off behind it.
+    Sweep,
+}
+
 /// Every colour the shell draws with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Theme {
@@ -86,9 +106,16 @@ pub struct Theme {
     pub button_hot: Color,
     /// What a dialog and its buttons cast on what is under them.
     pub shadow: Color,
+
+    /// The head of whatever the desktop animates between the panes; what
+    /// trails behind it is drawn in [`Theme::dim`]. A theme whose motion is
+    /// [`Motion::Still`] never draws in it.
+    pub fx: Color,
+    /// What the desktop does between the panes while a turn is running.
+    pub motion: Motion,
 }
 
-/// The DOS-blue theme, and the default.
+/// The DOS-blue theme: Turbo Vision as it shipped.
 ///
 /// The IBM CGA palette, which is exactly what the sixteen ANSI colours encode.
 /// The darker navy a bar track and a diff background would want is outside
@@ -130,6 +157,9 @@ pub const CLASSIC: Theme = Theme {
     button_focus_fg: Color::Black,
     button_hot: Color::Yellow,
     shadow: Color::Black,
+
+    fx: Color::Cyan,
+    motion: Motion::Still,
 };
 
 /// Green on black: the terminal every film puts in front of a hacker.
@@ -185,15 +215,128 @@ pub const NEO: Theme = Theme {
     button_focus_fg: Color::Black,
     button_hot: Color::White,
     shadow: Color::DarkGray,
+
+    fx: Color::LightGreen,
+    motion: Motion::Rain,
+};
+
+/// Green and magenta on near-black: the default.
+///
+/// The design is two accents on a black desk — a green that carries the
+/// chrome and everything the session did, and a magenta that carries the
+/// operator and the keys they can press. Both survive the reduction intact,
+/// because both are on the bright half of the sixteen. What does not survive
+/// is the design's third colour, a pale lavender for tool calls and the
+/// status line: there is no lavender in sixteen colours, so a tool call takes
+/// the bright blue, which is the only other hue on screen, and the status line
+/// takes the grey. Pane background and desk are one near-black apart in the
+/// design and are both black here, which is what makes the gutter between the
+/// panes a place the desktop's motion can be seen in at all.
+pub const CYBER: Theme = Theme {
+    name: "CYBER",
+
+    pane_bg: Color::Black,
+    frame: Color::LightGreen,
+    title: Color::LightMagenta,
+    fg: Color::White,
+    dim: Color::Green,
+    hot: Color::LightGreen,
+
+    menu_bg: Color::Black,
+    menu_fg: Color::White,
+    fkey_bg: Color::LightMagenta,
+    fkey_fg: Color::Black,
+
+    status_bg: Color::Black,
+    status_fg: Color::Gray,
+
+    add: Color::LightGreen,
+    del: Color::LightRed,
+
+    user: Color::LightMagenta,
+    agent: Color::LightGreen,
+    tool: Color::LightBlue,
+    code: Color::LightCyan,
+
+    // The dialog takes the magenta the chrome keeps for the operator, so a
+    // question reads as the shell asking rather than as the session reporting.
+    // Its buttons go back to the panes' black and green.
+    dialog_bg: Color::Magenta,
+    dialog_fg: Color::White,
+    dialog_frame: Color::LightMagenta,
+    button_bg: Color::Black,
+    button_fg: Color::LightGreen,
+    button_focus_bg: Color::LightGreen,
+    button_focus_fg: Color::Black,
+    button_hot: Color::LightYellow,
+    shadow: Color::Black,
+
+    fx: Color::Magenta,
+    motion: Motion::Drift,
+};
+
+/// The palette of a modern editor: grey chrome, a blue accent, and syntax
+/// colours for what the session did.
+///
+/// The design's four greys collapse to two — frame, menu bar and dialog share
+/// the dark one, secondary text takes the light one — which is enough,
+/// because no two of those are ever drawn on each other.
+///
+/// The editor's blue status bar is the one piece of the design that does not
+/// survive. The status line is where the backend, the branch, the budget and
+/// the plan's windows are told apart by colour, and on sixteen colours a blue
+/// bar leaves only white legible on it: the accent and the assistant's own
+/// blue both vanish into the background, and the strip goes monochrome. The
+/// bar takes the panes' black instead, which keeps every one of those
+/// readings, and the blue stays where it is still an accent — the F-key
+/// labels, and everything the shell wants the operator to look at.
+pub const MODERN: Theme = Theme {
+    name: "MODERN",
+
+    pane_bg: Color::Black,
+    frame: Color::DarkGray,
+    title: Color::LightYellow,
+    fg: Color::White,
+    dim: Color::Gray,
+    hot: Color::LightBlue,
+
+    menu_bg: Color::DarkGray,
+    menu_fg: Color::White,
+    fkey_bg: Color::Blue,
+    fkey_fg: Color::White,
+
+    status_bg: Color::Black,
+    status_fg: Color::Gray,
+
+    add: Color::Cyan,
+    del: Color::LightRed,
+
+    user: Color::LightYellow,
+    agent: Color::LightBlue,
+    tool: Color::LightMagenta,
+    code: Color::LightCyan,
+
+    dialog_bg: Color::DarkGray,
+    dialog_fg: Color::White,
+    dialog_frame: Color::Gray,
+    button_bg: Color::Blue,
+    button_fg: Color::White,
+    button_focus_bg: Color::LightBlue,
+    button_focus_fg: Color::Black,
+    button_hot: Color::LightYellow,
+    shadow: Color::Black,
+
+    fx: Color::LightBlue,
+    motion: Motion::Sweep,
 };
 
 /// Every theme there is, in the order `F9` cycles them. The first is the
 /// default.
-pub const THEMES: [Theme; 2] = [CLASSIC, NEO];
+pub const THEMES: [Theme; 4] = [CYBER, CLASSIC, NEO, MODERN];
 
 impl Theme {
-    /// The theme `name` selects — `classic`, `neo` — or `None` where no theme
-    /// is called that.
+    /// The theme `name` selects — `cyber`, `classic`, `neo`, `modern` — or
+    /// `None` where no theme is called that.
     ///
     /// Case is ignored: the name is written in a config file and on a command
     /// line, and the menu bar shows it in capitals.
@@ -210,7 +353,7 @@ impl Theme {
         // built one by hand; cycling from it starts the cycle rather than
         // failing, because there is nothing for the operator to do about it.
         let next = at.map_or(0, |at| (at + 1) % THEMES.len());
-        THEMES.get(next).copied().unwrap_or(CLASSIC)
+        THEMES.get(next).copied().unwrap_or(CYBER)
     }
 }
 
@@ -230,7 +373,7 @@ pub fn listed() -> String {
 
 impl Default for Theme {
     fn default() -> Self {
-        CLASSIC
+        CYBER
     }
 }
 
@@ -240,7 +383,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 27] {
+    fn colours(t: &Theme) -> [Color; 28] {
         [
             t.pane_bg,
             t.frame,
@@ -269,14 +412,15 @@ mod tests {
             t.button_focus_fg,
             t.button_hot,
             t.shadow,
+            t.fx,
         ]
     }
 
     #[test]
-    fn the_default_theme_is_classic() {
-        assert_eq!(Theme::default(), CLASSIC);
-        assert_eq!(CLASSIC.name, "CLASSIC");
-        assert_eq!(THEMES.first(), Some(&CLASSIC));
+    fn the_default_theme_is_cyber() {
+        assert_eq!(Theme::default(), CYBER);
+        assert_eq!(CYBER.name, "CYBER");
+        assert_eq!(THEMES.first(), Some(&CYBER));
     }
 
     #[test]
@@ -319,6 +463,14 @@ mod tests {
                 (t.fkey_fg, t.fkey_bg, "an F-key label"),
                 (t.fkey_bg, t.menu_bg, "an F-key label block"),
                 (t.status_fg, t.status_bg, "the status line"),
+                // The status line draws the pane colours on a background a
+                // theme may choose for itself, so each of them is checked
+                // against it as well as against the panes.
+                (t.hot, t.status_bg, "the status line's accent"),
+                (t.agent, t.status_bg, "the backend on the status line"),
+                (t.tool, t.status_bg, "the branch on the status line"),
+                (t.fg, t.status_bg, "a figure on the status line"),
+                (t.del, t.status_bg, "an error count on the status line"),
                 (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
                 (t.dialog_fg, t.dialog_bg, "dialog text"),
                 (t.dialog_frame, t.dialog_bg, "a dialog's border"),
@@ -332,6 +484,7 @@ mod tests {
                     "the focused button's label",
                 ),
                 (t.shadow, t.dialog_bg, "a dialog's shadow"),
+                (t.fx, t.pane_bg, "the desktop's motion"),
             ] {
                 assert_ne!(on, over, "{}: {what} is invisible", t.name);
             }
@@ -348,9 +501,25 @@ mod tests {
         }
     }
 
+    /// Only the palette tells the motions apart on screen, so a theme that
+    /// moves has to move in something other than what it draws its secondary
+    /// text in: the trail behind the head is `dim`, and a head the same colour
+    /// as its own trail is a trail with no head.
+    #[test]
+    fn every_theme_that_moves_has_a_head_its_trail_is_not() {
+        for t in THEMES {
+            if t.motion == Motion::Still {
+                continue;
+            }
+            assert_ne!(t.fx, t.dim, "{}", t.name);
+        }
+    }
+
     #[test]
     fn a_theme_is_selected_by_its_name_however_it_is_capitalised() {
         assert_eq!(Theme::by_name("classic"), Some(CLASSIC));
+        assert_eq!(Theme::by_name("cyber"), Some(CYBER));
+        assert_eq!(Theme::by_name("modern"), Some(MODERN));
         assert_eq!(Theme::by_name("neo"), Some(NEO));
         assert_eq!(Theme::by_name("NEO"), Some(NEO));
         assert_eq!(Theme::by_name("Neo"), Some(NEO));
@@ -373,6 +542,6 @@ mod tests {
 
     #[test]
     fn the_names_are_listed_the_way_a_sentence_lists_them() {
-        assert_eq!(listed(), "`classic` or `neo`");
+        assert_eq!(listed(), "`cyber`, `classic`, `neo` or `modern`");
     }
 }

@@ -29,6 +29,7 @@ use niobe_core::session::{FileChanges, SessionState};
 use crate::app::{
     Activity, Answer, App, Ask, Entry, EntryKind, Picker, SelectedProfile, tool_label,
 };
+use crate::fx;
 use crate::text;
 use crate::theme::Theme;
 
@@ -465,12 +466,19 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         return;
     }
 
-    // Session pane to right stack, 1.35 : 1.
+    // Session pane to right stack, 1.35 : 1, with a column of desktop between
+    // them.
     let [left, right] = Layout::horizontal([Constraint::Fill(135), Constraint::Fill(100)])
         .spacing(1)
         .areas(area);
 
     draw_session(frame, left, app, theme);
+    draw_desktop(
+        frame,
+        Rect::new(left.right(), area.y, 1, area.height),
+        app,
+        theme,
+    );
 
     let [cost, parallel, changes] = Layout::vertical([
         Constraint::Length(10),
@@ -484,13 +492,45 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_changes(frame, changes, app.session(), theme);
 }
 
+/// The strip of desktop between the panes, animated while a turn is running.
+///
+/// It is the one part of the screen that says the session is alive without
+/// the operator reading anything, and it is drawn from the same clock as the
+/// spinner under the transcript, so the two cannot disagree about whether a
+/// turn is going. A theme that does not animate, and a session with no turn
+/// running, leave the strip as it was: empty desktop.
+fn draw_desktop(frame: &mut Frame, strip: Rect, app: &App, theme: &Theme) {
+    let Some(activity) = app.activity() else {
+        return;
+    };
+    for mote in fx::column(theme, strip.height, fx::frame_at(activity.elapsed)) {
+        let at = (strip.x, strip.y.saturating_add(mote.row));
+        if let Some(cell) = frame.buffer_mut().cell_mut(at) {
+            cell.set_char(mote.symbol).set_fg(mote.colour);
+        }
+    }
+}
+
+/// Rows of content a pane keeps before it will spare a blank row under its
+/// title.
+const PANE_ROOM: u16 = 2;
+
 /// The pane frame every pane shares: double borders in the frame colour, the
-/// title centred on the top edge.
-fn pane(title: impl Into<String>, theme: &Theme) -> Block<'static> {
+/// title centred on the top edge, and room between the border and what is
+/// written inside it.
+///
+/// A column either side always, and a blank row under the title where the
+/// pane is tall enough to spare one. The blank row is the first thing a short
+/// pane gives up: at the smallest terminal the shell draws in, a row of the
+/// changed files is worth more than the room above them.
+fn pane(title: impl Into<String>, area: Rect, theme: &Theme) -> Block<'static> {
+    // Two rows of border, the blank row itself, and PANE_ROOM left over.
+    let top = u16::from(area.height > 2 + PANE_ROOM);
     Block::bordered()
         .border_type(BorderType::Double)
         .border_style(Style::new().fg(theme.frame))
         .style(Style::new().bg(theme.pane_bg).fg(theme.fg))
+        .padding(Padding::new(1, 1, top, 0))
         .title_top(
             Line::from(format!(" {} ", title.into()))
                 .style(Style::new().fg(theme.title).bold())
@@ -506,7 +546,7 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         format!("Session ─ {repo}")
     };
 
-    let mut block = pane(title, theme);
+    let mut block = pane(title, area, theme);
     if !app.follows_tail() {
         block = block.title_bottom(
             Line::from(" ↑ scrolled back · PgDn returns to the newest line ")
@@ -534,7 +574,16 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     ])
     .areas(inner);
 
-    draw_transcript(frame, transcript, app, theme);
+    // The scrollbar is drawn on the pane's own border rather than inside the
+    // room the padding keeps, so a transcript that overflows does not gain a
+    // second vertical line beside the one the pane already has.
+    draw_transcript(
+        frame,
+        transcript,
+        area.right().saturating_sub(1),
+        app,
+        theme,
+    );
 
     frame.render_widget(
         Paragraph::new(Line::from("─".repeat(usize::from(divider.width))))
@@ -552,7 +601,7 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     app.composer().render(editor, frame.buffer_mut());
 }
 
-fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+fn draw_transcript(frame: &mut Frame, area: Rect, border: u16, app: &mut App, theme: &Theme) {
     // A running turn keeps the bottom row, whatever is scrolled into view
     // above it: whether the session is at work is the question the operator
     // looks down to answer, and a line that scrolled away would not answer it.
@@ -594,7 +643,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
         Paragraph::new(visible).style(Style::new().bg(theme.pane_bg)),
         area,
     );
-    draw_scrollbar(frame, area, (start, total, height), theme);
+    draw_scrollbar(frame, area, border, (start, total, height), theme);
 }
 
 /// Every transcript entry's lines as they were last drawn, with what they were
@@ -652,12 +701,18 @@ fn drawn_from(entry: &Entry, width: usize, theme: &Theme) -> u64 {
 /// Where the view is in a transcript longer than the pane, drawn over the
 /// pane's right border beside the lines it measures. A transcript that fits
 /// has no scrollbar, so the border reads as a border.
-fn draw_scrollbar(frame: &mut Frame, area: Rect, extent: (usize, usize, usize), theme: &Theme) {
+fn draw_scrollbar(
+    frame: &mut Frame,
+    area: Rect,
+    border: u16,
+    extent: (usize, usize, usize),
+    theme: &Theme,
+) {
     let (start, lines, height) = extent;
     if lines <= height || area.height == 0 {
         return;
     }
-    let border = Rect::new(area.right(), area.y, 1, area.height);
+    let border = Rect::new(border, area.y, 1, area.height);
     let mut state = ScrollbarState::new(lines.saturating_sub(height))
         .viewport_content_length(height)
         .position(start);
@@ -724,7 +779,7 @@ fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
         Line::from(""),
         Line::from(match attached {
             true => "  Ask for a change; the bill is on the right.",
-            false => "  No backend is attached: `niobe profiles` shows what is defined.",
+            false => "  No backend attached. `niobe profiles` shows what is defined.",
         })
         .style(Style::new().fg(theme.dim)),
     ]
@@ -784,7 +839,7 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
 }
 
 fn draw_cost(frame: &mut Frame, area: Rect, session: &SessionState, theme: &Theme) {
-    let block = pane("Cost", theme);
+    let block = pane("Cost", area, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -894,7 +949,7 @@ fn bar_line(name: &str, count: u64, busiest: u64, width: usize, theme: &Theme) -
 fn draw_parallel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let session = app.session();
     let running = session.running_agents().len();
-    let block = pane(format!("Parallel ─ {running} running"), theme);
+    let block = pane(format!("Parallel ─ {running} running"), area, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -935,7 +990,7 @@ fn draw_parallel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_changes(frame: &mut Frame, area: Rect, session: &SessionState, theme: &Theme) {
-    let block = pane("Changes", theme);
+    let block = pane("Changes", area, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {

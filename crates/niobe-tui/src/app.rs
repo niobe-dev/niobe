@@ -1599,21 +1599,21 @@ mod tests {
 
     #[test]
     fn f9_moves_to_the_next_theme_and_takes_the_composer_with_it() {
-        use crate::theme::{CLASSIC, NEO, THEMES};
+        use crate::theme::{CLASSIC, CYBER, THEMES};
         use ratatui::crossterm::event::KeyCode;
 
         let mut app = app();
-        assert_eq!(*app.theme(), CLASSIC);
+        assert_eq!(*app.theme(), CYBER);
 
         app.on_key(key(KeyCode::F(9)));
 
-        assert_eq!(*app.theme(), NEO);
+        assert_eq!(*app.theme(), CLASSIC);
         // The composer keeps the styles it was given rather than being handed
         // them per frame, so a theme that did not reach it would leave the
         // prompt drawn in the one before.
         assert_eq!(
             app.composer().style(),
-            Style::new().fg(NEO.fg).bg(NEO.pane_bg)
+            Style::new().fg(CLASSIC.fg).bg(CLASSIC.pane_bg)
         );
         // And it says nothing: the menu bar already names the theme in force.
         assert_eq!(app.hint(), None);
@@ -1621,7 +1621,7 @@ mod tests {
         for _ in 1..THEMES.len() {
             app.on_key(key(KeyCode::F(9)));
         }
-        assert_eq!(*app.theme(), CLASSIC);
+        assert_eq!(*app.theme(), CYBER);
     }
 
     #[test]

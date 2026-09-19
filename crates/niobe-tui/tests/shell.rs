@@ -551,3 +551,103 @@ fn nothing_the_backends_did_not_report_appears_as_a_number() {
     assert!(empty.contains("no backend"), "{empty}");
     assert!(empty.contains('—'), "{empty}");
 }
+
+/// The column of desktop between the session pane and the right-hand stack,
+/// over the rows the panes occupy. Everything else on screen is a pane, and
+/// the panes are opaque.
+fn gutter(frame: &str) -> String {
+    let at = frame
+        .lines()
+        .nth(1)
+        .and_then(|border| border.chars().position(|c| c == '╗'))
+        .map(|at| at + 1)
+        .expect("the session pane's top-right corner is on the body's first row");
+    // The menu bar above the body, and the status line and F-key bar below it.
+    let body = frame.lines().count().saturating_sub(4);
+    frame
+        .lines()
+        .skip(1)
+        .take(body)
+        .filter_map(|row| row.chars().nth(at))
+        .collect()
+}
+
+/// Nothing fills the gutter until a turn is running, and what fills it then
+/// moves. A shell that looked the same whether or not it was working is the
+/// complaint this answers.
+#[test]
+fn the_desktop_moves_between_the_panes_while_a_turn_runs() {
+    use std::time::Duration;
+
+    let idle = gutter(&screen(&mut running_session(), 120, 30));
+    assert!(
+        idle.chars().all(char::is_whitespace),
+        "an idle session animated the desktop: {idle:?}"
+    );
+
+    let mut app = session_at_work();
+    let first = gutter(&screen(&mut app, 120, 30));
+    assert!(
+        !first.chars().all(char::is_whitespace),
+        "a running turn left the desktop blank"
+    );
+
+    // Two tenths of a second later the strip has moved on.
+    app.tick(std::time::Instant::now() + Duration::from_secs(200));
+    let later = gutter(&screen(&mut app, 120, 30));
+    assert_ne!(first, later, "the desktop drew the same frame twice");
+
+    // And it stops with the turn, rather than running on over a finished one.
+    app.apply(&Event::TurnEnded);
+    let stopped = gutter(&screen(&mut app, 120, 30));
+    assert!(
+        stopped.chars().all(char::is_whitespace),
+        "the desktop kept moving after the turn ended: {stopped:?}"
+    );
+}
+
+/// The columns a row is made of: a pane's border is `║`, or the scrollbar's
+/// thumb where one is drawn over it.
+fn borders(row: &str) -> Vec<usize> {
+    row.chars()
+        .enumerate()
+        .filter(|(_, c)| *c == '║' || *c == '█')
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// No pane puts its text against its border. A column either side of the
+/// content and a blank row under the title is what the panes are drawn to,
+/// and text touching a double border is what they are drawn that way to avoid.
+#[test]
+fn no_pane_draws_its_text_against_its_border() {
+    for (width, height) in [(80, 24), (120, 30), (200, 60)] {
+        let frame = screen(&mut running_session(), width, height);
+        let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+
+        for (at, row) in frame.lines().enumerate() {
+            let cells = &rows[at];
+            for pair in borders(row).chunks_exact(2) {
+                let (left, right) = (pair[0], pair[1]);
+                assert_eq!(
+                    cells.get(left + 1).copied(),
+                    Some(' '),
+                    "row {at} at {width}x{height} touches the border on its left:\n{frame}"
+                );
+                assert_eq!(
+                    cells.get(right - 1).copied(),
+                    Some(' '),
+                    "row {at} at {width}x{height} touches the border on its right:\n{frame}"
+                );
+            }
+        }
+
+        // The row under the body's top border belongs to the Session pane and
+        // to the Cost pane at once, and both keep it blank.
+        let under = frame.lines().nth(2).unwrap_or_default();
+        assert!(
+            under.chars().all(|c| c == '║' || c == ' '),
+            "the row under the pane titles at {width}x{height} is not blank: {under:?}"
+        );
+    }
+}

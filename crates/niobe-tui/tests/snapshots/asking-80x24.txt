@@ -1,23 +1,23 @@
- Niobe  Session  Files  Tools  Cost  Options  Help             theme:CLASSIC F9
+ Niobe  Session  Files  Tools  Cost  Options  Help               theme:CYBER F9
 ╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
-║  Caching the etag beside the body so a 304 can be answered from the LRU.     ║
 ║                                                                              ║
-║⚙ Edit  catalog/fetch.ts · 640 B out                                          ║
+║                                                                              ║
+║ ⚙ Edit  catalog/fetch.ts · 640 B out                                         ║
 ║   ╔═════════════════════════════ Permission ═════════════════════════════╗   ║
-║◆ c║                                                                      ║   ║
-║  R║  Read wants to run                                                   ║   ║
-║   ║  /repo/notes.txt                                                     ║   █
-║◆ c║                                                                      ║   █
-║  T║  {"file_path":"/repo/notes.txt"}                                     ║   █
+║ ◆ ║                                                                      ║   ║
+║   ║  Read wants to run                                                   ║   ║
+║   ║  /repo/notes.txt                                                     ║   ║
+║ ◆ ║                                                                      ║   █
+║   ║  {"file_path":"/repo/notes.txt"}                                     ║   █
 ║   ║                                                                      ║   █
-║! B║  Pin this saves Read(/repo/notes.txt)                                ║   █
+║ ! ║  Pin this saves Read(/repo/notes.txt)                                ║   █
 ║   ║                                                                      ║   █
-║◆ c║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║   █
-║  E║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║   █
-║  p╚═════════════════════ the turn is waiting on you ═════════════════════╝   █
+║ ◆ ║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║   █
+║   ║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║4  █
+║   ╚═════════════════════ the turn is waiting on you ═════════════════════╝   █
 ║                                                                              █
-║──────────────────────────────────────────────────────────────────────────────║
-║>  Ask for a change, or press F1 for help                                     ║
+║ ──────────────────────────────────────────────────────────────────────────── ║
+║ >  Ask for a change, or press F1 for help                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 example-app │ ⚡  claude · opus-5 │ ⎇ main │ 49k tokens │ 1 waiting on you │ 62%/
 ▸▸ ask mode · Shift+Tab cycles · F8 model · Enter send · F10 quit
