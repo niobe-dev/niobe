@@ -47,8 +47,8 @@ fn recorded_events() -> Vec<Event> {
 }
 
 #[test]
-fn the_recorded_session_is_six_hundred_and_thirty_one_events() {
-    assert_eq!(recorded_events().len(), 631);
+fn the_recorded_session_is_six_hundred_and_three_events() {
+    assert_eq!(recorded_events().len(), 603);
 }
 
 #[test]
@@ -117,10 +117,11 @@ fn a_recorded_log_replays_into_the_derived_totals() {
     assert!(state.decisions().is_empty());
     assert!(state.checkpoints().is_empty());
 
-    // Messages and the entries the bridge could not read.
+    // Messages, and no error: the CLI's background-task bookkeeping is
+    // passed over, and nothing in the session failed.
     assert_eq!(state.user_messages(), 6);
     assert_eq!(state.assistant_messages(), 15);
-    assert_eq!(state.errors(), 28);
+    assert_eq!(state.errors(), 0);
     assert_eq!(state.fatal_error(), None);
 }
 
@@ -189,7 +190,6 @@ fn the_recording_exercises_the_awkward_cases_a_live_session_has() {
     assert!(has(
         &|e| matches!(e, Event::ToolCallEnd { outcome, .. } if *outcome == ToolOutcome::Failed)
     ));
-    assert!(has(&|e| matches!(e, Event::Error { fatal: false, .. })));
     assert!(has(&|e| matches!(e, Event::UsageWindows(_))));
     assert!(has(&|e| matches!(e, Event::FileChange { .. })));
 }
@@ -214,6 +214,8 @@ fn the_gaps_log_exercises_what_no_producer_emits() {
     assert_eq!(state.peak_running_agents(), 2);
     assert_eq!(state.running_agents().len(), 1);
 
+    // One error the session carried on past, and the one that ended it.
+    assert_eq!(state.errors(), 2);
     assert_eq!(
         state.fatal_error(),
         Some("the `claude` session ended: exit status 1")

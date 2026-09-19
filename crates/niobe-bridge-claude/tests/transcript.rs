@@ -217,17 +217,20 @@ fn an_imported_cost_is_api_equivalent_and_never_measured() {
 }
 
 #[test]
-fn a_record_this_version_cannot_read_is_a_warning_and_not_a_lost_history() {
+fn a_record_this_version_cannot_read_is_shown_and_not_a_lost_history() {
     let events = folded();
-    let complaints = warnings(&events);
 
+    // A record type nobody has read is a notice: the CLI wrote it, and
+    // nothing in it says anything failed.
     assert!(
-        complaints.iter().any(|w| w.contains("teleport")),
-        "{complaints:?}"
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice { message } if message.contains("teleport")
+        )),
+        "{events:?}"
     );
-    assert!(
-        complaints.iter().any(|w| w.contains("could not read")),
-        "the line that is not JSON at all: {complaints:?}"
-    );
-    assert_eq!(complaints.len(), 2, "{complaints:?}");
+    // A line that is not JSON at all is something that could not be read.
+    let complaints = warnings(&events);
+    assert_eq!(complaints.len(), 1, "{complaints:?}");
+    assert!(complaints[0].contains("could not read"), "{complaints:?}");
 }

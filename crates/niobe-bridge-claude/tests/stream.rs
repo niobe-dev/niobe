@@ -220,22 +220,32 @@ fn a_session_cost_that_runs_on_is_reported_as_what_the_turn_added() {
     assert!((sonnet[1] - 0.04).abs() < 1e-9, "{sonnet:?}");
 }
 
-#[test]
-fn a_message_type_the_bridge_does_not_know_is_a_warning_and_not_a_crash() {
-    let events = translated();
-    let complaints = warnings(&events);
+fn notices(events: &[Event]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Notice { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect()
+}
 
+#[test]
+fn a_message_type_the_bridge_does_not_know_is_a_notice_and_not_a_crash() {
+    let events = translated();
+
+    // A shape nobody read stays in front of the operator, as a notice: the
+    // CLI did not say anything went wrong.
     assert!(
-        complaints
+        notices(&events)
             .iter()
-            .any(|w| w.contains("a_message_type_from_a_later_version")),
-        "{complaints:?}"
+            .any(|n| n.contains("a_message_type_from_a_later_version")),
+        "{events:?}"
     );
-    assert!(
-        complaints.iter().any(|w| w.contains("could not read")),
-        "the line that is not JSON at all: {complaints:?}"
-    );
-    assert_eq!(complaints.len(), 2, "{complaints:?}");
+    // A line that is not JSON at all is something that could not be read.
+    let complaints = warnings(&events);
+    assert_eq!(complaints.len(), 1, "{complaints:?}");
+    assert!(complaints[0].contains("could not read"), "{complaints:?}");
 }
 
 #[test]
@@ -397,17 +407,13 @@ fn a_prompt_with_no_answer_in_the_recording_stays_pending() {
 #[test]
 fn a_compaction_is_a_notice_rather_than_a_failure() {
     let events = translated();
-    let notices: Vec<&String> = events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Notice { message } => Some(message),
-            _ => None,
-        })
+    let compacted: Vec<&str> = notices(&events)
+        .into_iter()
+        .filter(|notice| notice.contains("compacted"))
         .collect();
 
-    assert_eq!(notices.len(), 1);
-    assert!(notices[0].contains("compacted"), "{notices:?}");
-    assert!(notices[0].contains("41000"), "{notices:?}");
+    assert_eq!(compacted.len(), 1, "{compacted:?}");
+    assert!(compacted[0].contains("41000"), "{compacted:?}");
 }
 
 #[test]
@@ -419,8 +425,8 @@ fn the_transcript_reads_as_the_session_happened() {
     assert_eq!(state.last_assistant(), Some("Done."));
     assert_eq!(
         state.errors(),
-        2,
-        "the two unreadable lines, and nothing else"
+        1,
+        "the line that is not JSON, and nothing else"
     );
     assert_eq!(state.fatal_error(), None);
 }
@@ -696,6 +702,16 @@ fn recorded_background_sub_agents_end_when_the_cli_says_they_stopped() {
             .all(|warning| !warning.contains("task_notification")),
         "a sub-agent's notification was reported as unreadable"
     );
+}
+
+#[test]
+fn a_recorded_session_that_runs_sub_agents_carries_no_error_entry() {
+    let events = translated_sub_agents();
+
+    // The recording holds 28 lines of the CLI's background-task bookkeeping —
+    // `task_started`, `task_progress`, `task_updated`,
+    // `background_tasks_changed` — and nothing in it failed.
+    assert_eq!(warnings(&events), Vec::<&str>::new());
 }
 
 #[test]

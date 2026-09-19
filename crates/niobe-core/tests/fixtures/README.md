@@ -7,7 +7,7 @@ Copyright (c) Viacheslav Shynkarenko
 
 ## `claude-session.jsonl`
 
-631 events, one JSON object per line, in the wire form `Event` serializes to.
+603 events, one JSON object per line, in the wire form `Event` serializes to.
 
 It is a **recording of a real `claude` bridge session**, driven through
 `niobe-bridge-claude`'s own `Session` against Claude Code 2.1.278 on
@@ -21,7 +21,9 @@ The CLI's raw stream was kept beside it, and this file is that stream folded
 again through the bridge as it stands, with the shell's events where they were:
 616 of the bridge's events compared equal to the ones produced live, and 14
 per-message usage records gained the one-hour share of their cache writes,
-which the live run read as none. The last two prompted turns of that stream,
+which the live run read as none. Folded once more after the bridge learned to
+pass over the CLI's background-task bookkeeping, 588 compared equal again and
+the 28 entries that had called that bookkeeping unreadable were gone. The last two prompted turns of that stream,
 and the two the CLI started after them, are `niobe-bridge-claude`'s
 `tests/fixtures/sub-agents.jsonl`.
 
@@ -65,28 +67,31 @@ It carries the cases a real session has and a written one tends not to:
 - **Three failed calls**: a test module that does not exist, a `grep` whose
   glob the shell refused, and a reviewer's probe that exited non-zero. A call
   that did not run changed no file.
-- **28 entries the bridge could not read.** Claude Code 2.1.278 emits
-  `system` subtypes this version of the bridge has no place for —
+- **No error entry.** Nothing in the session failed, and the stream held 28
+  lines of Claude Code 2.1.278's background-task bookkeeping —
   `task_started`, `task_progress`, `task_updated` and
-  `background_tasks_changed` — and each becomes a visible entry rather than a
-  crash. They are in the recording because they are what the session produced.
+  `background_tasks_changed` — which the bridge passes over on purpose.
 - **Every cache write a message reported was bought for the hour**: 40,054 of
   them. The 42,833 on the records from the closing `modelUsage` carry no split.
 - **A `rate_limit_event`** three times, which on a flat-rate plan is the budget.
 
 ## `producer-gaps.jsonl`
 
-Eight events, and **synthetic on purpose**. They are what the shared event
+Nine events, and **synthetic on purpose**. They are what the shared event
 model defines and a recording of a healthy, current session cannot contain, so
 that the fold is still held to handling them:
 
 - a `tool_call_end` whose `tool_call_start` never arrived. A producer that
   dropped an event is not something that can be recorded from one that did not;
 - a sub-agent that was **cancelled**, and one still running when the log ends.
-  No backend produces `AgentOutcome::Cancelled` today;
+  The Claude bridge reads a sub-agent the CLI stopped as cancelled, and every
+  sub-agent in the recorded session completed;
 - a `Decision` and a `Checkpoint`. Nothing produces either yet;
-- a **fatal** error. The driver produces one when the CLI leaves badly; the
-  recorded session's CLI was still running when the recording was cut.
+- an error the session **carried on past** — the one the bridge gives for a
+  tool result whose call it never saw announced — and a **fatal** one. Nothing
+  failed in the recorded session, so it carries neither; the driver produces
+  the fatal one when the CLI leaves badly, and the recorded session's CLI was
+  still running when the recording was cut.
 
 Each of these is one line, and each line is here for the reason above it. A
 variant that a backend starts producing belongs in a recording instead.

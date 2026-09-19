@@ -5,4 +5,5 @@
 {"type":"agent_spawn","id":"agent_cancelled","parent":null,"label":"review catalog/cache.py"}
 {"type":"agent_spawn","id":"agent_still_running","parent":"agent_cancelled","label":"review catalog/fetch.py"}
 {"type":"agent_exit","id":"agent_cancelled","outcome":"cancelled"}
+{"type":"error","message":"the CLI returned a result for tool call `toolu_whose_start_was_dropped`, which it never announced. The call is counted; what it was called with is lost.","fatal":false}
 {"type":"error","message":"the `claude` session ended: exit status 1","fatal":true}

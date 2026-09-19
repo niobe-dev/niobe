@@ -56,6 +56,10 @@
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
 //!   rest is not surfaced, because no pane reads it and widening the shared
 //!   vocabulary for figures nothing draws would be a change nobody could see.
+//! * `system`/`task_progress` carries a sub-agent's running token count, as
+//!   one number with no model and no split. It is passed over with the rest
+//!   of the CLI's background-task bookkeeping, because nothing could price it
+//!   and no pane draws a sub-agent's own figures.
 //! * A sub-agent's `parent_tool_use_id` says which sub-agent call a message
 //!   belongs to. Its tool calls and its tokens are folded in — they are work
 //!   done and money spent — but attributing each line of the transcript to the
@@ -306,12 +310,15 @@ impl Translator {
 
     /// The events one line of the CLI's standard output produced.
     ///
-    /// A line that does not parse, and a line whose `type` this bridge does not
-    /// know, become a warning entry: the CLI ships new shapes with new
-    /// versions, and a bridge that dies on one takes the session with it.
+    /// A line whose `type` this bridge does not know becomes a notice, and a
+    /// line that does not parse becomes a warning entry: the CLI ships new
+    /// shapes with new versions, and a bridge that dies on one takes the
+    /// session with it. Only the second is a failure — the first is a shape
+    /// nobody has read yet, which the operator should see without being told
+    /// that something went wrong.
     pub fn line(&mut self, line: &str) -> Vec<Event> {
         match serde_json::from_str::<wire::Message>(line) {
-            Ok(wire::Message::Unknown) => vec![warn(format!(
+            Ok(wire::Message::Unknown) => vec![unread(format!(
                 "the CLI sent a message of type `{}`, which this version of Niobe does not \
                  know how to read. It was not counted.",
                 kind_of(line)
@@ -411,9 +418,7 @@ impl Translator {
                 });
             }
             Some("permission_denied") => self.denied(system, out),
-            Some("task_notification") if self.is_agent(system.tool_use_id.as_deref()) => {
-                self.task_notification(system, out);
-            }
+            Some("task_notification") => self.task_notification(system, out),
             // The CLI's own request state — `requesting`, and whatever it adds
             // next. It says what the process is doing, not what the session is,
             // and the shell already shows that a turn is in flight.
@@ -425,7 +430,26 @@ impl Translator {
             // output tokens the turn is billed for. Counting it would put a
             // guess into a total the whole product promises is measured.
             Some("thinking_tokens") => {}
-            other => out.push(warn(format!(
+            // The CLI's bookkeeping for the work it runs in the background, as
+            // Claude Code 2.1.278 reports it. Passed over, each for its own
+            // reason:
+            //
+            // * `task_started` restates the call that started the task, which
+            //   is already a spawn for a sub-agent and a tool call for anything
+            //   else.
+            // * `task_progress` carries a running `usage.total_tokens` for one
+            //   sub-agent — one number across input, output and cache, with no
+            //   model and no split, so it cannot be priced or reconciled with
+            //   the bill, and no pane draws a sub-agent's own figures.
+            // * `task_updated` patches the task's status by the CLI's own task
+            //   id and names no call. The same end arrives as a
+            //   `task_notification` that does, and that is the one read.
+            // * `background_tasks_changed` lists what is running now, which is
+            //   what the spawns and exits already fold to.
+            Some(
+                "task_started" | "task_progress" | "task_updated" | "background_tasks_changed",
+            ) => {}
+            other => out.push(unread(format!(
                 "the CLI sent a system message of subtype `{}`, which this version of Niobe \
                  does not know how to read.",
                 other.unwrap_or("(none)")
@@ -439,8 +463,14 @@ impl Translator {
         id.is_some_and(|id| self.agents.contains_key(id))
     }
 
-    /// The CLI's word, on the live stream, that a sub-agent it ran in the
+    /// The CLI's word, on the live stream, that something it ran in the
     /// background has stopped.
+    ///
+    /// Only a sub-agent's end is read. A background command's is passed
+    /// over: its call already ended when the command was put in the
+    /// background, the model reads the output for itself, and the transcript
+    /// the CLI writes of the same session passes it over too, so a session
+    /// read back folds to what it showed live.
     fn task_notification(&mut self, system: wire::System, out: &mut Vec<Event>) {
         if let Some(id) = system.tool_use_id {
             out.append(&mut self.task_stopped(&id, system.status.as_deref()));
@@ -1128,6 +1158,13 @@ pub(crate) fn warn(message: String) -> Event {
     }
 }
 
+/// The entry for a shape this bridge has not read: visible, so that a shape a
+/// new release added cannot pass unnoticed, and a notice, because the CLI did
+/// not say that anything failed.
+pub(crate) fn unread(message: String) -> Event {
+    Event::Notice { message }
+}
+
 /// The `type` of a line, for a message that could not be read as one. Read
 /// separately and only on this path, so that the common case parses once.
 pub(crate) fn kind_of(line: &str) -> String {
@@ -1561,15 +1598,75 @@ mod tests {
         assert!(warnings(&events).is_empty(), "{events:?}");
     }
 
+    fn notices(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Notice { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_system_subtype_the_bridge_does_not_know_is_a_warning_and_not_a_crash() {
+    fn a_system_subtype_the_bridge_does_not_know_is_a_notice_and_not_an_error() {
         let mut translator = translator();
 
         let events = translator.line(r#"{"type":"system","subtype":"weather","outlook":"fine"}"#);
 
-        let said = warnings(&events);
+        assert!(warnings(&events).is_empty(), "{events:?}");
+        let said = notices(&events);
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].contains("`weather`"), "{said:?}");
+    }
+
+    #[test]
+    fn a_message_type_the_bridge_does_not_know_is_a_notice_and_not_an_error() {
+        let mut translator = translator();
+
+        let events = translator.line(r#"{"type":"weather","outlook":"fine"}"#);
+
+        assert!(warnings(&events).is_empty(), "{events:?}");
+        let said = notices(&events);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("`weather`"), "{said:?}");
+    }
+
+    #[test]
+    fn a_message_of_a_known_type_that_does_not_parse_is_still_an_error() {
+        let mut translator = translator();
+
+        let events = translator.line(r#"{"type":"system","subtype":7}"#);
+
+        assert_eq!(warnings(&events).len(), 1, "{events:?}");
+    }
+
+    /// The CLI's bookkeeping for its background tasks, as Claude Code 2.1.278
+    /// sent it for one sub-agent: each line is what the recording holds, cut
+    /// to the keys that say what it is.
+    const TASK_BOOKKEEPING: [&str; 4] = [
+        r#"{"type":"system","subtype":"task_started","task_id":"a59795b7f983ac4a4","tool_use_id":"toolu_a","description":"Summarize catalog/cache.py","subagent_type":"quick-lookup","is_backgrounded":true,"task_type":"local_agent"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a59795b7f983ac4a4","task_type":"local_agent","description":"Summarize catalog/cache.py"}]}"#,
+        r#"{"type":"system","subtype":"task_progress","task_id":"a59795b7f983ac4a4","tool_use_id":"toolu_a","description":"Reading catalog/cache.py","usage":{"total_tokens":5967,"tool_uses":1,"duration_ms":2818},"last_tool_name":"Read"}"#,
+        r#"{"type":"system","subtype":"task_updated","task_id":"a59795b7f983ac4a4","patch":{"status":"completed","end_time":1789833985799}}"#,
+    ];
+
+    #[test]
+    fn the_clis_bookkeeping_for_its_background_tasks_is_passed_over() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+        translator.line(&launched("toolu_a"));
+
+        for line in TASK_BOOKKEEPING {
+            let events = translator.line(line);
+
+            assert!(events.is_empty(), "{line}: {events:?}");
+        }
+        assert_eq!(
+            exits(&translator.line(&notified("toolu_a", "completed"))).len(),
+            1,
+            "the agent still ends at its notification, not at `task_updated`"
+        );
     }
 
     #[test]
@@ -2331,12 +2428,11 @@ mod tests {
     }
 
     #[test]
-    fn a_task_notification_for_something_that_is_not_a_sub_agent_is_still_reported() {
+    fn a_task_notification_for_something_that_is_not_a_sub_agent_is_passed_over() {
         let mut translator = translator();
 
         let events = translator.line(&notified("toolu_bash", "completed"));
 
-        assert!(exits(&events).is_empty(), "{events:?}");
-        assert_eq!(warnings(&events).len(), 1, "{events:?}");
+        assert!(events.is_empty(), "{events:?}");
     }
 }

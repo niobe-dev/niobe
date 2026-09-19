@@ -39,9 +39,10 @@ use niobe_bridge_claude::conformance;
 /// passes over it on purpose, or reports it. Do not add one to quiet the test.
 const SHAPES: &[&str] = &[
     // What a recording deliberately holds that cannot be read at all: a line
-    // that is not JSON, and a type from a later release on each carrier. Each
-    // becomes a warning entry rather than the end of the session, which is the
-    // behaviour the other tests in this crate assert.
+    // that is not JSON, and a type from a later release on each carrier. The
+    // first becomes a warning entry and each unknown type a notice, never the
+    // end of the session, which is the behaviour the other tests in this crate
+    // assert.
     "(not json)",
     "a_message_type_from_a_later_version",
     "teleport",
@@ -63,12 +64,13 @@ const SHAPES: &[&str] = &[
     "system/permission_denied",
     "system/status",
     // Read where it names a sub-agent's call: it is how a sub-agent launched
-    // in the background ends.
+    // in the background ends. One naming a background command is passed over.
     "system/task_notification",
     "system/thinking_tokens",
     // Sub-agent and background-task bookkeeping, recorded from Claude Code
-    // 2.1.278. Each is reported as an entry this bridge cannot read; none of
-    // them is folded.
+    // 2.1.278. Each is passed over on purpose: what it says is already folded
+    // from the call, the spawn and the notification, or is a figure no pane
+    // can price. `translate.rs` gives the reason for each.
     "system/background_tasks_changed",
     "system/task_progress",
     "system/task_started",

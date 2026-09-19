@@ -352,7 +352,7 @@ impl Fold {
             Ok(Line::CostState(record)) => self.cost(record),
             Ok(Line::PermissionMode(record)) => self.mode(record),
             Ok(Line::Aside) => {}
-            Ok(Line::Unknown) => self.out.push(translate::warn(format!(
+            Ok(Line::Unknown) => self.out.push(translate::unread(format!(
                 "the transcript holds a record of type `{}`, which this version of Niobe does \
                  not know how to read. It was not counted.",
                 translate::kind_of(line)
@@ -904,17 +904,17 @@ mod tests {
     }
 
     #[test]
-    fn a_record_this_version_cannot_read_is_reported_and_the_rest_is_kept() {
+    fn a_record_this_version_cannot_read_is_shown_and_the_rest_is_kept() {
         let events = folded(&[
             r#"{"type":"teleport","to":"mars"}"#,
             "not json at all",
             &prompt("still folded"),
         ]);
 
+        // A type nobody has read is a notice; a line that is not a record at
+        // all is something that could not be read.
         let [
-            Event::Error {
-                message: unknown, ..
-            },
+            Event::Notice { message: unknown },
             Event::Error {
                 message: unreadable,
                 ..
@@ -922,7 +922,7 @@ mod tests {
             said,
         ] = events.as_slice()
         else {
-            panic!("two warnings and the turn: {events:?}");
+            panic!("a notice, a warning and the turn: {events:?}");
         };
         assert!(unknown.contains("teleport"), "{unknown}");
         assert!(unreadable.contains("(untyped)"), "{unreadable}");
