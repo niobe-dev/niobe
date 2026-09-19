@@ -52,8 +52,6 @@ pub struct Theme {
     /// Text on the status line.
     pub status_fg: Color,
 
-    /// The unfilled part of a bar.
-    pub bar_bg: Color,
     /// Added lines.
     pub add: Color,
     /// Removed lines, and errors.
@@ -90,7 +88,6 @@ pub const CLASSIC: Theme = Theme {
     status_bg: Color::Black,
     status_fg: Color::Gray,
 
-    bar_bg: Color::Black,
     add: Color::LightGreen,
     del: Color::LightRed,
 
@@ -109,9 +106,7 @@ pub const CLASSIC: Theme = Theme {
 /// recedes behind it is the right way round. `title` and `hot` stay bright
 /// with it, which is what separates a pane's title from its border.
 ///
-/// `bar_bg` is the glyph an unfilled bar is drawn with rather than a
-/// background, so it cannot be the pane's own black — it would draw nothing.
-/// The F-key labels are the other place the design's near-blacks collapse:
+/// The F-key labels are the place the design's near-blacks collapse:
 /// black on green rather than green on near-black, because a label the same
 /// colour as the bar behind it is not a label.
 pub const NEO: Theme = Theme {
@@ -132,7 +127,6 @@ pub const NEO: Theme = Theme {
     status_bg: Color::Black,
     status_fg: Color::Green,
 
-    bar_bg: Color::Green,
     add: Color::LightGreen,
     del: Color::LightRed,
 
@@ -194,7 +188,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 18] {
+    fn colours(t: &Theme) -> [Color; 17] {
         [
             t.pane_bg,
             t.frame,
@@ -208,7 +202,6 @@ mod tests {
             t.fkey_fg,
             t.status_bg,
             t.status_fg,
-            t.bar_bg,
             t.add,
             t.del,
             t.user,
@@ -242,9 +235,8 @@ mod tests {
     /// Readability in sixteen colours is the whole reason the palettes are
     /// named rather than written in hex, and the way to lose it is to put a
     /// colour on top of itself. Every pairing the drawing code makes is
-    /// checked, including the two that are not a foreground on a background:
-    /// an unfilled bar is a glyph drawn in `bar_bg` on the pane, and an
-    /// F-key's label block has to stand out from the bar it sits in.
+    /// checked, including the one that is not a foreground on a background:
+    /// an F-key's label block has to stand out from the bar it sits in.
     #[test]
     fn nothing_any_theme_draws_is_drawn_on_top_of_its_own_colour() {
         for t in THEMES {
@@ -259,7 +251,6 @@ mod tests {
                 (t.user, t.pane_bg, "the operator's own message"),
                 (t.agent, t.pane_bg, "an assistant message"),
                 (t.tool, t.pane_bg, "a tool call"),
-                (t.bar_bg, t.pane_bg, "the unfilled part of a bar"),
                 (t.menu_fg, t.menu_bg, "the menu bar"),
                 (t.hot, t.menu_bg, "a menu hot key"),
                 (t.fkey_fg, t.fkey_bg, "an F-key label"),

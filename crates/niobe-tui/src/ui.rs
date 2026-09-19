@@ -652,7 +652,9 @@ fn draw_cost(frame: &mut Frame, area: Rect, session: &SessionState, theme: &Them
         lines.push(Line::from("no tool calls yet").style(Style::new().fg(theme.dim)));
     } else {
         let busiest = mix.first().map(|(_, n)| **n).unwrap_or(1).max(1);
-        let bar_width = usize::from(rest.width).saturating_sub(22);
+        let bar_width = usize::from(rest.width)
+            .saturating_sub(BAR_NAME + BAR_COUNT + 2)
+            .min(BAR_CELLS);
         for (name, count) in mix.iter().take(rows.saturating_sub(1)) {
             lines.push(bar_line(name, **count, busiest, bar_width, theme));
         }
@@ -673,25 +675,39 @@ fn draw_cost(frame: &mut Frame, area: Rect, session: &SessionState, theme: &Them
     frame.render_widget(Paragraph::new(lines), rest);
 }
 
-/// One `name ████░░░ count` row.
+/// Columns a tool's name gets in the cost pane's mix.
+const BAR_NAME: usize = 18;
+
+/// Columns a tool's count gets, right-aligned.
+const BAR_COUNT: usize = 4;
+
+/// The longest a bar is drawn. The bars compare the tools with one another,
+/// which a dozen cells does as well as the whole pane, and a bar across the
+/// pane is a block of colour the count beside it gets lost in.
+const BAR_CELLS: usize = 12;
+
+/// One `Notion·search         2 ━━━━━━` row: the name, the count, and a thin
+/// bar in the tool colour for how it compares with the busiest tool.
 fn bar_line(name: &str, count: u64, busiest: u64, width: usize, theme: &Theme) -> Line<'static> {
-    let filled = if busiest == 0 {
-        0
-    } else {
-        (count as usize * width) / busiest as usize
+    // At least one cell for a tool that ran, so the least used still shows.
+    let filled = match busiest {
+        0 => 0,
+        _ => ((count as usize * width) / busiest as usize).max(1),
     };
 
     Line::from(vec![
         Span::styled(
-            format!("{:<12}", text::truncate(name, 12)),
-            Style::new().fg(theme.dim),
+            format!(
+                "{:<BAR_NAME$}",
+                text::truncate(&crate::app::tool_label(name), BAR_NAME - 1)
+            ),
+            Style::new().fg(theme.fg),
         ),
-        Span::styled("█".repeat(filled), Style::new().fg(theme.hot)),
         Span::styled(
-            "░".repeat(width.saturating_sub(filled)),
-            Style::new().fg(theme.bar_bg),
+            format!("{count:>BAR_COUNT$} "),
+            Style::new().fg(theme.hot).bold(),
         ),
-        Span::styled(format!(" {count:>4}"), Style::new().fg(theme.fg)),
+        Span::styled("━".repeat(filled.min(width)), Style::new().fg(theme.tool)),
     ])
 }
 
@@ -809,7 +825,7 @@ fn draw_changes(frame: &mut Frame, area: Rect, session: &SessionState, theme: &T
         let mix = tools
             .by_name
             .iter()
-            .map(|(name, count)| format!("{name} {count}"))
+            .map(|(name, count)| format!("{} {count}", crate::app::tool_label(name)))
             .collect::<Vec<_>>()
             .join(" · ");
         for wrapped in text::wrap(&mix, width) {

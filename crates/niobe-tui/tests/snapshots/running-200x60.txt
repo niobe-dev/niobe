@@ -2,9 +2,9 @@
 ╔════════════════════════════════════════════ Session ─ example-app ═════════════════════════════════════════════╗ ╔══════════════════════════════════════ Cost ═══════════════════════════════════════╗
 ║> you                                                                                                           ║ ║session              tokens in            tokens out          cache read           ║
 ║  add etag support to the catalog fetcher so we stop re-downloading unchanged manifests                         ║ ║≥$0.04               5500                 800                 40k                  ║
-║                                                                                                                ║ ║Bash        █████████████████████████████████████████████████████████████    1     ║
-║◆ claude                                                                                                        ║ ║Edit        █████████████████████████████████████████████████████████████    1     ║
-║  Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                ║ ║Read        █████████████████████████████████████████████████████████████    1     ║
+║                                                                                                                ║ ║Bash                 1 ━━━━━━━━━━━━                                                ║
+║◆ claude                                                                                                        ║ ║Edit                 1 ━━━━━━━━━━━━                                                ║
+║  Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                ║ ║Read                 1 ━━━━━━━━━━━━                                                ║
 ║                                                                                                                ║ ║3 calls · 1 failed · 0 denied · 9.9 kB out                                         ║
 ║⚙ Read  catalog/fetch.ts · 7.2 kB out                                                                           ║ ║                                                                                   ║
 ║                                                                                                                ║ ║                                                                                   ║
