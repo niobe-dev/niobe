@@ -76,6 +76,12 @@ pub struct Ask {
 }
 
 impl Ask {
+    /// Whether this prompt can be given `answer`. A standing answer about the
+    /// target needs a target to be about.
+    pub fn offers(&self, answer: Answer) -> bool {
+        answer != Answer::AlwaysTarget || self.target.is_some()
+    }
+
     /// The standing rule "always this tool".
     pub fn tool_rule(&self) -> Rule {
         Rule::tool(self.tool.clone())
@@ -101,6 +107,17 @@ pub enum Answer {
     AlwaysTarget,
     /// Refused.
     No,
+}
+
+impl Answer {
+    /// Every answer, in the order the dialog's buttons are laid out and Tab
+    /// walks them.
+    pub const ALL: [Answer; 4] = [
+        Answer::Once,
+        Answer::AlwaysTool,
+        Answer::AlwaysTarget,
+        Answer::No,
+    ];
 }
 
 /// The models the operator is choosing between.
@@ -209,6 +226,10 @@ pub struct App {
     /// calls of the same turn and answering them out of order would put the
     /// wrong arguments in front of the operator.
     asks: VecDeque<Ask>,
+    /// Which of [`Answer::ALL`] the front prompt's Enter would give. Every
+    /// prompt starts on the first, so Enter means the same thing whichever
+    /// prompt it lands on.
+    ask_focus: usize,
     /// The standing answers this session starts with, plus the ones made in
     /// it.
     allowed: Allowlist,
@@ -271,6 +292,7 @@ impl App {
             viewport_lines: 0,
             hint: None,
             asks: VecDeque::new(),
+            ask_focus: 0,
             allowed: Allowlist::new(),
             learned: Vec::new(),
             produced: Vec::new(),
@@ -500,7 +522,39 @@ impl App {
     /// Drops a prompt from the queue, and gives it back.
     fn forget_ask(&mut self, id: &ToolCallId) -> Option<Ask> {
         let at = self.asks.iter().position(|ask| &ask.id == id)?;
+        if at == 0 {
+            self.ask_focus = 0;
+        }
         self.asks.remove(at)
+    }
+
+    /// The answer Enter would give the prompt on screen.
+    pub fn ask_focus(&self) -> Answer {
+        Answer::ALL
+            .get(self.ask_focus)
+            .copied()
+            .unwrap_or(Answer::Once)
+    }
+
+    /// Moves the focus one button along, `forward` or back, over the buttons
+    /// the prompt offers, wrapping at either end.
+    fn move_ask_focus(&mut self, forward: bool) {
+        let Some(ask) = self.asks.front() else {
+            return;
+        };
+        let count = Answer::ALL.len();
+        let step = if forward { 1 } else { count - 1 };
+        let mut at = self.ask_focus;
+        for _ in 0..count {
+            at = (at + step) % count;
+            if Answer::ALL
+                .get(at)
+                .is_some_and(|answer| ask.offers(*answer))
+            {
+                self.ask_focus = at;
+                return;
+            }
+        }
     }
 
     /// The prompt the modal is showing, if any.
@@ -1015,7 +1069,10 @@ impl App {
 
         let has_target = self.asking().is_some_and(|ask| ask.target.is_some());
         match key.code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.answer(Answer::Once),
+            KeyCode::Enter => self.answer(self.ask_focus()),
+            KeyCode::Tab | KeyCode::Right => self.move_ask_focus(true),
+            KeyCode::BackTab | KeyCode::Left => self.move_ask_focus(false),
+            KeyCode::Char('y' | 'Y') => self.answer(Answer::Once),
             KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer(Answer::No),
             KeyCode::Char('a' | 'A') => self.answer(Answer::AlwaysTool),
             KeyCode::Char('p' | 'P') if has_target => self.answer(Answer::AlwaysTarget),
@@ -1023,8 +1080,6 @@ impl App {
         }
     }
 
-    /// Sends what is in the composer.
-    ///
     /// Hands in the clock, once per pass of the event loop.
     ///
     /// The running turn's elapsed time is measured from the first tick that
@@ -1077,6 +1132,8 @@ impl App {
         }
     }
 
+    /// Sends what is in the composer.
+    ///
     /// The prompt is folded in and queued: the event loop takes it from
     /// [`App::take_produced`] and hands it to the backend and to the journal.
     /// With nothing attached, the shell says so plainly rather than leaving a
@@ -1304,7 +1361,7 @@ mod tests {
     use super::*;
     use niobe_core::event::{Backend, SessionMeta, Usage};
     use niobe_core::permission::Rule;
-    use ratatui::crossterm::event::KeyCode;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui_textarea::Key;
     use std::time::{Duration, Instant};
 
@@ -2132,5 +2189,77 @@ mod tests {
         let mut app = sent(app().attached(), "go");
         app.not_sent("the pipe is closed");
         assert_eq!(app.activity(), None);
+    }
+
+    fn asked(target: Option<&str>) -> App {
+        let mut app = app();
+        for id in ["t1", "t2"] {
+            app.apply(&Event::PermissionRequest {
+                id: id.into(),
+                tool: "Bash".to_owned(),
+                input: r#"{"command":"ls"}"#.to_owned(),
+                target: target.map(str::to_owned),
+            });
+        }
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn the_first_button_has_focus_and_tab_walks_the_rest_in_order() {
+        let mut app = asked(Some("ls"));
+        assert_eq!(app.ask_focus(), Answer::Once);
+
+        let mut walked = Vec::new();
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Tab);
+            walked.push(app.ask_focus());
+        }
+        assert_eq!(
+            walked,
+            [
+                Answer::AlwaysTool,
+                Answer::AlwaysTarget,
+                Answer::No,
+                Answer::Once
+            ]
+        );
+
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.ask_focus(), Answer::No);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.ask_focus(), Answer::Once);
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.ask_focus(), Answer::No);
+    }
+
+    #[test]
+    fn a_prompt_with_no_target_has_no_target_button_to_focus() {
+        let mut app = asked(None);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.ask_focus(), Answer::No);
+    }
+
+    #[test]
+    fn enter_presses_the_focused_button_and_the_next_prompt_starts_on_the_first() {
+        let mut app = asked(Some("ls"));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Deny,
+            }]
+        );
+        assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
+        assert_eq!(app.ask_focus(), Answer::Once);
     }
 }

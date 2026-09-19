@@ -3,18 +3,18 @@
 ║  Caching the etag beside the body so a 304 can be answered from the LRU.     ║
 ║                                                                              ║
 ║⚙ Edit  catalog/fetch.ts · 640 B out                                          ║
-║                                                                              ║
-║◆ claude                                                                      ║
-║  R╔═════════════════════════════ Permission ═════════════════════════════╗   ║
-║   ║ Read wants to run                                                    ║   ║
-║◆ c║ /repo/notes.txt                                                      ║   ║
-║  T║                                                                      ║   ║
-║   ║ {"file_path":"/repo/notes.txt"}                                      ║   ║
-║! B║                                                                      ║   ║
-║   ║ y allow once    n deny                                               ║   ║
-║◆ c║ a always Read   p always Read(/repo/notes.txt)                       ║   ║
-║  E╚═════════════════════ the turn is waiting on you ═════════════════════╝   ║
-║  path asserts a body that is no longer sent.                                 ║
+║   ╔═════════════════════════════ Permission ═════════════════════════════╗   ║
+║◆ c║                                                                      ║   ║
+║  R║  Read wants to run                                                   ║   ║
+║   ║  /repo/notes.txt                                                     ║   ║
+║◆ c║                                                                      ║   ║
+║  T║  {"file_path":"/repo/notes.txt"}                                     ║   ║
+║   ║                                                                      ║   ║
+║! B║  Pin this saves Read(/repo/notes.txt)                                ║   ║
+║   ║                                                                      ║   ║
+║◆ c║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║   ║
+║  E║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║   ║
+║  p╚═════════════════════ the turn is waiting on you ═════════════════════╝   ║
 ║                                                                              ║
 ║──────────────────────────────────────────────────────────────────────────────║
 ║>  Ask for a change, or press F1 for help                                     ║

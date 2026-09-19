@@ -63,6 +63,27 @@ pub struct Theme {
     pub agent: Color,
     /// Tool calls.
     pub tool: Color,
+
+    /// A dialog's face: the permission prompt and the model list, drawn on a
+    /// colour of their own so they read as a question laid over the panes
+    /// rather than as one more pane.
+    pub dialog_bg: Color,
+    /// Text in a dialog.
+    pub dialog_fg: Color,
+    /// A dialog's border and title.
+    pub dialog_frame: Color,
+    /// A button.
+    pub button_bg: Color,
+    /// A button's label.
+    pub button_fg: Color,
+    /// The button Enter presses.
+    pub button_focus_bg: Color,
+    /// The label of the button Enter presses.
+    pub button_focus_fg: Color,
+    /// The letter that presses a button from anywhere in the dialog.
+    pub button_hot: Color,
+    /// What a dialog and its buttons cast on what is under them.
+    pub shadow: Color,
 }
 
 /// The DOS-blue theme, and the default.
@@ -94,6 +115,18 @@ pub const CLASSIC: Theme = Theme {
     user: Color::LightYellow,
     agent: Color::LightCyan,
     tool: Color::LightMagenta,
+
+    // Turbo Vision's: a grey dialog with a white frame, green buttons with
+    // yellow hot letters, and a black shadow.
+    dialog_bg: Color::Gray,
+    dialog_fg: Color::Black,
+    dialog_frame: Color::White,
+    button_bg: Color::Green,
+    button_fg: Color::Black,
+    button_focus_bg: Color::LightGreen,
+    button_focus_fg: Color::Black,
+    button_hot: Color::Yellow,
+    shadow: Color::Black,
 };
 
 /// Green on black: the terminal every film puts in front of a hacker.
@@ -133,6 +166,19 @@ pub const NEO: Theme = Theme {
     user: Color::White,
     agent: Color::LightGreen,
     tool: Color::Green,
+
+    // Inverted, so the dialog stands off the black panes: black on green, with
+    // the buttons back in the panes' green on black. Nothing is darker than the
+    // panes' black, so the shadow is the grey the design keeps for chrome.
+    dialog_bg: Color::Green,
+    dialog_fg: Color::Black,
+    dialog_frame: Color::Black,
+    button_bg: Color::Black,
+    button_fg: Color::LightGreen,
+    button_focus_bg: Color::LightGreen,
+    button_focus_fg: Color::Black,
+    button_hot: Color::White,
+    shadow: Color::DarkGray,
 };
 
 /// Every theme there is, in the order `F9` cycles them. The first is the
@@ -188,7 +234,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 17] {
+    fn colours(t: &Theme) -> [Color; 26] {
         [
             t.pane_bg,
             t.frame,
@@ -207,6 +253,15 @@ mod tests {
             t.user,
             t.agent,
             t.tool,
+            t.dialog_bg,
+            t.dialog_fg,
+            t.dialog_frame,
+            t.button_bg,
+            t.button_fg,
+            t.button_focus_bg,
+            t.button_focus_fg,
+            t.button_hot,
+            t.shadow,
         ]
     }
 
@@ -256,6 +311,19 @@ mod tests {
                 (t.fkey_fg, t.fkey_bg, "an F-key label"),
                 (t.fkey_bg, t.menu_bg, "an F-key label block"),
                 (t.status_fg, t.status_bg, "the status line"),
+                (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
+                (t.dialog_fg, t.dialog_bg, "dialog text"),
+                (t.dialog_frame, t.dialog_bg, "a dialog's border"),
+                (t.button_bg, t.dialog_bg, "a button"),
+                (t.button_fg, t.button_bg, "a button's label"),
+                (t.button_hot, t.button_bg, "a button's hot letter"),
+                (t.button_focus_bg, t.button_bg, "the focused button"),
+                (
+                    t.button_focus_fg,
+                    t.button_focus_bg,
+                    "the focused button's label",
+                ),
+                (t.shadow, t.dialog_bg, "a dialog's shadow"),
             ] {
                 assert_ne!(on, over, "{}: {what} is invisible", t.name);
             }

@@ -21,18 +21,18 @@
 ║                                                                                                                ║ ║  “Caching the etag beside the body so a 304 can be answered from the LRU.”        ║
 ║! Bash  npm test -- fetch · failed · 2.0 kB out                                                                 ║ ║▸ catalog/etag.test.ts                                                       +24 — ║
 ║                                                                                                                ║ ║  “Rewriting the 304 test around the cached body.”                                 ║
-║◆ claude                                                                                                        ║ ║▸ docs/notebooks/catalog.ipynb                                                 — — ║
-║  Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no      ║ ║  “The notebook that demonstrates the fetcher needs the new call shape.”           ║
-║  longer sent.                                                 ╔═════════════════════════════ Permission ═════════════════════════════╗                                                               ║
-║                                                               ║ Read wants to run                                                    ║                                                               ║
-║                                                               ║ /repo/notes.txt                                                      ║ LRU instead of a new Map — avoids a second eviction policy.   ║
+║◆ claude                                                       ╔═════════════════════════════ Permission ═════════════════════════════╗alog.ipynb                                                 — — ║
+║  Etags cached in the LRU; 304s short-circuit. One test still r║                                                                      ║ demonstrates the fetcher needs the new call shape.”           ║
+║  longer sent.                                                 ║  Read wants to run                                                   ║                                                               ║
+║                                                               ║  /repo/notes.txt                                                     ║                                                               ║
+║                                                               ║                                                                      ║ LRU instead of a new Map — avoids a second eviction policy.   ║
+║                                                               ║  {"file_path":"/repo/notes.txt"}                                     ║                                                               ║
 ║                                                               ║                                                                      ║                                                               ║
-║                                                               ║ {"file_path":"/repo/notes.txt"}                                      ║                                                               ║
-║                                                               ║                                                                      ║ad 1                                                           ║
-║                                                               ║ y allow once    n deny                                               ║                                                               ║
-║                                                               ║ a always Read   p always Read(/repo/notes.txt)                       ║                                                               ║
+║                                                               ║  Pin this saves Read(/repo/notes.txt)                                ║ad 1                                                           ║
+║                                                               ║                                                                      ║                                                               ║
+║                                                               ║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║                                                               ║
+║                                                               ║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║                                                               ║
 ║                                                               ╚═════════════════════ the turn is waiting on you ═════════════════════╝                                                               ║
-║                                                                                                                ║ ║                                                                                   ║
 ║                                                                                                                ║ ║                                                                                   ║
 ║                                                                                                                ║ ║                                                                                   ║
 ║                                                                                                                ║ ║                                                                                   ║

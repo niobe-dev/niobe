@@ -171,11 +171,13 @@ fn the_modal_shows_what_would_run_and_every_way_to_answer_it() {
         frame.contains(r#"{"file_path":"/repo/notes.txt"}"#),
         "{frame}"
     );
-    assert!(frame.contains("y allow once"), "{frame}");
-    assert!(frame.contains("n deny"), "{frame}");
-    assert!(frame.contains("a always Read"), "{frame}");
+    // The first button has the focus, so Enter gives it.
+    assert!(frame.contains("►Yes, once◄"), "{frame}");
+    assert!(frame.contains(" Always Read "), "{frame}");
+    assert!(frame.contains(" Pin this "), "{frame}");
+    assert!(frame.contains(" No "), "{frame}");
     assert!(
-        frame.contains("p always Read(/repo/notes.txt)"),
+        frame.contains("Pin this saves Read(/repo/notes.txt)"),
         "the standing answer does not say what it would allow:\n{frame}"
     );
     assert!(frame.contains("waiting on you"), "{frame}");
@@ -190,7 +192,7 @@ fn the_modal_shows_what_would_run_and_every_way_to_answer_it() {
 }
 
 #[test]
-fn a_standing_answer_too_long_for_its_column_is_given_rows_of_its_own_and_read_whole() {
+fn a_standing_answer_too_long_for_one_row_is_wrapped_and_read_whole() {
     let mut app = running_session();
     let command = "grep -rn description --include=Cargo.toml . | grep -v target";
     app.apply(&Event::PermissionRequest {
@@ -200,7 +202,7 @@ fn a_standing_answer_too_long_for_its_column_is_given_rows_of_its_own_and_read_w
         target: Some(command.to_owned()),
     });
     let frame = screen(&mut app, 120, 30);
-    // The frame's rows, with the modal's borders and padding taken off.
+    // The frame's rows, with the dialog's borders and padding taken off.
     let rows: Vec<&str> = frame
         .lines()
         .filter_map(|row| row.split('║').nth(2))
@@ -208,19 +210,19 @@ fn a_standing_answer_too_long_for_its_column_is_given_rows_of_its_own_and_read_w
         .collect();
 
     assert!(
-        rows.contains(&"a always mcp__claude_ai_Notion__notion-search"),
-        "the tool's standing answer runs into the next one:\n{frame}"
+        frame.contains(" Always Notion·search "),
+        "the tool's button does not name it the way the timeline does:\n{frame}"
     );
     let rule: String = rows
         .iter()
-        .skip_while(|row| !row.starts_with("p always"))
-        .take_while(|row| !row.is_empty() && !row.contains("waiting on you"))
+        .skip_while(|row| !row.starts_with("Pin this saves"))
+        .take_while(|row| !row.is_empty())
         .copied()
         .collect::<Vec<_>>()
         .join(" ");
     assert_eq!(
         rule,
-        format!("p always mcp__claude_ai_Notion__notion-search({command})"),
+        format!("Pin this saves mcp__claude_ai_Notion__notion-search({command})"),
         "the rule the operator would save is not shown whole:\n{frame}"
     );
 }

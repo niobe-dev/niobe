@@ -23,7 +23,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget};
 use niobe_core::event::UsageWindows;
 use niobe_core::session::{FileChanges, SessionState};
 
-use crate::app::{Activity, App, Ask, Entry, Picker, SelectedProfile};
+use crate::app::{Activity, Answer, App, Ask, Entry, Picker, SelectedProfile, tool_label};
 use crate::text;
 use crate::theme::Theme;
 
@@ -126,7 +126,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // same rule and never beside it — the shell hands the keyboard to one
     // question at a time.
     if let Some(ask) = app.asking() {
-        draw_ask(frame, body, ask, app.asks_waiting(), &theme);
+        draw_ask(frame, body, app, ask, &theme);
     } else if let Some(picker) = app.picking() {
         draw_pick(frame, body, picker, app.session().model(), &theme);
     }
@@ -144,17 +144,8 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
         return;
     }
 
-    let block = pane("Model", theme)
-        .border_style(Style::new().fg(theme.hot))
-        .padding(Padding::horizontal(1))
-        .title_bottom(
-            Line::from(" applied from the next turn ")
-                .style(Style::new().fg(theme.dim))
-                .centered(),
-        );
-
-    let text_width = usize::from(width).saturating_sub(4);
-    let mut lines: Vec<Line> = Vec::new();
+    let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
+    let mut lines: Vec<Line> = vec![Line::from("")];
     for (i, model) in picker.models.iter().enumerate() {
         let on_it = i == picker.at;
         let marker = match (on_it, current == Some(model.as_str())) {
@@ -162,85 +153,112 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
             (false, true) => PICK_CURRENT,
             (false, false) => "  ",
         };
-        let style = match on_it {
-            true => Style::new().fg(theme.hot).bold(),
-            false => Style::new().fg(theme.fg),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(marker, Style::new().fg(theme.hot).bold()),
-            Span::styled(text::truncate(model, text_width.saturating_sub(2)), style),
-        ]));
+        let row = format!(
+            "{marker}{:<room$}",
+            text::truncate(model, text_width.saturating_sub(2)),
+            room = text_width.saturating_sub(2)
+        );
+        lines.push(match on_it {
+            true => Line::from(row).style(
+                Style::new()
+                    .bg(theme.button_focus_bg)
+                    .fg(theme.button_focus_fg)
+                    .bold(),
+            ),
+            false => Line::from(row).style(Style::new().fg(theme.dialog_fg)),
+        });
     }
     lines.push(Line::from(""));
-    lines.push(choice("↑↓", "choose", "⏎", "switch", theme));
-    lines.push(choice("Esc", "keep this one", "", "", theme));
-
-    let height = u16::try_from(lines.len() + 2)
-        .unwrap_or(u16::MAX)
-        .min(body.height);
-    let [area] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(body);
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(area);
-
-    let inner = block.inner(area);
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
-        inner,
+    lines.push(
+        Line::from("↑↓ choose · Enter switch · Esc keep this one")
+            .style(Style::new().fg(theme.dialog_fg)),
     );
+
+    let inner = dialog(
+        frame,
+        body,
+        (width, lines.len()),
+        ("Model", " applied from the next turn "),
+        theme,
+    );
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The permission modal: what would run, and the four ways to answer.
+/// The permission dialog: what would run, and a button for each way to
+/// answer.
 ///
 /// The whole of the arguments is shown under the target, wrapped rather than
-/// truncated. Approving a call whose arguments were cut off at the pane edge
-/// is approving something the operator did not read.
-fn draw_ask(frame: &mut Frame, body: Rect, ask: &Ask, waiting: usize, theme: &Theme) {
+/// truncated, and so is the rule `Pin this` would save. Approving a call whose
+/// arguments were cut off at the edge, or keeping a rule nobody could read
+/// whole, is approving something the operator did not read.
+fn draw_ask(frame: &mut Frame, body: Rect, app: &App, ask: &Ask, theme: &Theme) {
     let width = ASK_COLUMNS.min(body.width.saturating_sub(ASK_MARGIN * 2));
     if width < 20 {
         return;
     }
 
-    let block = pane("Permission", theme)
-        .border_style(Style::new().fg(theme.hot))
-        .padding(Padding::horizontal(1))
-        .title_bottom(
-            Line::from(match waiting {
-                0 => " the turn is waiting on you ".to_owned(),
-                1 => " 1 more prompt behind this one ".to_owned(),
-                n => format!(" {n} more prompts behind this one "),
-            })
-            .style(Style::new().fg(theme.dim))
-            .centered(),
-        );
-
-    // The two border columns and the padding inside them.
-    let text_width = usize::from(width).saturating_sub(4);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(ask.tool.clone(), Style::new().fg(theme.tool).bold()),
-        Span::styled(" wants to run", Style::new().fg(theme.fg)),
-    ])];
+    let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
+    let plain = Style::new().fg(theme.dialog_fg);
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(tool_label(&ask.tool), plain.bold()),
+            Span::styled(" wants to run", plain),
+        ]),
+    ];
     for wrapped in text::wrap(ask.target.as_deref().unwrap_or(&ask.input), text_width) {
-        lines.push(Line::from(wrapped).style(Style::new().fg(theme.hot).bold()));
+        lines.push(Line::from(wrapped).style(plain.bold()));
     }
     if ask.target.is_some() {
         lines.push(Line::from(""));
         for wrapped in text::wrap(&ask.input, text_width) {
-            lines.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
+            lines.push(Line::from(wrapped).style(plain));
+        }
+    }
+    if let Some(rule) = ask.target_rule() {
+        lines.push(Line::from(""));
+        for wrapped in text::wrap(&format!("Pin this saves {rule}"), text_width) {
+            lines.push(Line::from(wrapped).style(plain.italic()));
         }
     }
     lines.push(Line::from(""));
-    lines.push(choice("y", "allow once", "n", "deny", theme));
-    lines.extend(standing_answers(ask, text_width, theme));
+    lines.extend(buttons(ask, app.ask_focus(), text_width, theme));
 
-    // The lines, and the two rows of border they sit inside.
-    let height = u16::try_from(lines.len() + 2)
+    let waiting = app.asks_waiting();
+    let footer = match waiting {
+        0 => " the turn is waiting on you ".to_owned(),
+        1 => " 1 more prompt behind this one ".to_owned(),
+        n => format!(" {n} more prompts behind this one "),
+    };
+    let inner = dialog(
+        frame,
+        body,
+        (width, lines.len()),
+        ("Permission", &footer),
+        theme,
+    );
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Columns a dialog's frame and padding take from its width: a border and two
+/// columns of padding on each side.
+const DIALOG_INSET: usize = 6;
+
+/// Draws a dialog's frame, centred in `body` over whatever is there, with its
+/// shadow, and returns the area inside it. `size` is the width and the number
+/// of lines it will hold; `titles` are the text on its top and bottom edges.
+fn dialog(
+    frame: &mut Frame,
+    body: Rect,
+    size: (u16, usize),
+    titles: (&str, &str),
+    theme: &Theme,
+) -> Rect {
+    let (width, lines) = size;
+    let (title, footer) = titles;
+    let height = u16::try_from(lines + 2)
         .unwrap_or(u16::MAX)
-        .min(body.height);
+        .min(body.height.saturating_sub(1));
     let [area] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(body);
@@ -248,74 +266,129 @@ fn draw_ask(frame: &mut Frame, body: Rect, ask: &Ask, waiting: usize, theme: &Th
         .flex(Flex::Center)
         .areas(area);
 
+    cast_shadow(frame, area, body, theme);
+
+    let frame_style = Style::new().fg(theme.dialog_frame).bg(theme.dialog_bg);
+    let block = Block::bordered()
+        .border_type(BorderType::Double)
+        .border_style(frame_style)
+        .style(Style::new().bg(theme.dialog_bg).fg(theme.dialog_fg))
+        .padding(Padding::horizontal(2))
+        .title_top(
+            Line::from(format!(" {title} "))
+                .style(frame_style.bold())
+                .centered(),
+        )
+        .title_bottom(Line::from(footer.to_owned()).style(frame_style).centered());
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
-        inner,
-    );
+    inner
 }
 
-/// The modal's two standing answers: every call to the tool, and every call to
-/// it on this target.
-///
-/// They share a row while both fit its columns. A tool name wider than the
-/// left column, or a rule wider than what is left of the row, gives each answer
-/// rows of its own, the rule wrapped rather than cut at the modal's edge: a
-/// rule is saved for good, and saving one the operator could not read whole is
-/// the approval the modal exists to prevent.
-fn standing_answers(ask: &Ask, text_width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let tool = format!("always {}", ask.tool);
-    let target = match ask.target_rule() {
-        Some(rule) => format!("always {rule}"),
-        None => "always this call — no target to save".to_owned(),
-    };
-    let row = choice("a", &tool, "p", &target, theme);
-    if text::width(&tool) < CHOICE_COLUMNS && row.width() <= text_width {
-        return vec![row];
+/// Darkens the two columns right of `area` and the row under it, offset by
+/// one, the way a dialog in Turbo Vision stands off the screen. What is under
+/// the shadow keeps its characters, so the transcript still reads through it.
+fn cast_shadow(frame: &mut Frame, area: Rect, bounds: Rect, theme: &Theme) {
+    let style = Style::new().bg(theme.shadow).fg(theme.dim);
+    let right = Rect::new(area.right(), area.y + 1, 2, area.height);
+    let below = Rect::new(area.x + 2, area.bottom(), area.width, 1);
+    for strip in [right, below] {
+        frame
+            .buffer_mut()
+            .set_style(strip.intersection(bounds), style);
     }
-    let mut lines = keyed_rows("a", &tool, text_width, theme);
-    lines.extend(keyed_rows("p", &target, text_width, theme));
+}
+
+/// The dialog's buttons, laid out left to right and onto another row where the
+/// width runs out, each with its shadow under it.
+fn buttons(ask: &Ask, focus: Answer, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let offered: Vec<(Answer, String, char)> = Answer::ALL
+        .into_iter()
+        .filter(|answer| ask.offers(*answer))
+        .map(|answer| {
+            let (label, hot) = button_label(answer, ask);
+            (answer, label, hot)
+        })
+        .collect();
+
+    let mut rows: Vec<Vec<(Answer, String, char)>> = vec![Vec::new()];
+    let mut used = 0;
+    for button in offered {
+        // The label, a column of padding on each side and the column of
+        // shadow after it, then a column of gap.
+        let cells = text::width(&button.1) + 4;
+        if used > 0 && used + cells > width {
+            rows.push(Vec::new());
+            used = 0;
+        }
+        used += cells;
+        if let Some(row) = rows.last_mut() {
+            row.push(button);
+        }
+    }
+
+    let mut lines = Vec::new();
+    for row in rows {
+        let mut face = Vec::new();
+        let mut under = vec![Span::raw(" ")];
+        for (answer, label, hot) in row {
+            face.extend(button_face(&label, hot, answer == focus, theme));
+            face.push(Span::styled("▄", Style::new().fg(theme.shadow)));
+            face.push(Span::raw(" "));
+            under.push(Span::styled(
+                "▀".repeat(text::width(&label) + 2),
+                Style::new().fg(theme.shadow),
+            ));
+            under.push(Span::raw("  "));
+        }
+        lines.push(Line::from(face));
+        lines.push(Line::from(under));
+    }
     lines
 }
 
-/// A key and its label wrapped to the width, the continuation rows indented
-/// under the label so the key stays alone in its column.
-fn keyed_rows(key: &str, label: &str, text_width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let indent = " ".repeat(text::width(key) + 1);
-    text::wrap(label, text_width.saturating_sub(indent.len()))
-        .into_iter()
-        .enumerate()
-        .map(|(row, wrapped)| {
-            let lead = match row {
-                0 => Span::styled(format!("{key} "), Style::new().fg(theme.hot).bold()),
-                _ => Span::raw(indent.clone()),
-            };
-            Line::from(vec![lead, Span::styled(wrapped, Style::new().fg(theme.fg))])
-        })
-        .collect()
+/// What a button says, and the letter that presses it.
+fn button_label(answer: Answer, ask: &Ask) -> (String, char) {
+    match answer {
+        Answer::Once => ("Yes, once".to_owned(), 'Y'),
+        Answer::AlwaysTool => (
+            format!("Always {}", text::truncate(&tool_label(&ask.tool), 24)),
+            'A',
+        ),
+        Answer::AlwaysTarget => ("Pin this".to_owned(), 'P'),
+        Answer::No => ("No".to_owned(), 'N'),
+    }
 }
 
-/// The width of the left label's column in the modal's key list.
-const CHOICE_COLUMNS: usize = 14;
-
-/// One row of the modal's two-column key list.
-fn choice(
-    left: &str,
-    left_label: &str,
-    right: &str,
-    right_label: &str,
-    theme: &Theme,
-) -> Line<'static> {
-    let key = Style::new().fg(theme.hot).bold();
-    let label = Style::new().fg(theme.fg);
-    Line::from(vec![
-        Span::styled(format!("{left} "), key),
-        Span::styled(format!("{left_label:<CHOICE_COLUMNS$}"), label),
-        Span::styled(format!("{right} "), key),
-        Span::styled(right_label.to_owned(), label),
-    ])
+/// One button: its label on the button colour with the hot letter picked out,
+/// or, with the focus, on the focus colour between `►` and `◄`.
+fn button_face(label: &str, hot: char, focused: bool, theme: &Theme) -> Vec<Span<'static>> {
+    let (bg, fg) = match focused {
+        true => (theme.button_focus_bg, theme.button_focus_fg),
+        false => (theme.button_bg, theme.button_fg),
+    };
+    let face = Style::new().bg(bg).fg(fg);
+    let (open, close) = match focused {
+        true => ("►", "◄"),
+        false => (" ", " "),
+    };
+    let mut spans = vec![Span::styled(open, face.bold())];
+    match label.find(hot) {
+        Some(at) => {
+            let (before, rest) = label.split_at(at);
+            let after = &rest[hot.len_utf8()..];
+            spans.push(Span::styled(before.to_owned(), face));
+            spans.push(Span::styled(
+                hot.to_string(),
+                face.fg(theme.button_hot).bold(),
+            ));
+            spans.push(Span::styled(after.to_owned(), face));
+        }
+        None => spans.push(Span::styled(label.to_owned(), face)),
+    }
+    spans.push(Span::styled(close, face.bold()));
+    spans
 }
 
 /// What the shell says when it has fewer than eighty by twenty-four to draw in.
