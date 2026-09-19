@@ -69,6 +69,7 @@ pub fn attach(
     root: &Path,
     profile: Option<&Selected<'_>>,
     with: &Attach,
+    home: Option<OsString>,
 ) -> Result<Attachment, String> {
     let Some(selected) = profile else {
         return Ok(detached());
@@ -76,8 +77,8 @@ pub fn attach(
 
     match selected.profile.backend() {
         Backend::Claude => {
-            let session =
-                Session::spawn(&claude_options(root, selected, with)).map_err(describe)?;
+            let options = claude_options(root, selected, with, home)?;
+            let session = Session::spawn(&options).map_err(describe)?;
             Ok(Attachment {
                 bridge: Box::new(Claude(session)),
                 attached: true,
@@ -105,6 +106,47 @@ pub struct Recorded {
     pub last_at: Option<SystemTime>,
     /// The first thing the operator asked it, where there is one.
     pub first_prompt: Option<String>,
+}
+
+/// The file the `claude` CLI reads its own settings out of, in its
+/// configuration directory.
+const CLI_SETTINGS: &str = "settings.json";
+
+/// The `claude` CLI's own settings file, where that file puts every session on
+/// this machine on Bedrock.
+///
+/// Read because a profile that names no settings file of its own runs under
+/// this one whatever its `env` says: the CLI lays its settings' `env` over the
+/// environment its process was started with, so a variable a profile cleared
+/// is set again by the file. Which is the whole reason a profile can name a
+/// settings file at all, and why a listing says which profiles have not.
+///
+/// One key is read — `env.CLAUDE_CODE_USE_BEDROCK` — and nothing is written.
+/// No credential of the CLI's is opened here or anywhere else in Niobe.
+///
+/// `None` where there is no such file, where it cannot be read, where it is
+/// not JSON or where it does not turn Bedrock on: a note nothing substantiates
+/// is not a note worth printing.
+pub fn bedrock_settings(config_dir: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let dir = transcript::config_dir(config_dir.as_deref(), home.as_deref())?;
+    let path = dir.join(CLI_SETTINGS);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let settings: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let set = settings.get("env")?.get("CLAUDE_CODE_USE_BEDROCK")?;
+    on(set).then_some(path)
+}
+
+/// Whether a value the CLI's settings set a variable to turns it on.
+///
+/// The CLI reads its settings' `env` as strings, and the way one is turned off
+/// there is `"0"` or the empty string — which is also how a settings file
+/// clears a variable the settings beneath it set. A value of another JSON type
+/// is not one the CLI would take, so nothing is read into it.
+fn on(value: &serde_json::Value) -> bool {
+    match value.as_str() {
+        Some(text) => !text.is_empty() && text != "0",
+        None => false,
+    }
 }
 
 /// Where the `claude` CLI keeps the transcripts of the sessions it has run in
@@ -192,11 +234,18 @@ pub fn history(
 ///
 /// Written apart from the spawn so that what a profile turns into can be
 /// checked without starting a real session on the operator's own
-/// subscription.
-fn claude_options(root: &Path, profile: &Selected<'_>, with: &Attach) -> Options {
+/// subscription — and so that a profile naming a settings file that is not
+/// there fails here, which is before there is a process to fail after.
+fn claude_options(
+    root: &Path,
+    profile: &Selected<'_>,
+    with: &Attach,
+    home: Option<OsString>,
+) -> Result<Options, String> {
     let mut options = Options::new(root, profile.name);
     options.env = profile.profile.env().clone();
     options.args = profile.profile.args().to_vec();
+    options.settings = crate::config::settings_path(profile, home)?;
     options.resume = with.resume.clone();
     options.budget_usd = with.budget_usd;
     // A resumed session starts the CLI in the mode it was left in; a new one
@@ -209,7 +258,7 @@ fn claude_options(root: &Path, profile: &Selected<'_>, with: &Attach) -> Options
     // flag is not set for a backend with nothing answering: the CLI stops the
     // turn on every gated call and waits for an answer that would never come.
     options.ask_over_stdio = true;
-    options
+    Ok(options)
 }
 
 fn detached() -> Attachment {
@@ -265,10 +314,14 @@ mod tests {
         Config::parse(text, &PathBuf::from("config.toml")).expect("the config parses")
     }
 
+    /// The `claude` CLI's own settings on a machine that has none, which is
+    /// every machine these tests run on.
+    const NO_HOME: Option<OsString> = None;
+
     #[test]
     fn a_session_under_no_profile_is_attached_to_nothing() {
-        let attachment =
-            attach(Path::new("/repo"), None, &Attach::default()).expect("nothing to start");
+        let attachment = attach(Path::new("/repo"), None, &Attach::default(), NO_HOME)
+            .expect("nothing to start");
 
         assert!(!attachment.attached());
     }
@@ -281,8 +334,13 @@ mod tests {
             .expect("the profile is defined")
             .expect("a profile was selected");
 
-        let attachment = attach(Path::new("/repo"), Some(&selected), &Attach::default())
-            .expect("nothing to start");
+        let attachment = attach(
+            Path::new("/repo"),
+            Some(&selected),
+            &Attach::default(),
+            NO_HOME,
+        )
+        .expect("nothing to start");
 
         assert!(!attachment.attached());
     }
@@ -304,7 +362,9 @@ mod tests {
                 resume: Some("s-1".to_owned()),
                 ..Attach::default()
             },
-        );
+            NO_HOME,
+        )
+        .expect("the profile names no settings file to be missing");
 
         assert!(
             options.ask_over_stdio,
@@ -323,6 +383,79 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_that_names_a_settings_file_starts_the_cli_under_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let file = dir.path().join("claude-personal.json");
+        std::fs::write(&file, "{}").expect("the settings file is written");
+        let config =
+            config("[profiles.max]\nbackend = \"claude\"\nsettings = \"~/claude-personal.json\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let options = claude_options(
+            Path::new("/repo"),
+            &selected,
+            &Attach::default(),
+            Some(OsString::from(dir.path())),
+        )
+        .expect("the settings file is there");
+
+        let argv = options.argv();
+        let flag = argv
+            .iter()
+            .position(|a| a == "--settings")
+            .unwrap_or_else(|| panic!("no --settings: {argv:?}"));
+        assert_eq!(argv[flag + 1], file.display().to_string());
+    }
+
+    #[test]
+    fn a_profile_that_names_no_settings_file_passes_no_settings_argument() {
+        let config = config("[profiles.max]\nbackend = \"claude\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let options = claude_options(Path::new("/repo"), &selected, &Attach::default(), NO_HOME)
+            .expect("the profile names no settings file to be missing");
+
+        assert_eq!(options.settings, None);
+        // Not a flag with an empty value, and not the CLI's own settings
+        // rewritten as one: a profile that says nothing starts the CLI the way
+        // the operator's own settings would.
+        assert!(!options.argv().contains(&"--settings".to_owned()));
+    }
+
+    #[test]
+    fn a_settings_file_that_is_not_there_stops_the_session_before_anything_is_spawned() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let missing = dir.path().join("gone.json");
+        let config = config(&format!(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"{}\"\n",
+            missing.display()
+        ));
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        // Nothing here can spawn: the options a session is started from are
+        // what fails, so there is no order in which the CLI runs first.
+        let error = claude_options(Path::new("/repo"), &selected, &Attach::default(), NO_HOME)
+            .expect_err("the settings file is not there");
+
+        assert_eq!(
+            error,
+            format!(
+                "config.toml:3: profiles.max.settings: no such file: {}",
+                missing.display()
+            )
+        );
+    }
+
+    #[test]
     fn a_profile_from_a_file_nobody_trusted_starts_the_cli_with_nothing_of_its_own() {
         let config = config(
             "[profiles.repo]\nbackend = \"claude\"\n\
@@ -335,7 +468,8 @@ mod tests {
             .expect("the profile is defined")
             .expect("a profile was selected");
 
-        let options = claude_options(Path::new("/repo"), &selected, &Attach::default());
+        let options = claude_options(Path::new("/repo"), &selected, &Attach::default(), NO_HOME)
+            .expect("nothing of the profile's is in force");
 
         assert!(options.env.is_empty(), "{:?}", options.env);
         assert!(options.args.is_empty(), "{:?}", options.args);
@@ -386,7 +520,9 @@ mod tests {
                 mode: Some(Mode::Plan),
                 budget_usd: Some(0.5),
             },
-        );
+            NO_HOME,
+        )
+        .expect("the profile names no settings file to be missing");
 
         assert_eq!(options.mode, Mode::Plan);
         assert_eq!(options.budget_usd, Some(0.5));
@@ -400,7 +536,8 @@ mod tests {
             .expect("the profile is defined")
             .expect("a profile was selected");
 
-        let options = claude_options(Path::new("/repo"), &selected, &Attach::default());
+        let options = claude_options(Path::new("/repo"), &selected, &Attach::default(), NO_HOME)
+            .expect("the profile names no settings file to be missing");
 
         // The shell cycles from `ask` when nothing has reported a mode, so a
         // session that starts anywhere else would move on the first keypress.
@@ -442,6 +579,56 @@ mod tests {
             transcripts(None, Path::new("/w/repo"), None, home),
             Some(PathBuf::from("/home/me/.claude/projects/-w-repo"))
         );
+    }
+
+    /// A `claude` configuration directory holding `settings`, or holding
+    /// nothing where that is `None`.
+    fn cli_config(settings: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        if let Some(settings) = settings {
+            std::fs::write(dir.path().join("settings.json"), settings)
+                .expect("the settings file is written");
+        }
+        dir
+    }
+
+    #[test]
+    fn settings_that_put_every_session_on_this_machine_on_bedrock_are_found() {
+        let dir = cli_config(Some(
+            r#"{"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "an-account"}}"#,
+        ));
+
+        assert_eq!(
+            bedrock_settings(Some(OsString::from(dir.path())), None),
+            Some(dir.path().join("settings.json"))
+        );
+    }
+
+    #[test]
+    fn settings_that_do_not_turn_bedrock_on_are_no_note_to_print() {
+        // Cleared and off, which is how a settings file takes back what the
+        // settings beneath it set, and a file that says nothing about it.
+        for settings in [
+            r#"{"env": {"CLAUDE_CODE_USE_BEDROCK": ""}}"#,
+            r#"{"env": {"CLAUDE_CODE_USE_BEDROCK": "0"}}"#,
+            r#"{"env": {"AWS_PROFILE": "an-account"}}"#,
+            r#"{"model": "opus"}"#,
+            "not json at all",
+        ] {
+            let dir = cli_config(Some(settings));
+            assert_eq!(
+                bedrock_settings(Some(OsString::from(dir.path())), None),
+                None,
+                "{settings}"
+            );
+        }
+
+        let empty = cli_config(None);
+        assert_eq!(
+            bedrock_settings(Some(OsString::from(empty.path())), None),
+            None
+        );
+        assert_eq!(bedrock_settings(None, None), None);
     }
 
     #[test]

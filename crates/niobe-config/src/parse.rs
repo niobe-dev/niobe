@@ -17,7 +17,7 @@ use niobe_core::permission::{Allowlist, Rule};
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
-use crate::{Config, ConfigError, DefaultProfile, Profile};
+use crate::{Config, ConfigError, DefaultProfile, Profile, Settings};
 
 /// What `backend` may be, in the order an error lists them.
 const BACKENDS: [Backend; 3] = [Backend::Claude, Backend::Codex, Backend::Native];
@@ -123,6 +123,7 @@ impl File<'_> {
         let mut env = BTreeMap::new();
         let mut args = Vec::new();
         let mut models = Vec::new();
+        let mut settings = None;
         let mut auth_refresh = None;
 
         for (key, value) in in_file_order(self.table(value, at)?) {
@@ -132,6 +133,12 @@ impl File<'_> {
                 "env" => env = self.env(value, &at)?,
                 "args" => args = self.strings(value, &at)?,
                 "models" => models = self.non_empty_strings(value, &at)?,
+                "settings" => {
+                    settings = Some(Settings {
+                        path: self.non_empty_string(value, &at)?.to_owned(),
+                        line: self.line(&value.span()),
+                    });
+                }
                 "auth_refresh" => {
                     auth_refresh = Some(self.non_empty_string(value, &at)?.to_owned());
                 }
@@ -139,8 +146,8 @@ impl File<'_> {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        "unknown key; expected `backend`, `env`, `args`, `models` or \
-                         `auth_refresh`",
+                        "unknown key; expected `backend`, `env`, `args`, `models`, \
+                         `settings` or `auth_refresh`",
                     ));
                 }
             }
@@ -158,6 +165,7 @@ impl File<'_> {
             env,
             args,
             models,
+            settings,
             auth_refresh,
             source: self.path.to_path_buf(),
             withheld: None,
@@ -356,6 +364,13 @@ impl Key {
     }
 }
 
+/// The dotted key of a profile's `settings`, the way the config file spells
+/// it, so that a path that cannot be used is reported at the key that named
+/// it.
+pub(crate) fn settings_key(profile: &str) -> String {
+    Key::root("profiles").child(profile).child("settings").0
+}
+
 /// A key as TOML would need it written: bare when it can be, quoted when not.
 fn quoted(name: &str) -> String {
     let bare = !name.is_empty()
@@ -436,6 +451,12 @@ mod tests {
         assert_eq!(file.line(&(2..3)), 2);
         assert_eq!(file.line(&(5..6)), 4);
         assert_eq!(file.line(&(99..100)), 4);
+    }
+
+    #[test]
+    fn a_settings_key_is_spelt_the_way_the_file_spells_it() {
+        assert_eq!(settings_key("max"), "profiles.max.settings");
+        assert_eq!(settings_key("my work"), "profiles.\"my work\".settings");
     }
 
     #[test]

@@ -446,6 +446,55 @@ fn a_claude_session_read_in_is_a_niobe_session_from_then_on() {
     assert!(out.contains("1 changed — +3 −1"), "{out}");
 }
 
+/// A user config directory holding `config`, to run the shell under.
+fn user_config(config: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::create_dir(home.path().join("niobe")).expect("a niobe config directory");
+    std::fs::write(home.path().join("niobe").join("config.toml"), config)
+        .expect("the user config is written");
+    home
+}
+
+#[test]
+fn a_settings_file_a_profile_names_and_this_machine_has_not_stops_the_session() {
+    let repo = repo();
+    let missing = repo.path().join("gone.json");
+    let home = user_config(&format!(
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\nsettings = \"{}\"\n",
+        missing.display()
+    ));
+    let (terminal, slave) = Terminal::open();
+
+    let mut shell = shell_command(&slave, repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        // Nothing of the operator's is started by a test: with no `claude` to
+        // find, a run that got as far as spawning one would say that instead,
+        // rather than open a session on whatever this machine is signed in as.
+        .env("PATH", repo.path().join("nothing-here"))
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert_eq!(status.code(), Some(1), "{drawn}");
+    assert!(
+        drawn.contains(&format!(
+            "profiles.max.settings: no such file: {}",
+            missing.display()
+        )),
+        "the failure names the key, the line and the path: {drawn}"
+    );
+    assert!(
+        !drawn.contains("is not on PATH"),
+        "the CLI was reached for before its settings were looked at: {drawn}"
+    );
+    // The shell never took the terminal, so there is nothing to hand back and
+    // nothing was recorded here.
+    assert!(!repo.path().join(".niobe").exists(), "{drawn}");
+}
+
 #[test]
 fn a_clean_quit_hands_the_terminal_back() {
     let repo = repo();

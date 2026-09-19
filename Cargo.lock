@@ -736,6 +736,7 @@ dependencies = [
  "niobe-tui",
  "ratatui",
  "rustix",
+ "serde_json",
  "tempfile",
 ]
 

@@ -12,11 +12,11 @@
 //! [`niobe_config::trust`]. The record of that decision sits beside the user's
 //! config, which is the one directory a repository cannot write to.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use niobe_config::trust::Trusted;
-use niobe_config::{Config, FILE_NAME, Selected};
+use niobe_config::{Config, FILE_NAME, Selected, Settings};
 use niobe_tui::app::SelectedProfile;
 
 use crate::repo;
@@ -55,6 +55,68 @@ pub fn named(selected: Selected<'_>) -> SelectedProfile {
         name: selected.name.to_owned(),
         backend: selected.profile.backend(),
         models: selected.profile.models().to_vec(),
+    }
+}
+
+/// The settings file `selected` starts its backend under, where it names one,
+/// as a path on this machine.
+///
+/// A leading `~` stands for the home directory, the way it does in a shell and
+/// the way a settings path is written by hand. Nothing else is expanded: a
+/// path only some shells would resolve is a path that runs a session on
+/// credentials nobody chose.
+///
+/// The file has to be there, and this is looked at before a backend is
+/// spawned. The `claude` CLI started without the settings a profile named
+/// would run on the settings the machine holds for every session — which, on a
+/// machine that has a second account configured, is the account the profile
+/// was written to keep it off.
+pub fn settings_path(
+    selected: &Selected<'_>,
+    home: Option<OsString>,
+) -> Result<Option<String>, String> {
+    let Some(settings) = selected.profile.settings() else {
+        return Ok(None);
+    };
+    let said = |message: String| selected.settings_invalid(settings, &message).to_string();
+    let path = expanded(settings, home.as_deref()).ok_or_else(|| {
+        said(format!(
+            "names `{}`, and HOME does not say what `~` is",
+            settings.path()
+        ))
+    })?;
+
+    if !Path::new(&path).is_file() {
+        let problem = match Path::new(&path).exists() {
+            true => "is not a file",
+            false => "no such file",
+        };
+        return Err(said(format!("{problem}: {path}")));
+    }
+    Ok(Some(path))
+}
+
+/// `settings` as a path, with a leading `~` replaced by `home`.
+///
+/// `None` where the path starts with `~/` and `home` does not name a
+/// directory this can expand it against, which is a path Niobe would
+/// otherwise have to guess at. A `~` followed by anything else — `~other` —
+/// is a path this does not expand, and is taken as written.
+fn expanded(settings: &Settings, home: Option<&OsStr>) -> Option<String> {
+    let written = settings.path();
+    let Some(under) = written.strip_prefix('~') else {
+        return Some(written.to_owned());
+    };
+    if !under.is_empty() && !under.starts_with('/') {
+        return Some(written.to_owned());
+    }
+    let home = home
+        .and_then(OsStr::to_str)
+        .filter(|home| !home.is_empty())?;
+    let under = under.trim_start_matches('/');
+    match under.is_empty() {
+        true => Some(home.to_owned()),
+        false => Some(format!("{}/{under}", home.trim_end_matches('/'))),
     }
 }
 
@@ -199,6 +261,95 @@ mod tests {
 
     fn os(value: &str) -> Option<OsString> {
         Some(OsString::from(value))
+    }
+
+    /// A config whose `max` profile names `path` as its settings file.
+    fn with_settings(path: &str) -> niobe_config::Config {
+        niobe_config::Config::parse(
+            &format!("[profiles.max]\nbackend = \"claude\"\nsettings = \"{path}\"\n"),
+            Path::new("/u/config.toml"),
+        )
+        .expect("the config is valid")
+    }
+
+    /// The `max` profile of `config`, selected.
+    fn max(config: &niobe_config::Config) -> Selected<'_> {
+        config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected")
+    }
+
+    #[test]
+    fn a_settings_path_is_expanded_against_the_home_directory() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let file = dir.path().join("claude-personal.json");
+        std::fs::write(&file, "{}").expect("the settings file is written");
+        let config = with_settings("~/claude-personal.json");
+
+        assert_eq!(
+            settings_path(&max(&config), Some(OsString::from(dir.path()))),
+            Ok(Some(file.display().to_string()))
+        );
+    }
+
+    #[test]
+    fn a_settings_path_that_is_not_under_the_home_directory_is_taken_as_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let file = dir.path().join("elsewhere.json");
+        std::fs::write(&file, "{}").expect("the settings file is written");
+        let config = with_settings(&file.display().to_string());
+
+        assert_eq!(
+            settings_path(&max(&config), os("/home/me")),
+            Ok(Some(file.display().to_string()))
+        );
+    }
+
+    #[test]
+    fn a_profile_that_names_no_settings_file_runs_its_backend_under_none() {
+        let config = niobe_config::Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\n",
+            Path::new("/u/config.toml"),
+        )
+        .expect("the config is valid");
+
+        assert_eq!(settings_path(&max(&config), os("/home/me")), Ok(None));
+    }
+
+    #[test]
+    fn a_settings_file_that_is_not_there_is_reported_at_its_key_and_its_line() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let missing = dir.path().join("gone.json");
+        let config = with_settings(&missing.display().to_string());
+
+        assert_eq!(
+            settings_path(&max(&config), os("/home/me")),
+            Err(format!(
+                "/u/config.toml:3: profiles.max.settings: no such file: {}",
+                missing.display()
+            ))
+        );
+
+        // A directory where the file should be is not a settings file either.
+        let config = with_settings(&dir.path().display().to_string());
+        assert_eq!(
+            settings_path(&max(&config), os("/home/me")),
+            Err(format!(
+                "/u/config.toml:3: profiles.max.settings: is not a file: {}",
+                dir.path().display()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_settings_path_under_a_home_nothing_names_is_reported_rather_than_guessed() {
+        let config = with_settings("~/claude-personal.json");
+
+        assert_eq!(
+            settings_path(&max(&config), None),
+            Err("/u/config.toml:3: profiles.max.settings: names `~/claude-personal.json`, and HOME does not say what `~` is".to_owned())
+        );
     }
 
     #[test]

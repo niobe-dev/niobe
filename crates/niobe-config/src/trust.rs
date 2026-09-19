@@ -4,13 +4,14 @@
 //! Which config files may put an environment in front of a backend.
 //!
 //! A repository's config arrives with the clone. It can define profiles, and a
-//! profile's `env`, `args` and `auth_refresh` are what a backend is started
-//! with: a file nobody read could set `ANTHROPIC_BASE_URL`, and the official
-//! CLI would then send the subscription it is signed in as to a host the
-//! repository chose. Niobe would have touched no token file and still have
+//! profile's `env`, `args`, `settings` and `auth_refresh` are what a backend is
+//! started with: a file nobody read could set `ANTHROPIC_BASE_URL`, and the
+//! official CLI would then send the subscription it is signed in as to a host
+//! the repository chose. Niobe would have touched no token file and still have
 //! broken the line it stands on. `auth_refresh` is a shell command, and `args`
-//! reach the same binary `env` does — the `claude` CLI takes an environment on
-//! its own command line — so all three are the same exposure.
+//! and `settings` reach the same binary `env` does — the `claude` CLI takes an
+//! environment both on its own command line and out of a settings file — so
+//! all four are the same exposure.
 //!
 //! So they take effect only once the operator has said, of the contents they
 //! read, that this file may do that. The decision is recorded against the
@@ -43,9 +44,10 @@ pub const FILE_NAME: &str = "trusted.list";
 /// directory says what it is.
 const HEADER: &str = "\
 # Written by niobe. Each line is a repository config this machine has been told
-# it may start a backend with — its profiles' env, args and auth_refresh — and
-# the SHA-256 of that file's contents when it was told so. Editing the config
-# makes it untrusted again. `niobe untrust` removes a line; so does deleting it.
+# it may start a backend with — its profiles' env, args, settings and
+# auth_refresh — and the SHA-256 of that file's contents when it was told so.
+# Editing the config makes it untrusted again. `niobe untrust` removes a line;
+# so does deleting it.
 ";
 
 /// The SHA-256 of a config file's contents, as lower-case hex.
@@ -250,9 +252,12 @@ mod tests {
                 .to_string()
         };
 
+        // Counted from the header rather than written out: the line the
+        // failure is reported at is the file's, header and all.
+        let second_entry = HEADER.lines().count() + 2;
         assert_eq!(
             said(&format!("{HEADER}{} /a\nnodigest\n", digest("a"))),
-            "/u/trusted.list:6: expected a digest, a space and a path"
+            format!("/u/trusted.list:{second_entry}: expected a digest, a space and a path")
         );
         assert_eq!(
             said("beef /a\n"),

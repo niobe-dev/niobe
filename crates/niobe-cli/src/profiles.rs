@@ -3,9 +3,10 @@
 
 //! The profile list `niobe profiles` prints.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use niobe_config::{Config, Withheld};
+use niobe_config::{Config, Profile, Withheld};
+use niobe_core::Backend;
 
 /// The list: one row per profile under a header, the selected one marked with
 /// `*`, and under each row what the profile sets beyond its backend.
@@ -18,7 +19,17 @@ use niobe_config::{Config, Withheld};
 /// trusting the file would put in force: the operator needs to know which of
 /// the two answers explains a session that is not running the way its profile
 /// reads.
-pub fn table(config: &Config, selected: Option<&str>) -> Vec<String> {
+///
+/// `forcing_bedrock` is the `claude` CLI's own settings file where that file
+/// puts every session on this machine on Bedrock. A profile that names no
+/// settings file of its own runs under it whatever its `env` says, so the
+/// profiles that do are named here rather than left to be discovered from a
+/// bill.
+pub fn table(
+    config: &Config,
+    selected: Option<&str>,
+    forcing_bedrock: Option<&Path>,
+) -> Vec<String> {
     let profiles = config.profiles();
     let name_width = profiles
         .keys()
@@ -43,30 +54,55 @@ pub fn table(config: &Config, selected: Option<&str>) -> Vec<String> {
             profile.source().display()
         ));
 
-        let detail =
-            |label: &str, value: String| format!("  {:<name_width$}  {label:<13}{value}", "");
-        if !profile.env().is_empty() {
-            let names: Vec<&str> = profile.env().keys().map(String::as_str).collect();
-            lines.push(detail("env", names.join(", ")));
-        }
-        if !profile.args().is_empty() {
-            lines.push(detail("args", profile.args().join(" ")));
-        }
-        if !profile.models().is_empty() {
-            lines.push(detail("models", profile.models().join(", ")));
-        }
-        if let Some(command) = profile.auth_refresh() {
-            lines.push(detail("auth_refresh", command.to_owned()));
-        }
-        if let Some(withheld) = profile.withheld() {
-            lines.push(detail("not in force", listed(withheld)));
-            lines.push(detail(
-                "not trusted",
-                "`niobe trust` reads that file as it stands and puts them in force".to_owned(),
+        lines.extend(details(profile, forcing_bedrock, name_width));
+    }
+    lines
+}
+
+/// What a profile sets beyond its backend, one indented row each, under the
+/// row that named it.
+fn details(profile: &Profile, forcing_bedrock: Option<&Path>, name_width: usize) -> Vec<String> {
+    let detail = |label: &str, value: String| format!("  {:<name_width$}  {label:<13}{value}", "");
+    let mut rows = Vec::new();
+
+    if !profile.env().is_empty() {
+        let names: Vec<&str> = profile.env().keys().map(String::as_str).collect();
+        rows.push(detail("env", names.join(", ")));
+    }
+    if !profile.args().is_empty() {
+        rows.push(detail("args", profile.args().join(" ")));
+    }
+    if !profile.models().is_empty() {
+        rows.push(detail("models", profile.models().join(", ")));
+    }
+    if let Some(settings) = profile.settings() {
+        rows.push(detail("settings", settings.path().to_owned()));
+    }
+    if let Some(command) = profile.auth_refresh() {
+        rows.push(detail("auth_refresh", command.to_owned()));
+    }
+    // A profile whose settings file is withheld for want of trust names none
+    // here, which is right: a file that is not in force runs nothing under it.
+    if let Some(path) = forcing_bedrock {
+        if profile.backend() == Backend::Claude && profile.settings().is_none() {
+            rows.push(detail(
+                "no settings",
+                format!(
+                    "{} sets CLAUDE_CODE_USE_BEDROCK for every session; a `settings` file \
+                     here is what would run this profile elsewhere",
+                    path.display()
+                ),
             ));
         }
     }
-    lines
+    if let Some(withheld) = profile.withheld() {
+        rows.push(detail("not in force", listed(withheld)));
+        rows.push(detail(
+            "not trusted",
+            "`niobe trust` reads that file as it stands and puts them in force".to_owned(),
+        ));
+    }
+    rows
 }
 
 /// What an untrusted file set, by name: enough to say what trusting it would
@@ -78,6 +114,9 @@ fn listed(withheld: &Withheld) -> String {
     }
     if withheld.args {
         parts.push("args".to_owned());
+    }
+    if withheld.settings {
+        parts.push("settings".to_owned());
     }
     if withheld.auth_refresh {
         parts.push("auth_refresh".to_owned());
@@ -118,7 +157,7 @@ auth_refresh = "aws sso login"
     #[test]
     fn rows_are_aligned_and_the_selected_profile_is_marked() {
         assert_eq!(
-            table(&config(), Some("work")),
+            table(&config(), Some("work"), None),
             [
                 "  PROFILE   BACKEND  DEFINED IN",
                 "  personal  claude   /u/config.toml",
@@ -139,7 +178,7 @@ auth_refresh = "aws sso login"
         .expect("the config is valid");
 
         assert_eq!(
-            table(&config, None),
+            table(&config, None, None),
             [
                 "  PROFILE  BACKEND  DEFINED IN",
                 "  max      claude   /u/config.toml",
@@ -149,13 +188,82 @@ auth_refresh = "aws sso login"
     }
 
     #[test]
+    fn the_settings_file_a_profile_runs_its_backend_under_is_listed() {
+        let config = Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"~/.config/niobe/max.json\"\n",
+            Path::new("/u/config.toml"),
+        )
+        .expect("the config is valid");
+
+        assert_eq!(
+            table(&config, None, None),
+            [
+                "  PROFILE  BACKEND  DEFINED IN",
+                "  max      claude   /u/config.toml",
+                "           settings     ~/.config/niobe/max.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_claude_profile_with_no_settings_file_says_what_the_machine_runs_it_on() {
+        let config = Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"~/max.json\"\n\
+             \n[profiles.work]\nbackend = \"claude\"\n\
+             \n[profiles.other]\nbackend = \"codex\"\n",
+            Path::new("/u/config.toml"),
+        )
+        .expect("the config is valid");
+
+        let listing = table(
+            &config,
+            None,
+            Some(Path::new("/home/me/.claude/settings.json")),
+        );
+
+        let said: Vec<&String> = listing
+            .iter()
+            .filter(|line| line.contains("no settings"))
+            .collect();
+        assert_eq!(said.len(), 1, "{listing:#?}");
+        assert!(
+            said[0].contains("/home/me/.claude/settings.json sets CLAUDE_CODE_USE_BEDROCK"),
+            "{}",
+            said[0]
+        );
+        // The profile that names one is running under it, and a profile whose
+        // backend is not the claude CLI is not running under that file at all.
+        let rows: Vec<&String> = listing.iter().collect();
+        assert!(
+            rows.iter()
+                .any(|line| line.contains("settings     ~/max.json")),
+            "{listing:#?}"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_settings_file_is_named_among_what_is_not_in_force() {
+        let config = Config::parse(
+            "[profiles.repo]\nbackend = \"claude\"\nsettings = \"./theirs.json\"\n",
+            Path::new("/r/.niobe/config.toml"),
+        )
+        .expect("the config is valid")
+        .untrusted();
+
+        let listing = table(&config, None, None).join("\n");
+
+        assert!(listing.contains("not in force settings"), "{listing}");
+        assert!(!listing.contains("theirs.json"), "{listing}");
+    }
+
+    #[test]
     fn an_untrusted_profile_says_so_and_says_what_trusting_would_put_in_force() {
         let config = Config::parse(CONFIG, Path::new("/r/.niobe/config.toml"))
             .expect("the config is valid")
             .untrusted();
 
         assert_eq!(
-            table(&config, None),
+            table(&config, None, None),
             [
                 "  PROFILE   BACKEND  DEFINED IN",
                 "  personal  claude   /r/.niobe/config.toml",
@@ -165,14 +273,14 @@ auth_refresh = "aws sso login"
                  them in force",
             ]
         );
-        let listing = table(&config, None).join("\n");
+        let listing = table(&config, None, None).join("\n");
         assert!(!listing.contains("do-not-print"), "{listing}");
         assert!(!listing.contains("aws sso login"), "{listing}");
     }
 
     #[test]
     fn no_value_of_a_variable_is_printed() {
-        let listing = table(&config(), None).join("\n");
+        let listing = table(&config(), None, None).join("\n");
         assert!(!listing.contains("do-not-print"), "{listing}");
         assert!(!listing.contains("example-sso"), "{listing}");
         assert!(!listing.contains('*'), "{listing}");

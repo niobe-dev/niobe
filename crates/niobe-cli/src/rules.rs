@@ -68,7 +68,8 @@ impl Rules for ConfigRules {
     /// about that file where they had made one.
     ///
     /// The write is Niobe's own and adds one permission the operator just
-    /// granted: it cannot introduce an `env`, an `args` or an `auth_refresh`,
+    /// granted: it cannot introduce an `env`, an `args`, a `settings` or an
+    /// `auth_refresh`,
     /// because splicing the `allow` array is all it does. Leaving the file
     /// untrusted here would take a profile's environment away in the middle of
     /// a session, for a change the operator asked for and Niobe made.

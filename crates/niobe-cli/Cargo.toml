@@ -24,6 +24,10 @@ niobe-tui.workspace = true
 niobe-bridge-claude.workspace = true
 niobe-bridge-codex.workspace = true
 
+# The `claude` CLI's own settings file, read to say what a profile that names
+# none is running under. One key of it; nothing is written.
+serde_json.workspace = true
+
 [dev-dependencies]
 # The shell's key events are ratatui's; the tests drive the shell with them.
 ratatui.workspace = true

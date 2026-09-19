@@ -164,6 +164,7 @@ fn shell(profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
             budget_usd: budget,
             ..backend::Attach::default()
         },
+        std::env::var_os("HOME"),
     )?;
     let app = if backend.attached() {
         app.attached()
@@ -256,6 +257,7 @@ fn resume(session: SessionId, profile: Option<&str>, budget: Option<f64>) -> Res
             mode: app.session().mode(),
             budget_usd: budget,
         },
+        std::env::var_os("HOME"),
     )?;
     let app = if backend.attached() {
         app.attached()
@@ -334,6 +336,7 @@ fn import(session: &str, profile: Option<&str>, budget: Option<f64>) -> Result<(
             mode: app.session().mode(),
             budget_usd: budget,
         },
+        std::env::var_os("HOME"),
     )?;
     let app = if backend.attached() {
         app.attached()
@@ -414,11 +417,12 @@ fn list_sessions() -> Result<(), String> {
 /// explanation on screen.
 const UNTRUSTED: &str = "\
 This repository's config sets what a backend is started with — a profile's \
-`env`, `args` or `auth_refresh`. A config arrives with a clone, and those are \
-how the official CLI would be pointed at somewhere other than where it is \
-signed in, so they are not in force until you have read the file. \
-`niobe profiles` shows what it sets; `niobe trust` puts it in force as it now \
-stands, and editing it afterwards asks again.";
+`env`, `args`, `settings` or `auth_refresh`. A config arrives with a clone, \
+and those are how the official CLI would be pointed at somewhere other than \
+where it is signed in, or signed in as something else, so they are not in \
+force until you have read the file. `niobe profiles` shows what it sets; \
+`niobe trust` puts it in force as it now stands, and editing it afterwards \
+asks again.";
 
 /// The shell, saying so when this repository's config has not been trusted.
 fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
@@ -429,7 +433,8 @@ fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
 }
 
 /// Records this repository's config as one the operator has read, so that the
-/// `env`, `args` and `auth_refresh` of the profiles it defines take effect.
+/// `env`, `args`, `settings` and `auth_refresh` of the profiles it defines
+/// take effect.
 fn trust() -> Result<(), String> {
     let (path, text) = repo_config()?;
     let record = trust_record()?;
@@ -439,8 +444,8 @@ fn trust() -> Result<(), String> {
 
     println!("trusted {}", path.display());
     println!(
-        "the env, args and auth_refresh of the profiles it defines are in force here; \
-         `niobe profiles` lists them, and editing the file asks again"
+        "the env, args, settings and auth_refresh of the profiles it defines are in force \
+         here; `niobe profiles` lists them, and editing the file asks again"
     );
     Ok(())
 }
@@ -458,8 +463,8 @@ fn untrust() -> Result<(), String> {
     }
     trusted.write(&record).map_err(|e| e.to_string())?;
     println!(
-        "{} is no longer trusted; the env, args and auth_refresh of the profiles it defines \
-         are not in force",
+        "{} is no longer trusted; the env, args, settings and auth_refresh of the profiles \
+         it defines are not in force",
         path.display()
     );
     Ok(())
@@ -490,6 +495,10 @@ fn trust_record() -> Result<PathBuf, String> {
 
 /// Prints the profiles the config defines for this repository, the selected one
 /// marked.
+///
+/// The `claude` CLI's own settings are read here, and only here, so that a
+/// profile which names no settings file of its own says what this machine is
+/// running it on.
 fn list_profiles(profile: Option<&str>) -> Result<(), String> {
     let loaded = config::load(&repo::root(&cwd()?))?;
     let selected = loaded.selected(profile)?;
@@ -498,7 +507,15 @@ fn list_profiles(profile: Option<&str>) -> Result<(), String> {
         println!("{}", profiles::none_defined(&loaded.searched));
         return Ok(());
     }
-    for line in profiles::table(&loaded.config, selected.as_ref().map(|s| s.name.as_str())) {
+    let bedrock = backend::bedrock_settings(
+        std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
+        std::env::var_os("HOME"),
+    );
+    for line in profiles::table(
+        &loaded.config,
+        selected.as_ref().map(|s| s.name.as_str()),
+        bedrock.as_deref(),
+    ) {
         println!("{line}");
     }
     Ok(())
@@ -612,6 +629,10 @@ PROFILES:
         env = {{ CLAUDE_CODE_USE_BEDROCK = \"1\", AWS_PROFILE = \"work-sso\" }}
         auth_refresh = \"aws sso login --profile work-sso\"
 
+        [profiles.personal-account]
+        backend = \"claude\"
+        settings = \"~/.config/niobe/claude-personal.json\"
+
     The user's config is ~/.config/niobe/config.toml ($XDG_CONFIG_HOME/niobe
     when that is set); a repository's is .niobe/config.toml at its root, and
     overrides the user's, replacing any profile of the same name whole. The
@@ -620,11 +641,24 @@ PROFILES:
     a profile that names none has nothing to switch between, because niobe
     never invents a model id.
 
+    settings names a file the backend runs under, passed to the claude CLI as
+    --settings <path>: its own settings file, which that CLI reads in front of
+    the one it would otherwise use. That is what keeps a second account on a
+    machine whose own settings configure the first — the CLI's settings env
+    wins over the environment a process is started with, so a profile's env
+    cannot take back what that file sets, and a file of your own can. Niobe
+    merges nothing and rewrites nothing: the path is passed on, the CLI reads
+    it. A ~ at the front is your home directory; the file has to be there, and
+    a path that is not is reported at its line in the config before anything
+    is started. niobe profiles shows which profiles name one — and, where this
+    machine's own claude settings set CLAUDE_CODE_USE_BEDROCK, which do not.
+
 TRUST:
-    A repository's config arrives with the clone, and env, args and
+    A repository's config arrives with the clone, and env, args, settings and
     auth_refresh are what a backend is started with — enough to point the
-    official CLI at a host the repository chose, or to run a command of its
-    own. So those three do nothing until you have read the file and said so:
+    official CLI at a host the repository chose, to sign it in as something
+    else, or to run a command of its own. So those four do nothing until you
+    have read the file and said so:
 
         niobe trust        this repository's config, as it now stands
         niobe untrust      take it back
@@ -636,8 +670,8 @@ TRUST:
     backend and their models and lose the rest, the shell says so in the
     transcript, and niobe profiles names what trusting would put in force.
     Answering \"always\" in the shell adds a rule to the repository's config.
-    That write is niobe's own and can add no env, no args and no auth_refresh,
-    so a file you had trusted stays trusted across it.
+    That write is niobe's own and can add no env, no args, no settings and no
+    auth_refresh, so a file you had trusted stays trusted across it.
 
 PRICES:
     Costs are computed from a price table bundled into niobe: USD per million
@@ -727,8 +761,8 @@ PERMISSIONS:
 
 BACKENDS:
     A claude profile drives the official `claude` CLI as a subprocess, with the
-    profile's environment and arguments and the repository as its working
-    directory. Niobe never reads the CLI's credential files and never sets its
+    profile's environment, arguments and settings file and the repository as
+    its working directory. Niobe never reads the CLI's credential files and never sets its
     user agent: whatever that binary is signed in as is what the session runs
     on. Every cost the CLI reports is one it computed from published prices, so
     Niobe stores it as API-equivalent and never as money that moved.

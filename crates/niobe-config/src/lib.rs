@@ -12,6 +12,7 @@
 //!
 //! [profiles.personal]
 //! backend = "claude"
+//! settings = "~/.config/niobe/claude-personal.json"
 //!
 //! [profiles.work]
 //! backend = "claude"
@@ -36,6 +37,13 @@
 //! allow = ["Read", "Bash(cargo test)"]
 //! ```
 //!
+//! A profile may name a settings file the backend is to run under, which is
+//! how a machine whose CLI is configured one way runs a session the other: the
+//! path is passed to the backend and nothing in it is merged or rewritten
+//! here. `env` is the environment the backend is started with; `settings` is
+//! the file that backend reads for itself, and where the two disagree the file
+//! is what the `claude` CLI goes by.
+//!
 //! Profiles are what keep several real backends — a personal login, a company
 //! cloud account, a second vendor's CLI — as lines of config rather than code
 //! paths. The `env` of a profile is kept exactly as written: no variable is
@@ -47,10 +55,10 @@
 //! [`Config::overlay`]). Where the files live is the caller's business; this
 //! crate reads the paths it is given and never looks at the environment.
 //!
-//! A repository's file arrives with the clone, so what it may put in front of
-//! a backend — a profile's `env`, `args` and `auth_refresh` — takes effect
-//! only once the operator has read it and said so. [`trust`] is where that
-//! decision is kept and [`Config::untrusted`] is the config as it applies
+//! A repository's file arrives with the clone, so what it may put in front of a
+//! backend — a profile's `env`, `args`, `settings` and `auth_refresh` — takes
+//! effect only once the operator has read it and said so. [`trust`] is where
+//! that decision is kept and [`Config::untrusted`] is the config as it applies
 //! until it has been made.
 //!
 //! Depends on `niobe-core` and on no other workspace crate.
@@ -88,6 +96,33 @@ pub struct Withheld {
     pub args: bool,
     /// Whether the file gave a credential refresh command.
     pub auth_refresh: bool,
+    /// Whether the file named a settings file for the backend to run under.
+    pub settings: bool,
+}
+
+/// A settings file a profile starts its backend under, and where it was
+/// written.
+///
+/// The path is kept exactly as the config wrote it, `~` and all: expanding one
+/// means reading the environment, and this crate reads none. The line is kept
+/// because a path that is not there is the operator's to fix in the file, and
+/// they fix it at that line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    path: String,
+    line: usize,
+}
+
+impl Settings {
+    /// The path, as the config wrote it.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The line it was written on, counted from 1.
+    pub fn line(&self) -> usize {
+        self.line
+    }
 }
 
 /// A backend plus the environment, arguments and credential refresh it runs
@@ -98,6 +133,7 @@ pub struct Profile {
     env: BTreeMap<String, String>,
     args: Vec<String>,
     models: Vec<String>,
+    settings: Option<Settings>,
     auth_refresh: Option<String>,
     source: PathBuf,
     withheld: Option<Withheld>,
@@ -133,6 +169,17 @@ impl Profile {
         &self.models
     }
 
+    /// The settings file the backend is to run under, where the profile names
+    /// one. What that file means is the backend's own business: the `claude`
+    /// CLI reads an environment, a model and hooks out of it, and reads it in
+    /// front of the settings it would otherwise use, which is what lets one
+    /// machine hold a profile per account.
+    ///
+    /// `None` for a profile from a file that has not been trusted.
+    pub fn settings(&self) -> Option<&Settings> {
+        self.settings.as_ref()
+    }
+
     /// A shell command that renews the backend's credentials when they have
     /// expired, such as a single sign-on login. Never empty when present.
     ///
@@ -160,6 +207,7 @@ impl Profile {
         self.withheld.is_some()
             || !self.env.is_empty()
             || !self.args.is_empty()
+            || self.settings.is_some()
             || self.auth_refresh.is_some()
     }
 
@@ -167,7 +215,10 @@ impl Profile {
     /// the names of it.
     fn withhold(&mut self) {
         if self.withheld.is_some()
-            || (self.env.is_empty() && self.args.is_empty() && self.auth_refresh.is_none())
+            || (self.env.is_empty()
+                && self.args.is_empty()
+                && self.settings.is_none()
+                && self.auth_refresh.is_none())
         {
             return;
         }
@@ -175,6 +226,7 @@ impl Profile {
             env: std::mem::take(&mut self.env).into_keys().collect(),
             args: !std::mem::take(&mut self.args).is_empty(),
             auth_refresh: self.auth_refresh.take().is_some(),
+            settings: self.settings.take().is_some(),
         });
     }
 }
@@ -203,6 +255,26 @@ pub struct Selected<'a> {
     pub name: &'a str,
     /// The profile.
     pub profile: &'a Profile,
+}
+
+impl Selected<'_> {
+    /// Reports `message` against `settings`, at the key and the line this
+    /// profile wrote it on, so that a path that cannot be used is fixed where
+    /// it was written.
+    ///
+    /// Whether it can be used is the caller's to find out: the path is written
+    /// the way a shell would take it, `~` and all, and expanding one means
+    /// reading an environment this crate does not read. The settings are
+    /// handed back rather than read off the profile again, so that there is no
+    /// line to invent for a profile that named no file.
+    pub fn settings_invalid(&self, settings: &Settings, message: &str) -> ConfigError {
+        ConfigError::Invalid {
+            path: self.profile.source.clone(),
+            line: settings.line,
+            key: Some(parse::settings_key(self.name)),
+            message: message.to_owned(),
+        }
+    }
 }
 
 impl Config {
@@ -258,7 +330,8 @@ impl Config {
 
     /// This config as it applies while the file it came from has not been
     /// trusted: every profile keeps its backend and the models it offers, and
-    /// loses its `env`, its `args` and its `auth_refresh` (see [`trust`]).
+    /// loses its `env`, its `args`, its `settings` and its `auth_refresh`
+    /// (see [`trust`]).
     ///
     /// Applied to the layer, before it is laid over anything, so that a
     /// profile the repository replaces cannot end up holding half of the
@@ -437,6 +510,53 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     }
 
     #[test]
+    fn a_profile_can_name_the_settings_file_its_backend_runs_under() {
+        let config = parsed(
+            "[profiles.max]\nbackend = \"claude\"\n\nsettings = \"~/.config/niobe/claude-personal.json\"\n",
+        );
+
+        let settings = config.profiles()["max"]
+            .settings()
+            .expect("the profile names a settings file");
+        assert_eq!(settings.path(), "~/.config/niobe/claude-personal.json");
+        // The line, because a path that is not there is reported at it.
+        assert_eq!(settings.line(), 4);
+        assert_eq!(parsed(EXAMPLE).profiles()["personal"].settings(), None);
+    }
+
+    #[test]
+    fn a_settings_path_that_is_not_there_is_reported_at_its_key_and_its_line() {
+        let config =
+            parsed("[profiles.max]\nbackend = \"claude\"\nsettings = \"~/nowhere.json\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        assert_eq!(
+            selected
+                .settings_invalid(
+                    selected.profile.settings().expect("a settings file"),
+                    "no such file: /home/me/nowhere.json"
+                )
+                .to_string(),
+            "/configs/user/config.toml:3: profiles.max.settings: no such file: /home/me/nowhere.json"
+        );
+    }
+
+    #[test]
+    fn a_settings_path_that_says_nothing_is_reported_at_its_line() {
+        assert_eq!(
+            invalid("[profiles.max]\nbackend = \"claude\"\nsettings = \"  \"\n"),
+            "/configs/user/config.toml:3: profiles.max.settings: is empty"
+        );
+        assert_eq!(
+            invalid("[profiles.max]\nbackend = \"claude\"\nsettings = 1\n"),
+            "/configs/user/config.toml:3: profiles.max.settings: expected a string, found an integer"
+        );
+    }
+
+    #[test]
     fn an_empty_file_is_a_config_with_nothing_in_it() {
         assert_eq!(parsed(""), Config::default());
         assert_eq!(parsed("# only a comment\n"), Config::default());
@@ -502,8 +622,33 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
                 env: Vec::new(),
                 args: true,
                 auth_refresh: false,
+                settings: false,
             }
         );
+    }
+
+    #[test]
+    fn an_untrusted_file_names_no_settings_file_for_a_backend_to_run_under() {
+        // A settings file is where the official CLI is told what to sign in
+        // as, so a clone naming one is a clone choosing the credentials.
+        let config =
+            parsed("[profiles.repo]\nbackend = \"claude\"\nsettings = \"./theirs.json\"\n");
+        assert!(config.needs_trust());
+
+        let config = config.untrusted();
+        let repo = &config.profiles()["repo"];
+
+        assert_eq!(repo.settings(), None);
+        assert_eq!(
+            repo.withheld().expect("the profile named a settings file"),
+            &Withheld {
+                env: Vec::new(),
+                args: false,
+                auth_refresh: false,
+                settings: true,
+            }
+        );
+        assert!(config.needs_trust());
     }
 
     #[test]
@@ -715,7 +860,7 @@ backend = "codex"
         assert_eq!(
             invalid("[profiles.work]\nbackend = \"claude\"\nenviron = { AWS_PROFILE = \"x\" }\n"),
             "/configs/user/config.toml:3: profiles.work.environ: unknown key; \
-             expected `backend`, `env`, `args`, `models` or `auth_refresh`"
+             expected `backend`, `env`, `args`, `models`, `settings` or `auth_refresh`"
         );
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
