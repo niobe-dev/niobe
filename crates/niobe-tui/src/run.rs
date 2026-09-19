@@ -161,6 +161,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // what a recording being read back spent under one it knew nothing of.
         app.settle_budget();
         send_produced(app, journal, backend, rules);
+        app.tick(std::time::Instant::now());
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         let tick = if producing { BUSY_TICK } else { TICK };

@@ -15,6 +15,7 @@
 //! are neither queued nor shown again after a restart.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use niobe_core::event::{
     AgentId, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome, UsageWindow,
@@ -169,6 +170,17 @@ pub struct Entry {
     pub streaming: bool,
 }
 
+/// What a running turn is doing, for the line that shows the session is at
+/// work between one event and the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Activity {
+    /// How long the turn has run, by the clock the event loop hands in.
+    pub elapsed: Duration,
+    /// What it is doing now: `thinking`, `writing`, `running <tool>  <what>`
+    /// or `waiting on you`.
+    pub doing: String,
+}
+
 /// Everything the shell draws, and the keys that change it.
 #[derive(Debug)]
 pub struct App {
@@ -215,6 +227,15 @@ pub struct App {
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
     attached: bool,
+    /// Whether a prompt was sent to the backend from this process. A turn the
+    /// fold says is running may be one read back from a record, which nothing
+    /// is working on now; only one sent from here can be shown as working.
+    sent_here: bool,
+    /// The clock, as the event loop last handed it in. The draw never reads
+    /// the time itself, so a test draws the same frame every time.
+    now: Option<Instant>,
+    /// When the running turn was first seen running by that clock.
+    working_since: Option<Instant>,
     should_quit: bool,
 }
 
@@ -257,6 +278,9 @@ impl App {
             budget_usd: None,
             budget_warned: false,
             attached: false,
+            sent_here: false,
+            now: None,
+            working_since: None,
             should_quit: false,
         }
     }
@@ -306,12 +330,17 @@ impl App {
                 }
             },
 
-            Event::ToolCallStart { id, name, input } => {
+            Event::ToolCallStart {
+                id,
+                name,
+                input,
+                summary,
+            } => {
                 self.tool_entries.insert(id.clone(), self.entries.len());
                 self.push(Entry {
                     kind: EntryKind::Tool,
-                    head: name.clone(),
-                    meta: one_line(input),
+                    head: tool_label(name),
+                    meta: what_it_does(summary.as_deref(), input),
                     body: String::new(),
                     streaming: true,
                 });
@@ -323,9 +352,14 @@ impl App {
                 input,
                 bytes,
                 outcome,
+                summary,
                 ..
             } => {
-                let meta = format!("{} · {}", one_line(input), outcome_label(*outcome, *bytes));
+                let meta = format!(
+                    "{} · {}",
+                    what_it_does(summary.as_deref(), input),
+                    outcome_label(*outcome, *bytes)
+                );
                 match self
                     .tool_entries
                     .remove(id)
@@ -347,13 +381,17 @@ impl App {
                         } else {
                             EntryKind::Failure
                         },
-                        head: name.clone(),
+                        head: tool_label(name),
                         meta,
                         body: String::new(),
                         streaming: false,
                     }),
                 }
             }
+
+            // The working line reads the end off the fold; the transcript has
+            // already shown everything the turn said.
+            Event::TurnEnded => {}
 
             Event::Error { message, fatal } => self.push(Entry {
                 kind: EntryKind::Failure,
@@ -392,7 +430,7 @@ impl App {
                 if *decision == PermissionDecision::Deny {
                     let (tool, what) = match &asked {
                         Some(ask) => (
-                            ask.tool.clone(),
+                            tool_label(&ask.tool),
                             ask.target.clone().unwrap_or_else(|| one_line(&ask.input)),
                         ),
                         None => (id.to_string(), String::new()),
@@ -987,6 +1025,58 @@ impl App {
 
     /// Sends what is in the composer.
     ///
+    /// Hands in the clock, once per pass of the event loop.
+    ///
+    /// The running turn's elapsed time is measured from the first tick that
+    /// saw it running, so a turn is timed from when the shell knew of it.
+    pub fn tick(&mut self, now: Instant) {
+        self.now = Some(now);
+        self.working_since = match self.working() {
+            true => self.working_since.or(Some(now)),
+            false => None,
+        };
+    }
+
+    /// What the running turn is doing, while one sent from here is running.
+    pub fn activity(&self) -> Option<Activity> {
+        if !self.working() {
+            return None;
+        }
+        let elapsed = match (self.now, self.working_since) {
+            (Some(now), Some(since)) => now.saturating_duration_since(since),
+            _ => Duration::ZERO,
+        };
+        Some(Activity {
+            elapsed,
+            doing: self.doing(),
+        })
+    }
+
+    fn working(&self) -> bool {
+        self.attached && self.sent_here && self.session.turn_running()
+    }
+
+    /// The operator first, then the newest call still running, then the reply
+    /// being written: the first of them there is, is what the turn is waiting
+    /// on.
+    fn doing(&self) -> String {
+        if !self.session.pending_permissions().is_empty() {
+            return "waiting on you".to_owned();
+        }
+        let running = self
+            .tool_entries
+            .values()
+            .max()
+            .and_then(|i| self.entries.get(*i));
+        match (running, self.entries.last()) {
+            (Some(call), _) => format!("running {}  {}", call.head, call.meta),
+            (None, Some(last)) if last.kind == EntryKind::Agent && last.streaming => {
+                "writing".to_owned()
+            }
+            _ => "thinking".to_owned(),
+        }
+    }
+
     /// The prompt is folded in and queued: the event loop takes it from
     /// [`App::take_produced`] and hands it to the backend and to the journal.
     /// With nothing attached, the shell says so plainly rather than leaving a
@@ -999,6 +1089,7 @@ impl App {
 
         self.composer.clear();
         self.produce(Event::UserMessage { text });
+        self.sent_here = self.attached;
         if !self.attached {
             self.push(Entry {
                 kind: EntryKind::Notice,
@@ -1017,6 +1108,7 @@ impl App {
     /// Says in the transcript that a turn never reached the backend, so that a
     /// prompt with no reply is not read as a backend thinking about it.
     pub fn not_sent(&mut self, error: &str) {
+        self.sent_here = false;
         self.push(Entry {
             kind: EntryKind::Failure,
             head: "not sent".to_owned(),
@@ -1152,6 +1244,37 @@ fn fkey_hint(n: u8) -> &'static str {
     }
 }
 
+/// A tool's name as a person reads it.
+///
+/// An MCP tool arrives as `mcp__<server>__<tool>`, and the server as the
+/// client registered it (`claude_ai_Notion`). It reads as the server's last
+/// word and the tool, with the server's name taken off the tool's front where
+/// it repeats it: `Notion·search`. Every other name is the backend's own.
+pub fn tool_label(name: &str) -> String {
+    let Some((server, tool)) = name
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+    else {
+        return name.to_owned();
+    };
+    let server = server.rsplit('_').next().unwrap_or(server);
+    let prefix = format!("{}-", server.to_lowercase());
+    let tool = match tool.to_lowercase().starts_with(&prefix) {
+        true => tool.get(prefix.len()..).unwrap_or(tool),
+        false => tool,
+    };
+    format!("{server}·{tool}")
+}
+
+/// The backend's one-line reading of a call, or its arguments where it had
+/// none.
+fn what_it_does(summary: Option<&str>, input: &str) -> String {
+    match summary {
+        Some(summary) => one_line(summary),
+        None => one_line(input),
+    }
+}
+
 /// Collapses whitespace so a tool's arguments stay on the one line beside its
 /// name.
 fn one_line(input: &str) -> String {
@@ -1183,6 +1306,7 @@ mod tests {
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::KeyCode;
     use ratatui_textarea::Key;
+    use std::time::{Duration, Instant};
 
     fn app() -> App {
         App::new(Repo {
@@ -1227,6 +1351,7 @@ mod tests {
             id: "t1".into(),
             name: "Read".to_owned(),
             input: "catalog/fetch.ts".to_owned(),
+            summary: None,
         });
         assert!(app.entries()[0].streaming);
 
@@ -1237,6 +1362,7 @@ mod tests {
             output: "212 lines".to_owned(),
             bytes: 4_096,
             outcome: ToolOutcome::Ok,
+            summary: None,
         });
 
         assert_eq!(app.entries().len(), 1, "the end opened a second entry");
@@ -1251,6 +1377,7 @@ mod tests {
             id: "t1".into(),
             name: "Bash".to_owned(),
             input: "npm test".to_owned(),
+            summary: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: "t1".into(),
@@ -1259,6 +1386,7 @@ mod tests {
             output: "1 failing".to_owned(),
             bytes: 128,
             outcome: ToolOutcome::Failed,
+            summary: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -1267,6 +1395,7 @@ mod tests {
             output: String::new(),
             bytes: 0,
             outcome: ToolOutcome::Denied,
+            summary: None,
         });
 
         assert_eq!(app.entries()[0].kind, EntryKind::Failure);
@@ -1880,5 +2009,128 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(4_096), "4.0 kB");
         assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    fn sent(mut app: App, prompt: &str) -> App {
+        for c in prompt.chars() {
+            app.type_into_composer(Input {
+                key: Key::Char(c),
+                ..Default::default()
+            });
+        }
+        app.submit();
+        app
+    }
+
+    fn start(id: &str, name: &str, input: &str, summary: Option<&str>) -> Event {
+        Event::ToolCallStart {
+            id: id.into(),
+            name: name.to_owned(),
+            input: input.to_owned(),
+            summary: summary.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_tool_is_named_the_way_a_person_would_name_it() {
+        assert_eq!(tool_label("Bash"), "Bash");
+        assert_eq!(
+            tool_label("mcp__claude_ai_Notion__notion-search"),
+            "Notion·search"
+        );
+        assert_eq!(
+            tool_label("mcp__code-review-graph__query_graph_tool"),
+            "code-review-graph·query_graph_tool"
+        );
+        assert_eq!(
+            tool_label("mcp__github__create_issue"),
+            "github·create_issue"
+        );
+    }
+
+    #[test]
+    fn a_tool_line_reads_as_what_the_call_does_rather_than_its_arguments() {
+        let mut app = app();
+        app.apply(&start(
+            "t1",
+            "mcp__claude_ai_Notion__notion-search",
+            r#"{"query":"Niobe"}"#,
+            Some("query: Niobe"),
+        ));
+        app.apply(&start("t2", "Glob", r#"{"pattern":"*.rs"}"#, None));
+
+        assert_eq!(app.entries()[0].head, "Notion·search");
+        assert_eq!(app.entries()[0].meta, "query: Niobe");
+        assert_eq!(
+            app.entries()[1].meta,
+            r#"{"pattern":"*.rs"}"#,
+            "with no summary the arguments are all there is to show"
+        );
+    }
+
+    #[test]
+    fn a_prompt_sent_from_here_shows_the_session_working_until_the_turn_ends() {
+        let mut app = sent(app().attached(), "fix it");
+        let t0 = Instant::now();
+        app.tick(t0);
+        let working = app.activity().expect("a prompt was just sent");
+        assert_eq!(working.doing, "thinking");
+        assert_eq!(working.elapsed, Duration::ZERO);
+
+        app.tick(t0 + Duration::from_secs(12));
+        app.apply(&start(
+            "t1",
+            "Bash",
+            r#"{"command":"cargo test"}"#,
+            Some("cargo test"),
+        ));
+        let working = app.activity().expect("the turn is still running");
+        assert_eq!(working.doing, "running Bash  cargo test");
+        assert_eq!(working.elapsed, Duration::from_secs(12));
+
+        app.apply(&Event::AssistantDelta {
+            text: "The test".to_owned(),
+        });
+        assert_eq!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("running Bash  cargo test"),
+            "a call still running is what the session is doing"
+        );
+
+        app.apply(&Event::TurnEnded);
+        app.tick(t0 + Duration::from_secs(13));
+        assert_eq!(app.activity(), None);
+    }
+
+    #[test]
+    fn a_turn_waiting_on_a_prompt_says_it_is_waiting_on_the_operator() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Bash".to_owned(),
+            input: "{}".to_owned(),
+            target: None,
+        });
+        assert_eq!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("waiting on you")
+        );
+    }
+
+    #[test]
+    fn a_turn_read_back_from_a_record_is_not_shown_as_working() {
+        let mut app = app().attached();
+        app.apply(&Event::UserMessage {
+            text: "from an earlier run".to_owned(),
+        });
+        app.tick(Instant::now());
+        assert_eq!(app.activity(), None);
+    }
+
+    #[test]
+    fn a_prompt_that_never_reached_the_backend_is_not_shown_as_working() {
+        let mut app = sent(app().attached(), "go");
+        app.not_sent("the pipe is closed");
+        assert_eq!(app.activity(), None);
     }
 }

@@ -225,6 +225,50 @@ fn a_standing_answer_too_long_for_its_column_is_given_rows_of_its_own_and_read_w
     );
 }
 
+/// A prompt sent from this shell, with a call of its turn still running, a
+/// minute and a quarter in by the clock the event loop hands the shell.
+fn session_at_work() -> App {
+    use std::time::{Duration, Instant};
+
+    let mut app = App::new(Repo {
+        name: "example-app".to_owned(),
+        branch: Some("main".to_owned()),
+    })
+    .attached();
+    for c in "fix the etag test".chars() {
+        app.type_into_composer(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char(c),
+            ..Default::default()
+        });
+    }
+    app.submit();
+    let t0 = Instant::now();
+    app.tick(t0);
+    app.apply(&Event::ToolCallStart {
+        id: "t1".into(),
+        name: "Bash".to_owned(),
+        input: r#"{"command":"npm test -- fetch"}"#.to_owned(),
+        summary: Some("npm test -- fetch".to_owned()),
+    });
+    app.tick(t0 + Duration::from_secs(75));
+    app
+}
+
+#[test]
+fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
+    let mut app = session_at_work();
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        frame.contains("running Bash  npm test -- fetch · 1m 15s"),
+        "{frame}"
+    );
+    assert_snapshot("working-80x24", &frame);
+
+    app.apply(&Event::TurnEnded);
+    let frame = screen(&mut app, 80, 24);
+    assert!(!frame.contains("running Bash"), "{frame}");
+}
+
 #[test]
 fn a_selected_profile_is_named_in_the_status_line_and_the_menu_bar() {
     let mut app = empty_session().with_profile(SelectedProfile {

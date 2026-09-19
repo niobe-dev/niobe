@@ -187,6 +187,8 @@ pub struct SessionState {
     usage_windows: Option<UsageWindows>,
     tools: ToolTotals,
     in_flight_tools: BTreeMap<ToolCallId, String>,
+    /// Whether the backend is still answering the last prompt.
+    turn_running: bool,
     user_messages: u64,
     assistant_messages: u64,
     pending_assistant: String,
@@ -246,7 +248,12 @@ impl SessionState {
             // choice did not land.
             Event::ModelSelected { model } => self.model = Some(model.clone()),
 
-            Event::UserMessage { .. } => self.user_messages += 1,
+            Event::UserMessage { .. } => {
+                self.user_messages += 1;
+                self.turn_running = true;
+            }
+
+            Event::TurnEnded => self.turn_running = false,
 
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
 
@@ -340,6 +347,7 @@ impl SessionState {
                 self.errors += 1;
                 if *fatal {
                     self.fatal_error = Some(message.clone());
+                    self.turn_running = false;
                 }
             }
 
@@ -443,6 +451,16 @@ impl SessionState {
     /// Tool calls that started and have not ended, by name.
     pub fn in_flight_tools(&self) -> &BTreeMap<ToolCallId, String> {
         &self.in_flight_tools
+    }
+
+    /// Whether the backend is still answering the last prompt: from the prompt
+    /// until [`Event::TurnEnded`], or a fatal error ends the session under it.
+    ///
+    /// A log recorded by a backend that never reports a turn's end leaves its
+    /// last turn running here; whether that turn is running *now* is a question
+    /// about a live process, which a fold of a record cannot answer.
+    pub fn turn_running(&self) -> bool {
+        self.turn_running
     }
 
     /// How many prompts the operator sent.
@@ -632,12 +650,49 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_runs_from_the_prompt_until_the_backend_says_it_ended() {
+        let mut state = SessionState::new();
+        assert!(!state.turn_running());
+
+        state.apply(&Event::UserMessage {
+            text: "fix the test".to_owned(),
+        });
+        assert!(state.turn_running());
+        state.apply(&Event::AssistantMessage {
+            text: "Reading it first.".to_owned(),
+        });
+        assert!(state.turn_running(), "a reply mid-turn is not its end");
+
+        state.apply(&Event::TurnEnded);
+        assert!(!state.turn_running());
+    }
+
+    #[test]
+    fn a_fatal_error_ends_the_turn_and_a_recoverable_one_does_not() {
+        let mut state = SessionState::new();
+        state.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        state.apply(&Event::Error {
+            message: "retrying".to_owned(),
+            fatal: false,
+        });
+        assert!(state.turn_running());
+        state.apply(&Event::Error {
+            message: "the CLI exited".to_owned(),
+            fatal: true,
+        });
+        assert!(!state.turn_running());
+    }
+
+    #[test]
     fn tool_calls_pair_up_and_the_unpaired_ones_are_visible() {
         let mut state = SessionState::new();
         state.apply(&Event::ToolCallStart {
             id: "t1".into(),
             name: "Read".to_owned(),
             input: "fetch.ts".to_owned(),
+            summary: None,
         });
         assert_eq!(state.in_flight_tools().len(), 1);
 
@@ -648,6 +703,7 @@ mod tests {
             output: "212 lines".to_owned(),
             bytes: 4_096,
             outcome: ToolOutcome::Ok,
+            summary: None,
         });
         state.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -656,6 +712,7 @@ mod tests {
             output: "1 failing".to_owned(),
             bytes: 128,
             outcome: ToolOutcome::Failed,
+            summary: None,
         });
 
         let tools = state.tools();

@@ -53,6 +53,7 @@ fn session_events() -> Vec<Event> {
             id: "t1".into(),
             name: "Read".to_owned(),
             input: "catalog/fetch.ts".to_owned(),
+            summary: None,
         },
         Event::ToolCallEnd {
             id: "t1".into(),
@@ -61,6 +62,7 @@ fn session_events() -> Vec<Event> {
             output: "212 lines".to_owned(),
             bytes: 7_412,
             outcome: ToolOutcome::Ok,
+            summary: None,
         },
         Event::Usage(Usage {
             input: 2_100,
@@ -118,6 +120,7 @@ fn session_events() -> Vec<Event> {
             id: "t2".into(),
             name: "Edit".to_owned(),
             input: "catalog/fetch.ts".to_owned(),
+            summary: None,
         },
         Event::PermissionRequest {
             id: "t2".into(),
@@ -136,6 +139,7 @@ fn session_events() -> Vec<Event> {
             output: "+38 −9".to_owned(),
             bytes: 640,
             outcome: ToolOutcome::Ok,
+            summary: None,
         },
         Event::FileChange {
             path: "catalog/fetch.ts".to_owned(),
@@ -168,6 +172,7 @@ fn session_events() -> Vec<Event> {
             output: "1 failing".to_owned(),
             bytes: 2_048,
             outcome: ToolOutcome::Failed,
+            summary: None,
         },
         Event::Usage(Usage {
             input: 3_400,

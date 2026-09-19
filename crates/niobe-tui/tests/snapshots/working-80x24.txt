@@ -1,0 +1,24 @@
+ Niobe  Session  Files  Tools  Cost  Options  Help             theme:CLASSIC F9
+╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
+║> you                                                                         ║
+║  fix the etag test                                                           ║
+║                                                                              ║
+║⚙ Bash  npm test -- fetch                                                     ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║                                                                              ║
+║⠋ running Bash  npm test -- fetch · 1m 15s                                    ║
+║──────────────────────────────────────────────────────────────────────────────║
+║>  Ask for a change, or press F1 for help                                     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+example-app │ no backend attached │ ⎇ main │ 0 tokens
+Enter send · Alt+Enter newline · PgUp/PgDn scrollback · F10 quit
+1Help   2Plan   3Diff   4Undo   5Cost   6Files  7Tools  8Model  9Theme  10Quit

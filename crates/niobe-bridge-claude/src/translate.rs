@@ -168,6 +168,8 @@ struct Call {
     name: String,
     input: String,
     target: Option<String>,
+    /// The call in one line, for the transcript.
+    summary: Option<String>,
     /// The arguments as the CLI sent them. The rendered `input` is for a
     /// human; counting what an edit changed needs the fields themselves.
     arguments: serde_json::Value,
@@ -627,12 +629,14 @@ impl Translator {
                 }
                 wire::Block::ToolUse { id, name, input } => {
                     let rendered = render(&input);
+                    let summary = self.summary_of(&name, &input);
                     self.tool_calls.insert(
                         id.clone(),
                         Call {
                             name: name.clone(),
                             input: rendered.clone(),
                             target: target_of(&input),
+                            summary: summary.clone(),
                             arguments: input.clone(),
                         },
                     );
@@ -651,6 +655,7 @@ impl Translator {
                         id: ToolCallId::new(id),
                         name,
                         input: rendered,
+                        summary,
                     });
                 }
                 // A tool result never rides on an assistant message, and
@@ -689,14 +694,14 @@ impl Translator {
 
             let output = content.map(render_content).unwrap_or_default();
             let bytes = output.len() as u64;
-            let (name, input, arguments) = match self.tool_calls.remove(&tool_use_id) {
-                Some(call) => (call.name, call.input, call.arguments),
+            let (name, input, summary, arguments) = match self.tool_calls.remove(&tool_use_id) {
+                Some(call) => (call.name, call.input, call.summary, call.arguments),
                 None => {
                     out.push(warn(format!(
                         "the CLI returned a result for tool call `{tool_use_id}`, which it never \
                          announced. The call is counted; what it was called with is lost."
                     )));
-                    (String::new(), String::new(), serde_json::Value::Null)
+                    (String::new(), String::new(), None, serde_json::Value::Null)
                 }
             };
             // A refusal reaches the model as an error, so the result alone
@@ -744,6 +749,7 @@ impl Translator {
                 output,
                 bytes,
                 outcome,
+                summary,
             });
             out.extend(change);
         }
@@ -814,6 +820,32 @@ impl Translator {
             added,
             removed,
         })
+    }
+
+    /// A call in the words a person would use for it: what a shell command
+    /// runs, which file a file tool reads or writes, what a search looks for.
+    ///
+    /// Built from the CLI's own tool schemas, which is why it is worded here
+    /// and not in the shell. A tool this does not know — an MCP server's, a
+    /// new one — is read as its scalar arguments, `key: value`, with nested
+    /// values reduced to their shape, so it still reads as words rather than
+    /// as JSON. Arguments that say nothing (an empty object) give `None`.
+    fn summary_of(&self, name: &str, input: &serde_json::Value) -> Option<String> {
+        let field = |key| input.get(key).and_then(serde_json::Value::as_str);
+        let path = |key| field(key).map(|path| self.relative(path));
+        match name {
+            "Bash" => field("command").map(first_line),
+            "Read" | "Edit" | "MultiEdit" | "Write" => path("file_path"),
+            "NotebookEdit" => path("notebook_path"),
+            "Grep" | "Glob" => field("pattern").map(|pattern| match path("path") {
+                Some(within) => format!("{pattern} in {within}"),
+                None => pattern.to_owned(),
+            }),
+            "WebFetch" => field("url").map(str::to_owned),
+            "WebSearch" | "ToolSearch" => field("query").map(str::to_owned),
+            _ if AGENT_TOOLS.contains(&name) => field("description").map(str::to_owned),
+            _ => scalars_of(input),
+        }
     }
 
     /// A path as the operator reads it: relative to where the session runs,
@@ -965,6 +997,11 @@ impl Translator {
                 fatal: false,
             });
         }
+
+        // Last, after everything the line reports: the shell stops showing
+        // the session as working when it reads this, and a figure that came
+        // after it would land in a turn the operator saw end.
+        out.push(Event::TurnEnded);
     }
 
     /// Checks the turn's own total against what the per-message records added
@@ -1236,6 +1273,43 @@ fn target_of(input: &serde_json::Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The first line of a shell command, marked as cut where there is more.
+fn first_line(command: &str) -> String {
+    let mut lines = command.trim().lines();
+    let first = lines.next().unwrap_or_default().trim_end();
+    match lines.next() {
+        Some(_) => format!("{first} …"),
+        None => first.to_owned(),
+    }
+}
+
+/// Arguments of a tool nothing here knows, as `key: value` pairs: strings,
+/// numbers and booleans as they are, a list as its length, an object as `{…}`.
+///
+/// Text comes first, then numbers and flags, then the shapes: the line is cut
+/// at the pane's edge, and a query or a name says more about a call than its
+/// page size does. Within each, the keys keep the parser's alphabetical order.
+fn scalars_of(input: &serde_json::Value) -> Option<String> {
+    let serde_json::Value::Object(fields) = input else {
+        return None;
+    };
+    let mut pairs: Vec<(u8, String)> = fields
+        .iter()
+        .map(|(key, value)| {
+            let (rank, value) = match value {
+                serde_json::Value::String(text) => (0, first_line(text)),
+                serde_json::Value::Array(items) => (2, format!("[{}]", items.len())),
+                serde_json::Value::Object(_) => (2, "{…}".to_owned()),
+                other => (1, other.to_string()),
+            };
+            (rank, format!("{key}: {value}"))
+        })
+        .collect();
+    pairs.sort_by_key(|(rank, _)| *rank);
+    let pairs: Vec<String> = pairs.into_iter().map(|(_, pair)| pair).collect();
+    (!pairs.is_empty()).then(|| pairs.join(", "))
+}
+
 /// The text of a tool result, which the CLI writes either as a string or as
 /// the content blocks a tool returned.
 fn render_content(content: wire::Content) -> String {
@@ -1455,9 +1529,9 @@ mod tests {
     fn a_pricing_basis_the_bridge_does_not_know_is_reported_and_still_not_called_measured() {
         let mut translator = translator();
 
-        let events = translator.line(
+        let events = before_the_end(translator.line(
             r#"{"type":"result","subtype":"success","modelUsage":{"opus-5":{"costUSD":0.5,"costBasis":"billed"}},"total_cost_usd":0.5}"#,
-        );
+        ));
 
         let said = warnings(&events);
         assert_eq!(said.len(), 1, "{said:?}");
@@ -1485,10 +1559,12 @@ mod tests {
     fn a_result_that_priced_the_session_without_splitting_it_by_model_still_reports_the_cost() {
         let mut translator = translator();
 
-        let first =
-            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.25}"#);
-        let second =
-            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.40}"#);
+        let first = before_the_end(
+            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.25}"#),
+        );
+        let second = before_the_end(
+            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.40}"#),
+        );
 
         let [Event::Usage(first)] = first.as_slice() else {
             panic!("one cost record: {first:?}");
@@ -1508,9 +1584,9 @@ mod tests {
     fn a_turn_that_failed_does_not_end_the_session() {
         let mut translator = translator();
 
-        let events = translator.line(
+        let events = before_the_end(translator.line(
             r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"the provider refused"}"#,
-        );
+        ));
 
         let [Event::Error { message, fatal }] = events.as_slice() else {
             panic!("one error: {events:?}");
@@ -1754,9 +1830,9 @@ mod tests {
         let announced = translator.line(
             r#"{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"toolu_1","message":"This command requires approval"}"#,
         );
-        let result = translator.line(
+        let result = before_the_end(translator.line(
             r#"{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_1"}]}"#,
-        );
+        ));
 
         let [
             Event::PermissionRequest {
@@ -1821,11 +1897,10 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            translator
-                .line(
-                    r#"{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_1"}]}"#
-                )
-                .is_empty()
+            before_the_end(translator.line(
+                r#"{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_1"}]}"#
+            ))
+            .is_empty()
         );
     }
 
@@ -1855,9 +1930,9 @@ mod tests {
     fn a_refusal_the_cli_only_lists_at_the_end_is_still_recorded() {
         let mut translator = translator();
 
-        let events = translator.line(
+        let events = before_the_end(translator.line(
             r#"{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_9","tool_input":{"file_path":"/etc/hosts"}}]}"#,
-        );
+        ));
 
         let [
             Event::PermissionRequest { tool, input, .. },
@@ -2434,5 +2509,120 @@ mod tests {
         let events = translator.line(&notified("toolu_bash", "completed"));
 
         assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// What a result line reported before the turn ended, having checked that
+    /// it did end, and last.
+    fn before_the_end(mut events: Vec<Event>) -> Vec<Event> {
+        assert_eq!(events.pop(), Some(Event::TurnEnded), "{events:?}");
+        events
+    }
+
+    fn summary_of_call(name: &str, input: &str) -> Option<String> {
+        let mut translator = translator().in_dir("/repo");
+        translator
+            .line(&call("t1", name, input))
+            .into_iter()
+            .find_map(|event| match event {
+                Event::ToolCallStart { summary, .. } => Some(summary),
+                _ => None,
+            })
+            .flatten()
+    }
+
+    #[test]
+    fn a_call_is_summed_up_in_the_words_a_person_would_use_for_it() {
+        let cases = [
+            (
+                "Bash",
+                r#"{"command":"cargo test -p niobe-tui","description":"Run the tests"}"#,
+                "cargo test -p niobe-tui",
+            ),
+            ("Bash", r#"{"command":"cd x\ncargo build"}"#, "cd x …"),
+            (
+                "Read",
+                r#"{"file_path":"/repo/crates/ui.rs"}"#,
+                "crates/ui.rs",
+            ),
+            (
+                "Edit",
+                r#"{"file_path":"/repo/AGENTS.md","old_string":"a","new_string":"b"}"#,
+                "AGENTS.md",
+            ),
+            (
+                "Write",
+                r#"{"file_path":"/elsewhere/notes.txt","content":"x"}"#,
+                "/elsewhere/notes.txt",
+            ),
+            (
+                "Grep",
+                r#"{"pattern":"fn draw","path":"/repo/crates"}"#,
+                "fn draw in crates",
+            ),
+            ("Glob", r#"{"pattern":"**/*.rs"}"#, "**/*.rs"),
+            (
+                "WebFetch",
+                r#"{"url":"https://example.com/a","prompt":"read it"}"#,
+                "https://example.com/a",
+            ),
+            (
+                "WebSearch",
+                r#"{"query":"ratatui shadow"}"#,
+                "ratatui shadow",
+            ),
+            (
+                "Agent",
+                r#"{"subagent_type":"Explore","description":"Find the loop","prompt":"…"}"#,
+                "Find the loop",
+            ),
+            (
+                "mcp__claude_ai_Notion__notion-search",
+                r#"{"query":"Niobe milestones","page_size":10,"filters":{"a":1},"ids":["x","y"]}"#,
+                "query: Niobe milestones, page_size: 10, filters: {…}, ids: [2]",
+            ),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(
+                summary_of_call(name, input).as_deref(),
+                Some(expected),
+                "{name} {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_with_no_arguments_worth_reading_has_no_summary() {
+        assert_eq!(summary_of_call("mcp__x__list", "{}"), None);
+    }
+
+    #[test]
+    fn a_finished_call_repeats_the_summary_it_started_with() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call("t1", "Read", r#"{"file_path":"/repo/notes.txt"}"#));
+
+        let events = translator.line(&result("t1", "three lines", false));
+
+        let summary = events.iter().find_map(|event| match event {
+            Event::ToolCallEnd { summary, .. } => Some(summary.clone()),
+            _ => None,
+        });
+        assert_eq!(summary, Some(Some("notes.txt".to_owned())), "{events:?}");
+    }
+
+    #[test]
+    fn the_result_line_ends_the_turn_after_everything_it_reports() {
+        let mut translator = translator();
+        for line in [
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":10}}"#,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"the provider refused"}"#,
+        ] {
+            let events = translator.line(line);
+            assert_eq!(events.last(), Some(&Event::TurnEnded), "{events:?}");
+            assert_eq!(
+                events.iter().filter(|e| **e == Event::TurnEnded).count(),
+                1,
+                "{events:?}"
+            );
+        }
     }
 }

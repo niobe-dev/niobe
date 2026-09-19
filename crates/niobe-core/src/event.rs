@@ -373,6 +373,13 @@ pub enum Event {
         name: String,
         /// The arguments, rendered for display and for attribution.
         input: String,
+        /// What the call does, in one line a person reads without knowing the
+        /// tool's schema: the command, the file relative to the session's
+        /// directory, the pattern searched for. Worded by the backend, which
+        /// is what knows its tools' arguments. `None` means the backend had
+        /// nothing better than `input` to say, and `input` is shown instead.
+        #[serde(default)]
+        summary: Option<String>,
     },
 
     /// A tool call finished.
@@ -395,7 +402,19 @@ pub enum Event {
         bytes: u64,
         /// Success, failure or denial.
         outcome: ToolOutcome,
+        /// The start's one-line reading of the call, repeated for the same
+        /// reason `name` and `input` are.
+        #[serde(default)]
+        summary: Option<String>,
     },
+
+    /// The backend finished answering the operator's last prompt: every call
+    /// of the turn has returned and nothing more is coming until the next
+    /// prompt.
+    ///
+    /// Without it a session that is thinking and one that is waiting for the
+    /// operator look the same between one tool call and the next.
+    TurnEnded,
 
     /// Tokens and, when reported, money.
     Usage(Usage),

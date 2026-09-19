@@ -1034,7 +1034,14 @@ mod tests {
                 "modelUsage":{"m":{"inputTokens":1,"outputTokens":1,"costUSD":0.5}}}"#,
         ]);
 
-        let [Event::Error { message, fatal }, Event::Usage(_)] = events.as_slice() else {
+        // The cost-state line is read as the CLI's closing line, so the turn
+        // it closes ends after it.
+        let [
+            Event::Error { message, fatal },
+            Event::Usage(_),
+            Event::TurnEnded,
+        ] = events.as_slice()
+        else {
             panic!("the warning and the cost: {events:?}");
         };
         assert!(!fatal);

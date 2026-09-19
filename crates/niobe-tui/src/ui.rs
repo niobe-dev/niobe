@@ -23,7 +23,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget};
 use niobe_core::event::UsageWindows;
 use niobe_core::session::{FileChanges, SessionState};
 
-use crate::app::{App, Ask, Entry, Picker, SelectedProfile};
+use crate::app::{Activity, App, Ask, Entry, Picker, SelectedProfile};
 use crate::text;
 use crate::theme::Theme;
 
@@ -475,6 +475,22 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 }
 
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    // A running turn keeps the bottom row, whatever is scrolled into view
+    // above it: whether the session is at work is the question the operator
+    // looks down to answer, and a line that scrolled away would not answer it.
+    let area = match app.activity() {
+        Some(activity) if area.height > 1 => {
+            let [area, working] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+            frame.render_widget(
+                Paragraph::new(working_line(&activity, usize::from(working.width), theme))
+                    .style(Style::new().bg(theme.pane_bg)),
+                working,
+            );
+            area
+        }
+        _ => area,
+    };
     let width = usize::from(area.width);
     let height = usize::from(area.height);
 
@@ -495,6 +511,39 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
         Paragraph::new(lines[start..end].to_vec()).style(Style::new().bg(theme.pane_bg)),
         area,
     );
+}
+
+/// The frames of the working line's spinner, one per tenth of a second.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// `⠹ running Bash  cargo test · 1m 15s`: a spinner that moves while nothing
+/// else on screen does, what the turn is doing, and for how long.
+///
+/// The time is kept whatever the width, and what the turn is doing gives way
+/// to it: a line that loses its clock no longer says the session is alive.
+fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'static> {
+    let tenths = activity.elapsed.as_millis() / 100;
+    let spinner = SPINNER[usize::try_from(tenths % 10).unwrap_or(0)];
+    let clock = format!(" · {}", elapsed(activity.elapsed));
+    let room = width.saturating_sub(text::width(spinner) + 1 + text::width(&clock));
+    Line::from(vec![
+        Span::styled(format!("{spinner} "), Style::new().fg(theme.hot).bold()),
+        Span::styled(
+            text::truncate(&activity.doing, room),
+            Style::new().fg(theme.fg),
+        ),
+        Span::styled(clock, Style::new().fg(theme.dim)),
+    ])
+}
+
+/// `12s`, `1m 15s`, `2h 03m`.
+fn elapsed(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60),
+    }
 }
 
 /// What the session pane says before anything has happened in it.
