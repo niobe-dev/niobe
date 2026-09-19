@@ -384,6 +384,17 @@ mod tests {
     }
 
     #[test]
+    fn the_one_hour_share_is_read_past_the_five_minute_one_beside_it() {
+        let usage: Usage = serde_json::from_str(
+            r#"{"cache_creation_input_tokens":90,"cache_creation":{"ephemeral_1h_input_tokens":60,"ephemeral_5m_input_tokens":30}}"#,
+        )
+        .expect("usage with both lifetimes");
+
+        assert_eq!(usage.cache_creation_input_tokens, 90);
+        assert_eq!(usage.cache_write_1h(), 60);
+    }
+
+    #[test]
     fn a_window_the_cli_named_without_measuring_carries_no_share() {
         let message: Message = serde_json::from_str(
             r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"resetsAt":1789779600}}}}"#,

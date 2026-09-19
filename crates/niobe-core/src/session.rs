@@ -31,6 +31,12 @@ pub struct Totals {
     pub cache_read: u64,
     /// Input tokens written into the prompt cache.
     pub cache_write: u64,
+    /// Of [`Totals::cache_write`], the tokens written to live for an hour
+    /// rather than the default five minutes. A share of the writes, not more
+    /// of them, so it is never added to [`Totals::tokens`]: providers bill the
+    /// hour at a higher rate, and a consumer that prices the session needs the
+    /// share to price it at all.
+    pub cache_write_1h: u64,
     /// Reasoning tokens.
     pub reasoning: u64,
     /// How many usage records were folded in.
@@ -64,6 +70,7 @@ impl Totals {
         self.output = self.output.saturating_add(usage.output);
         self.cache_read = self.cache_read.saturating_add(usage.cache_read);
         self.cache_write = self.cache_write.saturating_add(usage.cache_write);
+        self.cache_write_1h = self.cache_write_1h.saturating_add(usage.cache_write_1h);
         self.reasoning = self.reasoning.saturating_add(usage.reasoning);
         self.records += 1;
         match usage.cost_usd {
@@ -569,6 +576,37 @@ mod tests {
         assert_eq!(totals.records_without_cost, 1);
         assert!((totals.reported_cost_usd - 0.75).abs() < f64::EPSILON);
         assert!(!totals.cost_fully_reported());
+    }
+
+    /// A cache write bought for an hour costs twice the input rate where five
+    /// minutes costs 1.25×, so the share is what a session is priced from. The
+    /// fold has to carry it: a total that drops it prices every write at the
+    /// cheaper rate and reports a bill nobody was sent.
+    #[test]
+    fn one_hour_cache_writes_are_summed_as_a_share_of_the_writes_not_beside_them() {
+        let write = |cache_write, cache_write_1h| {
+            Event::Usage(Usage {
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write,
+                cache_write_1h,
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: None,
+                cost_basis: None,
+            })
+        };
+        let state = SessionState::replay(&[write(100, 100), write(50, 0), write(10, 4)]);
+
+        let totals = state.totals();
+        assert_eq!(totals.cache_write, 160);
+        assert_eq!(totals.cache_write_1h, 104);
+        assert_eq!(
+            totals.tokens(),
+            160,
+            "the one-hour writes are already in the write total"
+        );
     }
 
     #[test]

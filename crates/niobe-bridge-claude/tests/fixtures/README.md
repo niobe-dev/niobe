@@ -75,6 +75,14 @@ did not produce, and it carries the cases that are easy to get wrong:
   the closing `result`'s `permission_denials`. Counting both would double every
   denial; the first is also what tells a call that was not allowed to run from
   one that broke.
+- **cache writes bought for two different lifetimes.** The CLI reports the
+  split per message in `usage.cache_creation`, and the provider bills the hour
+  at twice the input rate where five minutes costs 1.25×. `msg_2`'s 50 writes
+  were bought for five minutes and every other message's for the hour, so a
+  bridge that reads only `cache_creation_input_tokens` prices this recording's
+  writes 30.5% below what they cost. What the two readings come to is checked
+  against a hand computation in the binary's `tests/cache_lifetime.rs`, which
+  is the only crate that may name the bridge and the price table at once;
 - a `rate_limit_event`, which is how much of the plan's five-hour and seven-day
   windows is gone. On a flat-rate plan that is the budget, and it is the one
   figure in the stream that is a level rather than a total: the CLI reports it
@@ -89,25 +97,67 @@ did not produce, and it carries the cases that are easy to get wrong:
 
 Every `message_delta` in a turn adds up to that turn's `result.usage`:
 
-| Turn | in | out | cache read | cache write |
-| ---- | -- | --- | ---------- | ----------- |
-| 1    | 3 + 2 + 1 = **6** | 40 + 25 + 12 = **77** | 1000 + 1100 + 1150 = **3250** | 100 + 50 + 10 = **160** |
-| 2    | 1 + 1 + 1 = **3** | 20 + 10 + 8 = **38** | 1200 + 1250 + 0 = **2450** | 10 + 10 + 5 = **25** |
+| Turn | in | out | cache read | cache write | of which for an hour |
+| ---- | -- | --- | ---------- | ----------- | -------------------- |
+| 1    | 3 + 2 + 1 = **6** | 40 + 25 + 12 = **77** | 1000 + 1100 + 1150 = **3250** | 100 + 50 + 10 = **160** | 100 + 0 + 10 = **110** |
+| 2    | 1 + 1 + 1 = **3** | 20 + 10 + 8 = **38** | 1200 + 1250 + 0 = **2450** | 10 + 10 + 5 = **25** | 10 + 10 + 5 = **25** |
 
 `modelUsage` for `claude-sonnet-5` is the running total of both: 9 in, 115 out,
-5700 cache read, 185 cache write. Its cost runs 0.05 then 0.09, so turn two
-reports $0.04; `claude-haiku-4-5` costs $0.001, reported in full on turn one
-and unchanged after. `total_cost_usd` is the sum of the two — 0.051, then
-0.091 — which is the checksum the bridge warns about when it does not hold.
+5700 cache read, 185 cache write — 135 of those writes bought for the hour and
+50 for five minutes. Its cost runs 0.05 then 0.09, so turn two reports $0.04;
+`claude-haiku-4-5` costs $0.001, reported in full on turn one and unchanged
+after. `total_cost_usd` is the sum of the two — 0.051, then 0.091 — which is
+the checksum the bridge warns about when it does not hold.
 
-To re-derive the table from the fixture:
+At the rates the ledger bundles for Claude Sonnet 5 from 2026-06-30 — $2.00
+input, $10.00 output, $0.20 cache read, $2.50 cache write, $4.00 cache write
+for an hour, each per million tokens — the six messages come to
+
+    9×2.00 + 115×10.00 + 5700×0.20 + 50×2.50 + 135×4.00 = 2973 millionths
+
+or $0.002973, against $0.0027705 for the same tokens with every write read as
+a five-minute one. The difference is $0.0002025, which is 30.5% of what the
+writes cost.
+
+To re-derive the table from the fixture — the fixture holds a line that is not
+JSON, so the program reads the file as text and drops what will not parse, the
+way the fold does:
 
 ```sh
-jq -s 'map(select(.type=="stream_event" and .event.type=="message_delta").event.usage)
-       | {in: (map(.input_tokens)|add), out: (map(.output_tokens)|add),
-          cache_read: (map(.cache_read_input_tokens)|add),
-          cache_write: (map(.cache_creation_input_tokens)|add)}' stream-json.jsonl
+jq -R -s 'split("\n") | map(fromjson? // empty)
+          | map(select(.type=="stream_event" and .event.type=="message_delta").event.usage)
+          | {in: (map(.input_tokens)|add), out: (map(.output_tokens)|add),
+             cache_read: (map(.cache_read_input_tokens)|add),
+             cache_write: (map(.cache_creation_input_tokens)|add),
+             cache_write_1h: (map(.cache_creation.ephemeral_1h_input_tokens)|add)}' \
+  stream-json.jsonl
 ```
+
+### Where a cache write's lifetime comes from, and what happens without one
+
+`cache_creation_input_tokens` is every cache write of a message; the
+`cache_creation` object beside it says how many of them were bought for an
+hour and how many for five minutes. The bridge reads the one-hour count and
+leaves the rest of the total to be priced as five-minute writes, which is
+right because the two lifetimes always add up to the total (below). A message
+whose `cache_creation` is missing altogether is recorded as **no one-hour
+writes** — not as writes of an unknown lifetime, and not as one-hour ones — so
+it prices at the five-minute rate. That is what `wire.rs` pins in
+`cache_writes_without_a_reported_split_are_no_one_hour_writes`, and it is the
+one reading here that is a convention rather than a measurement — it is
+written down because a CLI that stopped reporting the split would otherwise
+make every write quietly cheaper with nothing on screen to say so.
+
+Measured on the 1,017 transcripts on the machine this was written on, over
+27 Claude Code 2.1.x releases up to 2.1.277 and 174,140 messages that carried
+usage (19 September 2026): every one of them carried `cache_creation`, and on
+every one of them `cache_creation_input_tokens` was exactly the two lifetimes
+added together — so the no-breakdown case above has not been observed, and the
+two keys never disagree with the total. The lifetimes themselves are close to
+evenly split: 520,535,496 cache-write tokens, 263,468,094 of them bought for
+the hour and 257,067,402 for five minutes. No single message mixed the two,
+which is why one is hand-built in `wire.rs` rather than recorded — the field
+allows it and the arithmetic has to hold for it.
 
 ## `edits.jsonl`
 
@@ -211,11 +261,11 @@ is what makes the double count visible: a fold that counted the messages as
 well would report 910 in, 140 out, 4200 cache read and 300 cache write. The
 per-message table is
 
-| Message | in | out | cache read | cache write |
-| ------- | -- | --- | ---------- | ----------- |
-| `msg_1` | 3  | 40  | 1000       | 100 (all bought for the hour) |
-| `msg_2` | 2  | 25  | 1100       | 50 |
-| **sum** | **5** | **65** | **2100** | **150** |
+| Message | in | out | cache read | cache write | of which for an hour |
+| ------- | -- | --- | ---------- | ----------- | -------------------- |
+| `msg_1` | 3  | 40  | 1000       | 100         | 100 |
+| `msg_2` | 2  | 25  | 1100       | 50          | 0   |
+| **sum** | **5** | **65** | **2100** | **150**  | **100** |
 
 and it is what a session the CLI has not closed — one with no `cost-state` —
 is counted from instead, as tokens with no money against them.
@@ -229,6 +279,7 @@ jq -R -s 'split("\n") | map(fromjson? // empty)
           | map(select(.type=="assistant").message) | unique_by(.id) | map(.usage)
           | {in: (map(.input_tokens)|add), out: (map(.output_tokens)|add),
              cache_read: (map(.cache_read_input_tokens)|add),
-             cache_write: (map(.cache_creation_input_tokens)|add)}' \
+             cache_write: (map(.cache_creation_input_tokens)|add),
+             cache_write_1h: (map(.cache_creation.ephemeral_1h_input_tokens)|add)}' \
   transcripts/2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42.jsonl
 ```

@@ -107,6 +107,36 @@ fn a_recorded_stream_folds_into_the_totals_the_cli_reported() {
     );
 }
 
+/// Anthropic bills a cache write bought for an hour at twice the input rate
+/// and one bought for five minutes at 1.25×, so which lifetime a write was
+/// bought for is the difference between a bill and a guess. The CLI states it
+/// per message, in `cache_creation`, and the recording carries both.
+#[test]
+fn each_message_says_which_lifetime_its_cache_writes_were_bought_for() {
+    let events = translated();
+    let split: Vec<(u64, u64)> = usage_records(&events)
+        .into_iter()
+        .filter(|usage| usage.cost_usd.is_none())
+        .map(|usage| (usage.cache_write, usage.cache_write_1h))
+        .collect();
+
+    // `msg_2`'s 50 writes were bought for five minutes; every other message's
+    // were bought for the hour. Both readings are in `stream-json.jsonl`, and
+    // the table in `tests/fixtures/README.md` is where they are written down.
+    assert_eq!(
+        split,
+        [(100, 100), (50, 0), (10, 10), (10, 10), (10, 10), (5, 5)]
+    );
+
+    let state = SessionState::replay(&events);
+    let totals = state.totals();
+    assert_eq!(totals.cache_write, 185);
+    assert_eq!(
+        totals.cache_write_1h, 135,
+        "185 written, of which 50 for five minutes"
+    );
+}
+
 #[test]
 fn the_per_message_tokens_add_up_to_what_the_cli_reported_for_the_turn() {
     // The bridge checks this itself on every `result` and says so when it

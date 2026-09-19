@@ -923,6 +923,36 @@ mod tests {
         );
     }
 
+    /// A session the CLI has not closed is counted from its messages, and the
+    /// lifetime a message's cache writes were bought for is on the message.
+    /// Dropping it here would price those writes at the five-minute rate, on
+    /// exactly the sessions that have no accounting to be checked against.
+    #[test]
+    fn an_unclosed_sessions_cache_writes_keep_the_lifetime_they_were_bought_for() {
+        let written = r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"said"}],"usage":{"input_tokens":3,"output_tokens":40,"cache_read_input_tokens":900,"cache_creation_input_tokens":80,"cache_creation":{"ephemeral_1h_input_tokens":50,"ephemeral_5m_input_tokens":30}}}}"#;
+
+        let events = folded(&[written]);
+
+        let counted: Vec<&Event> = events
+            .iter()
+            .filter(|event| matches!(event, Event::Usage(_)))
+            .collect();
+        assert_eq!(
+            counted,
+            [&Event::Usage(niobe_core::Usage {
+                input: 3,
+                output: 40,
+                cache_read: 900,
+                cache_write: 80,
+                cache_write_1h: 50,
+                reasoning: 0,
+                model: "claude-opus-5".to_owned(),
+                cost_usd: None,
+                cost_basis: None,
+            })]
+        );
+    }
+
     #[test]
     fn a_message_the_cli_wrote_itself_does_not_rename_the_model_the_session_runs_on() {
         let events = folded(&[
