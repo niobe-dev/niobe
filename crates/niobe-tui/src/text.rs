@@ -169,12 +169,15 @@ mod tests {
 
     #[test]
     fn a_word_wider_than_the_line_is_split_rather_than_overflowing() {
-        let lines = wrap("see crates/niobe-core/tests/fixtures/session-200.jsonl", 12);
+        let lines = wrap(
+            "see crates/niobe-core/tests/fixtures/claude-session.jsonl",
+            12,
+        );
         assert!(
             lines.iter().all(|l| width(l) <= 12),
             "a line overflowed: {lines:?}"
         );
-        assert!(lines.concat().contains("session-200.jsonl"));
+        assert!(lines.concat().contains("claude-session.jsonl"));
     }
 
     #[test]

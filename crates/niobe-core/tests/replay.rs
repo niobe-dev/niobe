@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! Replay: a recorded log folded into [`SessionState`], with the derived
+//! Replay: recorded logs folded into [`SessionState`], with the derived
 //! totals asserted.
 //!
 //! The expected numbers below were not produced by this crate. They were
-//! derived from the committed fixture with `jq`, as
+//! derived from the committed fixtures with `jq`, as
 //! `crates/niobe-core/tests/fixtures/README.md` records, so a bug in the fold
 //! cannot quietly agree with itself.
 
@@ -14,22 +14,25 @@ use std::time::Instant;
 use niobe_core::event::{AgentOutcome, Backend, Event, ToolOutcome};
 use niobe_core::session::SessionState;
 
-/// The recorded log, 200 events, one JSON object per line.
-const FIXTURE: &str = include_str!("fixtures/session-200.jsonl");
+/// A recorded `claude` bridge session, one JSON object per line.
+const SESSION: &str = include_str!("fixtures/claude-session.jsonl");
 
-/// The 200-event fixture must replay in under this many milliseconds.
+/// The events the shared model defines that the recording above does not
+/// carry, because nothing produces them today.
+const GAPS: &str = include_str!("fixtures/producer-gaps.jsonl");
+
+/// The recorded session must replay in under this many milliseconds.
 ///
 /// This test stays in the binary it shares with the ones around it, where the
 /// shell redraw needed one of its own. Timed on four two-vCPU CI runners, the
-/// fold took a median of 0.05 ms with those siblings running in parallel and
-/// 0.06 ms alone, and the slowest single fold of the 80 timed was 0.18 ms. A
-/// budget this far above the measurement cannot be reached by a scheduler
-/// taking the core away.
+/// fold of the 200-event log this replaced took a median of 0.05 ms with those
+/// siblings running in parallel and 0.06 ms alone, and the slowest single fold
+/// of the 80 timed was 0.18 ms. A budget this far above the measurement cannot
+/// be reached by a scheduler taking the core away.
 const REPLAY_BUDGET_MS: u128 = 50;
 
-fn recorded_events() -> Vec<Event> {
-    FIXTURE
-        .lines()
+fn events_of(log: &str) -> Vec<Event> {
+    log.lines()
         .filter(|line| !line.trim().is_empty())
         .enumerate()
         .map(|(i, line)| {
@@ -39,9 +42,13 @@ fn recorded_events() -> Vec<Event> {
         .collect()
 }
 
+fn recorded_events() -> Vec<Event> {
+    events_of(SESSION)
+}
+
 #[test]
-fn the_fixture_is_two_hundred_events() {
-    assert_eq!(recorded_events().len(), 200);
+fn the_recorded_session_is_three_hundred_and_thirteen_events() {
+    assert_eq!(recorded_events().len(), 313);
 }
 
 #[test]
@@ -51,73 +58,59 @@ fn a_recorded_log_replays_into_the_derived_totals() {
 
     let meta = state.meta().expect("the log opens with session meta");
     assert_eq!(meta.backend, Backend::Claude);
-    assert_eq!(meta.profile, "default");
+    assert_eq!(meta.profile, "max");
 
-    // Tokens and money, summed from the 14 usage records.
+    // Tokens and money, summed from the 21 usage records.
     let totals = state.totals();
-    assert_eq!(totals.input, 25_500);
-    assert_eq!(totals.output, 3_370);
-    assert_eq!(totals.cache_read, 86_300);
-    assert_eq!(totals.cache_write, 1_560);
-    assert_eq!(totals.reasoning, 5_824);
-    assert_eq!(totals.tokens(), 122_554);
-    assert_eq!(totals.records, 14);
+    assert_eq!(totals.input, 92);
+    assert_eq!(totals.output, 5_015);
+    assert_eq!(totals.cache_read, 303_513);
+    assert_eq!(totals.cache_write, 58_457);
+    assert_eq!(totals.reasoning, 0);
+    assert_eq!(totals.tokens(), 367_077);
+    assert_eq!(totals.records, 21);
 
-    // Four of those records carried no cost, so the reported figure is a floor
-    // and the state says so rather than presenting it as the session's bill.
-    assert_eq!(totals.records_without_cost, 4);
+    // Fourteen of those records are the per-message counts, which the CLI
+    // reports without money; the seven that carry a cost are the ones the
+    // closing `result` priced. The session's cost is therefore a floor, and
+    // the state says so rather than presenting it as the bill.
+    assert_eq!(totals.records_without_cost, 14);
     assert!(!totals.cost_fully_reported());
-    assert!((totals.reported_cost_usd - 2.47).abs() < 1e-9);
+    assert!((totals.reported_cost_usd - 0.344_362_3).abs() < 1e-9);
 
-    // Tool calls. One end arrives without its start — a recording of a
-    // producer that dropped an event — and is counted rather than swallowed.
+    // Tool calls. `Grep` is not in this CLI release's tool list, so the call
+    // the model made for it came back refused and is counted as failed.
     let tools = state.tools();
-    assert_eq!(tools.started, 39);
-    assert_eq!(tools.finished, 40);
-    assert_eq!(tools.failed, 4);
-    assert_eq!(tools.denied, 2);
-    assert_eq!(tools.unmatched_ends, 1);
-    assert_eq!(tools.output_bytes, 92_944);
-    assert_eq!(tools.by_name["Read"], 15);
-    assert_eq!(tools.by_name["Bash"], 10);
-    assert_eq!(tools.by_name["Grep"], 5);
-    assert_eq!(tools.by_name["Edit"], 5);
-    assert_eq!(tools.by_name["Write"], 5);
+    assert_eq!(tools.started, 20);
+    assert_eq!(tools.finished, 20);
+    assert_eq!(tools.failed, 2);
+    assert_eq!(tools.denied, 1);
+    assert_eq!(tools.unmatched_ends, 0);
+    assert_eq!(tools.output_bytes, 13_219);
+    assert_eq!(tools.by_name["Read"], 8);
+    assert_eq!(tools.by_name["Bash"], 5);
+    assert_eq!(tools.by_name["Agent"], 3);
+    assert_eq!(tools.by_name["Edit"], 1);
+    assert_eq!(tools.by_name["Write"], 1);
+    assert_eq!(tools.by_name["Grep"], 1);
     assert!(state.in_flight_tools().is_empty());
 
-    // Permissions, decisions, checkpoints.
-    assert_eq!(state.permission_requests(), 10);
-    assert_eq!(state.permissions_denied(), 2);
+    // Permissions: four prompts, one of them refused, all of them answered.
+    assert_eq!(state.permission_requests(), 4);
+    assert_eq!(state.permissions_denied(), 1);
     assert!(state.pending_permissions().is_empty());
-    assert_eq!(state.decisions().len(), 8);
-    assert_eq!(state.checkpoints().len(), 7);
-    assert_eq!(
-        state.decisions().last().map(|d| d.summary.as_str()),
-        Some("Skipped the image proxy - out of scope, asked first")
-    );
 
-    // Sub-agents: three ran at once at the peak, two were still running when
-    // the recording was cut.
-    assert_eq!(state.agents_spawned(), 8);
-    assert_eq!(state.agents_completed(), 3);
-    assert_eq!(state.agents_failed(), 2);
-    assert_eq!(state.agents_cancelled(), 1);
-    assert_eq!(state.peak_running_agents(), 3);
-    assert_eq!(state.running_agents().len(), 2);
+    // Nothing produces a decision or a checkpoint yet, so an ordinary session
+    // carries none. `producer-gaps.jsonl` is where the fold's handling of them
+    // is held.
+    assert!(state.decisions().is_empty());
+    assert!(state.checkpoints().is_empty());
 
-    // Messages and the error that ended it.
-    assert_eq!(state.user_messages(), 13);
-    assert_eq!(state.assistant_messages(), 14);
-    assert_eq!(state.pending_assistant(), "");
-    assert_eq!(
-        state.last_assistant(),
-        Some("Done. Etags cached in the LRU; 304s short-circuit.")
-    );
-    assert_eq!(state.errors(), 4);
-    assert_eq!(
-        state.fatal_error(),
-        Some("backend exited after the final turn")
-    );
+    // Messages and the entries the bridge could not read.
+    assert_eq!(state.user_messages(), 6);
+    assert_eq!(state.assistant_messages(), 10);
+    assert_eq!(state.errors(), 18);
+    assert_eq!(state.fatal_error(), None);
 }
 
 #[test]
@@ -133,14 +126,14 @@ fn replaying_event_by_event_matches_replaying_the_whole_log() {
 }
 
 #[test]
-fn two_hundred_events_replay_inside_the_budget() {
+fn the_recorded_session_replays_inside_the_budget() {
     let events = recorded_events();
 
     let started = Instant::now();
     let state = SessionState::replay(&events);
     let elapsed = started.elapsed();
 
-    assert_eq!(state.totals().records, 14);
+    assert_eq!(state.totals().records, 21);
     assert!(
         elapsed.as_millis() < REPLAY_BUDGET_MS,
         "replay took {elapsed:?}, over the {REPLAY_BUDGET_MS} ms budget"
@@ -148,37 +141,78 @@ fn two_hundred_events_replay_inside_the_budget() {
 }
 
 #[test]
-fn every_event_in_the_log_round_trips_through_its_wire_form() {
-    for (i, event) in recorded_events().iter().enumerate() {
-        let json = serde_json::to_string(event).expect("an Event serializes");
-        let back: Event = serde_json::from_str(&json).expect("an Event deserializes");
-        assert_eq!(*event, back, "event {} did not round trip", i + 1);
+fn every_event_in_the_logs_round_trips_through_its_wire_form() {
+    for (name, log) in [("claude-session", SESSION), ("producer-gaps", GAPS)] {
+        for (i, event) in events_of(log).iter().enumerate() {
+            let json = serde_json::to_string(event).expect("an Event serializes");
+            let back: Event = serde_json::from_str(&json).expect("an Event deserializes");
+            assert_eq!(*event, back, "{name} event {} did not round trip", i + 1);
+        }
     }
 }
 
 #[test]
-fn the_log_exercises_the_awkward_variants() {
+fn the_recording_exercises_the_awkward_cases_a_live_session_has() {
     let events = recorded_events();
-
     let has = |f: &dyn Fn(&Event) -> bool| events.iter().any(f);
 
+    // A per-message count the CLI reported without money: the session's cost
+    // is a floor while any of these are in it.
     assert!(has(
         &|e| matches!(e, Event::Usage(u) if u.cost_usd.is_none())
     ));
+    // A model the session was moved to partway through, and one that produced
+    // no message of its own and arrived only in the closing `modelUsage` —
+    // billed under an id no message in the session ever named.
     assert!(has(
-        &|e| matches!(e, Event::Usage(u) if u.model == "sonnet-5")
+        &|e| matches!(e, Event::Usage(u) if u.model == "claude-haiku-4-5-20251001")
     ));
+    assert!(has(
+        &|e| matches!(e, Event::Usage(u) if u.model == "claude-opus-5[1m]")
+    ));
+    assert!(has(&|e| matches!(e, Event::ModelSelected { .. })));
+
     assert!(has(
         &|e| matches!(e, Event::ToolCallEnd { outcome, .. } if *outcome == ToolOutcome::Denied)
     ));
     assert!(has(
         &|e| matches!(e, Event::ToolCallEnd { outcome, .. } if *outcome == ToolOutcome::Failed)
     ));
-    assert!(has(
-        &|e| matches!(e, Event::AgentExit { outcome, .. } if *outcome == AgentOutcome::Cancelled)
+    assert!(has(&|e| matches!(e, Event::Error { fatal: false, .. })));
+    assert!(has(&|e| matches!(e, Event::UsageWindows(_))));
+    assert!(has(&|e| matches!(e, Event::FileChange { .. })));
+}
+
+#[test]
+fn the_gaps_log_exercises_what_no_producer_emits() {
+    let events = events_of(GAPS);
+    let state = SessionState::replay(&events);
+
+    // A `tool_call_end` whose start the producer dropped is counted, not
+    // swallowed: a lossy recording is not a session with fewer calls in it.
+    assert_eq!(state.tools().unmatched_ends, 1);
+    assert_eq!(state.tools().finished, 1);
+    assert_eq!(state.tools().started, 0);
+
+    assert_eq!(state.decisions().len(), 1);
+    assert_eq!(state.checkpoints().len(), 1);
+
+    // Two agents, one killed and one still running when the log ends.
+    assert_eq!(state.agents_spawned(), 2);
+    assert_eq!(state.agents_cancelled(), 1);
+    assert_eq!(state.peak_running_agents(), 2);
+    assert_eq!(state.running_agents().len(), 1);
+
+    assert_eq!(
+        state.fatal_error(),
+        Some("the `claude` session ended: exit status 1")
+    );
+    assert!(events.iter().any(
+        |e| matches!(e, Event::AgentExit { outcome, .. } if *outcome == AgentOutcome::Cancelled)
     ));
-    assert!(has(&|e| matches!(e, Event::Error { fatal: true, .. })));
-    assert!(has(
-        &|e| matches!(e, Event::AgentSpawn { parent, .. } if parent.is_some())
-    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::AgentSpawn { parent, .. } if parent.is_some()))
+    );
 }

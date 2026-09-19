@@ -19,19 +19,26 @@ use niobe_core::event::{Event, Usage};
 use niobe_core::session::SessionState;
 use niobe_store::{Recorder, SessionId, Store, StoreError, read_log};
 
-/// The recorded 200-event log `niobe-core` asserts its fold against.
-const FIXTURE: &str = include_str!("../../niobe-core/tests/fixtures/session-200.jsonl");
+/// The recorded `claude` bridge session `niobe-core` asserts its fold against.
+const FIXTURE: &str = include_str!("../../niobe-core/tests/fixtures/claude-session.jsonl");
 
-/// A stored 200-event session must load and replay in under this many
+/// A stored session of this size must load and replay in under this many
 /// milliseconds.
 ///
 /// This test stays in the binary it shares with the ones around it, where the
-/// shell redraw needed one of its own. Timed on four two-vCPU CI runners,
-/// opening, loading and folding took a median of 2.0 to 2.8 ms with those
+/// shell redraw needed one of its own. The budget was set against the
+/// 200-event log this fixture replaced: timed on four two-vCPU CI runners,
+/// opening, loading and folding it took a median of 2.0 to 2.8 ms with those
 /// siblings running in parallel and 1.3 to 1.7 ms alone, and the slowest
-/// single run of the 80 timed was 4.8 ms. The siblings cost it about 1.7
-/// times, which is the factor that broke the shell redraw — it survives here
-/// because it starts with thirty times the headroom, not two.
+/// single run of the 80 timed was 4.8 ms.
+///
+/// The recording that replaced it is 1.6 times the events and 2.7 times the
+/// bytes, and its best run on a developer machine was 2.2 ms — so the budget
+/// keeps most of the order of magnitude it was given. What it does not
+/// survive is a loaded machine: on one carrying a load average above fifty
+/// the same measurement ranged from 2 ms to 94 ms, and the log it replaced
+/// ranged from 4 ms to 171 ms there. This is I/O against a SQLite file, so a
+/// failure here is re-run once before it is treated as a regression.
 const REPLAY_BUDGET_MS: u128 = 50;
 
 fn fixture() -> Vec<Event> {
@@ -123,7 +130,7 @@ fn a_restart_shows_the_same_timeline_and_the_same_totals() {
 }
 
 #[test]
-fn a_stored_two_hundred_event_session_loads_and_replays_inside_the_budget() {
+fn a_stored_session_loads_and_replays_inside_the_budget() {
     let (_dir, path) = scratch();
     let session = {
         let store = Store::open(&path).expect("a store opens");
@@ -140,8 +147,8 @@ fn a_stored_two_hundred_event_session_loads_and_replays_inside_the_budget() {
     let state = SessionState::replay(stored.iter().map(|s| &s.event));
     let elapsed = started.elapsed();
 
-    assert_eq!(stored.len(), 200);
-    assert_eq!(state.totals().records, 14);
+    assert_eq!(stored.len(), 313);
+    assert_eq!(state.totals().records, 21);
     assert!(
         elapsed.as_millis() < REPLAY_BUDGET_MS,
         "open, load and replay took {elapsed:?}, over the {REPLAY_BUDGET_MS} ms budget"

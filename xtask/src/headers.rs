@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(rule_for("CLAUDE.md"), Some(Rule::Exempt));
         assert_eq!(rule_for("Cargo.lock"), Some(Rule::Exempt));
         assert_eq!(
-            rule_for("crates/niobe-core/tests/fixtures/session-200.jsonl"),
+            rule_for("crates/niobe-core/tests/fixtures/claude-session.jsonl"),
             Some(Rule::Exempt)
         );
         assert_eq!(
