@@ -79,7 +79,7 @@ const POLL: Timespec = Timespec {
 
 /// Text from the opening frame with no styling inside it to be broken up by
 /// escape sequences: once it has been read off the pty, the shell has drawn.
-const OPENING_FRAME: &str = "A terminal coding agent that shows you the bill.";
+const OPENING_FRAME: &str = "A terminal coding agent that keeps you aware of what is";
 
 /// Entering the mode the shell draws in: the alternate screen. Leaving it
 /// proves nothing unless the shell entered it first.

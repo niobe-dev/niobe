@@ -468,13 +468,15 @@ fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::from(""),
         Line::from("  niobe").style(Style::new().fg(theme.hot).bold()),
-        Line::from("  A terminal coding agent that shows you the bill.")
+        Line::from("  A terminal coding agent that keeps you aware of what is")
             .style(Style::new().fg(theme.fg)),
+        Line::from("  being built and how.").style(Style::new().fg(theme.fg)),
         Line::from(""),
-        Line::from("  Every token, every decision and every minute of agent time is")
+        Line::from("  What the agent did, decided and touched, what it is doing now")
             .style(Style::new().fg(theme.dim)),
-        Line::from("  visible while it happens, and nothing on screen is a guess.")
+        Line::from("  and what it cost, visible while it happens and never a guess.")
             .style(Style::new().fg(theme.dim)),
+        Line::from("  You stay on the loop instead of in it.").style(Style::new().fg(theme.dim)),
         Line::from(""),
         Line::from(match attached {
             true => "  Ask for a change; the bill is on the right.",

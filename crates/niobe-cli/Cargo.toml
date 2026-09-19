@@ -9,7 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Niobe — a terminal coding agent that shows you the bill."
+description = "Niobe — a terminal coding agent that keeps you aware of what is being built and how, from each decision to what it cost."
 
 [[bin]]
 name = "niobe"

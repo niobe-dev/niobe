@@ -2,14 +2,14 @@
 ╔══════════════════════════════ Session ─ niobe ═══════════════════════════════╗
 ║                                                                              ║
 ║  niobe                                                                       ║
-║  A terminal coding agent that shows you the bill.                            ║
+║  A terminal coding agent that keeps you aware of what is                     ║
+║  being built and how.                                                        ║
 ║                                                                              ║
-║  Every token, every decision and every minute of agent time is               ║
-║  visible while it happens, and nothing on screen is a guess.                 ║
+║  What the agent did, decided and touched, what it is doing now               ║
+║  and what it cost, visible while it happens and never a guess.               ║
+║  You stay on the loop instead of in it.                                      ║
 ║                                                                              ║
 ║  No backend is attached: `niobe profiles` shows what is defined.             ║
-║                                                                              ║
-║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║

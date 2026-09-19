@@ -638,7 +638,8 @@ fn print_help() {
     println!(
         "\
 {name} {version}
-A terminal coding agent that shows you the bill.
+A terminal coding agent that keeps you aware of what is being built and how:
+what the agent did, decided and touched, what it is doing now and what it cost.
 
 USAGE:
     niobe                  Open the shell on a new session

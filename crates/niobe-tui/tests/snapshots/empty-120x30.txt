@@ -2,14 +2,14 @@
 ╔════════════════════════ Session ─ niobe ═════════════════════════╗ ╔═════════════════════ Cost ══════════════════════╗
 ║                                                                  ║ ║session     tokens in    tokens out  cache read  ║
 ║  niobe                                                           ║ ║—           0            0           0           ║
-║  A terminal coding agent that shows you the bill.                ║ ║no tool calls yet                                ║
-║                                                                  ║ ║0 calls · 0 failed · 0 denied · 0 B out          ║
-║  Every token, every decision and every minute of agent time is   ║ ║                                                 ║
-║  visible while it happens, and nothing on screen is a guess.     ║ ║                                                 ║
+║  A terminal coding agent that keeps you aware of what is         ║ ║no tool calls yet                                ║
+║  being built and how.                                            ║ ║0 calls · 0 failed · 0 denied · 0 B out          ║
 ║                                                                  ║ ║                                                 ║
-║  No backend is attached: `niobe profiles` shows what is defined. ║ ║                                                 ║
+║  What the agent did, decided and touched, what it is doing now   ║ ║                                                 ║
+║  and what it cost, visible while it happens and never a guess.   ║ ║                                                 ║
+║  You stay on the loop instead of in it.                          ║ ║                                                 ║
 ║                                                                  ║ ╚═════════════════════════════════════════════════╝
-║                                                                  ║ ╔═════════════ Parallel ─ 0 running ══════════════╗
+║  No backend is attached: `niobe profiles` shows what is defined. ║ ╔═════════════ Parallel ─ 0 running ══════════════╗
 ║                                                                  ║ ║no sub-agents                                    ║
 ║                                                                  ║ ║0 spawned · peak 0 · 0 done · 0 failed           ║
 ║                                                                  ║ ║                                                 ║

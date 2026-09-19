@@ -15,8 +15,11 @@ This file is your core instruction manual. Refer to it and the principles within
 
 ## 0. The project
 
-Niobe is a terminal coding agent that shows you the bill: every token, every decision and every
-minute of agent time is visible while it happens, and the harness spends less by default.
+Niobe is a terminal coding agent that keeps the engineer aware of what is being built and how:
+what the agent did, what it decided, what it touched, what it is doing right now and what it
+cost, visible while it happens. The engineer stays on the loop instead of in it — informed without
+having to approve every step. The bill is one of the things on screen, every figure in it measured
+or labelled, and the harness spends less by default.
 
 **Bridge-first.** Niobe drives the official `claude` and `codex` CLIs as subprocesses, so it uses
 whatever access those CLIs are already signed in with. A native agent loop on provider API keys
