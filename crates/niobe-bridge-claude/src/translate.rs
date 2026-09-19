@@ -709,7 +709,11 @@ impl Translator {
         match event.event {
             wire::StreamBody::MessageStart { message } => {
                 let Some(model) = message.model else { return };
-                if stream.is_none() {
+                let same_model = self
+                    .model
+                    .as_deref()
+                    .is_some_and(|session| is_window_of(session, &model));
+                if stream.is_none() && !same_model {
                     self.set_model(model.clone(), out);
                 }
                 self.in_flight.insert(stream, model);
@@ -887,6 +891,7 @@ impl Translator {
             self.report_session_cost(outcome, out);
             return;
         }
+        self.file_messages_under_their_bill(&outcome.model_usage);
 
         let mut costs = 0.0;
         for (model, usage) in &outcome.model_usage {
@@ -919,6 +924,35 @@ impl Translator {
                 "the CLI's per-model costs add up to ${costs:.6}, and it reported \
                  ${total:.6} for the session. The per-model figures are what was counted."
             )));
+        }
+    }
+
+    /// Moves what the messages reported under one id to the id the CLI billed
+    /// them under, where `modelUsage` says the two are the same model.
+    ///
+    /// A session on a model with its 1M-token window selected names the model
+    /// as the family in every `message_start` — `claude-opus-5` — and bills it
+    /// as `claude-opus-5[1m]`, naming the family in `canonicalModel`. Recorded
+    /// live on Claude Code 2.1.278. Reconciled by id, the two have nothing in
+    /// common, and every token the messages carried is reported again.
+    ///
+    /// Only where the family is not billed in its own right in the same
+    /// `result`: then there is no telling which of the two a message belongs
+    /// to, and each is reconciled against what was reported under its own id.
+    fn file_messages_under_their_bill(&mut self, model_usage: &BTreeMap<String, wire::ModelUsage>) {
+        for (billed, usage) in model_usage {
+            let Some(named) = usage.canonical_model.as_ref() else {
+                continue;
+            };
+            if named == billed || model_usage.contains_key(named) {
+                continue;
+            }
+            let Some(messages) = self.reported.remove(named) else {
+                continue;
+            };
+            let bill = self.reported.entry(billed.clone()).or_default();
+            bill.tokens.add(messages.tokens);
+            bill.cost_usd += messages.cost_usd;
         }
     }
 
@@ -961,6 +995,17 @@ impl Translator {
             cost_basis: (spent > 0.0).then_some(CostBasis::ApiEquivalent),
         })
     }
+}
+
+/// Whether `session` is `model` with a context window selected, as in
+/// `claude-opus-5[1m]` over `claude-opus-5`.
+///
+/// The CLI's `init` names the session by the first and its messages by the
+/// second, so a message naming the family is not the session moving model.
+fn is_window_of(session: &str, model: &str) -> bool {
+    session
+        .strip_prefix(model)
+        .is_some_and(|window| window.starts_with('[') && window.ends_with(']'))
 }
 
 /// The mode the CLI reports, as one of the three Niobe models.
@@ -1232,6 +1277,40 @@ mod tests {
         };
         assert_eq!(usage.model, "haiku-4-5");
         assert_eq!(usage.output, 7);
+    }
+
+    #[test]
+    fn a_family_billed_in_its_own_right_keeps_its_own_messages() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"opus-5"}}}"#,
+        );
+        translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":5,"output_tokens":7}}}"#,
+        );
+
+        // Both ids are on the bill, so the message belongs to the one it named,
+        // and the windowed id's tokens are its own.
+        let events = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":7},"modelUsage":{"opus-5":{"inputTokens":5,"outputTokens":7,"costUSD":0.1,"canonicalModel":"opus-5"},"opus-5[1m]":{"inputTokens":2,"outputTokens":3,"costUSD":0.05,"canonicalModel":"opus-5"}},"total_cost_usd":0.15}"#,
+        );
+
+        let billed: Vec<(&str, u64, u64)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.model.as_str(), usage.input, usage.output)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(billed, [("opus-5", 0, 0), ("opus-5[1m]", 2, 3)]);
+    }
+
+    #[test]
+    fn a_window_is_a_bracketed_suffix_on_the_same_id() {
+        assert!(is_window_of("claude-opus-5[1m]", "claude-opus-5"));
+        assert!(!is_window_of("claude-opus-5", "claude-opus-5"));
+        assert!(!is_window_of("claude-opus-5-1", "claude-opus-5"));
+        assert!(!is_window_of("claude-opus-5[1m]", "claude-opus"));
     }
 
     #[test]

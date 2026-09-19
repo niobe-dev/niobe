@@ -229,6 +229,47 @@ What the recording settles:
   `updatedInput`, and one with an empty `updatedInput`, each let a `Write` run
   as the model asked for it. The field is not what makes a call go ahead.
 
+## `long-context.jsonl`
+
+A two-turn session on `claude-opus-5[1m]` — Opus 5 with its 1M-token window
+selected — recorded from Claude Code 2.1.278 on 19 September 2026 with the
+flags shown for `stream-json.jsonl`, `--model 'claude-opus-5[1m]'` and no
+`--permission-mode`, so the CLI started it in `auto`. Each turn asked for
+one word. The lines are the CLI's own. The only edits: `system`/`init` cut
+down to the keys that say what ran, with its `cwd` rewritten to `/repo`; the
+`result`'s `subagent_stats` dropped; and `system`/`status`,
+`content_block_start`, `content_block_stop` and `message_stop` left out,
+because the bridge reads none of them.
+
+It exists because the session names its model two ways:
+
+| Where | Id |
+| ----- | -- |
+| `system`/`init` `model` | `claude-opus-5[1m]` |
+| `stream_event`/`message_start` `message.model` | `claude-opus-5` |
+| `assistant` `message.model` | `claude-opus-5` |
+| `result` `modelUsage` key | `claude-opus-5[1m]`, with `canonicalModel: "claude-opus-5"` |
+
+`modelUsage` is the session's running total, and the bridge reports what each
+turn added beyond what the messages already carried. Matched by id alone, the
+messages under `claude-opus-5` and the bill under `claude-opus-5[1m]` have
+nothing in common, and every token is counted twice. `canonicalModel` is what
+says they are the same model. The same session without `--model`, on the
+default Opus, names `claude-opus-5` in all four places.
+
+### The arithmetic the tests assert
+
+| Turn | in | out | cache read | cache write | `modelUsage` cost, running |
+| ---- | -- | --- | ---------- | ----------- | -------------------------- |
+| 1    | 2  | 3   | 10,118     | 10,948      | $0.114624 |
+| 2    | 2  | 3   | 11,854     | 14,885      | $0.269486 |
+| **session** | **4** | **6** | **21,972** | **25,833** | **$0.269486** |
+
+The per-turn rows are the `message_delta` usage, which equals each `result`'s
+`usage`; the session row is the second `result`'s `modelUsage`. A fold that
+counts both the messages and the bill reports 8 in, 12 out, 43,944 cache read
+and 51,666 cache write.
+
 ## `transcripts/`
 
 A directory of session transcripts in the shape the CLI writes them: one

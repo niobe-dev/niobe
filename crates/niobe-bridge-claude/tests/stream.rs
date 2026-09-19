@@ -539,3 +539,89 @@ mod edits {
         );
     }
 }
+
+/// A live session on a model with its 1M-token window selected, where the
+/// messages and the bill name the model differently. The numbers are the
+/// recording's own `result` lines, as `tests/fixtures/README.md` sets out.
+mod long_context {
+    use super::*;
+
+    const LONG_CONTEXT: &str = include_str!("fixtures/long-context.jsonl");
+
+    fn translated() -> Vec<Event> {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        LONG_CONTEXT
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .collect()
+    }
+
+    /// Every message names `claude-opus-5` and `modelUsage` names
+    /// `claude-opus-5[1m]`. Reconciling the one against the other by id finds
+    /// nothing in common and reports every token a second time: 8 in, 12 out,
+    /// 43,944 cache read and 51,666 cache write.
+    #[test]
+    fn a_session_billed_under_another_id_than_its_messages_counts_each_token_once() {
+        let events = translated();
+        assert!(
+            warnings(&events).is_empty(),
+            "the recording folds without complaint: {:?}",
+            warnings(&events)
+        );
+        let totals = SessionState::replay(&events).totals().clone();
+
+        assert_eq!(totals.input, 4);
+        assert_eq!(totals.output, 6);
+        assert_eq!(totals.cache_read, 21_972);
+        assert_eq!(totals.cache_write, 25_833);
+        assert!(
+            (totals.reported_cost_usd - 0.269_486).abs() < 1e-9,
+            "the session cost {} rather than the 0.269486 the CLI reported",
+            totals.reported_cost_usd
+        );
+    }
+
+    /// The bill is filed under the id the CLI billed, with the money on it
+    /// and no tokens: the messages already carried every one of them.
+    #[test]
+    fn the_cost_is_reported_under_the_id_the_cli_billed() {
+        let events = translated();
+        let billed: Vec<_> = usage_records(&events)
+            .into_iter()
+            .filter(|usage| usage.cost_usd.is_some())
+            .collect();
+
+        assert_eq!(billed.len(), 2, "one cost record a turn: {billed:?}");
+        for usage in billed {
+            assert_eq!(usage.model, "claude-opus-5[1m]");
+            assert_eq!(usage.cost_basis, Some(CostBasis::ApiEquivalent));
+            assert_eq!(
+                (
+                    usage.input,
+                    usage.output,
+                    usage.cache_read,
+                    usage.cache_write
+                ),
+                (0, 0, 0, 0),
+                "{usage:?}"
+            );
+        }
+    }
+
+    /// The status line shows the model the CLI said the session is on, which
+    /// carries the window; a message naming the family does not take it away.
+    #[test]
+    fn the_session_stays_on_the_model_with_its_window() {
+        let events = translated();
+        let models: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::SessionMeta(meta) => Some(meta.model.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(models, ["claude-opus-5[1m]"]);
+    }
+}

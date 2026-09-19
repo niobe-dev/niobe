@@ -397,7 +397,9 @@ impl Fold {
         // this machine on 18 September 2026 across twenty-five transcripts: not
         // one message named the id its session was billed under. Counting both
         // would report every token twice, and deciding that one id is the
-        // other would be a guess about a price. So a priced session is counted
+        // other would be a guess about a price: the live `result` names the
+        // family behind a billed id in `canonicalModel`, and `cost-state`
+        // does not. So a priced session is counted
         // from the CLI's own accounting and this from the messages, and a
         // session the CLI has not closed yet — which has no accounting — is
         // counted from the messages, which is measured and reads as a floor.

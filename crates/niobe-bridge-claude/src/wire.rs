@@ -322,6 +322,11 @@ pub(crate) struct ModelUsage {
     /// than billed. A subscription plan reports exactly that.
     #[serde(rename = "costBasis")]
     pub(crate) cost_basis: Option<String>,
+    /// The model id the messages billed here name. It differs from the key
+    /// when the key carries the context window — `claude-opus-5[1m]` over
+    /// messages that say `claude-opus-5`.
+    #[serde(rename = "canonicalModel")]
+    pub(crate) canonical_model: Option<String>,
 }
 
 /// One call the CLI refused to make.
