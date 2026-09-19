@@ -76,7 +76,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   including the `git diff --numstat` figures the per-file `+`/`−` counts are checked against;
   `tests/conformance.rs` asserts those recordings' shape inventory — message types, `system`
   subtypes, stream events, content blocks, deltas — against a checked-in list, so a shape the
-  bridge silently passes over cannot arrive with a new CLI release unnoticed.
+  bridge silently passes over cannot arrive with a new CLI release unnoticed;
+  `tests/answers.rs` answers a recorded pair of permission prompts through a running `Session`,
+  against a stand-in `claude` that waits for each answer as the CLI does.
   The codex bridge names its binary and does not spawn it yet.
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
   the TUI, and the only one that wires the others together: it finds the config files and opens

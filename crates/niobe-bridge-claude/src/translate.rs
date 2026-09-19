@@ -33,6 +33,9 @@
 //!   `result` lists it again. Counting both doubles every denial; reading the
 //!   first is also the only way to tell a call that was not allowed to run
 //!   from a tool that broke, because the model is told about both as errors.
+//!   That holds for a call the CLI refuses by itself. A call refused over the
+//!   control channel gets no `permission_denied` at all, so the driver tells
+//!   the translator about it instead ([`Translator::refused`]).
 //!
 //! # What is recognised and not yet translated
 //!
@@ -258,6 +261,11 @@ impl Translator {
     /// time the call has already been shown as failed. Told at the moment the
     /// answer goes out, the translator reads that result as the denial it is,
     /// and does not report the closing list as a second refusal.
+    ///
+    /// This is the only thing that marks such a call denied. Recorded against
+    /// Claude Code 2.1.278: the CLI sends no `system`/`permission_denied` for a
+    /// call refused over the control channel, only for one it refuses by its
+    /// own rules.
     pub fn refused(&mut self, id: &ToolCallId) {
         self.denied.insert(id.as_str().to_owned(), ());
     }
@@ -572,8 +580,9 @@ impl Translator {
             };
             // A refusal reaches the model as an error, so the result alone
             // cannot tell a tool that broke from one that was not allowed to
-            // run. The CLI says which in the `permission_denied` it sends
-            // first, and that is what this reads.
+            // run. What says which came first: the `permission_denied` the CLI
+            // sends for a refusal of its own, or the driver's word for one
+            // made over the control channel.
             let outcome = match (
                 is_error.unwrap_or(false),
                 self.denied.contains_key(&tool_use_id),

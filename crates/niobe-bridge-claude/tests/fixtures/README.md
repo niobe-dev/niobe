@@ -195,6 +195,40 @@ Every `message_delta` in the turn adds up to the closing `result.usage` — 15
 in, 279 out, 6760 cache read, 91 cache write — by the same `jq` program above,
 with `edits.jsonl` in place of `stream-json.jsonl`.
 
+## `stdio-answers.jsonl`
+
+One turn with two permission prompts, recorded from Claude Code 2.1.278 on
+19 September 2026 through this crate's own `Session`, spawned with
+`--permission-prompt-tool stdio` and answered from Niobe's shell. The lines are
+the CLI's own. The only edits: paths rewritten to `/repo`, `system`/`init` cut
+down to the keys that say what ran, the `result`'s `subagent_stats` dropped,
+and the stream events, the `Read` the model did first and the `system`
+status lines left out, because nothing here is about them.
+
+The turn asked for an `Edit` and then a `Write`. The `Edit` was allowed and the
+file was changed. The `Write` was refused and the file was never created.
+`tests/answers.rs` replays this through a stand-in `claude` that stops at each
+`control_request` until an answer arrives, as the CLI does, and keeps the
+answers so they can be checked.
+
+What the recording settles:
+
+- **A call refused over the control channel gets no `system`/`permission_denied`.**
+  The only signs of it are the tool result, an error that carries the refusal's
+  `message` word for word, and the closing `result`'s `permission_denials`. So
+  the driver has to tell the translator about the refusal before that tool
+  result arrives. Without that, the call reads as a tool that broke.
+- **The tool result for that call carries `tool_result_meta`**:
+  `[{"id": …, "non_execution_kind": "permission-rule"}]`. The CLI's own
+  transcript of the same session does not keep it, so a session read back
+  from disk could not rely on it. The bridge does not read it.
+- **The `control_request` carries `display_name` and `permission_suggestions`**
+  (here, a switch to `acceptEdits` for the session). The bridge reads neither.
+- **The approval went back with the arguments in `updatedInput` and the call
+  ran.** Separately, from the same release: an approval with no
+  `updatedInput`, and one with an empty `updatedInput`, each let a `Write` run
+  as the model asked for it. The field is not what makes a call go ahead.
+
 ## `transcripts/`
 
 A directory of session transcripts in the shape the CLI writes them: one

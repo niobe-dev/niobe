@@ -373,9 +373,12 @@ impl Session {
     /// silently dropped a decision would look as though the call had been
     /// allowed.
     ///
-    /// An approval carries the arguments back as they came. The protocol sends
-    /// the approved arguments rather than a bare yes, and Niobe approves a
-    /// call without ever rewriting one, so what goes back is what was shown.
+    /// An approval carries the arguments back as they came, in `updatedInput`.
+    /// Claude Code 2.1.278 was recorded taking an approval without that field
+    /// as well, so it is not what makes the call go ahead; it is sent because
+    /// the field is where the protocol puts the arguments that were approved,
+    /// and Niobe approves a call without ever rewriting one, so what goes back
+    /// is what was shown.
     pub fn answer(&mut self, id: &ToolCallId, decision: PermissionDecision) -> std::io::Result<()> {
         let asked = self
             .waiting
