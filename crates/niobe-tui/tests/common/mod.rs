@@ -11,6 +11,14 @@
 //! are about where things land on screen, and a fixture that drifts would make
 //! the pictures drift with it.
 
+// Each of the two binaries that include this module compiles its own copy and
+// uses the part of it that it needs: the frame-budget test times frames and
+// never asks what colour they came out.
+#![allow(
+    dead_code,
+    reason = "shared by two test binaries, neither of which uses all of it"
+)]
+
 use niobe_core::event::{
     AgentOutcome, Backend, Event, Mode, PermissionDecision, SessionMeta, ToolOutcome, Usage,
     UsageWindow, UsageWindows,
@@ -19,7 +27,8 @@ use niobe_tui::app::{App, Repo};
 use niobe_tui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::style::{Color, Style};
 
 fn session_events() -> Vec<Event> {
     vec![
@@ -192,12 +201,80 @@ pub fn running_session() -> App {
 
 /// Draws one frame and returns the screen as text, one line per row.
 pub fn screen(app: &mut App, width: u16, height: u16) -> String {
+    render(drawn(app, width, height).backend().buffer())
+}
+
+/// Draws one frame and returns the colour of every cell.
+///
+/// A theme changes no character on screen, so a picture of the text says
+/// nothing about one. This is the picture that does: a legend of every style
+/// the frame used, and one character per cell naming which. A palette that
+/// moved shows up as a legend line that changed; a colour that reached the
+/// wrong half of the screen shows up as a map that did.
+pub fn paint(app: &mut App, width: u16, height: u16) -> String {
+    let terminal = drawn(app, width, height);
+    let buffer = terminal.backend().buffer();
+
+    let mut legend: Vec<Style> = Vec::new();
+    let mut rows = Vec::with_capacity(usize::from(buffer.area.height));
+    for y in 0..buffer.area.height {
+        let mut row = String::with_capacity(usize::from(buffer.area.width));
+        for x in 0..buffer.area.width {
+            let style = buffer.cell((x, y)).map_or_else(Style::new, Cell::style);
+            let at = legend.iter().position(|seen| *seen == style);
+            let at = at.unwrap_or_else(|| {
+                legend.push(style);
+                legend.len() - 1
+            });
+            row.push(mark(at));
+        }
+        rows.push(row);
+    }
+
+    let legend: Vec<String> = legend
+        .iter()
+        .enumerate()
+        .map(|(at, style)| format!("  {}  {}", mark(at), described(style)))
+        .collect();
+    format!("{}\n\n{}", legend.join("\n"), rows.join("\n"))
+}
+
+/// The character a style is drawn as in a paint map.
+///
+/// Sixty-two of them, which is far more than a palette of sixteen colours can
+/// make out of the handful of modifiers the shell uses. Running out would make
+/// two styles read as one, so it panics rather than drawing a map that lies.
+fn mark(at: usize) -> char {
+    const MARKS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    char::from(
+        *MARKS
+            .get(at)
+            .expect("a frame uses fewer styles than there are marks for them"),
+    )
+}
+
+/// One style, as a legend line reads it.
+fn described(style: &Style) -> String {
+    let colour = |colour: Option<Color>| match colour {
+        Some(colour) => format!("{colour:?}"),
+        // The cell a double-width glyph spills into is left as the terminal's
+        // own: nothing is drawn there, so there is no colour to name.
+        None => "unset".to_owned(),
+    };
+    let mut described = format!("{} on {}", colour(style.fg), colour(style.bg));
+    if !style.add_modifier.is_empty() {
+        described.push_str(&format!(", {:?}", style.add_modifier).to_lowercase());
+    }
+    described
+}
+
+fn drawn(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("a test backend cannot fail");
     terminal
         .draw(|frame| ui::draw(frame, app))
         .expect("a test backend cannot fail");
-    render(terminal.backend().buffer())
+    terminal
 }
 
 fn render(buffer: &Buffer) -> String {

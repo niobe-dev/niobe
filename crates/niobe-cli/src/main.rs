@@ -34,7 +34,8 @@ use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
-use niobe_tui::{Detached, Ended, Forgotten};
+use niobe_tui::theme;
+use niobe_tui::{Detached, Ended, Forgotten, Theme};
 
 use crate::args::{Command, Invocation, Resume};
 use crate::journal::StoreJournal;
@@ -101,13 +102,15 @@ fn run(
         command,
         profile,
         budget,
+        theme,
     }: Invocation,
 ) -> Result<(), String> {
     let profile = profile.as_deref();
+    let asked = Asked { budget, theme };
     match command {
-        Command::Shell => shell(profile, budget),
-        Command::Resume(Resume::Recorded(session)) => resume(session, profile, budget),
-        Command::Resume(Resume::Imported(session)) => import(&session, profile, budget),
+        Command::Shell => shell(profile, &asked),
+        Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked),
+        Command::Resume(Resume::Imported(session)) => import(&session, profile, &asked),
         Command::Sessions => list_sessions(),
         Command::Profiles => list_profiles(profile),
         Command::Trust => trust(),
@@ -125,26 +128,66 @@ fn run(
     }
 }
 
+/// What the command line asked of a session, beyond which one it is.
+///
+/// Both apply to every way a session is opened — a new one, a recorded one
+/// resumed, one read in from the `claude` CLI — so they travel together rather
+/// than as a widening list of arguments each of those three repeats.
+#[derive(Debug, Clone, Copy)]
+struct Asked {
+    /// The most the session may spend, in USD.
+    budget: Option<f64>,
+    /// The palette the shell opens in.
+    theme: Option<Theme>,
+}
+
+/// The palette a session opens in: what `--theme` asked for, or what the
+/// config names, or the default.
+///
+/// A name in the config that no theme answers to is reported at its line
+/// rather than falling back: an operator who wrote a theme into their config
+/// and got the usual one would read it as the file not being loaded. `F9`
+/// changes it from here for the rest of the session.
+fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String> {
+    if let Some(theme) = asked.theme {
+        return Ok(theme);
+    }
+    let Some(named) = loaded.config.theme() else {
+        return Ok(Theme::default());
+    };
+    Theme::by_name(named.name()).ok_or_else(|| {
+        named
+            .invalid(&format!(
+                "`{}` is not a theme; expected {}",
+                named.name(),
+                theme::listed()
+            ))
+            .to_string()
+    })
+}
+
 /// Opens the shell on a new session, recorded into this repository's store.
 ///
 /// Without a terminal there is nothing to draw into and raw mode would fail, so
 /// a piped or redirected run prints the help instead of an errno. The config is
 /// read first either way, so a config that cannot be used is reported rather
 /// than hidden behind the help.
-fn shell(profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
+fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
     let app = say_untrusted(
-        App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone()),
+        App::new(repo::describe(&cwd))
+            .with_rules(loaded.config.allowed().clone())
+            .with_theme(chosen_theme(asked, &loaded)?),
         &loaded,
     );
     let app = match &selected {
         Some(selected) => app.with_profile(config::named(*selected)),
         None => app,
     };
-    let app = match budget {
+    let app = match asked.budget {
         Some(budget) => app.with_budget(budget),
         None => app,
     };
@@ -161,7 +204,7 @@ fn shell(profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
         &root,
         selected.as_ref(),
         &backend::Attach {
-            budget_usd: budget,
+            budget_usd: asked.budget,
             ..backend::Attach::default()
         },
         std::env::var_os("HOME"),
@@ -195,19 +238,21 @@ fn shell(profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
 
 /// Opens the shell on a recorded session and keeps recording into it. Without
 /// a terminal, prints what the session folds to.
-fn resume(session: SessionId, profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
+fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
     let mut app = say_untrusted(
-        App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone()),
+        App::new(repo::describe(&cwd))
+            .with_rules(loaded.config.allowed().clone())
+            .with_theme(chosen_theme(asked, &loaded)?),
         &loaded,
     );
     if let Some(selected) = &selected {
         app = app.with_profile(config::named(*selected));
     }
-    if let Some(budget) = budget {
+    if let Some(budget) = asked.budget {
         app = app.with_budget(budget);
     }
 
@@ -255,7 +300,7 @@ fn resume(session: SessionId, profile: Option<&str>, budget: Option<f64>) -> Res
         &backend::Attach {
             resume: continuing,
             mode: app.session().mode(),
-            budget_usd: budget,
+            budget_usd: asked.budget,
         },
         std::env::var_os("HOME"),
     )?;
@@ -279,11 +324,12 @@ fn resume(session: SessionId, profile: Option<&str>, budget: Option<f64>) -> Res
 /// Nothing is written back to the CLI's own store. What is read becomes a
 /// Niobe session like any other, so from here on `niobe --resume <number>`
 /// continues it and every total on screen is a fold over the same events.
-fn import(session: &str, profile: Option<&str>, budget: Option<f64>) -> Result<(), String> {
+fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
+    let theme = chosen_theme(asked, &loaded)?;
 
     let started = Instant::now();
     let events = backend::history(
@@ -294,13 +340,15 @@ fn import(session: &str, profile: Option<&str>, budget: Option<f64>) -> Result<(
         std::env::var_os("HOME"),
     )?;
     let mut app = say_untrusted(
-        App::new(repo::describe(&cwd)).with_rules(loaded.config.allowed().clone()),
+        App::new(repo::describe(&cwd))
+            .with_rules(loaded.config.allowed().clone())
+            .with_theme(theme),
         &loaded,
     );
     if let Some(selected) = &selected {
         app = app.with_profile(config::named(*selected));
     }
-    if let Some(budget) = budget {
+    if let Some(budget) = asked.budget {
         app = app.with_budget(budget);
     }
     app.extend(&events);
@@ -334,7 +382,7 @@ fn import(session: &str, profile: Option<&str>, budget: Option<f64>) -> Result<(
             // conversation back.
             resume: Some(session.to_owned()),
             mode: app.session().mode(),
-            budget_usd: budget,
+            budget_usd: asked.budget,
         },
         std::env::var_os("HOME"),
     )?;
@@ -605,6 +653,7 @@ USAGE:
 OPTIONS:
     --profile <name>       Run under this profile instead of the default one
     --budget <amount>      Stop the session once it has cost this many dollars
+    --theme <name>         Draw the shell in this palette: classic, neo
     -h, --help             Print this help
     -V, --version          Print the version
 
@@ -713,6 +762,7 @@ IN THE SHELL:
     PgUp / PgDn            Scroll the transcript
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
     F8                     Pick a model from the ones the profile names
+    F9                     Cycle the palette the shell draws in
     F10, Ctrl+Q            Quit
 
     When a backend stops for permission, the turn waits on a prompt that takes
@@ -736,6 +786,14 @@ MODE AND MODEL:
     to change, not replaced. The backend resolves the name it is given and says
     what it ended up on, which may be spelt differently from the way it was
     asked for.
+
+THEME:
+    classic is DOS blue and neo is green on black. --theme <name> opens the
+    shell in one, theme = \"neo\" at the top of a config makes it the one every
+    session opens in, and F9 cycles them while a session runs. Every colour is
+    one of the sixteen the terminal names rather than a hex value, so a session
+    looks the same over SSH and in screen, and your own colour scheme is what
+    those sixteen mean.
 
 BUDGET:
     --budget <amount> caps what a session may spend, in dollars, and niobe says

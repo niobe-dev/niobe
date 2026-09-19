@@ -613,7 +613,7 @@ fn a_config_that_is_not_toml_names_the_line() {
 }
 
 #[test]
-fn the_help_says_how_the_mode_the_model_and_the_budget_are_changed() {
+fn the_help_says_how_the_mode_the_model_the_budget_and_the_theme_are_changed() {
     let setup = Configured::new("", "");
     let out = stdout(&setup.run(&["--help"]));
 
@@ -625,12 +625,27 @@ fn the_help_says_how_the_mode_the_model_and_the_budget_are_changed() {
         "models = [",
         "niobe trust",
         "trusted.list",
+        "--theme <name>",
+        "F9",
+        "theme = \"neo\"",
     ] {
         assert!(
             out.contains(said),
             "the help does not mention {said}:\n{out}"
         );
     }
+}
+
+#[test]
+fn a_theme_that_does_not_exist_is_refused_before_anything_is_started() {
+    let setup = Configured::new("", "");
+    let output = setup.run(&["--theme", "matrix"]);
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(err.contains("`matrix` is not a theme"), "{err}");
+    assert!(err.contains("`classic`"), "{err}");
+    assert!(err.contains("`neo`"), "{err}");
 }
 
 #[test]

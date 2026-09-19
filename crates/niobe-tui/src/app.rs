@@ -233,10 +233,7 @@ impl App {
         // path or a URL longer than the pane falls back to breaking mid-word.
         composer.set_wrap_mode(WrapMode::WordOrGlyph);
         composer.set_placeholder_text("Ask for a change, or press F1 for help");
-        composer.set_placeholder_style(Style::new().fg(theme.dim).bg(theme.pane_bg));
-        composer.set_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
-        composer.set_cursor_line_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
-        composer.set_cursor_style(Style::new().fg(theme.pane_bg).bg(theme.hot));
+        paint_composer(&mut composer, &theme);
 
         Self {
             repo,
@@ -743,6 +740,27 @@ impl App {
         self
     }
 
+    /// The same shell, drawn in `theme`.
+    ///
+    /// The composer is a widget that holds its own styles rather than being
+    /// handed them at draw time, so it is repainted here; everything else
+    /// reads [`App::theme`] as it draws.
+    #[must_use]
+    pub fn with_theme(mut self, theme: Theme) -> Self {
+        self.set_theme(theme);
+        self
+    }
+
+    /// Moves to the next theme, which is what `F9` does.
+    fn cycle_theme(&mut self) {
+        self.set_theme(self.theme.next());
+    }
+
+    fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        paint_composer(&mut self.composer, &theme);
+    }
+
     /// The same shell, opening on a line from the shell itself.
     ///
     /// For what the operator has to know before the first prompt and would
@@ -940,6 +958,7 @@ impl App {
             // the session fold knows that.
             (KeyCode::F(5), _) => self.hint = Some(self.cost_hint(now_secs())),
             (KeyCode::F(8), _) => self.pick_model(),
+            (KeyCode::F(9), _) => self.cycle_theme(),
             (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
 
             _ => {
@@ -1100,10 +1119,22 @@ pub fn windows_label(windows: &UsageWindows) -> Option<String> {
     }
 }
 
+/// Gives the composer the theme's colours.
+///
+/// The composer is `ratatui-textarea`, which keeps the styles it draws with
+/// rather than taking them per frame, so a theme reaches it by being written
+/// into it. Everything else the shell draws reads the theme at draw time.
+fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
+    composer.set_placeholder_style(Style::new().fg(theme.dim).bg(theme.pane_bg));
+    composer.set_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
+    composer.set_cursor_line_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
+    composer.set_cursor_style(Style::new().fg(theme.pane_bg).bg(theme.hot));
+}
+
 /// What an F-key does, for the ones that do nothing yet.
 ///
-/// F5, F8 and F10 are handled before this is reached, so nothing here names
-/// them.
+/// F5, F8, F9 and F10 are handled before this is reached, so nothing here
+/// names them.
 fn fkey_hint(n: u8) -> &'static str {
     match n {
         1 => "F1 Help — the help browser is not implemented yet",
@@ -1115,9 +1146,8 @@ fn fkey_hint(n: u8) -> &'static str {
         4 => "F4 Undo — checkpoints and rewind are not implemented yet",
         6 => "F6 Files — file attribution is not implemented yet",
         7 => "F7 Tools — tool detail is not implemented yet",
-        // F8 opens the model list rather than saying anything, so nothing here
-        // names it.
-        9 => "F9 Theme — classic is the only theme",
+        // F8 opens the model list and F9 changes the theme rather than saying
+        // anything, so nothing here names them.
         _ => "F10 Quit",
     }
 }
@@ -1351,6 +1381,46 @@ mod tests {
             code,
             ratatui::crossterm::event::KeyModifiers::NONE,
         )
+    }
+
+    #[test]
+    fn f9_moves_to_the_next_theme_and_takes_the_composer_with_it() {
+        use crate::theme::{CLASSIC, NEO, THEMES};
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = app();
+        assert_eq!(*app.theme(), CLASSIC);
+
+        app.on_key(key(KeyCode::F(9)));
+
+        assert_eq!(*app.theme(), NEO);
+        // The composer keeps the styles it was given rather than being handed
+        // them per frame, so a theme that did not reach it would leave the
+        // prompt drawn in the one before.
+        assert_eq!(
+            app.composer().style(),
+            Style::new().fg(NEO.fg).bg(NEO.pane_bg)
+        );
+        // And it says nothing: the menu bar already names the theme in force.
+        assert_eq!(app.hint(), None);
+
+        for _ in 1..THEMES.len() {
+            app.on_key(key(KeyCode::F(9)));
+        }
+        assert_eq!(*app.theme(), CLASSIC);
+    }
+
+    #[test]
+    fn a_shell_opened_on_a_theme_draws_its_composer_in_it() {
+        use crate::theme::NEO;
+
+        let app = app().with_theme(NEO);
+
+        assert_eq!(*app.theme(), NEO);
+        assert_eq!(
+            app.composer().placeholder_style(),
+            Some(Style::new().fg(NEO.dim).bg(NEO.pane_bg))
+        );
     }
 
     #[test]

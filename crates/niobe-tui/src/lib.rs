@@ -40,7 +40,7 @@ pub use journal::{Journal, JournalError, Unrecorded};
 pub use rules::{Forgotten, Rules, RulesError};
 pub use run::{Ended, run};
 pub use terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
-pub use theme::{CLASSIC, Theme};
+pub use theme::{CLASSIC, NEO, Theme};
 pub use ui::{MIN_SIZE, WIDE_COLUMNS, draw, session_cost};
 
 #[cfg(test)]

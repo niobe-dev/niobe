@@ -37,6 +37,17 @@
 //! allow = ["Read", "Bash(cargo test)"]
 //! ```
 //!
+//! and the palette the shell opens in:
+//!
+//! ```toml
+//! theme = "neo"
+//! ```
+//!
+//! Which palettes there are is the shell's business, not this crate's, so the
+//! name is carried as written and the caller resolves it; [`ThemeName`] keeps
+//! the line so that a name nothing answers to is reported where it was
+//! written.
+//!
 //! A profile may name a settings file the backend is to run under, which is
 //! how a machine whose CLI is configured one way runs a session the other: the
 //! path is passed to the backend and nothing in it is merged or rewritten
@@ -240,11 +251,43 @@ struct DefaultProfile {
     line: usize,
 }
 
+/// The name a config gives the palette the shell opens in, and where it was
+/// set.
+///
+/// The name is kept as written rather than resolved: the palettes live in the
+/// TUI, which this crate cannot name. [`ThemeName::invalid`] is how the caller
+/// that can resolve it reports one that nothing answers to, at the line the
+/// operator wrote it on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeName {
+    name: String,
+    path: PathBuf,
+    line: usize,
+}
+
+impl ThemeName {
+    /// The name, as the config wrote it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Reports `message` against this `theme`, at its key and its line.
+    pub fn invalid(&self, message: &str) -> ConfigError {
+        ConfigError::Invalid {
+            path: self.path.clone(),
+            line: self.line,
+            key: Some("theme".to_owned()),
+            message: message.to_owned(),
+        }
+    }
+}
+
 /// One config file, or several laid over one another.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     profiles: BTreeMap<String, Profile>,
     default_profile: Option<DefaultProfile>,
+    theme: Option<ThemeName>,
     allowed: Allowlist,
 }
 
@@ -321,6 +364,9 @@ impl Config {
         if over.default_profile.is_some() {
             self.default_profile = over.default_profile;
         }
+        if over.theme.is_some() {
+            self.theme = over.theme;
+        }
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
         // where one is taken back.
@@ -360,6 +406,15 @@ impl Config {
     /// Every profile, by name.
     pub fn profiles(&self) -> &BTreeMap<String, Profile> {
         &self.profiles
+    }
+
+    /// The palette the shell opens in, where a config names one.
+    ///
+    /// Not gated on trust: a palette is what the shell draws in and nothing a
+    /// backend is started with, so a repository that sets one has changed some
+    /// colours and no more.
+    pub fn theme(&self) -> Option<&ThemeName> {
+        self.theme.as_ref()
     }
 
     /// The profile a session runs under: the one `requested` names, or else
@@ -799,6 +854,52 @@ backend = "codex"
     }
 
     #[test]
+    fn a_theme_is_carried_as_written_with_the_line_it_was_written_on() {
+        let config = parsed("\n\n\n\ntheme = \"neo\"\n\n[profiles.p]\nbackend = \"claude\"\n");
+        let theme = config.theme().expect("the config names a theme");
+
+        assert_eq!(theme.name(), "neo");
+        assert_eq!(
+            theme.invalid("is not a theme").to_string(),
+            "/configs/user/config.toml:5: theme: is not a theme"
+        );
+        assert_eq!(parsed("[profiles.p]\nbackend = \"claude\"\n").theme(), None);
+    }
+
+    #[test]
+    fn a_theme_is_not_what_trust_gates_and_the_last_file_to_name_one_wins() {
+        // A palette is what the shell draws in: a repository that sets one has
+        // changed some colours and started nothing.
+        let user = parsed("theme = \"classic\"\n").untrusted();
+        assert_eq!(user.theme().map(ThemeName::name), Some("classic"));
+        assert!(!user.needs_trust());
+
+        let repo = Config::parse("theme = \"neo\"\n", &path("repo")).expect("valid");
+        let config = user.clone().overlay(repo);
+        assert_eq!(config.theme().map(ThemeName::name), Some("neo"));
+
+        // A file that names none leaves the one before it standing.
+        let quiet =
+            Config::parse("[profiles.p]\nbackend = \"claude\"\n", &path("repo")).expect("valid");
+        assert_eq!(
+            user.overlay(quiet).theme().map(ThemeName::name),
+            Some("classic")
+        );
+    }
+
+    #[test]
+    fn a_theme_that_says_nothing_is_a_mistake_in_the_file() {
+        assert_eq!(
+            invalid("theme = \"  \"\n"),
+            "/configs/user/config.toml:1: theme: is empty"
+        );
+        assert_eq!(
+            invalid("theme = 3\n"),
+            "/configs/user/config.toml:1: theme: expected a string, found an integer"
+        );
+    }
+
+    #[test]
     fn a_default_set_by_one_file_may_name_a_profile_another_defines() {
         let user = parsed("[profiles.work]\nbackend = \"claude\"\n");
         let repo = Config::parse("default_profile = \"work\"\n", &path("repo")).expect("valid");
@@ -865,7 +966,7 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `profiles` or `permissions`"
+             expected `default_profile`, `theme`, `profiles` or `permissions`"
         );
     }
 

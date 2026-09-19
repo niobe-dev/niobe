@@ -98,6 +98,11 @@ const RESTORED: &str = "\x1b[?1049l\x1b[?25h";
 /// Ctrl+Q, one of the two keys that quit the shell.
 const CTRL_Q: &[u8] = b"\x11";
 
+/// F9, the key that moves the shell to the next theme. A terminal sends it as
+/// this sequence, which is what proves the key reaches the shell as F9 rather
+/// than as the characters it is spelt with.
+const F9: &[u8] = b"\x1b[20~";
+
 /// The variable the binary reads to panic inside the event loop, which is the
 /// only way in to the one exit path nothing else can reach. The binary compiles
 /// it in only with debug assertions on, which is how `cargo test` builds it.
@@ -492,6 +497,75 @@ fn a_settings_file_a_profile_names_and_this_machine_has_not_stops_the_session() 
     );
     // The shell never took the terminal, so there is nothing to hand back and
     // nothing was recorded here.
+    assert!(!repo.path().join(".niobe").exists(), "{drawn}");
+}
+
+/// The three ways a palette is chosen, on the one screen that can show it: the
+/// flag, a config key, and F9 while the session runs. The menu bar names the
+/// theme in force, so it is what each of them is read off — the name alone,
+/// because it is drawn as a span of its own and the `theme:` in front of it is
+/// a colour change away in the bytes that reach the terminal.
+#[test]
+fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
+    let repo = repo();
+    let home = user_config("theme = \"neo\"\n");
+    let (terminal, slave) = Terminal::open();
+
+    // The config alone: the shell opens on the theme it names.
+    let mut shell = shell_command(&slave, repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows("NEO");
+    terminal.typed(F9);
+    // Two themes, so the next one round is the default again.
+    terminal.shows("CLASSIC");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    assert!(status.success(), "the shell ended with {status}");
+
+    // The flag beats the config, which is the point of having both.
+    let (flagged, flagged_slave) = Terminal::open();
+    let mut shell = shell_command(&flagged_slave, repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .arg("--theme")
+        .arg("classic")
+        .spawn()
+        .expect("the niobe binary runs");
+    flagged.shows("CLASSIC");
+    flagged.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    assert!(status.success(), "the shell ended with {status}");
+
+    drop(slave);
+    drop(flagged_slave);
+    terminal.drained();
+    flagged.drained();
+}
+
+#[test]
+fn a_config_naming_a_theme_that_does_not_exist_stops_the_session_at_its_line() {
+    let repo = repo();
+    let home = user_config("\n\ntheme = \"matrix\"\n");
+    let (terminal, slave) = Terminal::open();
+
+    let mut shell = shell_command(&slave, repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert_eq!(status.code(), Some(1), "{drawn}");
+    assert!(
+        drawn.contains("config.toml:3: theme: `matrix` is not a theme"),
+        "the failure names the key, the line and the name: {drawn}"
+    );
+    assert!(drawn.contains("`classic`"), "{drawn}");
+    // The shell never took the terminal, so a palette nobody has is not a
+    // session opened in the default one.
     assert!(!repo.path().join(".niobe").exists(), "{drawn}");
 }
 

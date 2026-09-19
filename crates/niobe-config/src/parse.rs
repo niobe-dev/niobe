@@ -17,7 +17,7 @@ use niobe_core::permission::{Allowlist, Rule};
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
-use crate::{Config, ConfigError, DefaultProfile, Profile, Settings};
+use crate::{Config, ConfigError, DefaultProfile, Profile, Settings, ThemeName};
 
 /// What `backend` may be, in the order an error lists them.
 const BACKENDS: [Backend; 3] = [Backend::Claude, Backend::Codex, Backend::Native];
@@ -51,6 +51,13 @@ impl File<'_> {
                         line: self.line(&value.span()),
                     });
                 }
+                "theme" => {
+                    config.theme = Some(ThemeName {
+                        name: self.non_empty_string(value, &at)?.to_owned(),
+                        path: self.path.to_path_buf(),
+                        line: self.line(&value.span()),
+                    });
+                }
                 "permissions" => config.allowed = self.permissions(value, &at)?,
                 "profiles" => {
                     for (name, profile) in in_file_order(self.table(value, &at)?) {
@@ -70,7 +77,8 @@ impl File<'_> {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        "unknown key; expected `default_profile`, `profiles` or `permissions`",
+                        "unknown key; expected `default_profile`, `theme`, `profiles` \
+                         or `permissions`",
                     ));
                 }
             }

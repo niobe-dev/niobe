@@ -8,6 +8,11 @@
 //! picture of the screen, so a layout change has to be looked at rather than
 //! merely compiled. Regenerate with `UPDATE_SNAPSHOTS=1 cargo test`.
 //!
+//! A theme changes no character on screen, so its pictures are of the colours
+//! instead: `neo-*` is a legend of every style the frame used and a map of
+//! which cell got which. The text pictures stay in the default theme, which is
+//! what keeps one committed picture of the layout rather than one per palette.
+//!
 //! How long a redraw takes is measured in `frame_budget.rs`, a binary of its
 //! own, because the tests here run in parallel and would share its cores.
 
@@ -20,9 +25,10 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{running_session, screen};
+use common::{paint, running_session, screen};
 use niobe_core::event::{Backend, Event, Mode, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Repo, SelectedProfile};
+use niobe_tui::theme::{CLASSIC, NEO};
 
 /// The same session, stopped on a permission prompt it is waiting on.
 ///
@@ -79,6 +85,47 @@ fn assert_snapshot(name: &str, screen: &str) {
          right, run `UPDATE_SNAPSHOTS=1 cargo test`",
         path.display()
     );
+}
+
+#[test]
+fn the_neo_theme_paints_the_shell_at_both_sizes() {
+    assert_snapshot(
+        "neo-80x24",
+        &paint(&mut running_session().with_theme(NEO), 80, 24),
+    );
+    assert_snapshot(
+        "neo-200x60",
+        &paint(&mut running_session().with_theme(NEO), 200, 60),
+    );
+}
+
+/// A theme is a palette and nothing else: every character stays where it was,
+/// so the one committed picture of the layout covers every theme. The menu bar
+/// is the exception, because it names the theme in force and the names are not
+/// the same width.
+#[test]
+fn a_theme_moves_no_character_on_screen_but_the_name_it_shows() {
+    for (width, height) in [(80, 24), (200, 60)] {
+        let classic = screen(&mut running_session().with_theme(CLASSIC), width, height);
+        let neo = screen(&mut running_session().with_theme(NEO), width, height);
+
+        let mut classic = classic.lines();
+        let mut neo = neo.lines();
+        let (classic_menu, neo_menu) = (classic.next(), neo.next());
+        assert!(
+            classic_menu.is_some_and(|line| line.contains("theme:CLASSIC")),
+            "{classic_menu:?}"
+        );
+        assert!(
+            neo_menu.is_some_and(|line| line.contains("theme:NEO")),
+            "{neo_menu:?}"
+        );
+        assert_eq!(
+            classic.collect::<Vec<_>>(),
+            neo.collect::<Vec<_>>(),
+            "the theme moved something at {width}x{height}"
+        );
+    }
 }
 
 #[test]

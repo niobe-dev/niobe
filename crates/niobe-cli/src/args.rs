@@ -9,6 +9,8 @@
 use std::path::PathBuf;
 
 use niobe_store::SessionId;
+use niobe_tui::Theme;
+use niobe_tui::theme;
 
 /// What the operator asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,20 +62,25 @@ pub struct Invocation {
     pub profile: Option<String>,
     /// The most the session may spend, in USD, if `--budget` was given.
     pub budget: Option<f64>,
+    /// The palette `--theme` named, if it was given. It beats the one a config
+    /// names, and `F9` beats both for the rest of the session.
+    pub theme: Option<Theme>,
 }
 
 /// Parses the arguments after the program name. The error is a sentence for
 /// the operator.
 ///
-/// `--profile <name>` and `--budget <amount>` may stand anywhere on the line,
-/// since they qualify the command rather than being one.
+/// `--profile <name>`, `--budget <amount>` and `--theme <name>` may stand
+/// anywhere on the line, since they qualify the command rather than being one.
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
     const NO_PROFILE: &str = "`--profile` needs a profile name; `niobe profiles` lists them";
     const NO_BUDGET: &str = "`--budget` needs an amount in dollars, as in `--budget 0.50`";
+    let no_theme = || format!("`--theme` needs a theme name; expected {}", theme::listed());
 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (profile, rest) = take_flag(&args, "--profile", NO_PROFILE)?;
     let (budget, rest) = take_flag(&rest, "--budget", NO_BUDGET)?;
+    let (theme, rest) = take_flag(&rest, "--theme", &no_theme())?;
     let command = command(&rest)?;
 
     let runs_a_session = matches!(command, Command::Shell | Command::Resume(_));
@@ -93,12 +100,28 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
             "`--budget` applies to the shell and `--resume`, and to nothing else".to_owned(),
         );
     }
+    if theme.is_some() && !runs_a_session {
+        return Err(
+            "`--theme` applies to the shell and `--resume`, and to nothing else".to_owned(),
+        );
+    }
 
     Ok(Invocation {
         command,
         profile: profile.map(str::to_owned),
         budget: budget.map(budget_usd).transpose()?,
+        theme: theme.map(named_theme).transpose()?,
     })
+}
+
+/// The palette `--theme` named.
+///
+/// A name no theme answers to is refused here rather than falling back to the
+/// default: an operator who asked for a palette and got the usual one would
+/// read it as the theme not having landed.
+fn named_theme(name: &str) -> Result<Theme, String> {
+    Theme::by_name(name)
+        .ok_or_else(|| format!("`{name}` is not a theme; expected {}", theme::listed()))
 }
 
 /// The amount `--budget` was given, as a ceiling on what a session may spend.
@@ -337,6 +360,7 @@ mod tests {
                 command: Command::Shell,
                 profile: Some("work".to_owned()),
                 budget: None,
+                theme: None,
             })
         );
         assert_eq!(profile(&["--profile=work"]), Ok(Some("work".to_owned())));
@@ -346,6 +370,7 @@ mod tests {
                 command: Command::Resume(id("3")),
                 profile: Some("work".to_owned()),
                 budget: None,
+                theme: None,
             })
         );
         assert_eq!(
@@ -396,6 +421,7 @@ mod tests {
                 command: Command::Resume(id("3")),
                 profile: None,
                 budget: Some(1.25),
+                theme: None,
             })
         );
         assert_eq!(invocation(&[]).map(|i| i.budget), Ok(None));
@@ -421,6 +447,52 @@ mod tests {
         for args in [
             &["--budget", "1", "sessions"][..],
             &["prices", "--budget=1"],
+        ] {
+            let error = invocation(args).expect_err("does not apply");
+            assert!(error.contains("applies to"), "{args:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_theme_flag_names_a_palette_either_way_round_and_ignores_its_case() {
+        use niobe_tui::NEO;
+
+        assert_eq!(
+            invocation(&["--theme", "neo"]).map(|i| i.theme),
+            Ok(Some(NEO))
+        );
+        assert_eq!(invocation(&["--theme=NEO"]).map(|i| i.theme), Ok(Some(NEO)));
+        assert_eq!(
+            invocation(&["--resume", "3", "--theme", "neo"]).map(|i| i.theme),
+            Ok(Some(NEO))
+        );
+        assert_eq!(invocation(&[]).map(|i| i.theme), Ok(None));
+    }
+
+    #[test]
+    fn a_theme_flag_that_names_no_palette_lists_the_ones_there_are() {
+        for args in [
+            &["--theme"][..],
+            &["--theme="],
+            &["--theme", "matrix"],
+            &["--theme", "--budget", "1"],
+        ] {
+            let error = invocation(args).expect_err("not a theme");
+            assert!(
+                error.contains("--theme") || error.contains("not a theme"),
+                "{args:?}: {error}"
+            );
+            assert!(error.contains("`classic`"), "{args:?}: {error}");
+            assert!(error.contains("`neo`"), "{args:?}: {error}");
+        }
+        assert!(invocation(&["--theme", "neo", "--theme=classic"]).is_err());
+    }
+
+    #[test]
+    fn a_theme_applies_only_where_a_session_runs() {
+        for args in [
+            &["--theme", "neo", "sessions"][..],
+            &["prices", "--theme=neo"],
         ] {
             let error = invocation(args).expect_err("does not apply");
             assert!(error.contains("applies to"), "{args:?}: {error}");
