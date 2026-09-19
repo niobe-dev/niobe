@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use niobe_bridge_claude::{Options, Session};
+use niobe_bridge_claude::{Options, Session, SpawnError};
 use niobe_core::event::{Event, PermissionDecision, ToolCallId, ToolOutcome};
 
 /// How long the whole exchange may take. The stand-in answers at once, so
@@ -58,6 +58,28 @@ fn stand_in(dir: &Path) -> PathBuf {
     script
 }
 
+/// Starts the stand-in, waiting out Linux's `ETXTBSY`.
+///
+/// The test binary runs its tests on threads, and a thread that forks while
+/// another has the stand-in open for writing hands that open file to its
+/// child until the child execs. Executing a file something holds open for
+/// writing is refused as "text file busy", however briefly, so the start is
+/// tried again for as long as that is the reason, and for no other failure.
+fn spawn(options: &Options) -> Session {
+    let started = Instant::now();
+    loop {
+        match Session::spawn(options) {
+            Err(SpawnError::Failed { error, .. })
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && started.elapsed() < PATIENCE =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            started => return started.expect("the stand-in starts"),
+        }
+    }
+}
+
 /// Runs the recorded turn, answering each prompt with what `decide` says
 /// about the tool it names, and returns every event and every answer the
 /// stand-in received.
@@ -66,7 +88,7 @@ fn exchange(decide: impl Fn(&str) -> PermissionDecision) -> (Vec<Event>, Vec<ser
     let mut options = Options::new(dir.path(), "max");
     options.binary = stand_in(dir.path());
     options.ask_over_stdio = true;
-    let mut session = Session::spawn(&options).expect("the stand-in starts");
+    let mut session = spawn(&options);
     session.send("edit the notes").expect("the turn is sent");
 
     let started = Instant::now();
