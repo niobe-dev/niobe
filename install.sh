@@ -109,8 +109,9 @@ main() {
 
     expected=$(cut -d ' ' -f 1 <"$scratch/$archive.sha256")
     actual=$(sha256 "$scratch/$archive")
-    [ -n "$expected" ] && [ "$expected" = "$actual" ] ||
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
         fail "$archive does not match its published SHA-256 (expected $expected, got $actual); nothing was installed"
+    fi
 
     tar -xzf "$scratch/$archive" -C "$scratch"
     [ -f "$scratch/niobe" ] || fail "$archive holds no niobe binary"
