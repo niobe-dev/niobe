@@ -64,7 +64,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
-  enters and restores the terminal, `theme.rs` is the palette, `text.rs` wraps and truncates. Snapshot pictures of the screen live in `tests/snapshots/`.
+  enters and restores the terminal and the mouse it takes for the wheel, `theme.rs` is the
+  palette, `text.rs` wraps and truncates, `markdown.rs` draws the assistant's replies from their
+  markdown and wraps the styled text itself, so the transcript's line count stays exact. Snapshot
+  pictures of the screen live in `tests/snapshots/`.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
@@ -251,8 +254,9 @@ Where tests live:
     pictures in `tests/snapshots/`. After an intentional layout change, regenerate with
     `UPDATE_SNAPSHOTS=1 cargo test -p niobe-tui --test shell` and **read the diff** of the
     snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
-  - `niobe-tui/tests/frame_budget.rs` times a 200×60 redraw against a 16 ms budget. It is a
-    test binary of its own so that no parallel test shares its cores, and it asserts the median
+  - `niobe-tui/tests/frame_budget.rs` times a 200×60 resize, and the steady redraw of a long
+    session of markdown replies, against a 16 ms budget. It is a test binary of its own and its
+    tests take turns on a lock, so that nothing shares their cores, and each asserts the median
     of 31 frames so that a frame the scheduler interrupted cannot fail it.
   - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached
     the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM and

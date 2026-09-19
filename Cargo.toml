@@ -67,6 +67,11 @@ signal-hook = "0.4"
 # the CLI's tests drive the binary through a pty.
 rustix = "1.1"
 
+# The assistant's replies are CommonMark, and the transcript draws them styled.
+# Only the parser: the default features add an HTML renderer and a command
+# line's option parser, neither of which the shell uses.
+pulldown-cmark = { version = "0.13", default-features = false }
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

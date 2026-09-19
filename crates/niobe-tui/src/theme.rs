@@ -20,7 +20,7 @@
 use ratatui::style::Color;
 
 /// Every colour the shell draws with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Theme {
     /// The name shown in the menu bar.
     pub name: &'static str,
@@ -63,6 +63,8 @@ pub struct Theme {
     pub agent: Color,
     /// Tool calls.
     pub tool: Color,
+    /// Code in the assistant's replies: a code span, a code block.
+    pub code: Color,
 
     /// A dialog's face: the permission prompt and the model list, drawn on a
     /// colour of their own so they read as a question laid over the panes
@@ -115,6 +117,7 @@ pub const CLASSIC: Theme = Theme {
     user: Color::LightYellow,
     agent: Color::LightCyan,
     tool: Color::LightMagenta,
+    code: Color::LightCyan,
 
     // Turbo Vision's: a grey dialog with a white frame, green buttons with
     // yellow hot letters, and a black shadow.
@@ -166,6 +169,9 @@ pub const NEO: Theme = Theme {
     user: Color::White,
     agent: Color::LightGreen,
     tool: Color::Green,
+    // Code stands out from the green prose the way a code span stands out in
+    // a rendered page: by being the one thing that is not green.
+    code: Color::White,
 
     // Inverted, so the dialog stands off the black panes: black on green, with
     // the buttons back in the panes' green on black. Nothing is darker than the
@@ -234,7 +240,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 26] {
+    fn colours(t: &Theme) -> [Color; 27] {
         [
             t.pane_bg,
             t.frame,
@@ -253,6 +259,7 @@ mod tests {
             t.user,
             t.agent,
             t.tool,
+            t.code,
             t.dialog_bg,
             t.dialog_fg,
             t.dialog_frame,
@@ -306,6 +313,7 @@ mod tests {
                 (t.user, t.pane_bg, "the operator's own message"),
                 (t.agent, t.pane_bg, "an assistant message"),
                 (t.tool, t.pane_bg, "a tool call"),
+                (t.code, t.pane_bg, "code in a reply"),
                 (t.menu_fg, t.menu_bg, "the menu bar"),
                 (t.hot, t.menu_bg, "a menu hot key"),
                 (t.fkey_fg, t.fkey_bg, "an F-key label"),

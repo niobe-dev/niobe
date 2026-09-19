@@ -15,9 +15,11 @@
 
 mod common;
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use common::{running_session, screen};
+use common::{MARKDOWN_REPLY, running_session, screen};
+use niobe_core::event::Event;
 use niobe_tui::app::App;
 
 /// A frame is drawn inside a 60 Hz budget at the largest supported snapshot
@@ -29,27 +31,75 @@ const FRAME_BUDGET: Duration = Duration::from_millis(16);
 /// How many frames are timed. Odd, so the median is one of them.
 const FRAMES: usize = 31;
 
+/// Held by each test while it times, so the tests of this binary, which the
+/// harness would run in parallel, time their frames one after the other and
+/// never on shared cores.
+static ALONE: Mutex<()> = Mutex::new(());
+
+/// Replies in a long session's transcript, each [`MARKDOWN_REPLY`].
+const LONG_SESSION_REPLIES: usize = 60;
+
+/// A resize: every frame at a different width, so every entry is wrapped
+/// again, and the frame has to come in inside the budget anyway.
 #[test]
 fn a_resize_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut app = running_session();
     // Warm: the first draw allocates what later draws reuse.
     let _ = screen(&mut app, 200, 60);
 
-    let median = median_frame(&mut app, 200, 60);
+    let median = median_frame(&mut app, &[(200, 60), (180, 60)]);
 
     assert!(
         median <= FRAME_BUDGET,
-        "the median frame at 200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
+        "the median resized frame at 200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
     );
 }
 
-/// The median time to draw one frame. A frame the scheduler took the core away
+/// The redraw every tick makes, ten a second, in a long session of replies in
+/// markdown. Each reply is parsed and wrapped once and drawn from what that
+/// made after, so a transcript that only grows costs a frame what its visible
+/// lines cost.
+///
+/// A resize of this session renders every reply again, once. That is timed
+/// outside this test, against the release binary: in a debug build it lands
+/// within a few milliseconds of the budget and would fail on a slower runner
+/// for reasons that are not the drawing code's.
+#[test]
+fn a_long_session_of_markdown_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for _ in 0..LONG_SESSION_REPLIES {
+        app.apply(&Event::UserMessage {
+            text: "What changed?".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: MARKDOWN_REPLY.to_owned(),
+        });
+    }
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame of {LONG_SESSION_REPLIES} markdown replies at 200x60 took \
+         {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// The median time to draw one frame, cycling through `sizes`. A frame the scheduler took the core away
 /// from says nothing about the drawing code, and a mean lets one such frame
 /// push the whole figure over the budget. The median holds until half the
 /// frames are slowed, which is what a slower drawing path does.
-fn median_frame(app: &mut App, width: u16, height: u16) -> Duration {
+fn median_frame(app: &mut App, sizes: &[(u16, u16)]) -> Duration {
     let mut frames: Vec<Duration> = (0..FRAMES)
-        .map(|_| {
+        .map(|frame| {
+            let (width, height) = sizes[frame % sizes.len()];
             let started = Instant::now();
             let _ = screen(app, width, height);
             started.elapsed()

@@ -25,7 +25,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{paint, running_session, screen};
+use common::{paint, running_session, screen, session_with_a_markdown_reply};
 use niobe_core::event::{Backend, Event, Mode, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Repo, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, NEO};
@@ -96,6 +96,32 @@ fn the_neo_theme_paints_the_shell_at_both_sizes() {
     assert_snapshot(
         "neo-200x60",
         &paint(&mut running_session().with_theme(NEO), 200, 60),
+    );
+}
+
+/// A reply's markdown is drawn, not shown: no asterisks, backticks or pipes
+/// reach the screen, and the picture in each theme is the committed one.
+#[test]
+fn a_reply_in_markdown_is_drawn_styled_in_both_themes() {
+    let frame = screen(&mut session_with_a_markdown_reply(), 120, 40);
+    for mark in ["**", "`", "| file", "## ", "```"] {
+        assert!(
+            !frame.contains(mark),
+            "{mark:?} reached the screen:\n{frame}"
+        );
+    }
+    assert!(
+        frame.contains("• catalog/fetch.ts keeps the etag"),
+        "{frame}"
+    );
+    assert_snapshot("markdown-120x40", &frame);
+    assert_snapshot(
+        "markdown-neo-120x40",
+        &paint(
+            &mut session_with_a_markdown_reply().with_theme(NEO),
+            120,
+            40,
+        ),
     );
 }
 

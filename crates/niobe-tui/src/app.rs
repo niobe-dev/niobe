@@ -134,7 +134,7 @@ pub struct Picker {
 }
 
 /// What a transcript entry is, which decides its glyph and its colour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
     /// The operator.
     User,
@@ -173,7 +173,7 @@ impl EntryKind {
 }
 
 /// One block in the transcript: a message, a tool call or a notice.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Entry {
     /// Decides the glyph and the colour.
     pub kind: EntryKind,
@@ -257,6 +257,8 @@ pub struct App {
     now: Option<Instant>,
     /// When the running turn was first seen running by that clock.
     working_since: Option<Instant>,
+    /// Each entry as last drawn, so a redraw re-renders only what changed.
+    drawn: crate::ui::DrawnEntries,
     should_quit: bool,
 }
 
@@ -303,6 +305,7 @@ impl App {
             sent_here: false,
             now: None,
             working_since: None,
+            drawn: crate::ui::DrawnEntries::default(),
             should_quit: false,
         }
     }
@@ -912,6 +915,12 @@ impl App {
     /// The transcript, oldest first.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// The entries together with what the last draw made of them, for the
+    /// draw to reuse.
+    pub(crate) fn entries_to_draw(&mut self) -> (&[Entry], &mut crate::ui::DrawnEntries) {
+        (&self.entries, &mut self.drawn)
     }
 
     /// The composer widget, for the draw.

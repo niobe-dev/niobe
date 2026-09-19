@@ -27,6 +27,7 @@ pub mod app;
 pub mod bridge;
 mod input;
 pub mod journal;
+mod markdown;
 pub mod rules;
 pub mod run;
 pub mod terminal;

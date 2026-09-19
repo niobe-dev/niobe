@@ -204,6 +204,40 @@ pub fn running_session() -> App {
     app
 }
 
+/// A reply written the way the assistant writes one: a heading, emphasis,
+/// code spans, a nested list, a table and a fenced code block.
+pub const MARKDOWN_REPLY: &str = "## What changed
+
+**How it works:** the fetcher keeps the `etag` beside the body, so a *304* is \
+answered from the LRU without reading the body again.
+
+- `catalog/fetch.ts` keeps the etag
+  - and sends `If-None-Match`
+- `etag.test.ts` asserts the cached body
+
+| file | lines |
+|---|---:|
+| fetch.ts | +38 |
+| etag.test.ts | +24 |
+
+```ts
+if (res.status === 304) return cached.body;
+```
+";
+
+/// The running session after one more prompt, answered in [`MARKDOWN_REPLY`],
+/// scrolled to the reply.
+pub fn session_with_a_markdown_reply() -> App {
+    let mut app = running_session();
+    app.apply(&Event::UserMessage {
+        text: "What changed?".to_owned(),
+    });
+    app.apply(&Event::AssistantMessage {
+        text: MARKDOWN_REPLY.to_owned(),
+    });
+    app
+}
+
 /// Draws one frame and returns the screen as text, one line per row.
 pub fn screen(app: &mut App, width: u16, height: u16) -> String {
     render(drawn(app, width, height).backend().buffer())

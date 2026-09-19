@@ -79,7 +79,7 @@ fn wrap_paragraph(paragraph: &str, columns: usize, lines: &mut Vec<String>) {
 }
 
 /// Cuts a string into pieces no wider than `columns` cells.
-fn split_to_width(text: &str, columns: usize) -> Vec<String> {
+pub fn split_to_width(text: &str, columns: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut chunk = String::new();
     let mut chunk_width = 0;

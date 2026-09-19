@@ -26,7 +26,9 @@ use ratatui::widgets::{
 use niobe_core::event::UsageWindows;
 use niobe_core::session::{FileChanges, SessionState};
 
-use crate::app::{Activity, Answer, App, Ask, Entry, Picker, SelectedProfile, tool_label};
+use crate::app::{
+    Activity, Answer, App, Ask, Entry, EntryKind, Picker, SelectedProfile, tool_label,
+};
 use crate::text;
 use crate::theme::Theme;
 
@@ -570,24 +572,81 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
     let width = usize::from(area.width);
     let height = usize::from(area.height);
 
-    let lines = if app.entries().is_empty() {
-        empty_transcript(app.is_attached(), theme)
-    } else {
-        app.entries()
-            .iter()
-            .flat_map(|entry| entry_lines(entry, width, theme))
-            .collect()
-    };
+    if app.entries().is_empty() {
+        let lines = empty_transcript(app.is_attached(), theme);
+        app.measured(lines.len(), height);
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
+            area,
+        );
+        return;
+    }
 
-    app.measured(lines.len(), height);
+    let (entries, drawn) = app.entries_to_draw();
+    drawn.update(entries, width, theme);
+    let total = drawn.line_count();
 
-    let start = app.scroll().min(lines.len());
-    let end = (start + height).min(lines.len());
+    app.measured(total, height);
+    let start = app.scroll().min(total);
+    let (_, drawn) = app.entries_to_draw();
+    let visible = drawn.lines(start, height);
     frame.render_widget(
-        Paragraph::new(lines[start..end].to_vec()).style(Style::new().bg(theme.pane_bg)),
+        Paragraph::new(visible).style(Style::new().bg(theme.pane_bg)),
         area,
     );
-    draw_scrollbar(frame, area, (start, lines.len(), height), theme);
+    draw_scrollbar(frame, area, (start, total, height), theme);
+}
+
+/// Every transcript entry's lines as they were last drawn, with what they were
+/// drawn from, so that a redraw renders again only the entries that changed.
+///
+/// A finished reply never changes, and parsing and wrapping every one of them
+/// on every frame is what a long session's redraw would otherwise spend its
+/// time on. An entry is drawn again when its text, the pane's width or the
+/// theme changes, which is everything its lines depend on.
+#[derive(Debug, Default)]
+pub struct DrawnEntries {
+    drawn: Vec<(u64, Vec<Line<'static>>)>,
+}
+
+impl DrawnEntries {
+    /// Brings every entry's lines up to date.
+    fn update(&mut self, entries: &[Entry], width: usize, theme: &Theme) {
+        self.drawn.truncate(entries.len());
+        for (at, entry) in entries.iter().enumerate() {
+            let key = drawn_from(entry, width, theme);
+            match self.drawn.get_mut(at) {
+                Some((drawn_key, _)) if *drawn_key == key => {}
+                Some(slot) => *slot = (key, entry_lines(entry, width, theme)),
+                None => self.drawn.push((key, entry_lines(entry, width, theme))),
+            }
+        }
+    }
+
+    fn line_count(&self) -> usize {
+        self.drawn.iter().map(|(_, lines)| lines.len()).sum()
+    }
+
+    /// `count` lines from line `start` of the whole transcript.
+    fn lines(&self, start: usize, count: usize) -> Vec<Line<'static>> {
+        self.drawn
+            .iter()
+            .flat_map(|(_, lines)| lines)
+            .skip(start)
+            .take(count)
+            .cloned()
+            .collect()
+    }
+}
+
+/// What an entry's lines are drawn from, as one number.
+fn drawn_from(entry: &Entry, width: usize, theme: &Theme) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    entry.hash(&mut hasher);
+    width.hash(&mut hasher);
+    theme.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Where the view is in a transcript longer than the pane, drawn over the
@@ -693,16 +752,35 @@ fn entry_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>>
     }
 
     let mut lines = vec![Line::from(head)];
-    // A tool call carries its whole story on the head line, so an empty body
-    // must not become a blank line under it.
-    for wrapped in text::wrap(entry.body.trim_end(), body_width) {
-        lines.push(Line::from(vec![
-            Span::raw(" ".repeat(GUTTER)),
-            Span::styled(wrapped, Style::new().fg(theme.fg)),
-        ]));
-    }
+    lines.extend(
+        body_lines(entry, body_width, theme)
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }),
+    );
     lines.push(Line::from(""));
     lines
+}
+
+/// An entry's body, wrapped to the pane.
+///
+/// The assistant writes markdown and is drawn from it. The operator's own
+/// words and the shell's notices are shown as typed: a prompt with an asterisk
+/// in it means the asterisk. A tool call carries its whole story on the head
+/// line, so its empty body is no lines at all rather than a blank one.
+fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    match entry.kind {
+        EntryKind::Agent => crate::markdown::render(entry.body.trim_end(), width, theme),
+        EntryKind::User | EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
+            text::wrap(entry.body.trim_end(), width)
+                .into_iter()
+                .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.fg)))
+                .collect()
+        }
+    }
 }
 
 fn draw_cost(frame: &mut Frame, area: Rect, session: &SessionState, theme: &Theme) {
