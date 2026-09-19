@@ -18,7 +18,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget};
+use ratatui::widgets::{
+    Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Widget,
+};
 
 use niobe_core::event::UsageWindows;
 use niobe_core::session::{FileChanges, SessionState};
@@ -583,6 +586,32 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
     frame.render_widget(
         Paragraph::new(lines[start..end].to_vec()).style(Style::new().bg(theme.pane_bg)),
         area,
+    );
+    draw_scrollbar(frame, area, (start, lines.len(), height), theme);
+}
+
+/// Where the view is in a transcript longer than the pane, drawn over the
+/// pane's right border beside the lines it measures. A transcript that fits
+/// has no scrollbar, so the border reads as a border.
+fn draw_scrollbar(frame: &mut Frame, area: Rect, extent: (usize, usize, usize), theme: &Theme) {
+    let (start, lines, height) = extent;
+    if lines <= height || area.height == 0 {
+        return;
+    }
+    let border = Rect::new(area.right(), area.y, 1, area.height);
+    let mut state = ScrollbarState::new(lines.saturating_sub(height))
+        .viewport_content_length(height)
+        .position(start);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("║"))
+            .track_style(Style::new().fg(theme.frame))
+            .thumb_symbol("█")
+            .thumb_style(Style::new().fg(theme.hot)),
+        border,
+        &mut state,
     );
 }
 

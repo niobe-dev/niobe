@@ -213,6 +213,7 @@ fn read_input(app: &mut App) -> io::Result<()> {
             // Windows reports a press and a release; acting on both would
             // send every prompt twice.
             Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+            Event::Mouse(mouse) => app.on_mouse(mouse),
             // The next draw reads the new size; nothing to do here.
             Event::Resize(_, _) => {}
             _ => {}

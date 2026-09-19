@@ -6,16 +6,16 @@
 ║   ╔═════════════════════════════ Permission ═════════════════════════════╗   ║
 ║◆ c║                                                                      ║   ║
 ║  R║  Read wants to run                                                   ║   ║
-║   ║  /repo/notes.txt                                                     ║   ║
-║◆ c║                                                                      ║   ║
-║  T║  {"file_path":"/repo/notes.txt"}                                     ║   ║
-║   ║                                                                      ║   ║
-║! B║  Pin this saves Read(/repo/notes.txt)                                ║   ║
-║   ║                                                                      ║   ║
-║◆ c║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║   ║
-║  E║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║   ║
-║  p╚═════════════════════ the turn is waiting on you ═════════════════════╝   ║
-║                                                                              ║
+║   ║  /repo/notes.txt                                                     ║   █
+║◆ c║                                                                      ║   █
+║  T║  {"file_path":"/repo/notes.txt"}                                     ║   █
+║   ║                                                                      ║   █
+║! B║  Pin this saves Read(/repo/notes.txt)                                ║   █
+║   ║                                                                      ║   █
+║◆ c║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║   █
+║  E║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║   █
+║  p╚═════════════════════ the turn is waiting on you ═════════════════════╝   █
+║                                                                              █
 ║──────────────────────────────────────────────────────────────────────────────║
 ║>  Ask for a change, or press F1 for help                                     ║
 ╚══════════════════════════════════════════════════════════════════════════════╝

@@ -994,6 +994,22 @@ impl App {
         self.follow = true;
     }
 
+    /// Lines one notch of the mouse wheel scrolls, as most terminals scroll
+    /// their own scrollback.
+    const WHEEL_LINES: usize = 3;
+
+    /// Handles one mouse report: the wheel scrolls the transcript. Nothing
+    /// else the mouse does means anything to the shell yet.
+    pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
+        use ratatui::crossterm::event::MouseEventKind;
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_up(Self::WHEEL_LINES),
+            MouseEventKind::ScrollDown => self.scroll_down(Self::WHEEL_LINES),
+            _ => {}
+        }
+    }
+
     /// Handles one key.
     ///
     /// The shell's own bindings are taken first and everything left over goes
@@ -1286,7 +1302,10 @@ fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
 /// names them.
 fn fkey_hint(n: u8) -> &'static str {
     match n {
-        1 => "F1 Help — the help browser is not implemented yet",
+        1 => {
+            "F1 Help — the help browser is not implemented yet. The wheel and PgUp/PgDn \
+             scroll; Shift- or Option-drag selects text"
+        }
         2 => {
             "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \
               session in plan mode"
@@ -1361,7 +1380,7 @@ mod tests {
     use super::*;
     use niobe_core::event::{Backend, SessionMeta, Usage};
     use niobe_core::permission::Rule;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui_textarea::Key;
     use std::time::{Duration, Instant};
 
@@ -2261,5 +2280,33 @@ mod tests {
         );
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
         assert_eq!(app.ask_focus(), Answer::Once);
+    }
+
+    fn wheel(app: &mut App, kind: MouseEventKind) {
+        app.on_mouse(MouseEvent {
+            kind,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_transcript_and_back_down_to_the_tail() {
+        let mut app = app();
+        app.measured(100, 20);
+        assert_eq!(app.scroll(), 80);
+
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        assert_eq!(app.scroll(), 77);
+        assert!(!app.follows_tail());
+
+        wheel(&mut app, MouseEventKind::ScrollDown);
+        wheel(&mut app, MouseEventKind::ScrollDown);
+        assert_eq!(app.scroll(), 80);
+        assert!(app.follows_tail(), "the bottom sticks to the tail again");
+
+        wheel(&mut app, MouseEventKind::Moved);
+        assert_eq!(app.scroll(), 80, "only the wheel scrolls");
     }
 }

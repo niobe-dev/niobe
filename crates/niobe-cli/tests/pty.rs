@@ -89,11 +89,12 @@ const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h";
 /// twice fails as well as one never handed back at all.
 const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 
-/// The terminal handed back: off the alternate screen and the cursor visible,
-/// in that order. The shell writes the two from one place, so they arrive as
-/// one run of bytes, and a restoration that stopped in the middle — a visible
-/// prompt with no cursor on it — is not this.
-const RESTORED: &str = "\x1b[?1049l\x1b[?25h";
+/// The terminal handed back: the mouse no longer reported, off the alternate
+/// screen and the cursor visible, in that order. The shell writes them from
+/// one place, so they arrive as one run of bytes, and a restoration that
+/// stopped in the middle — a prompt that prints escape sequences at every
+/// click, or has no cursor on it — is not this.
+const RESTORED: &str = "\x1b[?1006l\x1b[?1000l\x1b[?1049l\x1b[?25h";
 
 /// Ctrl+Q, one of the two keys that quit the shell.
 const CTRL_Q: &[u8] = b"\x11";

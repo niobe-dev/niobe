@@ -47,11 +47,32 @@ use ratatui::crossterm::terminal::{
 /// test must not spray escape sequences at a terminal the shell never touched.
 static TERMINAL_ENTERED: AtomicBool = AtomicBool::new(false);
 
+/// Asks the terminal to report mouse buttons and the wheel, in SGR encoding.
+///
+/// Written by hand rather than with crossterm's `EnableMouseCapture`, which
+/// also asks for every movement of the pointer: the shell reads only the
+/// wheel, and a report per movement would wake the event loop for nothing.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+
+/// Takes [`MOUSE_ON`] back. Harmless on a terminal that was never asked, which
+/// is what lets the panic hook write it without knowing how far entry got.
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+
+/// Writes the sequences that put a terminal into the drawing mode.
+fn enter_screen(out: &mut impl Write) -> io::Result<()> {
+    execute!(out, EnterAlternateScreen, Hide)?;
+    out.write_all(MOUSE_ON)?;
+    out.flush()
+}
+
 /// Writes the sequences that take a terminal out of the drawing mode.
 ///
 /// Separated from [`TerminalGuard`] so that the panic hook, which cannot reach
-/// the guard, emits exactly the same bytes.
+/// the guard, emits exactly the same bytes. The mouse goes back first: a
+/// terminal left reporting it would print escape sequences into the shell the
+/// operator returns to at every click.
 fn leave(out: &mut impl Write) -> io::Result<()> {
+    out.write_all(MOUSE_OFF)?;
     execute!(out, LeaveAlternateScreen, Show)
 }
 
@@ -69,7 +90,8 @@ pub struct TerminalGuard<W: Write> {
 }
 
 impl<W: Write> TerminalGuard<W> {
-    /// Enters raw mode and the alternate screen, and hides the cursor.
+    /// Enters raw mode and the alternate screen, hides the cursor and asks for
+    /// the mouse wheel.
     pub fn enter(out: W) -> io::Result<Self> {
         enable_raw_mode()?;
 
@@ -85,7 +107,7 @@ impl<W: Write> TerminalGuard<W> {
         // `restore` checks, and a failure on the next line has to undo raw
         // mode rather than decide there was nothing to undo.
         TERMINAL_ENTERED.store(true, Ordering::SeqCst);
-        execute!(guard.out, EnterAlternateScreen, Hide)?;
+        enter_screen(&mut guard.out)?;
 
         Ok(guard)
     }
@@ -97,7 +119,7 @@ impl<W: Write> TerminalGuard<W> {
     /// raw mode. Tests use this; the shell does not.
     #[cfg(test)]
     fn enter_screen_only(mut out: W) -> io::Result<Self> {
-        execute!(out, EnterAlternateScreen, Hide)?;
+        enter_screen(&mut out)?;
         Ok(Self {
             out,
             raw_mode: false,
@@ -234,6 +256,8 @@ mod tests {
     const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
     const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h";
     const SHOW_CURSOR: &str = "\x1b[?25h";
+    const MOUSE_ON: &str = "\x1b[?1000h";
+    const MOUSE_OFF: &str = "\x1b[?1000l";
 
     fn written(bytes: &[u8]) -> String {
         String::from_utf8(bytes.to_owned()).expect("crossterm writes UTF-8")
@@ -260,6 +284,10 @@ mod tests {
         assert!(
             out.find(ENTER_ALTERNATE_SCREEN) < out.find(LEAVE_ALTERNATE_SCREEN),
             "left before it entered: {out:?}"
+        );
+        assert!(
+            out.find(MOUSE_ON) < out.find(MOUSE_OFF),
+            "the mouse was not handed back after it was taken: {out:?}"
         );
     }
 
@@ -297,6 +325,7 @@ mod tests {
             "a panic left the terminal on the alternate screen: {out:?}"
         );
         assert!(out.contains(SHOW_CURSOR), "a panic left the cursor hidden");
+        assert!(out.contains(MOUSE_OFF), "a panic left the mouse captured");
     }
 
     /// A signal is delivered to the process, not to the `Shutdown` that asked
