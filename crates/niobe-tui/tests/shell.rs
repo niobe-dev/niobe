@@ -190,6 +190,42 @@ fn the_modal_shows_what_would_run_and_every_way_to_answer_it() {
 }
 
 #[test]
+fn a_standing_answer_too_long_for_its_column_is_given_rows_of_its_own_and_read_whole() {
+    let mut app = running_session();
+    let command = "grep -rn description --include=Cargo.toml . | grep -v target";
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_mcp".into(),
+        tool: "mcp__claude_ai_Notion__notion-search".to_owned(),
+        input: format!(r#"{{"command":"{command}"}}"#),
+        target: Some(command.to_owned()),
+    });
+    let frame = screen(&mut app, 120, 30);
+    // The frame's rows, with the modal's borders and padding taken off.
+    let rows: Vec<&str> = frame
+        .lines()
+        .filter_map(|row| row.split('║').nth(2))
+        .map(str::trim)
+        .collect();
+
+    assert!(
+        rows.contains(&"a always mcp__claude_ai_Notion__notion-search"),
+        "the tool's standing answer runs into the next one:\n{frame}"
+    );
+    let rule: String = rows
+        .iter()
+        .skip_while(|row| !row.starts_with("p always"))
+        .take_while(|row| !row.is_empty() && !row.contains("waiting on you"))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        rule,
+        format!("p always mcp__claude_ai_Notion__notion-search({command})"),
+        "the rule the operator would save is not shown whole:\n{frame}"
+    );
+}
+
+#[test]
 fn a_selected_profile_is_named_in_the_status_line_and_the_menu_bar() {
     let mut app = empty_session().with_profile(SelectedProfile {
         name: "work".to_owned(),

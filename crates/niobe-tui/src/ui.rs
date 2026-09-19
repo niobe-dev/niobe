@@ -235,16 +235,7 @@ fn draw_ask(frame: &mut Frame, body: Rect, ask: &Ask, waiting: usize, theme: &Th
     }
     lines.push(Line::from(""));
     lines.push(choice("y", "allow once", "n", "deny", theme));
-    lines.push(choice(
-        "a",
-        &format!("always {}", ask.tool),
-        "p",
-        &match ask.target_rule() {
-            Some(rule) => format!("always {rule}"),
-            None => "always this call — no target to save".to_owned(),
-        },
-        theme,
-    ));
+    lines.extend(standing_answers(ask, text_width, theme));
 
     // The lines, and the two rows of border they sit inside.
     let height = u16::try_from(lines.len() + 2)
@@ -266,6 +257,49 @@ fn draw_ask(frame: &mut Frame, body: Rect, ask: &Ask, waiting: usize, theme: &Th
     );
 }
 
+/// The modal's two standing answers: every call to the tool, and every call to
+/// it on this target.
+///
+/// They share a row while both fit its columns. A tool name wider than the
+/// left column, or a rule wider than what is left of the row, gives each answer
+/// rows of its own, the rule wrapped rather than cut at the modal's edge: a
+/// rule is saved for good, and saving one the operator could not read whole is
+/// the approval the modal exists to prevent.
+fn standing_answers(ask: &Ask, text_width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let tool = format!("always {}", ask.tool);
+    let target = match ask.target_rule() {
+        Some(rule) => format!("always {rule}"),
+        None => "always this call — no target to save".to_owned(),
+    };
+    let row = choice("a", &tool, "p", &target, theme);
+    if text::width(&tool) < CHOICE_COLUMNS && row.width() <= text_width {
+        return vec![row];
+    }
+    let mut lines = keyed_rows("a", &tool, text_width, theme);
+    lines.extend(keyed_rows("p", &target, text_width, theme));
+    lines
+}
+
+/// A key and its label wrapped to the width, the continuation rows indented
+/// under the label so the key stays alone in its column.
+fn keyed_rows(key: &str, label: &str, text_width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let indent = " ".repeat(text::width(key) + 1);
+    text::wrap(label, text_width.saturating_sub(indent.len()))
+        .into_iter()
+        .enumerate()
+        .map(|(row, wrapped)| {
+            let lead = match row {
+                0 => Span::styled(format!("{key} "), Style::new().fg(theme.hot).bold()),
+                _ => Span::raw(indent.clone()),
+            };
+            Line::from(vec![lead, Span::styled(wrapped, Style::new().fg(theme.fg))])
+        })
+        .collect()
+}
+
+/// The width of the left label's column in the modal's key list.
+const CHOICE_COLUMNS: usize = 14;
+
 /// One row of the modal's two-column key list.
 fn choice(
     left: &str,
@@ -278,7 +312,7 @@ fn choice(
     let label = Style::new().fg(theme.fg);
     Line::from(vec![
         Span::styled(format!("{left} "), key),
-        Span::styled(format!("{left_label:<14}"), label),
+        Span::styled(format!("{left_label:<CHOICE_COLUMNS$}"), label),
         Span::styled(format!("{right} "), key),
         Span::styled(right_label.to_owned(), label),
     ])
