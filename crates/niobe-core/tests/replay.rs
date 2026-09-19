@@ -47,8 +47,8 @@ fn recorded_events() -> Vec<Event> {
 }
 
 #[test]
-fn the_recorded_session_is_three_hundred_and_thirteen_events() {
-    assert_eq!(recorded_events().len(), 313);
+fn the_recorded_session_is_six_hundred_and_thirty_one_events() {
+    assert_eq!(recorded_events().len(), 631);
 }
 
 #[test]
@@ -60,43 +60,54 @@ fn a_recorded_log_replays_into_the_derived_totals() {
     assert_eq!(meta.backend, Backend::Claude);
     assert_eq!(meta.profile, "max");
 
-    // Tokens and money, summed from the 21 usage records.
+    // Tokens and money, summed from the 25 usage records.
     let totals = state.totals();
-    assert_eq!(totals.input, 92);
-    assert_eq!(totals.output, 5_015);
-    assert_eq!(totals.cache_read, 303_513);
-    assert_eq!(totals.cache_write, 58_457);
+    assert_eq!(totals.input, 120);
+    assert_eq!(totals.output, 19_606);
+    assert_eq!(totals.cache_read, 460_375);
+    assert_eq!(totals.cache_write, 82_887);
+    // Every cache write a message reported was bought for an hour. The eleven
+    // records from the closing `modelUsage` carry no split, so their writes
+    // are not counted here.
+    assert_eq!(totals.cache_write_1h, 40_054);
     assert_eq!(totals.reasoning, 0);
-    assert_eq!(totals.tokens(), 367_077);
-    assert_eq!(totals.records, 21);
+    assert_eq!(totals.tokens(), 562_988);
+    assert_eq!(totals.records, 25);
 
     // Fourteen of those records are the per-message counts, which the CLI
-    // reports without money; the seven that carry a cost are the ones the
-    // closing `result` priced. The session's cost is therefore a floor, and
+    // reports without money; the eleven that carry a cost are the ones the
+    // closing `result`s priced. The session's cost is therefore a floor, and
     // the state says so rather than presenting it as the bill.
     assert_eq!(totals.records_without_cost, 14);
     assert!(!totals.cost_fully_reported());
-    assert!((totals.reported_cost_usd - 0.344_362_3).abs() < 1e-9);
+    assert!((totals.reported_cost_usd - 0.865_523_95).abs() < 1e-9);
 
-    // Tool calls. `Grep` is not in this CLI release's tool list, so the call
-    // the model made for it came back refused and is counted as failed.
+    // Tool calls. Three failed — a test module that does not exist, a shell
+    // glob the shell refused, and a sub-agent's probe that exited non-zero —
+    // and one the operator refused.
     let tools = state.tools();
-    assert_eq!(tools.started, 20);
-    assert_eq!(tools.finished, 20);
-    assert_eq!(tools.failed, 2);
+    assert_eq!(tools.started, 26);
+    assert_eq!(tools.finished, 26);
+    assert_eq!(tools.failed, 3);
     assert_eq!(tools.denied, 1);
     assert_eq!(tools.unmatched_ends, 0);
-    assert_eq!(tools.output_bytes, 13_219);
+    assert_eq!(tools.output_bytes, 19_154);
     assert_eq!(tools.by_name["Read"], 8);
-    assert_eq!(tools.by_name["Bash"], 5);
+    assert_eq!(tools.by_name["Bash"], 12);
     assert_eq!(tools.by_name["Agent"], 3);
-    assert_eq!(tools.by_name["Edit"], 1);
+    assert_eq!(tools.by_name["Edit"], 2);
     assert_eq!(tools.by_name["Write"], 1);
-    assert_eq!(tools.by_name["Grep"], 1);
     assert!(state.in_flight_tools().is_empty());
 
-    // Permissions: four prompts, one of them refused, all of them answered.
-    assert_eq!(state.permission_requests(), 4);
+    // Three sub-agents, each launched in the background and each ended by the
+    // CLI's word that it stopped; the two asked for in parallel ran together.
+    assert_eq!(state.agents_spawned(), 3);
+    assert_eq!(state.agents_cancelled(), 0);
+    assert_eq!(state.peak_running_agents(), 2);
+    assert!(state.running_agents().is_empty());
+
+    // Permissions: eight prompts, one of them refused, all of them answered.
+    assert_eq!(state.permission_requests(), 8);
     assert_eq!(state.permissions_denied(), 1);
     assert!(state.pending_permissions().is_empty());
 
@@ -108,8 +119,8 @@ fn a_recorded_log_replays_into_the_derived_totals() {
 
     // Messages and the entries the bridge could not read.
     assert_eq!(state.user_messages(), 6);
-    assert_eq!(state.assistant_messages(), 10);
-    assert_eq!(state.errors(), 18);
+    assert_eq!(state.assistant_messages(), 15);
+    assert_eq!(state.errors(), 28);
     assert_eq!(state.fatal_error(), None);
 }
 
@@ -133,7 +144,7 @@ fn the_recorded_session_replays_inside_the_budget() {
     let state = SessionState::replay(&events);
     let elapsed = started.elapsed();
 
-    assert_eq!(state.totals().records, 21);
+    assert_eq!(state.totals().records, 25);
     assert!(
         elapsed.as_millis() < REPLAY_BUDGET_MS,
         "replay took {elapsed:?}, over the {REPLAY_BUDGET_MS} ms budget"

@@ -53,11 +53,26 @@ const SHAPES: &[&str] = &[
     "stream_event/content_block_delta",
     "stream_event/message_delta",
     "stream_event/message_start",
+    // The frame around a block and a message, passed over on purpose: the
+    // text is on the deltas and the counts are on `message_delta`.
+    "stream_event/content_block_start",
+    "stream_event/content_block_stop",
+    "stream_event/message_stop",
     "system/compact_boundary",
     "system/init",
     "system/permission_denied",
     "system/status",
+    // Read where it names a sub-agent's call: it is how a sub-agent launched
+    // in the background ends.
+    "system/task_notification",
     "system/thinking_tokens",
+    // Sub-agent and background-task bookkeeping, recorded from Claude Code
+    // 2.1.278. Each is reported as an entry this bridge cannot read; none of
+    // them is folded.
+    "system/background_tasks_changed",
+    "system/task_progress",
+    "system/task_started",
+    "system/task_updated",
     "user",
     // Content blocks and deltas, which ride on both the stream and the
     // transcript.
@@ -67,6 +82,11 @@ const SHAPES: &[&str] = &[
     "block/tool_use",
     "delta/text_delta",
     "delta/thinking_delta",
+    // A tool call's arguments as they are typed, and a thinking block's
+    // signature: passed over, because the complete call arrives on the
+    // `assistant` message and a signature says nothing about the session.
+    "delta/input_json_delta",
+    "delta/signature_delta",
     // The transcript's own records: what the session cost, how it was gating
     // calls, and the CLI's furniture.
     "agent-name",

@@ -11,7 +11,7 @@
 //!
 //! # What the recording taught, and what the protocol costs
 //!
-//! Four properties of the stream are not obvious and are the reason this file
+//! Five properties of the stream are not obvious and are the reason this file
 //! is not a `match` over message types:
 //!
 //! * **`assistant` messages repeat their `usage`.** The CLI splits one API
@@ -36,6 +36,14 @@
 //!   That holds for a call the CLI refuses by itself. A call refused over the
 //!   control channel gets no `permission_denied` at all, so the driver tells
 //!   the translator about it instead ([`Translator::refused`]).
+//! * **A sub-agent's call returns before the sub-agent is done.** The CLI
+//!   runs a sub-agent in the background unless told otherwise, answers the
+//!   call at once with a `tool_use_result` whose `status` is `async_launched`,
+//!   and says the agent stopped only later, in a `system`/`task_notification`
+//!   naming the call. Ending the agent at its call's result would show every
+//!   one of them finished while it is still working. Measured across the
+//!   CLI's own transcripts on the machine this was written on: 465 of 477
+//!   sub-agent calls were launched that way.
 //!
 //! # What is recognised and not yet translated
 //!
@@ -48,7 +56,7 @@
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
 //!   rest is not surfaced, because no pane reads it and widening the shared
 //!   vocabulary for figures nothing draws would be a change nobody could see.
-//! * A sub-agent's `parent_tool_use_id` says which `Task` call a message
+//! * A sub-agent's `parent_tool_use_id` says which sub-agent call a message
 //!   belongs to. Its tool calls and its tokens are folded in — they are work
 //!   done and money spent — but attributing each line of the transcript to the
 //!   agent that wrote it needs a pane that can show two agents at once.
@@ -65,8 +73,16 @@ use niobe_core::event::{
 use crate::conformance;
 use crate::wire;
 
-/// The tool whose call is a sub-agent rather than an action.
-const TASK_TOOL: &str = "Task";
+/// The names of the tool whose call is a sub-agent rather than an action.
+///
+/// Claude Code registers the tool as `Agent` with `Task` as its alias, and
+/// counts a call under either name as a sub-agent it spawned. Measured on the
+/// machine this was written on, 19 September 2026: 477 sub-agent calls in the
+/// CLI's own transcripts, from twenty-one releases between 2.1.231 and
+/// 2.1.278, every one of them `Agent`. `Task` is kept because the CLI still
+/// accepts it and still lists it in `init`, so a model that reads the list
+/// can call it.
+const AGENT_TOOLS: [&str; 2] = ["Agent", "Task"];
 
 /// How far apart two figures for the same money may be before the difference
 /// is reported, in USD.
@@ -75,6 +91,13 @@ const TASK_TOOL: &str = "Task";
 /// separately, so the two disagree in the last bits. Half a hundredth of a
 /// cent is below anything a screen shows and far above that error.
 const COST_TOLERANCE_USD: f64 = 0.000_05;
+
+/// Whether a sub-agent this session spawned is still working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Running {
+    Yes,
+    No,
+}
 
 /// Token counts, summed the way both sides of a reconciliation sum them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -183,7 +206,7 @@ pub struct Translator {
     model: Option<String>,
     backend_session: Option<String>,
     /// The model of the message in flight, per stream: the main session is
-    /// `None` and each sub-agent is its `Task` call's id. `message_delta`
+    /// `None` and each sub-agent is the id of the call that spawned it. `message_delta`
     /// carries the turn's authoritative usage and no model, so the model is
     /// remembered from the `message_start` that opened the same stream.
     in_flight: BTreeMap<Option<String>, String>,
@@ -193,8 +216,9 @@ pub struct Translator {
     /// The permission prompts read since the last drain, for whatever owns the
     /// CLI's standard input to answer.
     asked: Vec<Asked>,
-    /// The `tool_use` ids that are sub-agents rather than actions.
-    agents: BTreeMap<String, ()>,
+    /// The sub-agents this session has spawned, by the id of the call that
+    /// spawned each, and whether each is still running.
+    agents: BTreeMap<String, Running>,
     /// The `tool_use` ids the CLI refused and this bridge has already
     /// reported, so that the closing `result`'s list of the same refusals is
     /// not counted a second time.
@@ -387,6 +411,9 @@ impl Translator {
                 });
             }
             Some("permission_denied") => self.denied(system, out),
+            Some("task_notification") if self.is_agent(system.tool_use_id.as_deref()) => {
+                self.task_notification(system, out);
+            }
             // The CLI's own request state — `requesting`, and whatever it adds
             // next. It says what the process is doing, not what the session is,
             // and the shell already shows that a turn is in flight.
@@ -404,6 +431,69 @@ impl Translator {
                 other.unwrap_or("(none)")
             ))),
         }
+    }
+
+    /// Whether `id` is the call that spawned one of this session's
+    /// sub-agents, running or not.
+    fn is_agent(&self, id: Option<&str>) -> bool {
+        id.is_some_and(|id| self.agents.contains_key(id))
+    }
+
+    /// The CLI's word, on the live stream, that a sub-agent it ran in the
+    /// background has stopped.
+    fn task_notification(&mut self, system: wire::System, out: &mut Vec<Event>) {
+        if let Some(id) = system.tool_use_id {
+            out.append(&mut self.task_stopped(&id, system.status.as_deref()));
+        }
+    }
+
+    /// The events for the CLI saying that the background task call `id`
+    /// started has stopped, with `status` in the CLI's spelling.
+    ///
+    /// Nothing, where `id` spawned no sub-agent: the CLI notifies about
+    /// background commands the same way. Nothing either for a sub-agent that
+    /// has already ended — one that is sent another message runs again and
+    /// notifies again, and only the first end is one this session saw begin.
+    ///
+    /// The live stream spells the statuses `completed`, `failed` and
+    /// `stopped`, which are the CLI's own schema for the message; its
+    /// transcripts also say `killed` for a task stopped from outside. Both
+    /// read as cancelled.
+    pub(crate) fn task_stopped(&mut self, id: &str, status: Option<&str>) -> Vec<Event> {
+        let mut out = Vec::new();
+        if !self.is_agent(Some(id)) {
+            return out;
+        }
+        let outcome = match status {
+            Some("completed") => AgentOutcome::Completed,
+            Some("failed") => AgentOutcome::Failed,
+            Some("stopped" | "killed") => AgentOutcome::Cancelled,
+            other => {
+                out.push(warn(format!(
+                    "the CLI reported sub-agent `{id}` as `{}`, which this version of Niobe \
+                     does not read as an end, so it is still shown as running.",
+                    other.unwrap_or("(no status)")
+                )));
+                return out;
+            }
+        };
+        self.agent_ended(id, outcome, &mut out);
+        out
+    }
+
+    /// Ends the sub-agent spawned by call `id`, once, if the call spawned one.
+    fn agent_ended(&mut self, id: &str, outcome: AgentOutcome, out: &mut Vec<Event>) {
+        let Some(running) = self.agents.get_mut(id) else {
+            return;
+        };
+        if *running == Running::No {
+            return;
+        }
+        *running = Running::No;
+        out.push(Event::AgentExit {
+            id: AgentId::new(id.to_owned()),
+            outcome,
+        });
     }
 
     /// Says, once a session, when the CLI on the other end is a release these
@@ -516,8 +606,8 @@ impl Translator {
                             arguments: input.clone(),
                         },
                     );
-                    if name == TASK_TOOL {
-                        self.agents.insert(id.clone(), ());
+                    if AGENT_TOOLS.contains(&name.as_str()) {
+                        self.agents.insert(id.clone(), Running::Yes);
                         calls.push(Event::AgentSpawn {
                             id: AgentId::new(id.clone()),
                             // Which agent spawned this one is the sub-agent
@@ -549,6 +639,7 @@ impl Translator {
     }
 
     fn user(&mut self, envelope: wire::Envelope, out: &mut Vec<Event>) {
+        let background = envelope.launched_in_background();
         let Some(wire::Content::Blocks(blocks)) = envelope.message.content else {
             // A `user` message with plain text is the turn Niobe itself wrote,
             // echoed back. The shell already has it; folding it again would
@@ -592,14 +683,20 @@ impl Translator {
                 (false, false) => ToolOutcome::Ok,
             };
 
-            if self.agents.remove(&tool_use_id).is_some() {
-                out.push(Event::AgentExit {
-                    id: AgentId::new(tool_use_id.clone()),
-                    outcome: match outcome {
+            // A sub-agent the CLI ran in the background is still working when
+            // its call returns — the result says only that it was launched —
+            // and its end arrives later as a `task_notification`. One that ran
+            // in the foreground, or never started, ends with its call.
+            let background = outcome == ToolOutcome::Ok && background;
+            if !background {
+                self.agent_ended(
+                    &tool_use_id,
+                    match outcome {
                         ToolOutcome::Ok => AgentOutcome::Completed,
                         ToolOutcome::Failed | ToolOutcome::Denied => AgentOutcome::Failed,
                     },
-                });
+                    out,
+                );
             }
 
             // Only a call that ran changed anything: a refused or broken edit
@@ -1118,12 +1215,16 @@ fn render_content(content: wire::Content) -> String {
     }
 }
 
-/// What a `Task` call was spawned to do, as the parallel pane will name it.
+/// What a sub-agent call was spawned to do, as the parallel pane will name it:
+/// the kind of agent it asked for, where it named one, and what it was for.
 fn label_of(input: &serde_json::Value) -> Option<String> {
-    input
-        .get("description")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+    let field = |key| input.get(key).and_then(serde_json::Value::as_str);
+    match (field("subagent_type"), field("description")) {
+        (Some(kind), Some(description)) => Some(format!("{kind}: {description}")),
+        (Some(kind), None) => Some(kind.to_owned()),
+        (None, Some(description)) => Some(description.to_owned()),
+        (None, None) => None,
+    }
 }
 
 /// The windows one `rate_limit_event` reported.
@@ -2055,5 +2156,187 @@ mod tests {
             changes(&events),
             vec![("/etc/hosts".to_owned(), Some(1), Some(1))]
         );
+    }
+
+    /// A sub-agent call as Claude Code 2.1.278 writes it: the tool is `Agent`,
+    /// and the call names the kind of agent it wants.
+    fn agent_call(id: &str, tool: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"{tool}","input":{{"subagent_type":"quick-lookup","description":"Summarize catalog/cache.py","prompt":"Read catalog/cache.py and summarize it."}}}}]}}}}"#
+        )
+    }
+
+    /// The CLI's answer to a sub-agent call it ran in the background: the
+    /// call returns at once, and `tool_use_result` says the agent was launched
+    /// rather than that it finished.
+    fn launched(id: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","content":[{{"type":"text","text":"Async agent launched successfully."}}]}}]}},"tool_use_result":{{"isAsync":true,"status":"async_launched","agentId":"a819f5cc82e486a11","description":"Summarize catalog/cache.py"}}}}"#
+        )
+    }
+
+    /// The CLI's word that a background task stopped, in the shape its own
+    /// schema gives `system`/`task_notification`.
+    fn notified(id: &str, status: &str) -> String {
+        format!(
+            r#"{{"type":"system","subtype":"task_notification","task_id":"a819f5cc82e486a11","tool_use_id":"{id}","status":"{status}","output_file":"","summary":"Agent \"Summarize catalog/cache.py\" finished","usage":{{"total_tokens":6609,"tool_uses":1,"duration_ms":5506}}}}"#
+        )
+    }
+
+    fn exits(events: &[Event]) -> Vec<(String, AgentOutcome)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentExit { id, outcome } => Some((id.as_str().to_owned(), *outcome)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_call_to_the_agent_tool_spawns_a_sub_agent_labelled_with_its_kind() {
+        let mut translator = translator();
+
+        let events = translator.line(&agent_call("toolu_a", "Agent"));
+
+        let spawned: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentSpawn { id, label, .. } => Some((id.as_str(), label.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            spawned,
+            [("toolu_a", "quick-lookup: Summarize catalog/cache.py")]
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ToolCallStart { name, .. } if name == "Agent")),
+            "the call itself is still in the transcript: {events:?}"
+        );
+    }
+
+    #[test]
+    fn the_tools_other_name_spawns_a_sub_agent_too() {
+        let mut translator = translator();
+
+        let events = translator.line(&agent_call("toolu_t", "Task"));
+
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::AgentSpawn { id, .. } if id.as_str() == "toolu_t")
+            ),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_tool_with_neither_name_is_an_ordinary_call() {
+        let mut translator = translator();
+
+        let events = translator.line(&agent_call("toolu_x", "TaskCreate"));
+
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, Event::AgentSpawn { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_launched_in_the_background_is_still_running_when_its_call_returns() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+
+        let events = translator.line(&launched("toolu_a"));
+
+        assert!(exits(&events).is_empty(), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::ToolCallEnd {
+                    outcome: ToolOutcome::Ok,
+                    ..
+                }
+            )),
+            "the launch itself is a call that ran: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_background_sub_agent_ends_when_the_cli_says_its_task_stopped() {
+        for (status, outcome) in [
+            ("completed", AgentOutcome::Completed),
+            ("failed", AgentOutcome::Failed),
+            ("stopped", AgentOutcome::Cancelled),
+        ] {
+            let mut translator = translator();
+            translator.line(&agent_call("toolu_a", "Agent"));
+            translator.line(&launched("toolu_a"));
+
+            let events = translator.line(&notified("toolu_a", status));
+
+            assert_eq!(
+                exits(&events),
+                [("toolu_a".to_owned(), outcome)],
+                "{status}"
+            );
+            assert!(warnings(&events).is_empty(), "{status}: {events:?}");
+        }
+    }
+
+    #[test]
+    fn a_sub_agent_that_notifies_again_after_it_ended_is_not_ended_twice() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+        translator.line(&launched("toolu_a"));
+        translator.line(&notified("toolu_a", "completed"));
+
+        let events = translator.line(&notified("toolu_a", "completed"));
+
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_sub_agent_whose_call_returned_its_answer_has_finished() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+
+        let events = translator.line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"The cache is a bounded dict."}]},"tool_use_result":{"status":"completed","prompt":"Read catalog/cache.py and summarize it."}}"#,
+        );
+
+        assert_eq!(
+            exits(&events),
+            [("toolu_a".to_owned(), AgentOutcome::Completed)]
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_whose_launch_failed_has_failed() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+
+        let events = translator.line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Agent type 'nope' not found","is_error":true}]}}"#,
+        );
+
+        assert_eq!(
+            exits(&events),
+            [("toolu_a".to_owned(), AgentOutcome::Failed)]
+        );
+    }
+
+    #[test]
+    fn a_task_notification_for_something_that_is_not_a_sub_agent_is_still_reported() {
+        let mut translator = translator();
+
+        let events = translator.line(&notified("toolu_bash", "completed"));
+
+        assert!(exits(&events).is_empty(), "{events:?}");
+        assert_eq!(warnings(&events).len(), 1, "{events:?}");
     }
 }

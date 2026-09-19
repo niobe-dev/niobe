@@ -125,10 +125,10 @@ fn replaying_the_fixture_prints_its_totals_inside_the_budget() {
     let out = stdout(&output);
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(out.contains("367,077"), "{out}");
-    assert!(out.contains("≥$0.34"), "{out}");
+    assert!(out.contains("562,988"), "{out}");
+    assert!(out.contains("≥$0.87"), "{out}");
     assert!(
-        out.contains("14 of 21 usage records reported no cost"),
+        out.contains("14 of 25 usage records reported no cost"),
         "{out}"
     );
 
@@ -158,7 +158,7 @@ fn a_resumed_session_shows_the_totals_the_log_it_recorded_folds_to() {
 
     assert!(resumed.status.success(), "{}", stderr(&resumed));
     let resumed = stdout(&resumed);
-    assert!(resumed.starts_with("session 1 · 313 events"), "{resumed}");
+    assert!(resumed.starts_with("session 1 · 631 events"), "{resumed}");
     assert_eq!(body(&resumed), body(&stdout(&replayed)));
 }
 
@@ -171,7 +171,7 @@ fn the_session_list_shows_what_the_store_holds() {
     assert!(output.status.success(), "{}", stderr(&output));
     let row = out.lines().nth(1).unwrap_or_default();
     assert!(row.trim_start().starts_with("1 "), "{out}");
-    assert!(row.contains(" 313 "), "{out}");
+    assert!(row.contains(" 631 "), "{out}");
     assert!(row.contains("Read catalog/fetch.py"), "{out}");
 }
 

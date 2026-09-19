@@ -16,6 +16,7 @@ use niobe_core::session::SessionState;
 
 /// A two-turn session as the CLI prints it.
 const FIXTURE: &str = include_str!("fixtures/stream-json.jsonl");
+const SUB_AGENTS: &str = include_str!("fixtures/sub-agents.jsonl");
 
 /// Every event the fixture translates to, in order.
 fn translated() -> Vec<Event> {
@@ -623,5 +624,116 @@ mod long_context {
             .collect();
 
         assert_eq!(models, ["claude-opus-5[1m]"]);
+    }
+}
+
+fn translated_sub_agents() -> Vec<Event> {
+    let mut translator = Translator::new("max").in_dir("/repo");
+    SUB_AGENTS
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect()
+}
+
+#[test]
+fn a_recorded_agent_call_is_a_sub_agent_named_for_its_kind_and_its_task() {
+    let events = translated_sub_agents();
+
+    let spawned: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentSpawn { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        spawned,
+        [
+            "quick-lookup: Summarize catalog/cache.py",
+            "deep-reasoner: Review catalog/fetch.py for bugs",
+            "deep-reasoner: Review catalog/cache.py for bugs",
+        ]
+    );
+}
+
+#[test]
+fn recorded_background_sub_agents_end_when_the_cli_says_they_stopped() {
+    let events = translated_sub_agents();
+    let state = SessionState::replay(&events);
+
+    assert_eq!(state.agents_spawned(), 3);
+    assert_eq!(state.agents_completed(), 3);
+    assert_eq!(
+        state.peak_running_agents(),
+        2,
+        "the parallel pair ran together"
+    );
+    assert!(state.running_agents().is_empty());
+
+    // Each launch returned at once; each end came later, from its own
+    // notification. The review of cache.py finished first.
+    let ended: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentExit { id, outcome } if *outcome == AgentOutcome::Completed => {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ended,
+        [
+            "toolu_01Bjmsju8Kjg8jieHzs66KmX",
+            "toolu_018oEYQ3e89jvpp8SycSyQ75",
+            "toolu_018CBLWZbbx5bZCa7U5VkDVi",
+        ]
+    );
+    assert!(
+        warnings(&events)
+            .iter()
+            .all(|warning| !warning.contains("task_notification")),
+        "a sub-agent's notification was reported as unreadable"
+    );
+}
+
+#[test]
+fn the_cli_lists_the_sub_agent_tool_under_one_name_and_the_model_calls_it_by_the_other() {
+    let init = SUB_AGENTS
+        .lines()
+        .find(|line| line.contains(r#""subtype":"init""#))
+        .expect("the recording opens its turns with init");
+    let init: serde_json::Value = serde_json::from_str(init).expect("init is JSON");
+    let tools: Vec<&str> = init["tools"]
+        .as_array()
+        .expect("init lists the tools")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        tools.contains(&"Task") && !tools.contains(&"Agent"),
+        "{tools:?}"
+    );
+
+    let state = SessionState::replay(&translated_sub_agents());
+    assert_eq!(state.tools().by_name.get("Agent"), Some(&3));
+    assert_eq!(state.tools().by_name.get("Task"), None);
+}
+
+#[test]
+fn a_message_delta_says_its_cache_writes_were_bought_for_an_hour_inside_its_iterations() {
+    let events = translated_sub_agents();
+
+    let per_message: Vec<&niobe_core::Usage> = usage_records(&events)
+        .into_iter()
+        .filter(|usage| usage.cost_usd.is_none() && usage.cache_write > 0)
+        .collect();
+    assert!(!per_message.is_empty());
+    for usage in per_message {
+        assert_eq!(
+            usage.cache_write_1h, usage.cache_write,
+            "every write this session made was an hour's: {usage:?}"
+        );
     }
 }

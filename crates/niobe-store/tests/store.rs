@@ -147,8 +147,8 @@ fn a_stored_session_loads_and_replays_inside_the_budget() {
     let state = SessionState::replay(stored.iter().map(|s| &s.event));
     let elapsed = started.elapsed();
 
-    assert_eq!(stored.len(), 313);
-    assert_eq!(state.totals().records, 21);
+    assert_eq!(stored.len(), 631);
+    assert_eq!(state.totals().records, 25);
     assert!(
         elapsed.as_millis() < REPLAY_BUDGET_MS,
         "open, load and replay took {elapsed:?}, over the {REPLAY_BUDGET_MS} ms budget"

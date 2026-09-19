@@ -7,7 +7,7 @@ Copyright (c) Viacheslav Shynkarenko
 
 ## `claude-session.jsonl`
 
-313 events, one JSON object per line, in the wire form `Event` serializes to.
+631 events, one JSON object per line, in the wire form `Event` serializes to.
 
 It is a **recording of a real `claude` bridge session**, driven through
 `niobe-bridge-claude`'s own `Session` against Claude Code 2.1.278 on
@@ -17,59 +17,62 @@ alongside it — the prompt the operator typed, the answer they gave a
 permission prompt, the model they moved the session to. None of it was written
 by hand.
 
+The CLI's raw stream was kept beside it, and this file is that stream folded
+again through the bridge as it stands, with the shell's events where they were:
+616 of the bridge's events compared equal to the ones produced live, and 14
+per-message usage records gained the one-hour share of their cache writes,
+which the live run read as none. The last two prompted turns of that stream,
+and the two the CLI started after them, are `niobe-bridge-claude`'s
+`tests/fixtures/sub-agents.jsonl`.
+
 The session works on a small Python catalog client, in a repository scrubbed to
-`/repo`: a `Read` and a `grep`, an `Edit` that adds etag support to
+`/repo`: a `Read` and a `grep`, two `Edit`s that add etag support to
 `catalog/fetch.py`, a test run, a `Write` the operator refused, a failing test
-run, a move from `claude-sonnet-5` to `claude-haiku-4-5`, and three sub-agent
-calls. The recording is cut while the last turn is still going, which is what a
-session someone closed looks like.
+run, a move from `claude-sonnet-5` to `claude-haiku-4-5`, and three sub-agents —
+one on its own and two in parallel — whose work, and the turns the CLI started
+when each finished, run to the end of the recording. The CLI was still running
+when it was cut.
 
 **What was scrubbed, and nothing else**: the working directory to `/repo`, the
-CLI's own session id to a fixed one, the directory it spills large tool results
-into, and an interpreter path to `/usr/lib/python3.14`. The tool-call ids, the
-token counts, the costs, the prompts and every tool result are as they were
+CLI's own session id to a fixed one, the directory it keeps a background task's
+output in, and an interpreter path to `/usr/lib/python3.14`. The tool-call ids,
+the token counts, the costs, the prompts and every tool result are as they were
 recorded.
 
 It is also read by `niobe-store`'s tests, which record it into a session store
 and fold what comes back, and by `niobe-cli`'s, which replay and resume it
 through the binary. Those tests compare the stored copy with the log rather
 than with fixed numbers, except for the totals `tests/cli.rs` checks in the
-printed summary (`367,077` tokens, `≥$0.34`, 14 of 21 records without a cost).
+printed summary (`562,988` tokens, `≥$0.87`, 14 of 25 records without a cost).
 
 It carries the cases a real session has and a written one tends not to:
 
-- **14 of the 21 usage records carry no cost.** The CLI reports tokens per
+- **14 of the 25 usage records carry no cost.** The CLI reports tokens per
   message and money only in the closing `result`, so the session's cost is a
   floor, not a measurement.
-- **A third model that produced no message.** The session ran on
+- **A third model that produced no counted message.** The session ran on
   `claude-sonnet-5` and then `claude-haiku-4-5-20251001`, and the closing
-  `modelUsage` also billed `claude-opus-5[1m]` — 4 in, 621 out, 25,791 cache
-  writes, $0.177 — under an id **no message in the session ever named**. The
-  `[1m]` suffix is a different rate for the same model, so anything that
-  reconciles per-message counts against `modelUsage` by model id has to treat
-  the two as unrelated, which is what the bridge does.
+  `modelUsage` also billed `claude-opus-5[1m]` — 24 in, 13,963 out, 169,624
+  cache reads, 36,584 cache writes, $0.662657 — for the two sub-agents that
+  reviewed the code. Their messages reach the stream whole but never as the
+  `message_delta`s the bridge counts from, so the bill is the only place their
+  tokens are.
+- **Three sub-agents, each launched in the background.** Each `Agent` call
+  returns at once and the agent ends later, when the CLI says so; the two
+  asked for in parallel ran together, so two were running at the peak.
 - **A refused call**: a `Write` the operator denied, which the CLI reports
   twice and the bridge counts once.
-- **Two failed calls**, one of them a tool this CLI release does not have:
-  asked for `Grep`, it answered `No such tool available: Grep`. A call that did
-  not run changed no file, and the changes pane shows one file, not two.
-- **18 entries the bridge could not read.** Claude Code 2.1.278 emits
+- **Three failed calls**: a test module that does not exist, a `grep` whose
+  glob the shell refused, and a reviewer's probe that exited non-zero. A call
+  that did not run changed no file.
+- **28 entries the bridge could not read.** Claude Code 2.1.278 emits
   `system` subtypes this version of the bridge has no place for —
-  `task_started`, `task_progress`, `task_updated`, `task_notification` and
+  `task_started`, `task_progress`, `task_updated` and
   `background_tasks_changed` — and each becomes a visible entry rather than a
   crash. They are in the recording because they are what the session produced.
-- **A `rate_limit_event`** twice, which on a flat-rate plan is the budget.
-
-### What it does not carry
-
-Three sub-agent calls are in it as ordinary tool calls, under the name the CLI
-gave them (`Agent`), and not as `AgentSpawn` / `AgentExit`: this version of the
-bridge recognises the sub-agent tool only under its other name, `Task`. Nothing
-here is worked around — the recording says what the bridge produced.
-
-There are no one-hour cache writes in it either: every `cache_creation` the CLI
-reported in this session was a five-minute write. The one-hour split is held in
-`niobe-bridge-claude`'s own fixtures instead, where it is priced.
+- **Every cache write a message reported was bought for the hour**: 40,054 of
+  them. The 42,833 on the records from the closing `modelUsage` carry no split.
+- **A `rate_limit_event`** three times, which on a flat-rate plan is the budget.
 
 ## `producer-gaps.jsonl`
 
@@ -101,6 +104,7 @@ jq -s '{
   output: (map(select(.type=="usage").output) | add),
   cache_read: (map(select(.type=="usage").cache_read) | add),
   cache_write: (map(select(.type=="usage").cache_write) | add),
+  cache_write_1h: (map(select(.type=="usage").cache_write_1h) | add),
   reasoning: (map(select(.type=="usage").reasoning) | add),
   usage_records: (map(select(.type=="usage")) | length),
   records_without_cost: (map(select(.type=="usage" and .cost_usd==null)) | length),
@@ -140,7 +144,7 @@ jq -s '{
 }' claude-session.jsonl
 ```
 
-`reported_cost_usd` prints as `0.3443623`: floating-point addition, which is
+`reported_cost_usd` prints as `0.86552395`: floating-point addition, which is
 why the test compares it against that figure with a tolerance rather than for
 equality.
 
@@ -157,3 +161,12 @@ machine it runs on, or the recording is of that machine rather than of the CLI:
   whatever servers the operator has configured.
 - **the working directory passed exactly as the CLI reports it** — its resolved
   form, or the paths the bridge makes relative stay absolute.
+- **the system directories still on `PATH`**, even where the hook's binary is
+  kept off it: the CLI reads its login from the operating system's credential
+  store through a tool that lives there, and without it every turn comes back
+  "Not logged in".
+
+Keep what the CLI printed as well as what the bridge made of it — a `claude`
+first on `PATH` that runs the real one and `tee`s its standard output is
+enough. A fix to the bridge can then be carried into the recording by folding
+the stream again, rather than by recording a different session.

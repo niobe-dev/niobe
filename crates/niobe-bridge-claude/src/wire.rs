@@ -67,9 +67,14 @@ pub(crate) struct System {
     pub(crate) permission_mode: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) compact_metadata: Option<CompactMetadata>,
-    /// On `permission_denied`: the call that was refused.
+    /// On `permission_denied`: the call that was refused. On
+    /// `task_notification`: the call that started the task, where a call did.
     pub(crate) tool_name: Option<String>,
     pub(crate) tool_use_id: Option<String>,
+    /// On `task_notification`: how the task stopped — `completed`, `failed` or
+    /// `stopped` in the CLI's own schema. On `status`, the CLI's request state,
+    /// which is not read.
+    pub(crate) status: Option<String>,
 }
 
 /// What the CLI says about a context compaction.
@@ -81,13 +86,41 @@ pub(crate) struct CompactMetadata {
 
 /// An `assistant` or `user` line.
 ///
-/// The envelope also carries `parent_tool_use_id`, naming the `Task` call
-/// whose sub-agent produced the message. It is not read here: a complete
-/// message is folded in the same way whichever agent wrote it, and only the
-/// fragments of one need to be told apart — see [`StreamEvent`].
+/// The envelope also carries `parent_tool_use_id`, naming the sub-agent call
+/// whose agent produced the message. It is not read here: a complete message
+/// is folded in the same way whichever agent wrote it, and only the fragments
+/// of one need to be told apart — see [`StreamEvent`].
 #[derive(Debug, Deserialize)]
 pub(crate) struct Envelope {
     pub(crate) message: ApiMessage,
+    /// On a `user` line that carries a tool result: what the tool reported
+    /// about itself, in a shape of the tool's own. Kept as a value because
+    /// every tool shapes it differently — an object for most, a bare string
+    /// for some — and a field that failed to parse would take the result with
+    /// it.
+    #[serde(default)]
+    pub(crate) tool_use_result: Option<serde_json::Value>,
+}
+
+impl Envelope {
+    /// A message with nothing beside its content.
+    pub(crate) fn of(message: ApiMessage) -> Self {
+        Self {
+            message,
+            tool_use_result: None,
+        }
+    }
+
+    /// Whether the tool this line answers started work that carries on after
+    /// the call returned: a sub-agent the CLI ran in the background, whose
+    /// end the CLI reports later as a `system`/`task_notification`.
+    pub(crate) fn launched_in_background(&self) -> bool {
+        self.tool_use_result
+            .as_ref()
+            .and_then(|result| result.get("status"))
+            .and_then(serde_json::Value::as_str)
+            == Some("async_launched")
+    }
 }
 
 /// The message itself.
@@ -186,16 +219,39 @@ pub(crate) struct Usage {
     #[serde(default)]
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_creation: Option<CacheCreation>,
+    /// The API requests the message took, each with its own counts. Read only
+    /// for the split of the cache writes by lifetime, which Claude Code 2.1.278
+    /// puts here and not beside the total on a `message_delta`.
+    #[serde(default)]
+    pub(crate) iterations: Vec<Iteration>,
 }
 
 impl Usage {
     /// Of the cache writes, the ones bought for an hour rather than for the
     /// default five minutes. Zero where the CLI reported no split.
+    ///
+    /// The split beside the total wins where there is one; otherwise it is
+    /// summed over the iterations. Reading only the first would price every
+    /// one-hour write on a 2.1.278 `message_delta` as a five-minute one — in
+    /// the session recorded on 19 September 2026, every cache write it made.
     pub(crate) fn cache_write_1h(&self) -> u64 {
-        self.cache_creation
-            .as_ref()
-            .map_or(0, |c| c.ephemeral_1h_input_tokens)
+        match &self.cache_creation {
+            Some(split) => split.ephemeral_1h_input_tokens,
+            None => self
+                .iterations
+                .iter()
+                .filter_map(|iteration| iteration.cache_creation.as_ref())
+                .fold(0, |sum, split| {
+                    sum.saturating_add(split.ephemeral_1h_input_tokens)
+                }),
+        }
     }
+}
+
+/// One API request of a message, as its `usage` lists them.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub(crate) struct Iteration {
+    pub(crate) cache_creation: Option<CacheCreation>,
 }
 
 /// How the cache writes of a message split by lifetime.
@@ -397,6 +453,18 @@ mod tests {
 
         assert_eq!(usage.cache_creation_input_tokens, 90);
         assert_eq!(usage.cache_write_1h(), 60);
+    }
+
+    #[test]
+    fn the_one_hour_share_is_read_from_the_iterations_where_the_total_carries_no_split() {
+        // A `message_delta` as Claude Code 2.1.278 prints it: the split by
+        // lifetime is only on the iteration that produced the message.
+        let usage: Usage = serde_json::from_str(
+            r#"{"input_tokens":2,"cache_creation_input_tokens":10059,"cache_read_input_tokens":11685,"output_tokens":300,"output_tokens_details":{"thinking_tokens":0},"iterations":[{"input_tokens":2,"output_tokens":300,"cache_read_input_tokens":11685,"cache_creation_input_tokens":10059,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":10059},"type":"message"}]}"#,
+        )
+        .expect("a message_delta's usage");
+
+        assert_eq!(usage.cache_write_1h(), 10_059);
     }
 
     #[test]

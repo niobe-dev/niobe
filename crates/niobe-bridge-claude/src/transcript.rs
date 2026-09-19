@@ -74,6 +74,16 @@ const EXTENSION: &str = "jsonl";
 /// the one line that says what a session was about skips over it.
 const CLI_WROTE_IT: [&str; 2] = ["<command-name>", "<local-command-stdout>"];
 
+/// The `origin.kind` of the turn the CLI writes when background work stops.
+///
+/// Read off the transcripts on the machine this was written on, 19 September
+/// 2026: 1,111 such turns from twenty-two releases between 2.1.231 and
+/// 2.1.277, each one a `<task-notification>`. 932 of them name the call that
+/// started the work in `<tool-use-id>` and how it ended in `<status>`; the
+/// rest name no call, so there is no agent to match them to and they are
+/// passed over.
+const TASK_NOTIFICATION: &str = "task-notification";
+
 /// What the CLI puts where a message's model would be when it wrote the
 /// message itself rather than asking a model for it — the line it shows when a
 /// request failed, and the like. Read off the transcripts above, where it
@@ -384,11 +394,11 @@ impl Fold {
             None => true,
         };
 
-        self.fold(wire::Message::Assistant(wire::Envelope {
-            message: wire::ApiMessage {
+        self.fold(wire::Message::Assistant(wire::Envelope::of(
+            wire::ApiMessage {
                 content: message.content,
             },
-        }));
+        )));
 
         // Counted here only where the session was never priced. A message
         // names the model it ran on as the family — `claude-opus-5` — and the
@@ -421,6 +431,23 @@ impl Fold {
         if record.is_meta {
             return;
         }
+        // Background work stopping is written as a user turn too, and it is
+        // the CLI speaking. What it says is how a sub-agent launched in the
+        // background ended, which the call's own result never does.
+        let kind = record
+            .origin
+            .as_ref()
+            .and_then(|origin| origin.get("kind"))
+            .and_then(serde_json::Value::as_str);
+        if kind == Some(TASK_NOTIFICATION) {
+            if let Some(text) = record.message.content.as_ref().and_then(said)
+                && let Some(id) = tag(&text, "tool-use-id")
+            {
+                let mut ended = self.translator.task_stopped(id, tag(&text, "status"));
+                self.out.append(&mut ended);
+            }
+            return;
+        }
         if let Some(text) = record.message.content.as_ref().and_then(said) {
             self.out.push(Event::UserMessage { text });
         }
@@ -430,6 +457,7 @@ impl Fold {
             message: wire::ApiMessage {
                 content: record.message.content,
             },
+            tool_use_result: record.tool_use_result,
         }));
     }
 
@@ -487,6 +515,16 @@ impl Fold {
     fn fold(&mut self, message: wire::Message) {
         self.out.append(&mut self.translator.message(message));
     }
+}
+
+/// The text of the first `<name>` element in a turn the CLI wrote in its own
+/// markup, such as a task notification.
+fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let start = text.find(&open)? + open.len();
+    let length = text[start..].find(&close)?;
+    Some(text[start..start + length].trim())
 }
 
 /// What a turn holds as prose, where it holds any.
@@ -590,6 +628,15 @@ struct User {
     /// operator sent.
     #[serde(rename = "isMeta", default)]
     is_meta: bool,
+    /// Where the turn came from. The CLI writes it both as a bare word
+    /// (`"cli"`) and as an object with a `kind`, so it is read as a value: a
+    /// shape this cannot type would otherwise lose the turn it is on.
+    #[serde(default)]
+    origin: Option<serde_json::Value>,
+    /// What the tool whose result this record carries reported about itself;
+    /// the live stream's `tool_use_result`, under the transcript's spelling.
+    #[serde(rename = "toolUseResult", default)]
+    tool_use_result: Option<serde_json::Value>,
 }
 
 /// The turn itself.
@@ -624,7 +671,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use niobe_core::event::Mode;
+    use niobe_core::event::{AgentId, AgentOutcome, Mode};
 
     #[test]
     fn the_cli_keeps_its_transcripts_where_its_own_variable_says() {
@@ -1007,5 +1054,67 @@ mod tests {
                 text: "and this is mine".to_owned()
             }]
         );
+    }
+
+    /// A sub-agent call and the CLI's answer that it launched the agent in the
+    /// background, as Claude Code 2.1.278 writes both to its transcript.
+    const LAUNCHED: [&str; 2] = [
+        r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"quick-lookup","description":"Summarize catalog/cache.py","prompt":"Read it."}}]}}"#,
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a819f5cc82e486a11"}}"#,
+    ];
+
+    /// The turn the CLI writes when background work stops, naming the call
+    /// that started it.
+    fn notification(id: &str, status: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"<task-notification>\n<task-id>a819f5cc82e486a11</task-id>\n<tool-use-id>{id}</tool-use-id>\n<output-file>/tmp/a.output</output-file>\n<status>{status}</status>\n<summary>Agent \"Summarize catalog/cache.py\" finished</summary>\n</task-notification>"}},"origin":{{"kind":"task-notification"}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_background_sub_agent_in_a_transcript_ends_where_the_cli_wrote_that_it_stopped() {
+        let launched = folded(&LAUNCHED);
+        assert!(
+            launched
+                .iter()
+                .any(|event| matches!(event, Event::AgentSpawn { .. })),
+            "{launched:?}"
+        );
+        assert!(
+            launched
+                .iter()
+                .all(|event| !matches!(event, Event::AgentExit { .. })),
+            "ended at its launch: {launched:?}"
+        );
+
+        for (status, outcome) in [
+            ("completed", AgentOutcome::Completed),
+            ("failed", AgentOutcome::Failed),
+            ("killed", AgentOutcome::Cancelled),
+        ] {
+            let stopped = notification("toolu_a", status);
+            let events = folded(&[LAUNCHED[0], LAUNCHED[1], &stopped]);
+
+            let exits: Vec<&Event> = events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentExit { .. }))
+                .collect();
+            assert_eq!(
+                exits,
+                [&Event::AgentExit {
+                    id: AgentId::new("toolu_a"),
+                    outcome
+                }],
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cli_saying_background_work_stopped_is_not_the_operator_speaking() {
+        let about_a_command = notification("toolu_bash", "completed");
+        let events = folded(&[&about_a_command]);
+
+        assert_eq!(events, []);
     }
 }

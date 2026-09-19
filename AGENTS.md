@@ -231,10 +231,10 @@ Where tests live:
 
 - **Unit tests** in a `#[cfg(test)] mod tests` at the bottom of the module they test.
 - **Integration tests** in each crate's `tests/`:
-  - `niobe-core/tests/replay.rs` folds the recorded log `tests/fixtures/session-200.jsonl`. The
+  - `niobe-core/tests/replay.rs` folds the recorded log `tests/fixtures/claude-session.jsonl`. The
     expected numbers are derived from the fixture with `jq`, never from `SessionState`, so a bug in
     the fold cannot agree with itself. The `jq` program is in `tests/fixtures/README.md`; re-run it
-    after editing the fixture.
+    after replacing the fixture.
   - `niobe-tui/tests/shell.rs` draws the shell into a `TestBackend` and compares it with the
     pictures in `tests/snapshots/`. After an intentional layout change, regenerate with
     `UPDATE_SNAPSHOTS=1 cargo test -p niobe-tui --test shell` and **read the diff** of the

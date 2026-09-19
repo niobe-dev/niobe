@@ -65,7 +65,9 @@ did not produce, and it carries the cases that are easy to get wrong:
 - a model that never produces a message of its own (`claude-haiku-4-5`, which
   the CLI uses for its own small jobs) and whose tokens and cost therefore
   arrive only in `modelUsage`;
-- a `Task` call, which is a sub-agent rather than an action;
+- a `Task` call, which is a sub-agent rather than an action. `Task` is the
+  alias the CLI accepts for its sub-agent tool; the name models call it by is
+  `Agent`, which `sub-agents.jsonl` holds as recorded;
 - a `control_request` of subtype `can_use_tool`, which is the CLI stopping the
   turn until something answers on its standard input. The recording is of what
   the CLI printed, so the answer is not in it: folding the fixture leaves that
@@ -158,6 +160,15 @@ evenly split: 520,535,496 cache-write tokens, 263,468,094 of them bought for
 the hour and 257,067,402 for five minutes. No single message mixed the two,
 which is why one is hand-built in `wire.rs` rather than recorded — the field
 allows it and the arithmetic has to hold for it.
+
+**On the live stream the split is not always beside the total.** Claude Code
+2.1.278's `message_delta` — the line the bridge folds usage from — carries
+`cache_creation_input_tokens` with no `cache_creation` beside it; the split is
+on each entry of `usage.iterations`, one per API request the message took. The
+bridge takes the split beside the total where there is one and sums the
+iterations' where there is not. Read only the first way, every write in
+`sub-agents.jsonl` — every one of them bought for the hour — would price as a
+five-minute write.
 
 ## `edits.jsonl`
 
@@ -269,6 +280,48 @@ The per-turn rows are the `message_delta` usage, which equals each `result`'s
 `usage`; the session row is the second `result`'s `modelUsage`. A fold that
 counts both the messages and the bill reports 8 in, 12 out, 43,944 cache read
 and 51,666 cache write.
+
+## `sub-agents.jsonl`
+
+The last two turns of a real session and the two turns the CLI started on its
+own after them, recorded from Claude Code 2.1.278 on 19 September 2026
+through the bridge's own `Session`, with the flags shown for `stream-json.jsonl`
+and `--strict-mcp-config`. 600 lines, the CLI's own. The only edits:
+`system`/`init` cut down to the keys that say what ran and which agents it
+offers; the working directory rewritten to `/repo`, the CLI's session id to a
+fixed one, and the directory it keeps a background task's output in to
+`/tmp/claude-sessions/-repo/`. The two prompts asked, in these words, for "the
+Task tool" to spawn one sub-agent and then two in parallel.
+
+It exists because of what a sub-agent call is on this release:
+
+- **The tool is called `Agent`.** `init` lists `Task` and no `Agent`; the
+  model, told to use the Task tool, called `Agent` all three times, with
+  `{subagent_type, description, prompt}`. The CLI registers `Agent` with `Task`
+  as its alias and counts a call under either name as a spawn. Across the
+  CLI's own transcripts on the machine this was recorded on — 477 sub-agent
+  calls from 21 releases between 2.1.231 and 2.1.278 — every call was `Agent`.
+- **The call returns before the agent is done.** Each `tool_result` comes back
+  at once, and its `tool_use_result` says `"status": "async_launched"`. The
+  agent's end is a `system`/`task_notification` naming the call in
+  `tool_use_id`, with `status` one of `completed`, `failed` or `stopped` in the
+  CLI's own schema for the message. Here all three completed, and the two
+  reviews ran at the same time: the review of `catalog/cache.py` ended first.
+- **A notification that arrives between turns starts one.** The model is told
+  the agent finished and answers, so the recording holds four `result`s for two
+  prompts; the first agent's notification arrived while the second prompt's
+  turn was running, and started nothing. `total_cost_usd` on them runs $0.1611705, $0.27226665,
+  $0.689141, $0.86552395 — the whole session's running total, as ever.
+- **A sub-agent's messages reach the stream whole, and its fragments do not.**
+  35 `assistant` and 16 `user` lines carry the `parent_tool_use_id` of the call
+  that spawned their agent, so its tool calls are in the timeline; no
+  `stream_event` does, so there is no `message_delta` to count its tokens from.
+  What the agents spent arrives only in the closing `modelUsage`, under
+  `claude-opus-5[1m]` for the two reviewers. The three permission prompts
+  here are all a reviewer's, and each `control_request` names the agent in
+  `agent_id`.
+- **Every cache write was bought for the hour**, and the `message_delta`s say
+  so only inside `usage.iterations` — see above.
 
 ## `transcripts/`
 
