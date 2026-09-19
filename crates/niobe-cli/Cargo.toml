@@ -32,6 +32,9 @@ serde_json.workspace = true
 # The shell's key events are ratatui's; the tests drive the shell with them.
 ratatui.workspace = true
 tempfile.workspace = true
+# The checksum a fake release is published with, computed apart from the
+# `shasum` / `sha256sum` the installer verifies it with.
+sha2.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # A pty to run the binary on, for the tests that take its terminal away, and

@@ -94,6 +94,14 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
+- **`install.sh`** — what users install niobe with: POSIX `sh`, picks the archive for the machine,
+  checks it against its published SHA-256 and puts `niobe` in `~/.local/bin`. It is published
+  with every release, so `releases/latest/download/install.sh` always matches the archives beside
+  it. `crates/niobe-cli/tests/install.rs` runs it against a release laid out on disk.
+- **`.github/workflows/release.yml`** — a tag `v<version>` builds macOS (arm64, x86_64) and static
+  musl Linux (x86_64, arm64) binaries and publishes them, with their checksums and `install.sh`,
+  as a GitHub Release. The tag must equal the workspace version. Run by hand it builds and
+  publishes nothing.
 
 ### 1.1 Layering (BINDING)
 
@@ -210,6 +218,7 @@ Every file that can carry a comment starts with the SPDX header, followed by a b
 
 - Rust (`.rs`): `//` comments, before any `//!` doc comment or `#![…]` attribute.
 - TOML, YAML, `.gitignore`: the same two lines with `#`.
+- Shell scripts (`.sh`): the same two lines with `#`, directly under the `#!` line.
 - Markdown: the two lines inside a leading `<!-- … -->` block.
 
 Exempt, because the format has no comments or the bytes are compared exactly: `LICENSE`,

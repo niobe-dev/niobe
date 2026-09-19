@@ -45,3 +45,9 @@ jobs:
 
       - name: Release binary size
         run: cargo xtask size
+
+      # The installer runs on machines with nothing but a POSIX sh, so it is
+      # linted as one. shellcheck is on the Ubuntu image, not the macOS one.
+      - name: Installer
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh install.sh

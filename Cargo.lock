@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "niobe-bridge-claude"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "niobe-core",
  "serde",
@@ -718,14 +718,14 @@ dependencies = [
 
 [[package]]
 name = "niobe-bridge-codex"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "niobe-core",
 ]
 
 [[package]]
 name = "niobe-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "niobe-bridge-claude",
  "niobe-bridge-codex",
@@ -737,12 +737,13 @@ dependencies = [
  "ratatui",
  "rustix",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
 [[package]]
 name = "niobe-config"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "niobe-core",
  "sha2",
@@ -752,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "niobe-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -760,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "niobe-ledger"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "niobe-core",
  "tempfile",
@@ -769,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "niobe-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "niobe-core",
  "rusqlite",
@@ -779,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "niobe-tui"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "niobe-core",
  "ratatui",
@@ -1938,7 +1939,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "zmij"

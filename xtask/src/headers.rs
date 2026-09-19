@@ -26,6 +26,9 @@ pub enum Rule {
     LineComment(&'static str),
     /// The two lines inside a leading `<!--` … `-->` block.
     HtmlComment,
+    /// The two lines behind `# `, under the `#!` line, which the kernel only
+    /// honours as the very first line of the file.
+    Script,
     /// The format has no comments, or its bytes are compared exactly.
     Exempt,
 }
@@ -47,6 +50,7 @@ pub fn rule_for(path: &str) -> Option<Rule> {
         Some("rs") => Some(Rule::LineComment("// ")),
         Some("toml" | "yml" | "yaml") => Some(Rule::LineComment("# ")),
         Some("md") => Some(Rule::HtmlComment),
+        Some("sh") => Some(Rule::Script),
         _ => None,
     }
 }
@@ -54,8 +58,15 @@ pub fn rule_for(path: &str) -> Option<Rule> {
 /// Whether `contents` opens with the header `rule` asks for, followed by a
 /// blank line.
 pub fn has_header(rule: Rule, contents: &str) -> bool {
+    let mut lines = contents.lines();
     let expected: Vec<String> = match rule {
         Rule::Exempt => return true,
+        Rule::Script => match lines.next() {
+            Some(shebang) if shebang.starts_with("#!") => {
+                vec![format!("# {LICENSE_LINE}"), format!("# {COPYRIGHT_LINE}")]
+            }
+            _ => return false,
+        },
         Rule::LineComment(prefix) => vec![
             format!("{prefix}{LICENSE_LINE}"),
             format!("{prefix}{COPYRIGHT_LINE}"),
@@ -68,7 +79,6 @@ pub fn has_header(rule: Rule, contents: &str) -> bool {
         ],
     };
 
-    let mut lines = contents.lines();
     expected
         .iter()
         .all(|line| lines.next() == Some(line.as_str()))
@@ -110,6 +120,20 @@ mod tests {
             rule_for("crates/niobe-tui/tests/snapshots/empty-80x24.txt"),
             Some(Rule::Exempt)
         );
+    }
+
+    #[test]
+    fn a_shell_script_carries_the_header_under_its_shebang() {
+        assert_eq!(rule_for("install.sh"), Some(Rule::Script));
+        let file = "#!/bin/sh\n# SPDX-License-Identifier: Apache-2.0\n\
+                    # Copyright (c) Viacheslav Shynkarenko\n\nset -eu\n";
+        assert!(has_header(Rule::Script, file));
+        assert!(!has_header(Rule::Script, "#!/bin/sh\nset -eu\n"));
+        assert!(!has_header(
+            Rule::Script,
+            "# SPDX-License-Identifier: Apache-2.0\n\
+             # Copyright (c) Viacheslav Shynkarenko\n\nset -eu\n"
+        ));
     }
 
     #[test]

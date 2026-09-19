@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+# Builds the niobe binary for every target install.sh knows and publishes it to
+# a GitHub Release, with a SHA-256 beside each archive and the installer itself,
+# so that `releases/latest/download/install.sh` is always the script that
+# matches the archives next to it.
+#
+# A pushed tag `v<version>` publishes; the tag must equal the workspace version,
+# so the binary's `--version` says what the release is called. Run by hand, the
+# workflow builds and uploads the archives as workflow artifacts and publishes
+# nothing, which is how a change to this file is tried.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Built on the same Apple-silicon runner: the Xcode toolchain links
+          # both architectures, which keeps both macOS builds on one image.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          # musl, statically linked, so one binary runs on any distribution
+          # whatever its glibc; SQLite is compiled in by rusqlite's `bundled`.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag names the workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match the workspace version ${version}" >&2
+            exit 1
+          fi
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+
+      - name: Install musl
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        shell: bash
+        run: |
+          target=${{ matrix.target }}
+          # The C compiler for the bundled SQLite: musl-gcc, where cc would
+          # otherwise pick the glibc one and the static link would fail.
+          if [[ "$target" == *musl ]]; then
+            export "CC_${target//-/_}=musl-gcc"
+          fi
+          cargo build --release --locked --package niobe-cli --target "$target"
+
+      - name: A binary built for this runner starts
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: target/${{ matrix.target }}/release/niobe --version
+
+      - name: Package
+        shell: bash
+        run: |
+          archive=niobe-${{ matrix.target }}.tar.gz
+          tar -czf "$archive" -C target/${{ matrix.target }}/release niobe
+          shasum -a 256 "$archive" > "$archive.sha256"
+          cat "$archive.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: niobe-${{ matrix.target }}
+          path: niobe-${{ matrix.target }}.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --title "niobe ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/* install.sh
