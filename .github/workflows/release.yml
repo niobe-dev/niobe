@@ -98,11 +98,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      # The whole history, so the annotated tag's own object is present and its
-      # message can be read back as the release notes.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -115,15 +111,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # An annotated tag's message is the release notes, so what the
-          # release says was written and reviewed with the release commit, in
-          # git, rather than composed in the web UI once the binaries are
-          # already published. A lightweight tag carries the commit's message
-          # instead of its own, which is not notes, so those fall back to the
-          # generated list of commits.
-          if [ "$(git cat-file -t "${GITHUB_REF_NAME}")" = tag ]; then
-            git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > notes.md
+          # release page says was written and reviewed with the release commit,
+          # in git, rather than composed in a web form once the binaries are
+          # already published.
+          #
+          # The tag is read from the API and not from the checkout: after
+          # fetching the tags, actions/checkout fetches the tagged commit again
+          # as `+<sha>:refs/tags/<tag>`, which overwrites the local ref with the
+          # commit, so on the runner every tag looks lightweight no matter how
+          # it was pushed.
+          ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" \
+            --jq '.object | "\(.type) \(.sha)"')
+          if [ "${ref%% *}" = tag ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${ref##* }" --jq .message > notes.md
             notes=(--notes-file notes.md)
           else
+            # Pushed without -a, so the tag has no message of its own.
             notes=(--generate-notes)
           fi
 
