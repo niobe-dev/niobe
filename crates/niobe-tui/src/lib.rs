@@ -38,6 +38,7 @@ pub mod terminal;
 mod text;
 pub mod theme;
 pub mod ui;
+pub mod usage;
 
 pub use app::{Answer, App, Ask, Entry, EntryKind, Picker, Repo, SelectedProfile};
 pub use bridge::{Bridge, BridgeError, Detached};

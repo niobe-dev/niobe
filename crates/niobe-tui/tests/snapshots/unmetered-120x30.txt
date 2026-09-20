@@ -1,29 +1,29 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
 ╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ╔════════════════ Usage ════════════════╗
 ║                                                                            ║ ║                                       ║
-║ ◆ claude                                                                   ║ ║ session            tokens in          ║
-║   Reading catalog/fetch.ts and its callers first. Two call sites, one test ║ ║ ≥$0.04             5500               ║
-║   file.                                                                    ║ ║ tokens out         cache read         ║
-║                                                                            █ ║ 800                40k                ║
-║ ⚙ Read  catalog/fetch.ts · 7.2 kB out                                      █ ║ Bash                 1 ━━━━━━━━━━━━   ║
-║                                                                            █ ║ Edit                 1 ━━━━━━━━━━━━   ║
-║ ◆ claude                                                                   █ ║ Read                 1 ━━━━━━━━━━━━   ║
-║   Caching the etag beside the body so a 304 can be answered from the LRU.  █ ║ 3 calls · 1 failed · 0 denied · 9.9 k ║
-║                                                                            █ ╚═══════════════════════════════════════╝
-║ ⚙ Edit  catalog/fetch.ts · 640 B out                                       █ ╔═══════════════ Changes ═══════════════╗
+║ ◆ claude                                                                   ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
+║   Reading catalog/fetch.ts and its callers first. Two call sites, one test ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
+║   file.                                                                    ║ ║ session ≥$0.04                        ║
+║                                                                            █ ║ Bash                 1 ━━━━━━━━━━━━   ║
+║ ⚙ Read  catalog/fetch.ts · 7.2 kB out                                      █ ║ Edit                 1 ━━━━━━━━━━━━   ║
+║                                                                            █ ║ Read                 1 ━━━━━━━━━━━━   ║
+║ ◆ claude                                                                   █ ║ 3 calls · 1 failed · 0 denied · 9.9 k ║
+║   Caching the etag beside the body so a 304 can be answered from the LRU.  █ ╚═══════════════════════════════════════╝
+║                                                                            █ ╔═══════════════ Changes ═══════════════╗
+║ ⚙ Edit  catalog/fetch.ts · 640 B out                                       █ ║                                       ║
+║                                                                            █ ║ ⎇ main                                ║
+║ ◆ claude                                                                   █ ║ Files ─ 3                             ║
+║   Rewriting the 304 test around the cached body.                           █ ║ ▸ catalog/fetch.ts            +38 −9  ║
+║                                                                            █ ║   “Caching the etag beside the bod…”  ║
+║ ◆ claude                                                                   █ ║ ▸ catalog/etag.test.ts         +24 —  ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║   “Rewriting the 304 test around t…”  ║
+║                                                                            █ ║ ▸ docs/notebooks/catalog.ipynb   — —  ║
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ╚═══════════════════════════════════════╝
+║                                                                            █ ╔════════ Parallel ─ 1 running ═════════╗
+║ ◆ claude                                                                   █ ║                                       ║
+║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║ ◆ test-writer → tests/fetch.test.ts   ║
+║   304 path asserts a body that is no longer sent.                          █ ║ 2 spawned · peak 2 · 1 done · 0 faile ║
 ║                                                                            █ ║                                       ║
-║ ◆ claude                                                                   █ ║ ⎇ main                                ║
-║   Rewriting the 304 test around the cached body.                           █ ║ Files ─ 3                             ║
-║                                                                            █ ║ ▸ catalog/fetch.ts            +38 −9  ║
-║ ◆ claude                                                                   █ ║   “Caching the etag beside the bod…”  ║
-║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║ ▸ catalog/etag.test.ts         +24 —  ║
-║                                                                            █ ║   “Rewriting the 304 test around t…”  ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ║ ▸ docs/notebooks/catalog.ipynb   — —  ║
-║                                                                            █ ╚═══════════════════════════════════════╝
-║ ◆ claude                                                                   █ ╔════════ Parallel ─ 1 running ═════════╗
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║                                       ║
-║   304 path asserts a body that is no longer sent.                          █ ║ ◆ test-writer → tests/fetch.test.ts   ║
-║                                                                            █ ║ 2 spawned · peak 2 · 1 done · 0 faile ║
 ║ ────────────────────────────────────────────────────────────────────────── ║ ║                                       ║
 ║ >  Ask for a change, or press F1 for help                                  ║ ║                                       ║
 ╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝

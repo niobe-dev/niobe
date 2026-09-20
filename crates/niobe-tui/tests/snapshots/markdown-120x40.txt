@@ -3,10 +3,10 @@
 ║                                                                            ║ ║                                       ║
 ║                                                                            ║ ║ 5h    ▓▓▓▓░░░  62% · resets 16:40     ║
 ║ ◆ claude                                                                   ║ ║ 7d    ▓░░░░░░  18% · resets Tue 15:00 ║
-║   Rewriting the 304 test around the cached body.                           ║ ║ session            tokens in          ║
-║                                                                            ║ ║ ≥$0.04             5500               ║
-║ ◆ claude                                                                   ║ ║ tokens out         cache read         ║
-║   The notebook that demonstrates the fetcher needs the new call shape.     ║ ║ 800                40k                ║
+║   Rewriting the 304 test around the cached body.                           ║ ║ ───────────────────────────────────── ║
+║                                                                            ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
+║ ◆ claude                                                                   ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     ║ ║ session ≥$0.04                        ║
 ║                                                                            ║ ║ Bash                 1 ━━━━━━━━━━━━   ║
 ║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            ║ ║ Edit                 1 ━━━━━━━━━━━━   ║
 ║                                                                            ║ ║ Read                 1 ━━━━━━━━━━━━   ║

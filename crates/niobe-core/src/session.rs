@@ -67,6 +67,17 @@ pub struct Totals {
     /// A model is in the map only while it is owed for, and the record's
     /// `cost_usd` is always `None` — it is what is *not* accounted for.
     pub unsettled: BTreeMap<String, Usage>,
+    /// Every token the session spent, summed per model, on the same definition
+    /// [`Totals::tokens`] uses — so the map adds up to that total exactly.
+    ///
+    /// Cumulative, and untouched by settlement: a model whose cost has landed
+    /// has not stopped having spent the tokens. That is what separates this
+    /// from [`Totals::unsettled`], which empties as money arrives and so can
+    /// only answer what is still owed for, never who spent what.
+    ///
+    /// The key is the model id the backend reported, unaltered. Two ids that
+    /// bill apart are two entries, even where they read alike.
+    pub tokens_by_model: BTreeMap<String, u64>,
     /// How many records each model in [`Totals::unsettled`] is owed for, so
     /// that a settlement takes exactly its own model's share back out of
     /// [`Totals::records_unsettled`]. Private because it is the bookkeeping
@@ -99,6 +110,10 @@ impl Totals {
         self.cache_write_1h = self.cache_write_1h.saturating_add(usage.cache_write_1h);
         self.reasoning = self.reasoning.saturating_add(usage.reasoning);
         self.records += 1;
+        self.tokens_by_model
+            .entry(usage.model.clone())
+            .and_modify(|spent| *spent = spent.saturating_add(usage.tokens()))
+            .or_insert_with(|| usage.tokens());
 
         // A settlement is read before its own cost is taken, so that a record
         // both settling the model and carrying tokens of its own — which the
@@ -719,6 +734,58 @@ mod tests {
             .get("opus-5")
             .expect("the new turn is owed for");
         assert_eq!((owed.input, owed.output), (200, 20));
+    }
+
+    /// Who spent the session's tokens is a different question from what is
+    /// still owed for: a model whose cost has landed has not stopped having
+    /// spent them. `unsettled` empties as money arrives, so it cannot answer
+    /// the first question and the fold keeps a cumulative map beside it.
+    #[test]
+    fn tokens_are_kept_per_model_whether_or_not_the_cost_has_settled() {
+        let state = SessionState::replay(&[
+            on_model("opus-5", 100, 10, None),
+            on_model("haiku-4-5", 300, 30, None),
+            settlement("opus-5", 0.75),
+        ]);
+
+        let totals = state.totals();
+        assert_eq!(totals.tokens_by_model.get("opus-5"), Some(&110));
+        assert_eq!(totals.tokens_by_model.get("haiku-4-5"), Some(&330));
+        // The settled model is gone from what is owed for and still counted
+        // among what was spent.
+        assert!(!totals.unsettled.contains_key("opus-5"));
+    }
+
+    /// Every token the session counts belongs to exactly one model, so the map
+    /// adds up to the whole of [`Totals::tokens`]. The per-model rows in the
+    /// shell are shares of that total; a map that did not sum to it would draw
+    /// shares that do not either.
+    #[test]
+    fn the_per_model_tokens_sum_to_the_sessions_own_total() {
+        let state = SessionState::replay(&[
+            Event::Usage(Usage {
+                input: 2_000,
+                output: 300,
+                cache_read: 18_000,
+                cache_write: 900,
+                cache_write_1h: 400,
+                reasoning: 120,
+                model: "opus-5".to_owned(),
+                cost_usd: Some(0.04),
+                cost_basis: None,
+                settles_model: false,
+            }),
+            on_model("haiku-4-5", 300, 30, None),
+        ]);
+
+        let totals = state.totals();
+        // 2,000 + 300 + 18,000 + 900 + 120 for opus; the hour is a share of
+        // the writes, not more of them.
+        assert_eq!(totals.tokens_by_model.get("opus-5"), Some(&21_320));
+        assert_eq!(
+            totals.tokens_by_model.values().sum::<u64>(),
+            totals.tokens()
+        );
     }
 
     #[test]

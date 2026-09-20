@@ -26,7 +26,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::{paint, running_session, screen, session_with_a_markdown_reply, unmetered_session};
-use niobe_core::event::{Backend, Event, Mode, UsageWindow, UsageWindows};
+use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Repo, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, NEO};
 
@@ -110,8 +110,8 @@ impl niobe_tui::Prices for ATenthOfACentPerThousand {
     }
 }
 
-/// The session pane's cost tile is what the shell is for, so the running
-/// figure has to reach the screen and not merely the label function. The
+/// The Usage pane's cost figure is what the shell is for, so it has to reach
+/// the screen and not merely the label function. The
 /// recorded session reports tokens and no money, which without a price sheet
 /// reads `unpriced`; with one it reads the estimate, marked as one.
 #[test]
@@ -119,7 +119,7 @@ fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
     let without = screen(&mut running_session(), 120, 40);
     assert!(
         without.contains("≥$0.04"),
-        "with nothing to value the rest, the tile is a floor:\n{without}"
+        "with nothing to value the rest, the figure is a floor:\n{without}"
     );
 
     let mut priced = running_session().with_prices(Box::new(ATenthOfACentPerThousand));
@@ -513,6 +513,148 @@ fn a_plan_spending_beyond_its_flat_fee_is_marked_in_the_usage_pane() {
     assert!(
         !frame.contains("$0.00"),
         "what the extra costs is not a figure any backend reports:\n{frame}"
+    );
+}
+
+/// A session whose sub-agents ran on cheaper models than its main turn, which
+/// is what the per-model block exists to show: the session's tokens split by
+/// who spent them.
+fn session_on_three_models() -> App {
+    let mut app = running_session();
+    for (model, input, output, cache_read) in [
+        ("claude-sonnet-5-20250929", 900_u64, 240_u64, 9_000_u64),
+        ("claude-haiku-4-5-20251001", 400, 90, 2_000),
+    ] {
+        app.apply(&Event::Usage(Usage {
+            input,
+            output,
+            cache_read,
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: model.to_owned(),
+            cost_usd: Some(0.01),
+            cost_basis: None,
+            settles_model: false,
+        }));
+    }
+    app
+}
+
+/// The block the Usage pane's token tiles became: a row per model that spent
+/// something, the share it spent, and how much.
+#[test]
+fn the_usage_pane_splits_the_sessions_tokens_by_the_model_that_spent_them() {
+    let mut app = session_on_three_models();
+    let frame = screen(&mut app, 120, 30);
+
+    // Worked out from the fixture by hand: opus has 2,100+180+18,400+900 and
+    // 3,400+620+22,000+1,200, which is 48,800; sonnet 10,140; haiku 2,490.
+    // Of 61,430 that is 79.4%, 16.5% and 4.1% — floors 79, 16, 4, and the
+    // percent left over goes to sonnet, cut by most.
+    let totals = app.session().totals();
+    assert_eq!(totals.tokens_by_model.get("opus-5"), Some(&48_800));
+    assert_eq!(totals.tokens(), 61_430);
+
+    for row in ["opus-5", "sonnet-5", "haiku-4-5"] {
+        assert!(frame.contains(row), "no row for {row}:\n{frame}");
+    }
+    // The ids are shown shortened, so the release date the backend reported is
+    // not what the operator reads a row for.
+    assert!(!frame.contains("20250929"), "{frame}");
+    assert!(frame.contains(" 79%"), "{frame}");
+    assert!(frame.contains(" 17%"), "{frame}");
+    assert!(frame.contains("  4%"), "{frame}");
+    // Compacted, through the same function the tiles it replaced used.
+    assert!(frame.contains("49k"), "{frame}");
+
+    assert_snapshot("models-120x30", &frame);
+}
+
+/// The shares on screen add up to the session, at every width the pane has.
+/// Three figures rounded one at a time read 99% or 101%, and a column of
+/// percentages that does not add up is the pane arguing with itself.
+#[test]
+fn the_per_model_shares_on_screen_add_up_to_a_hundred() {
+    let mut app = session_on_three_models();
+    for width in [120, 200] {
+        let frame = screen(&mut app, width, 40);
+        let shares: Vec<u64> = frame.lines().filter_map(model_row_share).collect();
+        assert_eq!(shares.len(), 3, "at {width} columns:\n{frame}");
+        assert_eq!(
+            shares.iter().sum::<u64>(),
+            100,
+            "at {width} columns:\n{frame}"
+        );
+    }
+}
+
+/// The percent on a row naming one of the three models, if this line is one.
+///
+/// A row of the frame is the whole width of the screen, panes and borders and
+/// all, so the label is looked for inside it rather than at its start. What
+/// makes a line a model row is a share right after the label — which the menu
+/// row, where the session's model is also named, does not have.
+fn model_row_share(row: &str) -> Option<u64> {
+    ["opus-5", "sonnet-5", "haiku-4-5"]
+        .into_iter()
+        .find_map(|model| {
+            let after = &row[row.find(model)? + model.len()..];
+            let figure = after.split('%').next()?.trim();
+            match (1..=3).contains(&figure.len()) {
+                true => figure.parse::<u64>().ok(),
+                false => None,
+            }
+        })
+}
+
+/// One model is one row. Not a bar at 100% next to three blank tiles, which is
+/// what the four tiles this block replaced did with a single-model session.
+#[test]
+fn a_session_on_one_model_gets_one_row_and_nothing_beside_it() {
+    let mut app = running_session();
+    let frame = screen(&mut app, 120, 30);
+
+    let rows: Vec<&str> = frame
+        .lines()
+        .filter(|row| model_row_share(row).is_some())
+        .collect();
+    assert_eq!(rows.len(), 1, "{frame}");
+    assert!(rows[0].contains("100%"), "{rows:?}");
+    assert!(!frame.contains("tokens in"), "the tiles are gone:\n{frame}");
+}
+
+/// The cache row is a different kind of figure from the model rows above it —
+/// a hit rate, not a share of the session — so it has to be unmistakable or it
+/// is a lie told in a bar chart.
+#[test]
+fn the_cache_row_is_a_hit_rate_and_says_so() {
+    let mut app = running_session();
+    let frame = screen(&mut app, 120, 30);
+
+    // The fixture sent 2,100 + 3,400 of uncached input, 900 of cache writes
+    // and 40,400 of reads: 40,400 of 46,800 is 86.3%.
+    assert!(frame.contains("cache hit"), "{frame}");
+    assert!(frame.contains(" 86%"), "{frame}");
+    // And the reads themselves, so the rate is readable as what it came from.
+    assert!(frame.contains("40k"), "{frame}");
+    // The row is not one of the model rows: it does not answer the question
+    // they do, and it must not be counted with them.
+    assert!(model_row_share("cache hit  86%").is_none());
+}
+
+/// A session nothing has been billed for yet has no rate to report — which is
+/// not a cache that missed. Nor does it get a row per model it never ran.
+#[test]
+fn a_session_with_nothing_reported_yet_draws_no_share_and_no_rate() {
+    let mut app = empty_session();
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(!frame.contains("cache hit   0%"), "{frame}");
+    assert!(!frame.contains("100%"), "{frame}");
+    assert!(
+        frame.contains("no tokens reported yet"),
+        "the block says it is empty rather than drawing zeroes:\n{frame}"
     );
 }
 

@@ -14,9 +14,9 @@
 //! measured is indistinguishable from one that was, and that is the product
 //! gone.
 //!
-//! The Usage pane has no cost-per-edit tile: that needs spend attributed to
-//! individual calls, which the ledger does not do yet. The fourth tile is a
-//! measured one instead.
+//! The Usage pane shows no cost per edit or per tool: that needs spend
+//! attributed to individual calls, which the ledger does not do yet. It shows
+//! the tool mix, which is measured, and says so.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -39,6 +39,7 @@ use crate::meter::meter;
 use crate::prices::Prices;
 use crate::text;
 use crate::theme::Theme;
+use crate::usage;
 
 /// Smallest terminal the shell draws in, as (columns, rows).
 pub const MIN_SIZE: (u16, u16) = (80, 24);
@@ -626,7 +627,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     // the two panes that grow with the session, 1.3 : 1 in favour of the files
     // it changed.
     let [usage, changes, parallel] = Layout::vertical([
-        Constraint::Length(usage_height(app, pane_inner_width(right.width)).min(right.height)),
+        Constraint::Length(usage_height(app).min(right.height)),
         Constraint::Fill(13),
         Constraint::Fill(10),
     ])
@@ -654,12 +655,6 @@ fn draw_desktop(frame: &mut Frame, strip: Rect, app: &App, theme: &Theme) {
             cell.set_char(mote.symbol).set_fg(mote.colour);
         }
     }
-}
-
-/// The columns a pane leaves for what is written in it: the two borders and
-/// the column of padding either side.
-fn pane_inner_width(width: u16) -> u16 {
-    width.saturating_sub(4)
 }
 
 /// Rows of content a pane keeps before it will spare a blank row under its
@@ -993,27 +988,6 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
     }
 }
 
-/// The widest label a Usage tile carries, and a column of gap after it. A tile
-/// narrower than this shows a label cut mid-word, which reads as a different
-/// figure's name.
-const TILE_COLUMNS: u16 = 11;
-
-/// How many of the four tiles fit side by side: all four where the pane is
-/// wide enough for their labels, two otherwise. The right-hand column is a
-/// third of the screen, and at eighty columns that is not four tiles wide.
-fn tiles_across(width: u16) -> usize {
-    match width / TILE_COLUMNS {
-        0..=1 => 1,
-        2..=3 => 2,
-        _ => 4,
-    }
-}
-
-/// The denominator the tiles' columns are cut with. Ratio wants a `u32`.
-fn across_ratio(across: usize) -> u32 {
-    u32::try_from(across).unwrap_or(1).max(1)
-}
-
 /// Tool rows the Usage pane draws before it stops, whatever the tool mix is.
 ///
 /// The pane is sized to its content, so without a cap a session that reached
@@ -1021,20 +995,24 @@ fn across_ratio(across: usize) -> u32 {
 /// read in. Four is the busiest of them; the footer counts the rest.
 const MIX_SHOWN: usize = 4;
 
-/// The rows the Usage pane needs: its frame, its tiles, whatever windows and
-/// budget the session has been told about, its tool mix and its footer.
+/// The rows the Usage pane needs: its frame, whatever windows the session has
+/// been told about, a row per model and the cache, the session's cost and its
+/// budget, the tool mix and the footer.
 ///
 /// Read before the pane is drawn, because the column above it is laid out
 /// from it — the pane takes the rows its figures need and leaves the rest to
 /// the panes that grow with the session.
-fn usage_height(app: &App, width: u16) -> u16 {
+fn usage_height(app: &App) -> u16 {
     let session = app.session();
     let budget = usize::from(app.budget().is_some());
     let mix = session.tools().by_name.len().clamp(1, MIX_SHOWN);
+    let windows = window_rows(app);
+    let spend = spend_rows(app);
     // Two rows of border, the blank row under the title, a row per window the
-    // backend reported, a label row and a value row per band of tiles, then
-    // the figures and the footer.
-    let rows = 3 + window_rows(app) + 2 * 4_usize.div_ceil(tiles_across(width)) + budget + mix + 1;
+    // backend reported, the rule between the two blocks where both have rows,
+    // a row per model and the cache row, the session's cost and whatever
+    // budget it runs against, the tool mix and the footer.
+    let rows = 3 + windows + usize::from(windows > 0 && spend > 0) + spend + 1 + budget + mix + 1;
     u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
@@ -1147,6 +1125,143 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
+/// What a model's tokens get: the widest figure [`compact`] produces
+/// (`1000k`) and a column of gap before it.
+const MODEL_TOKENS: usize = 6;
+
+/// What a model's share is drawn in: three columns and the sign, with a space
+/// either side of them.
+const MODEL_SHARE: usize = 6;
+
+/// The label the cache row carries. It names what its figure means, because a
+/// hit rate and a share of the session are two different questions and the
+/// column they are drawn in is the same.
+const CACHE_LABEL: &str = "cache hit";
+
+/// How many rows the tokens block takes: one per model that spent something,
+/// one for the cache, or one line saying the session has been billed for
+/// nothing yet.
+///
+/// The pane is sized from this before it is drawn, so it has to agree with
+/// [`spend_lines`] exactly; a test holds the two together.
+fn spend_rows(app: &App) -> usize {
+    match models(app).len() {
+        0 => 1,
+        rows => rows + 1,
+    }
+}
+
+/// The models that spent something, largest first, with their tokens.
+///
+/// A model that spent nothing is not a model at 0% — it gets no row. Ties go
+/// to the id, so the order of two models that spent alike does not depend on
+/// the order their records arrived in.
+fn models(app: &App) -> Vec<(String, u64)> {
+    let mut spent: Vec<(String, u64)> = app
+        .session()
+        .totals()
+        .tokens_by_model
+        .iter()
+        .filter(|(_, tokens)| **tokens > 0)
+        .map(|(model, tokens)| (model.clone(), *tokens))
+        .collect();
+    spent.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    spent
+}
+
+/// Who spent the session's tokens, and what the cache saved.
+///
+/// A row per model, the share it spent of the session's own tokens, and how
+/// much — then the cache row, which is a **hit rate** rather than a share of
+/// anything on the rows above it. Two meanings in one column, so the cache row
+/// says which it is in its label and is drawn in a colour of its own.
+///
+/// Every model row is drawn in the same colour. The busiest is not a warning —
+/// [`Theme::hot`] means *nearly gone* everywhere else in the shell, and a model
+/// that spent the most has not gone wrong — and the bar beside it already says
+/// which spent most.
+fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let spent = models(app);
+    if spent.is_empty() {
+        return vec![Line::from("no tokens reported yet").style(dim)];
+    }
+
+    let labels = usage::labels(spent.iter().map(|(model, _)| model.as_str()));
+    let columns = labels
+        .iter()
+        .map(|label| text::width(label))
+        .chain(std::iter::once(text::width(CACHE_LABEL)))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    // The meter gives up cells until the row fits, the way a window row's
+    // does: how much of a bar is drawn is worth less than the figure beside it.
+    let cells = width
+        .saturating_sub(columns + MODEL_SHARE + MODEL_TOKENS)
+        .min(METER_CELLS);
+
+    // A label, a figure, a meter of the share that figure rounds, and a count.
+    // The meter is drawn from the share itself rather than from the whole
+    // percent beside it, so a model that spent too little to round up to one
+    // still keeps the cell the meter gives anything above nothing.
+    let row = |label: &str, figure: String, share: f64, count: String, style: Style| {
+        let (filled, track) = meter(share, cells);
+        Line::from(vec![
+            Span::styled(format!("{label:<columns$}"), dim),
+            Span::styled(figure, style.bold()),
+            Span::styled("  ", dim),
+            Span::styled(filled, style),
+            Span::styled(track, dim),
+            Span::styled(format!("{count:>MODEL_TOKENS$}"), dim),
+        ])
+    };
+
+    let totals = app.session().totals();
+    let session_tokens = totals.tokens().max(1);
+    let percents = usage::shares(&spent.iter().map(|(_, tokens)| *tokens).collect::<Vec<_>>());
+    let mut lines: Vec<Line<'static>> = spent
+        .iter()
+        .zip(labels)
+        .zip(percents)
+        .map(|(((_, tokens), label), percent)| {
+            row(
+                &label,
+                format!("{percent:>3}%"),
+                *tokens as f64 / session_tokens as f64,
+                compact(*tokens),
+                Style::new().fg(theme.fg),
+            )
+        })
+        .collect();
+
+    // The reads are beside the rate so that it can be read as what it came
+    // from, and an em dash stands where nothing has been eligible for a cache
+    // yet: a `0%` there would say the cache was offered the work and missed.
+    let hit = usage::cache_hit_rate(totals);
+    lines.push(row(
+        CACHE_LABEL,
+        match hit {
+            Some(hit) => format!("{:>3}%", crate::app::percent(hit)),
+            None => format!("{:>4}", "—"),
+        },
+        hit.unwrap_or(0.0),
+        match hit {
+            Some(_) => compact(totals.cache_read),
+            None => String::new(),
+        },
+        Style::new().fg(theme.add),
+    ));
+    lines
+}
+
+/// The rule the mock draws between the pane's blocks. Its blocks answer
+/// different questions — what the plan has left, and who spent the session's
+/// tokens — and without it they read as one list.
+fn divider(width: usize, theme: &Theme) -> Line<'static> {
+    Line::from("─".repeat(width)).style(Style::new().fg(theme.frame))
+}
+
 fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let session = app.session();
     let prices = app.prices();
@@ -1158,50 +1273,28 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 
     let totals = session.totals();
-    let tiles = [
-        ("session", session_cost(session, prices), theme.hot),
-        ("tokens in", compact(totals.input), theme.fg),
-        ("tokens out", compact(totals.output), theme.fg),
-        ("cache read", compact(totals.cache_read), theme.fg),
-    ];
+    let width = usize::from(inner.width);
 
     // The windows come first: on a flat-rate plan they are what the operator
     // is spending, and everything below them is detail about how.
-    let windows = window_lines(app, usize::from(inner.width), theme);
-    let across = tiles_across(inner.width);
-    let tile_rows = u16::try_from(tiles.len().div_ceil(across)).unwrap_or(1);
-    let [windowed, tiled, rest] = Layout::vertical([
-        Constraint::Length(u16::try_from(windows.len()).unwrap_or(u16::MAX)),
-        Constraint::Length(tile_rows * 2),
-        Constraint::Min(0),
-    ])
-    .areas(inner);
-    frame.render_widget(Paragraph::new(windows), windowed);
-
-    for (row, row_of_tiles) in tiles.chunks(across).enumerate() {
-        let top = tiled.y.saturating_add(u16::try_from(row * 2).unwrap_or(0));
-        if top >= tiled.bottom() {
-            break;
-        }
-        let band = Rect::new(tiled.x, top, tiled.width, 2.min(tiled.bottom() - top));
-        let [labels, values] =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(band);
-        let columns = Layout::horizontal(vec![Constraint::Ratio(1, across_ratio(across)); across])
-            .split(labels);
-        let value_columns =
-            Layout::horizontal(vec![Constraint::Ratio(1, across_ratio(across)); across])
-                .split(values);
-        for (i, (label, value, colour)) in row_of_tiles.iter().enumerate() {
-            frame.render_widget(
-                Paragraph::new(Line::from(*label).style(Style::new().fg(theme.dim))),
-                columns[i],
-            );
-            frame.render_widget(
-                Paragraph::new(Line::from(value.clone()).style(Style::new().fg(*colour).bold())),
-                value_columns[i],
-            );
-        }
+    let mut lines: Vec<Line> = window_lines(app, width, theme);
+    let spend = spend_lines(app, width, theme);
+    if !lines.is_empty() && !spend.is_empty() {
+        lines.push(divider(width, theme));
     }
+    lines.extend(spend);
+
+    // What the session cost, labelled for what is known about it. Which shape
+    // this pane takes on a metered profile — where the money is the headline
+    // rather than a row under the tokens — waits on the profile saying whether
+    // it is metered at all, which nothing in the stream does yet.
+    lines.push(Line::from(vec![
+        Span::styled("session ", Style::new().fg(theme.dim)),
+        Span::styled(
+            session_cost(session, prices),
+            Style::new().fg(theme.hot).bold(),
+        ),
+    ]));
 
     // Dollars per category would need spend attributed to each read, edit or
     // shell command, which the ledger does not do yet. The bars carry the tool
@@ -1210,8 +1303,7 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut mix: Vec<(&String, &u64)> = tools.by_name.iter().collect();
     mix.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
-    let rows = usize::from(rest.height);
-    let mut lines: Vec<Line> = Vec::new();
+    let rows = usize::from(inner.height);
 
     if let Some(budget) = app.budget() {
         let spent = totals.reported_cost_usd;
@@ -1229,7 +1321,7 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         lines.push(Line::from("no tool calls yet").style(Style::new().fg(theme.dim)));
     } else {
         let busiest = mix.first().map(|(_, n)| **n).unwrap_or(1).max(1);
-        let bar_width = usize::from(rest.width)
+        let bar_width = width
             .saturating_sub(BAR_NAME + BAR_COUNT + 2)
             .min(BAR_CELLS);
         let room = rows.saturating_sub(lines.len() + 1).min(MIX_SHOWN);
@@ -1250,7 +1342,7 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     );
 
     lines.truncate(rows);
-    frame.render_widget(Paragraph::new(lines), rest);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Columns a tool's name gets in the Usage pane's mix.
@@ -1597,7 +1689,8 @@ fn estimate_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Option<f6
     Some(sum)
 }
 
-/// Token counts, short enough for a tile.
+/// Token counts, short enough for a column of them: thousands above ten
+/// thousand, millions above a million.
 fn compact(n: u64) -> String {
     match n {
         0..=9_999 => n.to_string(),
@@ -2014,6 +2107,11 @@ mod tests {
         assert_eq!(compact(9_999), "9999");
         assert_eq!(compact(25_500), "26k");
         assert_eq!(compact(1_260_000), "1.3M");
+        // The two boundaries: where a figure starts being thousands, and where
+        // thousands become millions.
+        assert_eq!(compact(10_000), "10k");
+        assert_eq!(compact(999_999), "1000k");
+        assert_eq!(compact(1_000_000), "1.0M");
     }
 
     fn window(utilization: f64, resets_at: Option<u64>) -> UsageWindow {
@@ -2206,5 +2304,126 @@ mod tests {
                 .all(|row| row.contains("resets") || row.contains("extra")),
             "the reset time was dropped before the meter gave up a cell"
         );
+    }
+
+    /// A session that spent tokens under three models, one of which settled.
+    fn spending(records: &[(&str, u64)]) -> App {
+        let mut app = App::new(crate::app::Repo {
+            name: "example".to_owned(),
+            branch: None,
+        });
+        for (model, input) in records {
+            app.apply(&niobe_core::event::Event::Usage(Usage {
+                input: *input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: (*model).to_owned(),
+                cost_usd: Some(0.01),
+                cost_basis: None,
+                settles_model: false,
+            }));
+        }
+        app
+    }
+
+    fn spend_of(app: &App, width: usize) -> Vec<String> {
+        spend_lines(app, width, &Theme::default())
+            .iter()
+            .map(Line::to_string)
+            .collect()
+    }
+
+    /// The pane is sized from the row count before the rows are built, so the
+    /// two have to agree or the pane clips the cache row off its own bottom.
+    #[test]
+    fn the_token_rows_the_pane_is_sized_for_are_the_rows_it_draws() {
+        for records in [
+            &[][..],
+            &[("opus-5", 100)][..],
+            &[("opus-5", 100), ("haiku-4-5", 50), ("sonnet-5", 20)][..],
+        ] {
+            let app = spending(records);
+            assert_eq!(spend_rows(&app), spend_of(&app, 66).len(), "{records:?}");
+        }
+    }
+
+    /// A model nothing was billed under is not a model at 0%: the row is
+    /// absent, and with no model at all the block says so rather than drawing
+    /// a bar at nothing.
+    #[test]
+    fn a_model_that_spent_nothing_gets_no_row() {
+        assert_eq!(spend_of(&spending(&[]), 66), ["no tokens reported yet"]);
+
+        let nothing_spent = spending(&[("opus-5", 0)]);
+        assert_eq!(
+            nothing_spent.session().totals().records,
+            1,
+            "the record was folded"
+        );
+        assert_eq!(spend_of(&nothing_spent, 66), ["no tokens reported yet"]);
+    }
+
+    /// The label column is as wide as the widest label in the block, so the
+    /// figures line up, and the meter gives up cells until the row fits — the
+    /// same order of precedence a window row has.
+    #[test]
+    fn a_token_row_fits_the_pane_it_is_drawn_in() {
+        let app = spending(&[
+            ("claude-opus-5", 62_000),
+            ("claude-sonnet-5-20250929", 11_000),
+            ("claude-haiku-4-5-20251001", 3_000),
+        ]);
+
+        for width in [39, 45, 66] {
+            for row in spend_of(&app, width) {
+                assert!(
+                    text::width(&row) <= width,
+                    "{row:?} is {} columns in a pane {width} wide",
+                    text::width(&row)
+                );
+            }
+        }
+        // The shares and the counts survive the narrowest width; only the
+        // meter gives ground.
+        // 62k of 76k is 81.6%, 11k is 14.5% and 3k is 3.9%; floored that is
+        // 81 + 14 + 3, and the two percent left over go to the two shares
+        // flooring cut by most.
+        let narrow = spend_of(&app, 39);
+        assert!(
+            narrow[0].contains(" 82%") && narrow[0].contains("62k"),
+            "{narrow:?}"
+        );
+        assert!(narrow[1].contains(" 14%"), "{narrow:?}");
+        assert!(narrow[2].contains("  4%"), "{narrow:?}");
+        assert_eq!(narrow.len(), 4, "{narrow:?}");
+    }
+
+    /// Where no request has been eligible for a cache, the row has no figure —
+    /// and no count beside one either.
+    #[test]
+    fn the_cache_row_reads_an_em_dash_before_anything_was_eligible() {
+        let mut app = spending(&[]);
+        app.apply(&niobe_core::event::Event::Usage(Usage {
+            input: 0,
+            output: 400,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: "opus-5".to_owned(),
+            cost_usd: Some(0.01),
+            cost_basis: None,
+            settles_model: false,
+        }));
+
+        let rows = spend_of(&app, 66);
+        let cache = rows.last().expect("the cache row is the last of them");
+        assert!(cache.starts_with("cache hit"), "{rows:?}");
+        assert!(cache.contains('—'), "{rows:?}");
+        assert!(!cache.contains('%'), "{rows:?}");
+        assert!(!cache.contains('0'), "{rows:?}");
     }
 }
