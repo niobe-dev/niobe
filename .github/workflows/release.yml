@@ -98,7 +98,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The whole history, so the annotated tag's own object is present and its
+      # message can be read back as the release notes.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -106,11 +110,25 @@ jobs:
           merge-multiple: true
 
       - name: Create the release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # An annotated tag's message is the release notes, so what the
+          # release says was written and reviewed with the release commit, in
+          # git, rather than composed in the web UI once the binaries are
+          # already published. A lightweight tag carries the commit's message
+          # instead of its own, which is not notes, so those fall back to the
+          # generated list of commits.
+          if [ "$(git cat-file -t "${GITHUB_REF_NAME}")" = tag ]; then
+            git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > notes.md
+            notes=(--notes-file notes.md)
+          else
+            notes=(--generate-notes)
+          fi
+
           gh release create "${GITHUB_REF_NAME}" \
             --verify-tag \
             --title "niobe ${GITHUB_REF_NAME}" \
-            --generate-notes \
+            "${notes[@]}" \
             dist/* install.sh

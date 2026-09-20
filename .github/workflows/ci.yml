@@ -43,6 +43,9 @@ jobs:
       - name: Copyright headers
         run: cargo xtask headers
 
+      - name: Workspace version
+        run: cargo xtask version --check
+
       - name: Release binary size
         run: cargo xtask size
 

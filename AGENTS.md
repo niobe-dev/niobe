@@ -101,14 +101,17 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
+  `version.rs` is the workspace version: the eight places the root manifest writes it, and
+  what the conventional-commit subjects since the last release tag call for (§8).
 - **`install.sh`** — what users install niobe with: POSIX `sh`, picks the archive for the machine,
   checks it against its published SHA-256 and puts `niobe` in `~/.local/bin`. It is published
   with every release, so `releases/latest/download/install.sh` always matches the archives beside
   it. `crates/niobe-cli/tests/install.rs` runs it against a release laid out on disk.
 - **`.github/workflows/release.yml`** — a tag `v<version>` builds macOS (arm64, x86_64) and static
   musl Linux (x86_64, arm64) binaries and publishes them, with their checksums and `install.sh`,
-  as a GitHub Release. The tag must equal the workspace version. Run by hand it builds and
-  publishes nothing.
+  as a GitHub Release. The tag must equal the workspace version, and an annotated tag's own message
+  is what the release page says, so the notes are written and reviewed in git rather than in a web
+  form after the binaries are out. Run by hand it builds and publishes nothing.
 
 ### 1.1 Layering (BINDING)
 
@@ -278,6 +281,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo xtask layering
 cargo xtask headers
+cargo xtask version --check
 cargo xtask size
 ```
 
@@ -324,7 +328,8 @@ green, and the real mismatch surfaces a round later. Before editing a line to fi
    README that describes it.
 9. **Land the work.** The last step of a task: gate green (§6.1), then stage **exactly the files
    you touched, by name** (never `git add -A` or `git add .`), then commit, then push when asked
-   or when the maintainer-local instructions say so.
+   or when the maintainer-local instructions say so. **The version is not part of this commit**
+   — releasing is its own commit, cut only when the maintainer says so (§8).
    - **Commit messages**: Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`,
      `chore:`). The subject says what changed; the body explains *why* it is right rather than
      restating the diff. No planning identifiers (§4).
@@ -340,7 +345,89 @@ green, and the real mismatch surfaces a round later. Before editing a line to fi
 
 ---
 
-## 8. Common roadblocks
+## 8. Versioning and releases (BINDING)
+
+The workspace carries one version, in `[workspace.package]`; every crate inherits it and the
+binary's `--version` prints it. A release is the tag `v<version>`, which builds the binaries and
+publishes them. The tag has to equal the workspace version, so the two move in one commit and never
+separately.
+
+### 8.1 What a bump means
+
+Semantic versioning, with the 0.x contract written down: while the major version is `0`, `0.MINOR`
+is the compatibility unit — it is what cargo resolves on — so a breaking change moves the **minor**,
+and the patch stays fixes only. Reaching `1.0` is a decision about the product; no commit log makes
+it.
+
+The commit type the author already chose decides the bump, so a release turns on the record instead
+of on a judgement made from memory at the end of a session:
+
+| Commits since the last tag                  | Bump  | `0.4.0` becomes |
+| ------------------------------------------- | ----- | --------------- |
+| any `feat:`, or any `!` / `BREAKING CHANGE:` | minor | `0.5.0`         |
+| only `fix:` / `perf:`                        | patch | `0.4.1`         |
+| only `docs:` `test:` `chore:` `refactor:`    | none  | no release      |
+
+`cargo xtask version` reads that off the log and prints it, with the commit that forces it. It is
+the answer, not a starting point to re-derive. A commit whose type understates what it did is a bug
+in the commit message: say so plainly, and bump for what the change actually is.
+
+### 8.2 An agent never versions on its own
+
+1. **A feature or fix commit never touches the version.** The version sites are written only in a
+   release commit, so two branches cannot conflict over `Cargo.toml` and no merge invents a
+   version.
+2. **Cutting a release is the maintainer's call.** An agent proposes. It does not tag, and it does
+   not bump because the work felt significant.
+
+### 8.3 When to ask, and what to ask
+
+After landing work (§7.9) — gate green, committed — run `cargo xtask version`. Then:
+
+- **It reports that nothing calls for a release**: say nothing, ask nothing. Docs, tests, chores
+  and refactors accumulate quietly until something releasable joins them.
+- **It reports a bump**: ask **once**, with the answer already drafted, so the maintainer is
+  approving a release rather than being handed a question:
+  - **the version** the command computed, and the commit that forces it;
+  - **the release notes in full**, ready to use as written — what a user of this release can now
+    do, or what stopped being wrong for them, in the project's own voice. Not the commit subjects
+    pasted into a list, not a diffstat, and nothing from §4. Someone reading the release page has
+    never seen this repository's history.
+
+  The maintainer may take that version, raise it, or decline. **If they decline, do not ask again
+  for the same commits** — not when the next commit lands on top of them, not later in the session.
+
+Never ask mid-task, and never ask about work that is not committed yet.
+
+### 8.4 Cutting one
+
+Only once the maintainer has said yes, with the notes they approved:
+
+```sh
+cargo xtask ci                        # the gate, first and whole (§6.1)
+cargo xtask version <patch|minor|major|X.Y.Z>
+git add Cargo.toml Cargo.lock         # a release commit carries nothing else
+git commit -m "chore: release <version>"
+git tag -a v<version> -F <notes-file> # annotated: its message is the release notes
+git push origin HEAD v<version>
+```
+
+`cargo xtask version <bump>` moves all eight sites — `[workspace.package]` and the seven `niobe-*`
+path dependencies — and refreshes `Cargo.lock`. Do it by hand and the sites drift; `cargo xtask
+version --check` is in the gate for exactly that. It refuses a dirty tree, a version that does not
+come after the current one, a bump smaller than the commits call for, and a tag that already
+exists.
+
+The notes file goes in a scratch directory, never in the tree (§7.6). The tag must be annotated
+(`-a`): a lightweight tag has no message of its own, and the release would fall back to a generated
+list of commit subjects.
+
+**There is no changelog file.** The tag's message and the release page are the record, written once,
+at the moment the maintainer approves them.
+
+---
+
+## 9. Common roadblocks
 
 - **Snapshot test fails after a UI change**: expected. Regenerate (§6), read the snapshot diff,
   and accept it only if the new frame is right.

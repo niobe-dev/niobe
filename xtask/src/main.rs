@@ -9,6 +9,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod headers;
+mod version;
 
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -49,21 +50,27 @@ const ALLOWED_WORKSPACE_DEPS: &[(&str, &[&str])] = &[
 ];
 
 fn main() -> ExitCode {
-    let task = std::env::args().nth(1);
-    let result = match task.as_deref() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (task, rest) = args
+        .split_first()
+        .map_or((None, &[][..]), |(t, r)| (Some(t.as_str()), r));
+    let result = match task {
         Some("ci") => ci(),
         Some("size") => size().map(|_| ()),
         Some("layering") => layering(),
         Some("headers") => headers(),
+        Some("version") => version::run(rest),
         _ => {
             eprintln!(
                 "\
 usage: cargo xtask <task>
 
 tasks:
-    ci        fmt --check, clippy -D warnings, tests, layering, headers, then the size check
+    ci        fmt --check, clippy -D warnings, tests, layering, headers, versions, then size
     layering  check that no crate depends on a workspace crate it may not name
     headers   check that every file carries the SPDX copyright header
+    version   report what a release would be; --check that the manifest agrees with itself;
+              <patch|minor|major|X.Y.Z> to move the workspace to that version
     size      build --release and check the `niobe` binary against the 20 MB budget"
             );
             return ExitCode::FAILURE;
@@ -92,6 +99,7 @@ fn ci() -> Result<(), String> {
     cargo(&["test", "--workspace"])?;
     layering()?;
     headers()?;
+    version::run(&["--check".to_owned()])?;
     size().map(|_| ())
 }
 
@@ -231,14 +239,14 @@ fn target_dir() -> PathBuf {
     }
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     // xtask lives at <root>/xtask, so the workspace root is one level up from its
     // manifest directory regardless of where cargo was invoked from.
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
 /// The cargo that is running xtask, so a pinned toolchain stays pinned.
-fn cargo_program() -> String {
+pub(crate) fn cargo_program() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned())
 }
 
@@ -250,7 +258,7 @@ fn cargo_output(args: &[&str]) -> Result<String, String> {
 
 /// Runs `program` in the workspace root and returns its stdout, failing on a
 /// non-zero exit.
-fn command_output(program: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn command_output(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
         .args(args)
         .current_dir(workspace_root())
