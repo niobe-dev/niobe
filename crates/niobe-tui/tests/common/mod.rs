@@ -206,6 +206,60 @@ fn session_events() -> Vec<Event> {
 /// depend on the day the test ran or the machine it ran on.
 const READ_AT: u64 = 20_000 * 86_400 + 13 * 3_600 + 41 * 60;
 
+/// The twenty-three files a read of the repository reported, written out so
+/// that the pictures cover what the pane has to get right: several
+/// directories, a file at the repository root, a file git counts no lines in,
+/// a file that changed by no lines at all, a rename, and a path far longer
+/// than the column it has to fit in.
+fn working_tree() -> Vec<WorkingFile> {
+    let counted = |path: &str, added: u64, removed: u64| WorkingFile {
+        path: path.to_owned(),
+        added: Some(added),
+        removed: Some(removed),
+    };
+    vec![
+        WorkingFile {
+            path: "CHANGELOG.md".to_owned(),
+            added: Some(0),
+            removed: Some(0),
+        },
+        counted("catalog/fetch.ts", 149, 12),
+        counted("catalog/etag.ts", 88, 41),
+        counted("catalog/cache/lru.ts", 31, 9),
+        counted("catalog/cache/index.ts", 12, 0),
+        counted("docs/caching.md", 64, 22),
+        counted("docs/adr/0004-etags.md", 34, 1),
+        WorkingFile {
+            path: "docs/diagrams/cache.png".to_owned(),
+            added: None,
+            removed: None,
+        },
+        counted("server/handlers/manifest.ts", 97, 4),
+        counted("server/handlers/health.ts", 3, 19),
+        counted("server/middleware/etag.ts", 41, 37),
+        counted("server/index.ts", 8, 6),
+        counted("tests/etag.test.ts", 122, 8),
+        counted("tests/fetch.test.ts", 76, 14),
+        counted("tests/helpers.ts", 5, 2),
+        counted(
+            "tests/fixtures/recorded_catalog_2026-09-18_manifest_not_modified.json",
+            97,
+            0,
+        ),
+        counted(
+            "tests/fixtures/manifest.json => tests/fixtures/manifest.v2.json",
+            6,
+            3,
+        ),
+        counted("web/components/Catalog.tsx", 54, 31),
+        counted("web/components/Manifest.tsx", 18, 7),
+        counted("web/hooks/useCatalog.ts", 27, 18),
+        counted("web/styles/catalog.css", 14, 9),
+        counted("scripts/seed.ts", 22, 5),
+        counted("scripts/verify.ts", 9, 11),
+    ]
+}
+
 /// What a read of the repository hands the shell part-way through a task: a
 /// branch that is ahead of its upstream, a working tree with more files in it
 /// than the pane can show, and commits this session made, one of them still
@@ -214,24 +268,23 @@ fn read_repository() -> Repo {
     Repo {
         name: "example-app".to_owned(),
         branch: Some("main".to_owned()),
+        read: true,
         ahead: Some(3),
         behind: Some(0),
-        working: (0u64..23)
-            .map(|n| WorkingFile {
-                path: format!("catalog/module-{n:02}.ts"),
-                added: Some(n * 7 + 3),
-                removed: Some(n * 2),
-            })
-            .collect(),
+        working: working_tree(),
         commits: vec![
             Commit {
                 hash: "9f2c1ab".to_owned(),
                 subject: "feat: keep the etag beside the body".to_owned(),
+                // Dated against the same fixed moment the session is read at,
+                // so the ages in the pictures do not move with the clock.
+                at: Some(UNIX_EPOCH + Duration::from_secs(READ_AT - 12 * 60)),
                 pushed: Some(false),
             },
             Commit {
                 hash: "41de07c".to_owned(),
                 subject: "test: a 304 is answered from the cache".to_owned(),
+                at: Some(UNIX_EPOCH + Duration::from_secs(READ_AT - 2 * 3_600)),
                 pushed: Some(true),
             },
         ],

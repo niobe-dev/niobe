@@ -31,7 +31,7 @@ use niobe_core::event::UsageWindow;
 use niobe_core::session::{FileChanges, SessionState, Totals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, Entry, EntryKind, Picker, SelectedProfile, tool_label,
+    Activity, Answer, App, Ask, Entry, EntryKind, Picker, Section, SelectedProfile, tool_label,
 };
 use crate::clock;
 use crate::fx;
@@ -39,6 +39,7 @@ use crate::meter::meter;
 use crate::prices::Prices;
 use crate::text;
 use crate::theme::Theme;
+use crate::tree;
 use crate::usage;
 
 /// Smallest terminal the shell draws in, as (columns, rows).
@@ -51,17 +52,6 @@ pub const WIDE_COLUMNS: u16 = 100;
 
 /// Columns the transcript gives to an entry's glyph.
 const GUTTER: usize = 2;
-
-/// What a changed file's row opens with, and the columns it costs.
-const MARKER: &str = "\u{25b8} ";
-
-/// Files the changes pane lists before it says how many more there are.
-///
-/// Six with their explanations is about half the pane, which leaves the
-/// decisions and the tool mix under them visible. A session that touched more
-/// files than this is one whose whole diff belongs somewhere with room for it,
-/// not in a corner of the shell.
-const FILES_SHOWN: usize = 6;
 
 /// Widest the permission modal is drawn, in columns. Wide enough for a shell
 /// command that has a path in it, and narrow enough to leave the transcript
@@ -634,7 +624,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     .areas(right);
 
     draw_usage(frame, usage, app, theme);
-    draw_changes(frame, changes, app.repo(), app.session(), theme);
+    draw_changes(frame, changes, app, theme);
     draw_parallel(frame, parallel, app, theme);
 }
 
@@ -1424,13 +1414,14 @@ fn draw_parallel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_changes(
-    frame: &mut Frame,
-    area: Rect,
-    repo: &crate::app::Repo,
-    session: &SessionState,
-    theme: &Theme,
-) {
+/// The Changes pane: what the repository says about the working tree, what
+/// this session says it changed, and what it has committed.
+///
+/// The pane scrolls and its sections fold, so the drawing is in two halves:
+/// the rows are built whole, and then the height the pane got decides which of
+/// them the operator sees. Building them all is what lets the pane know how
+/// far it can be scrolled.
+fn draw_changes(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let block = pane("Changes", area, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1438,119 +1429,483 @@ fn draw_changes(
         return;
     }
 
-    let width = usize::from(inner.width);
-    let mut lines: Vec<Line> = Vec::new();
+    let rows = changes_rows(app, usize::from(inner.width), theme);
+    let held = rows.len();
+    app.measured_changes(inner, held, usize::from(inner.height));
+    let at = app.changes_scroll();
+    // Saturating rather than wrapping: a pane scrolled further than a `u16`
+    // can say would come back to the top.
+    let scroll = u16::try_from(at).unwrap_or(u16::MAX);
 
-    // What the session is changing things on. The rest of what the repository
-    // reports — how far ahead of its upstream the branch is, what the working
-    // tree has changed and what this session has committed — reaches the shell
-    // through `Repo` but has no line of its own here yet.
-    if let Some(branch) = &repo.branch {
-        lines.push(
-            Line::from(format!(
-                "⎇ {}",
-                text::truncate(branch, width.saturating_sub(2))
-            ))
-            .style(Style::new().fg(theme.tool)),
-        );
-    }
-
-    lines.push(
-        Line::from(format!("Files ─ {}", session.files().len()))
-            .style(Style::new().fg(theme.title).bold()),
+    frame.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+    // The same treatment the transcript gets. A terminal has no pointer to
+    // hover a pane with and nothing else to hint that one scrolls, so a pane
+    // that scrolled invisibly would be a pane nobody scrolled, and the rows
+    // below the fold might as well not be drawn.
+    draw_scrollbar(
+        frame,
+        inner,
+        area.right().saturating_sub(1),
+        (at, held, usize::from(inner.height)),
+        theme,
     );
-    if session.files().is_empty() {
-        lines.push(Line::from("nothing changed yet").style(Style::new().fg(theme.dim)));
-    } else {
-        for file in session.files().iter().take(FILES_SHOWN) {
-            // One column short of the pane, so the counts do not sit
-            // against the border they are read beside.
-            lines.push(file_line(file, width.saturating_sub(1), theme));
-            if let Some(why) = &file.why {
-                lines.push(
-                    Line::from(format!(
-                        "  “{}”",
-                        text::truncate(why, width.saturating_sub(5))
-                    ))
-                    .style(Style::new().fg(theme.dim).italic()),
-                );
-            }
-        }
-        if let Some(rest) = session
-            .files()
-            .len()
-            .checked_sub(FILES_SHOWN)
-            .filter(|n| *n > 0)
-        {
-            lines.push(Line::from(format!("  and {rest} more")).style(Style::new().fg(theme.dim)));
-        }
-    }
-
-    lines.push(Line::from(""));
-    lines.push(
-        Line::from(format!("Decisions ─ {}", session.decisions().len()))
-            .style(Style::new().fg(theme.title).bold()),
-    );
-    if session.decisions().is_empty() {
-        lines.push(Line::from("none recorded").style(Style::new().fg(theme.dim)));
-    } else {
-        for decision in session.decisions().iter().rev().take(4) {
-            for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(2))
-                .into_iter()
-                .enumerate()
-            {
-                let prefix = if i == 0 { "· " } else { "  " };
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, Style::new().fg(theme.dim)),
-                    Span::styled(wrapped, Style::new().fg(theme.fg)),
-                ]));
-            }
-        }
-    }
-
-    let tools = session.tools();
-    if !tools.by_name.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from("Tools").style(Style::new().fg(theme.title).bold()));
-        let mix = tools
-            .by_name
-            .iter()
-            .map(|(name, count)| format!("{} {count}", crate::app::tool_label(name)))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        for wrapped in text::wrap(&mix, width) {
-            lines.push(Line::from(wrapped).style(Style::new().fg(theme.fg)));
-        }
-    }
-
-    lines.truncate(usize::from(inner.height));
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// One file's row: what changed, and by how much, with the path given whatever
-/// the counts leave.
-fn file_line(file: &FileChanges, width: usize, theme: &Theme) -> Line<'static> {
-    let added = count('+', file.added, file.added_stated());
-    let removed = count('−', file.removed, file.removed_stated());
+/// Every row the pane has, folded sections included as their header alone.
+fn changes_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let repo = app.repo();
+    let session = app.session();
+    let mut rows: Vec<Line> = Vec::new();
 
-    // The counts are what the row is for, so they keep their columns and the
-    // path gives way: a path cut at the front still names the file, while a
-    // count cut anywhere is a different number. One column of gap is kept
-    // whatever the width, so the two never run together into a third figure.
-    let counts = text::width(&added) + 1 + text::width(&removed);
-    let room = width.saturating_sub(text::width(MARKER) + counts + 1);
-    let path = text::truncate_start(&file.path, room);
-    let gap = width
-        .saturating_sub(text::width(MARKER) + counts)
-        .saturating_sub(text::width(&path));
+    // A directory that is not a repository has no branch and no commits, and
+    // sections drawn empty would say it had none rather than that there is no
+    // repository to have any.
+    let in_repository = repo.branch.is_some();
+    if let Some(branch) = &repo.branch {
+        rows.push(branch_row(branch, repo, width, theme));
+    }
+
+    if in_repository {
+        rows.extend(working_tree_rows(app, repo, width, theme));
+        rows.extend(commit_rows(app, repo, width, theme));
+    }
+    rows.extend(session_file_rows(app, session, width, theme));
+    rows.extend(decision_rows(app, session, width, theme));
+    rows.extend(tool_rows(app, session, width, theme));
+    rows
+}
+
+/// `⎇ main  ↑3 ↓1`: the branch, and how far it has drifted from its upstream.
+///
+/// A branch with no upstream carries neither figure: it is not zero commits
+/// ahead of anything, it is ahead of nothing.
+fn branch_row(branch: &str, repo: &crate::app::Repo, width: usize, theme: &Theme) -> Line<'static> {
+    let drift: String = [(repo.ahead, '↑'), (repo.behind, '↓')]
+        .into_iter()
+        .filter_map(|(count, arrow)| match count {
+            Some(0) | None => None,
+            Some(count) => Some(format!(" {arrow}{count}")),
+        })
+        .collect();
 
     Line::from(vec![
-        Span::styled(MARKER, Style::new().fg(theme.dim)),
-        Span::styled(path, Style::new().fg(theme.fg)),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(added, Style::new().fg(theme.add)),
+        Span::styled(
+            format!(
+                "⎇ {}",
+                text::truncate(branch, width.saturating_sub(2 + text::width(&drift)))
+            ),
+            Style::new().fg(theme.tool),
+        ),
+        Span::styled(drift, Style::new().fg(theme.dim)),
+    ])
+}
+
+/// A section's header: the fold marker, its name, and what it summarises.
+///
+/// The marker is the fold's only affordance, so it is drawn whether or not the
+/// section has a key: a section that is folded must say so even when the way
+/// it was folded was the one key the F-key bar names.
+fn section_header(
+    folded: bool,
+    name: &str,
+    summary: Vec<Span<'static>>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let marker = match folded {
+        true => "▸ ",
+        false => "▾ ",
+    };
+    let mut spans = vec![Span::styled(
+        format!("{marker}{name}"),
+        Style::new().fg(theme.title).bold(),
+    )];
+    let room = width.saturating_sub(text::width(marker) + text::width(name) + 2);
+    let said: usize = summary.iter().map(|span| text::width(&span.content)).sum();
+    if said <= room {
+        spans.push(Span::raw("  "));
+        spans.extend(summary);
+    }
+    Line::from(spans)
+}
+
+/// What the repository measured the working tree to have changed.
+///
+/// These are git's figures, exact, about every file in the tree — including
+/// files this session never touched. They are never mixed with the session's
+/// own counts, which are a different claim by a different party and have their
+/// own section below.
+fn working_tree_rows(
+    app: &App,
+    repo: &crate::app::Repo,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let (added, removed) = repo.working.iter().fold((0u64, 0u64), |(a, r), file| {
+        (
+            a.saturating_add(file.added.unwrap_or(0)),
+            r.saturating_add(file.removed.unwrap_or(0)),
+        )
+    });
+    let summary = match repo.read {
+        false => vec![Span::styled("—", Style::new().fg(theme.dim))],
+        true => vec![
+            Span::styled(files_said(repo.working.len()), Style::new().fg(theme.fg)),
+            Span::raw("  "),
+            Span::styled(format!("+{added}"), Style::new().fg(theme.add)),
+            Span::raw(" "),
+            Span::styled(format!("−{removed}"), Style::new().fg(theme.del)),
+        ],
+    };
+
+    let folded = app.folded(Section::WorkingTree);
+    let mut rows = vec![section_header(
+        folded,
+        "Working tree",
+        summary,
+        width,
+        theme,
+    )];
+    if folded {
+        return rows;
+    }
+    // Nobody has looked yet, which is not the repository saying nothing
+    // changed.
+    if !repo.read {
+        rows.push(Line::from("  not read yet").style(Style::new().fg(theme.dim)));
+        return rows;
+    }
+    if repo.working.is_empty() {
+        rows.push(Line::from("  nothing changed yet").style(Style::new().fg(theme.dim)));
+        return rows;
+    }
+
+    for row in tree::grouped(&repo.working) {
+        rows.push(match &row {
+            tree::Row::Dir(_) => Line::from(format!(
+                "  {}",
+                text::truncate_start(row.name(), width.saturating_sub(2))
+            ))
+            .style(Style::new().fg(theme.dim)),
+            tree::Row::File { file, .. } => counted_row(
+                FILE_INDENT,
+                row.name(),
+                &measured('+', file.added),
+                &measured('−', file.removed),
+                width,
+                theme,
+            ),
+        });
+    }
+    rows
+}
+
+/// What this session's own edit tools said they changed.
+///
+/// A floor rather than a measurement: where a call did not say how many lines
+/// it touched the figure carries `≥`, and where none of them did it is an em
+/// dash. The paths are the backend's — absolute where it could not say
+/// otherwise — which is the other reason these rows are not folded into the
+/// working tree's: the two lists do not even name their files the same way.
+fn session_file_rows(
+    app: &App,
+    session: &SessionState,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let files = session.files();
+    // Summed from the per-file fold rather than kept as a second counter, so
+    // the header and the rows under it cannot disagree. A section total is a
+    // floor as soon as any one file's is.
+    let added: u64 = files.iter().fold(0, |a, f| a.saturating_add(f.added));
+    let removed: u64 = files.iter().fold(0, |r, f| r.saturating_add(f.removed));
+    let added_stated = files.iter().all(FileChanges::added_stated);
+    let removed_stated = files.iter().all(FileChanges::removed_stated);
+    let summary = vec![
+        Span::styled(files_said(files.len()), Style::new().fg(theme.fg)),
+        Span::raw("  "),
+        Span::styled(count('+', added, added_stated), Style::new().fg(theme.add)),
         Span::raw(" "),
-        Span::styled(removed, Style::new().fg(theme.del)),
+        Span::styled(
+            count('−', removed, removed_stated),
+            Style::new().fg(theme.del),
+        ),
+    ];
+
+    let folded = app.folded(Section::Edited);
+    let mut rows = vec![section_header(
+        folded,
+        "This session",
+        summary,
+        width,
+        theme,
+    )];
+    if folded || files.is_empty() {
+        return rows;
+    }
+
+    for file in files {
+        rows.push(counted_row(
+            ROW_INDENT,
+            &file.path,
+            &count('+', file.added, file.added_stated()),
+            &count('−', file.removed, file.removed_stated()),
+            width,
+            theme,
+        ));
+        if let Some(why) = &file.why {
+            rows.push(
+                Line::from(format!(
+                    "    “{}”",
+                    text::truncate(why, width.saturating_sub(7))
+                ))
+                .style(Style::new().fg(theme.dim).italic()),
+            );
+        }
+    }
+    rows
+}
+
+/// The commits the session has made, newest first.
+fn commit_rows(
+    app: &App,
+    repo: &crate::app::Repo,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let unknown = repo.commits.iter().any(|commit| commit.pushed.is_none());
+    let unpushed = repo
+        .commits
+        .iter()
+        .filter(|commit| commit.pushed == Some(false))
+        .count();
+    let mut summary = vec![Span::styled(
+        match (repo.read, repo.commits.len()) {
+            (false, _) => "—".to_owned(),
+            (true, 0) => "none this session".to_owned(),
+            (true, n) => format!("{n} this session"),
+        },
+        Style::new().fg(match repo.read {
+            true => theme.fg,
+            false => theme.dim,
+        }),
+    )];
+    if !repo.commits.is_empty() {
+        summary.push(Span::raw("  "));
+        summary.push(Span::styled(
+            // An upstream the repository could not compare against leaves this
+            // not known, and a count would be a guess dressed as a figure.
+            match unknown {
+                true => "unpushed —".to_owned(),
+                false => format!("{unpushed} unpushed"),
+            },
+            Style::new().fg(theme.hot),
+        ));
+    }
+
+    let folded = app.folded(Section::Commits);
+    let mut rows = vec![section_header(folded, "Commits", summary, width, theme)];
+    if folded {
+        return rows;
+    }
+    let ages: Vec<String> = repo
+        .commits
+        .iter()
+        .map(|commit| age_of(commit, app.stamp()))
+        .collect();
+    // One column for every age in the section, so they line up under each
+    // other however the magnitudes differ.
+    let column = ages.iter().map(|age| text::width(age)).max().unwrap_or(0);
+    for (commit, age) in repo.commits.iter().zip(ages) {
+        rows.push(commit_row(commit, &age, column, width, theme));
+    }
+    rows
+}
+
+/// How long ago a commit was made, or an em dash where that cannot be told: a
+/// commit the repository did not date, a shell that has not read its clock
+/// yet, or a commit dated after the moment being drawn against — which is a
+/// clock that moved rather than an age.
+fn age_of(commit: &crate::app::Commit, now: Option<crate::clock::Stamp>) -> String {
+    commit
+        .at
+        .zip(now)
+        .and_then(|(at, now)| now.at().duration_since(at).ok())
+        .map(clock::ago)
+        .unwrap_or_else(|| "—".to_owned())
+}
+
+/// `↑ c4fed15  12m  the subject`: one commit, marked where its upstream has
+/// not got it.
+///
+/// The mark is what says pushed from unpushed, not the colour: the pane has to
+/// read on a terminal whose palette the operator chose, and in a theme where
+/// the warning colour is close to the body's.
+fn commit_row(
+    commit: &crate::app::Commit,
+    age: &str,
+    column: usize,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let (mark, style) = match commit.pushed {
+        Some(false) => ("↑ ", Style::new().fg(theme.hot)),
+        Some(true) => ("  ", Style::new().fg(theme.dim)),
+        None => ("? ", Style::new().fg(theme.dim)),
+    };
+    let age = format!(
+        "{}{age}",
+        " ".repeat(column.saturating_sub(text::width(age)))
+    );
+    let used = text::width(mark) + text::width(&commit.hash) + 2 + text::width(&age) + 2;
+    let subject = text::truncate(&commit.subject, width.saturating_sub(used));
+
+    Line::from(vec![
+        Span::styled(mark, style),
+        Span::styled(commit.hash.clone(), style),
+        Span::raw("  "),
+        Span::styled(age, Style::new().fg(theme.dim)),
+        Span::raw("  "),
+        Span::styled(
+            subject,
+            match commit.pushed {
+                Some(true) => Style::new().fg(theme.dim),
+                Some(false) | None => Style::new().fg(theme.fg),
+            },
+        ),
+    ])
+}
+
+/// The decisions the session recorded, newest first.
+///
+/// Drawn here until there is an Activity pane to draw them in; they are about
+/// the work rather than about the repository, and this is where they have
+/// always been.
+fn decision_rows(
+    app: &App,
+    session: &SessionState,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let folded = app.folded(Section::Decisions);
+    let mut rows = vec![section_header(
+        folded,
+        "Decisions",
+        vec![Span::styled(
+            session.decisions().len().to_string(),
+            Style::new().fg(theme.fg),
+        )],
+        width,
+        theme,
+    )];
+    if folded {
+        return rows;
+    }
+    if session.decisions().is_empty() {
+        rows.push(Line::from("  none recorded").style(Style::new().fg(theme.dim)));
+        return rows;
+    }
+    for decision in session.decisions().iter().rev() {
+        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(4))
+            .into_iter()
+            .enumerate()
+        {
+            let prefix = if i == 0 { "  · " } else { "    " };
+            rows.push(Line::from(vec![
+                Span::styled(prefix, Style::new().fg(theme.dim)),
+                Span::styled(wrapped, Style::new().fg(theme.fg)),
+            ]));
+        }
+    }
+    rows
+}
+
+/// What the session called, and how often. Here for the same reason the
+/// decisions are.
+fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let tools = session.tools();
+    let folded = app.folded(Section::Tools);
+    let mut rows = vec![section_header(
+        folded,
+        "Tools",
+        vec![Span::styled(
+            match tools.finished {
+                1 => "1 call".to_owned(),
+                calls => format!("{calls} calls"),
+            },
+            Style::new().fg(theme.fg),
+        )],
+        width,
+        theme,
+    )];
+    if folded || tools.by_name.is_empty() {
+        return rows;
+    }
+    let mix = tools
+        .by_name
+        .iter()
+        .map(|(name, count)| format!("{} {count}", crate::app::tool_label(name)))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    for wrapped in text::wrap(&mix, width.saturating_sub(2)) {
+        rows.push(Line::from(format!("  {wrapped}")).style(Style::new().fg(theme.fg)));
+    }
+    rows
+}
+
+/// `23 files`, `1 file`, `no files`.
+fn files_said(files: usize) -> String {
+    match files {
+        0 => "no files".to_owned(),
+        1 => "1 file".to_owned(),
+        files => format!("{files} files"),
+    }
+}
+
+/// One side of a file's counts as the repository reported them.
+///
+/// Exact, because git counts every line it reports: `+0` is a file that
+/// changed by no lines and is still a changed file. The em dash is kept for
+/// the one case git declines to count — a binary file, where no number exists
+/// rather than a number nobody read.
+fn measured(sign: char, lines: Option<u64>) -> String {
+    match lines {
+        Some(lines) => format!("{sign}{lines}"),
+        None => "—".to_owned(),
+    }
+}
+
+/// What a row under a section header is indented by, and what a file under a
+/// directory row is indented by again.
+const ROW_INDENT: &str = "  ";
+const FILE_INDENT: &str = "    ";
+
+/// A row whose counts keep their columns and whose name gives way.
+///
+/// The name loses its front rather than its tail: a path cut at the front
+/// still names the file, and a count cut anywhere is a different number.
+fn counted_row(
+    indent: &'static str,
+    name: &str,
+    added: &str,
+    removed: &str,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let counts = text::width(added) + 1 + text::width(removed);
+    let room = width.saturating_sub(text::width(indent) + counts + 1);
+    let name = text::truncate_start(name, room);
+    let gap = width
+        .saturating_sub(text::width(indent) + counts)
+        .saturating_sub(text::width(&name));
+
+    Line::from(vec![
+        Span::raw(indent),
+        Span::styled(name, Style::new().fg(theme.fg)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(added.to_owned(), Style::new().fg(theme.add)),
+        Span::raw(" "),
+        Span::styled(removed.to_owned(), Style::new().fg(theme.del)),
     ])
 }
 
@@ -2045,13 +2400,20 @@ mod tests {
         }
     }
 
-    /// What one row reads as, counts and all.
+    /// What one row of the session's own files reads as, counts and all.
     fn row(file: &FileChanges, width: usize) -> String {
-        file_line(file, width, &Theme::default())
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
+        counted_row(
+            ROW_INDENT,
+            &file.path,
+            &count('+', file.added, file.added_stated()),
+            &count('−', file.removed, file.removed_stated()),
+            width,
+            &Theme::default(),
+        )
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
     }
 
     #[test]
@@ -2075,15 +2437,15 @@ mod tests {
 
         assert_eq!(
             row(&state.files()[0], 40),
-            "▸ catalog/fetch.ts                +38 −9"
+            "  catalog/fetch.ts                +38 −9"
         );
         assert_eq!(
             row(&state.files()[1], 40),
-            "▸ notes.md                          +1 —"
+            "  notes.md                          +1 —"
         );
         assert_eq!(
             row(&state.files()[2], 40),
-            "▸ run.ipynb                          — —"
+            "  run.ipynb                          — —"
         );
     }
 
@@ -2102,6 +2464,48 @@ mod tests {
         assert!(row.ends_with(" +120 −44"), "{row:?}");
         assert!(row.contains("translate.rs"), "{row:?}");
         assert_eq!(text::width(&row), 32, "{row:?}");
+    }
+
+    /// The pane has to read on a sixteen-colour terminal and in a theme whose
+    /// warning colour is close to its body colour, so what says pushed from
+    /// unpushed cannot be the colour alone.
+    #[test]
+    fn a_commit_the_upstream_has_not_got_is_marked_and_not_only_coloured() {
+        let theme = Theme::default();
+        let commit = |pushed| crate::app::Commit {
+            hash: "c4fed15".to_owned(),
+            subject: "keep the etag beside the body".to_owned(),
+            at: None,
+            pushed,
+        };
+        let text = |pushed| -> String {
+            commit_row(&commit(pushed), "12m", 3, 60, &theme)
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+
+        assert!(
+            text(Some(false)).starts_with("↑ "),
+            "{:?}",
+            text(Some(false))
+        );
+        assert!(text(Some(true)).starts_with("  "), "{:?}", text(Some(true)));
+        assert!(
+            text(None).starts_with("? "),
+            "an upstream git would not compare against is not a commit that is pushed"
+        );
+    }
+
+    /// `+0 −0` is a file the repository counted and found unchanged by any
+    /// line; the em dash is a file it counted no lines in at all. Reading one
+    /// as the other is the difference between a measurement and a gap.
+    #[test]
+    fn a_file_that_changed_by_no_lines_is_not_the_same_as_one_with_no_count() {
+        assert_eq!(measured('+', Some(0)), "+0");
+        assert_eq!(measured('−', Some(12)), "−12");
+        assert_eq!(measured('+', None), "—");
     }
 
     #[test]

@@ -11,13 +11,13 @@
 ║   Caching the etag beside the body so a 304 can be answered from the LRU.  █ ╚═══════════════════════════════════════╝
 ║                                                                            █ ╔═══════════════ Changes ═══════════════╗
 ║ ⚙ Edit  catalog/fetch.ts · 640 B out                                       █ ║                                       ║
-║                                                                            █ ║ ⎇ main                                ║
-║ ◆ claude                                                                   █ ║ Files ─ 3                             ║
-║   Rewriting the 304 test around the cached body.                           █ ║ ▸ catalog/fetch.ts            +38 −9  ║
-║                                                                            █ ║   “Caching the etag beside the bod…”  ║
-║ ◆ claude                                                                   █ ║ ▸ catalog/etag.test.ts         +24 —  ║
-║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║   “Rewriting the 304 test around t…”  ║
-║                                                                            █ ║ ▸ docs/notebooks/catalog.ipynb   — —  ║
+║                                                                            █ ║ ⎇ main ↑3                             █
+║ ◆ claude                                                                   █ ║ ▾ Working tree  23 files  +977 −259   ║
+║   Rewriting the 304 test around the cached body.                           █ ║   .                                   ║
+║                                                                            █ ║     CHANGELOG.md                +0 −0 ║
+║ ◆ claude                                                                   █ ║   catalog/                            ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║     fetch.ts                 +149 −12 ║
+║                                                                            █ ║     etag.ts                   +88 −41 ║
 ║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ╚═══════════════════════════════════════╝
 ║                                                                            █ ╔════════ Parallel ─ 1 running ═════════╗
 ║ ◆ claude                                                                   █ ║                                       ║

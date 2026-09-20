@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use common::{MARKDOWN_REPLY, running_session, screen};
 use niobe_core::event::Event;
-use niobe_tui::app::App;
+use niobe_tui::app::{App, WorkingFile};
 
 /// A frame is drawn inside a 60 Hz budget at the largest supported snapshot
 /// size, so a resize redraws without a visible stutter. The test binary is a
@@ -110,4 +110,36 @@ fn median_frame(app: &mut App, sizes: &[(u16, u16)]) -> Duration {
         .get(FRAMES / 2)
         .copied()
         .expect("FRAMES frames were timed")
+}
+
+/// A working tree far larger than the pane can show: the Changes pane builds
+/// every row it holds on every frame, because that is what tells it how far it
+/// can be scrolled. A big refactor is the case that makes that expensive, so
+/// it is the case that is timed.
+const BIG_WORKING_TREE: usize = 500;
+
+#[test]
+fn a_large_working_tree_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    let mut repo = app.repo().clone();
+    repo.working = (0..BIG_WORKING_TREE)
+        .map(|n| WorkingFile {
+            path: format!("crates/niobe-{}/src/module_{n:03}.rs", n % 7),
+            added: Some(n as u64),
+            removed: Some(n as u64 / 3),
+        })
+        .collect();
+    app.set_repo(repo);
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame with {BIG_WORKING_TREE} changed files at 200x60 took \
+         {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
 }

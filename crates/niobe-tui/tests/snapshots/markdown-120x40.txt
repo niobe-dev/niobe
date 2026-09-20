@@ -14,17 +14,17 @@
 ║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ╚═══════════════════════════════════════╝
 ║   304 path asserts a body that is no longer sent.                          █ ╔═══════════════ Changes ═══════════════╗
 ║                                                                            █ ║                                       ║
-║ > you                                                                      █ ║ ⎇ main                                ║
-║   What changed?                                                            █ ║ Files ─ 3                             ║
-║                                                                            █ ║ ▸ catalog/fetch.ts            +38 −9  ║
-║ ◆ claude                                                                   █ ║   “Caching the etag beside the bod…”  ║
-║   What changed                                                             █ ║ ▸ catalog/etag.test.ts         +24 —  ║
-║                                                                            █ ║   “Rewriting the 304 test around t…”  ║
-║   How it works: the fetcher keeps the etag beside the body, so a 304 is    █ ║ ▸ docs/notebooks/catalog.ipynb   — —  ║
-║   answered from the LRU without reading the body again.                    █ ║   “The notebook that demonstrates …”  ║
-║   • catalog/fetch.ts keeps the etag                                        █ ║                                       ║
-║     • and sends If-None-Match                                              █ ║ Decisions ─ 1                         ║
-║   • etag.test.ts asserts the cached body                                   █ ║ · Reuse the existing LRU instead of a ║
+║ > you                                                                      █ ║ ⎇ main ↑3                             █
+║   What changed?                                                            █ ║ ▾ Working tree  23 files  +977 −259   █
+║                                                                            █ ║   .                                   █
+║ ◆ claude                                                                   █ ║     CHANGELOG.md                +0 −0 ║
+║   What changed                                                             █ ║   catalog/                            ║
+║                                                                            █ ║     fetch.ts                 +149 −12 ║
+║   How it works: the fetcher keeps the etag beside the body, so a 304 is    █ ║     etag.ts                   +88 −41 ║
+║   answered from the LRU without reading the body again.                    █ ║     cache/lru.ts               +31 −9 ║
+║   • catalog/fetch.ts keeps the etag                                        █ ║     cache/index.ts             +12 −0 ║
+║     • and sends If-None-Match                                              █ ║   docs/                               ║
+║   • etag.test.ts asserts the cached body                                   █ ║     caching.md                +64 −22 ║
 ║                                                                            █ ╚═══════════════════════════════════════╝
 ║   file         │ lines                                                     █ ╔════════ Parallel ─ 1 running ═════════╗
 ║   ─────────────┼──────                                                     █ ║                                       ║

@@ -15,7 +15,7 @@
 //! are neither queued nor shown again after a restart.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::event::{
     AgentId, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome, UsageWindow,
@@ -43,6 +43,14 @@ pub struct Repo {
     pub name: String,
     /// The checked-out branch, where there is one.
     pub branch: Option<String>,
+    /// Whether a read of the repository has finished.
+    ///
+    /// Until one has, the working tree and the commits below are empty because
+    /// nobody has looked, which is not the same as the repository having
+    /// nothing to report — and a `+0 −0` standing in for the difference would
+    /// be the pane's first invented figure. The name and the branch are read
+    /// without a subprocess and are there from the start.
+    pub read: bool,
     /// Commits on the branch that its upstream does not have. `None` where the
     /// branch has no upstream to be ahead of: a branch nobody pushes is not
     /// zero commits ahead, it is not ahead of anything.
@@ -82,11 +90,63 @@ pub struct Commit {
     pub hash: String,
     /// The first line of the message.
     pub subject: String,
+    /// When it was committed, where the repository dated it. The pane draws
+    /// how long ago that was; a commit with no date carries no age rather than
+    /// one counted from the moment it was read.
+    pub at: Option<SystemTime>,
     /// Whether the branch's upstream already has it. A branch with no upstream
     /// has nowhere to have pushed it, so nothing there is pushed; `None` is a
     /// branch that names an upstream the repository cannot find, where the
     /// answer is not known rather than no.
     pub pushed: Option<bool>,
+}
+
+/// A section of the Changes pane, which folds on its own.
+///
+/// Each names one claim about the work, and two of them are claims about the
+/// same files made by different parties — which is why they are never one
+/// section: [`Section::WorkingTree`] is what the repository measured, and
+/// [`Section::Edited`] is what this session's own edit tools reported, a floor
+/// where a tool did not say how much it changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Section {
+    /// What the repository says the working tree has changed.
+    WorkingTree,
+    /// The commits made since the session started.
+    Commits,
+    /// What this session's edit tools said they changed.
+    Edited,
+    /// The decisions the session recorded.
+    Decisions,
+    /// The tools it called, and how often.
+    Tools,
+}
+
+impl Section {
+    /// Every section, in the order the pane draws them.
+    pub const ALL: [Section; 5] = [
+        Section::WorkingTree,
+        Section::Commits,
+        Section::Edited,
+        Section::Decisions,
+        Section::Tools,
+    ];
+}
+
+/// The Changes pane's own scroll position and which of its sections are
+/// folded.
+///
+/// The pane scrolls independently of the transcript, so it keeps its own
+/// offset and its own measurements; `area` is where it was drawn last frame,
+/// which is how a wheel notch can tell whether the pointer was over this pane
+/// or over the transcript.
+#[derive(Debug, Clone, Default)]
+struct Changes {
+    folded: std::collections::BTreeSet<Section>,
+    scroll: usize,
+    content: usize,
+    viewport: usize,
+    area: Option<ratatui::layout::Rect>,
 }
 
 /// The profile the operator selected, for the menu row to name until a
@@ -277,6 +337,7 @@ pub struct Pulse {
 #[derive(Debug)]
 pub struct App {
     repo: Repo,
+    changes: Changes,
     profile: Option<SelectedProfile>,
     theme: Theme,
     session: SessionState,
@@ -378,6 +439,7 @@ impl App {
 
         Self {
             repo,
+            changes: Changes::default(),
             profile: None,
             theme,
             session: SessionState::new(),
@@ -1082,6 +1144,54 @@ impl App {
         &self.repo
     }
 
+    /// Whether `section` of the Changes pane is folded away.
+    pub fn folded(&self, section: Section) -> bool {
+        self.changes.folded.contains(&section)
+    }
+
+    /// Folds `section` away, or opens it again.
+    pub fn fold(&mut self, section: Section) {
+        if !self.changes.folded.remove(&section) {
+            self.changes.folded.insert(section);
+        }
+        // What is above the viewport changed height, so an offset measured
+        // against the old height would leave the pane scrolled past its end
+        // until the next wheel notch.
+        self.changes.scroll = 0;
+    }
+
+    /// How far the Changes pane is scrolled, in rows.
+    pub fn changes_scroll(&self) -> usize {
+        self.changes.scroll.min(self.max_changes_scroll())
+    }
+
+    /// What the last frame drew the Changes pane as: where it is, how many
+    /// rows it had to show and how many it could.
+    ///
+    /// Told by the draw, because the pane's height is the layout's answer and
+    /// its content's height is the drawing's. Kept so that the wheel can be
+    /// given to whichever pane the pointer is over.
+    pub fn measured_changes(&mut self, area: ratatui::layout::Rect, content: usize, rows: usize) {
+        self.changes.area = Some(area);
+        self.changes.content = content;
+        self.changes.viewport = rows;
+        self.changes.scroll = self.changes.scroll.min(self.max_changes_scroll());
+    }
+
+    fn max_changes_scroll(&self) -> usize {
+        self.changes.content.saturating_sub(self.changes.viewport)
+    }
+
+    /// Scrolls the Changes pane, never past either end.
+    pub fn scroll_changes(&mut self, lines: isize) {
+        let max = self.max_changes_scroll();
+        let at = self.changes.scroll.min(max);
+        self.changes.scroll = match lines < 0 {
+            true => at.saturating_sub(lines.unsigned_abs()),
+            false => at.saturating_add(lines.unsigned_abs()).min(max),
+        };
+    }
+
     /// Replaces what the shell knows about the repository with a fresh read.
     ///
     /// Called from the event loop with whatever [`crate::watch::Watch`] has
@@ -1235,9 +1345,20 @@ impl App {
     pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::MouseEventKind;
 
-        match mouse.kind {
-            MouseEventKind::ScrollUp => self.scroll_up(Self::WHEEL_LINES),
-            MouseEventKind::ScrollDown => self.scroll_down(Self::WHEEL_LINES),
+        // The wheel goes to whatever the pointer is over. Two panes scroll now,
+        // and a notch that always moved the transcript would move the thing the
+        // operator was not looking at.
+        let over_changes = self
+            .changes
+            .area
+            .is_some_and(|area| area.contains((mouse.column, mouse.row).into()));
+        let lines = Self::WHEEL_LINES;
+
+        match (mouse.kind, over_changes) {
+            (MouseEventKind::ScrollUp, true) => self.scroll_changes(-(lines as isize)),
+            (MouseEventKind::ScrollDown, true) => self.scroll_changes(lines as isize),
+            (MouseEventKind::ScrollUp, false) => self.scroll_up(lines),
+            (MouseEventKind::ScrollDown, false) => self.scroll_down(lines),
             _ => {}
         }
     }
@@ -1297,6 +1418,11 @@ impl App {
             // question it is pressed for is when the windows come back, and
             // the session fold knows that.
             (KeyCode::F(5), _) => self.hint = Some(self.cost_hint(self.read_at())),
+            // The two sections the F-key bar already names. The bar has no key
+            // for the others, and inventing one here would be a keyboard the
+            // bar does not describe.
+            (KeyCode::F(6), _) => self.fold(Section::WorkingTree),
+            (KeyCode::F(7), _) => self.fold(Section::Tools),
             (KeyCode::F(8), _) => self.pick_model(),
             (KeyCode::F(9), _) => self.cycle_theme(),
             (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
@@ -1588,8 +1714,6 @@ fn fkey_hint(n: u8) -> &'static str {
         }
         3 => "F3 Diff — the diff viewer is not implemented yet",
         4 => "F4 Undo — checkpoints and rewind are not implemented yet",
-        6 => "F6 Files — file attribution is not implemented yet",
-        7 => "F7 Tools — tool detail is not implemented yet",
         // F8 opens the model list and F9 changes the theme rather than saying
         // anything, so nothing here names them.
         _ => "F10 Quit",
@@ -1658,6 +1782,7 @@ mod tests {
     use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindows};
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
     use ratatui_textarea::Key;
     use std::time::{Duration, Instant};
 
@@ -1667,6 +1792,71 @@ mod tests {
             branch: Some("main".to_owned()),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn a_section_folds_and_opens_again() {
+        let mut app = app();
+
+        assert!(Section::ALL.iter().all(|s| !app.folded(*s)));
+
+        app.fold(Section::Commits);
+        assert!(app.folded(Section::Commits));
+        assert!(!app.folded(Section::WorkingTree), "one section, not all");
+
+        app.fold(Section::Commits);
+        assert!(!app.folded(Section::Commits));
+    }
+
+    #[test]
+    fn folding_a_section_puts_the_pane_back_at_its_top() {
+        let mut app = app();
+        app.measured_changes(Rect::new(0, 0, 40, 10), 60, 10);
+        app.scroll_changes(20);
+        assert_eq!(app.changes_scroll(), 20);
+
+        app.fold(Section::WorkingTree);
+
+        assert_eq!(
+            app.changes_scroll(),
+            0,
+            "an offset measured against the old height scrolls past the new end"
+        );
+    }
+
+    #[test]
+    fn the_changes_pane_never_scrolls_past_either_end() {
+        let mut app = app();
+        app.measured_changes(Rect::new(0, 0, 40, 10), 25, 10);
+
+        app.scroll_changes(100);
+        assert_eq!(app.changes_scroll(), 15, "content 25 in a viewport of 10");
+
+        app.scroll_changes(-100);
+        assert_eq!(app.changes_scroll(), 0);
+    }
+
+    #[test]
+    fn a_pane_taller_than_what_it_holds_does_not_scroll_at_all() {
+        let mut app = app();
+        app.measured_changes(Rect::new(0, 0, 40, 30), 12, 30);
+
+        app.scroll_changes(5);
+
+        assert_eq!(app.changes_scroll(), 0);
+    }
+
+    #[test]
+    fn a_pane_that_shrank_under_the_scroll_comes_back_to_what_it_holds() {
+        let mut app = app();
+        app.measured_changes(Rect::new(0, 0, 40, 10), 60, 10);
+        app.scroll_changes(50);
+        assert_eq!(app.changes_scroll(), 50);
+
+        // The next frame is a smaller session, or a folded section.
+        app.measured_changes(Rect::new(0, 0, 40, 10), 20, 10);
+
+        assert_eq!(app.changes_scroll(), 10);
     }
 
     #[test]

@@ -16,10 +16,10 @@
 ║   Rewriting the 304 test around the cached body.                           █ ╚═══════════════════════════════════════╝
 ║                                                                            █ ╔═══════════════ Changes ═══════════════╗
 ║ ◆ claude                                                                   █ ║                                       ║
-║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║ ⎇ main                                ║
-║                                                                            █ ║ Files ─ 3                             ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ║ ▸ catalog/fetch.ts            +38 −9  ║
-║                                                                            █ ║   “Caching the etag beside the bod…”  ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║ ⎇ main ↑3                             █
+║                                                                            █ ║ ▾ Working tree  23 files  +977 −259   ║
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ║   .                                   ║
+║                                                                            █ ║     CHANGELOG.md                +0 −0 ║
 ║ ◆ claude                                                                   █ ╚═══════════════════════════════════════╝
 ║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ╔════════ Parallel ─ 1 running ═════════╗
 ║   304 path asserts a body that is no longer sent.                          █ ║                                       ║

@@ -37,12 +37,13 @@ pub mod run;
 pub mod terminal;
 mod text;
 pub mod theme;
+mod tree;
 pub mod ui;
 pub mod usage;
 pub mod watch;
 
 pub use app::{
-    Answer, App, Ask, Commit, Entry, EntryKind, Picker, Repo, SelectedProfile, WorkingFile,
+    Answer, App, Ask, Commit, Entry, EntryKind, Picker, Repo, Section, SelectedProfile, WorkingFile,
 };
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use journal::{Journal, JournalError, Unrecorded};

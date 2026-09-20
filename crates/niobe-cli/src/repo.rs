@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use niobe_store::Store;
 use niobe_tui::app::{Commit, Repo, WorkingFile};
@@ -282,10 +282,18 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
     let listed = match since {
         Since::Nothing => Vec::new(),
         Since::Everything if status.head.is_none() => Vec::new(),
-        Since::Everything => commits(&git(root, &["log", "-z", "--format=%h%x00%s", "HEAD"])?),
+        Since::Everything => commits(&git(
+            root,
+            &["log", "-z", "--format=%h%x00%s%x00%ct", "HEAD"],
+        )?),
         Since::Commit(oid) => commits(&git(
             root,
-            &["log", "-z", "--format=%h%x00%s", &format!("{oid}..HEAD")],
+            &[
+                "log",
+                "-z",
+                "--format=%h%x00%s%x00%ct",
+                &format!("{oid}..HEAD"),
+            ],
         )?),
     };
 
@@ -294,6 +302,7 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
         repo: Repo {
             name: name.to_owned(),
             branch: status.branch,
+            read: true,
             ahead: status.ahead,
             behind: status.behind,
             working,
@@ -437,17 +446,28 @@ fn working_tree(numstat: &str) -> Vec<WorkingFile> {
     files
 }
 
-/// Reads `git log -z --format=%h%x00%s`, newest first: `-z` separates one
-/// commit from the next with a NUL, so a subject with a newline in it cannot
-/// be read as two commits.
+/// Reads `git log -z --format=%h%x00%s%x00%ct`, newest first: `-z` separates
+/// one commit from the next with a NUL, so a subject with a newline in it
+/// cannot be read as two commits.
+///
+/// The date is `%ct`, the commit date in seconds since the epoch, which is
+/// what the pane draws an age from. A record whose date will not parse keeps
+/// its hash and subject and loses only the age: a commit dated from the moment
+/// it was read would be a figure about this read rather than about the commit.
 fn commits(log: &str) -> Vec<Commit> {
     let mut fields = log.split('\0').filter(|field| !field.is_empty());
     let mut commits = Vec::new();
 
-    while let (Some(hash), Some(subject)) = (fields.next(), fields.next()) {
+    while let (Some(hash), Some(subject), Some(at)) = (fields.next(), fields.next(), fields.next())
+    {
         commits.push(Commit {
             hash: hash.to_owned(),
             subject: subject.to_owned(),
+            at: at
+                .trim()
+                .parse()
+                .ok()
+                .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds)),
             // Filled in for all of them by `pushed`: it can take one more read
             // of the repository to know, and this one has none.
             pushed: None,
@@ -584,7 +604,9 @@ mod tests {
 
     #[test]
     fn a_log_is_read_as_a_hash_and_the_first_line_of_its_message() {
-        let made = commits("f92f375\0chore: release 0.7.0\0d432ed6\0feat: split the tokens\0");
+        let made = commits(
+            "f92f375\0chore: release 0.7.0\x001789939986\0d432ed6\0feat: split the tokens\x001789939158\0",
+        );
 
         assert_eq!(
             made,
@@ -592,15 +614,29 @@ mod tests {
                 Commit {
                     hash: "f92f375".to_owned(),
                     subject: "chore: release 0.7.0".to_owned(),
+                    at: Some(UNIX_EPOCH + Duration::from_secs(1_789_939_986)),
                     pushed: None,
                 },
                 Commit {
                     hash: "d432ed6".to_owned(),
                     subject: "feat: split the tokens".to_owned(),
+                    at: Some(UNIX_EPOCH + Duration::from_secs(1_789_939_158)),
                     pushed: None,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_commit_whose_date_will_not_parse_keeps_everything_else() {
+        let made = commits("f92f375\0chore: release 0.7.0\0not a date\0");
+
+        assert_eq!(made.len(), 1);
+        assert_eq!(
+            made[0].at, None,
+            "an age counted from the moment it was read would be about the read"
+        );
+        assert_eq!(made[0].subject, "chore: release 0.7.0");
     }
 
     /// A repository with one commit and an origin it has been pushed to, so

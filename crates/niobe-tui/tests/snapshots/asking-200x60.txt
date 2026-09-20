@@ -14,28 +14,28 @@
 ║                                                                                                                                ║ ╚═══════════════════════════════════════════════════════════════════╝
 ║ ⚙ Edit  catalog/fetch.ts · 640 B out                                                                                           ║ ╔═════════════════════════════ Changes ═════════════════════════════╗
 ║                                                                                                                                ║ ║                                                                   ║
-║ ◆ claude                                                                                                                       ║ ║ ⎇ main                                                            ║
-║   Rewriting the 304 test around the cached body.                                                                               ║ ║ Files ─ 3                                                         ║
-║                                                                                                                                ║ ║ ▸ catalog/fetch.ts                                        +38 −9  ║
-║ ◆ claude                                                                                                                       ║ ║   “Caching the etag beside the body so a 304 can be answered f…”  ║
-║   The notebook that demonstrates the fetcher needs the new call shape.                                                         ║ ║ ▸ catalog/etag.test.ts                                     +24 —  ║
-║                                                                                                                                ║ ║   “Rewriting the 304 test around the cached body.”                ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                ║ ║ ▸ docs/notebooks/catalog.ipynb                               — —  ║
-║                                                                                                                                ║ ║   “The notebook that demonstrates the fetcher needs the new ca…”  ║
-║ ◆ claude                                                      ╔═════════════════════════════ Permission ═════════════════════════════╗                                                               ║
-║   Etags cached in the LRU; 304s short-circuit. One test still ║                                                                      ║isions ─ 1                                                     ║
-║                                                               ║  Read wants to run                                                   ║euse the existing LRU instead of a new Map — avoids a second   ║
-║                                                               ║  /repo/notes.txt                                                     ║viction policy.                                                ║
-║                                                               ║                                                                      ║                                                               ║
-║                                                               ║  {"file_path":"/repo/notes.txt"}                                     ║ls                                                             ║
-║                                                               ║                                                                      ║h 1 · Edit 1 · Read 1                                          ║
-║                                                               ║  Pin this saves Read(/repo/notes.txt)                                ║                                                               ║
-║                                                               ║                                                                      ║                                                               ║
-║                                                               ║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║                                                               ║
-║                                                               ║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║                                                               ║
-║                                                               ╚═════════════════════ the turn is waiting on you ═════════════════════╝                                                               ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
+║ ◆ claude                                                                                                                       ║ ║ ⎇ main ↑3                                                         █
+║   Rewriting the 304 test around the cached body.                                                                               ║ ║ ▾ Working tree  23 files  +977 −259                               █
+║                                                                                                                                ║ ║   .                                                               █
+║ ◆ claude                                                                                                                       ║ ║     CHANGELOG.md                                            +0 −0 █
+║   The notebook that demonstrates the fetcher needs the new call shape.                                                         ║ ║   catalog/                                                        █
+║                                                                                                                                ║ ║     fetch.ts                                             +149 −12 █
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                ║ ║     etag.ts                                               +88 −41 █
+║                                                                                                                                ║ ║     cache/lru.ts                                           +31 −9 █
+║ ◆ claude                                                      ╔═════════════════════════════ Permission ═════════════════════════════╗ cache/index.ts                                         +12 −0 █
+║   Etags cached in the LRU; 304s short-circuit. One test still ║                                                                      ║ocs/                                                           █
+║                                                               ║  Read wants to run                                                   ║ caching.md                                            +64 −22 █
+║                                                               ║  /repo/notes.txt                                                     ║ adr/0004-etags.md                                      +34 −1 ║
+║                                                               ║                                                                      ║ diagrams/cache.png                                        — — ║
+║                                                               ║  {"file_path":"/repo/notes.txt"}                                     ║erver/                                                         ║
+║                                                               ║                                                                      ║ handlers/manifest.ts                                   +97 −4 ║
+║                                                               ║  Pin this saves Read(/repo/notes.txt)                                ║ handlers/health.ts                                     +3 −19 ║
+║                                                               ║                                                                      ║ middleware/etag.ts                                    +41 −37 ║
+║                                                               ║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║ index.ts                                                +8 −6 ║
+║                                                               ║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║ests/                                                          ║
+║                                                               ╚═════════════════════ the turn is waiting on you ═════════════════════╝ etag.test.ts                                          +122 −8 ║
+║                                                                                                                                ║ ║     fetch.test.ts                                         +76 −14 ║
+║                                                                                                                                ║ ║     helpers.ts                                              +5 −2 ║
 ║                                                                                                                                ║ ╚═══════════════════════════════════════════════════════════════════╝
 ║                                                                                                                                ║ ╔══════════════════════ Parallel ─ 1 running ═══════════════════════╗
 ║                                                                                                                                ║ ║                                                                   ║

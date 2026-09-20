@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 use common::{paint, running_session, screen, session_with_a_markdown_reply, unmetered_session};
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
-use niobe_tui::app::{App, Repo, SelectedProfile};
+use niobe_tui::app::{App, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, NEO};
 
 /// The same session, stopped on a permission prompt it is waiting on.
@@ -887,5 +887,108 @@ fn no_pane_draws_its_text_against_its_border() {
             under.chars().all(|c| c == '║' || c == ' '),
             "the row under the pane titles at {width}x{height} is not blank: {under:?}"
         );
+    }
+}
+
+/// A folded section is its header and nothing else, and what was under it
+/// gives its rows back to the sections below.
+///
+/// The marker is what says so: `▸` closed against `▾` open, which reads
+/// without colour and on a terminal that draws neither in bold.
+#[test]
+fn the_changes_pane_folds_a_section_away() {
+    let mut app = running_session();
+    app.fold(Section::WorkingTree);
+    let frame = screen(&mut app, 200, 60);
+
+    assert_snapshot("changes-folded-200x60", &frame);
+    assert!(
+        frame.contains("▸ Working tree"),
+        "a folded section still has to say that it is folded"
+    );
+    assert!(
+        !frame.contains("cache/lru.ts"),
+        "the files are folded away, not merely scrolled past"
+    );
+    assert!(
+        frame.contains("▾ Commits"),
+        "the sections below take the rows the folded one gave back"
+    );
+}
+
+/// The pane scrolls rather than truncating: the commits and what the session
+/// itself reported are below twenty-three files, and they are reachable.
+#[test]
+fn the_changes_pane_scrolls_to_what_is_below_the_files() {
+    let mut app = running_session();
+    // Draw once so the pane knows how tall it is and how much it holds; the
+    // event loop has always drawn before a wheel notch can arrive.
+    let _ = screen(&mut app, 200, 60);
+    app.scroll_changes(24);
+    let frame = screen(&mut app, 200, 60);
+
+    assert_snapshot("changes-scrolled-200x60", &frame);
+    assert!(
+        frame.contains("▾ Commits"),
+        "the commits section is what the pane was scrolled to"
+    );
+    assert!(
+        frame.contains("9f2c1ab"),
+        "a commit the session made is drawn with its short hash"
+    );
+}
+
+/// A directory that is not a repository has no branch and no commits, and the
+/// pane says nothing about either rather than drawing them empty: a `Commits`
+/// section reading `none this session` would be a claim about a repository
+/// that is not there.
+#[test]
+fn a_session_outside_a_repository_draws_no_branch_and_no_commits() {
+    let mut app = App::new(Repo {
+        name: "scratch".to_owned(),
+        branch: None,
+        ..Repo::default()
+    });
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(!frame.contains('⎇'), "there is no branch to name");
+    assert!(!frame.contains("Commits"), "{frame}");
+    assert!(!frame.contains("Working tree"), "{frame}");
+    assert!(
+        frame.contains("This session"),
+        "what the session itself changed is not the repository's to report"
+    );
+}
+
+/// The wheel goes to whatever the pointer is over. Two panes scroll, and a
+/// notch over one of them must not move the other.
+#[test]
+fn a_wheel_notch_over_the_changes_pane_leaves_the_transcript_where_it_was() {
+    let mut app = session_with_a_markdown_reply();
+    let _ = screen(&mut app, 200, 60);
+    app.scroll_to_head();
+    let transcript = app.scroll();
+
+    // Inside the Changes pane: the right-hand column, a third of the way down.
+    app.on_mouse(wheel_at(170, 25));
+
+    assert_eq!(
+        app.scroll(),
+        transcript,
+        "a notch over the Changes pane moved the transcript"
+    );
+    assert!(
+        app.changes_scroll() > 0,
+        "and it did not move the pane it was over"
+    );
+}
+
+/// One notch of the wheel, at a point on the screen.
+fn wheel_at(column: u16, row: u16) -> ratatui::crossterm::event::MouseEvent {
+    ratatui::crossterm::event::MouseEvent {
+        kind: ratatui::crossterm::event::MouseEventKind::ScrollDown,
+        column,
+        row,
+        modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
     }
 }

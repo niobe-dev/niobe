@@ -9,13 +9,13 @@
 ║   What the agent did, decided and touched, what it is doing now            ║ ╔═══════════════ Changes ═══════════════╗
 ║   and what it cost, visible while it happens and never a guess.            ║ ║                                       ║
 ║   You stay on the loop instead of in it.                                   ║ ║ ⎇ main                                ║
-║                                                                            ║ ║ Files ─ 0                             ║
-║   No backend attached. `niobe profiles` shows what is defined.             ║ ║ nothing changed yet                   ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║ Decisions ─ 0                         ║
-║                                                                            ║ ║ none recorded                         ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║                                       ║
+║                                                                            ║ ║ ▾ Working tree  —                     ║
+║   No backend attached. `niobe profiles` shows what is defined.             ║ ║   not read yet                        ║
+║                                                                            ║ ║ ▾ Commits  —                          ║
+║                                                                            ║ ║ ▾ This session  no files  +0 −0       ║
+║                                                                            ║ ║ ▾ Decisions  0                        ║
+║                                                                            ║ ║   none recorded                       ║
+║                                                                            ║ ║ ▾ Tools  0 calls                      ║
 ║                                                                            ║ ║                                       ║
 ║                                                                            ║ ╚═══════════════════════════════════════╝
 ║                                                                            ║ ╔════════ Parallel ─ 0 running ═════════╗
