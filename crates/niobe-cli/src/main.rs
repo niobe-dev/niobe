@@ -272,7 +272,10 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
         .store()
         .events(session)
         .map_err(|e| e.to_string())?;
-    app.extend(stored.iter().map(|s| &s.event));
+    // At the times the store recorded, not at the time it was read: a session
+    // resumed on Thursday did not happen on Thursday.
+    let clock = niobe_tui::clock::Clock::system();
+    app.extend_at(stored.iter().map(|s| (&s.event, clock.at(s.at))));
     let elapsed = started.elapsed();
 
     if !std::io::stdout().is_terminal() {

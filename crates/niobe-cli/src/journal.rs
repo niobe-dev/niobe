@@ -80,8 +80,11 @@ fn panic_if_the_environment_asks() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Instant, SystemTime};
+
     use niobe_core::session::SessionState;
     use niobe_tui::app::{App, EntryKind, Repo};
+    use niobe_tui::clock::{Clock, LocalTime, Stamp};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn send(app: &mut App, journal: &mut StoreJournal, prompt: &str) {
@@ -140,6 +143,60 @@ mod tests {
         assert_eq!(
             *after.session(),
             SessionState::replay(stored.iter().map(|s| &s.event))
+        );
+    }
+
+    #[test]
+    fn a_session_read_back_shows_the_times_the_store_recorded_it_at() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().to_path_buf();
+
+        let mut before = App::new(Repo::default());
+        let mut journal = StoreJournal::Pending(root.clone());
+        send(&mut before, &mut journal, "add etag support");
+        send(&mut before, &mut journal, "and a test for the 304 path");
+        let session = journal
+            .session()
+            .expect("the first prompt opened a session");
+        drop(journal);
+
+        let store = repo::open_existing_store(&root)
+            .expect("the store opens")
+            .expect("the store exists");
+        let stored = store.events(session).expect("the session loads");
+
+        // The shell reading it back is running on a clock of its own, and a
+        // resumed turn must not be dated by it.
+        let read_at = Stamp::new(SystemTime::UNIX_EPOCH, LocalTime::new(3, 0));
+        let clock = Clock::system();
+        let mut after = App::new(Repo::default());
+        after.tick(Instant::now(), Some(read_at));
+        after.extend_at(stored.iter().map(|s| (&s.event, clock.at(s.at))));
+
+        let recorded: Vec<SystemTime> = stored.iter().map(|s| s.at).collect();
+        let shown: Vec<SystemTime> = timeline(&after)
+            .iter()
+            .map(|entry| {
+                entry
+                    .at
+                    .expect("a recorded entry carries the time it was recorded at")
+                    .at()
+            })
+            .collect();
+
+        assert_eq!(shown.len(), 2);
+        assert_eq!(
+            shown, recorded,
+            "the shell dated a resumed session by its own clock"
+        );
+        assert!(
+            shown.iter().all(|at| *at != SystemTime::UNIX_EPOCH),
+            "the entries were stamped with the moment they were read"
+        );
+        assert_eq!(
+            after.stamp(),
+            Some(read_at),
+            "the live clock did not come back after the recorded fold"
         );
     }
 

@@ -22,12 +22,12 @@ use niobe_core::event::{
     UsageWindows,
 };
 use niobe_core::permission::{Allowlist, Rule};
-use niobe_core::session::SessionState;
+use niobe_core::session::{DecisionRecord, SessionState};
 use ratatui_textarea::{Input, TextArea, WrapMode};
 
 use ratatui::style::Style;
 
-use crate::clock::LocalTime;
+use crate::clock::{LocalTime, Stamp};
 use crate::prices::Prices;
 use crate::theme::Theme;
 
@@ -187,6 +187,18 @@ pub struct Entry {
     pub body: String,
     /// Whether more of this entry is still arriving.
     pub streaming: bool,
+    /// When the event behind this entry happened: read off the clock as the
+    /// shell took it off the channel, or off what the store recorded beside
+    /// it. Absent where the entry came from a log that kept no times.
+    pub at: Option<Stamp>,
+}
+
+/// A sub-agent as this shell saw it start: what it was spawned to do, and
+/// when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Spawned {
+    label: String,
+    at: Option<Stamp>,
 }
 
 /// What a running turn is doing, for the line that shows the session is at
@@ -224,10 +236,15 @@ pub struct App {
     session: SessionState,
     entries: Vec<Entry>,
     tool_entries: BTreeMap<ToolCallId, usize>,
-    /// What each sub-agent was spawned to do. The session fold keeps the counts
-    /// and the ids; the label is the parallel pane's business, so it is kept
-    /// here rather than widening the shared state for one pane.
-    agent_labels: BTreeMap<AgentId, String>,
+    /// What each sub-agent was spawned to do, and when it was spawned. The
+    /// session fold keeps the counts and the ids; the label and the moment are
+    /// this shell's business, so they are kept here rather than widening the
+    /// shared state — and the event model, which carries no time — for a pane.
+    agents: BTreeMap<AgentId, Spawned>,
+    /// When each decision in [`SessionState::decisions`] was recorded, in the
+    /// same order, so a pane reads the two together and cannot pair a decision
+    /// with another one's time.
+    decided_at: Vec<Option<Stamp>>,
     composer: TextArea<'static>,
     /// First transcript line drawn, in wrapped lines.
     scroll: usize,
@@ -276,15 +293,17 @@ pub struct App {
     /// The clock, as the event loop last handed it in. The draw never reads
     /// the time itself, so a test draws the same frame every time.
     now: Option<Instant>,
+    /// The wall clock the same tick read, which is what every event folded in
+    /// now is stamped with. `None` until the loop has ticked, which is also
+    /// what a fold with no clock behind it — a JSON Lines log — leaves behind:
+    /// no time at all, rather than the moment the log was parsed.
+    at: Option<Stamp>,
     /// When the running turn was first seen running by that clock.
     working_since: Option<Instant>,
     /// When the session was first seen not running by that clock. The mirror
     /// of `working_since`: exactly one of the two is set once the loop has
     /// ticked, so the state segment always has a duration to show.
     idle_since: Option<Instant>,
-    /// The wall clock as the event loop last read it. `None` until it has, and
-    /// on a machine that does not say what timezone it is in.
-    clock: Option<LocalTime>,
     /// Each entry as last drawn, so a redraw re-renders only what changed.
     drawn: crate::ui::DrawnEntries,
     should_quit: bool,
@@ -314,7 +333,8 @@ impl App {
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
-            agent_labels: BTreeMap::new(),
+            agents: BTreeMap::new(),
+            decided_at: Vec::new(),
             composer,
             scroll: 0,
             follow: true,
@@ -333,9 +353,9 @@ impl App {
             attached: false,
             sent_here: false,
             now: None,
+            at: None,
             working_since: None,
             idle_since: None,
-            clock: None,
             drawn: crate::ui::DrawnEntries::default(),
             should_quit: false,
         }
@@ -353,6 +373,7 @@ impl App {
                 meta: String::new(),
                 body: text.clone(),
                 streaming: false,
+                at: self.at,
             }),
 
             Event::AssistantDelta { text } => match self.streaming_agent_entry() {
@@ -365,6 +386,7 @@ impl App {
                         meta: String::new(),
                         body: text.clone(),
                         streaming: true,
+                        at: self.at,
                     });
                 }
             },
@@ -382,6 +404,7 @@ impl App {
                         meta: String::new(),
                         body: text.clone(),
                         streaming: false,
+                        at: self.at,
                     });
                 }
             },
@@ -399,6 +422,7 @@ impl App {
                     meta: what_it_does(summary.as_deref(), input),
                     body: String::new(),
                     streaming: true,
+                    at: self.at,
                 });
             }
 
@@ -441,6 +465,7 @@ impl App {
                         meta,
                         body: String::new(),
                         streaming: false,
+                        at: self.at,
                     }),
                 }
             }
@@ -455,6 +480,7 @@ impl App {
                 meta: String::new(),
                 body: message.clone(),
                 streaming: false,
+                at: self.at,
             }),
 
             Event::Notice { message } => self.push(Entry {
@@ -463,6 +489,7 @@ impl App {
                 meta: String::new(),
                 body: message.clone(),
                 streaming: false,
+                at: self.at,
             }),
 
             Event::PermissionRequest {
@@ -500,6 +527,7 @@ impl App {
                         },
                         body: String::new(),
                         streaming: false,
+                        at: self.at,
                     });
                 }
             }
@@ -516,22 +544,56 @@ impl App {
             | Event::ModelSelected { .. }
             | Event::UsageWindows(_)
             | Event::FileChange { .. }
-            | Event::Decision { .. }
             | Event::Checkpoint { .. } => {}
 
+            // The decision itself is in the session fold, which carries no
+            // times; when it was made is kept here, beside it.
+            Event::Decision { .. } => self.decided_at.push(self.at),
+
             Event::AgentSpawn { id, label, .. } => {
-                self.agent_labels.insert(id.clone(), label.clone());
+                self.agents.insert(
+                    id.clone(),
+                    Spawned {
+                        label: label.clone(),
+                        at: self.at,
+                    },
+                );
             }
             Event::AgentExit { id, .. } => {
-                self.agent_labels.remove(id);
+                self.agents.remove(id);
             }
         }
     }
 
+    /// Folds one event in at a moment something else recorded, rather than at
+    /// the clock this shell is running on.
+    ///
+    /// This is how a session read back off disk shows the times it actually
+    /// ran at: the store writes a time beside every row, and a resumed session
+    /// is folded in through here rather than through [`App::apply`], which
+    /// would stamp a three-day-old turn with the moment it was read.
+    pub fn apply_at(&mut self, event: &Event, at: Stamp) {
+        let live = self.at.replace(at);
+        self.apply(event);
+        self.at = live;
+    }
+
     /// Folds a whole stream in.
+    ///
+    /// Every entry it produces carries the clock the last [`App::tick`] handed
+    /// in — which, before the event loop has run, is no clock at all. A log
+    /// that recorded no times folds in through here and shows none.
     pub fn extend<'a>(&mut self, events: impl IntoIterator<Item = &'a Event>) {
         for event in events {
             self.apply(event);
+        }
+    }
+
+    /// Folds a whole recorded stream in, each event at the moment it was
+    /// recorded at.
+    pub fn extend_at<'a>(&mut self, events: impl IntoIterator<Item = (&'a Event, Stamp)>) {
+        for (event, at) in events {
+            self.apply_at(event, at);
         }
     }
 
@@ -684,6 +746,7 @@ impl App {
                  the prompt comes back next time: {error}"
             ),
             streaming: false,
+            at: self.at,
         });
     }
 
@@ -699,6 +762,7 @@ impl App {
                  still waiting there: {error}"
             ),
             streaming: false,
+            at: self.at,
         });
         self.scroll_to_tail();
     }
@@ -715,6 +779,7 @@ impl App {
                  resumed session will not show it: {error}"
             ),
             streaming: false,
+            at: self.at,
         });
     }
 
@@ -731,6 +796,7 @@ impl App {
                  it was: {error}"
             ),
             streaming: false,
+            at: self.at,
         });
         self.scroll_to_tail();
     }
@@ -789,6 +855,7 @@ impl App {
                    that crosses the line costs."
                 .to_owned(),
             streaming: false,
+            at: self.at,
         });
         self.scroll_to_tail();
     }
@@ -916,6 +983,7 @@ impl App {
             meta: meta.to_owned(),
             body: body.to_owned(),
             streaming: false,
+            at: self.at,
         });
         self
     }
@@ -954,10 +1022,33 @@ impl App {
 
     /// What a running sub-agent was spawned to do.
     pub fn agent_label(&self, id: &AgentId) -> Option<String> {
-        self.agent_labels.get(id).cloned()
+        self.agents.get(id).map(|spawned| spawned.label.clone())
     }
 
     /// The transcript, oldest first.
+    /// Each decision the session recorded, with the moment it was recorded at.
+    ///
+    /// The two are handed out together because they are kept apart: the
+    /// decision is in the session fold, which has no times, and the time is
+    /// here. A pane that paired them by index could pair the wrong two.
+    pub fn decisions(&self) -> impl Iterator<Item = (&DecisionRecord, Option<Stamp>)> {
+        // Padded rather than zipped short: the two grow together in the same
+        // fold and cannot fall out of step, and if they ever did, a decision
+        // that lost its time should still be on screen without one.
+        let times = self
+            .decided_at
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(None));
+        self.session.decisions().iter().zip(times)
+    }
+
+    /// When a sub-agent still running was spawned, where the shell had a clock
+    /// at the time.
+    pub fn agent_spawned_at(&self, id: &AgentId) -> Option<Stamp> {
+        self.agents.get(id).and_then(|spawned| spawned.at)
+    }
+
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -1156,11 +1247,14 @@ impl App {
     /// saw it running, so a turn is timed from when the shell knew of it, and
     /// an idle session's from the first tick that saw the turn stop.
     ///
-    /// `wall` is the time of day, read here rather than in the draw: the draw
-    /// reads no clock, so a test draws the same frame every time.
-    pub fn tick(&mut self, now: Instant, wall: Option<LocalTime>) {
+    /// `at` is the wall clock, read here rather than in the draw: the draw
+    /// reads no clock, so a test draws the same frame every time. It is also
+    /// the stamp every event folded in before the next tick is given, so one
+    /// read of the clock serves the menu row and the whole tick's events —
+    /// a hundred milliseconds of slack against a figure drawn to the minute.
+    pub fn tick(&mut self, now: Instant, at: Option<Stamp>) {
         self.now = Some(now);
-        self.clock = wall;
+        self.at = at;
         match self.working() {
             true => {
                 self.working_since = self.working_since.or(Some(now));
@@ -1175,7 +1269,12 @@ impl App {
 
     /// The time of day, as the event loop last read it.
     pub fn clock(&self) -> Option<LocalTime> {
-        self.clock
+        self.at.and_then(Stamp::local)
+    }
+
+    /// The clock the next event folded in will be stamped with.
+    pub fn stamp(&self) -> Option<Stamp> {
+        self.at
     }
 
     /// Whether a turn is running, and for how long it or the idle before it
@@ -1264,6 +1363,7 @@ impl App {
                        backend each one runs."
                     .to_owned(),
                 streaming: false,
+                at: self.at,
             });
         }
         self.scroll_to_tail();
@@ -1282,6 +1382,7 @@ impl App {
                  it: {error}"
             ),
             streaming: false,
+            at: self.at,
         });
         self.scroll_to_tail();
     }
@@ -2400,5 +2501,158 @@ mod tests {
 
         wheel(&mut app, MouseEventKind::Moved);
         assert_eq!(app.scroll(), 80, "only the wheel scrolls");
+    }
+
+    /// A clock reading, as the event loop hands one in.
+    fn at(seconds: u64, hour: u8, minute: u8) -> Stamp {
+        Stamp::new(
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
+            LocalTime::new(hour, minute),
+        )
+    }
+
+    #[test]
+    fn an_event_is_stamped_with_the_clock_the_tick_that_took_it_read() {
+        let mut app = app();
+        app.tick(Instant::now(), Some(at(50_700, 14, 5)));
+        app.apply(&Event::UserMessage {
+            text: "go on".to_owned(),
+        });
+
+        assert_eq!(
+            app.entries().last().and_then(|entry| entry.at),
+            Some(at(50_700, 14, 5)),
+            "a live entry carries no time the shell could draw"
+        );
+    }
+
+    #[test]
+    fn a_fold_with_no_clock_behind_it_leaves_no_times_rather_than_invented_ones() {
+        // A JSON Lines log records no times. It is folded in before the event
+        // loop has ticked, and what it produces has to say so.
+        let mut app = app();
+        app.extend(&[
+            Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            Event::AssistantMessage {
+                text: "done".to_owned(),
+            },
+        ]);
+
+        assert!(
+            app.entries().iter().all(|entry| entry.at.is_none()),
+            "a log that kept no times was stamped with the moment it was parsed"
+        );
+    }
+
+    #[test]
+    fn a_recorded_event_keeps_the_moment_it_was_recorded_at() {
+        let mut app = app();
+        app.tick(Instant::now(), Some(at(50_700, 14, 5)));
+        app.apply_at(
+            &Event::UserMessage {
+                text: "yesterday".to_owned(),
+            },
+            at(1_000, 9, 30),
+        );
+
+        assert_eq!(
+            app.entries().last().and_then(|entry| entry.at),
+            Some(at(1_000, 9, 30)),
+            "a session read back off disk was stamped with the time it was read"
+        );
+        assert_eq!(
+            app.stamp(),
+            Some(at(50_700, 14, 5)),
+            "the live clock did not come back after the recorded fold"
+        );
+    }
+
+    #[test]
+    fn a_whole_recorded_stream_is_folded_at_the_times_it_was_recorded_at() {
+        let first = Event::UserMessage {
+            text: "one".to_owned(),
+        };
+        let second = Event::UserMessage {
+            text: "two".to_owned(),
+        };
+        let mut app = app();
+        app.extend_at([(&first, at(1_000, 9, 30)), (&second, at(1_060, 9, 31))]);
+
+        let times: Vec<_> = app.entries().iter().map(|entry| entry.at).collect();
+        assert_eq!(times, [Some(at(1_000, 9, 30)), Some(at(1_060, 9, 31))]);
+        assert!(
+            app.stamp().is_none(),
+            "a fold left a clock the loop never read"
+        );
+    }
+
+    #[test]
+    fn a_decision_is_handed_out_with_the_time_it_was_made() {
+        let mut app = app();
+        app.tick(Instant::now(), Some(at(49_260, 13, 41)));
+        app.apply(&Event::Decision {
+            summary: "Reuse the existing cache".to_owned(),
+            rationale: None,
+            rejected: Vec::new(),
+        });
+        app.tick(Instant::now(), Some(at(50_580, 14, 3)));
+        app.apply(&Event::Decision {
+            summary: "Do not widen the layering table".to_owned(),
+            rationale: None,
+            rejected: Vec::new(),
+        });
+
+        let made: Vec<_> = app
+            .decisions()
+            .map(|(decision, at)| (decision.summary.as_str(), at.and_then(Stamp::local)))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                ("Reuse the existing cache", LocalTime::new(13, 41)),
+                ("Do not widen the layering table", LocalTime::new(14, 3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_decision_folded_in_without_a_clock_is_still_paired_with_its_own_row() {
+        let mut app = app();
+        app.apply(&Event::Decision {
+            summary: "made before the loop ticked".to_owned(),
+            rationale: None,
+            rejected: Vec::new(),
+        });
+
+        let made: Vec<_> = app.decisions().collect();
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].0.summary, "made before the loop ticked");
+        assert_eq!(made[0].1, None);
+    }
+
+    #[test]
+    fn a_running_sub_agent_carries_the_moment_it_was_spawned() {
+        let mut app = app();
+        app.tick(Instant::now(), Some(at(50_700, 14, 5)));
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("a1"),
+            parent: None,
+            label: "review the diff".to_owned(),
+        });
+
+        let spawned = app
+            .agent_spawned_at(&AgentId::new("a1"))
+            .expect("the shell had a clock when it took the spawn");
+        // Which is what a timer beside it is measured from.
+        assert_eq!(
+            at(50_802, 14, 6).since(spawned),
+            Some(Duration::from_secs(102))
+        );
+        assert_eq!(
+            app.agent_label(&AgentId::new("a1")).as_deref(),
+            Some("review the diff")
+        );
     }
 }

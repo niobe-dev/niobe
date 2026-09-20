@@ -33,6 +33,7 @@ use niobe_core::session::{FileChanges, SessionState, Totals};
 use crate::app::{
     Activity, Answer, App, Ask, Entry, EntryKind, Picker, SelectedProfile, tool_label,
 };
+use crate::clock;
 use crate::fx;
 use crate::prices::Prices;
 use crate::text;
@@ -565,7 +566,7 @@ fn pulse_label(pulse: crate::app::Pulse) -> String {
         false => ("\u{25cb}", "idle"),
     };
     match pulse.since {
-        Some(since) => format!("{glyph} {word} {}", elapsed(since)),
+        Some(since) => format!("{glyph} {word} {}", clock::spent(since)),
         None => format!("{glyph} {word}"),
     }
 }
@@ -903,7 +904,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'static> {
     let tenths = activity.elapsed.as_millis() / 100;
     let spinner = SPINNER[usize::try_from(tenths % 10).unwrap_or(0)];
-    let clock = format!(" · {}", elapsed(activity.elapsed));
+    let clock = format!(" · {}", clock::spent(activity.elapsed));
     let room = width.saturating_sub(text::width(spinner) + 1 + text::width(&clock));
     Line::from(vec![
         Span::styled(format!("{spinner} "), Style::new().fg(theme.hot).bold()),
@@ -913,16 +914,6 @@ fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'stati
         ),
         Span::styled(clock, Style::new().fg(theme.dim)),
     ])
-}
-
-/// `12s`, `1m 15s`, `2h 03m`.
-fn elapsed(duration: std::time::Duration) -> String {
-    let seconds = duration.as_secs();
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m {:02}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60),
-    }
 }
 
 /// What the session pane says before anything has happened in it.
@@ -1734,7 +1725,10 @@ mod tests {
         let mut ticked = attached_session();
         ticked.tick(
             std::time::Instant::now(),
-            crate::clock::LocalTime::new(14, 7),
+            Some(crate::clock::Stamp::new(
+                std::time::SystemTime::UNIX_EPOCH,
+                crate::clock::LocalTime::new(14, 7),
+            )),
         );
         assert_eq!(
             row_of(&ticked).last().map(String::as_str),
@@ -1796,7 +1790,10 @@ mod tests {
         let mut app = attached_session();
         app.tick(
             std::time::Instant::now(),
-            crate::clock::LocalTime::new(14, 7),
+            Some(crate::clock::Stamp::new(
+                std::time::SystemTime::UNIX_EPOCH,
+                crate::clock::LocalTime::new(14, 7),
+            )),
         );
 
         let whole = identity_segments(&app, &Theme::default());

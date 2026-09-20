@@ -42,6 +42,17 @@ const TICK: Duration = Duration::from_millis(100);
 /// idle shell and a session waiting on a tool call cost what they did before.
 const BUSY_TICK: Duration = Duration::from_millis(33);
 
+/// What the loop asks the machine about: whether the process has been told to
+/// stop, whether the terminal has anything to read, and what time it is.
+///
+/// One value rather than three arguments, because the loop takes them all the
+/// same way — once, at the top, before it looks at anything else.
+struct Machine<'a> {
+    shutdown: &'a Shutdown,
+    wait: &'a Wait,
+    clock: &'a crate::clock::Clock,
+}
+
 /// How a session ended.
 ///
 /// The caller needs the difference to know whether there is still a terminal
@@ -76,6 +87,10 @@ pub fn run(
     let shutdown = Shutdown::install()?;
     let wait = Wait::on_the_terminal();
 
+    // Read once: the timezone is a file on disk and the loop asks for the time
+    // ten times a second.
+    let clock = crate::clock::Clock::system();
+
     let mut guard = TerminalGuard::enter(io::stdout())?;
     // No `Terminal::clear` here: the alternate screen starts blank and the
     // first draw covers it. `clear` also asks the terminal where its cursor is
@@ -88,8 +103,11 @@ pub fn run(
         journal,
         backend,
         rules,
-        &shutdown,
-        &wait,
+        &Machine {
+            shutdown: &shutdown,
+            wait: &wait,
+            clock: &clock,
+        },
     );
 
     match &ended {
@@ -146,12 +164,15 @@ fn event_loop<B: Backend<Error = io::Error>>(
     journal: &mut dyn Journal,
     backend: &mut dyn Bridge,
     rules: &mut dyn Rules,
-    shutdown: &Shutdown,
-    wait: &Wait,
+    machine: &Machine<'_>,
 ) -> io::Result<Ended> {
     let mut ended = Ended::Quit;
 
     while !app.should_quit() {
+        // First, so that everything this pass folds in — what the backend
+        // produced and what the operator answered — is stamped with a clock
+        // read this pass, rather than with the one before it.
+        app.tick(std::time::Instant::now(), Some(machine.clock.now()));
         let producing = fold_backend(app, journal, backend);
         // Before the draw, so that a prompt a standing rule already answers is
         // never on screen for the frame it takes to answer it.
@@ -161,11 +182,10 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // what a recording being read back spent under one it knew nothing of.
         app.settle_budget();
         send_produced(app, journal, backend, rules);
-        app.tick(std::time::Instant::now(), crate::clock::now_local());
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         let tick = if producing { BUSY_TICK } else { TICK };
-        match wait.input(tick)? {
+        match machine.wait.input(tick)? {
             Input::Ready => {
                 read_input(app)?;
                 send_produced(app, journal, backend, rules);
@@ -180,7 +200,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
             }
         }
 
-        match shutdown.requested() {
+        match machine.shutdown.requested() {
             None => {}
             Some(Stop::Requested) => app.quit(),
             // SIGHUP is the terminal going away, reported by the kernel rather
