@@ -24,12 +24,13 @@ use ratatui::widgets::{
 };
 
 use niobe_core::event::UsageWindows;
-use niobe_core::session::{FileChanges, SessionState};
+use niobe_core::session::{FileChanges, SessionState, Totals};
 
 use crate::app::{
     Activity, Answer, App, Ask, Entry, EntryKind, Picker, SelectedProfile, tool_label,
 };
 use crate::fx;
+use crate::prices::Prices;
 use crate::text;
 use crate::theme::Theme;
 
@@ -487,7 +488,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     ])
     .areas(right);
 
-    draw_cost(frame, cost, app.session(), theme);
+    draw_cost(frame, cost, app.session(), app.prices(), theme);
     draw_parallel(frame, parallel, app, theme);
     draw_changes(frame, changes, app.session(), theme);
 }
@@ -838,7 +839,13 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
     }
 }
 
-fn draw_cost(frame: &mut Frame, area: Rect, session: &SessionState, theme: &Theme) {
+fn draw_cost(
+    frame: &mut Frame,
+    area: Rect,
+    session: &SessionState,
+    prices: Option<&dyn Prices>,
+    theme: &Theme,
+) {
     let block = pane("Cost", area, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -848,7 +855,7 @@ fn draw_cost(frame: &mut Frame, area: Rect, session: &SessionState, theme: &Them
 
     let totals = session.totals();
     let tiles = [
-        ("session", session_cost(session), theme.hot),
+        ("session", session_cost(session, prices), theme.hot),
         ("tokens in", compact(totals.input), theme.fg),
         ("tokens out", compact(totals.output), theme.fg),
         ("cache read", compact(totals.cache_read), theme.fg),
@@ -1274,11 +1281,19 @@ fn backend_label(
 
 /// The session's cost, labelled for what it is.
 ///
-/// A backend that reported no cost for some of its usage records leaves the sum
-/// a floor, and the figure says `≥` rather than pretending to be the bill.
+/// Four labels, and each says exactly how much is known:
+///
+/// * `$1.15` — every record is covered by a cost the backend reported.
+/// * `~$1.15` — some are not, and `prices` valued all of them, so the figure
+///   is what was reported plus an estimate at published rates.
+/// * `≥$1.15` — some are not and could not be valued, so the figure is a
+///   floor under the session's cost.
+/// * `unpriced` — nothing was reported and nothing could be valued.
+/// * `—` — there is no usage at all. Never a zero.
+///
 /// Public so that anything else printing a session's cost prints the same
 /// label the cost pane does.
-pub fn session_cost(session: &SessionState) -> String {
+pub fn session_cost(session: &SessionState, prices: Option<&dyn Prices>) -> String {
     let totals = session.totals();
     if totals.records == 0 {
         return "—".to_owned();
@@ -1286,10 +1301,27 @@ pub fn session_cost(session: &SessionState) -> String {
     if totals.cost_fully_reported() {
         return format!("${:.2}", totals.reported_cost_usd);
     }
+    if let Some(estimated) = estimate_unsettled(totals, prices) {
+        return format!("~${:.2}", totals.reported_cost_usd + estimated);
+    }
     if totals.reported_cost_usd == 0.0 {
         return "unpriced".to_owned();
     }
     format!("≥${:.2}", totals.reported_cost_usd)
+}
+
+/// What the tokens no reported cost covers come to at published rates.
+///
+/// `None` where there is no price sheet, or where any one model among them is
+/// not in it: a total missing one model's share understates the session, and
+/// an understated total shown as an estimate is worse than an honest floor.
+fn estimate_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Option<f64> {
+    let prices = prices?;
+    let mut sum = 0.0;
+    for owed in totals.unsettled.values() {
+        sum += prices.estimate(owed)?;
+    }
+    Some(sum)
 }
 
 /// Token counts, short enough for a tile.
@@ -1317,25 +1349,92 @@ mod tests {
             model: "opus-5".to_owned(),
             cost_usd: cost,
             cost_basis: None,
+            settles_model: false,
         })
+    }
+
+    /// A tenth of a cent per thousand tokens, so the arithmetic in the tests
+    /// below is done by hand rather than by the thing under test.
+    #[derive(Debug)]
+    struct ATenthOfACentPerThousand;
+
+    impl Prices for ATenthOfACentPerThousand {
+        fn estimate(&self, usage: &Usage) -> Option<f64> {
+            Some(usage.tokens() as f64 / 1_000.0 * 0.001)
+        }
+    }
+
+    /// What the bundled table does with a model it has never heard of.
+    #[derive(Debug)]
+    struct NothingIsPriced;
+
+    impl Prices for NothingIsPriced {
+        fn estimate(&self, _usage: &Usage) -> Option<f64> {
+            None
+        }
     }
 
     #[test]
     fn a_session_with_no_usage_shows_a_dash_not_a_zero() {
         let session = SessionState::new();
-        assert_eq!(session_cost(&session), "—");
+        assert_eq!(session_cost(&session, None), "—");
+        assert_eq!(session_cost(&session, Some(&ATenthOfACentPerThousand)), "—");
     }
 
     #[test]
     fn a_partly_reported_cost_reads_as_a_floor() {
         let fully = SessionState::replay(&[priced(Some(0.25)), priced(Some(0.50))]);
-        assert_eq!(session_cost(&fully), "$0.75");
+        assert_eq!(session_cost(&fully, None), "$0.75");
 
         let partly = SessionState::replay(&[priced(Some(0.25)), priced(None)]);
-        assert_eq!(session_cost(&partly), "≥$0.25");
+        assert_eq!(session_cost(&partly, None), "≥$0.25");
 
         let none = SessionState::replay(&[priced(None)]);
-        assert_eq!(session_cost(&none), "unpriced");
+        assert_eq!(session_cost(&none, None), "unpriced");
+    }
+
+    #[test]
+    fn a_turn_the_backend_has_not_priced_is_estimated_rather_than_left_unpriced() {
+        // Two records of 1,100 tokens each: 2,200 tokens at a tenth of a cent
+        // per thousand is $0.0022, which rounds to a cent.
+        let running = SessionState::replay(&[priced(None), priced(None)]);
+        assert_eq!(
+            session_cost(&running, Some(&ATenthOfACentPerThousand)),
+            "~$0.00"
+        );
+
+        // The estimate is added to what was already reported, not shown
+        // instead of it.
+        let after_one = SessionState::replay(&[priced(Some(0.25)), priced(None)]);
+        assert_eq!(
+            session_cost(&after_one, Some(&ATenthOfACentPerThousand)),
+            "~$0.25"
+        );
+    }
+
+    #[test]
+    fn a_model_the_table_does_not_list_is_unpriced_rather_than_estimated() {
+        let running = SessionState::replay(&[priced(None)]);
+        assert_eq!(session_cost(&running, Some(&NothingIsPriced)), "unpriced");
+
+        // A figure that leaves one model's share out is a floor, not an
+        // estimate, so what was reported is still shown as a floor.
+        let partly = SessionState::replay(&[priced(Some(0.25)), priced(None)]);
+        assert_eq!(session_cost(&partly, Some(&NothingIsPriced)), "≥$0.25");
+    }
+
+    #[test]
+    fn a_settled_turn_is_the_backends_own_figure_and_carries_no_mark() {
+        let mut settled = priced(Some(1.1521625));
+        if let niobe_core::event::Event::Usage(usage) = &mut settled {
+            usage.settles_model = true;
+        }
+        let session = SessionState::replay(&[priced(None), priced(None), settled]);
+        assert_eq!(
+            session_cost(&session, Some(&ATenthOfACentPerThousand)),
+            "$1.15",
+            "a settled session is the CLI's own total, neither a floor nor an estimate"
+        );
     }
 
     #[test]

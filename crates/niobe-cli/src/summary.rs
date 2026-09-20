@@ -15,7 +15,7 @@ pub fn lines(app: &App) -> Vec<String> {
     let session = app.session();
     vec![
         format!("tokens      {}", tokens(session)),
-        format!("cost        {}", cost(session)),
+        format!("cost        {}", cost(session, app.prices())),
         format!("tool calls  {}", tool_calls(session)),
         format!(
             "messages    {} from you · {} from the agent",
@@ -49,16 +49,17 @@ fn tokens(session: &SessionState) -> String {
     )
 }
 
-/// The pane's label, and the reason a figure is a floor or missing.
-fn cost(session: &SessionState) -> String {
+/// The pane's label, and the reason a figure is an estimate, a floor or
+/// missing.
+fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> String {
     let t = session.totals();
-    let label = niobe_tui::session_cost(session);
+    let label = niobe_tui::session_cost(session, prices);
     if t.records == 0 || t.cost_fully_reported() {
         return label;
     }
     format!(
-        "{label} — {} of {} usage records reported no cost",
-        grouped(t.records_without_cost),
+        "{label} — {} of {} usage records no reported cost covers",
+        grouped(t.records_unsettled),
         grouped(t.records)
     )
 }
@@ -137,6 +138,7 @@ mod tests {
             model: "opus-5".to_owned(),
             cost_usd,
             cost_basis: None,
+            settles_model: false,
         })
     }
 
@@ -167,7 +169,7 @@ mod tests {
         let summary = lines(&folded(&[usage(Some(0.25)), usage(None)]));
         assert_eq!(
             summary[1],
-            "cost        ≥$0.25 — 1 of 2 usage records reported no cost"
+            "cost        ≥$0.25 — 1 of 2 usage records no reported cost covers"
         );
         assert_eq!(
             summary[0],

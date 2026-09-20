@@ -100,11 +100,47 @@ fn a_recorded_stream_folds_into_the_totals_the_cli_reported() {
     // Six per-message records with no money on them, and one cost record per
     // model per turn that had something new to report.
     assert_eq!(totals.records, 9);
-    assert_eq!(totals.records_without_cost, 6);
+    assert_eq!(
+        totals.records_unsettled, 0,
+        "every message record's model was settled by a cost record, so the \
+         CLI's figure is the session's cost and not a floor under it"
+    );
+    assert!(totals.unsettled.is_empty());
     assert!(
         (totals.reported_cost_usd - 0.091).abs() < 1e-9,
         "the session cost {} rather than the 0.091 the CLI reported",
         totals.reported_cost_usd
+    );
+}
+
+/// While a turn is in flight the CLI has reported its tokens and none of its
+/// money, and what the operator is owed is a running figure rather than
+/// nothing. The fold prices none of it; it says which tokens no cost covers,
+/// in the shape a price table takes.
+#[test]
+fn a_turn_in_flight_says_which_tokens_no_cost_covers() {
+    let events = translated();
+    let first_cost = events
+        .iter()
+        .position(|event| matches!(event, Event::Usage(usage) if usage.cost_usd.is_some()))
+        .expect("the recording closes a turn with a cost");
+
+    let mid_turn = SessionState::replay(&events[..first_cost]);
+    let totals = mid_turn.totals();
+
+    assert!(totals.records_unsettled > 0, "no cost has landed yet");
+    let owed: u64 = totals.unsettled.values().map(|usage| usage.tokens()).sum();
+    assert_eq!(
+        owed,
+        totals.tokens(),
+        "every token reported so far is still owed for"
+    );
+    assert!(
+        totals
+            .unsettled
+            .values()
+            .all(|usage| usage.cost_usd.is_none()),
+        "what is owed for carries no cost of its own"
     );
 }
 

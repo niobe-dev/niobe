@@ -34,6 +34,7 @@ fn usage(model: &str) -> Usage {
         model: model.to_owned(),
         cost_usd: None,
         cost_basis: None,
+        settles_model: false,
     }
 }
 

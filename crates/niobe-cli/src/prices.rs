@@ -33,6 +33,37 @@ impl Loaded {
     }
 }
 
+/// A price table read for one day, as the shell's price sheet.
+///
+/// This is the whole of what `niobe-tui` is told about prices: the crate graph
+/// keeps the ledger out of the shell, so the shell takes a
+/// [`niobe_tui::Prices`] and the binary supplies one.
+///
+/// The day is fixed when the session opens rather than read per frame. A price
+/// that takes effect while a turn is in flight would otherwise move the
+/// running figure under the operator mid-turn, and the turn's own result
+/// settles it against the backend's figure in any case.
+#[derive(Debug)]
+pub struct Sheet {
+    table: PriceTable,
+    day: Date,
+}
+
+impl Sheet {
+    /// A sheet reading `table` at the prices in force on `day`.
+    pub fn new(table: PriceTable, day: Date) -> Self {
+        Self { table, day }
+    }
+}
+
+impl niobe_tui::Prices for Sheet {
+    fn estimate(&self, usage: &niobe_core::event::Usage) -> Option<f64> {
+        // `usd()` is `None` for a model the table does not list, which is how
+        // an unlisted model stays unpriced instead of being guessed at.
+        self.table.cost(usage, self.day).usd()
+    }
+}
+
 /// Reads the bundled table and the user's price file, in
 /// `$XDG_CONFIG_HOME/niobe/prices.toml` or `~/.config/niobe/prices.toml`.
 pub fn load() -> Result<Loaded, String> {

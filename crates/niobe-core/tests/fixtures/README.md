@@ -45,13 +45,19 @@ It is also read by `niobe-store`'s tests, which record it into a session store
 and fold what comes back, and by `niobe-cli`'s, which replay and resume it
 through the binary. Those tests compare the stored copy with the log rather
 than with fixed numbers, except for the totals `tests/cli.rs` checks in the
-printed summary (`562,988` tokens, `≥$0.87`, 14 of 25 records without a cost).
+printed summary (`562,988` tokens, `~$1.06`, 14 of 25 records no reported cost
+covers).
 
 It carries the cases a real session has and a written one tends not to:
 
-- **14 of the 25 usage records carry no cost.** The CLI reports tokens per
-  message and money only in the closing `result`, so the session's cost is a
-  floor, not a measurement.
+- **14 of the 25 usage records carry no cost, and none of them is settled.**
+  The CLI reports tokens per message and money only in the closing `result`.
+  This recording predates the bridge marking that closing figure as settling
+  the records before it, so every one of the fourteen is still owed for, and
+  the summary prices them from the table: $0.86552395 reported plus
+  $0.1918263 estimated is the `~$1.06` above. A recording made since — the
+  Claude bridge's `tests/fixtures/stream-json.jsonl` — settles instead, and
+  folds to no unsettled records at all.
 - **A third model that produced no counted message.** The session ran on
   `claude-sonnet-5` and then `claude-haiku-4-5-20251001`, and the closing
   `modelUsage` also billed `claude-opus-5[1m]` — 24 in, 13,963 out, 169,624
@@ -112,7 +118,10 @@ jq -s '{
   cache_write_1h: (map(select(.type=="usage").cache_write_1h) | add),
   reasoning: (map(select(.type=="usage").reasoning) | add),
   usage_records: (map(select(.type=="usage")) | length),
-  records_without_cost: (map(select(.type=="usage" and .cost_usd==null)) | length),
+  # No record in this log sets `settles_model`, so every one without a cost is
+  # still unsettled. Against a log that does, count only those no later
+  # settlement of the same model covers.
+  records_unsettled: (map(select(.type=="usage" and .cost_usd==null)) | length),
   reported_cost_usd: (map(select(.type=="usage" and .cost_usd!=null).cost_usd) | add),
   models: (map(select(.type=="usage").model) | unique),
   tool_started: (map(select(.type=="tool_call_start")) | length),

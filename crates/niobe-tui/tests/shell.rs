@@ -99,6 +99,51 @@ fn the_neo_theme_paints_the_shell_at_both_sizes() {
     );
 }
 
+/// A tenth of a cent per thousand tokens, so the figure the pane draws is one
+/// the test worked out rather than one the price table did.
+#[derive(Debug)]
+struct ATenthOfACentPerThousand;
+
+impl niobe_tui::Prices for ATenthOfACentPerThousand {
+    fn estimate(&self, usage: &niobe_core::event::Usage) -> Option<f64> {
+        Some(usage.tokens() as f64 / 1_000.0 * 0.001)
+    }
+}
+
+/// The session pane's cost tile is what the shell is for, so the running
+/// figure has to reach the screen and not merely the label function. The
+/// recorded session reports tokens and no money, which without a price sheet
+/// reads `unpriced`; with one it reads the estimate, marked as one.
+#[test]
+fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
+    let without = screen(&mut running_session(), 120, 40);
+    assert!(
+        without.contains("≥$0.04"),
+        "with nothing to value the rest, the tile is a floor:\n{without}"
+    );
+
+    let mut priced = running_session().with_prices(Box::new(ATenthOfACentPerThousand));
+    let totals = priced.session().totals().clone();
+    let owed: u64 = totals.unsettled.values().map(|usage| usage.tokens()).sum();
+    let expected = totals.reported_cost_usd + owed as f64 / 1_000.0 * 0.001;
+
+    let frame = screen(&mut priced, 120, 40);
+    // 27,220 tokens owed for, at a tenth of a cent per thousand, is $0.02722
+    // on top of the $0.04 the recording reported: $0.06722, to the cent.
+    assert_eq!(owed, 27_220);
+    assert_eq!(
+        format!("~${expected:.2}"),
+        "~$0.07",
+        "${:.5} reported plus {owed} tokens owed for",
+        totals.reported_cost_usd
+    );
+    assert!(frame.contains("~$0.07"), "{frame}");
+    assert!(
+        !frame.contains("≥$"),
+        "a valued turn is an estimate, not a floor:\n{frame}"
+    );
+}
+
 /// A reply's markdown is drawn, not shown: no asterisks, backticks or pipes
 /// reach the screen, and the picture in each theme is the committed one.
 #[test]

@@ -186,7 +186,7 @@ fn an_imported_session_folds_into_the_totals_the_cli_recorded() {
 
     assert_eq!(totals.records, 2);
     assert_eq!(
-        totals.records_without_cost, 0,
+        totals.records_unsettled, 0,
         "the CLI recorded what the session cost, so the figure is not a floor"
     );
     assert!(

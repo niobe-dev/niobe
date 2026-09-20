@@ -186,6 +186,18 @@ pub struct Usage {
     /// promoted to a measurement by being stored.
     #[serde(default)]
     pub cost_basis: Option<CostBasis>,
+    /// Whether [`Usage::cost_usd`] settles every record already folded in for
+    /// the same model, rather than pricing this record alone.
+    ///
+    /// A backend that reports tokens per message and money once per turn — the
+    /// `claude` CLI does — leaves the message records with no cost of their
+    /// own. They are not unpriced: the turn's figure covers them. A consumer
+    /// that counted them as unpriced would call a fully reported session a
+    /// floor forever. `false` is the safe reading, so a producer that says
+    /// nothing, and a record written before this was kept, price only
+    /// themselves.
+    #[serde(default)]
+    pub settles_model: bool,
 }
 
 impl Usage {
@@ -571,6 +583,7 @@ mod tests {
             model: "opus-5".to_owned(),
             cost_usd: None,
             cost_basis: None,
+            settles_model: false,
         };
         assert_eq!(usage.tokens(), 150);
     }
@@ -587,6 +600,7 @@ mod tests {
             model: "opus-5".to_owned(),
             cost_usd: None,
             cost_basis: None,
+            settles_model: false,
         };
         assert_eq!(usage.tokens(), 150);
     }
@@ -628,6 +642,7 @@ mod tests {
             model: "claude-sonnet-5".to_owned(),
             cost_usd: Some(0.084_735),
             cost_basis: Some(CostBasis::ApiEquivalent),
+            settles_model: false,
         };
 
         let line = serde_json::to_string(&Event::Usage(usage.clone())).expect("a usage record");
@@ -709,6 +724,7 @@ mod tests {
             model: "gpt-5-codex".to_owned(),
             cost_usd: None,
             cost_basis: None,
+            settles_model: false,
         };
         assert!(usage.cost_usd.is_none());
     }

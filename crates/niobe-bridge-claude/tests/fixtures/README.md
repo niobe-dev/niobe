@@ -111,6 +111,14 @@ Every `message_delta` in a turn adds up to that turn's `result.usage`:
 after. `total_cost_usd` is the sum of the two — 0.051, then 0.091 — which is
 the checksum the bridge warns about when it does not hold.
 
+Because each of those figures is what the CLI has billed under its model less
+what it had already billed, it covers every message the model produced up to
+that point. The bridge marks it as settling them, so the nine records this
+recording folds to leave nothing owed for: the session reads `$0.09`, the CLI's
+own figure, and not `≥$0.09`. Cut the recording short of its first `result` and
+the fold says instead which tokens no cost covers — that is the shape the cost
+pane values while a turn is still running.
+
 At the rates the ledger bundles for Claude Sonnet 5 from 2026-06-30 — $2.00
 input, $10.00 output, $0.20 cache read, $2.50 cache write, $4.00 cache write
 for an hour, each per million tokens — the six messages come to

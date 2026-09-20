@@ -74,6 +74,7 @@ fn session_events() -> Vec<Event> {
             model: "opus-5".to_owned(),
             cost_usd: Some(0.04),
             cost_basis: None,
+            settles_model: false,
         }),
         // A plan profile: the windows are what this session is metered
         // against, so they are on the status line where a budget would be.
@@ -184,6 +185,7 @@ fn session_events() -> Vec<Event> {
             model: "opus-5".to_owned(),
             cost_usd: None,
             cost_basis: None,
+            settles_model: false,
         }),
         Event::AssistantMessage {
             text: "Etags cached in the LRU; 304s short-circuit. One test still red — the \

@@ -905,9 +905,11 @@ impl Translator {
                     reasoning: 0,
                     model,
                     // The CLI reports no money per message; the turn's
-                    // `result` does, for the session so far.
+                    // `result` does, for the session so far, and settles this
+                    // record along with it.
                     cost_usd: None,
                     cost_basis: None,
+                    settles_model: false,
                 }));
             }
 
@@ -1157,6 +1159,11 @@ impl Translator {
             // A difference of zero is not a report that the turn was free.
             cost_usd: (spent > 0.0).then_some(spent),
             cost_basis: (spent > 0.0).then_some(CostBasis::ApiEquivalent),
+            // `spent` is what the CLI has billed under this model less what it
+            // had already billed, and the tokens above are those no message
+            // reported. Between them the two cover every record emitted under
+            // the model so far, so this figure settles them.
+            settles_model: true,
         })
     }
 }

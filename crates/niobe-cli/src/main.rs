@@ -178,9 +178,11 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
     let app = say_untrusted(
-        App::new(repo::describe(&cwd))
-            .with_rules(loaded.config.allowed().clone())
-            .with_theme(chosen_theme(asked, &loaded)?),
+        say_prices(
+            App::new(repo::describe(&cwd))
+                .with_rules(loaded.config.allowed().clone())
+                .with_theme(chosen_theme(asked, &loaded)?),
+        ),
         &loaded,
     );
     let app = match &selected {
@@ -244,9 +246,11 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
     let mut app = say_untrusted(
-        App::new(repo::describe(&cwd))
-            .with_rules(loaded.config.allowed().clone())
-            .with_theme(chosen_theme(asked, &loaded)?),
+        say_prices(
+            App::new(repo::describe(&cwd))
+                .with_rules(loaded.config.allowed().clone())
+                .with_theme(chosen_theme(asked, &loaded)?),
+        ),
         &loaded,
     );
     if let Some(selected) = &selected {
@@ -340,9 +344,11 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
         std::env::var_os("HOME"),
     )?;
     let mut app = say_untrusted(
-        App::new(repo::describe(&cwd))
-            .with_rules(loaded.config.allowed().clone())
-            .with_theme(theme),
+        say_prices(
+            App::new(repo::describe(&cwd))
+                .with_rules(loaded.config.allowed().clone())
+                .with_theme(theme),
+        ),
         &loaded,
     );
     if let Some(selected) = &selected {
@@ -473,6 +479,30 @@ force until you have read the file. `niobe profiles` shows what it sets; \
 asks again.";
 
 /// The shell, saying so when this repository's config has not been trusted.
+/// The shell with a price sheet, so that a turn the backend has not priced yet
+/// shows what it is costing rather than nothing.
+///
+/// A price file that will not read does not stop the session: the estimate is
+/// a convenience, the session is the point. It is said in the transcript
+/// rather than swallowed, because an operator who wrote a price file is owed
+/// the reason it is not in force.
+fn say_prices(app: App) -> App {
+    match prices::load() {
+        Ok(loaded) => app.with_prices(Box::new(prices::Sheet::new(
+            loaded.table,
+            Date::of(SystemTime::now()),
+        ))),
+        Err(error) => app.with_notice(
+            "no running cost estimate",
+            "price table",
+            &format!(
+                "The price table did not read, so a turn shows a figure only once the \
+                 backend reports one: {error}"
+            ),
+        ),
+    }
+}
+
 fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
     match &loaded.untrusted {
         None => app,
@@ -593,7 +623,10 @@ fn replay(log: &Path) -> Result<(), String> {
 
     let started = Instant::now();
     let events = read_log(&text).map_err(|e| format!("{}: {e}", log.display()))?;
-    let mut app = App::new(repo::describe(&cwd()?));
+    // The same price sheet the shell and `--resume` get: a replayed log and a
+    // resumed session that fold to the same totals must print the same cost,
+    // or one of the two figures is teaching the operator to distrust both.
+    let mut app = say_prices(App::new(repo::describe(&cwd()?)));
     app.extend(&events);
     let elapsed = started.elapsed();
 

@@ -9,9 +9,17 @@
 //! assert.
 //!
 //! What this type does *not* do is price anything. It sums the money backends
-//! reported and counts the records that reported none, so the ledger can label
-//! a figure measured, API-equivalent or unpriced. A number invented here would
-//! be indistinguishable from a measured one, which is the product gone.
+//! reported and says which tokens no reported figure covers, so the ledger can
+//! label what it derives measured, API-equivalent or unpriced. A number
+//! invented here would be indistinguishable from a measured one, which is the
+//! product gone.
+//!
+//! "Covers" is the fold's own bookkeeping, and it is what keeps a fully
+//! reported session from reading as a floor forever. A backend that reports
+//! tokens per message and money once per turn — the `claude` CLI does — closes
+//! the turn with a figure for everything it has billed under that model so
+//! far. That record says so ([`crate::event::Usage::settles_model`]), and the
+//! records it covers stop being owed for.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,9 +51,27 @@ pub struct Totals {
     pub records: u64,
     /// The sum of the costs backends actually reported, in USD.
     pub reported_cost_usd: f64,
-    /// How many usage records carried no cost. While this is non-zero,
+    /// How many usage records carried no cost and have not since been settled
+    /// by one that did. While this is non-zero,
     /// [`Totals::reported_cost_usd`] is a floor, not the session's cost.
-    pub records_without_cost: u64,
+    pub records_unsettled: u64,
+    /// The tokens those records carried, summed per model.
+    ///
+    /// A backend that reports money once per turn leaves the turn priced by
+    /// nothing while it runs. These are the tokens no reported figure covers,
+    /// in the shape a price table takes, so a consumer that has one can show
+    /// what the turn is costing instead of showing nothing. The fold itself
+    /// prices nothing: an invented number here would be indistinguishable
+    /// from a measured one.
+    ///
+    /// A model is in the map only while it is owed for, and the record's
+    /// `cost_usd` is always `None` — it is what is *not* accounted for.
+    pub unsettled: BTreeMap<String, Usage>,
+    /// How many records each model in [`Totals::unsettled`] is owed for, so
+    /// that a settlement takes exactly its own model's share back out of
+    /// [`Totals::records_unsettled`]. Private because it is the bookkeeping
+    /// behind that count rather than a figure of its own.
+    unsettled_records: BTreeMap<String, u64>,
 }
 
 impl Totals {
@@ -58,11 +84,11 @@ impl Totals {
             .saturating_add(self.reasoning)
     }
 
-    /// Whether every usage record came with a cost, i.e. whether
+    /// Whether a reported cost covers every usage record, i.e. whether
     /// [`Totals::reported_cost_usd`] is the whole bill and may be shown as a
     /// measurement rather than a floor.
     pub fn cost_fully_reported(&self) -> bool {
-        self.records_without_cost == 0
+        self.records_unsettled == 0
     }
 
     fn add(&mut self, usage: &Usage) {
@@ -73,9 +99,56 @@ impl Totals {
         self.cache_write_1h = self.cache_write_1h.saturating_add(usage.cache_write_1h);
         self.reasoning = self.reasoning.saturating_add(usage.reasoning);
         self.records += 1;
+
+        // A settlement is read before its own cost is taken, so that a record
+        // both settling the model and carrying tokens of its own — which the
+        // Claude bridge emits for tokens no message reported — leaves nothing
+        // owed rather than owing for itself.
+        if usage.settles_model && usage.cost_usd.is_some() {
+            self.clear_unsettled(&usage.model);
+        }
+
         match usage.cost_usd {
             Some(cost) => self.reported_cost_usd += cost,
-            None => self.records_without_cost += 1,
+            None => self.owe(usage),
+        }
+    }
+
+    /// Records tokens that no reported cost covers.
+    fn owe(&mut self, usage: &Usage) {
+        self.records_unsettled += 1;
+        let owed = self
+            .unsettled
+            .entry(usage.model.clone())
+            .or_insert_with(|| Usage {
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: usage.model.clone(),
+                cost_usd: None,
+                cost_basis: None,
+                settles_model: false,
+            });
+        owed.input = owed.input.saturating_add(usage.input);
+        owed.output = owed.output.saturating_add(usage.output);
+        owed.cache_read = owed.cache_read.saturating_add(usage.cache_read);
+        owed.cache_write = owed.cache_write.saturating_add(usage.cache_write);
+        owed.cache_write_1h = owed.cache_write_1h.saturating_add(usage.cache_write_1h);
+        owed.reasoning = owed.reasoning.saturating_add(usage.reasoning);
+        self.unsettled_records
+            .entry(usage.model.clone())
+            .and_modify(|n| *n = n.saturating_add(1))
+            .or_insert(1);
+    }
+
+    /// Forgets what `model` was owed for, because a cost has now covered it.
+    fn clear_unsettled(&mut self, model: &str) {
+        self.unsettled.remove(model);
+        if let Some(covered) = self.unsettled_records.remove(model) {
+            self.records_unsettled = self.records_unsettled.saturating_sub(covered);
         }
     }
 }
@@ -565,6 +638,10 @@ mod tests {
     use crate::event::{Backend, Mode, PermissionDecision};
 
     fn usage(input: u64, output: u64, cost: Option<f64>) -> Event {
+        on_model("opus-5", input, output, cost)
+    }
+
+    fn on_model(model: &str, input: u64, output: u64, cost: Option<f64>) -> Event {
         Event::Usage(Usage {
             input,
             output,
@@ -572,10 +649,76 @@ mod tests {
             cache_write: 0,
             cache_write_1h: 0,
             reasoning: 0,
-            model: "opus-5".to_owned(),
+            model: model.to_owned(),
             cost_usd: cost,
             cost_basis: None,
+            settles_model: false,
         })
+    }
+
+    /// What the Claude bridge emits at a turn's end: the money for every token
+    /// reported under the model so far, and whatever tokens the per-message
+    /// records had not already carried.
+    fn settlement(model: &str, cost: f64) -> Event {
+        let Event::Usage(mut usage) = on_model(model, 0, 0, Some(cost)) else {
+            unreachable!("on_model builds a usage event")
+        };
+        usage.settles_model = true;
+        Event::Usage(usage)
+    }
+
+    #[test]
+    fn a_settlement_prices_the_records_it_covers() {
+        // The CLI reports tokens per message and money once per turn, in a
+        // record that prices every token reported under the model so far. The
+        // message records are not unpriced once it lands; they are paid for.
+        let state = SessionState::replay(&[
+            usage(100, 10, None),
+            usage(200, 20, None),
+            settlement("opus-5", 0.75),
+        ]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 0);
+        assert!(totals.cost_fully_reported());
+        assert!((totals.reported_cost_usd - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_settlement_leaves_another_models_records_unsettled() {
+        let state = SessionState::replay(&[
+            on_model("opus-5", 100, 10, None),
+            on_model("haiku-4-5", 300, 30, None),
+            settlement("opus-5", 0.75),
+        ]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 1);
+        assert!(!totals.cost_fully_reported());
+        let owed = totals
+            .unsettled
+            .get("haiku-4-5")
+            .expect("haiku is owed for");
+        assert_eq!((owed.input, owed.output), (300, 30));
+        assert!(!totals.unsettled.contains_key("opus-5"));
+    }
+
+    #[test]
+    fn tokens_reported_after_a_settlement_are_unsettled_again() {
+        let state = SessionState::replay(&[
+            usage(100, 10, None),
+            settlement("opus-5", 0.75),
+            usage(200, 20, None),
+        ]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 1);
+        assert!(!totals.cost_fully_reported());
+        let owed = totals
+            .unsettled
+            .get("opus-5")
+            .expect("the new turn is owed for");
+        assert_eq!((owed.input, owed.output), (200, 20));
     }
 
     #[test]
@@ -591,7 +734,9 @@ mod tests {
         assert_eq!(totals.output, 60);
         assert_eq!(totals.tokens(), 660);
         assert_eq!(totals.records, 3);
-        assert_eq!(totals.records_without_cost, 1);
+        // A record that prices itself settles nothing else, so the one that
+        // reported no cost is still owed for.
+        assert_eq!(totals.records_unsettled, 1);
         assert!((totals.reported_cost_usd - 0.75).abs() < f64::EPSILON);
         assert!(!totals.cost_fully_reported());
     }
@@ -613,6 +758,7 @@ mod tests {
                 model: "opus-5".to_owned(),
                 cost_usd: None,
                 cost_basis: None,
+                settles_model: false,
             })
         };
         let state = SessionState::replay(&[write(100, 100), write(50, 0), write(10, 4)]);

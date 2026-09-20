@@ -78,7 +78,7 @@ fn a_recorded_log_replays_into_the_derived_totals() {
     // reports without money; the eleven that carry a cost are the ones the
     // closing `result`s priced. The session's cost is therefore a floor, and
     // the state says so rather than presenting it as the bill.
-    assert_eq!(totals.records_without_cost, 14);
+    assert_eq!(totals.records_unsettled, 14);
     assert!(!totals.cost_fully_reported());
     assert!((totals.reported_cost_usd - 0.865_523_95).abs() < 1e-9);
 

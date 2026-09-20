@@ -308,6 +308,7 @@ fn reported_costs_come_back_bit_for_bit() {
                     model: "opus-5".to_owned(),
                     cost_usd: Some(*cost),
                     cost_basis: None,
+                    settles_model: false,
                 }),
             )
             .expect("append");

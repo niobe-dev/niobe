@@ -968,6 +968,7 @@ mod tests {
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
                 cost_basis: None,
+                settles_model: false,
             })]
         );
     }
@@ -998,6 +999,7 @@ mod tests {
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
                 cost_basis: None,
+                settles_model: false,
             })]
         );
     }

@@ -27,6 +27,7 @@ use ratatui_textarea::{Input, TextArea, WrapMode};
 
 use ratatui::style::Style;
 
+use crate::prices::Prices;
 use crate::theme::Theme;
 
 /// Where the session is running, for the pane title and the status line.
@@ -241,6 +242,10 @@ pub struct App {
     picking: Option<Picker>,
     /// The most this session may spend, where the operator set a budget.
     budget_usd: Option<f64>,
+    /// What values the tokens a backend reported no cost for. Supplied by
+    /// whatever opened the shell, because the price table is not this crate's
+    /// business; `None` leaves an unpriced turn reading as one.
+    prices: Option<Box<dyn Prices>>,
     /// Whether the budget warning has already been given, so that it is said
     /// once rather than on every usage record after the line is crossed.
     budget_warned: bool,
@@ -300,6 +305,7 @@ impl App {
             produced: Vec::new(),
             picking: None,
             budget_usd: None,
+            prices: None,
             budget_warned: false,
             attached: false,
             sent_here: false,
@@ -709,6 +715,20 @@ impl App {
     pub fn with_budget(mut self, budget_usd: f64) -> Self {
         self.budget_usd = Some(budget_usd);
         self
+    }
+
+    /// The same shell, able to value the tokens a backend reported no cost
+    /// for, so that a turn in flight shows a figure rather than nothing.
+    #[must_use]
+    pub fn with_prices(mut self, prices: Box<dyn Prices>) -> Self {
+        self.prices = Some(prices);
+        self
+    }
+
+    /// What this shell values unpriced tokens with, where it was given
+    /// anything to value them with.
+    pub fn prices(&self) -> Option<&dyn Prices> {
+        self.prices.as_deref()
     }
 
     /// The most this session may spend, where the operator set a budget.
@@ -1577,6 +1597,7 @@ mod tests {
             model: "opus-5".to_owned(),
             cost_usd: Some(cost_usd),
             cost_basis: None,
+            settles_model: false,
         })
     }
 

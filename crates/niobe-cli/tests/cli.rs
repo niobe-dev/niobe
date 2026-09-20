@@ -126,9 +126,13 @@ fn replaying_the_fixture_prints_its_totals_inside_the_budget() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(out.contains("562,988"), "{out}");
-    assert!(out.contains("≥$0.87"), "{out}");
+    // $0.86552395 the recording reported, plus the fourteen records it did not
+    // price at the rates in force for their models: $0.0767031 of haiku-4-5
+    // and $0.1151232 of sonnet-5, which is $1.0573503 in all. Marked `~`,
+    // because the part of it Niobe worked out is an estimate.
+    assert!(out.contains("~$1.06"), "{out}");
     assert!(
-        out.contains("14 of 25 usage records reported no cost"),
+        out.contains("14 of 25 usage records no reported cost covers"),
         "{out}"
     );
 
