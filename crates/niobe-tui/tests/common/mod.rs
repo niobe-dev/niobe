@@ -25,7 +25,7 @@ use niobe_core::event::{
 };
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use niobe_tui::app::{App, Repo};
+use niobe_tui::app::{App, Commit, Repo, WorkingFile};
 use niobe_tui::clock::Clock;
 use niobe_tui::ui;
 use ratatui::Terminal;
@@ -206,15 +206,43 @@ fn session_events() -> Vec<Event> {
 /// depend on the day the test ran or the machine it ran on.
 const READ_AT: u64 = 20_000 * 86_400 + 13 * 3_600 + 41 * 60;
 
+/// What a read of the repository hands the shell part-way through a task: a
+/// branch that is ahead of its upstream, a working tree with more files in it
+/// than the pane can show, and commits this session made, one of them still
+/// unpushed.
+fn read_repository() -> Repo {
+    Repo {
+        name: "example-app".to_owned(),
+        branch: Some("main".to_owned()),
+        ahead: Some(3),
+        behind: Some(0),
+        working: (0u64..23)
+            .map(|n| WorkingFile {
+                path: format!("catalog/module-{n:02}.ts"),
+                added: Some(n * 7 + 3),
+                removed: Some(n * 2),
+            })
+            .collect(),
+        commits: vec![
+            Commit {
+                hash: "9f2c1ab".to_owned(),
+                subject: "feat: keep the etag beside the body".to_owned(),
+                pushed: Some(false),
+            },
+            Commit {
+                hash: "41de07c".to_owned(),
+                subject: "test: a 304 is answered from the cache".to_owned(),
+                pushed: Some(true),
+            },
+        ],
+    }
+}
+
 /// A session part-way through a task: tool calls, usage with and without a
 /// cost, a decision and two sub-agents.
 pub fn running_session() -> App {
     let clock = Clock::fixed(0).expect("UTC is an offset");
-    let mut app = App::new(Repo {
-        name: "example-app".to_owned(),
-        branch: Some("main".to_owned()),
-    })
-    .with_clock(clock.clone());
+    let mut app = App::new(read_repository()).with_clock(clock.clone());
     app.extend(&session_events());
     app.tick(
         Instant::now(),
@@ -234,11 +262,7 @@ pub fn unmetered_session() -> App {
         .filter(|event| !matches!(event, Event::UsageWindows(_)))
         .collect();
     let clock = Clock::fixed(0).expect("UTC is an offset");
-    let mut app = App::new(Repo {
-        name: "example-app".to_owned(),
-        branch: Some("main".to_owned()),
-    })
-    .with_clock(clock.clone());
+    let mut app = App::new(read_repository()).with_clock(clock.clone());
     app.extend(&events);
     app.tick(
         Instant::now(),

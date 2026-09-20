@@ -1441,9 +1441,10 @@ fn draw_changes(
     let width = usize::from(inner.width);
     let mut lines: Vec<Line> = Vec::new();
 
-    // What the session is changing things on. The shell is handed the branch
-    // by whatever opened it; how far ahead of its remote it is, and what else
-    // the working tree holds, is not read yet.
+    // What the session is changing things on. The rest of what the repository
+    // reports — how far ahead of its upstream the branch is, what the working
+    // tree has changed and what this session has committed — reaches the shell
+    // through `Repo` but has no line of its own here yet.
     if let Some(branch) = &repo.branch {
         lines.push(
             Line::from(format!(
@@ -1861,6 +1862,7 @@ mod tests {
         let selected = App::new(crate::app::Repo {
             name: "niobe".to_owned(),
             branch: None,
+            ..Default::default()
         })
         .with_profile(max);
 
@@ -1888,6 +1890,7 @@ mod tests {
         let mut app = App::new(crate::app::Repo {
             name: "niobe".to_owned(),
             branch: None,
+            ..Default::default()
         })
         .attached();
         app.apply(&niobe_core::event::Event::SessionMeta(SessionMeta {
@@ -2148,6 +2151,7 @@ mod tests {
         let mut app = App::new(crate::app::Repo {
             name: "niobe".to_owned(),
             branch: None,
+            ..Default::default()
         })
         .with_clock(clock.clone());
         app.apply(&niobe_core::event::Event::UsageWindows(windows));
@@ -2219,6 +2223,7 @@ mod tests {
         let app = App::new(crate::app::Repo {
             name: "niobe".to_owned(),
             branch: None,
+            ..Default::default()
         });
 
         assert!(rows_of(&app, 66).is_empty());
@@ -2311,6 +2316,7 @@ mod tests {
         let mut app = App::new(crate::app::Repo {
             name: "example".to_owned(),
             branch: None,
+            ..Default::default()
         });
         for (model, input) in records {
             app.apply(&niobe_core::event::Event::Usage(Usage {

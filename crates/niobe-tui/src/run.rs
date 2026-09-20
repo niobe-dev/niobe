@@ -24,6 +24,7 @@ use crate::journal::Journal;
 use crate::rules::Rules;
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 use crate::ui;
+use crate::watch::Watch;
 
 /// How long the loop waits for a key before looking at the shutdown flag.
 ///
@@ -71,6 +72,11 @@ pub enum Ended {
 /// `backend` and to `journal`, the standing answers they make to `rules`, and
 /// folding in everything `backend` produces.
 ///
+/// `watch` is where the state of the repository comes from. It is asked once a
+/// tick and never waited on, so a read that is slow, that failed, or that has
+/// nothing new to say costs the frame nothing and leaves the last one on
+/// screen.
+///
 /// `app` may already hold a session: a resumed one is folded in by the caller
 /// before the shell opens.
 ///
@@ -82,6 +88,7 @@ pub fn run(
     journal: &mut dyn Journal,
     backend: &mut dyn Bridge,
     rules: &mut dyn Rules,
+    watch: &mut dyn Watch,
 ) -> io::Result<Ended> {
     install_panic_hook();
     let shutdown = Shutdown::install()?;
@@ -107,6 +114,7 @@ pub fn run(
         journal,
         backend,
         rules,
+        watch,
         &Machine {
             shutdown: &shutdown,
             wait: &wait,
@@ -168,6 +176,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
     journal: &mut dyn Journal,
     backend: &mut dyn Bridge,
     rules: &mut dyn Rules,
+    watch: &mut dyn Watch,
     machine: &Machine<'_>,
 ) -> io::Result<Ended> {
     let mut ended = Ended::Quit;
@@ -177,7 +186,13 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // produced and what the operator answered — is stamped with a clock
         // read this pass, rather than with the one before it.
         app.tick(std::time::Instant::now(), Some(machine.clock.now()));
-        let producing = fold_backend(app, journal, backend);
+        let producing = fold_backend(app, journal, backend, watch);
+        // Whatever a read of the repository has finished with since the last
+        // tick. Nothing is waited on here: an unfinished or failed read says
+        // nothing and the pane keeps what it had.
+        if let Some(repo) = watch.look() {
+            app.set_repo(repo);
+        }
         // Before the draw, so that a prompt a standing rule already answers is
         // never on screen for the frame it takes to answer it.
         app.settle_rules();
@@ -314,13 +329,27 @@ fn send_produced(
 /// session shows the whole conversation or it shows half of one. They do not go
 /// through `take_produced`, which is the queue of what was done *here* and is
 /// what gets sent back to the backend.
-fn fold_backend(app: &mut App, journal: &mut dyn Journal, backend: &mut dyn Bridge) -> bool {
+///
+/// It is also where `watch` is told a file changed, because this is the one
+/// place a file change is seen arriving.
+fn fold_backend(
+    app: &mut App,
+    journal: &mut dyn Journal,
+    backend: &mut dyn Bridge,
+    watch: &mut dyn Watch,
+) -> bool {
     let events = backend.drain();
     if events.is_empty() {
         return false;
     }
     for event in &events {
         app.apply(event);
+        // A file the session just wrote is a file the repository now reports
+        // differently, and waiting out the watch's own cadence would leave the
+        // pane behind the edit the operator just watched happen.
+        if matches!(event, SessionEvent::FileChange { .. }) {
+            watch.changed();
+        }
         if let Err(error) = journal.append(event) {
             app.not_kept(&error.to_string());
         }
@@ -335,9 +364,11 @@ mod tests {
     use crate::bridge::{BridgeError, Detached};
     use crate::journal::JournalError;
     use crate::rules::{Forgotten, RulesError};
+    use crate::watch::{Unwatched, Watch};
     use niobe_core::event::{Mode, PermissionDecision, ToolCallId};
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::collections::VecDeque;
 
     /// Keeps everything, or refuses everything.
     #[derive(Default)]
@@ -424,6 +455,23 @@ mod tests {
             }
             self.rules.push(rule.clone());
             Ok(())
+        }
+    }
+
+    /// A watch that hands over reads in order and counts what it was told.
+    #[derive(Debug, Default)]
+    struct Watching {
+        reads: VecDeque<Repo>,
+        nudges: usize,
+    }
+
+    impl Watch for Watching {
+        fn look(&mut self) -> Option<Repo> {
+            self.reads.pop_front()
+        }
+
+        fn changed(&mut self) {
+            self.nudges += 1;
         }
     }
 
@@ -591,7 +639,7 @@ mod tests {
             ..Attached::default()
         };
 
-        let producing = fold_backend(&mut app, &mut journal, &mut backend);
+        let producing = fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
 
         assert!(producing, "the loop did not notice a reply arriving");
         assert_eq!(
@@ -708,7 +756,7 @@ mod tests {
             ..Attached::default()
         };
 
-        fold_backend(&mut app, &mut Kept::default(), &mut backend);
+        fold_backend(&mut app, &mut Kept::default(), &mut backend, &mut Unwatched);
         app.settle_rules();
         send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
 
@@ -784,9 +832,83 @@ mod tests {
         assert!(!fold_backend(
             &mut app,
             &mut Kept::default(),
-            &mut Attached::default()
+            &mut Attached::default(),
+            &mut Unwatched,
         ));
-        assert!(!fold_backend(&mut app, &mut Kept::default(), &mut Detached));
+        assert!(!fold_backend(
+            &mut app,
+            &mut Kept::default(),
+            &mut Detached,
+            &mut Unwatched,
+        ));
+    }
+
+    #[test]
+    fn a_file_the_session_changed_asks_the_repository_to_be_read_again() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut backend = Attached {
+            produces: vec![
+                SessionEvent::FileChange {
+                    path: "src/lib.rs".to_owned(),
+                    added: Some(3),
+                    removed: Some(1),
+                },
+                SessionEvent::AssistantMessage {
+                    text: "done".to_owned(),
+                },
+            ],
+            ..Attached::default()
+        };
+        let mut watch = Watching::default();
+
+        fold_backend(&mut app, &mut Kept::default(), &mut backend, &mut watch);
+
+        assert_eq!(
+            watch.nudges, 1,
+            "the edit the operator watched happen left the pane a cadence behind"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_changed_no_file_leaves_the_repository_unread() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut backend = Attached {
+            produces: vec![SessionEvent::AssistantMessage {
+                text: "nothing to change".to_owned(),
+            }],
+            ..Attached::default()
+        };
+        let mut watch = Watching::default();
+
+        fold_backend(&mut app, &mut Kept::default(), &mut backend, &mut watch);
+
+        assert_eq!(watch.nudges, 0);
+    }
+
+    #[test]
+    fn a_read_that_has_not_come_back_leaves_what_the_shell_had() {
+        let read = Repo {
+            name: "niobe".to_owned(),
+            branch: Some("main".to_owned()),
+            ahead: Some(3),
+            ..Repo::default()
+        };
+        let mut app = App::new(Repo::default());
+        let mut watch = Watching {
+            reads: VecDeque::from(vec![read.clone()]),
+            nudges: 0,
+        };
+
+        if let Some(repo) = watch.look() {
+            app.set_repo(repo);
+        }
+        assert_eq!(app.repo(), &read);
+
+        // The next tick: nothing finished, nothing failed into the pane.
+        if let Some(repo) = watch.look() {
+            app.set_repo(repo);
+        }
+        assert_eq!(app.repo(), &read);
     }
 
     #[test]

@@ -42,6 +42,7 @@ fn shell_on_the_prompt() -> App {
     let mut app = App::new(Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
+        ..Repo::default()
     })
     .attached();
     app.extend(&events);

@@ -52,6 +52,7 @@ fn empty_session() -> App {
     App::new(Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
+        ..Repo::default()
     })
 }
 
@@ -292,6 +293,7 @@ fn session_at_work() -> App {
     let mut app = App::new(Repo {
         name: "example-app".to_owned(),
         branch: Some("main".to_owned()),
+        ..Repo::default()
     })
     .attached();
     for c in "fix the etag test".chars() {

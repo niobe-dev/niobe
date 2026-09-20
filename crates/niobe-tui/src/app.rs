@@ -32,14 +32,61 @@ use crate::theme::Theme;
 
 /// Where the session is running, for the pane title and the Changes pane.
 ///
-/// Filled in by the caller: reading the working directory and the git branch is
-/// the CLI's job, not the TUI's.
+/// Filled in by the caller: reading the working directory and the repository is
+/// the CLI's job, not the TUI's. What the shell is handed first is the name and
+/// the branch alone; the rest arrives through [`crate::watch::Watch`] as reads
+/// of the repository finish, and a field nobody could read stays as it is here
+/// rather than becoming a zero.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Repo {
     /// The directory name the session was started in.
     pub name: String,
     /// The checked-out branch, where there is one.
     pub branch: Option<String>,
+    /// Commits on the branch that its upstream does not have. `None` where the
+    /// branch has no upstream to be ahead of: a branch nobody pushes is not
+    /// zero commits ahead, it is not ahead of anything.
+    pub ahead: Option<u32>,
+    /// Commits the upstream has that the branch does not, on the same terms as
+    /// [`Repo::ahead`].
+    pub behind: Option<u32>,
+    /// What the working tree has changed against the last commit, one entry per
+    /// file, in the order the repository reported them.
+    pub working: Vec<WorkingFile>,
+    /// The commits made since the session started, newest first.
+    pub commits: Vec<Commit>,
+}
+
+/// One file the working tree has changed, measured from the repository.
+///
+/// These are not the per-file counts the session's own fold carries: those are
+/// summed from what the backend's edit tools reported and are a floor when a
+/// tool did not say. These are what the repository itself reports about the
+/// whole tree, including changes no tool of this session made.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkingFile {
+    /// The path, as the repository gives it: relative to the repository root,
+    /// and `old => new` for a file the repository sees as renamed.
+    pub path: String,
+    /// Lines added. `None` for a file the repository counts no lines in, which
+    /// is what it says about a binary one.
+    pub added: Option<u64>,
+    /// Lines removed, on the same terms as [`WorkingFile::added`].
+    pub removed: Option<u64>,
+}
+
+/// A commit made while the session has been running.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Commit {
+    /// The hash, shortened the way the repository shortens it.
+    pub hash: String,
+    /// The first line of the message.
+    pub subject: String,
+    /// Whether the branch's upstream already has it. A branch with no upstream
+    /// has nowhere to have pushed it, so nothing there is pushed; `None` is a
+    /// branch that names an upstream the repository cannot find, where the
+    /// answer is not known rather than no.
+    pub pushed: Option<bool>,
 }
 
 /// The profile the operator selected, for the menu row to name until a
@@ -1035,6 +1082,16 @@ impl App {
         &self.repo
     }
 
+    /// Replaces what the shell knows about the repository with a fresh read.
+    ///
+    /// Called from the event loop with whatever [`crate::watch::Watch`] has
+    /// finished reading. A read that failed or has not come back yet hands over
+    /// nothing at all, so what is on screen is the last read that worked rather
+    /// than an emptied pane.
+    pub fn set_repo(&mut self, repo: Repo) {
+        self.repo = repo;
+    }
+
     /// The profile the operator selected, if any.
     pub fn profile(&self) -> Option<&SelectedProfile> {
         self.profile.as_ref()
@@ -1608,6 +1665,7 @@ mod tests {
         App::new(Repo {
             name: "niobe".to_owned(),
             branch: Some("main".to_owned()),
+            ..Default::default()
         })
     }
 

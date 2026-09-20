@@ -35,7 +35,7 @@ use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
 use niobe_tui::theme;
-use niobe_tui::{Detached, Ended, Forgotten, Theme};
+use niobe_tui::{Detached, Ended, Forgotten, Theme, Unwatched};
 
 use crate::args::{Command, Invocation, Resume};
 use crate::journal::StoreJournal;
@@ -219,8 +219,17 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
 
     let mut journal = StoreJournal::Pending(root.clone());
     let mut rules = ConfigRules::at(&root);
-    let ended = niobe_tui::run(app, &mut journal, backend.bridge(), &mut rules)
-        .map_err(|e| e.to_string())?;
+    // Started with the shell and stopped with it: the thread behind it reads
+    // the repository while the session runs, and a piped run never gets here.
+    let mut watching = repo::watch(&cwd);
+    let ended = niobe_tui::run(
+        app,
+        &mut journal,
+        backend.bridge(),
+        &mut rules,
+        &mut watching,
+    )
+    .map_err(|e| e.to_string())?;
 
     match ended {
         // There is nothing left to print on: the terminal the shell drew on is
@@ -319,9 +328,16 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
 
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
-    niobe_tui::run(app, &mut journal, backend.bridge(), &mut rules)
-        .map_err(|e| e.to_string())
-        .map(|_| ())
+    let mut watching = repo::watch(&cwd);
+    niobe_tui::run(
+        app,
+        &mut journal,
+        backend.bridge(),
+        &mut rules,
+        &mut watching,
+    )
+    .map_err(|e| e.to_string())
+    .map(|_| ())
 }
 
 /// Opens the shell on a session the `claude` CLI recorded, reading its history
@@ -403,8 +419,15 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
 
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
-    let ended = niobe_tui::run(app, &mut journal, backend.bridge(), &mut rules)
-        .map_err(|e| e.to_string())?;
+    let mut watching = repo::watch(&cwd);
+    let ended = niobe_tui::run(
+        app,
+        &mut journal,
+        backend.bridge(),
+        &mut rules,
+        &mut watching,
+    )
+    .map_err(|e| e.to_string())?;
 
     match ended {
         Ended::TerminalGone => return Ok(()),
@@ -648,9 +671,15 @@ fn replay(log: &Path) -> Result<(), String> {
 
     // A recorded log is being looked at, not continued: nothing is attached
     // and nothing is kept.
-    niobe_tui::run(app, &mut Unrecorded, &mut Detached, &mut Forgotten)
-        .map_err(|e| e.to_string())
-        .map(|_| ())
+    niobe_tui::run(
+        app,
+        &mut Unrecorded,
+        &mut Detached,
+        &mut Forgotten,
+        &mut Unwatched,
+    )
+    .map_err(|e| e.to_string())
+    .map(|_| ())
 }
 
 fn print_summary(header: &str, app: &App) {

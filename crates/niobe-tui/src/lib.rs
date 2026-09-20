@@ -39,8 +39,11 @@ mod text;
 pub mod theme;
 pub mod ui;
 pub mod usage;
+pub mod watch;
 
-pub use app::{Answer, App, Ask, Entry, EntryKind, Picker, Repo, SelectedProfile};
+pub use app::{
+    Answer, App, Ask, Commit, Entry, EntryKind, Picker, Repo, SelectedProfile, WorkingFile,
+};
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use journal::{Journal, JournalError, Unrecorded};
 pub use prices::Prices;
@@ -49,6 +52,7 @@ pub use run::{Ended, run};
 pub use terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 pub use theme::{CLASSIC, CYBER, MODERN, NEO, Theme};
 pub use ui::{MIN_SIZE, WIDE_COLUMNS, draw, session_cost};
+pub use watch::{Unwatched, Watch};
 
 #[cfg(test)]
 mod tests {
