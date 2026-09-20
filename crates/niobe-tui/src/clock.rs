@@ -56,6 +56,92 @@ impl fmt::Display for LocalTime {
     }
 }
 
+/// A day of the week, so a moment further off than today can be named by one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl Weekday {
+    /// The weekday `day` days after 1 January 1970, which was a Thursday.
+    ///
+    /// Taken from the day number rather than asked of the calendar, so that a
+    /// moment carries one number and cannot disagree with itself about which
+    /// day of the week it is.
+    pub fn on(day: i64) -> Self {
+        match (day + 3).rem_euclid(7) {
+            0 => Self::Monday,
+            1 => Self::Tuesday,
+            2 => Self::Wednesday,
+            3 => Self::Thursday,
+            4 => Self::Friday,
+            5 => Self::Saturday,
+            _ => Self::Sunday,
+        }
+    }
+
+    /// `Mon`: the three letters a pane names a day by, because a pane that is
+    /// forty columns wide has no room for `Monday` beside a time.
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Monday => "Mon",
+            Self::Tuesday => "Tue",
+            Self::Wednesday => "Wed",
+            Self::Thursday => "Thu",
+            Self::Friday => "Fri",
+            Self::Saturday => "Sat",
+            Self::Sunday => "Sun",
+        }
+    }
+}
+
+/// Where a moment falls on the machine's own calendar and clock: which local
+/// day, and the time of day on it.
+///
+/// The day is what tells `16:40` today apart from `16:40` tomorrow, which is
+/// the whole difference between a window that comes back before lunch and one
+/// that does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LocalMoment {
+    day: i64,
+    time: LocalTime,
+}
+
+impl LocalMoment {
+    /// A moment at `time` on `day`, which counts days from 1 January 1970 in
+    /// the machine's own timezone.
+    pub fn new(day: i64, time: LocalTime) -> Self {
+        Self { day, time }
+    }
+
+    /// The same, from the two halves of a time of day, or `None` when they are
+    /// not one.
+    pub fn at(day: i64, hour: u8, minute: u8) -> Option<Self> {
+        LocalTime::new(hour, minute).map(|time| Self::new(day, time))
+    }
+
+    /// Which local day, counted from 1 January 1970.
+    pub fn day(self) -> i64 {
+        self.day
+    }
+
+    /// The time of day.
+    pub fn time(self) -> LocalTime {
+        self.time
+    }
+
+    /// The day of the week this falls on.
+    pub fn weekday(self) -> Weekday {
+        Weekday::on(self.day)
+    }
+}
+
 /// The moment something happened, and the time of day that was.
 ///
 /// The time of day is resolved once, when the stamp is made, because resolving
@@ -66,7 +152,7 @@ impl fmt::Display for LocalTime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Stamp {
     at: SystemTime,
-    local: Option<LocalTime>,
+    local: Option<LocalMoment>,
 }
 
 impl Stamp {
@@ -74,12 +160,18 @@ impl Stamp {
     ///
     /// [`Clock`] is how one is normally made; this is for a caller that has
     /// both halves already, and for tests that need a fixed clock.
-    pub fn new(at: SystemTime, local: Option<LocalTime>) -> Self {
+    pub fn new(at: SystemTime, local: Option<LocalMoment>) -> Self {
         Self { at, local }
     }
 
     /// The time of day, where the machine said which timezone it is in.
     pub fn local(self) -> Option<LocalTime> {
+        self.local.map(LocalMoment::time)
+    }
+
+    /// The local day and time of day, where the machine said which timezone it
+    /// is in. What tells one `09:00` from another.
+    pub fn moment(self) -> Option<LocalMoment> {
         self.local
     }
 
@@ -118,6 +210,19 @@ impl Clock {
         }
     }
 
+    /// A clock at a fixed offset from UTC, in seconds east of it, or `None`
+    /// when that is not an offset any place on earth keeps.
+    ///
+    /// Unlike [`Clock::system`] it never moves for daylight saving, which is
+    /// what makes it the clock a test draws the same frame by on every
+    /// machine.
+    pub fn fixed(offset_seconds: i32) -> Option<Self> {
+        let offset = jiff::tz::Offset::from_seconds(offset_seconds).ok()?;
+        Some(Self {
+            zone: Some(jiff::tz::TimeZone::fixed(offset)),
+        })
+    }
+
     /// Whether the machine named a timezone, and so whether stamps from this
     /// clock carry a time of day.
     pub fn knows_the_zone(&self) -> bool {
@@ -140,16 +245,25 @@ impl Clock {
         }
     }
 
-    fn local(&self, at: SystemTime) -> Option<LocalTime> {
+    /// The local day and time of day of an instant.
+    ///
+    /// Both come from one number — the instant moved by the offset the zone
+    /// keeps at that instant — so the day and the clock cannot disagree, and
+    /// so a moment either side of a daylight-saving change is put on the day
+    /// the machine's own calendar puts it on rather than on one counted from
+    /// today's offset.
+    fn local(&self, at: SystemTime) -> Option<LocalMoment> {
         let zone = self.zone.clone()?;
-        let millis =
-            i64::try_from(at.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_millis()).ok()?;
-        let zoned = jiff::Timestamp::from_millisecond(millis)
-            .ok()?
-            .to_zoned(zone);
-        LocalTime::new(
-            u8::try_from(zoned.hour()).ok()?,
-            u8::try_from(zoned.minute()).ok()?,
+        let seconds =
+            i64::try_from(at.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs()).ok()?;
+        let offset = zone.to_offset(jiff::Timestamp::from_second(seconds).ok()?);
+        let local = seconds.checked_add(i64::from(offset.seconds()))?;
+        let day = local.div_euclid(86_400);
+        let into_the_day = local.rem_euclid(86_400);
+        LocalMoment::at(
+            day,
+            u8::try_from(into_the_day / 3_600).ok()?,
+            u8::try_from((into_the_day % 3_600) / 60).ok()?,
         )
     }
 }
@@ -183,6 +297,29 @@ pub fn ago(duration: Duration) -> String {
         ..86_400.0 => format!("{}h", duration.as_secs() / 3600),
         _ => format!("{}d", duration.as_secs() / 86_400),
     }
+}
+
+/// `16:40`, `Tue 09:00`: when something still to come comes around.
+///
+/// Today's is a clock time alone — a window four hours out is read against
+/// the clock on the wall, and a weekday beside it would be a word the
+/// operator has to discard. Any other day carries its weekday, which is as
+/// much calendar as a pane forty columns wide has room for and as much as a
+/// window a week wide needs. A moment a whole week out reads as the weekday it
+/// is, which is today's: nothing the shell draws is that far ahead.
+///
+/// `None` where there is nothing to say. A machine that named no timezone has
+/// no local time to render, and a moment that is not still to come is not
+/// upcoming: a recorded session is read back long after the window it reported
+/// came around, and `16:40` for a reset that has already happened is a figure
+/// that lies about the present.
+pub fn upcoming(now: Stamp, at: Stamp) -> Option<String> {
+    at.since(now)?;
+    let (now, at) = (now.moment()?, at.moment()?);
+    Some(match at.day() == now.day() {
+        true => at.time().to_string(),
+        false => format!("{} {}", at.weekday().short(), at.time()),
+    })
 }
 
 #[cfg(test)]
@@ -283,5 +420,67 @@ mod tests {
     fn an_age_under_ten_seconds_keeps_its_tenths_and_one_over_it_does_not() {
         assert_eq!(ago(Duration::from_millis(9900)), "9.9s");
         assert_eq!(ago(Duration::from_millis(10_100)), "10s");
+    }
+    /// A stamp in a timezone the test names, so the rendering can be asserted
+    /// without the machine's own zone reaching it.
+    fn moment(day: i64, hour: u8, minute: u8) -> Stamp {
+        let seconds =
+            day.unsigned_abs() * 86_400 + u64::from(hour) * 3_600 + u64::from(minute) * 60;
+        Stamp::new(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
+            LocalMoment::at(day, hour, minute),
+        )
+    }
+
+    #[test]
+    fn the_first_day_of_1970_was_a_thursday_and_the_week_runs_on_from_it() {
+        assert_eq!(Weekday::on(0), Weekday::Thursday);
+        assert_eq!(Weekday::on(1), Weekday::Friday);
+        assert_eq!(Weekday::on(4), Weekday::Monday);
+        assert_eq!(Weekday::on(7), Weekday::Thursday);
+        assert_eq!(Weekday::on(-1), Weekday::Wednesday);
+        assert_eq!(Weekday::Tuesday.short(), "Tue");
+    }
+
+    #[test]
+    fn something_coming_around_later_today_reads_as_a_clock_time() {
+        assert_eq!(
+            upcoming(moment(20_000, 13, 41), moment(20_000, 16, 40)).as_deref(),
+            Some("16:40")
+        );
+    }
+
+    #[test]
+    fn something_coming_around_on_another_day_carries_the_weekday() {
+        // Day 20_003 is a Monday, so the day after it is a Tuesday.
+        assert_eq!(
+            upcoming(moment(20_003, 13, 41), moment(20_004, 9, 0)).as_deref(),
+            Some("Tue 09:00")
+        );
+    }
+
+    #[test]
+    fn something_that_has_already_come_around_is_not_upcoming() {
+        assert_eq!(upcoming(moment(20_000, 13, 41), moment(20_000, 9, 0)), None);
+    }
+
+    #[test]
+    fn a_machine_that_named_no_timezone_has_nothing_to_render() {
+        let now = Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(100), None);
+        let later = Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(200), None);
+        assert_eq!(upcoming(now, later), None);
+    }
+
+    #[test]
+    fn a_clock_at_a_fixed_offset_resolves_the_day_the_offset_puts_it_on() {
+        let clock = Clock::fixed(2 * 3_600).expect("two hours east is an offset");
+        // 23:00 UTC on the first day of 1970 is one in the morning on the
+        // second, two hours east of it.
+        let stamp = clock.at(SystemTime::UNIX_EPOCH + Duration::from_secs(23 * 3_600));
+        let local = stamp.moment().expect("a fixed clock always names a zone");
+
+        assert_eq!(local.day(), 1);
+        assert_eq!(local.time().to_string(), "01:00");
+        assert_eq!(local.weekday(), Weekday::Friday);
     }
 }

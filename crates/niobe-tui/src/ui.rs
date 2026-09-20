@@ -27,7 +27,7 @@ use ratatui::widgets::{
     Widget,
 };
 
-use niobe_core::event::UsageWindows;
+use niobe_core::event::UsageWindow;
 use niobe_core::session::{FileChanges, SessionState, Totals};
 
 use crate::app::{
@@ -35,6 +35,7 @@ use crate::app::{
 };
 use crate::clock;
 use crate::fx;
+use crate::meter::meter;
 use crate::prices::Prices;
 use crate::text;
 use crate::theme::Theme;
@@ -1028,18 +1029,122 @@ const MIX_SHOWN: usize = 4;
 /// the panes that grow with the session.
 fn usage_height(app: &App, width: u16) -> u16 {
     let session = app.session();
-    let windows = session
-        .usage_windows()
-        .map_or(0, |w| usize::from(crate::app::windows_label(w).is_some()));
-    let overage = session
-        .usage_windows()
-        .map_or(0, |w| usize::from(w.using_overage));
     let budget = usize::from(app.budget().is_some());
     let mix = session.tools().by_name.len().clamp(1, MIX_SHOWN);
-    // Two rows of border, the blank row under the title, a label row and a
-    // value row per band of tiles, then the figures and the footer.
-    let rows = 3 + 2 * 4_usize.div_ceil(tiles_across(width)) + windows + overage + budget + mix + 1;
+    // Two rows of border, the blank row under the title, a row per window the
+    // backend reported, a label row and a value row per band of tiles, then
+    // the figures and the footer.
+    let rows = 3 + window_rows(app) + 2 * 4_usize.div_ceil(tiles_across(width)) + budget + mix + 1;
     u16::try_from(rows).unwrap_or(u16::MAX)
+}
+
+/// The widest label a window row carries — `extra` — and a column of gap.
+const WINDOW_LABEL: usize = 6;
+
+/// What a window's share is drawn in: a space, and three columns for the
+/// figure, which is one more than a full window needs so that a window
+/// reported past its end still lines up with the ones that are not.
+const WINDOW_SHARE: usize = 5;
+
+/// The longest a meter is drawn. Twelve cells read a share to within a tenth,
+/// which is as fine as a window is worth reading, and it leaves the reset time
+/// beside it room in a pane forty columns wide.
+const METER_CELLS: usize = 12;
+
+/// How many rows the plan's windows take: one per window a backend reported,
+/// and one more where the plan has started spending beyond its flat fee.
+///
+/// The pane is sized from this before it is drawn, so it has to agree with
+/// [`window_lines`] exactly; a test holds the two together.
+fn window_rows(app: &App) -> usize {
+    app.session().usage_windows().map_or(0, |windows| {
+        usize::from(windows.five_hour.is_some())
+            + usize::from(windows.seven_day.is_some())
+            + usize::from(windows.using_overage)
+    })
+}
+
+/// When a window comes back, as the row says it: ` · resets 16:40` later today
+/// and ` · resets Tue 09:00` on another day.
+///
+/// `None` where there is no reset to name — the backend reported the share
+/// without one, the machine named no timezone, or the reset has already come
+/// around, which is what a recorded session read back a day later has. The row
+/// then carries the share alone rather than a time that is no longer true.
+fn reset_clause(app: &App, window: &UsageWindow) -> Option<String> {
+    let at = window.resets_at?;
+    let when = clock::upcoming(app.stamp()?, app.moment(at))?;
+    Some(format!(" · resets {when}"))
+}
+
+/// The plan's windows, which on a flat-rate plan are what a budget is: a
+/// meter for each one a backend reported, the share beside it, and when it
+/// comes back.
+///
+/// A window no backend reported is not a window at zero — it draws no row at
+/// all. The meter shrinks before the reset time does: how much of a window is
+/// gone is worth a cell more or less, and `resets Tue 09:00` cut to
+/// `resets Tue 09` is a different time.
+fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(windows) = app.session().usage_windows() else {
+        return Vec::new();
+    };
+
+    let reported: Vec<(&str, UsageWindow, Option<String>)> =
+        [("5h", windows.five_hour), ("7d", windows.seven_day)]
+            .into_iter()
+            .filter_map(|(label, window)| window.map(|window| (label, window)))
+            .map(|(label, window)| {
+                let clause = reset_clause(app, &window);
+                (label, window, clause)
+            })
+            .collect();
+
+    let clause_columns = reported
+        .iter()
+        .filter_map(|(_, _, clause)| clause.as_deref().map(text::width))
+        .max()
+        .unwrap_or(0);
+    let cells = width
+        .saturating_sub(WINDOW_LABEL + WINDOW_SHARE + clause_columns)
+        .min(METER_CELLS);
+
+    let dim = Style::new().fg(theme.dim);
+    let mut lines: Vec<Line<'static>> = reported
+        .into_iter()
+        .map(|(label, window, clause)| {
+            let (filled, track) = meter(window.utilization, cells);
+            let style = window_style(&window, theme);
+            Line::from(vec![
+                Span::styled(format!("{label:<WINDOW_LABEL$}"), dim),
+                Span::styled(filled, style),
+                Span::styled(track, dim),
+                Span::styled(
+                    format!(" {:>3}%", crate::app::percent(window.utilization)),
+                    style.bold(),
+                ),
+                Span::styled(clause.unwrap_or_default(), dim),
+            ])
+        })
+        .collect();
+
+    // What the extra costs is a figure no backend reports: the CLI says that
+    // the plan is spending beyond its flat fee and never how much, so the
+    // money side is an em dash. A `$0.00` there would be a figure nobody
+    // measured, and the one it would be mistaken for is zero.
+    //
+    // The row is absent rather than `off` where the flag is not set: the flag
+    // is "spending extra, or the backend did not say", so drawing `off` would
+    // promise something nothing reported.
+    if windows.using_overage {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<WINDOW_LABEL$}", "extra"), dim),
+            Span::styled("—", dim),
+            Span::styled(" · on", Style::new().fg(theme.hot).bold()),
+        ]));
+    }
+
+    lines
 }
 
 fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -1060,10 +1165,18 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ("cache read", compact(totals.cache_read), theme.fg),
     ];
 
+    // The windows come first: on a flat-rate plan they are what the operator
+    // is spending, and everything below them is detail about how.
+    let windows = window_lines(app, usize::from(inner.width), theme);
     let across = tiles_across(inner.width);
     let tile_rows = u16::try_from(tiles.len().div_ceil(across)).unwrap_or(1);
-    let [tiled, rest] =
-        Layout::vertical([Constraint::Length(tile_rows * 2), Constraint::Min(0)]).areas(inner);
+    let [windowed, tiled, rest] = Layout::vertical([
+        Constraint::Length(u16::try_from(windows.len()).unwrap_or(u16::MAX)),
+        Constraint::Length(tile_rows * 2),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+    frame.render_widget(Paragraph::new(windows), windowed);
 
     for (row, row_of_tiles) in tiles.chunks(across).enumerate() {
         let top = tiled.y.saturating_add(u16::try_from(row * 2).unwrap_or(0));
@@ -1100,17 +1213,6 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let rows = usize::from(rest.height);
     let mut lines: Vec<Line> = Vec::new();
 
-    // On a flat-rate plan the windows are the budget, so they sit where a
-    // budget sits. Absent, not zeroed, until a backend reports one: a metered
-    // profile has no windows and a `0%/5h` would be a figure nobody measured.
-    if let Some(windows) = session.usage_windows() {
-        if let Some(label) = crate::app::windows_label(windows) {
-            lines.push(Line::from(label).style(window_style(windows, theme)));
-        }
-        if windows.using_overage {
-            lines.push(Line::from("overage").style(Style::new().fg(theme.hot).bold()));
-        }
-    }
     if let Some(budget) = app.budget() {
         let spent = totals.reported_cost_usd;
         lines.push(
@@ -1374,16 +1476,18 @@ fn count(sign: char, lines: u64, stated: bool) -> String {
     }
 }
 
-/// How the windows row is coloured: the same threshold and the same colour as
-/// a budget nearly spent, because on a flat-rate plan that is what a window
-/// nearly gone is.
-fn window_style(windows: &UsageWindows, theme: &Theme) -> Style {
-    let hot = [windows.five_hour, windows.seven_day]
-        .into_iter()
-        .flatten()
-        .any(|window| window.utilization >= BUDGET_SHOWN_HOT);
-    match hot {
-        true => Style::new().fg(theme.hot).bold(),
+/// How a window's meter and share are coloured: the same threshold and the
+/// same colour as a budget nearly spent, because on a flat-rate plan that is
+/// what a window nearly gone is.
+///
+/// Two states and not the mock's three. The shell has one written-down
+/// threshold for *nearly gone* — [`BUDGET_SHOWN_HOT`] — and the budget row is
+/// already drawn by it; a middle colour would need a second threshold nobody
+/// measured, and would say that a window at one figure and a budget at the
+/// same figure are different kinds of trouble.
+fn window_style(window: &UsageWindow, theme: &Theme) -> Style {
+    match window.utilization >= BUDGET_SHOWN_HOT {
+        true => Style::new().fg(theme.hot),
         false => Style::new().fg(theme.fg),
     }
 }
@@ -1505,6 +1609,7 @@ fn compact(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niobe_core::event::UsageWindows;
     use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindow};
 
     fn priced(cost: Option<f64>) -> niobe_core::event::Event {
@@ -1727,7 +1832,7 @@ mod tests {
             std::time::Instant::now(),
             Some(crate::clock::Stamp::new(
                 std::time::SystemTime::UNIX_EPOCH,
-                crate::clock::LocalTime::new(14, 7),
+                crate::clock::LocalMoment::at(0, 14, 7),
             )),
         );
         assert_eq!(
@@ -1792,7 +1897,7 @@ mod tests {
             std::time::Instant::now(),
             Some(crate::clock::Stamp::new(
                 std::time::SystemTime::UNIX_EPOCH,
-                crate::clock::LocalTime::new(14, 7),
+                crate::clock::LocalMoment::at(0, 14, 7),
             )),
         );
 
@@ -1911,17 +2016,10 @@ mod tests {
         assert_eq!(compact(1_260_000), "1.3M");
     }
 
-    fn windows(five_hour: f64, seven_day: f64) -> UsageWindows {
-        UsageWindows {
-            five_hour: Some(UsageWindow {
-                utilization: five_hour,
-                resets_at: None,
-            }),
-            seven_day: Some(UsageWindow {
-                utilization: seven_day,
-                resets_at: None,
-            }),
-            using_overage: false,
+    fn window(utilization: f64, resets_at: Option<u64>) -> UsageWindow {
+        UsageWindow {
+            utilization,
+            resets_at,
         }
     }
 
@@ -1931,16 +2029,182 @@ mod tests {
     #[test]
     fn a_window_nearly_gone_is_marked_the_way_a_budget_nearly_spent_is() {
         let theme = crate::theme::CLASSIC;
-        let hot = Style::new().fg(theme.hot).bold();
+        let hot = Style::new().fg(theme.hot);
         let plain = Style::new().fg(theme.fg);
 
-        assert_eq!(window_style(&windows(0.62, 0.18), &theme), plain);
-        assert_eq!(window_style(&windows(0.80, 0.18), &theme), hot);
-        assert_eq!(window_style(&windows(0.10, 0.95), &theme), hot);
+        assert_eq!(window_style(&window(0.62, None), &theme), plain);
+        assert_eq!(window_style(&window(0.79, None), &theme), plain);
+        assert_eq!(window_style(&window(0.80, None), &theme), hot);
+        assert_eq!(window_style(&window(1.04, None), &theme), hot);
+    }
+
+    /// The first moment of a day twenty thousand days after the epoch, which
+    /// is a Friday. Every window figure below is read against it, so the rows
+    /// read the same on every machine and in every month.
+    const A_FRIDAY: u64 = 20_000 * 86_400;
+
+    /// A session metered against the windows a test names, read at 13:41 on
+    /// [`A_FRIDAY`] by a clock that never moves for daylight saving.
+    fn metered(windows: UsageWindows) -> App {
+        let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
+        let mut app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+        })
+        .with_clock(clock.clone());
+        app.apply(&niobe_core::event::Event::UsageWindows(windows));
+        app.tick(
+            std::time::Instant::now(),
+            Some(clock.at(std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(A_FRIDAY + 13 * 3_600 + 41 * 60))),
+        );
+        app
+    }
+
+    fn rows_of(app: &App, width: usize) -> Vec<String> {
+        window_lines(app, width, &Theme::default())
+            .iter()
+            .map(Line::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_window_reads_as_a_meter_its_share_and_when_it_comes_back() {
+        let app = metered(UsageWindows {
+            five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
+            // Day 20_004 is a Tuesday.
+            seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
+            using_overage: false,
+        });
+
         assert_eq!(
-            window_style(&UsageWindows::default(), &theme),
-            plain,
-            "a plan with no window reported was marked as one nearly gone"
+            rows_of(&app, 66),
+            vec![
+                "5h    ▓▓▓▓▓▓░░░░░░  51% · resets 16:40".to_owned(),
+                "7d    ▓▓▓▓▓▓▓▓▓░░░  71% · resets Tue 09:00".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_reported_without_a_reset_shows_the_share_and_no_reset() {
+        let app = metered(UsageWindows {
+            five_hour: Some(window(0.51, None)),
+            seven_day: None,
+            using_overage: false,
+        });
+
+        assert_eq!(
+            rows_of(&app, 66),
+            vec!["5h    ▓▓▓▓▓▓░░░░░░  51%".to_owned()],
+            "a window nobody timed was given a reset, or the window nobody \
+             reported was given a row"
+        );
+    }
+
+    #[test]
+    fn a_reset_that_has_already_come_around_is_not_drawn_as_one_still_to_come() {
+        let app = metered(UsageWindows {
+            five_hour: Some(window(0.51, Some(A_FRIDAY + 9 * 3_600))),
+            seven_day: None,
+            using_overage: false,
+        });
+
+        assert_eq!(
+            rows_of(&app, 66),
+            vec!["5h    ▓▓▓▓▓▓░░░░░░  51%".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_session_no_backend_metered_draws_no_window_row_at_all() {
+        let app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+        });
+
+        assert!(rows_of(&app, 66).is_empty());
+        assert_eq!(window_rows(&app), 0);
+    }
+
+    #[test]
+    fn what_the_extra_costs_is_an_em_dash_until_a_backend_reports_it() {
+        let app = metered(UsageWindows {
+            five_hour: Some(window(1.0, None)),
+            seven_day: None,
+            using_overage: true,
+        });
+        let rows = rows_of(&app, 66);
+
+        assert_eq!(rows.last().map(String::as_str), Some("extra — · on"));
+        assert!(
+            !rows.iter().any(|row| row.contains("$0.00")),
+            "a figure nobody reported reached the pane: {rows:?}"
+        );
+    }
+
+    /// A plan not spending beyond its flat fee and a backend that never said
+    /// are the same `false`, so the row is absent rather than promising that
+    /// nothing extra is being charged.
+    #[test]
+    fn a_plan_that_did_not_say_it_is_spending_extra_gets_no_extra_row() {
+        let app = metered(UsageWindows {
+            five_hour: Some(window(0.51, None)),
+            seven_day: None,
+            using_overage: false,
+        });
+
+        assert!(!rows_of(&app, 66).iter().any(|row| row.contains("extra")));
+    }
+
+    /// The pane is sized from the row count before the rows are built, so the
+    /// two have to agree or the pane clips its own last row.
+    #[test]
+    fn the_rows_the_pane_is_sized_for_are_the_rows_it_draws() {
+        for windows in [
+            UsageWindows::default(),
+            UsageWindows {
+                five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600))),
+                seven_day: None,
+                using_overage: false,
+            },
+            UsageWindows {
+                five_hour: Some(window(0.51, None)),
+                seven_day: Some(window(0.71, None)),
+                using_overage: true,
+            },
+        ] {
+            let app = metered(windows);
+            assert_eq!(window_rows(&app), rows_of(&app, 66).len(), "{windows:?}");
+        }
+    }
+
+    /// The right-hand column is thirty-nine columns wide at a hundred and
+    /// twenty, and the reset time is what the row is for: the meter gives up
+    /// cells until the row fits, and a row still too wide for the pane is one
+    /// the terminal would cut mid-word.
+    #[test]
+    fn a_row_fits_the_pane_it_is_drawn_in() {
+        let app = metered(UsageWindows {
+            five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
+            seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
+            using_overage: true,
+        });
+
+        for width in [39, 45, 66] {
+            for row in rows_of(&app, width) {
+                assert!(
+                    text::width(&row) <= width,
+                    "{row:?} is {} columns in a pane {width} wide",
+                    text::width(&row)
+                );
+            }
+        }
+        assert!(
+            rows_of(&app, 39)
+                .iter()
+                .all(|row| row.contains("resets") || row.contains("extra")),
+            "the reset time was dropped before the meter gave up a cell"
         );
     }
 }

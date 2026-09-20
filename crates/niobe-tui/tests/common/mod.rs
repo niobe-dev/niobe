@@ -23,7 +23,10 @@ use niobe_core::event::{
     AgentOutcome, Backend, Event, Mode, PermissionDecision, SessionMeta, ToolOutcome, Usage,
     UsageWindow, UsageWindows,
 };
+use std::time::{Duration, Instant, UNIX_EPOCH};
+
 use niobe_tui::app::{App, Repo};
+use niobe_tui::clock::Clock;
 use niobe_tui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -78,17 +81,17 @@ fn session_events() -> Vec<Event> {
         }),
         // A plan profile: the windows are what this session is metered
         // against, so they are in the Usage pane where a budget would be.
-        // The reset times are fixed instants in the past — the session is a
-        // recording, and a reset in the future would make what the shell draws
-        // for it depend on the day the test ran.
+        // Both resets are a fixed distance ahead of [`READ_AT`], the moment
+        // the shell reads this recording at, so the times the pane draws are
+        // the same on every machine and in every month.
         Event::UsageWindows(UsageWindows {
             five_hour: Some(UsageWindow {
                 utilization: 0.62,
-                resets_at: Some(1_767_225_600),
+                resets_at: Some(READ_AT + 2 * 3_600 + 59 * 60),
             }),
             seven_day: Some(UsageWindow {
                 utilization: 0.18,
-                resets_at: Some(1_767_830_400),
+                resets_at: Some(READ_AT + 4 * 86_400 + 79 * 60),
             }),
             using_overage: false,
         }),
@@ -195,14 +198,52 @@ fn session_events() -> Vec<Event> {
     ]
 }
 
+/// When the shell reads the session below: 13:41 on a Friday twenty thousand
+/// days after the epoch.
+///
+/// A fixed moment, in a clock that never moves for daylight saving, because
+/// the pane draws when a window comes back and a picture of the screen cannot
+/// depend on the day the test ran or the machine it ran on.
+const READ_AT: u64 = 20_000 * 86_400 + 13 * 3_600 + 41 * 60;
+
 /// A session part-way through a task: tool calls, usage with and without a
 /// cost, a decision and two sub-agents.
 pub fn running_session() -> App {
+    let clock = Clock::fixed(0).expect("UTC is an offset");
     let mut app = App::new(Repo {
         name: "example-app".to_owned(),
         branch: Some("main".to_owned()),
-    });
+    })
+    .with_clock(clock.clone());
     app.extend(&session_events());
+    app.tick(
+        Instant::now(),
+        Some(clock.at(UNIX_EPOCH + Duration::from_secs(READ_AT))),
+    );
+    app
+}
+
+/// The same session on a profile no backend meters: every event above except
+/// the one that reports the plan's windows.
+///
+/// A metered profile has no windows, and neither has a CLI release that does
+/// not report them. What the pane must not do is stand a `0%` in for either.
+pub fn unmetered_session() -> App {
+    let events: Vec<Event> = session_events()
+        .into_iter()
+        .filter(|event| !matches!(event, Event::UsageWindows(_)))
+        .collect();
+    let clock = Clock::fixed(0).expect("UTC is an offset");
+    let mut app = App::new(Repo {
+        name: "example-app".to_owned(),
+        branch: Some("main".to_owned()),
+    })
+    .with_clock(clock.clone());
+    app.extend(&events);
+    app.tick(
+        Instant::now(),
+        Some(clock.at(UNIX_EPOCH + Duration::from_secs(READ_AT))),
+    );
     app
 }
 

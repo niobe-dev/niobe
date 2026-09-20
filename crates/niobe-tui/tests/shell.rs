@@ -25,7 +25,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{paint, running_session, screen, session_with_a_markdown_reply};
+use common::{paint, running_session, screen, session_with_a_markdown_reply, unmetered_session};
 use niobe_core::event::{Backend, Event, Mode, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Repo, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, NEO};
@@ -430,27 +430,41 @@ fn the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back() {
     let mut app = running_session();
     let frame = screen(&mut app, 120, 30);
 
-    // The fixture reports 0.62 and 0.18, which is what the line says and all
+    // The fixture reports 0.62 and 0.18, which is what the pane says and all
     // it says: no window is rounded into another's place.
-    assert!(frame.contains("62%/5h · 18%/7d"), "{frame}");
-    assert!(!frame.contains("overage"), "{frame}");
+    assert!(frame.contains("62%"), "{frame}");
+    assert!(frame.contains("18%"), "{frame}");
+    assert!(!frame.contains("extra"), "{frame}");
+    // Both resets are the same day the session is read on, so both read as a
+    // time on the clock rather than as a weekday.
+    assert!(frame.contains("resets 16:40"), "{frame}");
 
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
         ratatui::crossterm::event::KeyCode::F(5),
         ratatui::crossterm::event::KeyModifiers::NONE,
     ));
     let pressed = screen(&mut app, 120, 30);
-    // The fixture's windows came back long ago, so the line says so rather
-    // than counting down from nothing. What it says while one is still running
-    // is asserted against a fixed clock in `app`'s own tests.
+    // The key reads the windows out against the same moment the pane draws
+    // them at: one clock, or the shell says two things about one window.
     assert!(
-        pressed.contains("5h window 62%, already reset"),
+        pressed.contains("5h window 62%, resets in 2h 59m"),
         "{pressed}"
     );
     assert!(
-        pressed.contains("7d window 18%, already reset"),
+        pressed.contains("7d window 18%, resets in 4d 1h"),
         "{pressed}"
     );
+}
+
+/// The picture of a pane with no windows in it, so that what a metered
+/// profile's Usage pane looks like is something a change has to be read
+/// against rather than something nobody has seen.
+#[test]
+fn a_profile_no_backend_meters_draws_a_usage_pane_with_no_windows_in_it() {
+    let frame = screen(&mut unmetered_session(), 120, 30);
+    assert!(!frame.contains("5h"), "{frame}");
+    assert!(!frame.contains("resets"), "{frame}");
+    assert_snapshot("unmetered-120x30", &frame);
 }
 
 /// A metered profile reports no window, and a CLI version that does not emit
@@ -475,7 +489,7 @@ fn a_session_no_backend_reported_a_window_for_shows_no_window_at_all() {
 }
 
 #[test]
-fn a_plan_spending_beyond_its_flat_fee_is_marked_on_the_status_line() {
+fn a_plan_spending_beyond_its_flat_fee_is_marked_in_the_usage_pane() {
     let mut app = running_session();
     app.apply(&Event::UsageWindows(UsageWindows {
         five_hour: Some(UsageWindow {
@@ -490,10 +504,15 @@ fn a_plan_spending_beyond_its_flat_fee_is_marked_on_the_status_line() {
     }));
 
     let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("100%/5h · 91%/7d"), "{frame}");
+    assert!(frame.contains("100%"), "{frame}");
+    assert!(frame.contains(" 91%"), "{frame}");
     assert!(
-        frame.contains("overage"),
-        "the plan is spending real money and the line did not say so:\n{frame}"
+        frame.contains("extra — · on"),
+        "the plan is spending real money and the pane did not say so:\n{frame}"
+    );
+    assert!(
+        !frame.contains("$0.00"),
+        "what the extra costs is not a figure any backend reports:\n{frame}"
     );
 }
 

@@ -78,7 +78,7 @@ pub enum Ended {
 /// of the function — including the ways that do not return from it — puts the
 /// terminal back.
 pub fn run(
-    mut app: App,
+    app: App,
     journal: &mut dyn Journal,
     backend: &mut dyn Bridge,
     rules: &mut dyn Rules,
@@ -90,6 +90,10 @@ pub fn run(
     // Read once: the timezone is a file on disk and the loop asks for the time
     // ten times a second.
     let clock = crate::clock::Clock::system();
+    // The same clock the loop stamps events with, so that a moment an event
+    // names — when a window comes back — is read in the timezone the rest of
+    // the shell is drawn in.
+    let mut app = app.with_clock(clock.clone());
 
     let mut guard = TerminalGuard::enter(io::stdout())?;
     // No `Terminal::clear` here: the alternate screen starts blank and the

@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use niobe_core::event::{
     AgentId, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome, UsageWindow,
-    UsageWindows,
 };
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{DecisionRecord, SessionState};
@@ -27,7 +26,7 @@ use ratatui_textarea::{Input, TextArea, WrapMode};
 
 use ratatui::style::Style;
 
-use crate::clock::{LocalTime, Stamp};
+use crate::clock::{Clock, LocalTime, Stamp};
 use crate::prices::Prices;
 use crate::theme::Theme;
 
@@ -290,6 +289,10 @@ pub struct App {
     /// fold says is running may be one read back from a record, which nothing
     /// is working on now; only one sent from here can be shown as working.
     sent_here: bool,
+    /// The timezone a moment an event names is read in. `None` until the
+    /// event loop hands over the one it read: a fold with no clock behind it
+    /// has no local times to draw, which is what a shell drawn in a test has.
+    clock: Option<Clock>,
     /// The clock, as the event loop last handed it in. The draw never reads
     /// the time itself, so a test draws the same frame every time.
     now: Option<Instant>,
@@ -352,6 +355,7 @@ impl App {
             budget_warned: false,
             attached: false,
             sent_here: false,
+            clock: None,
             now: None,
             at: None,
             working_since: None,
@@ -808,6 +812,32 @@ impl App {
         self
     }
 
+    /// The same shell, reading the moments its events name — when a window
+    /// comes back — in the timezone this clock keeps.
+    ///
+    /// The event loop reads the machine's timezone once and hands it over;
+    /// without it the shell draws no local times at all, rather than times in
+    /// a timezone nobody chose.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// The moment `seconds` past the Unix epoch names, on the machine's own
+    /// calendar and clock.
+    ///
+    /// A conversion, not a reading of the clock: the draw calls it to say when
+    /// a window the backend timed comes back, and what it gets back does not
+    /// depend on when it was called.
+    pub fn moment(&self, seconds: u64) -> Stamp {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        match &self.clock {
+            Some(clock) => clock.at(at),
+            None => Stamp::new(at, None),
+        }
+    }
+
     /// The same shell, able to value the tokens a backend reported no cost
     /// for, so that a turn in flight shows a figure rather than nothing.
     #[must_use]
@@ -1209,7 +1239,7 @@ impl App {
             // F5 has no cost breakdown behind it, but on a flat-rate plan the
             // question it is pressed for is when the windows come back, and
             // the session fold knows that.
-            (KeyCode::F(5), _) => self.hint = Some(self.cost_hint(now_secs())),
+            (KeyCode::F(5), _) => self.hint = Some(self.cost_hint(self.read_at())),
             (KeyCode::F(8), _) => self.pick_model(),
             (KeyCode::F(9), _) => self.cycle_theme(),
             (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
@@ -1410,6 +1440,19 @@ impl App {
         format!("F5 Cost — {}", parts.join(" · "))
     }
 
+    /// The moment the shell is reading the session at, in seconds since the
+    /// Unix epoch.
+    ///
+    /// The clock the event loop last handed in, so that what a key reads out
+    /// about a window and what the Usage pane draws about the same window are
+    /// measured from one moment. Before the loop has ticked there is no such
+    /// moment and the machine's own clock stands in.
+    fn read_at(&self) -> u64 {
+        self.at
+            .and_then(|at| at.at().duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or_else(now_secs, |since| since.as_secs())
+    }
+
     /// Feeds a key straight to the composer, for tests and for a paste.
     pub fn type_into_composer(&mut self, input: impl Into<Input>) {
         self.composer.input(input);
@@ -1456,24 +1499,8 @@ fn left(seconds: u64) -> String {
 
 /// A share of a window as whole percent. Not clamped: a backend reporting more
 /// than the whole window is reporting something the operator has to see.
-fn percent(utilization: f64) -> u64 {
+pub fn percent(utilization: f64) -> u64 {
     (utilization * 100.0).round() as u64
-}
-
-/// The plan's windows as the Usage pane shows them — `62%/5h · 18%/7d` — and
-/// `None` where no backend has reported any, so the segment is absent rather
-/// than zeroed.
-pub fn windows_label(windows: &UsageWindows) -> Option<String> {
-    let parts: Vec<String> = [("5h", windows.five_hour), ("7d", windows.seven_day)]
-        .into_iter()
-        .filter_map(|(label, window)| {
-            window.map(|window| format!("{}%/{label}", percent(window.utilization)))
-        })
-        .collect();
-    match parts.is_empty() {
-        true => None,
-        false => Some(parts.join(" · ")),
-    }
 }
 
 /// Gives the composer the theme's colours.
@@ -1570,7 +1597,8 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use niobe_core::event::{Backend, SessionMeta, Usage};
+    use crate::clock::LocalMoment;
+    use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindows};
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui_textarea::Key;
@@ -2245,24 +2273,24 @@ mod tests {
     }
 
     #[test]
-    fn the_status_label_names_only_the_windows_that_were_reported() {
-        assert_eq!(
-            windows_label(&windows(0)).as_deref(),
-            Some("33%/5h · 23%/7d")
-        );
-        assert_eq!(
-            windows_label(&UsageWindows {
-                seven_day: None,
-                ..windows(0)
-            })
-            .as_deref(),
-            Some("33%/5h")
-        );
-        assert_eq!(
-            windows_label(&UsageWindows::default()),
-            None,
-            "a plan with no window reported was given one"
-        );
+    fn a_moment_an_event_named_is_read_in_the_clock_the_loop_handed_over() {
+        let app = App::new(Repo::default())
+            .with_clock(Clock::fixed(3_600).expect("an hour east is an offset"));
+        // Half past eleven at night on the first day of 1970, an hour east of
+        // UTC, is half past midnight on the second.
+        let moment = app
+            .moment(23 * 3_600 + 30 * 60)
+            .moment()
+            .expect("a fixed clock always names a zone");
+
+        assert_eq!(moment.day(), 1);
+        assert_eq!(moment.time().to_string(), "00:30");
+    }
+
+    #[test]
+    fn a_moment_read_without_a_clock_has_no_time_of_day_at_all() {
+        let app = App::new(Repo::default());
+        assert_eq!(app.moment(23 * 3_600).moment(), None);
     }
 
     #[test]
@@ -2507,7 +2535,7 @@ mod tests {
     fn at(seconds: u64, hour: u8, minute: u8) -> Stamp {
         Stamp::new(
             std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
-            LocalTime::new(hour, minute),
+            LocalMoment::at(0, hour, minute),
         )
     }
 

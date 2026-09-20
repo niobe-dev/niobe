@@ -84,7 +84,7 @@ mod tests {
 
     use niobe_core::session::SessionState;
     use niobe_tui::app::{App, EntryKind, Repo};
-    use niobe_tui::clock::{Clock, LocalTime, Stamp};
+    use niobe_tui::clock::{Clock, LocalMoment, Stamp};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn send(app: &mut App, journal: &mut StoreJournal, prompt: &str) {
@@ -167,7 +167,7 @@ mod tests {
 
         // The shell reading it back is running on a clock of its own, and a
         // resumed turn must not be dated by it.
-        let read_at = Stamp::new(SystemTime::UNIX_EPOCH, LocalTime::new(3, 0));
+        let read_at = Stamp::new(SystemTime::UNIX_EPOCH, LocalMoment::at(0, 3, 0));
         let clock = Clock::system();
         let mut after = App::new(Repo::default());
         after.tick(Instant::now(), Some(read_at));

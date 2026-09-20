@@ -1,30 +1,30 @@
- Niobe  Session  Files  Tools  Usage  Options  Help                           opus-5  claude · default  ○ not attached
+ Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
 ╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ╔════════════════ Usage ════════════════╗
 ║                                                                            ║ ║                                       ║
-║                                                                            ║ ║ session            tokens in          ║
-║ ◆ claude                                                                   ║ ║ ≥$0.04             5500               ║
-║   Rewriting the 304 test around the cached body.                           ║ ║ tokens out         cache read         ║
-║                                                                            ║ ║ 800                40k                ║
-║ ◆ claude                                                                   ║ ║ 62%/5h · 18%/7d                       ║
-║   The notebook that demonstrates the fetcher needs the new call shape.     ║ ║ Bash                 1 ━━━━━━━━━━━━   ║
-║                                                                            ║ ║ Edit                 1 ━━━━━━━━━━━━   ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            ║ ║ Read                 1 ━━━━━━━━━━━━   ║
-║                                                                            ║ ║ 3 calls · 1 failed · 0 denied · 9.9 k ║
-║ ◆ claude                                                                   █ ╚═══════════════════════════════════════╝
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ╔═══════════════ Changes ═══════════════╗
-║   304 path asserts a body that is no longer sent.                          █ ║                                       ║
-║                                                                            █ ║ ⎇ main                                ║
-║ > you                                                                      █ ║ Files ─ 3                             ║
-║   What changed?                                                            █ ║ ▸ catalog/fetch.ts            +38 −9  ║
-║                                                                            █ ║   “Caching the etag beside the bod…”  ║
-║ ◆ claude                                                                   █ ║ ▸ catalog/etag.test.ts         +24 —  ║
-║   What changed                                                             █ ║   “Rewriting the 304 test around t…”  ║
-║                                                                            █ ║ ▸ docs/notebooks/catalog.ipynb   — —  ║
-║   How it works: the fetcher keeps the etag beside the body, so a 304 is    █ ║   “The notebook that demonstrates …”  ║
-║   answered from the LRU without reading the body again.                    █ ║                                       ║
-║   • catalog/fetch.ts keeps the etag                                        █ ║ Decisions ─ 1                         ║
-║     • and sends If-None-Match                                              █ ║ · Reuse the existing LRU instead of a ║
-║   • etag.test.ts asserts the cached body                                   █ ║   new Map — avoids a second eviction  ║
+║                                                                            ║ ║ 5h    ▓▓▓▓░░░  62% · resets 16:40     ║
+║ ◆ claude                                                                   ║ ║ 7d    ▓░░░░░░  18% · resets Tue 15:00 ║
+║   Rewriting the 304 test around the cached body.                           ║ ║ session            tokens in          ║
+║                                                                            ║ ║ ≥$0.04             5500               ║
+║ ◆ claude                                                                   ║ ║ tokens out         cache read         ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     ║ ║ 800                40k                ║
+║                                                                            ║ ║ Bash                 1 ━━━━━━━━━━━━   ║
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            ║ ║ Edit                 1 ━━━━━━━━━━━━   ║
+║                                                                            ║ ║ Read                 1 ━━━━━━━━━━━━   ║
+║ ◆ claude                                                                   █ ║ 3 calls · 1 failed · 0 denied · 9.9 k ║
+║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ╚═══════════════════════════════════════╝
+║   304 path asserts a body that is no longer sent.                          █ ╔═══════════════ Changes ═══════════════╗
+║                                                                            █ ║                                       ║
+║ > you                                                                      █ ║ ⎇ main                                ║
+║   What changed?                                                            █ ║ Files ─ 3                             ║
+║                                                                            █ ║ ▸ catalog/fetch.ts            +38 −9  ║
+║ ◆ claude                                                                   █ ║   “Caching the etag beside the bod…”  ║
+║   What changed                                                             █ ║ ▸ catalog/etag.test.ts         +24 —  ║
+║                                                                            █ ║   “Rewriting the 304 test around t…”  ║
+║   How it works: the fetcher keeps the etag beside the body, so a 304 is    █ ║ ▸ docs/notebooks/catalog.ipynb   — —  ║
+║   answered from the LRU without reading the body again.                    █ ║   “The notebook that demonstrates …”  ║
+║   • catalog/fetch.ts keeps the etag                                        █ ║                                       ║
+║     • and sends If-None-Match                                              █ ║ Decisions ─ 1                         ║
+║   • etag.test.ts asserts the cached body                                   █ ║ · Reuse the existing LRU instead of a ║
 ║                                                                            █ ╚═══════════════════════════════════════╝
 ║   file         │ lines                                                     █ ╔════════ Parallel ─ 1 running ═════════╗
 ║   ─────────────┼──────                                                     █ ║                                       ║
