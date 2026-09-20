@@ -1,12 +1,14 @@
- Niobe  Session  Files  Tools  Cost  Options  Help               theme:CYBER F9
+ Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
 ╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
 ║                                                                              ║
+║ ◆ claude                                                                     ║
+║   Caching the etag beside the body so a 304 can be answered from the LRU.    ║
 ║                                                                              ║
 ║ ⚙ Edit  catalog/fetch.ts · 640 B out                                         ║
 ║                                                                              ║
 ║ ◆ claude                                                                     ║
-║   Rewriting the 304 test around the cached body.                             ║
-║                                                                              ║
+║   Rewriting the 304 test around the cached body.                             █
+║                                                                              █
 ║ ◆ claude                                                                     █
 ║   The notebook that demonstrates the fetcher needs the new call shape.       █
 ║                                                                              █
@@ -19,6 +21,4 @@
 ║ ──────────────────────────────────────────────────────────────────────────── ║
 ║ >  Ask for a change, or press F1 for help                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
-example-app │ ⚡  claude · opus-5 │ ⎇ main │ 49k tokens │ 62%/5h · 18%/7d
-▸▸ ask mode · Shift+Tab cycles · F8 model · Enter send · F10 quit
-1Help   2Plan   3Diff   4Undo   5Cost   6Files  7Tools  8Model  9Theme  10Quit
+1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit

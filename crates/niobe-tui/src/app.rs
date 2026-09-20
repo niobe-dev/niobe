@@ -27,10 +27,11 @@ use ratatui_textarea::{Input, TextArea, WrapMode};
 
 use ratatui::style::Style;
 
+use crate::clock::LocalTime;
 use crate::prices::Prices;
 use crate::theme::Theme;
 
-/// Where the session is running, for the pane title and the status line.
+/// Where the session is running, for the pane title and the Changes pane.
 ///
 /// Filled in by the caller: reading the working directory and the git branch is
 /// the CLI's job, not the TUI's.
@@ -42,7 +43,7 @@ pub struct Repo {
     pub branch: Option<String>,
 }
 
-/// The profile the operator selected, for the status line to name until a
+/// The profile the operator selected, for the menu row to name until a
 /// backend reports what the session is running.
 ///
 /// Plain data, filled in by the caller: the config is read by the CLI.
@@ -199,6 +200,21 @@ pub struct Activity {
     pub doing: String,
 }
 
+/// Whether a turn is running, and how long the session has been that way.
+///
+/// The menu row's state segment, which is the one place the shell says the
+/// session is alive without the operator reading a transcript. The duration is
+/// absent until the event loop has handed a clock in: how long a session has
+/// been idle is a measurement, and a shell that has not been told the time has
+/// not made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pulse {
+    /// Whether a turn sent from this process is running.
+    pub working: bool,
+    /// How long the session has been working, or been idle.
+    pub since: Option<Duration>,
+}
+
 /// Everything the shell draws, and the keys that change it.
 #[derive(Debug)]
 pub struct App {
@@ -262,6 +278,13 @@ pub struct App {
     now: Option<Instant>,
     /// When the running turn was first seen running by that clock.
     working_since: Option<Instant>,
+    /// When the session was first seen not running by that clock. The mirror
+    /// of `working_since`: exactly one of the two is set once the loop has
+    /// ticked, so the state segment always has a duration to show.
+    idle_since: Option<Instant>,
+    /// The wall clock as the event loop last read it. `None` until it has, and
+    /// on a machine that does not say what timezone it is in.
+    clock: Option<LocalTime>,
     /// Each entry as last drawn, so a redraw re-renders only what changed.
     drawn: crate::ui::DrawnEntries,
     should_quit: bool,
@@ -311,6 +334,8 @@ impl App {
             sent_here: false,
             now: None,
             working_since: None,
+            idle_since: None,
+            clock: None,
             drawn: crate::ui::DrawnEntries::default(),
             should_quit: false,
         }
@@ -481,7 +506,7 @@ impl App {
 
             // Everything else is a number or a list a pane reads off the
             // session fold, not a line in the transcript. The mode and the
-            // model are on the status line, which is where a session says what
+            // model are in the menu row, which is where a session says what
             // it is running as; a file's counts are in the changes pane, and
             // repeating them under the call that made them would say the same
             // thing twice in the place with the least room for it.
@@ -953,7 +978,7 @@ impl App {
         self.composer.lines().join("\n")
     }
 
-    /// The transient message on the status line, if there is one.
+    /// The transient message under the transcript, if there is one.
     pub fn hint(&self) -> Option<&str> {
         self.hint.as_deref()
     }
@@ -1128,13 +1153,50 @@ impl App {
     /// Hands in the clock, once per pass of the event loop.
     ///
     /// The running turn's elapsed time is measured from the first tick that
-    /// saw it running, so a turn is timed from when the shell knew of it.
-    pub fn tick(&mut self, now: Instant) {
+    /// saw it running, so a turn is timed from when the shell knew of it, and
+    /// an idle session's from the first tick that saw the turn stop.
+    ///
+    /// `wall` is the time of day, read here rather than in the draw: the draw
+    /// reads no clock, so a test draws the same frame every time.
+    pub fn tick(&mut self, now: Instant, wall: Option<LocalTime>) {
         self.now = Some(now);
-        self.working_since = match self.working() {
-            true => self.working_since.or(Some(now)),
-            false => None,
+        self.clock = wall;
+        match self.working() {
+            true => {
+                self.working_since = self.working_since.or(Some(now));
+                self.idle_since = None;
+            }
+            false => {
+                self.working_since = None;
+                self.idle_since = self.idle_since.or(Some(now));
+            }
+        }
+    }
+
+    /// The time of day, as the event loop last read it.
+    pub fn clock(&self) -> Option<LocalTime> {
+        self.clock
+    }
+
+    /// Whether a turn is running, and for how long it or the idle before it
+    /// has been.
+    ///
+    /// The duration is `None` until the loop has ticked at least once with the
+    /// session in the state it is in, so a turn that started since the last
+    /// tick says it is working without yet claiming a time for it.
+    pub fn pulse(&self) -> Pulse {
+        let working = self.working();
+        let since = match working {
+            true => self.working_since,
+            false => self.idle_since,
         };
+        Pulse {
+            working,
+            since: match (self.now, since) {
+                (Some(now), Some(since)) => Some(now.saturating_duration_since(since)),
+                _ => None,
+            },
+        }
     }
 
     /// What the running turn is doing, while one sent from here is running.
@@ -1280,7 +1342,7 @@ fn window_hint(label: &str, window: UsageWindow, now: u64) -> String {
 
 /// How long is left, in the two coarsest units that say anything: `4d 6h`,
 /// `2h 14m`, `47m`. Seconds are left out — a window is hours wide, and a
-/// countdown to the second on a status line is a number that redraws for
+/// countdown to the second in a pane is a number that redraws for
 /// nothing.
 fn left(seconds: u64) -> String {
     let minutes = seconds / 60;
@@ -1297,7 +1359,7 @@ fn percent(utilization: f64) -> u64 {
     (utilization * 100.0).round() as u64
 }
 
-/// The plan's windows as the status line shows them — `62%/5h · 18%/7d` — and
+/// The plan's windows as the Usage pane shows them — `62%/5h · 18%/7d` — and
 /// `None` where no backend has reported any, so the segment is absent rather
 /// than zeroed.
 pub fn windows_label(windows: &UsageWindows) -> Option<String> {
@@ -1884,7 +1946,7 @@ mod tests {
         assert_eq!(
             app.session().model(),
             Some("sonnet"),
-            "the status line would still name the model the session moved off"
+            "the menu row would still name the model the session moved off"
         );
     }
 
@@ -2037,7 +2099,7 @@ mod tests {
                 .contains("the cost breakdown is not implemented yet")
         );
 
-        // Pressing it is what puts the line on the status bar.
+        // Pressing it is what puts the line under the transcript.
         app.apply(&Event::UsageWindows(windows(1_789_000_000)));
         app.on_key(key(KeyCode::F(5)));
         assert!(
@@ -2178,12 +2240,12 @@ mod tests {
     fn a_prompt_sent_from_here_shows_the_session_working_until_the_turn_ends() {
         let mut app = sent(app().attached(), "fix it");
         let t0 = Instant::now();
-        app.tick(t0);
+        app.tick(t0, None);
         let working = app.activity().expect("a prompt was just sent");
         assert_eq!(working.doing, "thinking");
         assert_eq!(working.elapsed, Duration::ZERO);
 
-        app.tick(t0 + Duration::from_secs(12));
+        app.tick(t0 + Duration::from_secs(12), None);
         app.apply(&start(
             "t1",
             "Bash",
@@ -2204,7 +2266,7 @@ mod tests {
         );
 
         app.apply(&Event::TurnEnded);
-        app.tick(t0 + Duration::from_secs(13));
+        app.tick(t0 + Duration::from_secs(13), None);
         assert_eq!(app.activity(), None);
     }
 
@@ -2229,7 +2291,7 @@ mod tests {
         app.apply(&Event::UserMessage {
             text: "from an earlier run".to_owned(),
         });
-        app.tick(Instant::now());
+        app.tick(Instant::now(), None);
         assert_eq!(app.activity(), None);
     }
 

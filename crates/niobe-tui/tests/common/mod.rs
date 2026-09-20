@@ -77,7 +77,7 @@ fn session_events() -> Vec<Event> {
             settles_model: false,
         }),
         // A plan profile: the windows are what this session is metered
-        // against, so they are on the status line where a budget would be.
+        // against, so they are in the Usage pane where a budget would be.
         // The reset times are fixed instants in the past — the session is a
         // recording, and a reset in the future would make what the shell draws
         // for it depend on the day the test ran.

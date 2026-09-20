@@ -362,8 +362,8 @@ impl Translator {
     ///
     /// Only this side asks the CLI anything, so every `control_response` is an
     /// answer to a request made here — a mode or a model the session was asked
-    /// to move to. A refusal left unreported would leave the status line
-    /// showing a change that never happened.
+    /// to move to. A refusal left unreported would leave the shell showing a
+    /// change that never happened.
     fn answered(&mut self, response: wire::ControlResponse, out: &mut Vec<Event>) {
         let Some(outcome) = response.response else {
             return;
@@ -396,8 +396,8 @@ impl Translator {
                         // Naming it beats showing a mode the session is not in.
                         None => out.push(warn(format!(
                             "the CLI is gating tool calls as `{mode}`, which this version of \
-                             Niobe does not model. The status line shows no mode until the \
-                             session is moved to one it does."
+                             Niobe does not model. No mode is reported until the session is \
+                             moved to one it does."
                         ))),
                     }
                 }
@@ -593,7 +593,7 @@ impl Translator {
 
     /// Records the model the session is on, producing a fresh [`SessionMeta`]
     /// whenever it changes — which is how a routing decision reaches the
-    /// status line.
+    /// menu row.
     fn set_model(&mut self, model: String, out: &mut Vec<Event>) {
         if self.model.as_deref() == Some(model.as_str()) {
             return;

@@ -67,6 +67,14 @@ signal-hook = "0.4"
 # the CLI's tests drive the binary through a pty.
 rustix = "1.1"
 
+# The wall clock the shell shows, and the local offset it needs to be a wall
+# clock rather than UTC. Reading `/etc/localtime` and applying the right
+# transition is the tzdb's job, not a thing to hand-roll: an offset guessed
+# from `TZ` is wrong across a DST boundary, and a clock that is an hour out is
+# worse than no clock. Only what that needs: no serde, and no bundled database
+# — the system's own is read, and where there is none the shell draws no time.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+
 # The assistant's replies are CommonMark, and the transcript draws them styled.
 # Only the parser: the default features add an HTML renderer and a command
 # line's option parser, neither of which the shell uses.

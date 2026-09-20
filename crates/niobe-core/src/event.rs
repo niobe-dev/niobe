@@ -98,7 +98,7 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// The name shown in the status line.
+    /// The name the shell calls it by.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -309,7 +309,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// The name shown in the status line.
+    /// The name the shell calls it by.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Plan => "plan",
@@ -318,8 +318,8 @@ impl Mode {
         }
     }
 
-    /// The next mode in the cycle, which is the order the status line lists
-    /// them: least permissive first, so one keypress from `plan` never lands
+    /// The next mode in the cycle, least permissive first, so one keypress
+    /// from `plan` never lands
     /// on the mode that asks about the least.
     pub fn next(self) -> Self {
         match self {

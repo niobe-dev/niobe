@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! Drawing the four regions: menu bar, panes, status line, F-key bar.
+//! Drawing the three regions: menu bar, panes, F-key bar.
+//!
+//! There is no status line. What one carried is spread across the menu row —
+//! the session's identity, what it is doing and the time of day — and the
+//! panes that own each figure, so the body has the rows back.
 //!
 //! Every number on screen comes off [`App::session`], which is a fold over
 //! events and nothing else. Where the fold has nothing to say the pane says so
@@ -10,7 +14,7 @@
 //! measured is indistinguishable from one that was, and that is the product
 //! gone.
 //!
-//! The cost pane has no cost-per-edit tile: that needs spend attributed to
+//! The Usage pane has no cost-per-edit tile: that needs spend attributed to
 //! individual calls, which the ledger does not do yet. The fourth tile is a
 //! measured one instead.
 
@@ -72,9 +76,9 @@ const PICK_COLUMNS: u16 = 44;
 const PICK_CURSOR: &str = "› ";
 const PICK_CURRENT: &str = "· ";
 
-/// The share of a budget at which the status line starts saying so in the
+/// The share of a budget at which the Usage pane starts saying so in the
 /// colour it uses for anything waiting on the operator. The same fraction the
-/// transcript warning uses, so the line and the warning agree.
+/// transcript warning uses, so the pane and the warning agree.
 ///
 /// A plan's usage window is read against the same fraction, because on a
 /// flat-rate plan the window is the budget: what runs out is the hours, not
@@ -87,7 +91,7 @@ const FKEYS: [(&str, &str); 10] = [
     ("2", "Plan"),
     ("3", "Diff"),
     ("4", "Undo"),
-    ("5", "Cost"),
+    ("5", "Usage"),
     ("6", "Files"),
     ("7", "Tools"),
     ("8", "Model"),
@@ -97,8 +101,12 @@ const FKEYS: [(&str, &str); 10] = [
 
 /// The menu bar's items. The first letter is the hot key.
 const MENUS: [&str; 7] = [
-    "Niobe", "Session", "Files", "Tools", "Cost", "Options", "Help",
+    "Niobe", "Session", "Files", "Tools", "Usage", "Options", "Help",
 ];
+
+/// Columns between the menus and the session's identity, and between one
+/// segment of that identity and the next.
+const MENU_GAP: usize = 2;
 
 /// Draws one frame.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -115,17 +123,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         area,
     );
 
-    let [menu, body, status, fkeys] = Layout::vertical([
+    let [menu, body, fkeys] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(2),
         Constraint::Length(1),
     ])
     .areas(area);
 
     draw_menu(frame, menu, app, &theme);
     draw_body(frame, body, app, &theme);
-    draw_status(frame, status, app, &theme);
     draw_fkeys(frame, fkeys, &theme);
 
     // Last, and over the body: a prompt is what the session is waiting on, so
@@ -420,8 +426,36 @@ fn draw_too_small(frame: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
+/// The menu row: the seven menus on the left, and on the right what the
+/// session is, what it is doing and the time of day.
+///
+/// The theme is not named here. `9 Theme` in the F-key row is where a palette
+/// is changed, and a row that says which one is on says nothing the screen
+/// does not already show.
 fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let hot = Style::new().fg(theme.hot).bold();
+    let bar = Style::new().bg(theme.menu_bg).fg(theme.menu_fg);
+    let left = Line::from(menu_spans(theme));
+
+    let room = usize::from(area.width).saturating_sub(left.width() + MENU_GAP);
+    let identity = fitted(identity_segments(app, theme), room);
+
+    frame.render_widget(Paragraph::new(left).style(bar), area);
+    if !identity.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(segment_spans(identity)))
+                .alignment(Alignment::Right)
+                .style(bar),
+            area,
+        );
+    }
+}
+
+/// The seven menus, each with its hot key accented and underlined.
+///
+/// A terminal with no underline drops the underline and keeps the colour, so
+/// the hot key is still marked on one that has only the sixteen attributes.
+fn menu_spans(theme: &Theme) -> Vec<Span<'static>> {
+    let hot = Style::new().fg(theme.hot).bold().underlined();
     let plain = Style::new().fg(theme.menu_fg);
 
     let mut spans = vec![Span::raw(" ")];
@@ -432,33 +466,136 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         spans.push(Span::styled(chars.as_str().to_owned(), plain));
         spans.push(Span::raw("  "));
     }
+    spans
+}
 
-    let left = Line::from(spans);
-    let mut right = Vec::new();
-    if area.width >= WIDE_COLUMNS {
-        right.push(Span::styled(
-            format!(
-                "{}  ",
-                backend_label(app.session(), app.profile(), app.is_attached())
-            ),
-            Style::new().fg(theme.menu_fg),
-        ));
+/// One thing the menu row says about the session.
+///
+/// Kept as text rather than drawn where it is built, so the row can drop whole
+/// segments when the terminal narrows and so a test can read what it says
+/// without reading a frame.
+#[derive(Debug, Clone, PartialEq)]
+struct Segment {
+    text: String,
+    style: Style,
+}
+
+/// What the session is, what it is doing, and what time it is — in the order
+/// the row gives them up, which is right to left.
+///
+/// Errors come first because they are the last thing to be dropped: a session
+/// that hit errors says so wherever the operator is looking, without opening
+/// a pane. The mock has no error count, and a count with nowhere to be read is
+/// worse than a row that is one segment longer when something went wrong.
+fn identity_segments(app: &App, theme: &Theme) -> Vec<Segment> {
+    let mut segments = Vec::new();
+
+    let errors = app.session().errors();
+    if errors > 0 {
+        segments.push(Segment {
+            text: match errors {
+                1 => "\u{26a0} 1 error".to_owned(),
+                n => format!("\u{26a0} {n} errors"),
+            },
+            style: Style::new().fg(theme.del).bold(),
+        });
     }
-    right.push(Span::styled("theme:", Style::new().fg(theme.menu_fg)));
-    right.push(Span::styled(
-        theme.name,
-        Style::new().fg(theme.hot).bg(theme.menu_bg).bold(),
-    ));
-    right.push(Span::styled(" F9 ", Style::new().fg(theme.menu_fg)));
 
-    let bar = Style::new().bg(theme.menu_bg).fg(theme.menu_fg);
-    frame.render_widget(Paragraph::new(left).style(bar), area);
-    frame.render_widget(
-        Paragraph::new(Line::from(right))
-            .alignment(Alignment::Right)
-            .style(bar),
-        area,
-    );
+    let (model, under) = identity(app.session(), app.profile());
+    if let Some(model) = model {
+        segments.push(Segment {
+            text: model,
+            style: Style::new().fg(theme.menu_fg).bold(),
+        });
+    }
+    if let Some(under) = under {
+        segments.push(Segment {
+            text: under,
+            style: Style::new().fg(theme.menu_fg).dim(),
+        });
+    }
+
+    segments.push(Segment {
+        text: state_label(app),
+        style: Style::new().fg(theme.hot),
+    });
+
+    if let Some(clock) = app.clock() {
+        segments.push(Segment {
+            text: clock.to_string(),
+            style: Style::new().fg(theme.menu_fg).dim(),
+        });
+    }
+
+    segments
+}
+
+/// What the session is doing, which is not always a turn.
+///
+/// A shell with nothing listening, and one whose subprocess has started and
+/// not yet said anything, are both states the operator has to be able to tell
+/// from a session that is merely quiet: a prompt typed into either goes
+/// nowhere it will be answered from.
+fn state_label(app: &App) -> String {
+    let pulse = app.pulse();
+    // A turn that is running settles it: whatever the backend has or has not
+    // said about itself, the session is working and nothing else is truer.
+    if pulse.working {
+        return pulse_label(pulse);
+    }
+    if !app.is_attached() {
+        return "\u{25cb} not attached".to_owned();
+    }
+    if app.session().meta().is_none() {
+        return "\u{25cb} starting".to_owned();
+    }
+    pulse_label(pulse)
+}
+
+/// `● working 38s` while a turn is running, `○ idle 1m 12s` otherwise: a glyph
+/// that fills when there is work, the word for it, and how long it has been
+/// that way.
+///
+/// The duration is left off until the event loop has handed a clock in. How
+/// long a session has been idle is a measurement, and a shell that has not
+/// been told the time has not made it.
+fn pulse_label(pulse: crate::app::Pulse) -> String {
+    let (glyph, word) = match pulse.working {
+        true => ("\u{25cf}", "working"),
+        false => ("\u{25cb}", "idle"),
+    };
+    match pulse.since {
+        Some(since) => format!("{glyph} {word} {}", elapsed(since)),
+        None => format!("{glyph} {word}"),
+    }
+}
+
+/// The segments that fit in `room` columns, whole ones only.
+///
+/// Whole segments give way, rightmost first: half a model id, or a clock
+/// missing a digit, reads as a different figure, and a figure that is not what
+/// was measured is the one thing the shell never draws.
+fn fitted(mut segments: Vec<Segment>, room: usize) -> Vec<Segment> {
+    while !segments.is_empty() && segments_width(&segments) > room {
+        segments.pop();
+    }
+    segments
+}
+
+/// The columns a group of segments takes, gaps included.
+fn segments_width(segments: &[Segment]) -> usize {
+    let text: usize = segments.iter().map(|s| text::width(&s.text)).sum();
+    // A gap between each pair, and one column before the border.
+    text + segments.len() * MENU_GAP
+}
+
+fn segment_spans(segments: Vec<Segment>) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(segments.len() * 2 + 1);
+    for segment in segments {
+        spans.push(Span::styled(segment.text, segment.style));
+        spans.push(Span::raw(" ".repeat(MENU_GAP)));
+    }
+    spans
 }
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
@@ -467,9 +604,11 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         return;
     }
 
-    // Session pane to right stack, 1.35 : 1, with a column of desktop between
-    // them.
-    let [left, right] = Layout::horizontal([Constraint::Fill(135), Constraint::Fill(100)])
+    // Session pane to right stack, 1.9 : 1, with a column of desktop between
+    // them. The transcript is what a session is read in; the panes beside it
+    // are figures, and a figure needs a fraction of the width a paragraph
+    // does.
+    let [left, right] = Layout::horizontal([Constraint::Fill(19), Constraint::Fill(10)])
         .spacing(1)
         .areas(area);
 
@@ -481,16 +620,19 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         theme,
     );
 
-    let [cost, parallel, changes] = Layout::vertical([
-        Constraint::Length(10),
-        Constraint::Length(6),
-        Constraint::Min(4),
+    // Usage takes the rows its figures need and no more; what is left goes to
+    // the two panes that grow with the session, 1.3 : 1 in favour of the files
+    // it changed.
+    let [usage, changes, parallel] = Layout::vertical([
+        Constraint::Length(usage_height(app, pane_inner_width(right.width)).min(right.height)),
+        Constraint::Fill(13),
+        Constraint::Fill(10),
     ])
     .areas(right);
 
-    draw_cost(frame, cost, app.session(), app.prices(), theme);
+    draw_usage(frame, usage, app, theme);
+    draw_changes(frame, changes, app.repo(), app.session(), theme);
     draw_parallel(frame, parallel, app, theme);
-    draw_changes(frame, changes, app.session(), theme);
 }
 
 /// The strip of desktop between the panes, animated while a turn is running.
@@ -510,6 +652,12 @@ fn draw_desktop(frame: &mut Frame, strip: Rect, app: &App, theme: &Theme) {
             cell.set_char(mote.symbol).set_fg(mote.colour);
         }
     }
+}
+
+/// The columns a pane leaves for what is written in it: the two borders and
+/// the column of padding either side.
+fn pane_inner_width(width: u16) -> u16 {
+    width.saturating_sub(4)
 }
 
 /// Rows of content a pane keeps before it will spare a blank row under its
@@ -567,10 +715,16 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let typed = app.composed().lines().count().max(1);
     let cap = usize::from(inner.height / 3).max(1);
     let composer_rows = u16::try_from(typed.min(cap)).unwrap_or(1);
+    // The shell's own reply to the operator — what an F-key does, or why
+    // something they asked for did not happen. It costs a row only while there
+    // is one to give, and it sits against the composer because that is where
+    // they were looking when they asked.
+    let hint_rows = u16::from(app.hint().is_some());
 
-    let [transcript, divider, composer] = Layout::vertical([
+    let [transcript, divider, hint, composer] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
+        Constraint::Length(hint_rows),
         Constraint::Length(composer_rows),
     ])
     .areas(inner);
@@ -591,6 +745,14 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
             .style(Style::new().fg(theme.frame).bg(theme.pane_bg)),
         divider,
     );
+
+    if let Some(said) = app.hint() {
+        frame.render_widget(
+            Paragraph::new(Line::from(text::truncate(said, usize::from(hint.width))))
+                .style(Style::new().bg(theme.pane_bg).fg(theme.hot)),
+            hint,
+        );
+    }
 
     let [marker, editor] =
         Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(composer);
@@ -839,14 +1001,60 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
     }
 }
 
-fn draw_cost(
-    frame: &mut Frame,
-    area: Rect,
-    session: &SessionState,
-    prices: Option<&dyn Prices>,
-    theme: &Theme,
-) {
-    let block = pane("Cost", area, theme);
+/// The widest label a Usage tile carries, and a column of gap after it. A tile
+/// narrower than this shows a label cut mid-word, which reads as a different
+/// figure's name.
+const TILE_COLUMNS: u16 = 11;
+
+/// How many of the four tiles fit side by side: all four where the pane is
+/// wide enough for their labels, two otherwise. The right-hand column is a
+/// third of the screen, and at eighty columns that is not four tiles wide.
+fn tiles_across(width: u16) -> usize {
+    match width / TILE_COLUMNS {
+        0..=1 => 1,
+        2..=3 => 2,
+        _ => 4,
+    }
+}
+
+/// The denominator the tiles' columns are cut with. Ratio wants a `u32`.
+fn across_ratio(across: usize) -> u32 {
+    u32::try_from(across).unwrap_or(1).max(1)
+}
+
+/// Tool rows the Usage pane draws before it stops, whatever the tool mix is.
+///
+/// The pane is sized to its content, so without a cap a session that reached
+/// for a dozen tools would take the column the files and the sub-agents are
+/// read in. Four is the busiest of them; the footer counts the rest.
+const MIX_SHOWN: usize = 4;
+
+/// The rows the Usage pane needs: its frame, its tiles, whatever windows and
+/// budget the session has been told about, its tool mix and its footer.
+///
+/// Read before the pane is drawn, because the column above it is laid out
+/// from it — the pane takes the rows its figures need and leaves the rest to
+/// the panes that grow with the session.
+fn usage_height(app: &App, width: u16) -> u16 {
+    let session = app.session();
+    let windows = session
+        .usage_windows()
+        .map_or(0, |w| usize::from(crate::app::windows_label(w).is_some()));
+    let overage = session
+        .usage_windows()
+        .map_or(0, |w| usize::from(w.using_overage));
+    let budget = usize::from(app.budget().is_some());
+    let mix = session.tools().by_name.len().clamp(1, MIX_SHOWN);
+    // Two rows of border, the blank row under the title, a label row and a
+    // value row per band of tiles, then the figures and the footer.
+    let rows = 3 + 2 * 4_usize.div_ceil(tiles_across(width)) + windows + overage + budget + mix + 1;
+    u16::try_from(rows).unwrap_or(u16::MAX)
+}
+
+fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let session = app.session();
+    let prices = app.prices();
+    let block = pane("Usage", area, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -861,24 +1069,34 @@ fn draw_cost(
         ("cache read", compact(totals.cache_read), theme.fg),
     ];
 
-    let [labels, values, rest] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(inner);
+    let across = tiles_across(inner.width);
+    let tile_rows = u16::try_from(tiles.len().div_ceil(across)).unwrap_or(1);
+    let [tiled, rest] =
+        Layout::vertical([Constraint::Length(tile_rows * 2), Constraint::Min(0)]).areas(inner);
 
-    let columns = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(labels);
-    let value_columns = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(values);
-    for (i, (label, value, colour)) in tiles.iter().enumerate() {
-        frame.render_widget(
-            Paragraph::new(Line::from(*label).style(Style::new().fg(theme.dim))),
-            columns[i],
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(value.clone()).style(Style::new().fg(*colour).bold())),
-            value_columns[i],
-        );
+    for (row, row_of_tiles) in tiles.chunks(across).enumerate() {
+        let top = tiled.y.saturating_add(u16::try_from(row * 2).unwrap_or(0));
+        if top >= tiled.bottom() {
+            break;
+        }
+        let band = Rect::new(tiled.x, top, tiled.width, 2.min(tiled.bottom() - top));
+        let [labels, values] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(band);
+        let columns = Layout::horizontal(vec![Constraint::Ratio(1, across_ratio(across)); across])
+            .split(labels);
+        let value_columns =
+            Layout::horizontal(vec![Constraint::Ratio(1, across_ratio(across)); across])
+                .split(values);
+        for (i, (label, value, colour)) in row_of_tiles.iter().enumerate() {
+            frame.render_widget(
+                Paragraph::new(Line::from(*label).style(Style::new().fg(theme.dim))),
+                columns[i],
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(value.clone()).style(Style::new().fg(*colour).bold())),
+                value_columns[i],
+            );
+        }
     }
 
     // Dollars per category would need spend attributed to each read, edit or
@@ -890,6 +1108,30 @@ fn draw_cost(
 
     let rows = usize::from(rest.height);
     let mut lines: Vec<Line> = Vec::new();
+
+    // On a flat-rate plan the windows are the budget, so they sit where a
+    // budget sits. Absent, not zeroed, until a backend reports one: a metered
+    // profile has no windows and a `0%/5h` would be a figure nobody measured.
+    if let Some(windows) = session.usage_windows() {
+        if let Some(label) = crate::app::windows_label(windows) {
+            lines.push(Line::from(label).style(window_style(windows, theme)));
+        }
+        if windows.using_overage {
+            lines.push(Line::from("overage").style(Style::new().fg(theme.hot).bold()));
+        }
+    }
+    if let Some(budget) = app.budget() {
+        let spent = totals.reported_cost_usd;
+        lines.push(
+            Line::from(format!("budget ${spent:.2}/${budget:.2}")).style(
+                match spent >= budget * BUDGET_SHOWN_HOT {
+                    true => Style::new().fg(theme.hot).bold(),
+                    false => Style::new().fg(theme.fg),
+                },
+            ),
+        );
+    }
+
     if mix.is_empty() {
         lines.push(Line::from("no tool calls yet").style(Style::new().fg(theme.dim)));
     } else {
@@ -897,7 +1139,8 @@ fn draw_cost(
         let bar_width = usize::from(rest.width)
             .saturating_sub(BAR_NAME + BAR_COUNT + 2)
             .min(BAR_CELLS);
-        for (name, count) in mix.iter().take(rows.saturating_sub(1)) {
+        let room = rows.saturating_sub(lines.len() + 1).min(MIX_SHOWN);
+        for (name, count) in mix.iter().take(room) {
             lines.push(bar_line(name, **count, busiest, bar_width, theme));
         }
     }
@@ -917,7 +1160,7 @@ fn draw_cost(
     frame.render_widget(Paragraph::new(lines), rest);
 }
 
-/// Columns a tool's name gets in the cost pane's mix.
+/// Columns a tool's name gets in the Usage pane's mix.
 const BAR_NAME: usize = 18;
 
 /// Columns a tool's count gets, right-aligned.
@@ -996,7 +1239,13 @@ fn draw_parallel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_changes(frame: &mut Frame, area: Rect, session: &SessionState, theme: &Theme) {
+fn draw_changes(
+    frame: &mut Frame,
+    area: Rect,
+    repo: &crate::app::Repo,
+    session: &SessionState,
+    theme: &Theme,
+) {
     let block = pane("Changes", area, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1006,6 +1255,19 @@ fn draw_changes(frame: &mut Frame, area: Rect, session: &SessionState, theme: &T
 
     let width = usize::from(inner.width);
     let mut lines: Vec<Line> = Vec::new();
+
+    // What the session is changing things on. The shell is handed the branch
+    // by whatever opened it; how far ahead of its remote it is, and what else
+    // the working tree holds, is not read yet.
+    if let Some(branch) = &repo.branch {
+        lines.push(
+            Line::from(format!(
+                "⎇ {}",
+                text::truncate(branch, width.saturating_sub(2))
+            ))
+            .style(Style::new().fg(theme.tool)),
+        );
+    }
 
     lines.push(
         Line::from(format!("Files ─ {}", session.files().len()))
@@ -1109,7 +1371,7 @@ fn file_line(file: &FileChanges, width: usize, theme: &Theme) -> Line<'static> {
 /// One side of a file's counts: `+38`, `+≥38` where a call that changed the
 /// file did not say how much it added, or an em dash where none of them did.
 ///
-/// The three readings are the cost pane's: a bare figure is the whole of it,
+/// The three readings are the Usage pane's: a bare figure is the whole of it,
 /// `≥` means at least this much, and an em dash means nothing was reported. A
 /// zero here would say the session left that side of the file alone, which is
 /// a different claim from not knowing.
@@ -1121,99 +1383,8 @@ fn count(sign: char, lines: u64, stated: bool) -> String {
     }
 }
 
-fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let session = app.session();
-    let bar = Style::new().bg(theme.status_bg).fg(theme.status_fg);
-    let separator = Span::styled(" │ ", Style::new().fg(theme.status_fg).dim());
-
-    let mut top = vec![Span::styled(
-        app.repo().name.clone(),
-        Style::new().fg(theme.hot).bold(),
-    )];
-    top.push(separator.clone());
-    top.push(Span::styled(
-        backend_label(session, app.profile(), app.is_attached()),
-        Style::new().fg(theme.agent),
-    ));
-    if let Some(branch) = &app.repo().branch {
-        top.push(separator.clone());
-        top.push(Span::styled(
-            format!("⎇ {branch}"),
-            Style::new().fg(theme.tool),
-        ));
-    }
-    top.push(separator.clone());
-    top.push(Span::styled(
-        format!("{} tokens", compact(session.totals().tokens())),
-        Style::new().fg(theme.fg),
-    ));
-    if !session.pending_permissions().is_empty() {
-        top.push(separator.clone());
-        top.push(Span::styled(
-            format!("{} waiting on you", session.pending_permissions().len()),
-            Style::new().fg(theme.hot).bold(),
-        ));
-    }
-    // On a flat-rate plan the windows are the budget, so they sit where the
-    // budget does. Absent, not zeroed, until a backend reports one: a metered
-    // profile has no windows and a `0%/5h` would be a figure nobody measured.
-    if let Some(windows) = session.usage_windows() {
-        if let Some(label) = crate::app::windows_label(windows) {
-            top.push(separator.clone());
-            top.push(Span::styled(label, window_style(windows, theme)));
-        }
-        if windows.using_overage {
-            top.push(separator.clone());
-            top.push(Span::styled(
-                "overage".to_owned(),
-                Style::new().fg(theme.hot).bold(),
-            ));
-        }
-    }
-    if let Some(budget) = app.budget() {
-        let spent = session.totals().reported_cost_usd;
-        top.push(separator.clone());
-        top.push(Span::styled(
-            format!("budget ${spent:.2}/${budget:.2}"),
-            match spent >= budget * BUDGET_SHOWN_HOT {
-                true => Style::new().fg(theme.hot).bold(),
-                false => Style::new().fg(theme.fg),
-            },
-        ));
-    }
-    if session.errors() > 0 {
-        top.push(separator);
-        top.push(Span::styled(
-            format!("{} errors", session.errors()),
-            Style::new().fg(theme.del),
-        ));
-    }
-
-    let bottom = match (app.hint(), session.mode()) {
-        (Some(hint), _) => Line::from(hint.to_owned()).style(Style::new().fg(theme.hot)),
-        (None, Some(mode)) => Line::from(vec![
-            Span::styled(format!("▸▸ {mode} mode"), Style::new().fg(theme.hot).bold()),
-            Span::styled(
-                " · Shift+Tab cycles · F8 model · Enter send · F10 quit".to_owned(),
-                Style::new().fg(theme.status_fg),
-            ),
-        ]),
-        // Nothing has said how this session gates tool calls, so nothing
-        // claims to know: the keys are what is left to say.
-        (None, None) => Line::from(
-            "Enter send · Alt+Enter newline · PgUp/PgDn scrollback · F10 quit".to_owned(),
-        )
-        .style(Style::new().fg(theme.status_fg)),
-    };
-
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(top), bottom]).style(bar),
-        area,
-    );
-}
-
-/// How the windows segment is coloured: the same threshold and the same colour
-/// as a budget nearly spent, because on a flat-rate plan that is what a window
+/// How the windows row is coloured: the same threshold and the same colour as
+/// a budget nearly spent, because on a flat-rate plan that is what a window
 /// nearly gone is.
 fn window_style(windows: &UsageWindows, theme: &Theme) -> Style {
     let hot = [windows.five_hour, windows.seven_day]
@@ -1249,33 +1420,40 @@ fn draw_fkeys(frame: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
-/// What is running, or what is not running yet.
+/// What the session is on, and what it is running under.
 ///
-/// A backend's own report of what it runs wins over the profile that was
-/// selected to start it: the profile asks for a backend and the backend says
-/// which model it ended up on. Between the two — a subprocess started and not
-/// yet heard from — the line says it is starting rather than that nothing is
-/// attached, which would be read as a session that is not going to answer.
-fn backend_label(
+/// The model is `None` until a backend has said which one it ended up on: a
+/// profile names a backend, not a model, so naming one before the backend has
+/// would be a guess in the place the operator reads to know what they are
+/// paying for. A backend's own report wins over the profile that was selected
+/// to start it.
+///
+/// What it runs under is the backend and the profile that chose it, and it is
+/// `None` where no profile has been selected and no backend has spoken — the
+/// state segment is what says so. Which plan or contract that profile is on is
+/// the CLI's own business and is nowhere in the stream, so the row says what
+/// was reported and stops there.
+fn identity(
     session: &SessionState,
     profile: Option<&SelectedProfile>,
-    attached: bool,
-) -> String {
-    match (session.meta(), profile, attached) {
+) -> (Option<String>, Option<String>) {
+    match (session.meta(), profile) {
         // The model comes off the fold rather than off the meta: a model the
         // operator has just chosen is what the session is on from its next
         // turn, and naming the one it is moving off would read as a switch
         // that did not land.
-        (Some(meta), _, _) => format!(
-            "⚡ {} · {}",
-            meta.backend,
-            session.model().unwrap_or(&meta.model)
+        (Some(meta), _) => (
+            Some(session.model().unwrap_or(&meta.model).to_owned()),
+            Some(match meta.profile.is_empty() {
+                true => meta.backend.to_string(),
+                false => format!("{} · {}", meta.backend, meta.profile),
+            }),
         ),
-        (None, Some(profile), true) => format!("{} · {}, starting", profile.name, profile.backend),
-        (None, Some(profile), false) => {
-            format!("{} · {}, not attached", profile.name, profile.backend)
-        }
-        (None, None, _) => "no backend attached".to_owned(),
+        (None, Some(profile)) => (
+            None,
+            Some(format!("{} · {}", profile.backend, profile.name)),
+        ),
+        (None, None) => (None, None),
     }
 }
 
@@ -1292,7 +1470,7 @@ fn backend_label(
 /// * `—` — there is no usage at all. Never a zero.
 ///
 /// Public so that anything else printing a session's cost prints the same
-/// label the cost pane does.
+/// label the Usage pane does.
 pub fn session_cost(session: &SessionState, prices: Option<&dyn Prices>) -> String {
     let totals = session.totals();
     if totals.records == 0 {
@@ -1438,10 +1616,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unstarted_session_says_no_backend_is_attached() {
+    fn an_unstarted_session_names_no_model_it_was_never_told_about() {
         assert_eq!(
-            backend_label(&SessionState::new(), None, false),
-            "no backend attached"
+            identity(&SessionState::new(), None),
+            (None, None),
+            "nothing has said what this session is or what it runs under"
         );
 
         let running = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
@@ -1451,8 +1630,11 @@ mod tests {
             backend_session: None,
         })]);
         assert_eq!(
-            backend_label(&running, None, false),
-            "⚡ codex · gpt-5-codex"
+            identity(&running, None),
+            (
+                Some("gpt-5-codex".to_owned()),
+                Some("codex · default".to_owned())
+            )
         );
     }
 
@@ -1464,8 +1646,8 @@ mod tests {
             models: Vec::new(),
         };
         assert_eq!(
-            backend_label(&SessionState::new(), Some(&work), false),
-            "work · claude, not attached"
+            identity(&SessionState::new(), Some(&work)),
+            (None, Some("claude · work".to_owned()))
         );
 
         let running = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
@@ -1475,8 +1657,8 @@ mod tests {
             backend_session: None,
         })]);
         assert_eq!(
-            backend_label(&running, Some(&work), false),
-            "⚡ claude · opus-5"
+            identity(&running, Some(&work)),
+            (Some("opus-5".to_owned()), Some("claude · work".to_owned()))
         );
     }
 
@@ -1487,14 +1669,173 @@ mod tests {
             backend: Backend::Claude,
             models: Vec::new(),
         };
+        let selected = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+        })
+        .with_profile(max);
 
         assert_eq!(
-            backend_label(&SessionState::new(), Some(&max), true),
-            "max · claude, starting"
+            row_of(&selected),
+            vec!["claude · max".to_owned(), "○ not attached".to_owned()],
+            "a prompt typed here would go nowhere, and the row says so"
         );
         assert_eq!(
-            backend_label(&SessionState::new(), Some(&max), false),
-            "max · claude, not attached"
+            row_of(&selected.attached()),
+            vec!["claude · max".to_owned(), "○ starting".to_owned()],
+            "a subprocess that has not spoken is starting, not absent"
+        );
+    }
+
+    /// What the menu row's right-hand group reads as, segment by segment.
+    fn row_of(app: &App) -> Vec<String> {
+        identity_segments(app, &Theme::default())
+            .into_iter()
+            .map(|segment| segment.text)
+            .collect()
+    }
+
+    fn attached_session() -> App {
+        let mut app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+        })
+        .attached();
+        app.apply(&niobe_core::event::Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+        app
+    }
+
+    #[test]
+    fn the_menu_row_says_what_the_session_is_on_and_what_it_runs_under() {
+        assert_eq!(
+            row_of(&attached_session()),
+            vec![
+                "claude-opus-5".to_owned(),
+                "claude · max".to_owned(),
+                "○ idle".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_shell_that_has_not_been_told_the_time_draws_none_rather_than_a_guess() {
+        let app = attached_session();
+        assert!(
+            !row_of(&app).iter().any(|segment| segment.contains(':')),
+            "no clock until the event loop has read one: {:?}",
+            row_of(&app)
+        );
+
+        let mut ticked = attached_session();
+        ticked.tick(
+            std::time::Instant::now(),
+            crate::clock::LocalTime::new(14, 7),
+        );
+        assert_eq!(
+            row_of(&ticked).last().map(String::as_str),
+            Some("14:07"),
+            "the time of day is the rightmost thing the row says"
+        );
+    }
+
+    #[test]
+    fn a_running_turn_fills_the_glyph_and_an_idle_one_does_not() {
+        let mut app = attached_session();
+        let t0 = std::time::Instant::now();
+
+        app.tick(t0, None);
+        assert_eq!(
+            row_of(&app).get(2).map(String::as_str),
+            Some("○ idle 0s"),
+            "a session that has not been asked anything is idle, and says for how long"
+        );
+
+        app.tick(t0 + std::time::Duration::from_secs(72), None);
+        assert_eq!(
+            row_of(&app).get(2).map(String::as_str),
+            Some("○ idle 1m 12s")
+        );
+
+        app.type_into_composer(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char('x'),
+            ..Default::default()
+        });
+        app.submit();
+        app.tick(t0 + std::time::Duration::from_secs(72), None);
+        app.tick(t0 + std::time::Duration::from_secs(110), None);
+        assert_eq!(
+            row_of(&app).get(2).map(String::as_str),
+            Some("● working 38s"),
+            "a turn sent from here fills the glyph and is timed from when the shell saw it"
+        );
+    }
+
+    #[test]
+    fn a_session_that_hit_errors_says_so_without_a_pane_being_opened() {
+        let mut app = attached_session();
+        assert!(!row_of(&app).iter().any(|segment| segment.contains("error")));
+
+        app.apply(&niobe_core::event::Event::Error {
+            message: "the backend stopped answering".to_owned(),
+            fatal: false,
+        });
+        assert_eq!(
+            row_of(&app).first().map(String::as_str),
+            Some("⚠ 1 error"),
+            "errors lead the group, so they are the last segment a narrow row drops"
+        );
+    }
+
+    #[test]
+    fn a_narrowing_row_drops_whole_segments_from_the_right() {
+        let mut app = attached_session();
+        app.tick(
+            std::time::Instant::now(),
+            crate::clock::LocalTime::new(14, 7),
+        );
+
+        let whole = identity_segments(&app, &Theme::default());
+        let full = segments_width(&whole);
+
+        // One column short of the whole group, and the rightmost segment —
+        // the clock — is what gives way, entire.
+        let kept = drawn_segments(&app, full - 1);
+        assert_eq!(
+            kept,
+            vec![
+                "claude-opus-5".to_owned(),
+                "claude · max".to_owned(),
+                "○ idle 0s".to_owned()
+            ]
+        );
+
+        assert_eq!(
+            drawn_segments(&app, 0),
+            Vec::<String>::new(),
+            "a row with no room for a whole segment says nothing rather than half of something"
+        );
+    }
+
+    /// The segments that survive a group with `room` columns for them.
+    fn drawn_segments(app: &App, room: usize) -> Vec<String> {
+        fitted(identity_segments(app, &Theme::default()), room)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
+    }
+
+    #[test]
+    fn the_pane_that_shows_what_a_session_used_is_called_usage_everywhere() {
+        assert!(MENUS.contains(&"Usage"), "{MENUS:?}");
+        assert!(FKEYS.contains(&("5", "Usage")), "{FKEYS:?}");
+        assert!(
+            !MENUS.contains(&"Cost") && !FKEYS.iter().any(|(_, label)| *label == "Cost"),
+            "nothing the operator reads still calls this pane Cost"
         );
     }
 

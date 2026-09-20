@@ -652,7 +652,7 @@ mod long_context {
         }
     }
 
-    /// The status line shows the model the CLI said the session is on, which
+    /// The shell names the model the CLI said the session is on, which
     /// carries the window; a message naming the family does not take it away.
     #[test]
     fn the_session_stays_on_the_model_with_its_window() {

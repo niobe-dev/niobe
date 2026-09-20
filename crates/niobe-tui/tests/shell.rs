@@ -171,29 +171,15 @@ fn a_reply_in_markdown_is_drawn_styled_in_both_themes() {
 }
 
 /// A theme is a palette and nothing else: every character stays where it was,
-/// so the one committed picture of the layout covers every theme. The menu bar
-/// is the exception, because it names the theme in force and the names are not
-/// the same width.
+/// so the one committed picture of the layout covers every theme. Nothing on
+/// screen names the palette in force — `9 Theme` in the F-key row is where one
+/// is changed.
 #[test]
-fn a_theme_moves_no_character_on_screen_but_the_name_it_shows() {
+fn a_theme_moves_no_character_on_screen() {
     for (width, height) in [(80, 24), (200, 60)] {
-        let classic = screen(&mut running_session().with_theme(CLASSIC), width, height);
-        let neo = screen(&mut running_session().with_theme(NEO), width, height);
-
-        let mut classic = classic.lines();
-        let mut neo = neo.lines();
-        let (classic_menu, neo_menu) = (classic.next(), neo.next());
-        assert!(
-            classic_menu.is_some_and(|line| line.contains("theme:CLASSIC")),
-            "{classic_menu:?}"
-        );
-        assert!(
-            neo_menu.is_some_and(|line| line.contains("theme:NEO")),
-            "{neo_menu:?}"
-        );
         assert_eq!(
-            classic.collect::<Vec<_>>(),
-            neo.collect::<Vec<_>>(),
+            screen(&mut running_session().with_theme(CLASSIC), width, height),
+            screen(&mut running_session().with_theme(NEO), width, height),
             "the theme moved something at {width}x{height}"
         );
     }
@@ -316,14 +302,14 @@ fn session_at_work() -> App {
     }
     app.submit();
     let t0 = Instant::now();
-    app.tick(t0);
+    app.tick(t0, None);
     app.apply(&Event::ToolCallStart {
         id: "t1".into(),
         name: "Bash".to_owned(),
         input: r#"{"command":"npm test -- fetch"}"#.to_owned(),
         summary: Some("npm test -- fetch".to_owned()),
     });
-    app.tick(t0 + Duration::from_secs(75));
+    app.tick(t0 + Duration::from_secs(75), None);
     app
 }
 
@@ -343,48 +329,48 @@ fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
 }
 
 #[test]
-fn a_selected_profile_is_named_in_the_status_line_and_the_menu_bar() {
+fn a_selected_profile_is_named_in_the_menu_row_with_nothing_yet_listening() {
     let mut app = empty_session().with_profile(SelectedProfile {
         name: "work".to_owned(),
         backend: Backend::Claude,
         models: Vec::new(),
     });
-    let label = "work · claude, not attached";
 
+    // At the narrowest the shell draws in there is room for what it runs
+    // under and not for the rest, so that is what is kept.
     let narrow = screen(&mut app, 80, 24);
-    let status = narrow.lines().nth(21).unwrap_or_default();
-    assert!(status.contains(label), "{narrow}");
+    let menu = narrow.lines().next().unwrap_or_default();
+    assert!(menu.contains("claude · work"), "{narrow}");
 
     let wide = screen(&mut app, 120, 30);
     let menu = wide.lines().next().unwrap_or_default();
-    assert!(menu.contains(label), "{wide}");
+    assert!(menu.contains("claude · work"), "{wide}");
+    assert!(
+        menu.contains("○ not attached"),
+        "a prompt typed here goes nowhere and the row did not say so:\n{wide}"
+    );
 }
 
 #[test]
-fn the_status_line_says_how_tool_calls_are_gated_and_which_key_changes_it() {
+fn a_model_the_operator_moved_to_is_what_the_menu_row_names() {
     let mut app = running_session();
-    let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("▸▸ ask mode"), "{frame}");
-    assert!(frame.contains("Shift+Tab cycles"), "{frame}");
-
-    // A session nothing has reported a mode for claims none.
-    let empty = screen(&mut empty_session(), 120, 30);
-    assert!(!empty.contains("mode"), "{empty}");
-}
-
-#[test]
-fn a_model_the_operator_moved_to_is_what_the_status_line_names() {
-    let mut app = running_session();
-    assert!(screen(&mut app, 120, 30).contains("claude · opus-5"));
+    let menu = |app: &mut App| {
+        screen(app, 120, 30)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(menu(&mut app).contains("opus-5"), "{}", menu(&mut app));
 
     app.apply(&Event::ModelSelected {
         model: "haiku".to_owned(),
     });
 
-    let frame = screen(&mut app, 120, 30);
+    let row = menu(&mut app);
     assert!(
-        frame.contains("claude · haiku"),
-        "the status line named the model the session moved off:\n{frame}"
+        row.contains("haiku") && !row.contains("opus-5"),
+        "the menu row named the model the session moved off:\n{row}"
     );
 }
 
@@ -411,7 +397,7 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
 }
 
 #[test]
-fn a_budget_is_on_the_status_line_with_what_has_been_spent_against_it() {
+fn a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it() {
     let mut app = running_session().with_budget(0.50);
 
     let frame = screen(&mut app, 120, 30);
@@ -426,15 +412,13 @@ fn a_budget_is_on_the_status_line_with_what_has_been_spent_against_it() {
 }
 
 #[test]
-fn a_cycled_mode_is_on_the_status_line_and_a_denied_key_is_not() {
+fn a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not() {
     let mut app = running_session();
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
         ratatui::crossterm::event::KeyCode::BackTab,
         ratatui::crossterm::event::KeyModifiers::SHIFT,
     ));
 
-    let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("▸▸ auto mode"), "{frame}");
     assert_eq!(
         app.take_produced(),
         [Event::ModeSelected { mode: Mode::Auto }]
@@ -518,9 +502,9 @@ fn the_right_stack_collapses_below_a_hundred_columns() {
     let narrow = screen(&mut running_session(), 99, 30);
     let wide = screen(&mut running_session(), 100, 30);
 
-    // Matched on the border the title sits in, so the menu bar's own `Cost`
+    // Matched on the border the title sits in, so the menu bar's own `Usage`
     // and `Files` entries cannot stand in for a pane.
-    for pane in ["═ Cost ", "═ Parallel ", "═ Changes "] {
+    for pane in ["═ Usage ", "═ Parallel ", "═ Changes "] {
         assert!(
             !narrow.contains(pane),
             "the {pane:?} pane is still drawn at 99 columns:\n{narrow}"
@@ -534,6 +518,52 @@ fn the_right_stack_collapses_below_a_hundred_columns() {
     // The session pane is what the room goes to.
     assert!(narrow.contains("Session ─ example-app"));
     assert!(wide.contains("Session ─ example-app"));
+}
+
+/// The rows a pane's top border is on, in the order they appear.
+fn pane_tops(frame: &str, from: usize) -> Vec<usize> {
+    frame
+        .lines()
+        .enumerate()
+        .filter(|(_, row)| row.chars().skip(from).any(|c| c == '╔'))
+        .map(|(at, _)| at)
+        .collect()
+}
+
+#[test]
+fn the_body_is_cut_in_the_proportions_the_layout_is_drawn_to() {
+    let frame = screen(&mut running_session(), 200, 60);
+    let first = frame.lines().nth(1).unwrap_or_default();
+
+    // The session pane, a column of desktop, then the right-hand stack.
+    let gap = first.chars().position(|c| c == '╗').unwrap_or(0) + 1;
+    let session = gap;
+    let right = first.chars().count() - gap - 1;
+    let split = session as f64 / right as f64;
+    assert!(
+        (1.85..=1.95).contains(&split),
+        "the body is cut {split:.2} : 1, not 1.9 : 1 ({session} and {right} columns)"
+    );
+
+    // Usage takes what its figures need; Changes and Activity share the rest,
+    // 1.3 : 1 in favour of the files.
+    let tops = pane_tops(&frame, gap);
+    let [usage, changes, activity] = tops[..] else {
+        panic!("the right-hand stack is not three panes: {tops:?}");
+    };
+    let bottom = frame.lines().count() - 1;
+    let (changes_rows, activity_rows) = (activity - changes, bottom - activity);
+    let split = changes_rows as f64 / activity_rows as f64;
+    assert!(
+        (1.25..=1.35).contains(&split),
+        "Changes to Activity is {split:.2} : 1, not 1.3 : 1 \
+         ({changes_rows} and {activity_rows} rows)"
+    );
+    assert!(
+        changes - usage < changes_rows,
+        "Usage took more rows than its figures need: {} of them",
+        changes - usage
+    );
 }
 
 #[test]
@@ -593,7 +623,7 @@ fn nothing_the_backends_did_not_report_appears_as_a_number() {
 
     // An empty session has no cost at all, and says so.
     let empty = screen(&mut empty_session(), 120, 30);
-    assert!(empty.contains("no backend"), "{empty}");
+    assert!(empty.contains("No backend attached"), "{empty}");
     assert!(empty.contains('—'), "{empty}");
 }
 
@@ -607,8 +637,8 @@ fn gutter(frame: &str) -> String {
         .and_then(|border| border.chars().position(|c| c == '╗'))
         .map(|at| at + 1)
         .expect("the session pane's top-right corner is on the body's first row");
-    // The menu bar above the body, and the status line and F-key bar below it.
-    let body = frame.lines().count().saturating_sub(4);
+    // The menu bar above the body, and the F-key bar below it.
+    let body = frame.lines().count().saturating_sub(2);
     frame
         .lines()
         .skip(1)
@@ -638,7 +668,7 @@ fn the_desktop_moves_between_the_panes_while_a_turn_runs() {
     );
 
     // Two tenths of a second later the strip has moved on.
-    app.tick(std::time::Instant::now() + Duration::from_secs(200));
+    app.tick(std::time::Instant::now() + Duration::from_secs(200), None);
     let later = gutter(&screen(&mut app, 120, 30));
     assert_ne!(first, later, "the desktop drew the same frame twice");
 
@@ -688,7 +718,7 @@ fn no_pane_draws_its_text_against_its_border() {
         }
 
         // The row under the body's top border belongs to the Session pane and
-        // to the Cost pane at once, and both keep it blank.
+        // to the Usage pane at once, and both keep it blank.
         let under = frame.lines().nth(2).unwrap_or_default();
         assert!(
             under.chars().all(|c| c == '║' || c == ' '),

@@ -17,6 +17,7 @@ ratatui.workspace = true
 ratatui-textarea.workspace = true
 unicode-width.workspace = true
 pulldown-cmark.workspace = true
+jiff.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 signal-hook.workspace = true

@@ -374,7 +374,7 @@ impl Fold {
         // moved. A message the CLI wrote itself, such as the one it shows when
         // a request failed, is marked as written by no model; it is still what
         // the operator was shown, so it is kept, but naming the session after
-        // it would put a model that does not exist in the status line and
+        // it would put a model that does not exist in front of the operator
         // would overwrite the one the session is really on.
         if let Some(model) = message.model.filter(|model| model != NO_MODEL) {
             self.fold(wire::Message::StreamEvent(wire::StreamEvent {
@@ -505,8 +505,8 @@ impl Fold {
             // one this session ran under beats showing a mode it was not in.
             None => translate::warn(format!(
                 "the session was gating tool calls as `{spelt}`, which this version of Niobe \
-                 does not model. The status line shows no mode until the session is moved to \
-                 one it does."
+                 does not model. No mode is reported until the session is moved to one it \
+                 does."
             )),
         });
         self.mode = Some(spelt);

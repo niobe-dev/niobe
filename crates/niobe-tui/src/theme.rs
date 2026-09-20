@@ -67,11 +67,6 @@ pub struct Theme {
     /// Text on an F-key label.
     pub fkey_fg: Color,
 
-    /// The status line.
-    pub status_bg: Color,
-    /// Text on the status line.
-    pub status_fg: Color,
-
     /// Added lines.
     pub add: Color,
     /// Removed lines, and errors.
@@ -135,9 +130,6 @@ pub const CLASSIC: Theme = Theme {
     fkey_bg: Color::Cyan,
     fkey_fg: Color::Black,
 
-    status_bg: Color::Black,
-    status_fg: Color::Gray,
-
     add: Color::LightGreen,
     del: Color::LightRed,
 
@@ -190,9 +182,6 @@ pub const NEO: Theme = Theme {
     fkey_bg: Color::Green,
     fkey_fg: Color::Black,
 
-    status_bg: Color::Black,
-    status_fg: Color::Green,
-
     add: Color::LightGreen,
     del: Color::LightRed,
 
@@ -226,10 +215,10 @@ pub const NEO: Theme = Theme {
 /// chrome and everything the session did, and a magenta that carries the
 /// operator and the keys they can press. Both survive the reduction intact,
 /// because both are on the bright half of the sixteen. What does not survive
-/// is the design's third colour, a pale lavender for tool calls and the
-/// status line: there is no lavender in sixteen colours, so a tool call takes
-/// the bright blue, which is the only other hue on screen, and the status line
-/// takes the grey. Pane background and desk are one near-black apart in the
+/// is the design's third colour, a pale lavender for tool calls: there is no
+/// lavender in sixteen colours, so a tool call takes the bright blue, which is
+/// the only other hue on screen. Pane background and desk are one near-black
+/// apart in the
 /// design and are both black here, which is what makes the gutter between the
 /// panes a place the desktop's motion can be seen in at all.
 pub const CYBER: Theme = Theme {
@@ -246,9 +235,6 @@ pub const CYBER: Theme = Theme {
     menu_fg: Color::White,
     fkey_bg: Color::LightMagenta,
     fkey_fg: Color::Black,
-
-    status_bg: Color::Black,
-    status_fg: Color::Gray,
 
     add: Color::LightGreen,
     del: Color::LightRed,
@@ -282,14 +268,14 @@ pub const CYBER: Theme = Theme {
 /// the dark one, secondary text takes the light one — which is enough,
 /// because no two of those are ever drawn on each other.
 ///
-/// The editor's blue status bar is the one piece of the design that does not
-/// survive. The status line is where the backend, the branch, the budget and
-/// the plan's windows are told apart by colour, and on sixteen colours a blue
-/// bar leaves only white legible on it: the accent and the assistant's own
-/// blue both vanish into the background, and the strip goes monochrome. The
-/// bar takes the panes' black instead, which keeps every one of those
-/// readings, and the blue stays where it is still an accent — the F-key
-/// labels, and everything the shell wants the operator to look at.
+/// The editor's blue bars are the one piece of the design that does not
+/// survive. The menu row is where the model, the profile and what the session
+/// is doing are told apart by colour, and on sixteen colours a blue bar leaves
+/// only white legible on it: the accent and the assistant's own blue both
+/// vanish into the background, and the strip goes monochrome. The row takes
+/// the panes' black instead, which keeps every one of those readings, and the
+/// blue stays where it is still an accent — the F-key labels, and everything
+/// the shell wants the operator to look at.
 pub const MODERN: Theme = Theme {
     name: "MODERN",
 
@@ -304,9 +290,6 @@ pub const MODERN: Theme = Theme {
     menu_fg: Color::White,
     fkey_bg: Color::Blue,
     fkey_fg: Color::White,
-
-    status_bg: Color::Black,
-    status_fg: Color::Gray,
 
     add: Color::Cyan,
     del: Color::LightRed,
@@ -383,7 +366,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 28] {
+    fn colours(t: &Theme) -> [Color; 26] {
         [
             t.pane_bg,
             t.frame,
@@ -395,8 +378,6 @@ mod tests {
             t.menu_fg,
             t.fkey_bg,
             t.fkey_fg,
-            t.status_bg,
-            t.status_fg,
             t.add,
             t.del,
             t.user,
@@ -462,15 +443,10 @@ mod tests {
                 (t.hot, t.menu_bg, "a menu hot key"),
                 (t.fkey_fg, t.fkey_bg, "an F-key label"),
                 (t.fkey_bg, t.menu_bg, "an F-key label block"),
-                (t.status_fg, t.status_bg, "the status line"),
-                // The status line draws the pane colours on a background a
-                // theme may choose for itself, so each of them is checked
-                // against it as well as against the panes.
-                (t.hot, t.status_bg, "the status line's accent"),
-                (t.agent, t.status_bg, "the backend on the status line"),
-                (t.tool, t.status_bg, "the branch on the status line"),
-                (t.fg, t.status_bg, "a figure on the status line"),
-                (t.del, t.status_bg, "an error count on the status line"),
+                // The menu row carries the session's identity beside the
+                // menus, so what it says there is checked against the menu
+                // background as well.
+                (t.del, t.menu_bg, "an error count in the menu row"),
                 (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
                 (t.dialog_fg, t.dialog_bg, "dialog text"),
                 (t.dialog_frame, t.dialog_bg, "a dialog's border"),

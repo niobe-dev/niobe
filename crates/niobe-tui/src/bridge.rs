@@ -44,7 +44,7 @@ pub trait Bridge: std::fmt::Debug {
     /// Returns once the backend has the request, not once it has applied it: a
     /// backend that refuses says so on its own stream. The default refuses,
     /// for the reason [`Bridge::answer`] does — a change nobody took must be
-    /// reported, or the status line shows a session that is not the one
+    /// reported, or the menu row names a session that is not the one
     /// running.
     fn set_mode(&mut self, mode: Mode) -> Result<(), BridgeError> {
         let _ = mode;

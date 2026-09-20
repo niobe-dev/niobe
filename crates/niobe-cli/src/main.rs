@@ -811,9 +811,10 @@ IN THE SHELL:
 MODE AND MODEL:
     Shift+Tab cycles the mode the session runs in — plan changes nothing, ask
     stops for every call no rule already allows, auto leaves the decision to
-    the backend — and the status line names the one in force. A mode a backend
-    reports that niobe has no word for is named rather than shown as one of
-    these three.
+    the backend. The shell does not show which one is in force: the row that
+    named it is gone and the composer does not say yet. A mode a backend
+    reports that niobe has no word for is carried as reported rather than
+    forced into one of these three.
 
     F8 picks a model from the ones the profile names. The switch applies from
     the next turn and keeps everything said so far: the running session is told

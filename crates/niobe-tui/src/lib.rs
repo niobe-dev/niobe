@@ -7,8 +7,8 @@
 //! type may reach this crate, which is what keeps a second backend cheap.
 //! `cargo xtask layering` fails the build if that stops being true.
 //!
-//! The shell is four regions — a menu bar, the panes, a status line and an
-//! F-key bar — drawn from [`app::App`], which is a fold over
+//! The shell is three regions — a menu bar, the panes and an F-key bar —
+//! drawn from [`app::App`], which is a fold over
 //! [`niobe_core::event::Event`] and nothing else. Two properties are worth
 //! stating because the rest of the crate is arranged around them:
 //!
@@ -25,6 +25,7 @@
 
 pub mod app;
 pub mod bridge;
+pub mod clock;
 mod fx;
 mod input;
 pub mod journal;

@@ -1,24 +1,24 @@
- Niobe  Session  Files  Tools  Cost  Options  Help               theme:CYBER F9
+ Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
 ╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
 ║                                                                              ║
+║ ◆ claude                                                                     ║
+║   Caching the etag beside the body so a 304 can be answered from the LRU.    ║
 ║                                                                              ║
-║ ⚙ Edit  catalog/fetch.ts · 640 B out                                         ║
-║   ╔═════════════════════════════ Permission ═════════════════════════════╗   ║
-║ ◆ ║                                                                      ║   ║
-║   ║  Read wants to run                                                   ║   ║
-║   ║  /repo/notes.txt                                                     ║   ║
-║ ◆ ║                                                                      ║   █
-║   ║  {"file_path":"/repo/notes.txt"}                                     ║   █
+║ ⚙ ╔═════════════════════════════ Permission ═════════════════════════════╗   ║
+║   ║                                                                      ║   ║
+║ ◆ ║  Read wants to run                                                   ║   ║
+║   ║  /repo/notes.txt                                                     ║   █
 ║   ║                                                                      ║   █
-║ ! ║  Pin this saves Read(/repo/notes.txt)                                ║   █
+║ ◆ ║  {"file_path":"/repo/notes.txt"}                                     ║   █
 ║   ║                                                                      ║   █
-║ ◆ ║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║   █
-║   ║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║4  █
-║   ╚═════════════════════ the turn is waiting on you ═════════════════════╝   █
+║   ║  Pin this saves Read(/repo/notes.txt)                                ║   █
+║ ! ║                                                                      ║   █
+║   ║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║   █
+║ ◆ ║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║   █
+║   ╚═════════════════════ the turn is waiting on you ═════════════════════╝4  █
+║   path asserts a body that is no longer sent.                                █
 ║                                                                              █
 ║ ──────────────────────────────────────────────────────────────────────────── ║
 ║ >  Ask for a change, or press F1 for help                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
-example-app │ ⚡  claude · opus-5 │ ⎇ main │ 49k tokens │ 1 waiting on you │ 62%/
-▸▸ ask mode · Shift+Tab cycles · F8 model · Enter send · F10 quit
-1Help   2Plan   3Diff   4Undo   5Cost   6Files  7Tools  8Model  9Theme  10Quit
+1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit

@@ -501,11 +501,15 @@ fn a_settings_file_a_profile_names_and_this_machine_has_not_stops_the_session() 
     assert!(!repo.path().join(".niobe").exists(), "{drawn}");
 }
 
+/// What a palette writes when it opens the menu row: its own text colour on
+/// its own background, as ratatui writes an ANSI-256 pair. Nothing on screen
+/// names the palette in force, so this is what a choice of one is read off.
+const NEO_MENU: &str = "\u{1b}[38;5;2;48;5;0m";
+const MODERN_MENU: &str = "\u{1b}[38;5;15;48;5;8m";
+const CLASSIC_MENU: &str = "\u{1b}[38;5;0;48;5;7m";
+
 /// The three ways a palette is chosen, on the one screen that can show it: the
-/// flag, a config key, and F9 while the session runs. The menu bar names the
-/// theme in force, so it is what each of them is read off — the name alone,
-/// because it is drawn as a span of its own and the `theme:` in front of it is
-/// a colour change away in the bytes that reach the terminal.
+/// flag, a config key, and F9 while the session runs.
 #[test]
 fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
     let repo = repo();
@@ -517,10 +521,10 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
         .env("XDG_CONFIG_HOME", home.path())
         .spawn()
         .expect("the niobe binary runs");
-    terminal.shows("NEO");
+    terminal.shows(NEO_MENU);
     terminal.typed(F9);
     // F9 cycles the table in order, and `neo` is not the last of it.
-    terminal.shows("MODERN");
+    terminal.shows(MODERN_MENU);
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
     assert!(status.success(), "the shell ended with {status}");
@@ -533,7 +537,7 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
         .arg("classic")
         .spawn()
         .expect("the niobe binary runs");
-    flagged.shows("CLASSIC");
+    flagged.shows(CLASSIC_MENU);
     flagged.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
     assert!(status.success(), "the shell ended with {status}");

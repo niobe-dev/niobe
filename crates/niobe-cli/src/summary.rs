@@ -5,7 +5,7 @@
 //! output is not a terminal.
 //!
 //! Every figure is read off the same fold the shell's panes read, and the cost
-//! carries the same label the cost pane gives it.
+//! carries the same label the Usage pane gives it.
 
 use niobe_core::session::SessionState;
 use niobe_tui::app::App;
