@@ -7,8 +7,8 @@
 ║ ⚙ Edit  catalog/fetch.ts · 640 B out                                         ║
 ║                                                                              ║
 ║ ◆ claude                                                                     ║
-║   Rewriting the 304 test around the cached body.                             █
-║                                                                              █
+║   Rewriting the 304 test around the cached body.                             ║
+║                                                                              ║
 ║ ◆ claude                                                                     █
 ║   The notebook that demonstrates the fetcher needs the new call shape.       █
 ║                                                                              █

@@ -18,7 +18,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::event::{
-    AgentId, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome, UsageWindow,
+    AgentId, AgentOutcome, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome,
+    UsageWindow,
 };
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{DecisionRecord, SessionState};
@@ -101,7 +102,20 @@ pub struct Commit {
     pub pushed: Option<bool>,
 }
 
-/// A section of the Changes pane, which folds on its own.
+/// A pane of the right-hand stack that scrolls and holds folding sections.
+///
+/// Which pane a section belongs to decides which scroll offset folding it
+/// resets and which pane a wheel notch moves, so it is written down once here
+/// rather than inferred at each call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    /// What the session changed: the working tree, the commits, the files.
+    Changes,
+    /// What the session is doing: its sub-agents, decisions and tools.
+    Activity,
+}
+
+/// A section of the Changes or Activity pane, which folds on its own.
 ///
 /// Each names one claim about the work, and two of them are claims about the
 /// same files made by different parties — which is why they are never one
@@ -116,6 +130,8 @@ pub enum Section {
     Commits,
     /// What this session's edit tools said they changed.
     Edited,
+    /// The sub-agents the session spawned, running and finished.
+    SubAgents,
     /// The decisions the session recorded.
     Decisions,
     /// The tools it called, and how often.
@@ -123,30 +139,66 @@ pub enum Section {
 }
 
 impl Section {
-    /// Every section, in the order the pane draws them.
-    pub const ALL: [Section; 5] = [
+    /// Every section, in the order the panes draw them.
+    pub const ALL: [Section; 6] = [
         Section::WorkingTree,
         Section::Commits,
         Section::Edited,
+        Section::SubAgents,
         Section::Decisions,
         Section::Tools,
     ];
+
+    /// The pane this section is drawn in.
+    pub fn pane(self) -> Pane {
+        match self {
+            Section::WorkingTree | Section::Commits | Section::Edited => Pane::Changes,
+            Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
+        }
+    }
 }
 
-/// The Changes pane's own scroll position and which of its sections are
-/// folded.
+/// One scrolling pane's own offset and what the last frame measured it as.
 ///
-/// The pane scrolls independently of the transcript, so it keeps its own
-/// offset and its own measurements; `area` is where it was drawn last frame,
-/// which is how a wheel notch can tell whether the pointer was over this pane
-/// or over the transcript.
+/// Each pane scrolls independently of the transcript and of the other, so each
+/// keeps its own offset; `area` is where it was drawn last frame, which is how
+/// a wheel notch can tell which pane the pointer was over.
 #[derive(Debug, Clone, Default)]
-struct Changes {
-    folded: std::collections::BTreeSet<Section>,
+struct Scroller {
     scroll: usize,
     content: usize,
     viewport: usize,
     area: Option<ratatui::layout::Rect>,
+}
+
+impl Scroller {
+    fn max_scroll(&self) -> usize {
+        self.content.saturating_sub(self.viewport)
+    }
+
+    /// What the last frame drew this pane as: where it is, how many rows it
+    /// had to show and how many it could.
+    fn measured(&mut self, area: ratatui::layout::Rect, content: usize, rows: usize) {
+        self.area = Some(area);
+        self.content = content;
+        self.viewport = rows;
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    /// Scrolls the pane, never past either end.
+    fn scroll_by(&mut self, lines: isize) {
+        let max = self.max_scroll();
+        let at = self.scroll.min(max);
+        self.scroll = match lines < 0 {
+            true => at.saturating_sub(lines.unsigned_abs()),
+            false => at.saturating_add(lines.unsigned_abs()).min(max),
+        };
+    }
+
+    fn holds(&self, column: u16, row: u16) -> bool {
+        self.area
+            .is_some_and(|area| area.contains((column, row).into()))
+    }
 }
 
 /// The profile the operator selected, for the menu row to name until a
@@ -299,12 +351,22 @@ pub struct Entry {
     pub at: Option<Stamp>,
 }
 
-/// A sub-agent as this shell saw it start: what it was spawned to do, and
-/// when.
+/// A sub-agent as this shell saw it: what it was spawned to do, when it
+/// started, and how it ended if it has.
+///
+/// A finished agent is kept rather than dropped. What a session spawned and
+/// how it went is the record the operator reads the pane for; a list of only
+/// what is running now would erase the failure the moment it mattered most.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Spawned {
-    label: String,
-    at: Option<Stamp>,
+pub struct SubAgent {
+    /// The agent, as the backend named it.
+    pub id: AgentId,
+    /// What it was spawned to do.
+    pub label: String,
+    /// When it was spawned, where the shell had a clock at the time.
+    pub at: Option<Stamp>,
+    /// How it finished, or `None` while it is still running.
+    pub outcome: Option<AgentOutcome>,
 }
 
 /// What a running turn is doing, for the line that shows the session is at
@@ -337,17 +399,22 @@ pub struct Pulse {
 #[derive(Debug)]
 pub struct App {
     repo: Repo,
-    changes: Changes,
+    /// Sections the operator has folded away, in whichever pane they belong
+    /// to. One set, because a section is in exactly one pane.
+    folded: std::collections::BTreeSet<Section>,
+    changes: Scroller,
+    activity: Scroller,
     profile: Option<SelectedProfile>,
     theme: Theme,
     session: SessionState,
     entries: Vec<Entry>,
     tool_entries: BTreeMap<ToolCallId, usize>,
-    /// What each sub-agent was spawned to do, and when it was spawned. The
-    /// session fold keeps the counts and the ids; the label and the moment are
-    /// this shell's business, so they are kept here rather than widening the
-    /// shared state — and the event model, which carries no time — for a pane.
-    agents: BTreeMap<AgentId, Spawned>,
+    /// Every sub-agent the session spawned, in the order it spawned them. The
+    /// session fold keeps the counts and which ids are running; the label, the
+    /// moment and the outcome as this pane reads them are this shell's
+    /// business, so they are kept here rather than widening the shared state —
+    /// and the event model, which carries no time — for a pane.
+    agents: Vec<SubAgent>,
     /// When each decision in [`SessionState::decisions`] was recorded, in the
     /// same order, so a pane reads the two together and cannot pair a decision
     /// with another one's time.
@@ -439,13 +506,15 @@ impl App {
 
         Self {
             repo,
-            changes: Changes::default(),
+            folded: std::collections::BTreeSet::new(),
+            changes: Scroller::default(),
+            activity: Scroller::default(),
             profile: None,
             theme,
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
-            agents: BTreeMap::new(),
+            agents: Vec::new(),
             decided_at: Vec::new(),
             composer,
             scroll: 0,
@@ -664,16 +733,24 @@ impl App {
             Event::Decision { .. } => self.decided_at.push(self.at),
 
             Event::AgentSpawn { id, label, .. } => {
-                self.agents.insert(
-                    id.clone(),
-                    Spawned {
-                        label: label.clone(),
-                        at: self.at,
-                    },
-                );
+                let spawned = SubAgent {
+                    id: id.clone(),
+                    label: label.clone(),
+                    at: self.at,
+                    outcome: None,
+                };
+                // An id the backend hands out twice is one agent started
+                // again, not two rows: the second spawn replaces the first
+                // where it already stood, so the list keeps spawn order.
+                match self.agents.iter_mut().find(|agent| &agent.id == id) {
+                    Some(existing) => *existing = spawned,
+                    None => self.agents.push(spawned),
+                }
             }
-            Event::AgentExit { id, .. } => {
-                self.agents.remove(id);
+            Event::AgentExit { id, outcome } => {
+                if let Some(agent) = self.agents.iter_mut().find(|agent| &agent.id == id) {
+                    agent.outcome = Some(*outcome);
+                }
             }
         }
     }
@@ -1144,52 +1221,61 @@ impl App {
         &self.repo
     }
 
-    /// Whether `section` of the Changes pane is folded away.
+    /// Whether `section` is folded away.
     pub fn folded(&self, section: Section) -> bool {
-        self.changes.folded.contains(&section)
+        self.folded.contains(&section)
     }
 
     /// Folds `section` away, or opens it again.
     pub fn fold(&mut self, section: Section) {
-        if !self.changes.folded.remove(&section) {
-            self.changes.folded.insert(section);
+        if !self.folded.remove(&section) {
+            self.folded.insert(section);
         }
         // What is above the viewport changed height, so an offset measured
         // against the old height would leave the pane scrolled past its end
-        // until the next wheel notch.
-        self.changes.scroll = 0;
+        // until the next wheel notch. Only the pane the section is in moved.
+        self.scroller_mut(section.pane()).scroll = 0;
     }
 
-    /// How far the Changes pane is scrolled, in rows.
-    pub fn changes_scroll(&self) -> usize {
-        self.changes.scroll.min(self.max_changes_scroll())
+    fn scroller(&self, pane: Pane) -> &Scroller {
+        match pane {
+            Pane::Changes => &self.changes,
+            Pane::Activity => &self.activity,
+        }
     }
 
-    /// What the last frame drew the Changes pane as: where it is, how many
-    /// rows it had to show and how many it could.
+    fn scroller_mut(&mut self, pane: Pane) -> &mut Scroller {
+        match pane {
+            Pane::Changes => &mut self.changes,
+            Pane::Activity => &mut self.activity,
+        }
+    }
+
+    /// How far `pane` is scrolled, in rows.
+    pub fn pane_scroll(&self, pane: Pane) -> usize {
+        let scroller = self.scroller(pane);
+        scroller.scroll.min(scroller.max_scroll())
+    }
+
+    /// What the last frame drew `pane` as: where it is, how many rows it had
+    /// to show and how many it could.
     ///
     /// Told by the draw, because the pane's height is the layout's answer and
     /// its content's height is the drawing's. Kept so that the wheel can be
     /// given to whichever pane the pointer is over.
-    pub fn measured_changes(&mut self, area: ratatui::layout::Rect, content: usize, rows: usize) {
-        self.changes.area = Some(area);
-        self.changes.content = content;
-        self.changes.viewport = rows;
-        self.changes.scroll = self.changes.scroll.min(self.max_changes_scroll());
+    pub fn measured_pane(
+        &mut self,
+        pane: Pane,
+        area: ratatui::layout::Rect,
+        content: usize,
+        rows: usize,
+    ) {
+        self.scroller_mut(pane).measured(area, content, rows);
     }
 
-    fn max_changes_scroll(&self) -> usize {
-        self.changes.content.saturating_sub(self.changes.viewport)
-    }
-
-    /// Scrolls the Changes pane, never past either end.
-    pub fn scroll_changes(&mut self, lines: isize) {
-        let max = self.max_changes_scroll();
-        let at = self.changes.scroll.min(max);
-        self.changes.scroll = match lines < 0 {
-            true => at.saturating_sub(lines.unsigned_abs()),
-            false => at.saturating_add(lines.unsigned_abs()).min(max),
-        };
+    /// Scrolls `pane`, never past either end.
+    pub fn scroll_pane(&mut self, pane: Pane, lines: isize) {
+        self.scroller_mut(pane).scroll_by(lines);
     }
 
     /// Replaces what the shell knows about the repository with a fresh read.
@@ -1217,9 +1303,18 @@ impl App {
         &self.session
     }
 
-    /// What a running sub-agent was spawned to do.
+    /// Every sub-agent the session spawned, in spawn order, running and
+    /// finished alike.
+    pub fn agents(&self) -> &[SubAgent] {
+        &self.agents
+    }
+
+    /// What a sub-agent was spawned to do.
     pub fn agent_label(&self, id: &AgentId) -> Option<String> {
-        self.agents.get(id).map(|spawned| spawned.label.clone())
+        self.agents
+            .iter()
+            .find(|agent| &agent.id == id)
+            .map(|agent| agent.label.clone())
     }
 
     /// The transcript, oldest first.
@@ -1240,10 +1335,12 @@ impl App {
         self.session.decisions().iter().zip(times)
     }
 
-    /// When a sub-agent still running was spawned, where the shell had a clock
-    /// at the time.
+    /// When a sub-agent was spawned, where the shell had a clock at the time.
     pub fn agent_spawned_at(&self, id: &AgentId) -> Option<Stamp> {
-        self.agents.get(id).and_then(|spawned| spawned.at)
+        self.agents
+            .iter()
+            .find(|agent| &agent.id == id)
+            .and_then(|agent| agent.at)
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -1345,20 +1442,19 @@ impl App {
     pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::MouseEventKind;
 
-        // The wheel goes to whatever the pointer is over. Two panes scroll now,
-        // and a notch that always moved the transcript would move the thing the
-        // operator was not looking at.
-        let over_changes = self
-            .changes
-            .area
-            .is_some_and(|area| area.contains((mouse.column, mouse.row).into()));
+        // The wheel goes to whatever the pointer is over. Three panes scroll
+        // now, and a notch that always moved the transcript would move the
+        // thing the operator was not looking at.
+        let over = [Pane::Changes, Pane::Activity]
+            .into_iter()
+            .find(|pane| self.scroller(*pane).holds(mouse.column, mouse.row));
         let lines = Self::WHEEL_LINES;
 
-        match (mouse.kind, over_changes) {
-            (MouseEventKind::ScrollUp, true) => self.scroll_changes(-(lines as isize)),
-            (MouseEventKind::ScrollDown, true) => self.scroll_changes(lines as isize),
-            (MouseEventKind::ScrollUp, false) => self.scroll_up(lines),
-            (MouseEventKind::ScrollDown, false) => self.scroll_down(lines),
+        match (mouse.kind, over) {
+            (MouseEventKind::ScrollUp, Some(pane)) => self.scroll_pane(pane, -(lines as isize)),
+            (MouseEventKind::ScrollDown, Some(pane)) => self.scroll_pane(pane, lines as isize),
+            (MouseEventKind::ScrollUp, None) => self.scroll_up(lines),
+            (MouseEventKind::ScrollDown, None) => self.scroll_down(lines),
             _ => {}
         }
     }
@@ -1811,14 +1907,14 @@ mod tests {
     #[test]
     fn folding_a_section_puts_the_pane_back_at_its_top() {
         let mut app = app();
-        app.measured_changes(Rect::new(0, 0, 40, 10), 60, 10);
-        app.scroll_changes(20);
-        assert_eq!(app.changes_scroll(), 20);
+        app.measured_pane(Pane::Changes, Rect::new(0, 0, 40, 10), 60, 10);
+        app.scroll_pane(Pane::Changes, 20);
+        assert_eq!(app.pane_scroll(Pane::Changes), 20);
 
         app.fold(Section::WorkingTree);
 
         assert_eq!(
-            app.changes_scroll(),
+            app.pane_scroll(Pane::Changes),
             0,
             "an offset measured against the old height scrolls past the new end"
         );
@@ -1827,36 +1923,40 @@ mod tests {
     #[test]
     fn the_changes_pane_never_scrolls_past_either_end() {
         let mut app = app();
-        app.measured_changes(Rect::new(0, 0, 40, 10), 25, 10);
+        app.measured_pane(Pane::Changes, Rect::new(0, 0, 40, 10), 25, 10);
 
-        app.scroll_changes(100);
-        assert_eq!(app.changes_scroll(), 15, "content 25 in a viewport of 10");
+        app.scroll_pane(Pane::Changes, 100);
+        assert_eq!(
+            app.pane_scroll(Pane::Changes),
+            15,
+            "content 25 in a viewport of 10"
+        );
 
-        app.scroll_changes(-100);
-        assert_eq!(app.changes_scroll(), 0);
+        app.scroll_pane(Pane::Changes, -100);
+        assert_eq!(app.pane_scroll(Pane::Changes), 0);
     }
 
     #[test]
     fn a_pane_taller_than_what_it_holds_does_not_scroll_at_all() {
         let mut app = app();
-        app.measured_changes(Rect::new(0, 0, 40, 30), 12, 30);
+        app.measured_pane(Pane::Changes, Rect::new(0, 0, 40, 30), 12, 30);
 
-        app.scroll_changes(5);
+        app.scroll_pane(Pane::Changes, 5);
 
-        assert_eq!(app.changes_scroll(), 0);
+        assert_eq!(app.pane_scroll(Pane::Changes), 0);
     }
 
     #[test]
     fn a_pane_that_shrank_under_the_scroll_comes_back_to_what_it_holds() {
         let mut app = app();
-        app.measured_changes(Rect::new(0, 0, 40, 10), 60, 10);
-        app.scroll_changes(50);
-        assert_eq!(app.changes_scroll(), 50);
+        app.measured_pane(Pane::Changes, Rect::new(0, 0, 40, 10), 60, 10);
+        app.scroll_pane(Pane::Changes, 50);
+        assert_eq!(app.pane_scroll(Pane::Changes), 50);
 
         // The next frame is a smaller session, or a folded section.
-        app.measured_changes(Rect::new(0, 0, 40, 10), 20, 10);
+        app.measured_pane(Pane::Changes, Rect::new(0, 0, 40, 10), 20, 10);
 
-        assert_eq!(app.changes_scroll(), 10);
+        assert_eq!(app.pane_scroll(Pane::Changes), 10);
     }
 
     #[test]

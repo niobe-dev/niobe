@@ -143,3 +143,59 @@ fn a_large_working_tree_redraws_inside_a_frame_budget() {
          {median:?}, over the {FRAME_BUDGET:?} budget"
     );
 }
+
+/// A session busy enough that the Activity pane has to build every row it
+/// holds: four sub-agents, ten decisions and a dozen tools.
+///
+/// The pane builds them all on every frame for the same reason the Changes
+/// pane does — that is what tells it how far it can be scrolled — so what it
+/// costs is timed rather than assumed.
+const BUSY_AGENTS: usize = 4;
+const BUSY_DECISIONS: usize = 10;
+const BUSY_TOOLS: usize = 12;
+
+#[test]
+fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+
+    for n in 0..BUSY_AGENTS {
+        app.apply(&Event::AgentSpawn {
+            id: format!("busy-{n}").into(),
+            parent: None,
+            label: format!("explorer-{n} → crates/niobe-core/src/session.rs"),
+        });
+    }
+    for n in 0..BUSY_DECISIONS {
+        app.apply(&Event::Decision {
+            summary: format!(
+                "Decision {n}: keep the fold the one place a number comes from, so two \
+                 consumers cannot disagree about what the session spent."
+            ),
+            rationale: None,
+            rejected: vec![],
+        });
+    }
+    for n in 0..BUSY_TOOLS {
+        app.apply(&Event::ToolCallEnd {
+            id: format!("busy-t{n}").into(),
+            name: format!("mcp__claude_ai_Server{n}__do-the-thing"),
+            input: "{}".to_owned(),
+            output: String::new(),
+            bytes: 1_024,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: None,
+        });
+    }
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame with {BUSY_AGENTS} agents, {BUSY_DECISIONS} decisions and \
+         {BUSY_TOOLS} tools at 200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}

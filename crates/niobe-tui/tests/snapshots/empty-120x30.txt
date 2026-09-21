@@ -3,28 +3,28 @@
 ║                                                                            ║ ║                                       ║
 ║                                                                            ║ ║ no tokens reported yet                ║
 ║   niobe                                                                    ║ ║ session —                             ║
-║   A terminal coding agent that keeps you aware of what is                  ║ ║ no tool calls yet                     ║
-║   being built and how.                                                     ║ ║ 0 calls · 0 failed · 0 denied · 0 B o ║
-║                                                                            ║ ╚═══════════════════════════════════════╝
-║   What the agent did, decided and touched, what it is doing now            ║ ╔═══════════════ Changes ═══════════════╗
-║   and what it cost, visible while it happens and never a guess.            ║ ║                                       ║
-║   You stay on the loop instead of in it.                                   ║ ║ ⎇ main                                ║
-║                                                                            ║ ║ ▾ Working tree  —                     ║
-║   No backend attached. `niobe profiles` shows what is defined.             ║ ║   not read yet                        ║
+║   A terminal coding agent that keeps you aware of what is                  ║ ╚═══════════════════════════════════════╝
+║   being built and how.                                                     ║ ╔═══════════════ Changes ═══════════════╗
+║                                                                            ║ ║                                       ║
+║   What the agent did, decided and touched, what it is doing now            ║ ║ ⎇ main                                ║
+║   and what it cost, visible while it happens and never a guess.            ║ ║ ▾ Working tree  —                     ║
+║   You stay on the loop instead of in it.                                   ║ ║   not read yet                        ║
 ║                                                                            ║ ║ ▾ Commits  —                          ║
-║                                                                            ║ ║ ▾ This session  no files  +0 −0       ║
+║   No backend attached. `niobe profiles` shows what is defined.             ║ ║ ▾ This session  no files  +0 −0       ║
+║                                                                            ║ ║                                       ║
+║                                                                            ║ ║                                       ║
+║                                                                            ║ ║                                       ║
+║                                                                            ║ ║                                       ║
+║                                                                            ║ ║                                       ║
+║                                                                            ║ ╚═══════════════════════════════════════╝
+║                                                                            ║ ╔══════════════ Activity ═══════════════╗
+║                                                                            ║ ║                                       ║
+║                                                                            ║ ║ ▾ Sub-agents  0 running · 0 spawned   ║
+║                                                                            ║ ║   none spawned                        ║
 ║                                                                            ║ ║ ▾ Decisions  0                        ║
 ║                                                                            ║ ║   none recorded                       ║
-║                                                                            ║ ║ ▾ Tools  0 calls                      ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ╚═══════════════════════════════════════╝
-║                                                                            ║ ╔════════ Parallel ─ 0 running ═════════╗
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║ no sub-agents                         ║
-║                                                                            ║ ║ 0 spawned · peak 0 · 0 done · 0 faile ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║                                       ║
-║ ────────────────────────────────────────────────────────────────────────── ║ ║                                       ║
+║                                                                            ║ ║ ▾ Tools  0 calls · 0 denied · 0 B out ║
+║ ────────────────────────────────────────────────────────────────────────── ║ ║   none called                         ║
 ║ >  Ask for a change, or press F1 for help                                  ║ ║                                       ║
 ╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

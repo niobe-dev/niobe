@@ -1,30 +1,30 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
 ╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ╔════════════════ Usage ════════════════╗
 ║                                                                            ║ ║                                       ║
-║ ◆ claude                                                                   ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
-║   Reading catalog/fetch.ts and its callers first. Two call sites, one test ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
-║   file.                                                                    ║ ║ session ≥$0.04                        ║
-║                                                                            █ ║ Bash                 1 ━━━━━━━━━━━━   ║
-║ ⚙ Read  catalog/fetch.ts · 7.2 kB out                                      █ ║ Edit                 1 ━━━━━━━━━━━━   ║
-║                                                                            █ ║ Read                 1 ━━━━━━━━━━━━   ║
-║ ◆ claude                                                                   █ ║ 3 calls · 1 failed · 0 denied · 9.9 k ║
-║   Caching the etag beside the body so a 304 can be answered from the LRU.  █ ╚═══════════════════════════════════════╝
-║                                                                            █ ╔═══════════════ Changes ═══════════════╗
-║ ⚙ Edit  catalog/fetch.ts · 640 B out                                       █ ║                                       ║
-║                                                                            █ ║ ⎇ main ↑3                             █
-║ ◆ claude                                                                   █ ║ ▾ Working tree  23 files  +977 −259   ║
-║   Rewriting the 304 test around the cached body.                           █ ║   .                                   ║
-║                                                                            █ ║     CHANGELOG.md                +0 −0 ║
-║ ◆ claude                                                                   █ ║   catalog/                            ║
-║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║     fetch.ts                 +149 −12 ║
-║                                                                            █ ║     etag.ts                   +88 −41 ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ╚═══════════════════════════════════════╝
-║                                                                            █ ╔════════ Parallel ─ 1 running ═════════╗
-║ ◆ claude                                                                   █ ║                                       ║
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║ ◆ test-writer → tests/fetch.test.ts   ║
-║   304 path asserts a body that is no longer sent.                          █ ║ 2 spawned · peak 2 · 1 done · 0 faile ║
-║                                                                            █ ║                                       ║
-║ ────────────────────────────────────────────────────────────────────────── ║ ║                                       ║
-║ >  Ask for a change, or press F1 for help                                  ║ ║                                       ║
+║ ⚙ Notion·search  {} · 1.1 kB out                                           ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
+║                                                                            ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
+║ ⚙ Notion·fetch  {} · 2.5 kB out                                            ║ ║ session ≥$0.04                        ║
+║                                                                            ║ ╚═══════════════════════════════════════╝
+║ ! Notion·update-page  {} · failed · 96 B out                               ║ ╔═══════════════ Changes ═══════════════╗
+║                                                                            ║ ║                                       ║
+║ ◆ claude                                                                   █ ║ ⎇ main ↑3                             █
+║   Caching the etag beside the body so a 304 can be answered from the LRU.  █ ║ ▾ Working tree  23 files  +977 −259   █
+║                                                                            █ ║   .                                   ║
+║ ⚙ Edit  catalog/fetch.ts · 640 B out                                       █ ║     CHANGELOG.md                +0 −0 ║
+║                                                                            █ ║   catalog/                            ║
+║ ◆ claude                                                                   █ ║     fetch.ts                 +149 −12 ║
+║   Rewriting the 304 test around the cached body.                           █ ║     etag.ts                   +88 −41 ║
+║                                                                            █ ║     cache/lru.ts               +31 −9 ║
+║ ◆ claude                                                                   █ ║     cache/index.ts             +12 −0 ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     █ ╚═══════════════════════════════════════╝
+║                                                                            █ ╔══════════════ Activity ═══════════════╗
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ║                                       ║
+║                                                                            █ ║ ▾ Sub-agents                          █
+║ ◆ claude                                                                   █ ║ ◆ test-writer → tests… running 1m 42s █
+║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║ ◇ reviewer → catalog/cache.ts    done █
+║   304 path asserts a body that is no longer sent.                          █ ║ ✗ doc-writer → docs/etags.md   failed ║
+║                                                                            █ ║ ▾ Decisions  2                        ║
+║ ────────────────────────────────────────────────────────────────────────── ║ ║   13:39 Key the cache on the request  ║
+║ >  Ask for a change, or press F1 for help                                  ║ ║         URL, not the manifest id —    ║
 ╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

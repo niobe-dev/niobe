@@ -33,6 +33,20 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::style::{Color, Style};
 
+/// One finished MCP call, which is all the tools section reads: an end with a
+/// name, a size and an outcome.
+fn mcp_call(name: &str, bytes: u64, outcome: ToolOutcome) -> Event {
+    Event::ToolCallEnd {
+        id: name.into(),
+        name: name.to_owned(),
+        input: "{}".to_owned(),
+        output: String::new(),
+        bytes,
+        outcome,
+        summary: None,
+    }
+}
+
 fn session_events() -> Vec<Event> {
     vec![
         Event::SessionMeta(SessionMeta {
@@ -116,6 +130,42 @@ fn session_events() -> Vec<Event> {
             id: "a2".into(),
             outcome: AgentOutcome::Completed,
         },
+        // A third agent, so the pane's pictures carry all three states an
+        // agent can be drawn in rather than only the two that went well.
+        Event::AgentSpawn {
+            id: "a3".into(),
+            parent: None,
+            label: "doc-writer → docs/etags.md".to_owned(),
+        },
+        Event::AgentExit {
+            id: "a3".into(),
+            outcome: AgentOutcome::Failed,
+        },
+        Event::Decision {
+            summary: "Key the cache on the request URL, not the manifest id — two \
+                      manifests can share an id across catalogs."
+                .to_owned(),
+            rationale: None,
+            rejected: vec![],
+        },
+        // Three calls to one MCP server, one of which failed: what the tools
+        // section has to collapse into a single family row carrying its own
+        // failure count.
+        mcp_call(
+            "mcp__claude_ai_Notion__notion-search",
+            1_100,
+            ToolOutcome::Ok,
+        ),
+        mcp_call(
+            "mcp__claude_ai_Notion__notion-fetch",
+            2_600,
+            ToolOutcome::Ok,
+        ),
+        mcp_call(
+            "mcp__claude_ai_Notion__notion-update-page",
+            96,
+            ToolOutcome::Failed,
+        ),
         Event::AssistantMessage {
             text: "Caching the etag beside the body so a 304 can be answered from the LRU."
                 .to_owned(),
@@ -206,6 +256,10 @@ fn session_events() -> Vec<Event> {
 /// depend on the day the test ran or the machine it ran on.
 const READ_AT: u64 = 20_000 * 86_400 + 13 * 3_600 + 41 * 60;
 
+/// How long before it is read the session's events happened: `1m 42s`, which
+/// is what the sub-agent still running has been running for.
+const RAN_FOR: u64 = 102;
+
 /// The twenty-three files a read of the repository reported, written out so
 /// that the pictures cover what the pane has to get right: several
 /// directories, a file at the repository root, a file git counts no lines in,
@@ -294,13 +348,22 @@ fn read_repository() -> Repo {
 /// A session part-way through a task: tool calls, usage with and without a
 /// cost, a decision and two sub-agents.
 pub fn running_session() -> App {
+    session_read_at_a_fixed_moment(&session_events())
+}
+
+/// The session folded at a fixed moment and read at a fixed moment.
+///
+/// The events land a hundred and two seconds before the shell reads them, so
+/// the figures measured between the two — the time a decision was recorded at,
+/// how long the agent still running has been running — are real durations in
+/// the pictures rather than zeroes.
+fn session_read_at_a_fixed_moment(events: &[Event]) -> App {
     let clock = Clock::fixed(0).expect("UTC is an offset");
     let mut app = App::new(read_repository()).with_clock(clock.clone());
-    app.extend(&session_events());
-    app.tick(
-        Instant::now(),
-        Some(clock.at(UNIX_EPOCH + Duration::from_secs(READ_AT))),
-    );
+    let moment = |secs| clock.at(UNIX_EPOCH + Duration::from_secs(secs));
+    app.tick(Instant::now(), Some(moment(READ_AT - RAN_FOR)));
+    app.extend(events);
+    app.tick(Instant::now(), Some(moment(READ_AT)));
     app
 }
 
@@ -314,14 +377,7 @@ pub fn unmetered_session() -> App {
         .into_iter()
         .filter(|event| !matches!(event, Event::UsageWindows(_)))
         .collect();
-    let clock = Clock::fixed(0).expect("UTC is an offset");
-    let mut app = App::new(read_repository()).with_clock(clock.clone());
-    app.extend(&events);
-    app.tick(
-        Instant::now(),
-        Some(clock.at(UNIX_EPOCH + Duration::from_secs(READ_AT))),
-    );
-    app
+    session_read_at_a_fixed_moment(&events)
 }
 
 /// A reply written the way the assistant writes one: a heading, emphasis,

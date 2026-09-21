@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 use common::{paint, running_session, screen, session_with_a_markdown_reply, unmetered_session};
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
-use niobe_tui::app::{App, Repo, Section, SelectedProfile};
+use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, NEO};
 
 /// The same session, stopped on a permission prompt it is waiting on.
@@ -667,7 +667,7 @@ fn the_right_stack_collapses_below_a_hundred_columns() {
 
     // Matched on the border the title sits in, so the menu bar's own `Usage`
     // and `Files` entries cannot stand in for a pane.
-    for pane in ["═ Usage ", "═ Parallel ", "═ Changes "] {
+    for pane in ["═ Usage ", "═ Activity ", "═ Changes "] {
         assert!(
             !narrow.contains(pane),
             "the {pane:?} pane is still drawn at 99 columns:\n{narrow}"
@@ -924,7 +924,7 @@ fn the_changes_pane_scrolls_to_what_is_below_the_files() {
     // Draw once so the pane knows how tall it is and how much it holds; the
     // event loop has always drawn before a wheel notch can arrive.
     let _ = screen(&mut app, 200, 60);
-    app.scroll_changes(24);
+    app.scroll_pane(Pane::Changes, 24);
     let frame = screen(&mut app, 200, 60);
 
     assert_snapshot("changes-scrolled-200x60", &frame);
@@ -978,7 +978,7 @@ fn a_wheel_notch_over_the_changes_pane_leaves_the_transcript_where_it_was() {
         "a notch over the Changes pane moved the transcript"
     );
     assert!(
-        app.changes_scroll() > 0,
+        app.pane_scroll(Pane::Changes) > 0,
         "and it did not move the pane it was over"
     );
 }
@@ -991,4 +991,286 @@ fn wheel_at(column: u16, row: u16) -> ratatui::crossterm::event::MouseEvent {
         row,
         modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
     }
+}
+
+/// The three sections the pane holds, each with the summary line the operator
+/// reads it by.
+#[test]
+fn the_activity_pane_holds_the_sub_agents_the_decisions_and_the_tools() {
+    let frame = screen(&mut running_session(), 200, 60);
+
+    assert!(frame.contains("═ Activity "), "{frame}");
+    for section in ["▾ Sub-agents", "▾ Decisions", "▾ Tools"] {
+        assert!(frame.contains(section), "{section} is missing:\n{frame}");
+    }
+    // The recorded session spawned three: one still running, one done, one
+    // failed. The summary counts what it counted.
+    assert!(
+        frame.contains("1 running · 3 spawned · 1 failed"),
+        "{frame}"
+    );
+}
+
+/// A sixteen-colour terminal in a palette the operator chose is not somewhere
+/// a colour can be the only difference between an agent that finished and one
+/// that failed, so the glyph carries the state on its own.
+#[test]
+fn a_sub_agents_state_is_legible_without_its_colour() {
+    let frame = screen(&mut running_session(), 200, 60);
+
+    assert!(frame.contains("◆ test-writer"), "running:\n{frame}");
+    assert!(frame.contains("◇ reviewer"), "done:\n{frame}");
+    assert!(frame.contains("✗ doc-writer"), "failed:\n{frame}");
+}
+
+/// A list of only what is running now would erase the failure at the moment
+/// it matters most.
+#[test]
+fn an_agent_that_finished_stays_in_the_list_with_its_outcome() {
+    let frame = screen(&mut running_session(), 200, 60);
+
+    let row = frame
+        .lines()
+        .find(|line| line.contains("doc-writer"))
+        .unwrap_or_default();
+    assert!(row.contains("failed"), "{row:?}");
+
+    let done = frame
+        .lines()
+        .find(|line| line.contains("reviewer"))
+        .unwrap_or_default();
+    assert!(done.contains("done"), "{done:?}");
+}
+
+/// A running agent's status column is an elapsed time, measured from the
+/// moment it was spawned against the moment the shell is drawing at. A
+/// finished one carries no figure: its tokens are not attributed to it
+/// anywhere in the stream, and a zero would be a measurement nobody made.
+#[test]
+fn a_running_agent_is_timed_and_a_finished_one_claims_no_figure() {
+    let frame = screen(&mut running_session(), 200, 60);
+
+    let running = frame
+        .lines()
+        .find(|line| line.contains("test-writer"))
+        .unwrap_or_default();
+    assert!(
+        running.contains("running 1m 42s"),
+        "the session ran for 102 seconds before it was read:\n{running:?}"
+    );
+
+    for (finished, word) in [("reviewer", "done"), ("doc-writer", "failed")] {
+        let row = frame
+            .lines()
+            .find(|line| line.contains(finished))
+            .unwrap_or_default();
+        // The state is the whole status column: nothing follows it but the
+        // pane's own border.
+        assert!(
+            row.trim_end_matches(['║', ' ']).ends_with(word),
+            "{finished} claims a figure nothing reported: {row:?}"
+        );
+    }
+}
+
+/// A decision carries the time it was recorded, in a column of its own, and
+/// what wraps out of the summary hangs under the summary rather than under
+/// the time.
+#[test]
+fn a_decision_is_drawn_under_the_time_it_was_recorded_at() {
+    let frame = screen(&mut running_session(), 200, 60);
+    let rows: Vec<&str> = frame.lines().collect();
+    let at = rows
+        .iter()
+        .position(|line| line.contains("Key the cache on the request URL"))
+        .expect("the newest decision is the first one under the header");
+
+    // The recorded session is folded at 13:39 and read at 13:41: the column
+    // carries the moment the decision was recorded, not the moment it is
+    // drawn at.
+    assert!(rows[at].contains("13:39"), "{:?}", rows[at]);
+    assert!(
+        rows[at + 1].contains("manifests can share an id"),
+        "the summary wraps under itself, not under the time: {:?}",
+        rows[at + 1]
+    );
+    let hang = rows[at + 1]
+        .find("two manifests")
+        .zip(rows[at].find("Key the cache"));
+    assert!(
+        hang.map(|(a, b)| a == b).unwrap_or(false),
+        "the hanging indent is the summary's own column: {hang:?}"
+    );
+}
+
+/// Newest first: the pane does not follow its own tail, so a decision
+/// appended below the fold would never be seen. Under the header it is always
+/// one row from a heading the eye already has.
+#[test]
+fn the_newest_decision_is_the_one_under_the_header() {
+    let frame = screen(&mut running_session(), 200, 60);
+    let rows: Vec<&str> = frame.lines().collect();
+    let header = rows
+        .iter()
+        .position(|line| line.contains("▾ Decisions"))
+        .expect("the section is drawn");
+
+    assert!(
+        rows[header + 1].contains("Key the cache on the request URL"),
+        "the second decision recorded is the first one drawn: {:?}",
+        rows[header + 1]
+    );
+}
+
+/// A session reaches for one MCP server a dozen ways, and a row each says
+/// less about where its calls went than one row saying how many went to that
+/// server. A backend's own tools are already the family they belong to.
+#[test]
+fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
+    let frame = screen(&mut running_session(), 200, 60);
+
+    let row = frame
+        .lines()
+        .find(|line| line.contains("Notion·*"))
+        .unwrap_or_default();
+    assert!(row.contains('3'), "three calls to the one server: {row:?}");
+    assert!(
+        row.contains("✗ 1"),
+        "the family's own failure is on the family's row: {row:?}"
+    );
+    assert!(
+        !frame
+            .lines()
+            .any(|line| line.contains("Notion·search") && line.contains('━')),
+        "an individual MCP tool is not a row of its own:\n{frame}"
+    );
+
+    // A tool with no family shows under its own name, and carries no failure
+    // column where it has no failures.
+    let read = frame
+        .lines()
+        .find(|line| line.contains("Read"))
+        .unwrap_or_default();
+    assert!(!read.contains('✗'), "{read:?}");
+}
+
+/// Nothing having happened reads as nothing having happened — not as a figure
+/// of zero, and not as a bar drawn for a tool that never ran.
+#[test]
+fn an_untouched_activity_pane_draws_no_zeroed_bar() {
+    let frame = screen(&mut empty_session(), 120, 30);
+
+    assert!(frame.contains("none spawned"), "{frame}");
+    assert!(frame.contains("none recorded"), "{frame}");
+    assert!(frame.contains("none called"), "{frame}");
+    assert!(
+        !frame.contains('━'),
+        "a bar was drawn for a tool that never ran:\n{frame}"
+    );
+    assert!(
+        !frame.contains('✗'),
+        "no failure count where nothing failed:\n{frame}"
+    );
+}
+
+/// The pane scrolls rather than truncating: with three sections in it, the
+/// tools are below the sub-agents and the decisions, and they are reachable.
+#[test]
+fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
+    let mut app = running_session();
+    // Draw once so the pane knows how tall it is and how much it holds. At
+    // 200x60 it holds everything it has; a terminal half that tall is where a
+    // pane with three sections in it has to scroll.
+    let _ = screen(&mut app, 120, 30);
+    app.scroll_pane(Pane::Activity, 40);
+    let frame = screen(&mut app, 120, 30);
+
+    assert_snapshot("activity-scrolled-120x30", &frame);
+    assert!(
+        frame.contains("▾ Tools"),
+        "the tools section is what the pane was scrolled to:\n{frame}"
+    );
+    assert!(
+        !frame.contains("◆ test-writer"),
+        "and the agents above it are what it scrolled past:\n{frame}"
+    );
+}
+
+/// Each section folds on its own, and folding one in the Activity pane leaves
+/// the Changes pane where it was.
+#[test]
+fn the_activity_pane_folds_a_section_away() {
+    let mut app = running_session();
+    app.fold(Section::SubAgents);
+    let frame = screen(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("▸ Sub-agents"),
+        "a folded section still has to say that it is folded:\n{frame}"
+    );
+    assert!(
+        !frame.contains("test-writer"),
+        "the agents are folded away, not merely scrolled past:\n{frame}"
+    );
+    assert!(frame.contains("▾ Decisions"), "{frame}");
+    assert!(
+        frame.contains("▾ Working tree"),
+        "folding a section of one pane left the other alone:\n{frame}"
+    );
+}
+
+/// The wheel goes to whatever the pointer is over. Three panes scroll now, and
+/// a notch over the Activity pane must move neither of the other two.
+#[test]
+fn a_wheel_notch_over_the_activity_pane_moves_only_that_pane() {
+    let mut app = running_session();
+    let _ = screen(&mut app, 120, 30);
+    app.scroll_to_head();
+    let transcript = app.scroll();
+    let changes = app.pane_scroll(Pane::Changes);
+
+    // Inside the Activity pane: the right-hand column, near the bottom.
+    app.on_mouse(wheel_at(100, 26));
+
+    assert_eq!(app.scroll(), transcript, "the transcript moved");
+    assert_eq!(app.pane_scroll(Pane::Changes), changes, "the Changes moved");
+    assert!(
+        app.pane_scroll(Pane::Activity) > 0,
+        "and the pane the pointer was over did not"
+    );
+}
+
+/// A log that kept no times gives a decision no time. The column stays, so the
+/// summaries keep their edge, but it is left blank: a time of zero would be a
+/// moment nobody recorded, and the pane would be inventing one.
+#[test]
+fn a_decision_from_a_log_with_no_times_is_drawn_without_one() {
+    let mut app = empty_session();
+    app.apply(&Event::Decision {
+        summary: "Read the etag off the response, not the cache entry.".to_owned(),
+        rationale: None,
+        rejected: vec![],
+    });
+    let frame = screen(&mut app, 120, 30);
+    let row = frame
+        .lines()
+        .find(|line| line.contains("Read the etag off the response"))
+        .unwrap_or_default();
+
+    assert!(
+        !row.contains(':'),
+        "a shell with no clock drew a time anyway: {row:?}"
+    );
+    // The summary still starts where a decision with a time would: the column
+    // is what keeps the section's left edge straight.
+    let dated = screen(&mut running_session(), 120, 30);
+    let with_time = dated
+        .lines()
+        .find(|line| line.contains("13:39"))
+        .unwrap_or_default();
+    assert_eq!(
+        row.find("Read the etag"),
+        with_time.find("Reuse the existing LRU"),
+        "the summaries do not share a column:\n{row:?}\n{with_time:?}"
+    );
 }

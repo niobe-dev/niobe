@@ -7,51 +7,51 @@
 ║ ◆ claude                                                                                                                       ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                ║
 ║   Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                               ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k                                ║
 ║                                                                                                                                ║ ║ session ≥$0.04                                                    ║
-║ ⚙ Read  catalog/fetch.ts · 7.2 kB out                                                                                          ║ ║ Bash                 1 ━━━━━━━━━━━━                               ║
-║                                                                                                                                ║ ║ Edit                 1 ━━━━━━━━━━━━                               ║
-║ ◆ claude                                                                                                                       ║ ║ Read                 1 ━━━━━━━━━━━━                               ║
-║   Caching the etag beside the body so a 304 can be answered from the LRU.                                                      ║ ║ 3 calls · 1 failed · 0 denied · 9.9 kB out                        ║
-║                                                                                                                                ║ ╚═══════════════════════════════════════════════════════════════════╝
-║ ⚙ Edit  catalog/fetch.ts · 640 B out                                                                                           ║ ╔═════════════════════════════ Changes ═════════════════════════════╗
-║                                                                                                                                ║ ║                                                                   ║
-║ ◆ claude                                                                                                                       ║ ║   web/                                                            ║
-║   Rewriting the 304 test around the cached body.                                                                               ║ ║     components/Catalog.tsx                                +54 −31 ║
+║ ⚙ Read  catalog/fetch.ts · 7.2 kB out                                                                                          ║ ╚═══════════════════════════════════════════════════════════════════╝
+║                                                                                                                                ║ ╔═════════════════════════════ Changes ═════════════════════════════╗
+║ ⚙ Notion·search  {} · 1.1 kB out                                                                                               ║ ║                                                                   ║
+║                                                                                                                                ║ ║     index.ts                                                +8 −6 ║
+║ ⚙ Notion·fetch  {} · 2.5 kB out                                                                                                ║ ║   tests/                                                          ║
+║                                                                                                                                ║ ║     etag.test.ts                                          +122 −8 ║
+║ ! Notion·update-page  {} · failed · 96 B out                                                                                   ║ ║     fetch.test.ts                                         +76 −14 ║
+║                                                                                                                                ║ ║     helpers.ts                                              +5 −2 ║
+║ ◆ claude                                                                                                                       ║ ║     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 ║
+║   Caching the etag beside the body so a 304 can be answered from the LRU.                                                      ║ ║     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 ║
+║                                                                                                                                ║ ║   web/                                                            ║
+║ ⚙ Edit  catalog/fetch.ts · 640 B out                                                                                           ║ ║     components/Catalog.tsx                                +54 −31 ║
 ║                                                                                                                                ║ ║     components/Manifest.tsx                                +18 −7 ║
-║ ◆ claude                                                                                                                       ║ ║     hooks/useCatalog.ts                                   +27 −18 ║
-║   The notebook that demonstrates the fetcher needs the new call shape.                                                         ║ ║     styles/catalog.css                                     +14 −9 ║
-║                                                                                                                                ║ ║   scripts/                                                        ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                ║ ║     seed.ts                                                +22 −5 ║
-║                                                                                                                                ║ ║     verify.ts                                              +9 −11 ║
-║ ◆ claude                                                                                                                       ║ ║ ▾ Commits  2 this session  1 unpushed                             ║
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.        ║ ║ ↑ 9f2c1ab  12m  feat: keep the etag beside the body               ║
-║                                                                                                                                ║ ║   41de07c   2h  test: a 304 is answered from the cache            ║
-║                                                                                                                                ║ ║ ▾ This session  3 files  +≥62 −≥9                                 █
-║                                                                                                                                ║ ║   catalog/fetch.ts                                         +38 −9 █
+║ ◆ claude                                                                                                                       ║ ║     hooks/useCatalog.ts                                   +27 −18 █
+║   Rewriting the 304 test around the cached body.                                                                               ║ ║     styles/catalog.css                                     +14 −9 █
+║                                                                                                                                ║ ║   scripts/                                                        █
+║ ◆ claude                                                                                                                       ║ ║     seed.ts                                                +22 −5 █
+║   The notebook that demonstrates the fetcher needs the new call shape.                                                         ║ ║     verify.ts                                              +9 −11 █
+║                                                                                                                                ║ ║ ▾ Commits  2 this session  1 unpushed                             █
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                ║ ║ ↑ 9f2c1ab  12m  feat: keep the etag beside the body               █
+║                                                                                                                                ║ ║   41de07c   2h  test: a 304 is answered from the cache            █
+║ ◆ claude                                                                                                                       ║ ║ ▾ This session  3 files  +≥62 −≥9                                 █
+║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.        ║ ║   catalog/fetch.ts                                         +38 −9 █
 ║                                                                                                                                ║ ║     “Caching the etag beside the body so a 304 can be answered…”  █
 ║                                                                                                                                ║ ║   catalog/etag.test.ts                                      +24 — █
 ║                                                                                                                                ║ ║     “Rewriting the 304 test around the cached body.”              █
 ║                                                                                                                                ║ ║   docs/notebooks/catalog.ipynb                                — — █
 ║                                                                                                                                ║ ║     “The notebook that demonstrates the fetcher needs the new …”  █
-║                                                                                                                                ║ ║ ▾ Decisions  1                                                    █
-║                                                                                                                                ║ ║   · Reuse the existing LRU instead of a new Map — avoids a second █
-║                                                                                                                                ║ ║     eviction policy.                                              █
-║                                                                                                                                ║ ║ ▾ Tools  3 calls                                                  █
 ║                                                                                                                                ║ ╚═══════════════════════════════════════════════════════════════════╝
-║                                                                                                                                ║ ╔══════════════════════ Parallel ─ 1 running ═══════════════════════╗
+║                                                                                                                                ║ ╔════════════════════════════ Activity ═════════════════════════════╗
 ║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║ ◆ test-writer → tests/fetch.test.ts                               ║
-║                                                                                                                                ║ ║ 2 spawned · peak 2 · 1 done · 0 failed                            ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
+║                                                                                                                                ║ ║ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    ║
+║                                                                                                                                ║ ║ ◆ test-writer → tests/fetch.test.ts                running 1m 42s ║
+║                                                                                                                                ║ ║ ◇ reviewer → catalog/cache.ts                                done ║
+║                                                                                                                                ║ ║ ✗ doc-writer → docs/etags.md                               failed ║
+║                                                                                                                                ║ ║ ▾ Decisions  2                                                    ║
+║                                                                                                                                ║ ║   13:39 Key the cache on the request URL, not the manifest id —   ║
+║                                                                                                                                ║ ║         two manifests can share an id across catalogs.            ║
+║                                                                                                                                ║ ║   13:39 Reuse the existing LRU instead of a new Map — avoids a    ║
+║                                                                                                                                ║ ║         second eviction policy.                                   ║
+║                                                                                                                                ║ ║ ▾ Tools  6 calls ✗ 2 · 0 denied · 13.6 kB out                     ║
+║                                                                                                                                ║ ║   Notion·*             3 ━━━━━━━━━━━━ ✗ 1                         ║
+║                                                                                                                                ║ ║   Bash                 1 ━━━━         ✗ 1                         ║
+║                                                                                                                                ║ ║   Edit                 1 ━━━━                                     ║
+║                                                                                                                                ║ ║   Read                 1 ━━━━                                     ║
 ║                                                                                                                                ║ ║                                                                   ║
 ║                                                                                                                                ║ ║                                                                   ║
 ║ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ║ ║                                                                   ║

@@ -183,6 +183,10 @@ pub struct ToolTotals {
     pub output_bytes: u64,
     /// Finished calls per tool name.
     pub by_name: BTreeMap<String, u64>,
+    /// Failed calls per tool name, for a pane that says which tool the
+    /// failures belong to. A tool with no failures has no entry rather than a
+    /// zero, so a caller cannot read an absent count as a measured none.
+    pub failed_by_name: BTreeMap<String, u64>,
     /// Ends that arrived without a matching start. A non-zero count means the
     /// producer is dropping events, so it is surfaced rather than swallowed.
     pub unmatched_ends: u64,
@@ -368,7 +372,10 @@ impl SessionState {
                 *self.tools.by_name.entry(name.clone()).or_default() += 1;
                 match outcome {
                     ToolOutcome::Ok => {}
-                    ToolOutcome::Failed => self.tools.failed += 1,
+                    ToolOutcome::Failed => {
+                        self.tools.failed += 1;
+                        *self.tools.failed_by_name.entry(name.clone()).or_default() += 1;
+                    }
                     ToolOutcome::Denied => self.tools.denied += 1,
                 }
                 if self.in_flight_tools.remove(id).is_none() {
@@ -937,6 +944,10 @@ mod tests {
         assert_eq!(tools.output_bytes, 4_224);
         assert_eq!(tools.by_name["Read"], 1);
         assert_eq!(tools.by_name["Bash"], 1);
+        // The failure belongs to the tool that failed, and the tool that did
+        // not fail has no entry at all.
+        assert_eq!(tools.failed_by_name["Bash"], 1);
+        assert_eq!(tools.failed_by_name.get("Read"), None);
     }
 
     #[test]

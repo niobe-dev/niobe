@@ -344,7 +344,7 @@ pub enum AgentOutcome {
     Completed,
     /// Failed.
     Failed,
-    /// Killed from the parallel pane, or by a budget.
+    /// Killed from the Activity pane, or by a budget.
     Cancelled,
 }
 
@@ -536,7 +536,7 @@ pub enum Event {
         id: AgentId,
         /// The agent that spawned it, if it was not the session itself.
         parent: Option<AgentId>,
-        /// What it was spawned to do, for the parallel pane.
+        /// What it was spawned to do, for the Activity pane.
         label: String,
     },
 

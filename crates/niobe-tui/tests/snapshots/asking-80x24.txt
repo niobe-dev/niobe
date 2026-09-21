@@ -7,8 +7,8 @@
 ║ ⚙ ╔═════════════════════════════ Permission ═════════════════════════════╗   ║
 ║   ║                                                                      ║   ║
 ║ ◆ ║  Read wants to run                                                   ║   ║
-║   ║  /repo/notes.txt                                                     ║   █
-║   ║                                                                      ║   █
+║   ║  /repo/notes.txt                                                     ║   ║
+║   ║                                                                      ║   ║
 ║ ◆ ║  {"file_path":"/repo/notes.txt"}                                     ║   █
 ║   ║                                                                      ║   █
 ║   ║  Pin this saves Read(/repo/notes.txt)                                ║   █

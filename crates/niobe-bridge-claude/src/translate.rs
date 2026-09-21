@@ -1333,7 +1333,7 @@ fn render_content(content: wire::Content) -> String {
     }
 }
 
-/// What a sub-agent call was spawned to do, as the parallel pane will name it:
+/// What a sub-agent call was spawned to do, as the Activity pane names it:
 /// the kind of agent it asked for, where it named one, and what it was for.
 fn label_of(input: &serde_json::Value) -> Option<String> {
     let field = |key| input.get(key).and_then(serde_json::Value::as_str);

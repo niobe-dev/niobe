@@ -1,0 +1,30 @@
+ Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
+╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ╔════════════════ Usage ════════════════╗
+║                                                                            ║ ║                                       ║
+║ ⚙ Notion·search  {} · 1.1 kB out                                           ║ ║ 5h    ▓▓▓▓░░░  62% · resets 16:40     ║
+║                                                                            ║ ║ 7d    ▓░░░░░░  18% · resets Tue 15:00 ║
+║ ⚙ Notion·fetch  {} · 2.5 kB out                                            ║ ║ ───────────────────────────────────── ║
+║                                                                            ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
+║ ! Notion·update-page  {} · failed · 96 B out                               ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
+║                                                                            ║ ║ session ≥$0.04                        ║
+║ ◆ claude                                                                   █ ╚═══════════════════════════════════════╝
+║   Caching the etag beside the body so a 304 can be answered from the LRU.  █ ╔═══════════════ Changes ═══════════════╗
+║                                                                            █ ║                                       ║
+║ ⚙ Edit  catalog/fetch.ts · 640 B out                                       █ ║ ⎇ main ↑3                             █
+║                                                                            █ ║ ▾ Working tree  23 files  +977 −259   █
+║ ◆ claude                                                                   █ ║   .                                   ║
+║   Rewriting the 304 test around the cached body.                           █ ║     CHANGELOG.md                +0 −0 ║
+║                                                                            █ ║   catalog/                            ║
+║ ◆ claude                                                                   █ ║     fetch.ts                 +149 −12 ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║     etag.ts                   +88 −41 ║
+║                                                                            █ ║     cache/lru.ts               +31 −9 ║
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ╚═══════════════════════════════════════╝
+║                                                                            █ ╔══════════════ Activity ═══════════════╗
+║ ◆ claude                                                                   █ ║                                       ║
+║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║ ▾ Tools                               ║
+║   304 path asserts a body that is no longer sent.                          █ ║   Notion·*             3 ━━━━━━━ ✗ 1  ║
+║                                                                            █ ║   Bash                 1 ━━      ✗ 1  ║
+║ ────────────────────────────────────────────────────────────────────────── ║ ║   Edit                 1 ━━           ║
+║ >  Ask for a change, or press F1 for help                                  ║ ║   Read                 1 ━━           █
+╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
+1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

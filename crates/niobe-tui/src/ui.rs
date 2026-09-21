@@ -14,26 +14,29 @@
 //! measured is indistinguishable from one that was, and that is the product
 //! gone.
 //!
-//! The Usage pane shows no cost per edit or per tool: that needs spend
-//! attributed to individual calls, which the ledger does not do yet. It shows
-//! the tool mix, which is measured, and says so.
+//! Neither pane shows a cost per edit or per tool: that needs spend attributed
+//! to individual calls, which the ledger does not do yet. The Activity pane
+//! shows the tool mix instead, which is measured.
+
+use std::collections::BTreeMap;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
     Widget,
 };
 
-use niobe_core::event::UsageWindow;
-use niobe_core::session::{FileChanges, SessionState, Totals};
+use niobe_core::event::{AgentOutcome, UsageWindow};
+use niobe_core::session::{FileChanges, SessionState, ToolTotals, Totals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, Entry, EntryKind, Picker, Section, SelectedProfile, tool_label,
+    Activity, Answer, App, Ask, Entry, EntryKind, Pane, Picker, Section, SelectedProfile, SubAgent,
+    tool_label,
 };
-use crate::clock;
+use crate::clock::{self, Stamp};
 use crate::fx;
 use crate::meter::meter;
 use crate::prices::Prices;
@@ -616,7 +619,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     // Usage takes the rows its figures need and no more; what is left goes to
     // the two panes that grow with the session, 1.3 : 1 in favour of the files
     // it changed.
-    let [usage, changes, parallel] = Layout::vertical([
+    let [usage, changes, activity] = Layout::vertical([
         Constraint::Length(usage_height(app).min(right.height)),
         Constraint::Fill(13),
         Constraint::Fill(10),
@@ -625,7 +628,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 
     draw_usage(frame, usage, app, theme);
     draw_changes(frame, changes, app, theme);
-    draw_parallel(frame, parallel, app, theme);
+    draw_activity(frame, activity, app, theme);
 }
 
 /// The strip of desktop between the panes, animated while a turn is running.
@@ -978,31 +981,22 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
     }
 }
 
-/// Tool rows the Usage pane draws before it stops, whatever the tool mix is.
-///
-/// The pane is sized to its content, so without a cap a session that reached
-/// for a dozen tools would take the column the files and the sub-agents are
-/// read in. Four is the busiest of them; the footer counts the rest.
-const MIX_SHOWN: usize = 4;
-
 /// The rows the Usage pane needs: its frame, whatever windows the session has
-/// been told about, a row per model and the cache, the session's cost and its
-/// budget, the tool mix and the footer.
+/// been told about, a row per model and the cache, and the session's cost and
+/// its budget.
 ///
 /// Read before the pane is drawn, because the column above it is laid out
 /// from it — the pane takes the rows its figures need and leaves the rest to
 /// the panes that grow with the session.
 fn usage_height(app: &App) -> u16 {
-    let session = app.session();
     let budget = usize::from(app.budget().is_some());
-    let mix = session.tools().by_name.len().clamp(1, MIX_SHOWN);
     let windows = window_rows(app);
     let spend = spend_rows(app);
     // Two rows of border, the blank row under the title, a row per window the
     // backend reported, the rule between the two blocks where both have rows,
     // a row per model and the cache row, the session's cost and whatever
-    // budget it runs against, the tool mix and the footer.
-    let rows = 3 + windows + usize::from(windows > 0 && spend > 0) + spend + 1 + budget + mix + 1;
+    // budget it runs against.
+    let rows = 3 + windows + usize::from(windows > 0 && spend > 0) + spend + 1 + budget;
     u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
@@ -1286,13 +1280,6 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ),
     ]));
 
-    // Dollars per category would need spend attributed to each read, edit or
-    // shell command, which the ledger does not do yet. The bars carry the tool
-    // mix instead, which is measured, and the footer says so.
-    let tools = session.tools();
-    let mut mix: Vec<(&String, &u64)> = tools.by_name.iter().collect();
-    mix.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-
     let rows = usize::from(inner.height);
 
     if let Some(budget) = app.budget() {
@@ -1307,30 +1294,6 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         );
     }
 
-    if mix.is_empty() {
-        lines.push(Line::from("no tool calls yet").style(Style::new().fg(theme.dim)));
-    } else {
-        let busiest = mix.first().map(|(_, n)| **n).unwrap_or(1).max(1);
-        let bar_width = width
-            .saturating_sub(BAR_NAME + BAR_COUNT + 2)
-            .min(BAR_CELLS);
-        let room = rows.saturating_sub(lines.len() + 1).min(MIX_SHOWN);
-        for (name, count) in mix.iter().take(room) {
-            lines.push(bar_line(name, **count, busiest, bar_width, theme));
-        }
-    }
-
-    lines.push(
-        Line::from(format!(
-            "{} calls · {} failed · {} denied · {} out",
-            tools.finished,
-            tools.failed,
-            tools.denied,
-            crate::app::human_bytes(tools.output_bytes)
-        ))
-        .style(Style::new().fg(theme.dim)),
-    );
-
     lines.truncate(rows);
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -1341,98 +1304,244 @@ const BAR_NAME: usize = 18;
 /// Columns a tool's count gets, right-aligned.
 const BAR_COUNT: usize = 4;
 
+/// Columns a family's own failure count gets beside its bar — ` ✗ 3`.
+const BAR_FAILED: usize = 4;
+
 /// The longest a bar is drawn. The bars compare the tools with one another,
 /// which a dozen cells does as well as the whole pane, and a bar across the
 /// pane is a block of colour the count beside it gets lost in.
 const BAR_CELLS: usize = 12;
 
-/// One `Notion·search         2 ━━━━━━` row: the name, the count, and a thin
-/// bar in the tool colour for how it compares with the busiest tool.
-fn bar_line(name: &str, count: u64, busiest: u64, width: usize, theme: &Theme) -> Line<'static> {
+/// One `Notion·*            16 ━━ ✗ 3` row: the family, its calls, a thin bar
+/// in the tool colour for how it compares with the busiest family, and its own
+/// failures where it has any.
+///
+/// The failures are on the family's own row because the header's count says
+/// only that the session failed three calls, not which tool it kept failing
+/// at. A family with no failures carries no column at all — `✗ 0` is a
+/// reassurance dressed as a measurement.
+fn bar_line(
+    family: &str,
+    count: u64,
+    failed: u64,
+    busiest: u64,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
     // At least one cell for a tool that ran, so the least used still shows.
     let filled = match busiest {
         0 => 0,
         _ => ((count as usize * width) / busiest as usize).max(1),
     };
+    let failures = match failed {
+        0 => String::new(),
+        failed => format!(" ✗ {failed}"),
+    };
 
     Line::from(vec![
         Span::styled(
             format!(
-                "{:<BAR_NAME$}",
-                text::truncate(&crate::app::tool_label(name), BAR_NAME - 1)
+                "{ROW_INDENT}{:<BAR_NAME$}",
+                text::truncate(family, BAR_NAME - 1)
             ),
-            Style::new().fg(theme.fg),
+            Style::new().fg(theme.dim),
         ),
         Span::styled(
             format!("{count:>BAR_COUNT$} "),
             Style::new().fg(theme.hot).bold(),
         ),
-        Span::styled("━".repeat(filled.min(width)), Style::new().fg(theme.tool)),
+        Span::styled(
+            format!("{:<width$}", "━".repeat(filled.min(width))),
+            Style::new().fg(theme.tool),
+        ),
+        Span::styled(failures, Style::new().fg(theme.del)),
     ])
 }
 
-fn draw_parallel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+/// The Activity pane: the sub-agents the session spawned, the decisions it
+/// recorded, and the tools it called.
+///
+/// One column for what the agent is doing and what it has decided. It scrolls
+/// and its sections fold on the same mechanism the Changes pane uses.
+fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    draw_scrolling_pane(
+        frame,
+        area,
+        app,
+        Pane::Activity,
+        "Activity",
+        theme,
+        activity_rows,
+    );
+}
+
+/// Every row the Activity pane has, folded sections included as their header
+/// alone.
+fn activity_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let session = app.session();
-    let running = session.running_agents().len();
-    let block = pane(format!("Parallel ─ {running} running"), area, theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.height == 0 {
-        return;
+    let mut rows = agent_rows(app, session, width, theme);
+    rows.extend(decision_rows(app, session, width, theme));
+    rows.extend(tool_rows(app, session, width, theme));
+    rows
+}
+
+/// The glyph, the colour and the word a sub-agent's state is drawn with.
+///
+/// The glyph carries the state on its own: a sixteen-colour terminal in a
+/// theme the operator chose is not somewhere a colour can be the only
+/// difference between an agent that finished and one that failed.
+fn agent_state(
+    outcome: Option<AgentOutcome>,
+    theme: &Theme,
+) -> (&'static str, Color, &'static str) {
+    match outcome {
+        None => ("◆", theme.agent, "running"),
+        Some(AgentOutcome::Completed) => ("◇", theme.dim, "done"),
+        Some(AgentOutcome::Failed) => ("✗", theme.del, "failed"),
+        Some(AgentOutcome::Cancelled) => ("⊘", theme.dim, "cancelled"),
     }
+}
 
-    let rows = usize::from(inner.height);
-    let mut lines: Vec<Line> = Vec::new();
-
-    if running == 0 {
-        lines.push(Line::from("no sub-agents").style(Style::new().fg(theme.dim)));
-    } else {
-        for id in session.running_agents().iter().take(rows.saturating_sub(1)) {
-            let label = app.agent_label(id).unwrap_or_else(|| id.to_string());
-            lines.push(Line::from(vec![
-                Span::styled("◆ ", Style::new().fg(theme.agent).bold()),
-                Span::styled(
-                    text::truncate(&label, usize::from(inner.width).saturating_sub(2)),
-                    Style::new().fg(theme.fg),
-                ),
-            ]));
+/// What the sub-agents section says about itself: how many are running, how
+/// many were spawned in all, and how many failed.
+///
+/// A count that is zero is left out rather than drawn: `0 failed` is a line
+/// the operator has to read to learn nothing.
+fn agent_summary(session: &SessionState, theme: &Theme) -> Vec<Span<'static>> {
+    let running = session.running_agents().len();
+    let mut spans = vec![Span::styled(
+        format!("{running} running"),
+        Style::new().fg(theme.fg),
+    )];
+    let mut said = format!(" · {} spawned", session.agents_spawned());
+    for (count, word) in [
+        (session.agents_failed(), "failed"),
+        (session.agents_cancelled(), "cancelled"),
+    ] {
+        if count > 0 {
+            said.push_str(&format!(" · {count} {word}"));
         }
     }
-
-    lines.push(
-        Line::from(format!(
-            "{} spawned · peak {} · {} done · {} failed",
-            session.agents_spawned(),
-            session.peak_running_agents(),
-            session.agents_completed(),
-            session.agents_failed(),
-        ))
-        .style(Style::new().fg(theme.dim)),
-    );
-
-    lines.truncate(rows);
-    frame.render_widget(Paragraph::new(lines), inner);
+    spans.push(Span::styled(said, Style::new().fg(theme.dim)));
+    spans
 }
+
+/// A sub-agent per row: the state glyph, what it was spawned to do, and the
+/// status column.
+///
+/// The status column carries an elapsed time while the agent runs, and the
+/// state alone once it has finished. A finished agent's tokens are not
+/// attributed to it anywhere in the stream yet, so the column has no figure to
+/// carry rather than a zero — and how long it ran is not shown in a column the
+/// tokens are going to take.
+fn agent_rows(
+    app: &App,
+    session: &SessionState,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let folded = app.folded(Section::SubAgents);
+    let mut rows = vec![section_header(
+        folded,
+        "Sub-agents",
+        agent_summary(session, theme),
+        width,
+        theme,
+    )];
+    if folded {
+        return rows;
+    }
+    if app.agents().is_empty() {
+        rows.push(Line::from("  none spawned").style(Style::new().fg(theme.dim)));
+        return rows;
+    }
+
+    for agent in app.agents() {
+        let (glyph, colour, word) = agent_state(agent.outcome, theme);
+        let status = agent_status(agent, word, app.stamp());
+
+        let room = width
+            .saturating_sub(AGENT_GLYPH + text::width(&status) + AGENT_GAP)
+            .max(1);
+        let label = text::truncate(&agent.label, room);
+        // What is left between the two goes between them, so the status keeps
+        // the pane's right edge and the labels do not have to be one length.
+        let pad = width
+            .saturating_sub(AGENT_GLYPH + text::width(&label) + text::width(&status))
+            .max(AGENT_GAP);
+
+        rows.push(Line::from(vec![
+            Span::styled(format!("{glyph} "), Style::new().fg(colour).bold()),
+            Span::styled(label, Style::new().fg(theme.fg)),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(status, Style::new().fg(colour)),
+        ]));
+    }
+    rows
+}
+
+/// A sub-agent's status column: `running 1m 42s`, `done`, `failed`.
+///
+/// The elapsed time is there only while the agent runs, and only where the
+/// shell has both the moment it started and the moment it is drawing at — a
+/// session read back from a log that kept no times has neither, and the state
+/// alone is what there is to say.
+fn agent_status(agent: &SubAgent, word: &str, now: Option<Stamp>) -> String {
+    if agent.outcome.is_some() {
+        return word.to_owned();
+    }
+    match agent.at.zip(now).and_then(|(at, now)| now.since(at)) {
+        Some(ran) => format!("{word} {}", clock::spent(ran)),
+        None => word.to_owned(),
+    }
+}
+
+/// The glyph a sub-agent row opens with, and the space after it.
+const AGENT_GLYPH: usize = 2;
+
+/// The least that stands between what an agent is doing and its status, so
+/// the two never run together on a row whose label fills the pane.
+const AGENT_GAP: usize = 1;
 
 /// The Changes pane: what the repository says about the working tree, what
 /// this session says it changed, and what it has committed.
-///
-/// The pane scrolls and its sections fold, so the drawing is in two halves:
-/// the rows are built whole, and then the height the pane got decides which of
-/// them the operator sees. Building them all is what lets the pane know how
-/// far it can be scrolled.
 fn draw_changes(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    let block = pane("Changes", area, theme);
+    draw_scrolling_pane(
+        frame,
+        area,
+        app,
+        Pane::Changes,
+        "Changes",
+        theme,
+        changes_rows,
+    );
+}
+
+/// One of the two panes that scroll and hold folding sections.
+///
+/// The drawing is in two halves: the rows are built whole, and then the height
+/// the pane got decides which of them the operator sees. Building them all is
+/// what lets the pane know how far it can be scrolled.
+fn draw_scrolling_pane(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    which: Pane,
+    title: &str,
+    theme: &Theme,
+    rows: fn(&App, usize, &Theme) -> Vec<Line<'static>>,
+) {
+    let block = pane(title, area, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
         return;
     }
 
-    let rows = changes_rows(app, usize::from(inner.width), theme);
+    let rows = rows(app, usize::from(inner.width), theme);
     let held = rows.len();
-    app.measured_changes(inner, held, usize::from(inner.height));
-    let at = app.changes_scroll();
+    app.measured_pane(which, inner, held, usize::from(inner.height));
+    let at = app.pane_scroll(which);
     // Saturating rather than wrapping: a pane scrolled further than a `u16`
     // can say would come back to the top.
     let scroll = u16::try_from(at).unwrap_or(u16::MAX);
@@ -1470,8 +1579,6 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         rows.extend(commit_rows(app, repo, width, theme));
     }
     rows.extend(session_file_rows(app, session, width, theme));
-    rows.extend(decision_rows(app, session, width, theme));
-    rows.extend(tool_rows(app, session, width, theme));
     rows
 }
 
@@ -1776,11 +1883,19 @@ fn commit_row(
     ])
 }
 
+/// What a decision's time column is drawn in: `13:41` and a space.
+const DECISION_TIME: usize = 6;
+
 /// The decisions the session recorded, newest first.
 ///
-/// Drawn here until there is an Activity pane to draw them in; they are about
-/// the work rather than about the repository, and this is where they have
-/// always been.
+/// **Newest first**, now that the pane scrolls and three sections share it.
+/// The alternative — appending, which is the order the mock draws and the
+/// order a transcript reads in — puts each new decision at the bottom of a
+/// section whose top is wherever the sub-agents above it happen to end. The
+/// pane does not follow its own tail, so a decision recorded while the
+/// operator was reading something else would land below the fold and never be
+/// seen. Under the header it is always one row from a heading the eye already
+/// has.
 fn decision_rows(
     app: &App,
     session: &SessionState,
@@ -1805,14 +1920,27 @@ fn decision_rows(
         rows.push(Line::from("  none recorded").style(Style::new().fg(theme.dim)));
         return rows;
     }
-    for decision in session.decisions().iter().rev() {
-        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(4))
+
+    let indent = ROW_INDENT;
+    let column = text::width(indent) + DECISION_TIME;
+    for (decision, at) in app.decisions().collect::<Vec<_>>().into_iter().rev() {
+        // A log that kept no times gives a decision no time. The column stays
+        // so the summaries keep their edge, but it is left blank rather than
+        // filled with a zero, which would be a moment nobody recorded.
+        let when = at
+            .and_then(|at| at.local())
+            .map(|time| time.to_string())
+            .unwrap_or_default();
+        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(column + 1))
             .into_iter()
             .enumerate()
         {
-            let prefix = if i == 0 { "  · " } else { "    " };
+            let head = match i {
+                0 => format!("{indent}{when:<w$}", w = DECISION_TIME),
+                _ => " ".repeat(column),
+            };
             rows.push(Line::from(vec![
-                Span::styled(prefix, Style::new().fg(theme.dim)),
+                Span::styled(head, Style::new().fg(theme.dim)),
                 Span::styled(wrapped, Style::new().fg(theme.fg)),
             ]));
         }
@@ -1820,37 +1948,92 @@ fn decision_rows(
     rows
 }
 
-/// What the session called, and how often. Here for the same reason the
-/// decisions are.
+/// A tool's family, which is the row it is counted under.
+///
+/// **The rule: a tool an MCP server provides is counted under that server, and
+/// every other tool under its own name.** A session reaches for one MCP server
+/// a dozen ways — `Notion·search`, `Notion·fetch`, `Notion·update-page` — and
+/// a row each says less about where the session spent its calls than one row
+/// saying sixteen went to Notion. A backend's own tools are already the family
+/// they belong to: `Bash` is `Bash`.
+fn tool_family(name: &str) -> String {
+    let label = crate::app::tool_label(name);
+    match label.split_once('·') {
+        Some((server, _)) => format!("{server}·*"),
+        None => label,
+    }
+}
+
+/// What the session called, and how often: a row per family, busiest first,
+/// with a bar for how it compares and its own failures beside it.
 fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let tools = session.tools();
     let folded = app.folded(Section::Tools);
     let mut rows = vec![section_header(
         folded,
         "Tools",
-        vec![Span::styled(
-            match tools.finished {
-                1 => "1 call".to_owned(),
-                calls => format!("{calls} calls"),
-            },
-            Style::new().fg(theme.fg),
-        )],
+        tool_summary(tools, theme),
         width,
         theme,
     )];
-    if folded || tools.by_name.is_empty() {
+    if folded {
         return rows;
     }
-    let mix = tools
-        .by_name
-        .iter()
-        .map(|(name, count)| format!("{} {count}", crate::app::tool_label(name)))
-        .collect::<Vec<_>>()
-        .join(" · ");
-    for wrapped in text::wrap(&mix, width.saturating_sub(2)) {
-        rows.push(Line::from(format!("  {wrapped}")).style(Style::new().fg(theme.fg)));
+    if tools.by_name.is_empty() {
+        rows.push(Line::from("  none called").style(Style::new().fg(theme.dim)));
+        return rows;
+    }
+
+    let mut families: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for (name, count) in &tools.by_name {
+        let entry = families.entry(tool_family(name)).or_default();
+        entry.0 = entry.0.saturating_add(*count);
+        entry.1 = entry
+            .1
+            .saturating_add(tools.failed_by_name.get(name).copied().unwrap_or(0));
+    }
+    let mut mix: Vec<(&String, &(u64, u64))> = families.iter().collect();
+    mix.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(b.0)));
+
+    // The pane scrolls, so every family the session reached for gets a row.
+    // The cap the Usage pane drew them under was the price of a pane sized to
+    // its content; here the rows below the fold are scrolled to.
+    let busiest = mix.first().map(|(_, n)| n.0).unwrap_or(1).max(1);
+    let bar_width = width
+        .saturating_sub(text::width(ROW_INDENT) + BAR_NAME + BAR_COUNT + 2 + BAR_FAILED)
+        .min(BAR_CELLS);
+    for (family, (count, failed)) in mix {
+        rows.push(bar_line(family, *count, *failed, busiest, bar_width, theme));
     }
     rows
+}
+
+/// The tools section's header: the calls, the failures in the error colour,
+/// and the rest dimmed, because a failure is the one figure in the line the
+/// operator has to notice without looking for it.
+fn tool_summary(tools: &ToolTotals, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(
+        match tools.finished {
+            1 => "1 call".to_owned(),
+            calls => format!("{calls} calls"),
+        },
+        Style::new().fg(theme.fg),
+    )];
+    if tools.failed > 0 {
+        spans.push(Span::styled(
+            format!(" ✗ {}", tools.failed),
+            Style::new().fg(theme.del),
+        ));
+    }
+    spans.push(Span::styled(
+        format!(
+            " · {} denied · {} out",
+            tools.denied,
+            crate::app::human_bytes(tools.output_bytes)
+        ),
+        Style::new().fg(theme.dim),
+    ));
+    spans
 }
 
 /// `23 files`, `1 file`, `no files`.
