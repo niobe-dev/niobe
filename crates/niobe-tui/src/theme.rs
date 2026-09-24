@@ -81,7 +81,7 @@ pub struct Theme {
     /// Code in the assistant's replies: a code span, a code block.
     pub code: Color,
 
-    /// A dialog's face: the permission prompt and the model list, drawn on a
+    /// A dialog's face: the model list, drawn on a
     /// colour of their own so they read as a question laid over the panes
     /// rather than as one more pane.
     pub dialog_bg: Color,
@@ -89,17 +89,11 @@ pub struct Theme {
     pub dialog_fg: Color,
     /// A dialog's border and title.
     pub dialog_frame: Color,
-    /// A button.
-    pub button_bg: Color,
-    /// A button's label.
-    pub button_fg: Color,
-    /// The button Enter presses.
-    pub button_focus_bg: Color,
-    /// The label of the button Enter presses.
-    pub button_focus_fg: Color,
-    /// The letter that presses a button from anywhere in the dialog.
-    pub button_hot: Color,
-    /// What a dialog and its buttons cast on what is under them.
+    /// The row a dialog's list has its cursor on, which Enter chooses.
+    pub cursor_bg: Color,
+    /// The text of the row the cursor is on.
+    pub cursor_fg: Color,
+    /// What a dialog casts on what is under it.
     pub shadow: Color,
 
     /// The head of whatever the desktop animates between the panes; what
@@ -138,16 +132,13 @@ pub const CLASSIC: Theme = Theme {
     tool: Color::LightMagenta,
     code: Color::LightCyan,
 
-    // Turbo Vision's: a grey dialog with a white frame, green buttons with
-    // yellow hot letters, and a black shadow.
+    // Turbo Vision's: a grey dialog with a white frame, a green cursor row,
+    // and a black shadow.
     dialog_bg: Color::Gray,
     dialog_fg: Color::Black,
     dialog_frame: Color::White,
-    button_bg: Color::Green,
-    button_fg: Color::Black,
-    button_focus_bg: Color::LightGreen,
-    button_focus_fg: Color::Black,
-    button_hot: Color::Yellow,
+    cursor_bg: Color::LightGreen,
+    cursor_fg: Color::Black,
     shadow: Color::Black,
 
     fx: Color::Cyan,
@@ -192,17 +183,14 @@ pub const NEO: Theme = Theme {
     // a rendered page: by being the one thing that is not green.
     code: Color::White,
 
-    // Inverted, so the dialog stands off the black panes: black on green, with
-    // the buttons back in the panes' green on black. Nothing is darker than the
-    // panes' black, so the shadow is the grey the design keeps for chrome.
+    // Inverted, so the dialog stands off the black panes: black on green.
+    // Nothing is darker than the panes' black, so the shadow is the grey the
+    // design keeps for chrome.
     dialog_bg: Color::Green,
     dialog_fg: Color::Black,
     dialog_frame: Color::Black,
-    button_bg: Color::Black,
-    button_fg: Color::LightGreen,
-    button_focus_bg: Color::LightGreen,
-    button_focus_fg: Color::Black,
-    button_hot: Color::White,
+    cursor_bg: Color::LightGreen,
+    cursor_fg: Color::Black,
     shadow: Color::DarkGray,
 
     fx: Color::LightGreen,
@@ -244,17 +232,14 @@ pub const CYBER: Theme = Theme {
     tool: Color::LightBlue,
     code: Color::LightCyan,
 
-    // The dialog takes the magenta the chrome keeps for the operator, so a
-    // question reads as the shell asking rather than as the session reporting.
-    // Its buttons go back to the panes' black and green.
+    // The dialog takes the magenta the chrome keeps for the operator, so the
+    // list reads as the shell asking rather than as the session reporting.
+    // Its cursor row goes back to the panes' green.
     dialog_bg: Color::Magenta,
     dialog_fg: Color::White,
     dialog_frame: Color::LightMagenta,
-    button_bg: Color::Black,
-    button_fg: Color::LightGreen,
-    button_focus_bg: Color::LightGreen,
-    button_focus_fg: Color::Black,
-    button_hot: Color::LightYellow,
+    cursor_bg: Color::LightGreen,
+    cursor_fg: Color::Black,
     shadow: Color::Black,
 
     fx: Color::Magenta,
@@ -302,11 +287,8 @@ pub const MODERN: Theme = Theme {
     dialog_bg: Color::DarkGray,
     dialog_fg: Color::White,
     dialog_frame: Color::Gray,
-    button_bg: Color::Blue,
-    button_fg: Color::White,
-    button_focus_bg: Color::LightBlue,
-    button_focus_fg: Color::Black,
-    button_hot: Color::LightYellow,
+    cursor_bg: Color::LightBlue,
+    cursor_fg: Color::Black,
     shadow: Color::Black,
 
     fx: Color::LightBlue,
@@ -366,7 +348,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 26] {
+    fn colours(t: &Theme) -> [Color; 23] {
         [
             t.pane_bg,
             t.frame,
@@ -387,11 +369,8 @@ mod tests {
             t.dialog_bg,
             t.dialog_fg,
             t.dialog_frame,
-            t.button_bg,
-            t.button_fg,
-            t.button_focus_bg,
-            t.button_focus_fg,
-            t.button_hot,
+            t.cursor_bg,
+            t.cursor_fg,
             t.shadow,
             t.fx,
         ]
@@ -450,15 +429,11 @@ mod tests {
                 (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
                 (t.dialog_fg, t.dialog_bg, "dialog text"),
                 (t.dialog_frame, t.dialog_bg, "a dialog's border"),
-                (t.button_bg, t.dialog_bg, "a button"),
-                (t.button_fg, t.button_bg, "a button's label"),
-                (t.button_hot, t.button_bg, "a button's hot letter"),
-                (t.button_focus_bg, t.button_bg, "the focused button"),
-                (
-                    t.button_focus_fg,
-                    t.button_focus_bg,
-                    "the focused button's label",
-                ),
+                (t.cursor_bg, t.dialog_bg, "a dialog's cursor row"),
+                (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
+                // A question's selected answer is drawn inverted, in the pane
+                // background on the title colour.
+                (t.pane_bg, t.title, "a question's selected answer"),
                 (t.shadow, t.dialog_bg, "a dialog's shadow"),
                 (t.fx, t.pane_bg, "the desktop's motion"),
             ] {

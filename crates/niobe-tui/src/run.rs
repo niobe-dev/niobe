@@ -294,8 +294,12 @@ fn send_produced(
                     app.not_sent(&error.to_string());
                 }
             }
-            SessionEvent::PermissionResponse { id, decision } => {
-                if let Err(error) = backend.answer(id, *decision) {
+            SessionEvent::PermissionResponse {
+                id,
+                decision,
+                message,
+            } => {
+                if let Err(error) = backend.answer(id, *decision, message.as_deref()) {
                     app.not_answered(&error.to_string());
                 }
             }
@@ -393,6 +397,7 @@ mod tests {
     struct Attached {
         sent: Vec<String>,
         answered: Vec<(ToolCallId, PermissionDecision)>,
+        said: Vec<Option<String>>,
         modes: Vec<Mode>,
         models: Vec<String>,
         produces: Vec<SessionEvent>,
@@ -412,11 +417,13 @@ mod tests {
             &mut self,
             id: &ToolCallId,
             decision: PermissionDecision,
+            message: Option<&str>,
         ) -> Result<(), BridgeError> {
             if self.refuse {
                 return Err("the subprocess has gone".into());
             }
             self.answered.push((id.clone(), decision));
+            self.said.push(message.map(str::to_owned));
             Ok(())
         }
 
@@ -673,6 +680,7 @@ mod tests {
             [SessionEvent::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
+                message: None,
             }],
             "a resumed session would not know the call was allowed"
         );
@@ -760,7 +768,10 @@ mod tests {
         app.settle_rules();
         send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
 
-        assert!(app.asking().is_none(), "the modal asked what was decided");
+        assert!(
+            app.asking().is_none(),
+            "the transcript asked what was decided"
+        );
         assert_eq!(
             backend.answered,
             [(ToolCallId::new("t1"), PermissionDecision::Allow)]

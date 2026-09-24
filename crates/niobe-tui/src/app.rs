@@ -219,9 +219,9 @@ pub struct SelectedProfile {
 
 /// A permission prompt the shell is waiting on the operator to answer.
 ///
-/// What the backend said, and nothing derived: the modal shows the tool, what
-/// it would run on and the whole of its arguments, because approving a call
-/// whose arguments were summarised away is approving something else.
+/// What the backend said, and nothing derived: the question shows the tool,
+/// what it would run on and the whole of its arguments, because approving a
+/// call whose arguments were summarised away is approving something else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     /// The call being gated, which the answer is addressed by.
@@ -233,6 +233,10 @@ pub struct Ask {
     /// The one thing the call acts on, where the backend could name it. A
     /// prompt without one can only be answered for the whole tool.
     pub target: Option<String>,
+    /// The turn the call belongs to, counted in prompts sent this session,
+    /// which is what the question says it is blocking. Zero where the session
+    /// has no prompt on record, as one attached to a turn already running.
+    pub turn: u64,
 }
 
 impl Ask {
@@ -240,6 +244,14 @@ impl Ask {
     /// target needs a target to be about.
     pub fn offers(&self, answer: Answer) -> bool {
         answer != Answer::AlwaysTarget || self.target.is_some()
+    }
+
+    /// The answers this prompt offers, in the order they are numbered.
+    pub fn options(&self) -> Vec<Answer> {
+        Answer::ALL
+            .into_iter()
+            .filter(|answer| self.offers(*answer))
+            .collect()
     }
 
     /// The standing rule "always this tool".
@@ -256,7 +268,7 @@ impl Ask {
     }
 }
 
-/// What the operator chose in the permission modal.
+/// What the operator chose in answer to a permission prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
     /// Allowed, this call only.
@@ -270,14 +282,26 @@ pub enum Answer {
 }
 
 impl Answer {
-    /// Every answer, in the order the dialog's buttons are laid out and Tab
-    /// walks them.
+    /// Every answer, in the order a prompt numbers the ones it offers.
     pub const ALL: [Answer; 4] = [
         Answer::Once,
         Answer::AlwaysTool,
         Answer::AlwaysTarget,
         Answer::No,
     ];
+}
+
+/// Where the keyboard is while a prompt is waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskFocus {
+    /// On the numbered answers.
+    Choosing,
+    /// On an answer the operator is writing in place of the numbered ones.
+    Writing,
+    /// Put off with Esc: the question stays in the transcript unanswered, the
+    /// turn stays waiting on it, and the keyboard is the shell's until Esc
+    /// brings the operator back.
+    Deferred,
 }
 
 /// The models the operator is choosing between.
@@ -437,15 +461,19 @@ pub struct App {
     transcript_lines: usize,
     viewport_lines: usize,
     hint: Option<String>,
-    /// Prompts waiting on the operator, oldest first. The modal shows the
-    /// front one; the rest wait behind it, because a backend can gate two
+    /// Prompts waiting on the operator, oldest first. The transcript shows
+    /// the front one; the rest wait behind it, because a backend can gate two
     /// calls of the same turn and answering them out of order would put the
     /// wrong arguments in front of the operator.
     asks: VecDeque<Ask>,
-    /// Which of [`Answer::ALL`] the front prompt's Enter would give. Every
-    /// prompt starts on the first, so Enter means the same thing whichever
-    /// prompt it lands on.
-    ask_focus: usize,
+    /// Which of the front prompt's options Enter would give. Every prompt
+    /// starts on the first, so Enter means the same thing whichever prompt it
+    /// lands on.
+    ask_selected: usize,
+    /// Where the keyboard is while a prompt waits.
+    ask_focus: AskFocus,
+    /// The answer being written in place of the numbered ones.
+    ask_draft: String,
     /// The standing answers this session starts with, plus the ones made in
     /// it.
     allowed: Allowlist,
@@ -531,7 +559,9 @@ impl App {
             viewport_lines: 0,
             hint: None,
             asks: VecDeque::new(),
-            ask_focus: 0,
+            ask_selected: 0,
+            ask_focus: AskFocus::Choosing,
+            ask_draft: String::new(),
             allowed: Allowlist::new(),
             learned: Vec::new(),
             produced: Vec::new(),
@@ -692,13 +722,18 @@ impl App {
                 tool: tool.clone(),
                 input: input.clone(),
                 target: target.clone(),
+                turn: self.session.user_messages(),
             }),
 
             // A refusal is shown as its own entry rather than left to the tool
             // result that carries it back: a backend that reports nothing
             // further about a call it was not allowed to make would leave a
             // denial indistinguishable from the agent deciding not to act.
-            Event::PermissionResponse { id, decision } => {
+            Event::PermissionResponse {
+                id,
+                decision,
+                message,
+            } => {
                 let asked = self.forget_ask(id);
                 if *decision == PermissionDecision::Deny {
                     let (tool, what) = match &asked {
@@ -715,7 +750,10 @@ impl App {
                             true => tool.clone(),
                             false => format!("{tool} · {what}"),
                         },
-                        body: String::new(),
+                        body: message
+                            .as_ref()
+                            .map(|said| format!("You answered instead: {said}"))
+                            .unwrap_or_default(),
                         streaming: false,
                         at: self.at,
                     });
@@ -832,44 +870,73 @@ impl App {
     }
 
     /// Drops a prompt from the queue, and gives it back.
+    ///
+    /// The next prompt starts afresh — on its first option, with the keyboard
+    /// on it — whatever the operator was doing with the one before, so a
+    /// question put off is not mistaken for the one behind it.
     fn forget_ask(&mut self, id: &ToolCallId) -> Option<Ask> {
         let at = self.asks.iter().position(|ask| &ask.id == id)?;
         if at == 0 {
-            self.ask_focus = 0;
+            self.ask_selected = 0;
+            self.ask_focus = AskFocus::Choosing;
+            self.ask_draft.clear();
         }
         self.asks.remove(at)
     }
 
+    /// The answers the prompt on screen offers, in the order they are
+    /// numbered. Empty with no prompt waiting.
+    pub fn ask_options(&self) -> Vec<Answer> {
+        self.asks.front().map(Ask::options).unwrap_or_default()
+    }
+
     /// The answer Enter would give the prompt on screen.
-    pub fn ask_focus(&self) -> Answer {
-        Answer::ALL
-            .get(self.ask_focus)
+    pub fn ask_selected(&self) -> Answer {
+        self.ask_options()
+            .get(self.ask_selected)
             .copied()
             .unwrap_or(Answer::Once)
     }
 
-    /// Moves the focus one button along, `forward` or back, over the buttons
-    /// the prompt offers, wrapping at either end.
-    fn move_ask_focus(&mut self, forward: bool) {
-        let Some(ask) = self.asks.front() else {
+    /// Where the keyboard is while a prompt waits.
+    pub fn ask_focus(&self) -> AskFocus {
+        self.ask_focus
+    }
+
+    /// What the operator has written so far in place of the numbered answers.
+    pub fn ask_draft(&self) -> &str {
+        &self.ask_draft
+    }
+
+    /// Moves the selection one option along, `forward` or back, wrapping at
+    /// either end.
+    fn move_selection(&mut self, forward: bool) {
+        let count = self.ask_options().len();
+        if count == 0 {
             return;
+        }
+        let at = self.ask_selected.min(count - 1);
+        self.ask_selected = match forward {
+            true => (at + 1) % count,
+            false => (at + count - 1) % count,
         };
-        let count = Answer::ALL.len();
-        let step = if forward { 1 } else { count - 1 };
-        let mut at = self.ask_focus;
-        for _ in 0..count {
-            at = (at + step) % count;
-            if Answer::ALL
-                .get(at)
-                .is_some_and(|answer| ask.offers(*answer))
-            {
-                self.ask_focus = at;
-                return;
-            }
+    }
+
+    /// Selects the option numbered `number`, counted from one. A number past
+    /// the last option selects nothing rather than the nearest one: the
+    /// operator pressed a key for an answer that is not on offer.
+    fn select_option(&mut self, number: u32) {
+        let count = self.ask_options().len();
+        if let Some(at) = usize::try_from(number)
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|at| *at < count)
+        {
+            self.ask_selected = at;
         }
     }
 
-    /// The prompt the modal is showing, if any.
+    /// The prompt the transcript is asking, if any.
     pub fn asking(&self) -> Option<&Ask> {
         self.asks.front()
     }
@@ -906,11 +973,12 @@ impl App {
             self.produce(Event::PermissionResponse {
                 id,
                 decision: PermissionDecision::Allow,
+                message: None,
             });
         }
     }
 
-    /// Answers the prompt the modal is showing.
+    /// Answers the prompt the transcript is asking.
     ///
     /// "Always" stores the rule as well as answering, so that the same prompt
     /// does not come back. [`Answer::AlwaysTarget`] on a prompt the backend
@@ -941,6 +1009,32 @@ impl App {
         self.produce(Event::PermissionResponse {
             id: ask.id,
             decision,
+            message: None,
+        });
+        self.scroll_to_tail();
+    }
+
+    /// Answers the prompt the transcript is asking with the operator's own
+    /// words instead of one of the numbered answers.
+    ///
+    /// The call is refused and the words go with the refusal: the agent asked
+    /// to run something and was told something else, and a backend hands a
+    /// refusal's message to the agent as the call's result. Sending the words
+    /// as a new prompt instead would leave the call waiting and start a turn
+    /// behind it.
+    pub fn answer_saying(&mut self, words: &str) {
+        let Some(ask) = self.asks.front() else {
+            return;
+        };
+        let words = words.trim();
+        if words.is_empty() {
+            return;
+        }
+        let id = ask.id.clone();
+        self.produce(Event::PermissionResponse {
+            id,
+            decision: PermissionDecision::Deny,
+            message: Some(words.to_owned()),
         });
         self.scroll_to_tail();
     }
@@ -1175,7 +1269,7 @@ impl App {
         }
     }
 
-    fn agent_name(&self) -> String {
+    pub(crate) fn agent_name(&self) -> String {
         self.session
             .meta()
             .map(|meta| meta.backend.as_str().to_owned())
@@ -1505,12 +1599,34 @@ impl App {
             self.quit();
             return;
         }
-        // A prompt takes the keyboard whole. Typing into the composer behind a
-        // modal would put the answer to a question the operator is still being
-        // asked into the next turn.
+        // A prompt takes the keyboard whole until it is put off. Typing into
+        // the composer under a question would put the answer to it into the
+        // next turn.
         if self.asking().is_some() {
-            self.on_ask_key(key);
-            return;
+            match self.ask_focus {
+                AskFocus::Choosing | AskFocus::Writing => {
+                    self.on_ask_key(key);
+                    return;
+                }
+                AskFocus::Deferred if key.code == KeyCode::Esc => {
+                    self.ask_focus = AskFocus::Choosing;
+                    self.scroll_to_tail();
+                    return;
+                }
+                // The turn is waiting on the answer, and the backend would
+                // hold a prompt sent now until after it — so the operator
+                // would have written the next turn believing it the answer.
+                AskFocus::Deferred
+                    if key.code == KeyCode::Enter && key.modifiers != KeyModifiers::ALT =>
+                {
+                    self.hint = Some(
+                        "The turn is still waiting on the question above; Esc to answer it first"
+                            .to_owned(),
+                    );
+                    return;
+                }
+                AskFocus::Deferred => {}
+            }
         }
         // The model list takes the keyboard the same way, and for the same
         // reason: an arrow key that scrolled the transcript behind an open
@@ -1555,23 +1671,73 @@ impl App {
         }
     }
 
-    /// One key, while the permission modal is up.
+    /// One key, while a prompt has the keyboard.
     ///
-    /// Anything that is not an answer is swallowed rather than passed on: the
-    /// operator is being asked a question, and a key that did something else
-    /// under a modal would be a key nobody meant.
+    /// Scrolling still scrolls, because the work that led to the question is
+    /// what the operator reads to answer it. Anything else that is not about
+    /// the question is swallowed rather than passed on: a key that did
+    /// something else while a question was being asked would be a key nobody
+    /// meant.
     fn on_ask_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let page = self.viewport_lines.max(1);
+        match (key.code, key.modifiers) {
+            (KeyCode::PageUp, _) => return self.scroll_up(page),
+            (KeyCode::PageDown, _) => return self.scroll_down(page),
+            (KeyCode::Up, KeyModifiers::SHIFT) => return self.scroll_up(1),
+            (KeyCode::Down, KeyModifiers::SHIFT) => return self.scroll_down(1),
+            (KeyCode::Home, KeyModifiers::CONTROL) => return self.scroll_to_head(),
+            (KeyCode::End, KeyModifiers::CONTROL) => return self.scroll_to_tail(),
+            _ => {}
+        }
+        // The question is the last thing in the transcript. Scrolled back,
+        // the operator cannot see it, and a key that answered it then would
+        // answer something they were not reading; the first such key brings
+        // it into view and does nothing else.
+        if !self.follow {
+            self.scroll_to_tail();
+            return;
+        }
+        match self.ask_focus {
+            AskFocus::Writing => self.on_writing_key(key.code),
+            AskFocus::Choosing | AskFocus::Deferred => self.on_choosing_key(key.code),
+        }
+    }
+
+    /// One key, on the numbered answers.
+    fn on_choosing_key(&mut self, code: ratatui::crossterm::event::KeyCode) {
         use ratatui::crossterm::event::KeyCode;
 
-        let has_target = self.asking().is_some_and(|ask| ask.target.is_some());
-        match key.code {
-            KeyCode::Enter => self.answer(self.ask_focus()),
-            KeyCode::Tab | KeyCode::Right => self.move_ask_focus(true),
-            KeyCode::BackTab | KeyCode::Left => self.move_ask_focus(false),
-            KeyCode::Char('y' | 'Y') => self.answer(Answer::Once),
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer(Answer::No),
-            KeyCode::Char('a' | 'A') => self.answer(Answer::AlwaysTool),
-            KeyCode::Char('p' | 'P') if has_target => self.answer(Answer::AlwaysTarget),
+        match code {
+            KeyCode::Enter => self.answer(self.ask_selected()),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(true),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(false),
+            KeyCode::Char(c) => {
+                if let Some(number) = c.to_digit(10) {
+                    self.select_option(number);
+                }
+            }
+            KeyCode::Tab => self.ask_focus = AskFocus::Writing,
+            KeyCode::Esc => self.ask_focus = AskFocus::Deferred,
+            _ => {}
+        }
+    }
+
+    /// One key, on an answer being written.
+    fn on_writing_key(&mut self, code: ratatui::crossterm::event::KeyCode) {
+        use ratatui::crossterm::event::KeyCode;
+
+        match code {
+            KeyCode::Enter => {
+                let words = self.ask_draft.clone();
+                self.answer_saying(&words);
+            }
+            KeyCode::Char(c) => self.ask_draft.push(c),
+            KeyCode::Backspace => {
+                self.ask_draft.pop();
+            }
+            KeyCode::Esc => self.ask_focus = AskFocus::Choosing,
             _ => {}
         }
     }
@@ -2229,12 +2395,13 @@ mod tests {
         let mut app = app();
         app.apply(&prompt(Some("rm -rf build")));
 
-        let ask = app.asking().expect("the modal has a prompt");
+        let ask = app.asking().expect("the transcript has a question");
         assert_eq!(ask.tool, "Bash");
         assert_eq!(ask.target.as_deref(), Some("rm -rf build"));
         assert_eq!(app.asks_waiting(), 0);
+        assert_eq!(app.ask_selected(), Answer::Once);
 
-        app.on_key(key(KeyCode::Char('y')));
+        app.on_key(key(KeyCode::Enter));
 
         assert!(app.asking().is_none());
         assert_eq!(
@@ -2242,6 +2409,7 @@ mod tests {
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
+                message: None,
             }]
         );
         assert!(
@@ -2251,12 +2419,37 @@ mod tests {
     }
 
     #[test]
+    fn the_options_are_numbered_in_the_order_they_are_offered() {
+        let mut targeted = app();
+        targeted.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(
+            targeted.ask_options(),
+            [
+                Answer::Once,
+                Answer::AlwaysTool,
+                Answer::AlwaysTarget,
+                Answer::No
+            ]
+        );
+
+        // A prompt with no target has nothing to pin, and the numbers close up
+        // rather than leaving a gap the operator would have to count past.
+        let mut untargeted = app();
+        untargeted.apply(&prompt(None));
+        assert_eq!(
+            untargeted.ask_options(),
+            [Answer::Once, Answer::AlwaysTool, Answer::No]
+        );
+    }
+
+    #[test]
     fn a_refusal_is_visible_in_the_transcript() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = app();
         app.apply(&prompt(Some("rm -rf build")));
 
-        app.on_key(key(KeyCode::Char('n')));
+        app.on_key(key(KeyCode::Char('4')));
+        app.on_key(key(KeyCode::Enter));
 
         let entry = app.entries().last().expect("an entry was pushed");
         assert_eq!(entry.kind, EntryKind::Failure);
@@ -2271,7 +2464,8 @@ mod tests {
 
         let mut by_target = app();
         by_target.apply(&prompt(Some("rm -rf build")));
-        by_target.on_key(key(KeyCode::Char('p')));
+        by_target.on_key(key(KeyCode::Char('3')));
+        by_target.on_key(key(KeyCode::Enter));
         assert_eq!(
             by_target.take_rules(),
             [Rule::targeted("Bash", "rm -rf build")]
@@ -2280,7 +2474,8 @@ mod tests {
 
         let mut by_tool = app();
         by_tool.apply(&prompt(Some("rm -rf build")));
-        by_tool.on_key(key(KeyCode::Char('a')));
+        by_tool.on_key(key(KeyCode::Char('2')));
+        by_tool.on_key(key(KeyCode::Enter));
         assert_eq!(by_tool.take_rules(), [Rule::tool("Bash")]);
         assert!(by_tool.allowed().allows("Bash", Some("anything at all")));
 
@@ -2292,25 +2487,28 @@ mod tests {
                 [Event::PermissionResponse {
                     id: "t1".into(),
                     decision: PermissionDecision::AllowAlways,
+                    message: None,
                 }]
             );
         }
     }
 
     #[test]
-    fn a_prompt_with_no_target_cannot_be_answered_for_one() {
+    fn a_number_past_the_last_option_selects_nothing() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = app();
         app.apply(&prompt(None));
 
-        app.on_key(key(KeyCode::Char('p')));
+        app.on_key(key(KeyCode::Char('4')));
+        assert_eq!(app.ask_selected(), Answer::Once);
+        app.on_key(key(KeyCode::Char('3')));
+        assert_eq!(app.ask_selected(), Answer::No);
 
-        assert!(
-            app.asking().is_some(),
-            "the prompt was answered by a key it does not offer"
-        );
         assert!(app.take_rules().is_empty());
-        assert!(app.take_produced().is_empty());
+        assert!(
+            app.take_produced().is_empty(),
+            "a number answered by itself"
+        );
     }
 
     #[test]
@@ -2319,7 +2517,7 @@ mod tests {
         let mut app = app();
         app.apply(&prompt(Some("rm -rf build")));
 
-        // `x` is neither an answer nor a quit: under a modal it is nothing.
+        // `x` is neither an answer nor a quit: under a question it is nothing.
         app.on_key(key(KeyCode::Char('x')));
 
         assert_eq!(app.composed(), "");
@@ -2350,13 +2548,137 @@ mod tests {
         });
 
         assert_eq!(app.asks_waiting(), 1);
-        app.on_key(key(KeyCode::Char('y')));
+        app.on_key(key(KeyCode::Enter));
 
         assert_eq!(
             app.asking().map(|ask| ask.tool.clone()),
             Some("Write".to_owned())
         );
         assert_eq!(app.asks_waiting(), 0);
+    }
+
+    #[test]
+    fn a_question_names_the_turn_it_is_blocking() {
+        let mut app = sent(sent(app().attached(), "first"), "second");
+        app.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(app.asking().map(|ask| ask.turn), Some(2));
+    }
+
+    #[test]
+    fn tab_writes_an_answer_that_reaches_the_backend_as_the_answer() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.type_into_composer(Input {
+            key: Key::Char('d'),
+            ..Default::default()
+        });
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.ask_focus(), AskFocus::Writing);
+        for c in "keep buildx".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.ask_draft(), "keep build");
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Deny,
+                message: Some("keep build".to_owned()),
+            }],
+            "the words went somewhere other than the answer"
+        );
+        assert_eq!(app.session().user_messages(), 0, "the answer became a turn");
+        assert_eq!(app.composed(), "d", "the draft in the composer was touched");
+        let entry = app
+            .entries()
+            .last()
+            .expect("the answer is in the transcript");
+        assert_eq!(entry.head, "denied");
+        assert!(entry.body.ends_with("keep build"), "{entry:?}");
+    }
+
+    #[test]
+    fn an_empty_written_answer_sends_nothing_and_esc_goes_back_to_the_options() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.take_produced().is_empty());
+
+        app.on_key(key(KeyCode::Char('n')));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.ask_focus(), AskFocus::Choosing);
+        // Written in the box, not on the options: `n` selected nothing.
+        assert_eq!(app.ask_selected(), Answer::Once);
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn esc_puts_the_question_off_and_leaves_it_waiting_in_the_transcript() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+        assert!(app.asking().is_some(), "putting it off answered it");
+        assert!(app.take_produced().is_empty());
+        assert_eq!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("waiting on you"),
+            "the session stopped saying it is waiting"
+        );
+
+        // The keyboard is the shell's again: a draft can be typed …
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(app.composed(), "x");
+        // … but not sent into a turn that is waiting on the answer.
+        app.on_key(key(KeyCode::Enter));
+        assert!(
+            app.take_produced().is_empty(),
+            "a prompt went out past the question"
+        );
+        assert_eq!(app.composed(), "x");
+        let hint = app.hint().unwrap_or_default();
+        assert!(hint.contains("waiting"), "{hint}");
+
+        // Esc takes the operator back to it, on the option they had.
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.ask_focus(), AskFocus::Choosing);
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.asking().is_none());
+    }
+
+    #[test]
+    fn a_key_meant_for_a_question_out_of_view_brings_it_into_view_first() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.measured(100, 20);
+        app.scroll_up(30);
+        app.apply(&prompt(Some("rm -rf build")));
+        assert!(!app.follows_tail(), "the question yanked the view");
+
+        // Scrolling still reads the work that led to the question.
+        app.on_key(key(KeyCode::PageUp));
+        assert_eq!(app.scroll(), 30);
+
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.follows_tail());
+        assert!(
+            app.take_produced().is_empty(),
+            "a question the operator could not see was answered"
+        );
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.asking().is_none());
     }
 
     #[test]
@@ -2377,6 +2699,7 @@ mod tests {
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
+                message: None,
             }],
             "the call was let through without the backend being told"
         );
@@ -2823,14 +3146,19 @@ mod tests {
     }
 
     #[test]
-    fn the_first_button_has_focus_and_tab_walks_the_rest_in_order() {
+    fn arrows_and_vi_keys_move_the_selection_and_wrap_at_either_end() {
         let mut app = asked(Some("ls"));
-        assert_eq!(app.ask_focus(), Answer::Once);
+        assert_eq!(app.ask_selected(), Answer::Once);
 
         let mut walked = Vec::new();
-        for _ in 0..4 {
-            press(&mut app, KeyCode::Tab);
-            walked.push(app.ask_focus());
+        for code in [
+            KeyCode::Down,
+            KeyCode::Char('j'),
+            KeyCode::Down,
+            KeyCode::Down,
+        ] {
+            press(&mut app, code);
+            walked.push(app.ask_selected());
         }
         assert_eq!(
             walked,
@@ -2842,28 +3170,24 @@ mod tests {
             ]
         );
 
-        press(&mut app, KeyCode::Left);
-        assert_eq!(app.ask_focus(), Answer::No);
-        press(&mut app, KeyCode::Right);
-        assert_eq!(app.ask_focus(), Answer::Once);
-        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(app.ask_focus(), Answer::No);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.ask_selected(), Answer::No);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.ask_selected(), Answer::AlwaysTarget);
     }
 
     #[test]
-    fn a_prompt_with_no_target_has_no_target_button_to_focus() {
+    fn a_prompt_with_no_target_has_no_target_option_to_select() {
         let mut app = asked(None);
-        press(&mut app, KeyCode::Tab);
-        press(&mut app, KeyCode::Tab);
-        assert_eq!(app.ask_focus(), Answer::No);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.ask_selected(), Answer::No);
     }
 
     #[test]
-    fn enter_presses_the_focused_button_and_the_next_prompt_starts_on_the_first() {
+    fn enter_confirms_the_selection_and_the_next_prompt_starts_on_the_first() {
         let mut app = asked(Some("ls"));
-        press(&mut app, KeyCode::Tab);
-        press(&mut app, KeyCode::Tab);
-        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('4'));
         press(&mut app, KeyCode::Enter);
 
         assert_eq!(
@@ -2871,10 +3195,11 @@ mod tests {
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
+                message: None,
             }]
         );
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
-        assert_eq!(app.ask_focus(), Answer::Once);
+        assert_eq!(app.ask_selected(), Answer::Once);
     }
 
     fn wheel(app: &mut App, kind: MouseEventKind) {

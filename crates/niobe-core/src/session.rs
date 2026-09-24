@@ -394,7 +394,7 @@ impl SessionState {
                 self.pending_permissions.insert(id.clone());
             }
 
-            Event::PermissionResponse { id, decision } => {
+            Event::PermissionResponse { id, decision, .. } => {
                 self.pending_permissions.remove(id);
                 if !decision.allowed() {
                     self.permissions_denied += 1;
@@ -969,6 +969,7 @@ mod tests {
         state.apply(&Event::PermissionResponse {
             id: "t1".into(),
             decision: PermissionDecision::Deny,
+            message: None,
         });
         assert!(state.pending_permissions().is_empty());
         assert_eq!(state.permission_requests(), 1);

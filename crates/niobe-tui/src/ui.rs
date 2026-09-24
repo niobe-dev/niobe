@@ -33,8 +33,8 @@ use niobe_core::event::{AgentOutcome, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, ToolTotals, Totals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, Entry, EntryKind, Pane, Picker, Section, SelectedProfile, SubAgent,
-    tool_label,
+    Activity, Answer, App, Ask, AskFocus, Entry, EntryKind, Pane, Picker, Section, SelectedProfile,
+    SubAgent, tool_label,
 };
 use crate::clock::{self, Stamp};
 use crate::fx;
@@ -56,13 +56,18 @@ pub const WIDE_COLUMNS: u16 = 100;
 /// Columns the transcript gives to an entry's glyph.
 const GUTTER: usize = 2;
 
-/// Widest the permission modal is drawn, in columns. Wide enough for a shell
-/// command that has a path in it, and narrow enough to leave the transcript
-/// around it readable, so the operator can see what led to the prompt.
-const ASK_COLUMNS: u16 = 72;
+/// Widest a question in the transcript is drawn, in columns. Wide enough for
+/// a shell command that has a path in it, and capped rather than filling the
+/// pane, so on a wide screen it reads as an interruption in the transcript
+/// rather than as one more pane.
+const ASK_COLUMNS: usize = 72;
 
-/// Columns of margin a modal leaves on each side of a narrow screen.
-const ASK_MARGIN: u16 = 4;
+/// Columns a question's frame and padding take from its width: a border and a
+/// column of room on each side.
+const ASK_INSET: usize = 4;
+
+/// Columns of margin a dialog leaves on each side of a narrow screen.
+const DIALOG_MARGIN: u16 = 4;
 
 /// Widest the model list is drawn, in columns. A model id is a word or two, so
 /// the list is narrow enough to read as a list rather than as a pane.
@@ -130,13 +135,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_body(frame, body, app, &theme);
     draw_fkeys(frame, fkeys, &theme);
 
-    // Last, and over the body: a prompt is what the session is waiting on, so
-    // nothing drawn afterwards may cover it. The model list is drawn under the
-    // same rule and never beside it — the shell hands the keyboard to one
-    // question at a time.
-    if let Some(ask) = app.asking() {
-        draw_ask(frame, body, app, ask, &theme);
-    } else if let Some(picker) = app.picking() {
+    // Last, and over the body: the list is something the operator opened, and
+    // nothing drawn afterwards may cover it. A permission prompt is not drawn
+    // here — it is in the transcript, under the work that led to it.
+    if let Some(picker) = app.picking() {
         draw_pick(frame, body, picker, app.session().model(), &theme);
     }
 }
@@ -148,7 +150,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// turn, and a list that did not say so would read as though the reply being
 /// written were already coming from the new model.
 fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&str>, theme: &Theme) {
-    let width = PICK_COLUMNS.min(body.width.saturating_sub(ASK_MARGIN * 2));
+    let width = PICK_COLUMNS.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
     if width < 20 {
         return;
     }
@@ -168,12 +170,9 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
             room = text_width.saturating_sub(2)
         );
         lines.push(match on_it {
-            true => Line::from(row).style(
-                Style::new()
-                    .bg(theme.button_focus_bg)
-                    .fg(theme.button_focus_fg)
-                    .bold(),
-            ),
+            true => {
+                Line::from(row).style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold())
+            }
             false => Line::from(row).style(Style::new().fg(theme.dialog_fg)),
         });
     }
@@ -188,62 +187,6 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
         body,
         (width, lines.len()),
         ("Model", " applied from the next turn "),
-        theme,
-    );
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The permission dialog: what would run, and a button for each way to
-/// answer.
-///
-/// The whole of the arguments is shown under the target, wrapped rather than
-/// truncated, and so is the rule `Pin this` would save. Approving a call whose
-/// arguments were cut off at the edge, or keeping a rule nobody could read
-/// whole, is approving something the operator did not read.
-fn draw_ask(frame: &mut Frame, body: Rect, app: &App, ask: &Ask, theme: &Theme) {
-    let width = ASK_COLUMNS.min(body.width.saturating_sub(ASK_MARGIN * 2));
-    if width < 20 {
-        return;
-    }
-
-    let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
-    let plain = Style::new().fg(theme.dialog_fg);
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(tool_label(&ask.tool), plain.bold()),
-            Span::styled(" wants to run", plain),
-        ]),
-    ];
-    for wrapped in text::wrap(ask.target.as_deref().unwrap_or(&ask.input), text_width) {
-        lines.push(Line::from(wrapped).style(plain.bold()));
-    }
-    if ask.target.is_some() {
-        lines.push(Line::from(""));
-        for wrapped in text::wrap(&ask.input, text_width) {
-            lines.push(Line::from(wrapped).style(plain));
-        }
-    }
-    if let Some(rule) = ask.target_rule() {
-        lines.push(Line::from(""));
-        for wrapped in text::wrap(&format!("Pin this saves {rule}"), text_width) {
-            lines.push(Line::from(wrapped).style(plain.italic()));
-        }
-    }
-    lines.push(Line::from(""));
-    lines.extend(buttons(ask, app.ask_focus(), text_width, theme));
-
-    let waiting = app.asks_waiting();
-    let footer = match waiting {
-        0 => " the turn is waiting on you ".to_owned(),
-        1 => " 1 more prompt behind this one ".to_owned(),
-        n => format!(" {n} more prompts behind this one "),
-    };
-    let inner = dialog(
-        frame,
-        body,
-        (width, lines.len()),
-        ("Permission", &footer),
         theme,
     );
     frame.render_widget(Paragraph::new(lines), inner);
@@ -307,97 +250,6 @@ fn cast_shadow(frame: &mut Frame, area: Rect, bounds: Rect, theme: &Theme) {
             .buffer_mut()
             .set_style(strip.intersection(bounds), style);
     }
-}
-
-/// The dialog's buttons, laid out left to right and onto another row where the
-/// width runs out, each with its shadow under it.
-fn buttons(ask: &Ask, focus: Answer, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let offered: Vec<(Answer, String, char)> = Answer::ALL
-        .into_iter()
-        .filter(|answer| ask.offers(*answer))
-        .map(|answer| {
-            let (label, hot) = button_label(answer, ask);
-            (answer, label, hot)
-        })
-        .collect();
-
-    let mut rows: Vec<Vec<(Answer, String, char)>> = vec![Vec::new()];
-    let mut used = 0;
-    for button in offered {
-        // The label, a column of padding on each side and the column of
-        // shadow after it, then a column of gap.
-        let cells = text::width(&button.1) + 4;
-        if used > 0 && used + cells > width {
-            rows.push(Vec::new());
-            used = 0;
-        }
-        used += cells;
-        if let Some(row) = rows.last_mut() {
-            row.push(button);
-        }
-    }
-
-    let mut lines = Vec::new();
-    for row in rows {
-        let mut face = Vec::new();
-        let mut under = vec![Span::raw(" ")];
-        for (answer, label, hot) in row {
-            face.extend(button_face(&label, hot, answer == focus, theme));
-            face.push(Span::styled("▄", Style::new().fg(theme.shadow)));
-            face.push(Span::raw(" "));
-            under.push(Span::styled(
-                "▀".repeat(text::width(&label) + 2),
-                Style::new().fg(theme.shadow),
-            ));
-            under.push(Span::raw("  "));
-        }
-        lines.push(Line::from(face));
-        lines.push(Line::from(under));
-    }
-    lines
-}
-
-/// What a button says, and the letter that presses it.
-fn button_label(answer: Answer, ask: &Ask) -> (String, char) {
-    match answer {
-        Answer::Once => ("Yes, once".to_owned(), 'Y'),
-        Answer::AlwaysTool => (
-            format!("Always {}", text::truncate(&tool_label(&ask.tool), 24)),
-            'A',
-        ),
-        Answer::AlwaysTarget => ("Pin this".to_owned(), 'P'),
-        Answer::No => ("No".to_owned(), 'N'),
-    }
-}
-
-/// One button: its label on the button colour with the hot letter picked out,
-/// or, with the focus, on the focus colour between `►` and `◄`.
-fn button_face(label: &str, hot: char, focused: bool, theme: &Theme) -> Vec<Span<'static>> {
-    let (bg, fg) = match focused {
-        true => (theme.button_focus_bg, theme.button_focus_fg),
-        false => (theme.button_bg, theme.button_fg),
-    };
-    let face = Style::new().bg(bg).fg(fg);
-    let (open, close) = match focused {
-        true => ("►", "◄"),
-        false => (" ", " "),
-    };
-    let mut spans = vec![Span::styled(open, face.bold())];
-    match label.find(hot) {
-        Some(at) => {
-            let (before, rest) = label.split_at(at);
-            let after = &rest[hot.len_utf8()..];
-            spans.push(Span::styled(before.to_owned(), face));
-            spans.push(Span::styled(
-                hot.to_string(),
-                face.fg(theme.button_hot).bold(),
-            ));
-            spans.push(Span::styled(after.to_owned(), face));
-        }
-        None => spans.push(Span::styled(label.to_owned(), face)),
-    }
-    spans.push(Span::styled(close, face.bold()));
-    spans
 }
 
 /// What the shell says when it has fewer than eighty by twenty-four to draw in.
@@ -687,8 +539,14 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 
     let mut block = pane(title, area, theme);
     if !app.follows_tail() {
+        // A question arriving while the operator reads back does not move the
+        // view; it is said here instead, where the way back down is.
+        let said = match app.asking() {
+            Some(_) => " ↑ scrolled back · a question is waiting below · PgDn returns to it ",
+            None => " ↑ scrolled back · PgDn returns to the newest line ",
+        };
         block = block.title_bottom(
-            Line::from(" ↑ scrolled back · PgDn returns to the newest line ")
+            Line::from(said)
                 .style(Style::new().fg(theme.dim))
                 .centered(),
         );
@@ -774,7 +632,15 @@ fn draw_transcript(frame: &mut Frame, area: Rect, border: u16, app: &mut App, th
     let width = usize::from(area.width);
     let height = usize::from(area.height);
 
-    if app.entries().is_empty() {
+    // The question is the transcript's last entry for as long as it waits,
+    // drawn fresh every frame: it changes with every key the operator presses
+    // at it, and it is never more than a screenful.
+    let question = app
+        .asking()
+        .map(|ask| question_lines(app, ask, width, theme))
+        .unwrap_or_default();
+
+    if app.entries().is_empty() && question.is_empty() {
         let lines = empty_transcript(app.is_attached(), theme);
         app.measured(lines.len(), height);
         frame.render_widget(
@@ -786,12 +652,20 @@ fn draw_transcript(frame: &mut Frame, area: Rect, border: u16, app: &mut App, th
 
     let (entries, drawn) = app.entries_to_draw();
     drawn.update(entries, width, theme);
-    let total = drawn.line_count();
+    let above = drawn.line_count();
+    let total = above + question.len();
 
     app.measured(total, height);
     let start = app.scroll().min(total);
     let (_, drawn) = app.entries_to_draw();
-    let visible = drawn.lines(start, height);
+    let mut visible = drawn.lines(start, height);
+    let room = height.saturating_sub(visible.len());
+    visible.extend(
+        question
+            .into_iter()
+            .skip(start.saturating_sub(above))
+            .take(room),
+    );
     frame.render_widget(
         Paragraph::new(visible).style(Style::new().bg(theme.pane_bg)),
         area,
@@ -926,6 +800,266 @@ fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
         })
         .style(Style::new().fg(theme.dim)),
     ]
+}
+
+/// A permission prompt as the transcript's last entry: framed, indented under
+/// the gutter, with the question's labels on its top border, its numbered
+/// answers, and the keys that work in whatever state it is in.
+///
+/// The whole of the arguments is shown, wrapped rather than truncated:
+/// approving a call whose arguments were cut off at the edge is approving
+/// something the operator did not read.
+fn question_lines(app: &App, ask: &Ask, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let outer = width.saturating_sub(GUTTER).min(ASK_COLUMNS);
+    let inner = outer.saturating_sub(ASK_INSET);
+    let border = Style::new().fg(theme.hot);
+    let indent = " ".repeat(GUTTER);
+
+    let mut lines = vec![question_top(app, ask, outer, theme)];
+    lines.extend(
+        question_body(app, ask, inner, theme)
+            .into_iter()
+            .map(|line| {
+                let used = line.width();
+                let mut spans = vec![Span::raw(indent.clone()), Span::styled("│ ", border)];
+                spans.extend(
+                    line.spans
+                        .into_iter()
+                        .map(|span| span.patch_style(line.style)),
+                );
+                spans.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
+                spans.push(Span::styled(" │", border));
+                Line::from(spans)
+            }),
+    );
+    lines.push(Line::from(vec![
+        Span::raw(indent),
+        Span::styled(format!("└{}┘", "─".repeat(outer.saturating_sub(2))), border),
+    ]));
+    lines.push(Line::from(""));
+    lines
+}
+
+/// What is inside a question's frame, `inner` columns wide: what would run,
+/// the numbered answers, any consequence too long for its column said whole,
+/// the answer being written, and the keys.
+fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let plain = Style::new().fg(theme.fg);
+
+    let mut body: Vec<Line<'static>> = vec![Line::from(vec![
+        Span::styled("to run ", plain),
+        Span::styled(tool_label(&ask.tool), plain.bold()),
+    ])];
+    for wrapped in text::wrap(ask.target.as_deref().unwrap_or(&ask.input), inner) {
+        body.push(Line::from(wrapped).style(plain.bold()));
+    }
+    if ask.target.is_some() {
+        body.push(Line::from(""));
+        for wrapped in text::wrap(&ask.input, inner) {
+            body.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
+        }
+    }
+    body.push(Line::from(""));
+    let focus = app.ask_focus();
+    let selected = app.ask_selected();
+    let mut cut = Vec::new();
+    for (at, answer) in app.ask_options().into_iter().enumerate() {
+        let lit = focus == AskFocus::Choosing && answer == selected;
+        let (row, whole) = option_row(at + 1, answer, ask, lit, inner, theme);
+        body.push(row);
+        if !whole {
+            cut.push((at + 1, option_words(answer, ask).1));
+        }
+    }
+    // A consequence cut off at the edge of its column is said again whole: a
+    // standing answer is a rule the operator keeps, and keeping one nobody
+    // could read to its end is agreeing to something unread.
+    if !cut.is_empty() {
+        body.push(Line::from(""));
+        for (number, hint) in cut {
+            for wrapped in text::wrap(&format!("{number}. {hint}"), inner) {
+                body.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
+            }
+        }
+    }
+    if focus == AskFocus::Writing {
+        body.push(Line::from(""));
+        body.extend(written_answer(app.ask_draft(), inner, theme));
+    }
+    body.push(Line::from(""));
+    body.extend(key_rows(
+        &ask_keys(focus, app.ask_options().len()),
+        inner,
+        theme,
+    ));
+    body
+}
+
+/// `┌ ? claude asks ──── blocks turn 3 ┐`: who is asking at the left, in the
+/// title colour, and what is waiting on the answer at the right, dimmed.
+fn question_top(app: &App, ask: &Ask, outer: usize, theme: &Theme) -> Line<'static> {
+    let border = Style::new().fg(theme.hot);
+    let asks = format!(" ? {} asks ", app.agent_name());
+    let blocks = match ask.turn {
+        0 => "blocks this turn".to_owned(),
+        turn => format!("blocks turn {turn}"),
+    };
+    let blocks = match app.asks_waiting() {
+        0 => format!(" {blocks} "),
+        n => format!(" {blocks} · {n} more waiting "),
+    };
+    let room = outer.saturating_sub(2);
+    let asks = text::truncate(&asks, room);
+    let blocks = text::truncate(&blocks, room.saturating_sub(text::width(&asks) + 1));
+    let rule = room.saturating_sub(text::width(&asks) + text::width(&blocks) + 1);
+    Line::from(vec![
+        Span::raw(" ".repeat(GUTTER)),
+        Span::styled("┌─", border),
+        Span::styled(asks, Style::new().fg(theme.title).bold()),
+        Span::styled("─".repeat(rule), border),
+        Span::styled(blocks, Style::new().fg(theme.dim)),
+        Span::styled("┐", border),
+    ])
+}
+
+/// One numbered answer: the selection mark, the number, what the answer is
+/// and, at the right, what choosing it does — with whether the consequence
+/// fitted whole.
+///
+/// The label is kept whole before the consequence is, because it is what the
+/// operator is choosing; the consequence takes what is left.
+///
+/// The selected row is inverted whole — mark, number, label and consequence —
+/// so the selection is a solid bar, and it carries the `▶` besides, which is
+/// what makes it legible without colour.
+fn option_row(
+    number: usize,
+    answer: Answer,
+    ask: &Ask,
+    lit: bool,
+    width: usize,
+    theme: &Theme,
+) -> (Line<'static>, bool) {
+    let (label, hint) = option_words(answer, ask);
+    let lead = format!("{} {number}. ", if lit { "▶" } else { " " });
+    let rest = width.saturating_sub(text::width(&lead));
+    let label = text::truncate(&label, rest);
+    let hint_room = rest.saturating_sub(text::width(&label) + 2);
+    let whole = text::width(&hint) <= hint_room;
+    let hint = text::truncate(&hint, hint_room);
+    let gap = rest.saturating_sub(text::width(&label) + text::width(&hint));
+
+    let (base, dim) = match lit {
+        true => {
+            let bar = Style::new().bg(theme.title).fg(theme.pane_bg).bold();
+            (bar, bar)
+        }
+        false => (Style::new().fg(theme.fg), Style::new().fg(theme.dim)),
+    };
+    let row = Line::from(vec![
+        Span::styled(lead, base),
+        Span::styled(label, base),
+        Span::styled(" ".repeat(gap), base),
+        Span::styled(hint, dim),
+    ]);
+    (row, whole)
+}
+
+/// What an answer is called, and what choosing it does.
+///
+/// Both are Niobe's own words, not the agent's: the backend offers no answers
+/// of its own for a permission prompt. So the consequences say what Niobe
+/// does — `niobe saves …` for a standing answer — or what happens to the call,
+/// and never what the agent will say or think about it.
+fn option_words(answer: Answer, ask: &Ask) -> (String, String) {
+    match answer {
+        Answer::Once => ("Allow once".to_owned(), "this call only".to_owned()),
+        Answer::AlwaysTool => (
+            format!("Always allow {}", tool_label(&ask.tool)),
+            format!("niobe saves {}", ask.tool_rule()),
+        ),
+        Answer::AlwaysTarget => (
+            "Always allow this target".to_owned(),
+            ask.target_rule()
+                .map(|rule| format!("niobe saves {rule}"))
+                .unwrap_or_default(),
+        ),
+        Answer::No => ("Deny".to_owned(), "the call does not run".to_owned()),
+    }
+}
+
+/// The answer being written in place of the numbered ones, wrapped, with a
+/// cursor at its end and a line saying where it goes.
+fn written_answer(draft: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = text::wrap(&format!("› {draft}▏"), width)
+        .into_iter()
+        .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.hot)))
+        .collect();
+    lines.extend(
+        text::wrap(
+            "Sent with a refusal: the call does not run, and the agent is given these words.",
+            width,
+        )
+        .into_iter()
+        .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.dim).italic())),
+    );
+    lines
+}
+
+/// The keys that work at a question, as (key, what it does), for the state it
+/// is in.
+fn ask_keys(focus: AskFocus, options: usize) -> Vec<(String, &'static str)> {
+    match focus {
+        AskFocus::Choosing => vec![
+            ("↑↓".to_owned(), "move"),
+            (format!("1-{options}"), "jump"),
+            ("Enter".to_owned(), "confirm"),
+            ("Tab".to_owned(), "type your own"),
+            ("Esc".to_owned(), "decide later"),
+        ],
+        AskFocus::Writing => vec![
+            ("Enter".to_owned(), "send"),
+            ("Esc".to_owned(), "back to the options"),
+        ],
+        AskFocus::Deferred => vec![
+            (String::new(), "put off · the turn is still waiting on it"),
+            ("Esc".to_owned(), "answer it"),
+        ],
+    }
+}
+
+/// Key hints on as many rows as the width needs, each key accented and bold,
+/// broken between hints rather than inside one.
+fn key_rows(keys: &[(String, &str)], width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let key_style = Style::new().fg(theme.hot).bold();
+    let word_style = Style::new().fg(theme.dim);
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut used = 0;
+    for (key, does) in keys {
+        let cells = match key.is_empty() {
+            true => text::width(does),
+            false => text::width(key) + 1 + text::width(does),
+        };
+        let sep = if used == 0 { 0 } else { 3 };
+        if used > 0 && used + sep + cells > width {
+            rows.push(Vec::new());
+            used = 0;
+        }
+        let Some(row) = rows.last_mut() else {
+            break;
+        };
+        if used > 0 {
+            row.push(Span::styled(" · ", word_style));
+            used += 3;
+        }
+        if !key.is_empty() {
+            row.push(Span::styled(key.clone(), key_style));
+            row.push(Span::raw(" "));
+        }
+        row.push(Span::styled((*does).to_owned(), word_style));
+        used += cells;
+    }
+    rows.into_iter().map(Line::from).collect()
 }
 
 /// One transcript entry, wrapped to the pane: a head line and its body.

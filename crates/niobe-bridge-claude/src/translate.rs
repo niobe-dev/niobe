@@ -642,6 +642,7 @@ impl Translator {
         out.push(Event::PermissionResponse {
             id,
             decision: PermissionDecision::Deny,
+            message: None,
         });
     }
 
@@ -1038,6 +1039,7 @@ impl Translator {
             out.push(Event::PermissionResponse {
                 id,
                 decision: PermissionDecision::Deny,
+                message: None,
             });
         }
 

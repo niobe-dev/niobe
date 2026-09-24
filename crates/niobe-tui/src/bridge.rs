@@ -31,11 +31,20 @@ pub trait Bridge: std::fmt::Debug {
     /// Answers a permission prompt the backend raised, by the id of the call
     /// it gated. Returns once the backend has the answer.
     ///
+    /// `message` is what the operator wrote instead of choosing one of the
+    /// answers on offer; a backend hands it to the agent with the refusal it
+    /// comes with.
+    ///
     /// A backend that gates nothing is never asked, so the default refuses:
     /// an answer that went nowhere must be reported rather than dropped, or a
     /// refused call would look allowed.
-    fn answer(&mut self, id: &ToolCallId, decision: PermissionDecision) -> Result<(), BridgeError> {
-        let _ = decision;
+    fn answer(
+        &mut self,
+        id: &ToolCallId,
+        decision: PermissionDecision,
+        message: Option<&str>,
+    ) -> Result<(), BridgeError> {
+        let _ = (decision, message);
         Err(format!("nothing is waiting on a decision about tool call `{id}`").into())
     }
 

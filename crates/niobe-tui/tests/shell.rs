@@ -25,17 +25,20 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{paint, running_session, screen, session_with_a_markdown_reply, unmetered_session};
+use common::{
+    paint, running_session, screen, session_with_a_markdown_reply, style_at, unmetered_session,
+};
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, NEO};
+use ratatui::style::Style;
 
 /// The same session, stopped on a permission prompt it is waiting on.
 ///
 /// The prompt is the `control_request` of
 /// `niobe-bridge-claude/tests/fixtures/stream-json.jsonl`, translated: the
 /// bridge's own tests assert that the recorded line becomes exactly this
-/// event, so the modal is driven by a recording without this crate being able
+/// event, so the question is driven by a recording without this crate being able
 /// to name a bridge.
 pub fn session_waiting_on_a_prompt() -> App {
     let mut app = running_session();
@@ -203,7 +206,7 @@ fn an_empty_session_renders_at_both_sizes() {
 }
 
 #[test]
-fn a_recorded_prompt_puts_the_modal_on_screen_at_both_sizes() {
+fn a_recorded_prompt_puts_the_question_in_the_transcript_at_both_sizes() {
     assert_snapshot(
         "asking-80x24",
         &screen(&mut session_waiting_on_a_prompt(), 80, 24),
@@ -214,43 +217,90 @@ fn a_recorded_prompt_puts_the_modal_on_screen_at_both_sizes() {
     );
 }
 
+/// The rows of the question box, with its borders and the pane's taken off.
+fn question_rows(frame: &str) -> Vec<String> {
+    frame
+        .lines()
+        .filter_map(|row| row.split('│').nth(1))
+        .map(|row| row.trim().to_owned())
+        .collect()
+}
+
 #[test]
-fn the_modal_shows_what_would_run_and_every_way_to_answer_it() {
+fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     use niobe_tui::app::Answer;
 
     let mut app = session_waiting_on_a_prompt();
     let frame = screen(&mut app, 120, 30);
 
-    assert!(frame.contains("Permission"), "{frame}");
-    assert!(frame.contains("Read wants to run"), "{frame}");
-    assert!(frame.contains("/repo/notes.txt"), "{frame}");
+    assert!(frame.contains("? claude asks"), "{frame}");
+    assert!(frame.contains("blocks turn 1"), "{frame}");
+    let rows = question_rows(&frame);
+    assert!(rows.iter().any(|row| row == "to run Read"), "{frame}");
+    assert!(rows.iter().any(|row| row == "/repo/notes.txt"), "{frame}");
     // The whole of the arguments, not a summary of them.
     assert!(
-        frame.contains(r#"{"file_path":"/repo/notes.txt"}"#),
+        rows.iter()
+            .any(|row| row == r#"{"file_path":"/repo/notes.txt"}"#),
         "{frame}"
     );
-    // The first button has the focus, so Enter gives it.
-    assert!(frame.contains("►Yes, once◄"), "{frame}");
-    assert!(frame.contains(" Always Read "), "{frame}");
-    assert!(frame.contains(" Pin this "), "{frame}");
-    assert!(frame.contains(" No "), "{frame}");
-    assert!(
-        frame.contains("Pin this saves Read(/repo/notes.txt)"),
-        "the standing answer does not say what it would allow:\n{frame}"
-    );
-    assert!(frame.contains("waiting on you"), "{frame}");
+    // Numbered, the first selected, each with what choosing it does.
+    for (number, label, hint) in [
+        ("▶ 1.", "Allow once", "this call only"),
+        ("2.", "Always allow Read", "niobe saves Read"),
+        (
+            "3.",
+            "Always allow this target",
+            "niobe saves Read(/repo/notes.txt)",
+        ),
+        ("4.", "Deny", "the call does not run"),
+    ] {
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with(&format!("{number} {label}")) && row.ends_with(hint)),
+            "option {number} does not read `{label} … {hint}`:\n{frame}"
+        );
+    }
+    assert!(frame.contains("Tab type your own"), "{frame}");
+    assert!(frame.contains("Esc decide later"), "{frame}");
+    // In the transcript, not over it: the panes and the ask bar are still
+    // drawn around it.
+    assert!(frame.contains(" Usage "), "{frame}");
+    assert!(frame.contains("Ask for a change"), "{frame}");
 
-    // Answered, the modal goes and the session is drawn as it was.
+    // Answered, the question goes and the session is drawn as it was.
     app.answer(Answer::Once);
     assert_eq!(
         screen(&mut app, 120, 30),
         screen(&mut running_session(), 120, 30),
-        "the modal left something behind on the frame"
+        "the question left something behind on the frame"
     );
 }
 
 #[test]
-fn a_standing_answer_too_long_for_one_row_is_wrapped_and_read_whole() {
+fn the_selected_answer_is_a_solid_bar_as_well_as_a_mark() {
+    let mut app = session_waiting_on_a_prompt().with_theme(CLASSIC);
+    let bar = (
+        Some(CLASSIC.pane_bg),
+        Some(CLASSIC.title),
+        ratatui::style::Modifier::BOLD,
+    );
+    let face = |style: Option<Style>| style.map(|s| (s.fg, s.bg, s.add_modifier));
+    for text in ["▶ 1.", "Allow once", "this call only"] {
+        assert_eq!(
+            face(style_at(&mut app, 120, 30, text)),
+            Some(bar),
+            "`{text}` is not on the inverted bar"
+        );
+    }
+    assert_ne!(
+        face(style_at(&mut app, 120, 30, "Always allow Read")),
+        Some(bar)
+    );
+}
+
+#[test]
+fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
     let mut app = running_session();
     let command = "grep -rn description --include=Cargo.toml . | grep -v target";
     app.apply(&Event::PermissionRequest {
@@ -260,29 +310,110 @@ fn a_standing_answer_too_long_for_one_row_is_wrapped_and_read_whole() {
         target: Some(command.to_owned()),
     });
     let frame = screen(&mut app, 120, 30);
-    // The frame's rows, with the dialog's borders and padding taken off.
-    let rows: Vec<&str> = frame
-        .lines()
-        .filter_map(|row| row.split('║').nth(2))
-        .map(str::trim)
-        .collect();
+    let rows = question_rows(&frame);
 
     assert!(
-        frame.contains(" Always Notion·search "),
-        "the tool's button does not name it the way the timeline does:\n{frame}"
+        rows.iter()
+            .any(|row| row.starts_with("2. Always allow Notion·search")),
+        "the tool's option does not name it the way the timeline does:\n{frame}"
     );
     let rule: String = rows
         .iter()
-        .skip_while(|row| !row.starts_with("Pin this saves"))
+        .skip_while(|row| !row.starts_with("3. niobe saves"))
         .take_while(|row| !row.is_empty())
-        .copied()
+        .cloned()
         .collect::<Vec<_>>()
         .join(" ");
     assert_eq!(
         rule,
-        format!("Pin this saves mcp__claude_ai_Notion__notion-search({command})"),
+        format!("3. niobe saves mcp__claude_ai_Notion__notion-search({command})"),
         "the rule the operator would save is not shown whole:\n{frame}"
     );
+}
+
+#[test]
+fn a_long_request_wraps_inside_the_question() {
+    let mut app = running_session();
+    let command = format!("echo {}", "word ".repeat(40));
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_long".into(),
+        tool: "Bash".to_owned(),
+        input: format!(r#"{{"command":"{}"}}"#, command.trim()),
+        target: Some(command.trim().to_owned()),
+    });
+    let frame = screen(&mut app, 200, 60);
+
+    let rows = question_rows(&frame);
+    let words = rows
+        .iter()
+        .take_while(|row| !row.starts_with("▶ 1."))
+        .map(|row| row.matches("word").count())
+        .sum::<usize>();
+    // Forty in the command and forty again in the arguments, none cut off.
+    assert_eq!(words, 80, "{frame}");
+    assert!(frame.lines().all(|row| text_width(row) <= 200));
+}
+
+fn text_width(row: &str) -> usize {
+    row.chars().count()
+}
+
+#[test]
+fn a_question_put_off_stays_in_the_transcript_and_says_it_is_waiting() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_waiting_on_a_prompt();
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(frame.contains("? claude asks"), "{frame}");
+    assert!(frame.contains("the turn is still waiting on it"), "{frame}");
+    assert!(frame.contains("Esc answer it"), "{frame}");
+    assert!(
+        !frame.contains("▶"),
+        "a put-off question still shows a live selection"
+    );
+}
+
+#[test]
+fn an_answer_being_written_is_shown_in_the_question_with_where_it_goes() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_waiting_on_a_prompt();
+    for code in [KeyCode::Tab, KeyCode::Char('n'), KeyCode::Char('o')] {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(frame.contains("› no▏"), "{frame}");
+    assert!(
+        frame.contains("the call does not run, and the agent is given"),
+        "{frame}"
+    );
+    assert!(frame.contains("Enter send"), "{frame}");
+    assert_eq!(app.composed(), "", "the words went to the composer");
+}
+
+#[test]
+fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session();
+    screen(&mut app, 120, 30);
+    app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+    let before = screen(&mut app, 120, 30);
+    let top = |frame: &str| frame.lines().take(10).collect::<Vec<_>>().join("\n");
+
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_read".into(),
+        tool: "Read".to_owned(),
+        input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
+        target: Some("/repo/notes.txt".to_owned()),
+    });
+    let after = screen(&mut app, 120, 30);
+
+    assert_eq!(top(&before), top(&after), "the question moved the view");
+    assert!(after.contains("a question is waiting below"), "{after}");
 }
 
 /// A prompt sent from this shell, with a call of its turn still running, a

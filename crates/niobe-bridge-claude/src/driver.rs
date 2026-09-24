@@ -45,6 +45,11 @@ const GOODBYE: Duration = Duration::from_millis(500);
 /// refused.
 const REFUSED: &str = "The operator denied this call in Niobe.";
 
+/// What goes in front of the operator's own words when they answered a prompt
+/// by writing rather than choosing. The words follow whole, so the model reads
+/// what was written and who wrote it, and nothing Niobe made up between them.
+const REFUSED_SAYING: &str = "The operator denied this call in Niobe and answered instead: ";
+
 /// What the CLI is waiting on an answer to: the tool call it asked about, and
 /// the id the answer is addressed to, with the arguments to approve.
 ///
@@ -379,7 +384,17 @@ impl Session {
     /// the field is where the protocol puts the arguments that were approved,
     /// and Niobe approves a call without ever rewriting one, so what goes back
     /// is what was shown.
-    pub fn answer(&mut self, id: &ToolCallId, decision: PermissionDecision) -> std::io::Result<()> {
+    ///
+    /// `message` is what the operator wrote instead of choosing an answer. It
+    /// goes out with a refusal, which is the one place the protocol carries
+    /// words back to the model about a call it asked to make; an approval has
+    /// nowhere to put it.
+    pub fn answer(
+        &mut self,
+        id: &ToolCallId,
+        decision: PermissionDecision,
+        message: Option<&str>,
+    ) -> std::io::Result<()> {
         let asked = self
             .waiting
             .lock()
@@ -405,7 +420,11 @@ impl Session {
                 "the session has ended; its standard input is closed",
             ));
         };
-        writeln!(stdin, "{}", control_response(&request_id, &input, decision))?;
+        writeln!(
+            stdin,
+            "{}",
+            control_response(&request_id, &input, decision, message)
+        )?;
         stdin.flush()
     }
 
@@ -535,10 +554,15 @@ fn control_response(
     request_id: &str,
     input: &serde_json::Value,
     decision: PermissionDecision,
+    message: Option<&str>,
 ) -> serde_json::Value {
+    let refused = match message {
+        Some(said) => format!("{REFUSED_SAYING}{said}"),
+        None => REFUSED.to_owned(),
+    };
     let response = match decision.allowed() {
         true => serde_json::json!({ "behavior": "allow", "updatedInput": input }),
-        false => serde_json::json!({ "behavior": "deny", "message": REFUSED }),
+        false => serde_json::json!({ "behavior": "deny", "message": refused }),
     };
     serde_json::json!({
         "type": "control_response",
@@ -714,8 +738,8 @@ mod tests {
     fn an_approval_sends_back_the_arguments_that_were_shown() {
         let input = serde_json::json!({ "file_path": "/repo/notes.txt" });
 
-        let allowed = control_response("c1", &input, PermissionDecision::Allow);
-        let always = control_response("c1", &input, PermissionDecision::AllowAlways);
+        let allowed = control_response("c1", &input, PermissionDecision::Allow, None);
+        let always = control_response("c1", &input, PermissionDecision::AllowAlways, None);
 
         assert_eq!(
             allowed,
@@ -739,6 +763,7 @@ mod tests {
             "c2",
             &serde_json::json!({ "command": "rm -rf build" }),
             PermissionDecision::Deny,
+            None,
         );
 
         let response = &refused["response"]["response"];
@@ -748,6 +773,25 @@ mod tests {
             response.get("updatedInput").is_none(),
             "a refusal sent arguments to run: {refused}"
         );
+    }
+
+    #[test]
+    fn a_refusal_in_the_operators_own_words_hands_the_agent_those_words() {
+        let refused = control_response(
+            "c3",
+            &serde_json::json!({ "command": "git push" }),
+            PermissionDecision::Deny,
+            Some("open a PR instead"),
+        );
+
+        let response = &refused["response"]["response"];
+        assert_eq!(response["behavior"], "deny");
+        let said = response["message"].as_str().expect("the message is text");
+        assert!(
+            said.starts_with("The operator denied this call in Niobe"),
+            "{said}"
+        );
+        assert!(said.ends_with("open a PR instead"), "{said}");
     }
 
     #[test]
@@ -762,7 +806,7 @@ mod tests {
         let mut session = Session::spawn(&options).expect("`/bin/echo` is on every unix");
 
         let error = session
-            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow)
+            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow, None)
             .expect_err("the CLI was never asked about this call");
 
         let said = error.to_string();

@@ -49,6 +49,13 @@ fn shell_on_the_prompt() -> App {
     app
 }
 
+/// Chooses the answer numbered `number` and confirms it, as the operator does.
+fn choose(app: &mut App, number: char) {
+    for code in [KeyCode::Char(number), KeyCode::Enter] {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+}
+
 /// The screen as text, so that what the operator is shown is asserted rather
 /// than assumed.
 fn screen(app: &mut App) -> String {
@@ -73,10 +80,14 @@ fn a_recorded_prompt_stops_the_shell_and_shows_what_would_run() {
     let mut app = shell_on_the_prompt();
     let frame = screen(&mut app);
 
-    assert!(frame.contains("Permission"), "{frame}");
-    assert!(frame.contains("Bash wants to run"), "{frame}");
+    // The recorded line alone carries no `init`, so nothing has said which
+    // backend is asking yet.
+    assert!(frame.contains("? agent asks"), "{frame}");
+    // Attached to a turn this shell did not start, so there is no number to
+    // give it.
+    assert!(frame.contains("blocks this turn"), "{frame}");
+    assert!(frame.contains("to run Bash"), "{frame}");
     assert!(frame.contains("cargo test"), "{frame}");
-    assert!(frame.contains("waiting on you"), "{frame}");
     assert_eq!(app.session().pending_permissions().len(), 1);
 }
 
@@ -84,25 +95,26 @@ fn a_recorded_prompt_stops_the_shell_and_shows_what_would_run() {
 fn allowing_the_prompt_answers_the_call_it_gates_and_leaves_no_rule() {
     let mut app = shell_on_the_prompt();
 
-    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    choose(&mut app, '1');
 
     assert_eq!(
         app.take_produced(),
         [Event::PermissionResponse {
             id: "toolu_1".into(),
             decision: PermissionDecision::Allow,
+            message: None,
         }]
     );
     assert!(app.take_rules().is_empty());
     assert!(app.session().pending_permissions().is_empty());
-    assert!(!screen(&mut app).contains("Permission"));
+    assert!(!screen(&mut app).contains("agent asks"));
 }
 
 #[test]
 fn denying_the_prompt_is_visible_in_the_timeline() {
     let mut app = shell_on_the_prompt();
 
-    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    choose(&mut app, '4');
 
     assert_eq!(app.session().permissions_denied(), 1);
     let frame = screen(&mut app);
@@ -119,7 +131,7 @@ fn an_always_answer_survives_a_restart() {
 
     // The session the operator answers "always this target" in.
     let mut app = shell_on_the_prompt();
-    app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    choose(&mut app, '3');
     let made = app.take_rules();
     assert_eq!(made, [Rule::targeted("Bash", "cargo test")]);
     for rule in &made {
@@ -145,6 +157,7 @@ fn an_always_answer_survives_a_restart() {
         [Event::PermissionResponse {
             id: "toolu_1".into(),
             decision: PermissionDecision::Allow,
+            message: None,
         }]
     );
 }
@@ -152,7 +165,7 @@ fn an_always_answer_survives_a_restart() {
 #[test]
 fn a_rule_covers_the_target_it_names_and_nothing_else() {
     let mut app = shell_on_the_prompt();
-    app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    choose(&mut app, '3');
 
     // A different command under the same tool is a different question.
     app.apply(&Event::PermissionRequest {
@@ -173,7 +186,7 @@ fn a_rule_covers_the_target_it_names_and_nothing_else() {
 #[test]
 fn always_this_tool_answers_every_call_to_it() {
     let mut app = shell_on_the_prompt();
-    app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    choose(&mut app, '2');
     assert_eq!(app.take_rules(), [Rule::tool("Bash")]);
 
     app.apply(&Event::PermissionRequest {
@@ -185,4 +198,31 @@ fn always_this_tool_answers_every_call_to_it() {
     app.settle_rules();
 
     assert!(app.asking().is_none());
+}
+
+#[test]
+fn an_answer_written_at_the_prompt_is_the_answer_the_call_gets() {
+    let mut app = shell_on_the_prompt();
+
+    app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    for c in "run only the unit tests".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app.take_produced(),
+        [Event::PermissionResponse {
+            id: "toolu_1".into(),
+            decision: PermissionDecision::Deny,
+            message: Some("run only the unit tests".to_owned()),
+        }],
+        "the words did not go back as the answer to the call"
+    );
+    assert!(app.session().pending_permissions().is_empty());
+    assert_eq!(
+        app.session().user_messages(),
+        0,
+        "the answer became a new turn"
+    );
 }

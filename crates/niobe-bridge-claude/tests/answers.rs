@@ -101,7 +101,7 @@ fn exchange(decide: impl Fn(&str) -> PermissionDecision) -> (Vec<Event>, Vec<ser
         let drained = session.drain();
         for (id, tool) in questions(&drained) {
             session
-                .answer(&id, decide(&tool))
+                .answer(&id, decide(&tool), None)
                 .expect("the prompt is answered");
         }
         let ended = drained.iter().any(|event| {

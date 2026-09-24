@@ -1,22 +1,22 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
 ╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
 ║                                                                              ║
-║ ◆ claude                                                                     ║
-║   Caching the etag beside the body so a 304 can be answered from the LRU.    ║
+║   path asserts a body that is no longer sent.                                ║
 ║                                                                              ║
-║ ⚙ ╔═════════════════════════════ Permission ═════════════════════════════╗   ║
-║   ║                                                                      ║   ║
-║ ◆ ║  Read wants to run                                                   ║   ║
-║   ║  /repo/notes.txt                                                     ║   ║
-║   ║                                                                      ║   ║
-║ ◆ ║  {"file_path":"/repo/notes.txt"}                                     ║   █
-║   ║                                                                      ║   █
-║   ║  Pin this saves Read(/repo/notes.txt)                                ║   █
-║ ! ║                                                                      ║   █
-║   ║  ►Yes, once◄▄  Always Read ▄  Pin this ▄  No ▄                       ║   █
-║ ◆ ║   ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀                       ║   █
-║   ╚═════════════════════ the turn is waiting on you ═════════════════════╝4  █
-║   path asserts a body that is no longer sent.                                █
+║   ┌─ ? claude asks ─────────────────────────────────────── blocks turn 1 ┐   ║
+║   │ to run Read                                                          │   ║
+║   │ /repo/notes.txt                                                      │   ║
+║   │                                                                      │   ║
+║   │ {"file_path":"/repo/notes.txt"}                                      │   ║
+║   │                                                                      │   ║
+║   │ ▶ 1. Allow once                                       this call only │   ║
+║   │   2. Always allow Read                              niobe saves Read │   ║
+║   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │   ║
+║   │   4. Deny                                      the call does not run │   █
+║   │                                                                      │   █
+║   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │   █
+║   │ Esc decide later                                                     │   █
+║   └──────────────────────────────────────────────────────────────────────┘   █
 ║                                                                              █
 ║ ──────────────────────────────────────────────────────────────────────────── ║
 ║ >  Ask for a change, or press F1 for help                                    ║

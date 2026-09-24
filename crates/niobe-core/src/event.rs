@@ -462,6 +462,11 @@ pub enum Event {
         id: ToolCallId,
         /// What was decided.
         decision: PermissionDecision,
+        /// What the operator wrote instead of choosing one of the answers on
+        /// offer, which the backend hands the agent with the refusal. `None`
+        /// for every answer that was only a choice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
 
     /// How tool calls are gated: the mode a session started under, or the one
@@ -792,6 +797,35 @@ mod tests {
             serde_json::to_string(&Event::ModeSelected { mode: Mode::Ask })
                 .expect("an event serializes")
                 .contains(r#""mode":"ask""#)
+        );
+    }
+
+    #[test]
+    fn an_answer_in_the_operators_own_words_is_kept_and_a_plain_one_reads_as_before() {
+        let answered = Event::PermissionResponse {
+            id: "toolu_1".into(),
+            decision: PermissionDecision::Deny,
+            message: Some("use the staging bucket instead".to_owned()),
+        };
+        let line = serde_json::to_string(&answered).expect("an event serializes");
+        let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+        assert_eq!(read, answered, "{line}");
+
+        // A log written before an answer could carry words has no `message`,
+        // and one that carries none is written exactly as those were.
+        let plain = r#"{"type":"permission_response","id":"toolu_1","decision":"allow"}"#;
+        let read: Event = serde_json::from_str(plain).expect("an older record reads");
+        assert_eq!(
+            read,
+            Event::PermissionResponse {
+                id: "toolu_1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&read).expect("an event serializes"),
+            plain
         );
     }
 

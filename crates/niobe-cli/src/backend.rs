@@ -285,8 +285,15 @@ impl Bridge for Claude {
         self.0.send(prompt).map_err(BridgeError::from)
     }
 
-    fn answer(&mut self, id: &ToolCallId, decision: PermissionDecision) -> Result<(), BridgeError> {
-        self.0.answer(id, decision).map_err(BridgeError::from)
+    fn answer(
+        &mut self,
+        id: &ToolCallId,
+        decision: PermissionDecision,
+        message: Option<&str>,
+    ) -> Result<(), BridgeError> {
+        self.0
+            .answer(id, decision, message)
+            .map_err(BridgeError::from)
     }
 
     fn set_mode(&mut self, mode: Mode) -> Result<(), BridgeError> {

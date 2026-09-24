@@ -206,6 +206,7 @@ fn session_events() -> Vec<Event> {
         Event::PermissionResponse {
             id: "t2".into(),
             decision: PermissionDecision::Allow,
+            message: None,
         },
         Event::ToolCallEnd {
             id: "t2".into(),
@@ -502,6 +503,25 @@ fn described(style: &Style) -> String {
         described.push_str(&format!(", {:?}", style.add_modifier).to_lowercase());
     }
     described
+}
+
+/// Draws one frame and returns the style of the first cell of the first place
+/// `text` appears on it, reading row by row.
+pub fn style_at(app: &mut App, width: u16, height: u16, text: &str) -> Option<Style> {
+    let terminal = drawn(app, width, height);
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height).find_map(|y| {
+        let row: Vec<&Cell> = (0..buffer.area.width)
+            .filter_map(|x| buffer.cell((x, y)))
+            .collect();
+        let symbols: Vec<&str> = row.iter().map(|cell| cell.symbol()).collect();
+        (0..row.len()).find_map(|x| {
+            symbols[x..]
+                .concat()
+                .starts_with(text)
+                .then(|| row[x].style())
+        })
+    })
 }
 
 fn drawn(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
