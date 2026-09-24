@@ -364,17 +364,11 @@ fn theme_del(theme: &Theme) -> Style {
 
 /// A duration, short enough for the cost column: tenths of a second under
 /// ten seconds, whole seconds under a minute, minutes and seconds after.
-///
-/// Under a tenth reads as `<0.1s` rather than `0.0s`: the shell reads its
-/// clock once a tick, so a call that began and ended inside one tick took
-/// less than a tick, not no time at all.
-pub(crate) fn human_duration(took: Duration) -> String {
-    let millis = took.as_millis();
-    match millis {
-        0..100 => "<0.1s".to_owned(),
-        100..10_000 => format!("{:.1}s", took.as_secs_f64()),
-        10_000..60_000 => format!("{}s", took.as_secs()),
-        _ => format!("{}m{:02}s", took.as_secs() / 60, took.as_secs() % 60),
+fn human_duration(took: Duration) -> String {
+    match took.as_secs() {
+        0..10 => format!("{:.1}s", took.as_secs_f64()),
+        10..60 => format!("{}s", took.as_secs()),
+        secs => format!("{}m{:02}s", secs / 60, secs % 60),
     }
 }
 
@@ -511,7 +505,6 @@ mod tests {
 
     #[test]
     fn a_duration_reads_in_the_unit_that_says_anything() {
-        assert_eq!(human_duration(Duration::from_millis(40)), "<0.1s");
         assert_eq!(human_duration(Duration::from_millis(300)), "0.3s");
         assert_eq!(human_duration(Duration::from_millis(9_940)), "9.9s");
         assert_eq!(human_duration(Duration::from_millis(12_600)), "12s");

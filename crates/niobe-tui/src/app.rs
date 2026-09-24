@@ -412,8 +412,9 @@ pub struct Call {
     /// state it.
     pub lines: Option<(Option<u64>, Option<u64>)>,
     /// How long it ran by this shell's clock, or by the clock the store
-    /// recorded it with. `None` while it runs and wherever either end came
-    /// with no time — a log that kept none.
+    /// recorded it with. `None` while it runs, wherever either end came with
+    /// no time — a log that kept none — and where the two ends are closer
+    /// than the clock can tell apart ([`TIMED`]).
     pub took: Option<Duration>,
     /// What it did to a file, where the backend reported the lines it
     /// changed. Drawn under the call as a diff; `None` for a call that is not
@@ -448,7 +449,7 @@ impl Call {
         self.exit_code = ending.exit_code;
         self.error = ending.error;
         self.took = match (self.started, at) {
-            (Some(started), Some(at)) => at.since(started),
+            (Some(started), Some(at)) => at.since(started).filter(|took| *took >= TIMED),
             _ => None,
         };
     }
@@ -466,6 +467,19 @@ impl Call {
         )
     }
 }
+
+/// The shortest time between a call's start and its end that this shell can
+/// tell from no time at all.
+///
+/// The event loop reads the clock once a tick — a tenth of a second when
+/// idle, a thirtieth while a backend is producing — and stamps every event
+/// it drains in that tick with the one reading, so a call that started and
+/// ended inside a tick has two equal stamps and was not timed. A session read
+/// in from another record is the same: its events were recorded as fast as
+/// they were read, milliseconds apart, and those milliseconds are the reading
+/// and not the call. Under this, a call has no duration rather than one of
+/// nearly nothing.
+const TIMED: Duration = Duration::from_millis(100);
 
 /// What a call's end reported about it.
 struct Ending {
@@ -4060,6 +4074,29 @@ mod tests {
             app.entries()[0].calls[0].took,
             Some(Duration::from_millis(300))
         );
+    }
+
+    #[test]
+    fn a_call_whose_ends_the_clock_cannot_tell_apart_was_not_timed() {
+        let mut app = app();
+        // Inside one tick of the event loop, and as close together as a
+        // session read in from another record is written down.
+        for (id, ended_at) in [("t1", 1_000), ("t2", 1_003), ("t3", 1_099)] {
+            app.apply(&Event::TurnEnded);
+            app.apply_at(&start(id, "Bash", "{}", None), millis(1_000));
+            app.apply_at(&ended(id, "Bash", ToolOutcome::Ok, 3), millis(ended_at));
+        }
+        app.apply(&Event::TurnEnded);
+        app.apply_at(&start("t4", "Bash", "{}", None), millis(1_000));
+        app.apply_at(&ended("t4", "Bash", ToolOutcome::Ok, 3), millis(1_100));
+
+        let took: Vec<Option<Duration>> = app
+            .entries()
+            .iter()
+            .flat_map(|entry| &entry.calls)
+            .map(|call| call.took)
+            .collect();
+        assert_eq!(took, [None, None, None, Some(Duration::from_millis(100))]);
     }
 
     #[test]
