@@ -42,7 +42,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   numbers from; `permission.rs` is the standing answer to a permission prompt (`Rule`,
   `Allowlist`), which the shell matches and the config stores; `diff.rs` is the line arithmetic
   every backend counts a file change with, so two bridges cannot disagree about what a changed
-  line is. Depends on no other workspace crate and on no wire format.
+  line is, and the `Hunk` a change's lines travel in where the backend reported them. Depends on no other workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
@@ -68,7 +68,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   palette — one table entry per theme, every colour one of the sixteen ANSI names so a user's own
   scheme is honoured — `text.rs` wraps and truncates, `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
-  exact, and `fx.rs` is what the desktop between the panes does while a turn is running: a pure
+  exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
+  and `fx.rs` is what the desktop between the panes does while a turn is running: a pure
   function of the theme, the strip's height and how long the turn has run, so a frame of it can
   be asserted rather than merely observed to move. Snapshot pictures of the screen live in
   `tests/snapshots/`.

@@ -71,6 +71,21 @@ pub struct Theme {
     pub add: Color,
     /// Removed lines, and errors.
     pub del: Color,
+    /// Behind a diff in the transcript, so the block reads as a file's lines
+    /// rather than as the session's prose.
+    pub diff_bg: Color,
+    /// Behind an added line of a diff.
+    ///
+    /// A design fills changed lines with a wash of the added or removed
+    /// colour over the diff's background. A terminal has no alpha, so a wash
+    /// is an opaque colour chosen per theme — and none of the sixteen names
+    /// is a faint green or red: the plain ones are as loud as the text drawn
+    /// on them. Every theme therefore fills changed lines with [`Theme::diff_bg`]
+    /// and leaves the change to the line's colour and its `+`/`-` sign, which
+    /// is also what reads on a monochrome terminal.
+    pub add_bg: Color,
+    /// Behind a removed line of a diff; see [`Theme::add_bg`].
+    pub del_bg: Color,
 
     /// The operator's own messages.
     pub user: Color,
@@ -126,6 +141,11 @@ pub const CLASSIC: Theme = Theme {
 
     add: Color::LightGreen,
     del: Color::LightRed,
+    // The navy a diff would sit on is not one of the sixteen, so the block
+    // drops to black, which is what sets it off from the blue panes.
+    diff_bg: Color::Black,
+    add_bg: Color::Black,
+    del_bg: Color::Black,
 
     user: Color::LightYellow,
     agent: Color::LightCyan,
@@ -175,6 +195,9 @@ pub const NEO: Theme = Theme {
 
     add: Color::LightGreen,
     del: Color::LightRed,
+    diff_bg: Color::Black,
+    add_bg: Color::Black,
+    del_bg: Color::Black,
 
     user: Color::White,
     agent: Color::LightGreen,
@@ -226,6 +249,9 @@ pub const CYBER: Theme = Theme {
 
     add: Color::LightGreen,
     del: Color::LightRed,
+    diff_bg: Color::Black,
+    add_bg: Color::Black,
+    del_bg: Color::Black,
 
     user: Color::LightMagenta,
     agent: Color::LightGreen,
@@ -278,6 +304,9 @@ pub const MODERN: Theme = Theme {
 
     add: Color::Cyan,
     del: Color::LightRed,
+    diff_bg: Color::Black,
+    add_bg: Color::Black,
+    del_bg: Color::Black,
 
     user: Color::LightYellow,
     agent: Color::LightBlue,
@@ -348,7 +377,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 23] {
+    fn colours(t: &Theme) -> [Color; 26] {
         [
             t.pane_bg,
             t.frame,
@@ -362,6 +391,9 @@ mod tests {
             t.fkey_fg,
             t.add,
             t.del,
+            t.diff_bg,
+            t.add_bg,
+            t.del_bg,
             t.user,
             t.agent,
             t.tool,
@@ -414,6 +446,10 @@ mod tests {
                 (t.hot, t.pane_bg, "the accent"),
                 (t.add, t.pane_bg, "an added line"),
                 (t.del, t.pane_bg, "a removed line"),
+                (t.fg, t.diff_bg, "a diff's unchanged line"),
+                (t.dim, t.diff_bg, "a diff's line numbers"),
+                (t.add, t.add_bg, "a diff's added line"),
+                (t.del, t.del_bg, "a diff's removed line"),
                 (t.user, t.pane_bg, "the operator's own message"),
                 (t.agent, t.pane_bg, "an assistant message"),
                 (t.tool, t.pane_bg, "a tool call"),

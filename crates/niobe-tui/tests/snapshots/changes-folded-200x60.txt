@@ -15,36 +15,36 @@
 ║                                                                                                                                ║ ║ ▾ Commits  2 this session  1 unpushed                             ║
 ║ ! Notion·update-page  {} · failed · 96 B out                                                                                   ║ ║ ↑ 9f2c1ab  12m  feat: keep the etag beside the body               ║
 ║                                                                                                                                ║ ║   41de07c   2h  test: a 304 is answered from the cache            ║
-║ ◆ claude                                                                                                                       ║ ║ ▾ This session  3 files  +≥62 −≥9                                 ║
-║   Caching the etag beside the body so a 304 can be answered from the LRU.                                                      ║ ║   catalog/fetch.ts                                         +38 −9 ║
+║ ◆ claude                                                                                                                       ║ ║ ▾ This session  3 files  +≥30 −≥2                                 ║
+║   Caching the etag beside the body so a 304 can be answered from the LRU.                                                      ║ ║   catalog/fetch.ts                                          +6 −2 ║
 ║                                                                                                                                ║ ║     “Caching the etag beside the body so a 304 can be answered…”  ║
 ║ ⚙ Edit  catalog/fetch.ts · 640 B out                                                                                           ║ ║   catalog/etag.test.ts                                      +24 — ║
-║                                                                                                                                ║ ║     “Rewriting the 304 test around the cached body.”              ║
-║ ◆ claude                                                                                                                       ║ ║   docs/notebooks/catalog.ipynb                                — — ║
-║   Rewriting the 304 test around the cached body.                                                                               ║ ║     “The notebook that demonstrates the fetcher needs the new …”  ║
+║    41     const cached = cache.get(url);                                                                                       ║ ║     “Rewriting the 304 test around the cached body.”              ║
+║    42     const headers = new Headers(init.headers);                                                                           ║ ║   docs/notebooks/catalog.ipynb                                — — ║
+║    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                               ║ ║     “The notebook that demonstrates the fetcher needs the new …”  ║
+║    44 -   const res = await fetch(url, init);                                                                                  ║ ║                                                                   ║
+║    43 +   if (cached?.etag) {                                                                                                  ║ ║                                                                   ║
+║    44 +     headers.set("If-None-Match", cached.etag);                                                                         ║ ║                                                                   ║
+║    45 +   }                                                                                                                    ║ ║                                                                   ║
+║    46 +   const res = await fetch(url, { ...init, headers });                                                                  ║ ║                                                                   ║
+║    47 +   if (res.status === 304 && cached) return cached.body;                                                                ║ ║                                                                   ║
+║    48     return res;                                                                                                          ║ ║                                                                   ║
+║       …                                                                                                                        ║ ║                                                                   ║
+║   115     cache.set(url, {                                                                                                     ║ ║                                                                   ║
+║   116 +     etag: res.headers.get("ETag"),                                                                                     ║ ║                                                                   ║
+║   117       body,                                                                                                              ║ ║                                                                   ║
+║   └ allowed by you                                                                                                             ║ ║                                                                   ║
 ║                                                                                                                                ║ ║                                                                   ║
-║ ◆ claude                                                                                                                       ║ ║                                                                   ║
-║   The notebook that demonstrates the fetcher needs the new call shape.                                                         ║ ║                                                                   ║
+║ ◆ claude                                                                                                                       ║ ╚═══════════════════════════════════════════════════════════════════╝
+║   Rewriting the 304 test around the cached body.                                                                               ║ ╔════════════════════════════ Activity ═════════════════════════════╗
 ║                                                                                                                                ║ ║                                                                   ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║ ◆ claude                                                                                                                       ║ ║                                                                   ║
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.        ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ╚═══════════════════════════════════════════════════════════════════╝
-║                                                                                                                                ║ ╔════════════════════════════ Activity ═════════════════════════════╗
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    ║
-║                                                                                                                                ║ ║ ◆ test-writer → tests/fetch.test.ts sonnet-5       running 1m 42s ║
+║ ◆ claude                                                                                                                       ║ ║ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    ║
+║   The notebook that demonstrates the fetcher needs the new call shape.                                                         ║ ║ ◆ test-writer → tests/fetch.test.ts sonnet-5       running 1m 42s ║
 ║                                                                                                                                ║ ║   └ Reading tests/stream.rs                                       ║
-║                                                                                                                                ║ ║ ◇ reviewer → catalog/cache.ts haiku-4-5             done 4100 ctx ║
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                ║ ║ ◇ reviewer → catalog/cache.ts haiku-4-5             done 4100 ctx ║
 ║                                                                                                                                ║ ║ ✗ doc-writer → docs/etags.md                               failed ║
-║                                                                                                                                ║ ║   └ Notion 404, gave up after 2 retries                           ║
-║                                                                                                                                ║ ║ ▾ Decisions  2                                                    ║
+║ ◆ claude                                                                                                                       ║ ║   └ Notion 404, gave up after 2 retries                           ║
+║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.        ║ ║ ▾ Decisions  2                                                    ║
 ║                                                                                                                                ║ ║   13:39 Key the cache on the request URL, not the manifest id —   ║
 ║                                                                                                                                ║ ║         two manifests can share an id across catalogs.            ║
 ║                                                                                                                                ║ ║   13:39 Reuse the existing LRU instead of a new Map — avoids a    ║

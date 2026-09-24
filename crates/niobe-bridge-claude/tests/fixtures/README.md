@@ -202,9 +202,12 @@ of that file and the `Write` that then succeeds, and an `Edit` with
 | `1  4`  | `notes.md`               | **`+1`, removal unstated** — a `Write` carries what the file becomes and never what it was |
 | `2  2`  | `catalog/cache.ts`       | **both unstated** — `replace_all` matched twice and the call describes one occurrence |
 
-The last two are the cases the stream cannot support, and the fold marks them
-rather than filling them in. Both figures are under the measured one, never
-over it: that is what makes them a floor.
+The last two are the cases the calls' arguments cannot support. The CLI also
+reports each file tool's own diff beside its result, as `tool_use_result`'s
+`structuredPatch` (see `stdio-answers.jsonl`), and that settles both; this
+fixture leaves those reports out, so it is where a stream without them is
+checked. The fold marks the two figures rather than filling them in. Both are
+under the measured one, never over it: that is what makes them a floor.
 
 The refused `Write` is in the fixture because a call that did not run changed
 no file. Counting it would put `notes.md` in the change set twice and would
@@ -243,6 +246,15 @@ What the recording settles:
   from disk could not rely on it. The bridge does not read it.
 - **The `control_request` carries `display_name` and `permission_suggestions`**
   (here, a switch to `acceptEdits` for the session). The bridge reads neither.
+- **The `Edit`'s result carries the CLI's own diff of the file** in
+  `tool_use_result`: `structuredPatch` is one hunk, `oldStart 1`, `oldLines 2`,
+  `newStart 1`, `newLines 2`, with the lines `" alpha"`, `"-beta"`, `"+gamma"`
+  — three lines of context where the file has them, as `git diff` keeps. That
+  is the hunk `tests/stream.rs` asserts the change carries. The CLI's own
+  transcripts of 2.1.27x–2.1.281 carry the same report under `toolUseResult`,
+  on every `Edit` and on a `Write` over a file that was there (`type:
+  "update"`); a `Write` that created its file reports `type: "create"`, its
+  `content` and an empty `structuredPatch`.
 - **The approval went back with the arguments in `updatedInput` and the call
   ran.** Separately, from the same release: an approval with no
   `updatedInput`, and one with an empty `updatedInput`, each let a `Write` run

@@ -1,18 +1,18 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
 ╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ╔════════════════ Usage ════════════════╗
 ║                                                                            ║ ║                                       ║
-║ ⚙ Notion·search  {} · 1.1 kB out                                           ║ ║ 5h    ▓▓▓▓░░░  62% · resets 16:40     ║
-║                                                                            ║ ║ 7d    ▓░░░░░░  18% · resets Tue 15:00 ║
-║ ⚙ Notion·fetch  {} · 2.5 kB out                                            ║ ║ ───────────────────────────────────── ║
-║                                                                            ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
-║ ! Notion·update-page  {} · failed · 96 B out                               ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
-║                                                                            ║ ║ session ≥$0.04                        ║
-║ ◆ claude                                                                   █ ╚═══════════════════════════════════════╝
-║   Caching the etag beside the body so a 304 can be answered from the LRU.  █ ╔═══════════════ Changes ═══════════════╗
-║                                                                            █ ║                                       ║
-║ ⚙ Edit  catalog/fetch.ts · 640 B out                                       █ ║ ⎇ main ↑3                             █
-║                                                                            █ ║ ▾ Working tree  23 files  +977 −259   █
-║ ◆ claude                                                                   █ ║   .                                   ║
+║    44 +     headers.set("If-None-Match", cached.etag);                     ║ ║ 5h    ▓▓▓▓░░░  62% · resets 16:40     ║
+║    45 +   }                                                                ║ ║ 7d    ▓░░░░░░  18% · resets Tue 15:00 ║
+║    46 +   const res = await fetch(url, { ...init, headers });              ║ ║ ───────────────────────────────────── ║
+║    47 +   if (res.status === 304 && cached) return cached.body;            ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
+║    48     return res;                                                      ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
+║       …                                                                    ║ ║ session ≥$0.04                        ║
+║   115     cache.set(url, {                                                 ║ ╚═══════════════════════════════════════╝
+║   116 +     etag: res.headers.get("ETag"),                                 ║ ╔═══════════════ Changes ═══════════════╗
+║   117       body,                                                          ║ ║                                       ║
+║   └ allowed by you                                                         ║ ║ ⎇ main ↑3                             █
+║                                                                            ║ ║ ▾ Working tree  23 files  +977 −259   █
+║ ◆ claude                                                                   ║ ║   .                                   ║
 ║   Rewriting the 304 test around the cached body.                           █ ║     CHANGELOG.md                +0 −0 ║
 ║                                                                            █ ║   catalog/                            ║
 ║ ◆ claude                                                                   █ ║     fetch.ts                 +149 −12 ║

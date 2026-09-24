@@ -71,7 +71,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use niobe_core::diff;
+use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, CostBasis, Event, Mode, PermissionDecision, SessionMeta,
     ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
@@ -736,6 +736,7 @@ impl Translator {
 
     fn user(&mut self, envelope: wire::Envelope, out: &mut Vec<Event>) {
         let background = envelope.launched_in_background();
+        let reported = envelope.tool_use_result;
         let Some(wire::Content::Blocks(blocks)) = envelope.message.content else {
             // A `user` message with plain text is the turn Niobe itself wrote,
             // echoed back. The shell already has it; folding it again would
@@ -799,7 +800,7 @@ impl Translator {
             // would otherwise put a file in the change set that is not in the
             // diff.
             let change = match outcome {
-                ToolOutcome::Ok => self.file_change(&name, &arguments, &output),
+                ToolOutcome::Ok => self.file_change(&name, &arguments, &output, reported.as_ref()),
                 ToolOutcome::Failed | ToolOutcome::Denied => None,
             };
 
@@ -818,60 +819,81 @@ impl Translator {
 
     /// What a finished call did to a file, where it was a call that edits one.
     ///
-    /// The counts come from the call's own arguments and from nothing else.
-    /// Two cases the arguments do not settle are reported as unstated rather
-    /// than filled in:
+    /// The counts come from the call's own arguments where those settle them,
+    /// and otherwise from the diff the CLI reported beside the result. Two
+    /// cases the arguments do not settle:
     ///
     /// * **A replacement the CLI applied everywhere.** `replace_all` says the
     ///   CLI matched `old_string` as many times as it appears in the file, and
-    ///   the file is not in the stream. Counting one occurrence would under-
-    ///   report every further one: measured on this machine, a `replace_all`
-    ///   of three occurrences shows as `3 3` in `git diff --numstat` while the
-    ///   call describes one.
+    ///   the file is not in the arguments. Counting one occurrence would
+    ///   under-report every further one: measured on this machine, a
+    ///   `replace_all` of three occurrences shows as `3 3` in
+    ///   `git diff --numstat` while the call describes one.
     /// * **A `Write` over a file that already existed.** The call carries what
-    ///   the file becomes and never what it was, so the lines it dropped are
-    ///   not in the stream at all.
+    ///   the file becomes and never what it was.
+    ///
+    /// The report's patch is of the whole file, so it settles both. Where no
+    /// usable patch was reported the counts stay unstated rather than filled
+    /// in.
     fn file_change(
         &self,
         name: &str,
         arguments: &serde_json::Value,
         output: &str,
+        reported: Option<&serde_json::Value>,
     ) -> Option<Event> {
-        let (path, added, removed) = match name {
+        let (path, added, removed, hunks) = match name {
             EDIT_TOOL => {
                 let path = string_at(arguments, "file_path")?;
+                let hunks = reported_hunks(reported, path);
                 let counts = match arguments
                     .get("replace_all")
                     .and_then(serde_json::Value::as_bool)
                 {
-                    Some(true) => None,
+                    Some(true) => diff::hunks_changed(&hunks),
                     Some(false) | None => diff::lines_changed(
                         string_at(arguments, "old_string").unwrap_or_default(),
                         string_at(arguments, "new_string").unwrap_or_default(),
                     ),
                 };
                 match counts {
-                    Some((added, removed)) => (path, Some(added), Some(removed)),
-                    None => (path, None, None),
+                    Some((added, removed)) => (path, Some(added), Some(removed), hunks),
+                    None => (path, None, None, hunks),
                 }
             }
 
             WRITE_TOOL => {
                 let path = string_at(arguments, "file_path")?;
                 let written = string_at(arguments, "content").unwrap_or_default();
-                let added = written.lines().count() as u64;
                 // The CLI says which of the two it did, and its answer is read
                 // narrowly on purpose: a wording it no longer uses leaves the
                 // removal unstated, which is a figure the pane marks, where
                 // guessing "nothing was there" would be a zero that is wrong.
-                let removed = output.starts_with(CREATED_PREFIX).then_some(0);
-                (path, Some(added), removed)
+                let created = output.starts_with(CREATED_PREFIX);
+                let hunks = match created {
+                    true => created_hunk(reported, path),
+                    false => reported_hunks(reported, path),
+                };
+                match (created, diff::hunks_changed(&hunks)) {
+                    (false, Some((added, removed))) => (path, Some(added), Some(removed), hunks),
+                    (true, _) | (false, None) => (
+                        path,
+                        Some(written.lines().count() as u64),
+                        created.then_some(0),
+                        hunks,
+                    ),
+                }
             }
 
             // A notebook is edited by cell, so the call says which cell and
             // never how many lines. That the file changed is still worth
             // showing; how much it changed, this call cannot say.
-            NOTEBOOK_TOOL => (string_at(arguments, "notebook_path")?, None, None),
+            NOTEBOOK_TOOL => (
+                string_at(arguments, "notebook_path")?,
+                None,
+                None,
+                Vec::new(),
+            ),
 
             _ => return None,
         };
@@ -880,6 +902,7 @@ impl Translator {
             path: self.relative(path),
             added,
             removed,
+            hunks,
         })
     }
 
@@ -1309,6 +1332,68 @@ const NOTEBOOK_TOOL: &str = "NotebookEdit";
 /// How the CLI opens the result of a `Write` that made a file that was not
 /// there, as against one that replaced a file that was.
 const CREATED_PREFIX: &str = "File created successfully at:";
+
+/// The report beside a file tool's result, where it is about `path`.
+///
+/// The report rides on the line rather than on the result block, so one that
+/// names another file is not this call's and is not read as it.
+fn file_report(reported: Option<&serde_json::Value>, path: &str) -> Option<wire::FileReport> {
+    let report: wire::FileReport = serde_json::from_value(reported?.clone()).ok()?;
+    (report.file_path.as_deref() == Some(path)).then_some(report)
+}
+
+/// The hunks the CLI reported for a change to `path`, all of them or none.
+///
+/// One hunk that does not add up to its header drops the lot: a diff with
+/// one of its hunks missing reads as a change that did not happen.
+fn reported_hunks(reported: Option<&serde_json::Value>, path: &str) -> Vec<Hunk> {
+    let Some(report) = file_report(reported, path) else {
+        return Vec::new();
+    };
+    report
+        .structured_patch
+        .into_iter()
+        .map(hunk_of)
+        .collect::<Option<Vec<Hunk>>>()
+        .unwrap_or_default()
+}
+
+/// A created file as one hunk, from what the CLI reported it created.
+fn created_hunk(reported: Option<&serde_json::Value>, path: &str) -> Vec<Hunk> {
+    file_report(reported, path)
+        .filter(|report| report.kind.as_deref() == Some("create"))
+        .and_then(|report| Hunk::created(report.content.as_deref()?))
+        .into_iter()
+        .collect()
+}
+
+/// One hunk of the CLI's patch, or `None` where a line has no side marker or
+/// the lines do not add up to the header.
+///
+/// `\ No newline at end of file` is a note about the line above it, and the
+/// header does not count it, so it is passed over rather than drawn.
+fn hunk_of(patch: wire::PatchHunk) -> Option<Hunk> {
+    let mut lines = Vec::with_capacity(patch.lines.len());
+    for line in patch.lines {
+        let mut chars = line.chars();
+        let side = chars.next()?;
+        let text = chars.as_str().to_owned();
+        lines.push(match side {
+            ' ' => Line::Context(text),
+            '-' => Line::Removed(text),
+            '+' => Line::Added(text),
+            '\\' => continue,
+            _ => return None,
+        });
+    }
+    Hunk::checked(
+        patch.old_start,
+        patch.old_lines,
+        patch.new_start,
+        patch.new_lines,
+        lines,
+    )
+}
 
 /// A string argument, where the arguments are an object that carries it.
 fn string_at<'a>(arguments: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -2315,10 +2400,236 @@ mod tests {
                     path,
                     added,
                     removed,
+                    ..
                 } => Some((path.clone(), *added, *removed)),
                 _ => None,
             })
             .collect()
+    }
+
+    /// A tool result with what the CLI reported about the call beside it, as
+    /// it sends one for every file tool.
+    fn result_with(id: &str, content: &str, reported: &str) -> String {
+        let content = serde_json::Value::String(content.to_owned());
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","is_error":false,"content":{content}}}]}},"tool_use_result":{reported}}}"#
+        )
+    }
+
+    /// The hunks every file change in the events carries, one list per change.
+    fn hunks(events: &[Event]) -> Vec<Vec<Hunk>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::FileChange { hunks, .. } => Some(hunks.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn context(text: &str) -> Line {
+        Line::Context(text.to_owned())
+    }
+    fn removed(text: &str) -> Line {
+        Line::Removed(text.to_owned())
+    }
+    fn added(text: &str) -> Line {
+        Line::Added(text.to_owned())
+    }
+
+    /// The shape recorded in `tests/fixtures/stdio-answers.jsonl` (Claude Code
+    /// 2.1.278): the CLI's own diff of the file, under `structuredPatch`.
+    #[test]
+    fn an_edit_carries_the_hunks_the_cli_reported() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/notes.txt","old_string":"beta","new_string":"gamma","replace_all":false}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            UPDATED,
+            r#"{"filePath":"/repo/notes.txt","oldString":"beta","newString":"gamma","originalFile":"alpha\nbeta\n","structuredPatch":[{"oldStart":1,"oldLines":2,"newStart":1,"newLines":2,"lines":[" alpha","-beta","+gamma"]}],"userModified":false,"replaceAll":false}"#,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("notes.txt".to_owned(), Some(1), Some(1))]
+        );
+        assert_eq!(
+            hunks(&events),
+            vec![vec![
+                Hunk::checked(
+                    1,
+                    2,
+                    1,
+                    2,
+                    vec![context("alpha"), removed("beta"), added("gamma")]
+                )
+                .expect("consistent")
+            ]]
+        );
+    }
+
+    #[test]
+    fn an_edit_whose_result_reported_no_patch_carries_no_hunks() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/notes.txt","old_string":"beta","new_string":"gamma"}"#,
+        ));
+
+        let events = translator.line(&result("t1", UPDATED, false));
+
+        assert_eq!(hunks(&events), vec![Vec::<Hunk>::new()]);
+    }
+
+    /// A body that does not add up to its header was cut or misread, and one
+    /// hunk dropped out of several would show a diff with a change missing.
+    #[test]
+    fn a_patch_any_hunk_of_which_disagrees_with_its_header_carries_no_hunks_at_all() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/notes.txt","old_string":"b","new_string":"c","replace_all":true}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            UPDATED,
+            r#"{"filePath":"/repo/notes.txt","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-b","+c"]},{"oldStart":9,"oldLines":3,"newStart":9,"newLines":1,"lines":["-b","+c"]}],"replaceAll":true}"#,
+        ));
+
+        assert_eq!(hunks(&events), vec![Vec::<Hunk>::new()]);
+        assert_eq!(changes(&events), vec![("notes.txt".to_owned(), None, None)]);
+    }
+
+    /// The report sits beside the line, not inside the result; one that names
+    /// another file is about another call.
+    #[test]
+    fn a_patch_reported_for_another_file_is_not_taken_for_this_one() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/notes.txt","old_string":"beta","new_string":"gamma"}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            UPDATED,
+            r#"{"filePath":"/repo/other.txt","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-beta","+gamma"]}]}"#,
+        ));
+
+        assert_eq!(hunks(&events), vec![Vec::<Hunk>::new()]);
+    }
+
+    /// The patch is of the whole file, so it holds every occurrence the call
+    /// replaced — which is what makes a `replace_all` countable at all.
+    #[test]
+    fn a_replacement_made_everywhere_is_counted_from_the_hunks_the_cli_reported() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/rep.txt","old_string":"foo","new_string":"bar","replace_all":true}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            "The file /repo/rep.txt has been updated. All occurrences were successfully replaced.",
+            r#"{"filePath":"/repo/rep.txt","structuredPatch":[{"oldStart":1,"oldLines":2,"newStart":1,"newLines":2,"lines":["-foo","+bar"," x"]},{"oldStart":12,"oldLines":2,"newStart":12,"newLines":2,"lines":[" y","-foo","+bar"]}],"replaceAll":true}"#,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("rep.txt".to_owned(), Some(2), Some(2))]
+        );
+        assert_eq!(hunks(&events)[0].len(), 2);
+    }
+
+    /// A created file's report carries no patch: the CLI diffs against a file
+    /// that was not there, and says so with `type` rather than with hunks.
+    #[test]
+    fn a_created_file_is_one_hunk_of_the_lines_it_was_created_with() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Write",
+            r#"{"file_path":"/repo/fresh.py","content":"def foo():\n    return None\n"}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            "File created successfully at: /repo/fresh.py",
+            r#"{"type":"create","filePath":"/repo/fresh.py","content":"def foo():\n    return None\n","structuredPatch":[],"originalFile":null}"#,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("fresh.py".to_owned(), Some(2), Some(0))]
+        );
+        assert_eq!(
+            hunks(&events),
+            vec![vec![
+                Hunk::created("def foo():\n    return None\n").expect("two lines")
+            ]]
+        );
+    }
+
+    /// The call carries what the file became and never what it was; the
+    /// report carries the diff between the two, so what the overwrite dropped
+    /// is counted from that instead of left unstated.
+    #[test]
+    fn an_overwritten_file_is_counted_and_drawn_from_the_hunks_the_cli_reported() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Write",
+            r#"{"file_path":"/repo/doomed.txt","content":"one\ntwo 2\nthree\n"}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            "The file /repo/doomed.txt has been updated successfully.",
+            r#"{"type":"update","filePath":"/repo/doomed.txt","content":"one\ntwo 2\nthree\n","structuredPatch":[{"oldStart":1,"oldLines":4,"newStart":1,"newLines":3,"lines":[" one","-two","-gone","+two 2"," three"]}],"originalFile":"one\ntwo\ngone\nthree\n"}"#,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("doomed.txt".to_owned(), Some(1), Some(2))]
+        );
+        assert_eq!(hunks(&events)[0].len(), 1);
+    }
+
+    /// `\ No newline at end of file` is a note about the line above it, not a
+    /// line; the CLI's own header does not count it either.
+    #[test]
+    fn a_missing_newline_note_is_not_taken_for_a_line() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/notes.txt","old_string":"beta","new_string":"gamma"}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            UPDATED,
+            r#"{"filePath":"/repo/notes.txt","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-beta","\\ No newline at end of file","+gamma","\\ No newline at end of file"]}]}"#,
+        ));
+
+        assert_eq!(
+            hunks(&events),
+            vec![vec![
+                Hunk::checked(1, 1, 1, 1, vec![removed("beta"), added("gamma")])
+                    .expect("consistent")
+            ]]
+        );
     }
 
     #[test]

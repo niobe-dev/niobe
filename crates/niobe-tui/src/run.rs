@@ -774,7 +774,7 @@ mod tests {
         );
         assert_eq!(
             backend.answered,
-            [(ToolCallId::new("t1"), PermissionDecision::Allow)]
+            [(ToolCallId::new("t1"), PermissionDecision::AllowByRule)]
         );
     }
 
@@ -863,6 +863,7 @@ mod tests {
                     path: "src/lib.rs".to_owned(),
                     added: Some(3),
                     removed: Some(1),
+                    hunks: Vec::new(),
                 },
                 SessionEvent::AssistantMessage {
                     text: "done".to_owned(),

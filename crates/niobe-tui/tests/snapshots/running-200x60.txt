@@ -19,32 +19,32 @@
 ║   Caching the etag beside the body so a 304 can be answered from the LRU.                                                      ║ ║     etag.ts                                               +88 −41 █
 ║                                                                                                                                ║ ║     cache/lru.ts                                           +31 −9 █
 ║ ⚙ Edit  catalog/fetch.ts · 640 B out                                                                                           ║ ║     cache/index.ts                                         +12 −0 █
-║                                                                                                                                ║ ║   docs/                                                           █
-║ ◆ claude                                                                                                                       ║ ║     caching.md                                            +64 −22 █
-║   Rewriting the 304 test around the cached body.                                                                               ║ ║     adr/0004-etags.md                                      +34 −1 █
-║                                                                                                                                ║ ║     diagrams/cache.png                                        — — █
-║ ◆ claude                                                                                                                       ║ ║   server/                                                         █
-║   The notebook that demonstrates the fetcher needs the new call shape.                                                         ║ ║     handlers/manifest.ts                                   +97 −4 █
-║                                                                                                                                ║ ║     handlers/health.ts                                     +3 −19 ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                ║ ║     middleware/etag.ts                                    +41 −37 ║
-║                                                                                                                                ║ ║     index.ts                                                +8 −6 ║
-║ ◆ claude                                                                                                                       ║ ║   tests/                                                          ║
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.        ║ ║     etag.test.ts                                          +122 −8 ║
-║                                                                                                                                ║ ║     fetch.test.ts                                         +76 −14 ║
-║                                                                                                                                ║ ║     helpers.ts                                              +5 −2 ║
-║                                                                                                                                ║ ║     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 ║
-║                                                                                                                                ║ ║     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 ║
+║    41     const cached = cache.get(url);                                                                                       ║ ║   docs/                                                           █
+║    42     const headers = new Headers(init.headers);                                                                           ║ ║     caching.md                                            +64 −22 █
+║    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                               ║ ║     adr/0004-etags.md                                      +34 −1 █
+║    44 -   const res = await fetch(url, init);                                                                                  ║ ║     diagrams/cache.png                                        — — █
+║    43 +   if (cached?.etag) {                                                                                                  ║ ║   server/                                                         █
+║    44 +     headers.set("If-None-Match", cached.etag);                                                                         ║ ║     handlers/manifest.ts                                   +97 −4 █
+║    45 +   }                                                                                                                    ║ ║     handlers/health.ts                                     +3 −19 ║
+║    46 +   const res = await fetch(url, { ...init, headers });                                                                  ║ ║     middleware/etag.ts                                    +41 −37 ║
+║    47 +   if (res.status === 304 && cached) return cached.body;                                                                ║ ║     index.ts                                                +8 −6 ║
+║    48     return res;                                                                                                          ║ ║   tests/                                                          ║
+║       …                                                                                                                        ║ ║     etag.test.ts                                          +122 −8 ║
+║   115     cache.set(url, {                                                                                                     ║ ║     fetch.test.ts                                         +76 −14 ║
+║   116 +     etag: res.headers.get("ETag"),                                                                                     ║ ║     helpers.ts                                              +5 −2 ║
+║   117       body,                                                                                                              ║ ║     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 ║
+║   └ allowed by you                                                                                                             ║ ║     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 ║
 ║                                                                                                                                ║ ║   web/                                                            ║
-║                                                                                                                                ║ ╚═══════════════════════════════════════════════════════════════════╝
-║                                                                                                                                ║ ╔════════════════════════════ Activity ═════════════════════════════╗
+║ ◆ claude                                                                                                                       ║ ╚═══════════════════════════════════════════════════════════════════╝
+║   Rewriting the 304 test around the cached body.                                                                               ║ ╔════════════════════════════ Activity ═════════════════════════════╗
 ║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    ║
-║                                                                                                                                ║ ║ ◆ test-writer → tests/fetch.test.ts sonnet-5       running 1m 42s ║
+║ ◆ claude                                                                                                                       ║ ║ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    ║
+║   The notebook that demonstrates the fetcher needs the new call shape.                                                         ║ ║ ◆ test-writer → tests/fetch.test.ts sonnet-5       running 1m 42s ║
 ║                                                                                                                                ║ ║   └ Reading tests/stream.rs                                       ║
-║                                                                                                                                ║ ║ ◇ reviewer → catalog/cache.ts haiku-4-5             done 4100 ctx ║
+║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                ║ ║ ◇ reviewer → catalog/cache.ts haiku-4-5             done 4100 ctx ║
 ║                                                                                                                                ║ ║ ✗ doc-writer → docs/etags.md                               failed ║
-║                                                                                                                                ║ ║   └ Notion 404, gave up after 2 retries                           ║
-║                                                                                                                                ║ ║ ▾ Decisions  2                                                    ║
+║ ◆ claude                                                                                                                       ║ ║   └ Notion 404, gave up after 2 retries                           ║
+║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.        ║ ║ ▾ Decisions  2                                                    ║
 ║                                                                                                                                ║ ║   13:39 Key the cache on the request URL, not the manifest id —   ║
 ║                                                                                                                                ║ ║         two manifests can share an id across catalogs.            ║
 ║                                                                                                                                ║ ║   13:39 Reuse the existing LRU instead of a new Map — avoids a    ║

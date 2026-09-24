@@ -182,6 +182,7 @@ mod tests {
             path: path.to_owned(),
             added,
             removed,
+            hunks: Vec::new(),
         }
     }
 

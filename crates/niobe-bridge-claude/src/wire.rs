@@ -144,6 +144,43 @@ impl Envelope {
     }
 }
 
+/// What a file tool — `Edit`, `Write` — reports about itself beside its
+/// result, as recorded from Claude Code 2.1.278 and read in the CLI's own
+/// transcripts of 2.1.27x–2.1.281.
+///
+/// Every field the bridge reads is optional or defaulted except the patch's
+/// own: a report missing one of those is not read at all, and the change is
+/// shown by its counts rather than by a diff with a hole in it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileReport {
+    /// The file, as an absolute path.
+    #[serde(default)]
+    pub(crate) file_path: Option<String>,
+    /// `create` or `update` on a `Write`; absent on an `Edit`.
+    #[serde(rename = "type", default)]
+    pub(crate) kind: Option<String>,
+    /// What a `Write` left in the file.
+    #[serde(default)]
+    pub(crate) content: Option<String>,
+    /// The CLI's diff of the file before the call against the file after it,
+    /// with three lines of context. Empty for a file that was created.
+    #[serde(default)]
+    pub(crate) structured_patch: Vec<PatchHunk>,
+}
+
+/// One hunk of a [`FileReport`]: a unified diff's `@@` header and the lines
+/// under it, each still carrying its ` `, `-` or `+`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PatchHunk {
+    pub(crate) old_start: u64,
+    pub(crate) old_lines: u64,
+    pub(crate) new_start: u64,
+    pub(crate) new_lines: u64,
+    pub(crate) lines: Vec<String>,
+}
+
 /// The message itself.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiMessage {

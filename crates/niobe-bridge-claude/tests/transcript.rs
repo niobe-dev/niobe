@@ -123,6 +123,7 @@ fn a_transcript_folds_into_what_the_session_said_and_did() {
             path: "catalog/fetch.ts".to_owned(),
             added: Some(3),
             removed: Some(1),
+            hunks: Vec::new(),
         }
     );
     assert!(matches!(closing, Event::AssistantMessage { .. }));

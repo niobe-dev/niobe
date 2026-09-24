@@ -19,6 +19,7 @@
     reason = "shared by two test binaries, neither of which uses all of it"
 )]
 
+use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
     AgentOutcome, Backend, Event, Mode, PermissionDecision, SessionMeta, ToolOutcome, Usage,
     UsageWindow, UsageWindows,
@@ -212,15 +213,46 @@ fn session_events() -> Vec<Event> {
             id: "t2".into(),
             name: "Edit".to_owned(),
             input: "catalog/fetch.ts".to_owned(),
-            output: "+38 −9".to_owned(),
+            output: "+6 −2".to_owned(),
             bytes: 640,
             outcome: ToolOutcome::Ok,
             summary: None,
         },
+        // Two hunks, as the backend reports a change: what the transcript
+        // draws under the call, numbered on each side, with the lines between
+        // the hunks elided.
         Event::FileChange {
             path: "catalog/fetch.ts".to_owned(),
-            added: Some(38),
-            removed: Some(9),
+            added: Some(6),
+            removed: Some(2),
+            hunks: vec![
+                hunk(
+                    40,
+                    40,
+                    &[
+                        " export async function fetchCached(url: string, init: RequestInit) {",
+                        "   const cached = cache.get(url);",
+                        "   const headers = new Headers(init.headers);",
+                        "-  if (cached) headers.set(\"If-None-Match\", cached.etag);",
+                        "-  const res = await fetch(url, init);",
+                        "+  if (cached?.etag) {",
+                        "+    headers.set(\"If-None-Match\", cached.etag);",
+                        "+  }",
+                        "+  const res = await fetch(url, { ...init, headers });",
+                        "+  if (res.status === 304 && cached) return cached.body;",
+                        "   return res;",
+                    ],
+                ),
+                hunk(
+                    112,
+                    115,
+                    &[
+                        "   cache.set(url, {",
+                        "+    etag: res.headers.get(\"ETag\"),",
+                        "     body,",
+                    ],
+                ),
+            ],
         },
         // The two readings a count can have besides a figure: a rewrite whose
         // previous contents the backend never showed, and a change it stated
@@ -232,6 +264,7 @@ fn session_events() -> Vec<Event> {
             path: "catalog/etag.test.ts".to_owned(),
             added: Some(24),
             removed: None,
+            hunks: Vec::new(),
         },
         Event::AssistantMessage {
             text: "The notebook that demonstrates the fetcher needs the new call shape.".to_owned(),
@@ -240,6 +273,7 @@ fn session_events() -> Vec<Event> {
             path: "docs/notebooks/catalog.ipynb".to_owned(),
             added: None,
             removed: None,
+            hunks: Vec::new(),
         },
         Event::ToolCallEnd {
             id: "t3".into(),
@@ -369,6 +403,28 @@ fn read_repository() -> Repo {
 
 /// A session part-way through a task: tool calls, usage with and without a
 /// cost, a decision and two sub-agents.
+/// A hunk written the way a unified diff prints one, each line behind its
+/// ` `, `-` or `+`.
+pub fn hunk(old_start: u64, new_start: u64, lines: &[&str]) -> Hunk {
+    let lines: Vec<DiffLine> = lines
+        .iter()
+        .map(|line| match line.split_at(1) {
+            ("-", text) => DiffLine::Removed(text.to_owned()),
+            ("+", text) => DiffLine::Added(text.to_owned()),
+            (_, text) => DiffLine::Context(text.to_owned()),
+        })
+        .collect();
+    let old = lines
+        .iter()
+        .filter(|l| !matches!(l, DiffLine::Added(_)))
+        .count() as u64;
+    let new = lines
+        .iter()
+        .filter(|l| !matches!(l, DiffLine::Removed(_)))
+        .count() as u64;
+    Hunk::checked(old_start, old, new_start, new, lines).expect("written to agree with itself")
+}
+
 pub fn running_session() -> App {
     session_read_at_a_fixed_moment(&session_events())
 }

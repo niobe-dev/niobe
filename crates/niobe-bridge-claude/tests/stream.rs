@@ -525,9 +525,11 @@ mod edits {
         assert!(conditional.added_stated() && conditional.removed_stated());
     }
 
-    /// The two counts the stream cannot support, each marked rather than
-    /// guessed. Both would be wrong if they were filled in, and both are
-    /// under the truth rather than over it, which is what a floor means.
+    /// The two counts the calls' arguments cannot support, each marked rather
+    /// than guessed where the CLI's report of the change is not beside the
+    /// result — this fixture leaves those reports out. Both would be wrong if
+    /// they were filled in, and both are under the truth rather than over it,
+    /// which is what a floor means.
     #[test]
     fn a_count_the_stream_does_not_carry_is_marked_rather_than_filled_in() {
         let state = folded();
@@ -579,6 +581,52 @@ mod edits {
             state.files()[0].why.as_deref(),
             Some("Returning the cached body on a 304."),
             "the second edit did not bring its own explanation with it"
+        );
+    }
+}
+
+/// A turn recorded with the CLI's own report beside each tool result, where
+/// the hunks a file change carries come from.
+mod reported_hunks {
+    use super::*;
+    use niobe_core::diff::{Hunk, Line};
+
+    const ANSWERS: &str = include_str!("fixtures/stdio-answers.jsonl");
+
+    /// The `Edit` the fixture's README describes: `beta` became `gamma` in a
+    /// two-line file, and the CLI reported that as one hunk with `alpha` above
+    /// it. The refused `Write` changed nothing and carries nothing.
+    #[test]
+    fn a_recorded_edit_carries_the_hunk_the_cli_reported_beside_its_result() {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        let changes: Vec<Event> = ANSWERS
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .filter(|event| matches!(event, Event::FileChange { .. }))
+            .collect();
+
+        assert_eq!(
+            changes,
+            vec![Event::FileChange {
+                path: "notes.txt".to_owned(),
+                added: Some(1),
+                removed: Some(1),
+                hunks: vec![
+                    Hunk::checked(
+                        1,
+                        2,
+                        1,
+                        2,
+                        vec![
+                            Line::Context("alpha".to_owned()),
+                            Line::Removed("beta".to_owned()),
+                            Line::Added("gamma".to_owned()),
+                        ],
+                    )
+                    .expect("the recorded header counts two lines on each side"),
+                ],
+            }]
         );
     }
 }

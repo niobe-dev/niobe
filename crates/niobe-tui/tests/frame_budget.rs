@@ -18,7 +18,7 @@ mod common;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use common::{MARKDOWN_REPLY, running_session, screen};
+use common::{MARKDOWN_REPLY, hunk, running_session, screen};
 use niobe_core::event::Event;
 use niobe_tui::app::{App, WorkingFile};
 
@@ -90,6 +90,79 @@ fn a_long_session_of_markdown_redraws_inside_a_frame_budget() {
         "the median frame of {LONG_SESSION_REPLIES} markdown replies at 200x60 took \
          {median:?}, over the {FRAME_BUDGET:?} budget"
     );
+}
+
+/// File changes in a long session's transcript, each drawn as its diff.
+const LONG_SESSION_DIFFS: usize = 50;
+
+/// The redraw every tick makes in a long session of edits, each drawn under
+/// its call as the lines it changed: two hunks of a realistic size, with
+/// lines long enough to be cut at the pane's edge. Like a reply, a diff is
+/// laid out once and drawn from that after, so the frame costs what its
+/// visible rows cost.
+#[test]
+fn a_long_session_of_diffs_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for n in 0..LONG_SESSION_DIFFS {
+        let id = format!("edit-{n}");
+        let path = format!("crates/niobe-{}/src/module_{n:02}.rs", n % 7);
+        app.apply(&Event::ToolCallStart {
+            id: id.as_str().into(),
+            name: "Edit".to_owned(),
+            input: path.clone(),
+            summary: Some(path.clone()),
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.as_str().into(),
+            name: "Edit".to_owned(),
+            input: path.clone(),
+            output: "updated".to_owned(),
+            bytes: 64,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some(path.clone()),
+        });
+        app.apply(&Event::FileChange {
+            path,
+            added: Some(8),
+            removed: Some(4),
+            hunks: vec![edit_hunk(40), edit_hunk(210)],
+        });
+    }
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame of {LONG_SESSION_DIFFS} diffs at 200x60 took {median:?}, over the \
+         {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// Three lines of context each side of two removed lines and four added ones,
+/// which is what the backend reports for an ordinary edit.
+fn edit_hunk(start: u64) -> niobe_core::diff::Hunk {
+    hunk(
+        start,
+        start,
+        &[
+            "     pub fn label_for(fold: &Fold, total: Money) -> Label {",
+            "         let unsettled = fold.unsettled_count();",
+            "         // Every figure the pane shows is measured or labelled, never a plausible guess.",
+            "-        if unsettled > 0 { return Label::Estimate(total) }",
+            "-        Label::Measured(total)",
+            "+        match (unsettled, fold.unpriced_models().is_empty()) {",
+            "+            (0, _) => Label::Measured(total),",
+            "+            (_, true) => Label::Estimate(total),",
+            "+            (_, false) => Label::Floor(total), // any unpriced model makes the figure a floor, which the pane marks",
+            "         }",
+            "     }",
+            " ",
+        ],
+    )
 }
 
 /// The median time to draw one frame, cycling through `sizes`. A frame the scheduler took the core away

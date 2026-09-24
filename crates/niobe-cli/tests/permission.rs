@@ -156,7 +156,7 @@ fn an_always_answer_survives_a_restart() {
         next.take_produced(),
         [Event::PermissionResponse {
             id: "toolu_1".into(),
-            decision: PermissionDecision::Allow,
+            decision: PermissionDecision::AllowByRule,
             message: None,
         }]
     );

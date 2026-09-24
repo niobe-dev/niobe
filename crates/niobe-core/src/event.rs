@@ -280,6 +280,13 @@ pub enum PermissionDecision {
     Allow,
     /// Allowed, and a rule was stored so the prompt does not return.
     AllowAlways,
+    /// Allowed without the operator being asked, by a standing rule the
+    /// session already held.
+    ///
+    /// Kept apart from [`PermissionDecision::Allow`] so that a transcript can
+    /// say who let a call through. A session recorded before this existed
+    /// records a rule's answer as `Allow`.
+    AllowByRule,
     /// Denied.
     Deny,
 }
@@ -287,7 +294,7 @@ pub enum PermissionDecision {
 impl PermissionDecision {
     /// Whether the call was let through.
     pub fn allowed(self) -> bool {
-        matches!(self, Self::Allow | Self::AllowAlways)
+        matches!(self, Self::Allow | Self::AllowAlways | Self::AllowByRule)
     }
 }
 
@@ -504,6 +511,10 @@ pub enum Event {
     /// Counted with [`crate::diff::lines_changed`] by whichever backend
     /// produced it, so that two backends cannot disagree about what a changed
     /// line is.
+    ///
+    /// Arrives directly after the [`Event::ToolCallEnd`] of the call that
+    /// made the change, which is how a transcript puts the change under the
+    /// call.
     FileChange {
         /// The file, as the backend named it: relative to where the session
         /// runs where the backend could say, and absolute where it could not.
@@ -512,6 +523,12 @@ pub enum Event {
         added: Option<u64>,
         /// Lines removed, where the call said enough to count them.
         removed: Option<u64>,
+        /// The lines that changed, in the order they sit in the file, where
+        /// the backend reported them. Empty where it did not: a change is
+        /// then shown by its counts alone, never by a diff rebuilt from the
+        /// file as it is now.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hunks: Vec<crate::diff::Hunk>,
     },
 
     /// A structured `decide` record: why a plan, a model, a file or a declined
@@ -830,9 +847,10 @@ mod tests {
     }
 
     #[test]
-    fn allowed_covers_both_allow_variants() {
+    fn allowed_covers_every_allow_variant() {
         assert!(PermissionDecision::Allow.allowed());
         assert!(PermissionDecision::AllowAlways.allowed());
+        assert!(PermissionDecision::AllowByRule.allowed());
         assert!(!PermissionDecision::Deny.allowed());
     }
 }

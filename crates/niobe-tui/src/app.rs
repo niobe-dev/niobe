@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
 
+use niobe_core::diff::Hunk;
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome,
     UsageWindow,
@@ -373,6 +374,72 @@ pub struct Entry {
     /// shell took it off the channel, or off what the store recorded beside
     /// it. Absent where the entry came from a log that kept no times.
     pub at: Option<Stamp>,
+    /// What a tool call did to a file, where the backend reported the lines
+    /// it changed. Drawn under the call as a diff; `None` for every entry
+    /// that is not such a call, and for one whose backend sent only counts.
+    pub change: Option<Change>,
+}
+
+/// The lines a call changed in a file, and how the call came to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    hunks: Vec<Hunk>,
+    gate: Option<Gate>,
+    /// The hunks hashed once, when the change arrived. The transcript keys
+    /// each entry's drawn lines on a hash of the entry, taken every frame,
+    /// and a session of edits would otherwise hash every line of every diff
+    /// ten times a second — measured at a millisecond of a 16 ms frame for
+    /// fifty diffs.
+    fingerprint: u64,
+}
+
+impl Change {
+    /// A change of `hunks`, let through as `gate` says.
+    pub fn new(hunks: Vec<Hunk>, gate: Option<Gate>) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hunks.hash(&mut hasher);
+        Self {
+            hunks,
+            gate,
+            fingerprint: hasher.finish(),
+        }
+    }
+
+    /// The hunks, as the backend reported them. Never empty for a change a
+    /// transcript entry carries.
+    pub fn hunks(&self) -> &[Hunk] {
+        &self.hunks
+    }
+
+    /// Who let the call through, where this shell can say. `None` where it
+    /// cannot — a call read back from a record that kept no answer and was
+    /// not run from here — which draws no claim at all rather than a guess.
+    pub fn gate(&self) -> Option<Gate> {
+        self.gate
+    }
+}
+
+impl std::hash::Hash for Change {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.fingerprint.hash(state);
+        self.gate.hash(state);
+    }
+}
+
+/// How a call that changed a file came to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Gate {
+    /// The operator allowed it at the prompt.
+    Operator,
+    /// The operator allowed it at the prompt and saved a rule for next time.
+    OperatorAlways,
+    /// A standing rule answered the prompt before the operator saw it.
+    Rule,
+    /// No prompt reached this shell: the backend ran the call in this mode
+    /// without asking. Claimed only for a call sent from this shell, which
+    /// would have seen a prompt had there been one.
+    Unasked(Mode),
 }
 
 /// A sub-agent as this shell saw it: what it was spawned to do, when it
@@ -441,6 +508,14 @@ pub struct App {
     session: SessionState,
     entries: Vec<Entry>,
     tool_entries: BTreeMap<ToolCallId, usize>,
+    /// How each call the operator or a rule let through was allowed, until
+    /// the call ends and its entry takes the answer.
+    answered: BTreeMap<ToolCallId, PermissionDecision>,
+    /// The entry of the call that ended with the event just folded, and how
+    /// it came to run. A backend reports a file change directly after the
+    /// end of the call that made it, so this is where the change is drawn;
+    /// any other event in between clears it.
+    just_ended: Option<(usize, Option<Gate>)>,
     /// Every sub-agent the session spawned, in the order it spawned them. The
     /// session fold keeps the counts and which ids are running; the label, the
     /// moment and the outcome as this pane reads them are this shell's
@@ -550,6 +625,8 @@ impl App {
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
+            answered: BTreeMap::new(),
+            just_ended: None,
             agents: Vec::new(),
             decided_at: Vec::new(),
             composer,
@@ -585,6 +662,7 @@ impl App {
     /// transcript entry it produces, if it produces one.
     pub fn apply(&mut self, event: &Event) {
         self.session.apply(event);
+        let ended = self.just_ended.take();
 
         match event {
             Event::UserMessage { text } => self.push(Entry {
@@ -594,6 +672,7 @@ impl App {
                 body: text.clone(),
                 streaming: false,
                 at: self.at,
+                change: None,
             }),
 
             Event::AssistantDelta { text } => match self.streaming_agent_entry() {
@@ -607,6 +686,7 @@ impl App {
                         body: text.clone(),
                         streaming: true,
                         at: self.at,
+                        change: None,
                     });
                 }
             },
@@ -625,6 +705,7 @@ impl App {
                         body: text.clone(),
                         streaming: false,
                         at: self.at,
+                        change: None,
                     });
                 }
             },
@@ -643,6 +724,7 @@ impl App {
                     body: String::new(),
                     streaming: true,
                     at: self.at,
+                    change: None,
                 });
             }
 
@@ -660,11 +742,9 @@ impl App {
                     what_it_does(summary.as_deref(), input),
                     outcome_label(*outcome, *bytes)
                 );
-                match self
-                    .tool_entries
-                    .remove(id)
-                    .and_then(|i| self.entries.get_mut(i))
-                {
+                let gate = self.gate(id);
+                let started = self.tool_entries.remove(id);
+                match started.and_then(|i| self.entries.get_mut(i)) {
                     Some(entry) => {
                         entry.meta = meta;
                         entry.streaming = false;
@@ -686,7 +766,21 @@ impl App {
                         body: String::new(),
                         streaming: false,
                         at: self.at,
+                        change: None,
                     }),
+                }
+                if *outcome == ToolOutcome::Ok {
+                    let at = started.unwrap_or(self.entries.len().saturating_sub(1));
+                    self.just_ended = Some((at, gate));
+                }
+            }
+
+            Event::FileChange { hunks, .. } => {
+                if let Some((at, gate)) = ended
+                    && !hunks.is_empty()
+                    && let Some(entry) = self.entries.get_mut(at)
+                {
+                    entry.change = Some(Change::new(hunks.clone(), gate));
                 }
             }
 
@@ -701,6 +795,7 @@ impl App {
                 body: message.clone(),
                 streaming: false,
                 at: self.at,
+                change: None,
             }),
 
             Event::Notice { message } => self.push(Entry {
@@ -710,6 +805,7 @@ impl App {
                 body: message.clone(),
                 streaming: false,
                 at: self.at,
+                change: None,
             }),
 
             Event::PermissionRequest {
@@ -735,6 +831,9 @@ impl App {
                 message,
             } => {
                 let asked = self.forget_ask(id);
+                if decision.allowed() {
+                    self.answered.insert(id.clone(), *decision);
+                }
                 if *decision == PermissionDecision::Deny {
                     let (tool, what) = match &asked {
                         Some(ask) => (
@@ -756,6 +855,7 @@ impl App {
                             .unwrap_or_default(),
                         streaming: false,
                         at: self.at,
+                        change: None,
                     });
                 }
             }
@@ -763,15 +863,12 @@ impl App {
             // Everything else is a number or a list a pane reads off the
             // session fold, not a line in the transcript. The mode and the
             // model are in the menu row, which is where a session says what
-            // it is running as; a file's counts are in the changes pane, and
-            // repeating them under the call that made them would say the same
-            // thing twice in the place with the least room for it.
+            // it is running as.
             Event::SessionMeta(_)
             | Event::Usage(_)
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
             | Event::UsageWindows(_)
-            | Event::FileChange { .. }
             | Event::Checkpoint { .. } => {}
 
             // The decision itself is in the session fold, which carries no
@@ -874,6 +971,23 @@ impl App {
     /// The next prompt starts afresh — on its first option, with the keyboard
     /// on it — whatever the operator was doing with the one before, so a
     /// question put off is not mistaken for the one behind it.
+    /// How the call `id` came to run, as far as this shell saw.
+    ///
+    /// An answer it folded says who gave it. With no answer, the call ran
+    /// without a prompt only if it was sent from here, where a prompt would
+    /// have been seen; a call read back from a record or an imported
+    /// transcript may have been asked about somewhere this shell was not.
+    fn gate(&mut self, id: &ToolCallId) -> Option<Gate> {
+        match self.answered.remove(id) {
+            Some(PermissionDecision::Allow) => Some(Gate::Operator),
+            Some(PermissionDecision::AllowAlways) => Some(Gate::OperatorAlways),
+            Some(PermissionDecision::AllowByRule) => Some(Gate::Rule),
+            Some(PermissionDecision::Deny) => None,
+            None if self.sent_here => self.session.mode().map(Gate::Unasked),
+            None => None,
+        }
+    }
+
     fn forget_ask(&mut self, id: &ToolCallId) -> Option<Ask> {
         let at = self.asks.iter().position(|ask| &ask.id == id)?;
         if at == 0 {
@@ -972,7 +1086,7 @@ impl App {
             let id = ask.id.clone();
             self.produce(Event::PermissionResponse {
                 id,
-                decision: PermissionDecision::Allow,
+                decision: PermissionDecision::AllowByRule,
                 message: None,
             });
         }
@@ -1057,6 +1171,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
+            change: None,
         });
     }
 
@@ -1073,6 +1188,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
+            change: None,
         });
         self.scroll_to_tail();
     }
@@ -1090,6 +1206,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
+            change: None,
         });
     }
 
@@ -1107,6 +1224,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
+            change: None,
         });
         self.scroll_to_tail();
     }
@@ -1192,6 +1310,7 @@ impl App {
                 .to_owned(),
             streaming: false,
             at: self.at,
+            change: None,
         });
         self.scroll_to_tail();
     }
@@ -1320,6 +1439,7 @@ impl App {
             body: body.to_owned(),
             streaming: false,
             at: self.at,
+            change: None,
         });
         self
     }
@@ -1865,6 +1985,7 @@ impl App {
                     .to_owned(),
                 streaming: false,
                 at: self.at,
+                change: None,
             });
         }
         self.scroll_to_tail();
@@ -1884,6 +2005,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
+            change: None,
         });
         self.scroll_to_tail();
     }
@@ -2698,7 +2820,7 @@ mod tests {
             app.take_produced(),
             [Event::PermissionResponse {
                 id: "t1".into(),
-                decision: PermissionDecision::Allow,
+                decision: PermissionDecision::AllowByRule,
                 message: None,
             }],
             "the call was let through without the backend being told"
@@ -3430,5 +3552,165 @@ mod tests {
         });
 
         assert!(app.agents().is_empty());
+    }
+
+    /// An edit the backend reported the lines of, as a bridge produces it:
+    /// the call's end, and the change directly after it.
+    fn edited(app: &mut App, id: &str, hunks: Vec<Hunk>) {
+        app.apply(&start(
+            id,
+            "Edit",
+            r#"{"file_path":"/repo/a.rs"}"#,
+            Some("a.rs"),
+        ));
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Edit".to_owned(),
+            input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
+            output: "updated".to_owned(),
+            bytes: 7,
+            outcome: ToolOutcome::Ok,
+            summary: Some("a.rs".to_owned()),
+        });
+        app.apply(&Event::FileChange {
+            path: "a.rs".to_owned(),
+            added: Some(1),
+            removed: Some(1),
+            hunks,
+        });
+    }
+
+    fn one_hunk() -> Vec<Hunk> {
+        vec![
+            Hunk::checked(
+                3,
+                1,
+                3,
+                1,
+                vec![
+                    niobe_core::diff::Line::Removed("old".to_owned()),
+                    niobe_core::diff::Line::Added("new".to_owned()),
+                ],
+            )
+            .expect("one line each side"),
+        ]
+    }
+
+    fn change_of(app: &App) -> Option<&Change> {
+        app.entries()
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == EntryKind::Tool)
+            .and_then(|entry| entry.change.as_ref())
+    }
+
+    #[test]
+    fn a_change_the_backend_reported_the_lines_of_is_drawn_under_the_call_that_made_it() {
+        let mut app = app();
+        edited(&mut app, "t1", one_hunk());
+
+        assert_eq!(
+            change_of(&app).map(Change::hunks),
+            Some(one_hunk().as_slice())
+        );
+        assert_eq!(
+            app.entries().len(),
+            1,
+            "the change became an entry of its own"
+        );
+    }
+
+    #[test]
+    fn a_change_reported_only_as_counts_leaves_the_call_as_its_summary_line() {
+        let mut app = app();
+        edited(&mut app, "t1", Vec::new());
+
+        assert_eq!(change_of(&app), None);
+    }
+
+    /// A change is drawn under the call only when it follows that call's end,
+    /// which is the order a backend reports the two in. Anything else is a
+    /// change this shell cannot place.
+    #[test]
+    fn a_change_that_does_not_follow_the_end_of_its_call_is_not_put_under_another_call() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash", r#"{"command":"ls"}"#, Some("ls")));
+        app.apply(&Event::ToolCallEnd {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            output: String::new(),
+            bytes: 0,
+            outcome: ToolOutcome::Ok,
+            summary: None,
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "and then".to_owned(),
+        });
+        app.apply(&Event::FileChange {
+            path: "a.rs".to_owned(),
+            added: Some(1),
+            removed: Some(1),
+            hunks: one_hunk(),
+        });
+
+        assert!(app.entries().iter().all(|entry| entry.change.is_none()));
+    }
+
+    fn answered(app: &mut App, decision: PermissionDecision) {
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Edit".to_owned(),
+            input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
+            target: Some("/repo/a.rs".to_owned()),
+        });
+        app.apply(&Event::PermissionResponse {
+            id: "t1".into(),
+            decision,
+            message: None,
+        });
+    }
+
+    #[test]
+    fn the_diff_says_whether_the_operator_or_a_standing_rule_let_the_call_through() {
+        for (decision, gate) in [
+            (PermissionDecision::Allow, Gate::Operator),
+            (PermissionDecision::AllowAlways, Gate::OperatorAlways),
+            (PermissionDecision::AllowByRule, Gate::Rule),
+        ] {
+            let mut app = app();
+            answered(&mut app, decision);
+            edited(&mut app, "t1", one_hunk());
+
+            assert_eq!(
+                change_of(&app).and_then(Change::gate),
+                Some(gate),
+                "{decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_sent_from_here_that_nobody_was_asked_about_ran_in_the_mode() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&Event::ModeSelected { mode: Mode::Auto });
+        edited(&mut app, "t1", one_hunk());
+
+        assert_eq!(
+            change_of(&app).and_then(Change::gate),
+            Some(Gate::Unasked(Mode::Auto))
+        );
+    }
+
+    /// A call read back from a record, with no answer beside it, may have
+    /// been asked about somewhere this shell was not; saying it was not asked
+    /// would be a guess.
+    #[test]
+    fn a_call_read_back_without_an_answer_makes_no_claim_about_how_it_ran() {
+        let mut app = app();
+        app.apply(&Event::ModeSelected { mode: Mode::Auto });
+        edited(&mut app, "t1", one_hunk());
+
+        assert_eq!(change_of(&app).map(Change::gate), Some(None));
     }
 }

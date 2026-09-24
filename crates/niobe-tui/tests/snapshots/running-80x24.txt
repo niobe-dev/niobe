@@ -1,17 +1,17 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
 ╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
 ║                                                                              ║
-║ ◆ claude                                                                     ║
-║   Caching the etag beside the body so a 304 can be answered from the LRU.    ║
-║                                                                              ║
-║ ⚙ Edit  catalog/fetch.ts · 640 B out                                         ║
+║   115     cache.set(url, {                                                   ║
+║   116 +     etag: res.headers.get("ETag"),                                   ║
+║   117       body,                                                            ║
+║   └ allowed by you                                                           ║
 ║                                                                              ║
 ║ ◆ claude                                                                     ║
 ║   Rewriting the 304 test around the cached body.                             ║
 ║                                                                              ║
-║ ◆ claude                                                                     █
-║   The notebook that demonstrates the fetcher needs the new call shape.       █
-║                                                                              █
+║ ◆ claude                                                                     ║
+║   The notebook that demonstrates the fetcher needs the new call shape.       ║
+║                                                                              ║
 ║ ! Bash  npm test -- fetch · failed · 2.0 kB out                              █
 ║                                                                              █
 ║ ◆ claude                                                                     █

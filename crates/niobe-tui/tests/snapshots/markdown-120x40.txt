@@ -13,11 +13,11 @@
 ║ ◆ claude                                                                   ║ ║ ⎇ main ↑3                             █
 ║   Etags cached in the LRU; 304s short-circuit. One test still red — the    ║ ║ ▾ Working tree  23 files  +977 −259   █
 ║   304 path asserts a body that is no longer sent.                          ║ ║   .                                   █
-║                                                                            █ ║     CHANGELOG.md                +0 −0 █
-║ > you                                                                      █ ║   catalog/                            ║
-║   What changed?                                                            █ ║     fetch.ts                 +149 −12 ║
-║                                                                            █ ║     etag.ts                   +88 −41 ║
-║ ◆ claude                                                                   █ ║     cache/lru.ts               +31 −9 ║
+║                                                                            ║ ║     CHANGELOG.md                +0 −0 █
+║ > you                                                                      ║ ║   catalog/                            ║
+║   What changed?                                                            ║ ║     fetch.ts                 +149 −12 ║
+║                                                                            ║ ║     etag.ts                   +88 −41 ║
+║ ◆ claude                                                                   ║ ║     cache/lru.ts               +31 −9 ║
 ║   What changed                                                             █ ║     cache/index.ts             +12 −0 ║
 ║                                                                            █ ║   docs/                               ║
 ║   How it works: the fetcher keeps the etag beside the body, so a 304 is    █ ║     caching.md                +64 −22 ║

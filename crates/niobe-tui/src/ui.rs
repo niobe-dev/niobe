@@ -1205,9 +1205,15 @@ fn entry_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>>
     }
 
     let mut lines = vec![Line::from(head)];
+    let diff = entry
+        .change
+        .as_ref()
+        .map(|change| crate::hunks::lines(change, body_width, theme))
+        .unwrap_or_default();
     lines.extend(
         body_lines(entry, body_width, theme)
             .into_iter()
+            .chain(diff)
             .map(|line| {
                 let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
                 spans.extend(line.spans);
@@ -2901,6 +2907,7 @@ mod tests {
             path: path.to_owned(),
             added,
             removed,
+            hunks: Vec::new(),
         }
     }
 

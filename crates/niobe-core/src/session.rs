@@ -405,6 +405,7 @@ impl SessionState {
                 path,
                 added,
                 removed,
+                ..
             } => self.change_file(path, *added, *removed),
 
             Event::Decision {
@@ -1083,6 +1084,7 @@ mod tests {
             path: path.to_owned(),
             added,
             removed,
+            hunks: Vec::new(),
         }
     }
 

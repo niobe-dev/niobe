@@ -1255,7 +1255,10 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
         "{frame}"
     );
     assert!(under("reviewer").contains("✗ doc-writer"), "{frame}");
-    assert_eq!(frame.matches('└').count(), 2, "{frame}");
+    // The transcript's diff closes on a `└` of its own, saying who let the
+    // edit through; every other one is under an agent.
+    let under_agents = frame.matches('└').count() - frame.matches("└ allowed by").count();
+    assert_eq!(under_agents, 2, "{frame}");
 }
 
 /// A decision carries the time it was recorded, in a column of its own, and

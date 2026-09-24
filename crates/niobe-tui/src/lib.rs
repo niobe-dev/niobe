@@ -27,6 +27,7 @@ pub mod app;
 pub mod bridge;
 pub mod clock;
 mod fx;
+mod hunks;
 mod input;
 pub mod journal;
 mod markdown;

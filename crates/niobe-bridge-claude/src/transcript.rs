@@ -1131,4 +1131,24 @@ mod tests {
 
         assert_eq!(events, []);
     }
+
+    /// An edit as the CLI writes it to its own transcript: the report of the
+    /// change is under `toolUseResult`, the transcript's spelling of the live
+    /// stream's `tool_use_result`.
+    #[test]
+    fn an_imported_edit_carries_the_hunks_the_cli_wrote_beside_it() {
+        let events = folded(&[
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_e","name":"Edit","input":{"file_path":"/repo/notes.txt","old_string":"beta","new_string":"gamma","replace_all":false}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_e","content":"The file /repo/notes.txt has been updated successfully."}]},"toolUseResult":{"filePath":"/repo/notes.txt","oldString":"beta","newString":"gamma","structuredPatch":[{"oldStart":1,"oldLines":2,"newStart":1,"newLines":2,"lines":[" alpha","-beta","+gamma"]}],"userModified":false,"replaceAll":false}}"#,
+        ]);
+
+        let hunks: Vec<usize> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::FileChange { hunks, .. } => Some(hunks.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hunks, [1], "{events:?}");
+    }
 }
