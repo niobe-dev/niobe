@@ -576,7 +576,7 @@ fn the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back() {
         ratatui::crossterm::event::KeyCode::F(5),
         ratatui::crossterm::event::KeyModifiers::NONE,
     ));
-    let pressed = screen(&mut app, 120, 30);
+    let pressed = screen(&mut app, 200, 60);
     // The key reads the windows out against the same moment the pane draws
     // them at: one clock, or the shell says two things about one window.
     assert!(
@@ -1458,4 +1458,201 @@ fn a_decision_from_a_log_with_no_times_is_drawn_without_one() {
         with_time.find("Reuse the existing LRU"),
         "the summaries do not share a column:\n{row:?}\n{with_time:?}"
     );
+}
+
+/// The row the ask bar is drawn on: the one its badge starts.
+fn bar_row(frame: &str) -> String {
+    frame
+        .lines()
+        .find(|row| row.contains(" ask ") && row.contains(" > "))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("no ask bar on the frame:\n{frame}"))
+}
+
+fn press(app: &mut App, code: ratatui::crossterm::event::KeyCode) {
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        code,
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+}
+
+#[test]
+fn the_ask_bar_wears_its_badge_in_every_theme() {
+    for theme in niobe_tui::theme::THEMES {
+        let mut app = running_session().with_theme(theme);
+        let badge = style_at(&mut app, 120, 30, " ask ").expect("the bar is drawn");
+        assert_eq!(
+            (badge.fg, badge.bg),
+            (Some(theme.pane_bg), Some(theme.hot)),
+            "the badge is the pane's colour on the hot one, as a chip"
+        );
+        assert!(
+            badge.add_modifier.contains(ratatui::style::Modifier::BOLD),
+            "the badge is bold"
+        );
+    }
+}
+
+#[test]
+fn the_placeholder_names_only_what_the_composer_does_today() {
+    let mut app = running_session();
+    let row = bar_row(&screen(&mut app, 120, 30));
+    assert!(row.contains("Ask for a change"), "{row}");
+    for promise in ["/ search", "@ file", "! shell"] {
+        assert!(
+            !row.contains(promise),
+            "the bar promises `{promise}`, which the composer does not do:\n{row}"
+        );
+    }
+
+    app.type_into_composer(ratatui_textarea::Input {
+        key: ratatui_textarea::Key::Char('x'),
+        ..Default::default()
+    });
+    let row = bar_row(&screen(&mut app, 120, 30));
+    assert!(
+        !row.contains("Ask for a change"),
+        "the placeholder stays behind what was typed:\n{row}"
+    );
+}
+
+#[test]
+fn the_bar_names_the_mode_once_a_backend_has_said_it() {
+    let mut app = empty_session();
+    let row = bar_row(&screen(&mut app, 200, 60));
+    assert!(
+        !row.contains("▸▸"),
+        "nothing has said how this session gates tool calls, and the bar claims to know:\n{row}"
+    );
+    assert!(row.contains("Shift+Tab mode"), "{row}");
+    assert!(row.contains("Alt+Enter newline"), "{row}");
+
+    app.apply(&Event::ModeSelected { mode: Mode::Plan });
+    let row = bar_row(&screen(&mut app, 200, 60));
+    assert!(row.contains("▸▸ plan mode"), "{row}");
+    assert!(row.contains("Shift+Tab cycles"), "{row}");
+    assert!(row.contains("Alt+Enter newline"), "{row}");
+}
+
+#[test]
+fn a_narrowing_bar_drops_whole_hints_and_never_cuts_one() {
+    let mut app = running_session();
+    app.apply(&Event::ModeSelected { mode: Mode::Auto });
+    let whole = ["▸▸ auto mode", "Shift+Tab cycles", "Alt+Enter newline"];
+    let mut seen = std::collections::BTreeSet::new();
+    for width in 80..=200 {
+        let row = bar_row(&screen(&mut app, width, 30));
+        let shown: Vec<&str> = whole
+            .iter()
+            .copied()
+            .filter(|hint| row.contains(hint))
+            .collect();
+        assert_eq!(
+            shown,
+            whole[..shown.len()],
+            "at {width} columns the hints are not the first ones whole:\n{row}"
+        );
+        for piece in ["Alt+En", "Shift+T", "▸▸ auto"] {
+            assert!(
+                shown.iter().any(|hint| hint.starts_with(piece)) || !row.contains(piece),
+                "at {width} columns a hint is cut short:\n{row}"
+            );
+        }
+        seen.insert(shown.len());
+    }
+    assert!(
+        seen.len() > 1,
+        "no width in the range dropped a hint, so the test proves nothing: {seen:?}"
+    );
+}
+
+#[test]
+fn typing_takes_room_from_the_hints_rather_than_writing_over_them() {
+    let mut app = running_session();
+    for c in "a prompt long enough to reach where the hints are drawn on the bar".chars() {
+        app.type_into_composer(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char(c),
+            ..Default::default()
+        });
+    }
+    let row = bar_row(&screen(&mut app, 80, 24));
+    assert!(row.contains("a prompt long enough"), "{row}");
+    assert!(
+        !row.contains("newline"),
+        "the hints were drawn over what was typed:\n{row}"
+    );
+}
+
+#[test]
+fn the_shells_reply_is_said_in_the_bar_without_taking_a_row() {
+    let mut app = running_session();
+    let before = screen(&mut app, 120, 30);
+
+    press(&mut app, ratatui::crossterm::event::KeyCode::F(3));
+    let after = screen(&mut app, 120, 30);
+    let row = bar_row(&after);
+    assert!(row.contains("F3 Diff"), "{row}");
+    assert_eq!(
+        before.lines().position(|row| row.contains(" ask ")),
+        after.lines().position(|row| row.contains(" ask ")),
+        "the reply pushed the bar down a row:\n{after}"
+    );
+    assert_eq!(
+        before.lines().filter(|row| row.contains("────")).count(),
+        after.lines().filter(|row| row.contains("────")).count(),
+    );
+
+    press(&mut app, ratatui::crossterm::event::KeyCode::Char('x'));
+    assert!(!bar_row(&screen(&mut app, 120, 30)).contains("F3 Diff"));
+}
+
+#[test]
+fn the_composer_still_grows_to_a_third_of_the_pane() {
+    let mut app = running_session();
+    for _ in 0..20 {
+        app.type_into_composer(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char('x'),
+            ..Default::default()
+        });
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::ALT,
+        ));
+    }
+    let frame = screen(&mut app, 80, 24);
+    let rows: Vec<&str> = frame.lines().collect();
+    let bar = rows
+        .iter()
+        .position(|row| row.contains(" ask "))
+        .expect("the bar is drawn");
+    let bottom = rows
+        .iter()
+        .rposition(|row| row.starts_with('╚'))
+        .expect("the pane is closed");
+    // The pane's inner rows, less the one border and padding row above.
+    let inner = bottom - 2;
+    assert_eq!(bottom - bar, inner / 3, "{frame}");
+}
+
+#[test]
+fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
+    let mut app = running_session();
+    press(&mut app, ratatui::crossterm::event::KeyCode::F(1));
+    let frame = screen(&mut app, 80, 24);
+    let rows: Vec<&str> = frame.lines().collect();
+    let bar = rows
+        .iter()
+        .position(|row| row.contains(" ask "))
+        .expect("the bar is drawn");
+    let said: String = rows[bar..]
+        .iter()
+        .take_while(|row| !row.starts_with('╚'))
+        .map(|row| row.trim_matches(|c| c == '║' || c == ' ').to_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        said.ends_with("Shift- or Option-drag selects text"),
+        "the reply was cut:\n{frame}"
+    );
+    assert!(!said.contains("Ask for a change"), "{frame}");
 }

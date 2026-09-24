@@ -19,6 +19,6 @@
 ║   └──────────────────────────────────────────────────────────────────────┘   █
 ║                                                                              █
 ║ ──────────────────────────────────────────────────────────────────────────── ║
-║ >  Ask for a change, or press F1 for help                                    ║
+║  ask  >  Ask for a change ▸▸ ask mode · Shift+Tab cycles · Alt+Enter newline ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit

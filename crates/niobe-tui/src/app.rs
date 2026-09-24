@@ -537,7 +537,7 @@ impl App {
         // A prompt is prose, so it wraps rather than scrolling sideways, and a
         // path or a URL longer than the pane falls back to breaking mid-word.
         composer.set_wrap_mode(WrapMode::WordOrGlyph);
-        composer.set_placeholder_text("Ask for a change, or press F1 for help");
+        composer.set_placeholder_text("Ask for a change");
         paint_composer(&mut composer, &theme);
 
         Self {
@@ -1896,7 +1896,7 @@ impl App {
     /// wording can be asserted against a fixed clock.
     pub fn cost_hint(&self, now: u64) -> String {
         let Some(windows) = self.session.usage_windows() else {
-            return "F5 Cost — the cost breakdown is not implemented yet".to_owned();
+            return "F5 Usage — the usage breakdown is not implemented yet".to_owned();
         };
         let mut parts = Vec::new();
         if let Some(window) = windows.five_hour {
@@ -1908,7 +1908,7 @@ impl App {
         if windows.using_overage {
             parts.push("spending beyond the plan".to_owned());
         }
-        format!("F5 Cost — {}", parts.join(" · "))
+        format!("F5 Usage — {}", parts.join(" · "))
     }
 
     /// The moment the shell is reading the session at, in seconds since the
@@ -2913,7 +2913,7 @@ mod tests {
 
         assert_eq!(
             app.cost_hint(NOW),
-            "F5 Cost — 5h window 33%, resets in 1h 30m · 7d window 23%, resets in 4d 6h"
+            "F5 Usage — 5h window 33%, resets in 1h 30m · 7d window 23%, resets in 4d 6h"
         );
     }
 
@@ -2922,7 +2922,7 @@ mod tests {
         let mut app = app();
         assert!(
             app.cost_hint(0)
-                .contains("the cost breakdown is not implemented yet")
+                .contains("the usage breakdown is not implemented yet")
         );
 
         // Pressing it is what puts the line under the transcript.
@@ -2955,7 +2955,7 @@ mod tests {
 
         assert_eq!(
             app.cost_hint(NOW),
-            "F5 Cost — 5h window 90%, already reset · 7d window 40%, no reset time \
+            "F5 Usage — 5h window 90%, already reset · 7d window 40%, no reset time \
              reported · spending beyond the plan"
         );
     }

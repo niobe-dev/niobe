@@ -25,6 +25,6 @@
 ║   304 path asserts a body that is no longer sent.                          █ ║ ◇ reviewer → catalog/c… done 4100 ctx ║
 ║                                                                            █ ║ ✗ doc-writer → docs/etags.md   failed ║
 ║ ────────────────────────────────────────────────────────────────────────── ║ ║   └ Notion 404, gave up after 2 retr… ║
-║ >  Ask for a change, or press F1 for help                                  ║ ║ ▾ Decisions  2                        ║
+║  ask  >  Ask for a change                   ▸▸ ask mode · Shift+Tab cycles ║ ║ ▾ Decisions  2                        ║
 ╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

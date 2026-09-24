@@ -831,22 +831,24 @@ IN THE SHELL:
     F9                     Cycle the palette the shell draws in
     F10, Ctrl+Q            Quit
 
-    When a backend stops for permission, the turn waits on a prompt that takes
-    the keyboard:
+    When a backend stops for permission, the question is asked at the foot of
+    the transcript and the turn waits on it:
 
-    y, Enter               Allow this call
-    n, Esc                 Deny it; the denial is shown in the timeline
-    a                      Allow it, and every call to that tool from now on
-    p                      Allow it, and every call to that tool on the same
-                           target from now on
+    1-4, Up / Down         Choose: allow this call once, allow every call to
+                           that tool, allow every call on the same target, or
+                           deny it
+    Enter                  Give the chosen answer
+    Tab                    Write an answer instead: the call is refused and
+                           your words are what the agent reads back
+    Esc                    Decide later and go back to the composer; Esc
+                           again returns to the question
 
 MODE AND MODEL:
     Shift+Tab cycles the mode the session runs in — plan changes nothing, ask
     stops for every call no rule already allows, auto leaves the decision to
-    the backend. The shell does not show which one is in force: the row that
-    named it is gone and the composer does not say yet. A mode a backend
-    reports that niobe has no word for is carried as reported rather than
-    forced into one of these three.
+    the backend. The ask bar under the transcript names the one in force once a
+    backend has said which it is. A mode a backend reports that niobe has no
+    word for is carried as reported rather than forced into one of these three.
 
     F8 picks a model from the ones the profile names. The switch applies from
     the next turn and keeps everything said so far: the running session is told

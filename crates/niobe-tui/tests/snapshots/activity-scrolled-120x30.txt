@@ -25,6 +25,6 @@
 ║   304 path asserts a body that is no longer sent.                          █ ║   Notion·*             3 ━━━━━━━ ✗ 1  ║
 ║                                                                            █ ║   Bash                 1 ━━      ✗ 1  ║
 ║ ────────────────────────────────────────────────────────────────────────── ║ ║   Edit                 1 ━━           ║
-║ >  Ask for a change, or press F1 for help                                  ║ ║   Read                 1 ━━           █
+║  ask  >  Ask for a change                   ▸▸ ask mode · Shift+Tab cycles ║ ║   Read                 1 ━━           █
 ╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

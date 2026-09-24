@@ -29,7 +29,7 @@ use ratatui::widgets::{
     Widget,
 };
 
-use niobe_core::event::{AgentOutcome, UsageWindow};
+use niobe_core::event::{AgentOutcome, Mode, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, ToolTotals, Totals};
 
 use crate::app::{
@@ -560,19 +560,16 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 
     // The composer grows with what is typed into it, up to a third of the pane,
     // so a long prompt is editable without hiding the transcript behind it.
-    let typed = app.composed().lines().count().max(1);
+    // The shell's own reply wraps in the bar rather than being cut, and takes
+    // a row of its own only while it is too long for one.
+    let said = bar_says(app, theme, bar_room(app, inner.width));
+    let typed = app.composed().lines().count().max(said.len()).max(1);
     let cap = usize::from(inner.height / 3).max(1);
     let composer_rows = u16::try_from(typed.min(cap)).unwrap_or(1);
-    // The shell's own reply to the operator — what an F-key does, or why
-    // something they asked for did not happen. It costs a row only while there
-    // is one to give, and it sits against the composer because that is where
-    // they were looking when they asked.
-    let hint_rows = u16::from(app.hint().is_some());
 
-    let [transcript, divider, hint, composer] = Layout::vertical([
+    let [transcript, divider, composer] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
-        Constraint::Length(hint_rows),
         Constraint::Length(composer_rows),
     ])
     .areas(inner);
@@ -594,22 +591,146 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         divider,
     );
 
-    if let Some(said) = app.hint() {
-        frame.render_widget(
-            Paragraph::new(Line::from(text::truncate(said, usize::from(hint.width))))
-                .style(Style::new().bg(theme.pane_bg).fg(theme.hot)),
-            hint,
-        );
-    }
+    draw_ask_bar(frame, composer, said, app, theme);
+}
 
-    let [marker, editor] =
-        Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(composer);
+/// The badge in front of the composer: what the bar is for, as a chip.
+const ASK_BADGE: &str = " ask ";
+
+/// What the bar puts between its hints.
+const HINT_SEPARATOR: &str = " · ";
+
+/// The columns of the badge and the marker in front of the composer.
+const BAR_LEAD: u16 = 8;
+
+/// The composer, with its badge in front and, at its right-hand end, what the
+/// shell has to say: its own reply to the last key when it has one, otherwise
+/// the mode the session is in and the keys that change what the bar does.
+fn draw_ask_bar(
+    frame: &mut Frame,
+    area: Rect,
+    said: Vec<Line<'static>>,
+    app: &mut App,
+    theme: &Theme,
+) {
+    let badge_width = u16::try_from(text::width(ASK_BADGE)).unwrap_or(u16::MAX);
+    let [badge, marker, rest] = Layout::horizontal([
+        Constraint::Length(badge_width),
+        Constraint::Length(BAR_LEAD.saturating_sub(badge_width)),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    let pane = Style::new().bg(theme.pane_bg);
     frame.render_widget(
-        Paragraph::new(Line::from(">").style(Style::new().fg(theme.hot).bold()))
-            .style(Style::new().bg(theme.pane_bg)),
+        Paragraph::new(
+            Line::from(ASK_BADGE).style(Style::new().fg(theme.pane_bg).bg(theme.hot).bold()),
+        )
+        .style(pane),
+        Rect { height: 1, ..badge },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(" > ").style(Style::new().fg(theme.hot).bold())).style(pane),
         marker,
     );
+
+    // A reply takes every column the composer leaves it, so no part of the
+    // placeholder is left showing beside it; the key hints take only their own.
+    let said_width = match app.hint() {
+        Some(_) if !said.is_empty() => bar_room(app, area.width),
+        _ => said.iter().map(Line::width).max().unwrap_or(0),
+    };
+    let said_width = u16::try_from(said_width).unwrap_or(0);
+    let [editor, _, right] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(u16::from(said_width > 0)),
+        Constraint::Length(said_width),
+    ])
+    .areas(rest);
     app.composer().render(editor, frame.buffer_mut());
+    frame.render_widget(Paragraph::new(said).style(pane), right);
+}
+
+/// The columns the bar's right-hand end may take on a pane `width` wide.
+///
+/// What was typed keeps the room it needs, and the right-hand end gets what is
+/// left: a hint drawn over a prompt would hide the prompt.
+fn bar_room(app: &App, width: u16) -> usize {
+    usize::from(width.saturating_sub(BAR_LEAD)).saturating_sub(editor_needs(app) + 1)
+}
+
+/// The columns the composer needs to show what is in it, cursor included.
+///
+/// An empty composer needs its placeholder, unless the shell has something to
+/// say: the placeholder teaches what the bar is for, and a reply to the key
+/// just pressed is the more pressing of the two.
+fn editor_needs(app: &App) -> usize {
+    let typed = app.composed();
+    let widest = match (typed.is_empty(), app.hint()) {
+        (true, Some(_)) => 0,
+        (true, None) => text::width(app.composer().placeholder_text()),
+        (false, _) => typed.lines().map(text::width).max().unwrap_or(0),
+    };
+    widest + 1
+}
+
+/// What the bar's right-hand end says in `room` columns, a line per row.
+///
+/// The shell's own reply is wrapped, since it is a sentence the operator asked
+/// for. The key hints are one row and give way whole, the last first, because
+/// half a key reads as a different key.
+fn bar_says(app: &App, theme: &Theme, room: usize) -> Vec<Line<'static>> {
+    if room == 0 {
+        return Vec::new();
+    }
+    if let Some(said) = app.hint() {
+        return text::wrap(said, room)
+            .into_iter()
+            .map(|line| Line::from(line).style(Style::new().fg(theme.hot)))
+            .collect();
+    }
+    let hints = fitted_hints(key_hints(app.session().mode(), theme), room);
+    let mut spans = Vec::with_capacity(hints.len() * 2);
+    for (i, hint) in hints.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(HINT_SEPARATOR, Style::new().fg(theme.dim)));
+        }
+        spans.push(Span::styled(hint.text, hint.style));
+    }
+    vec![Line::from(spans)]
+}
+
+/// The mode the session gates tool calls in, and the keys the bar answers
+/// to, most important first.
+fn key_hints(mode: Option<Mode>, theme: &Theme) -> Vec<Segment> {
+    let key = |text: &str| Segment {
+        text: text.to_owned(),
+        style: Style::new().fg(theme.dim),
+    };
+    match mode {
+        Some(mode) => vec![
+            Segment {
+                text: format!("\u{25b8}\u{25b8} {mode} mode"),
+                style: Style::new().fg(theme.hot).bold(),
+            },
+            key("Shift+Tab cycles"),
+            key("Alt+Enter newline"),
+        ],
+        // Nothing has said how this session gates tool calls, so nothing
+        // claims to know: the key that sets it is what is left to say.
+        None => vec![key("Shift+Tab mode"), key("Alt+Enter newline")],
+    }
+}
+
+/// The hints that fit in `room` columns, separators included, whole ones only.
+fn fitted_hints(mut hints: Vec<Segment>, room: usize) -> Vec<Segment> {
+    let width = |hints: &[Segment]| {
+        let text: usize = hints.iter().map(|h| text::width(&h.text)).sum();
+        text + hints.len().saturating_sub(1) * text::width(HINT_SEPARATOR)
+    };
+    while !hints.is_empty() && width(&hints) > room {
+        hints.pop();
+    }
+    hints
 }
 
 fn draw_transcript(frame: &mut Frame, area: Rect, border: u16, app: &mut App, theme: &Theme) {

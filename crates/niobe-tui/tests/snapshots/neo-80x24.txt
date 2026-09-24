@@ -4,8 +4,9 @@
   d  LightGreen on Black, bold
   e  LightGreen on Black
   f  LightRed on Black, bold
-  g  Black on LightGreen
-  h  Black on Green
+  g  Black on LightGreen, bold
+  h  Black on LightGreen
+  i  Black on Green
 
 abaaaaaabaaaaaaaabaaaaaabaaaaaabaaaaaabaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaccccccaa
 aaaaaaaaaaaaaaaaaaaaaaaaaaaadddddddddddddddddddddddaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -28,6 +29,6 @@ aeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 aeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 aeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 aeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaea
-aedegaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeea
+aegggggdddhaaaaaaaaaaaaaaaaedddddddddddaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaea
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-dhhhhhhedhhhhhhedhhhhhhedhhhhhhedhhhhhhedhhhhhhedhhhhhhedhhhhhhedhhhhhheddhhhhhe
+diiiiiiediiiiiiediiiiiiediiiiiiediiiiiiediiiiiiediiiiiiediiiiiiediiiiiieddiiiiie
