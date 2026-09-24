@@ -21,10 +21,10 @@
 ║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ║                                       ║
 ║                                                                            █ ║ ▾ Sub-agents                          █
 ║ ◆ claude                                                                   █ ║ ◆ test-writer → tests… running 1m 42s █
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║ ◇ reviewer → catalog/cache.ts    done █
-║   304 path asserts a body that is no longer sent.                          █ ║ ✗ doc-writer → docs/etags.md   failed ║
-║                                                                            █ ║ ▾ Decisions  2                        ║
-║ ────────────────────────────────────────────────────────────────────────── ║ ║   13:39 Key the cache on the request  ║
-║ >  Ask for a change, or press F1 for help                                  ║ ║         URL, not the manifest id —    ║
+║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║   └ Reading tests/stream.rs           █
+║   304 path asserts a body that is no longer sent.                          █ ║ ◇ reviewer → catalog/c… done 4100 ctx ║
+║                                                                            █ ║ ✗ doc-writer → docs/etags.md   failed ║
+║ ────────────────────────────────────────────────────────────────────────── ║ ║   └ Notion 404, gave up after 2 retr… ║
+║ >  Ask for a change, or press F1 for help                                  ║ ║ ▾ Decisions  2                        ║
 ╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

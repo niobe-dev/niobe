@@ -63,16 +63,17 @@ const SHAPES: &[&str] = &[
     "system/init",
     "system/permission_denied",
     "system/status",
-    // Read where it names a sub-agent's call: it is how a sub-agent launched
-    // in the background ends. One naming a background command is passed over.
+    // Read where it names a sub-agent's call: the first is how a sub-agent
+    // launched in the background ends, with its answer, and the second the
+    // step it is on. One naming a background command is passed over.
     "system/task_notification",
+    "system/task_progress",
     "system/thinking_tokens",
     // Sub-agent and background-task bookkeeping, recorded from Claude Code
     // 2.1.278. Each is passed over on purpose: what it says is already folded
-    // from the call, the spawn and the notification, or is a figure no pane
-    // can price. `translate.rs` gives the reason for each.
+    // from the call, the spawn and the notification. `translate.rs` gives the
+    // reason for each.
     "system/background_tasks_changed",
-    "system/task_progress",
     "system/task_started",
     "system/task_updated",
     "user",
@@ -234,6 +235,87 @@ fn every_shape_in_the_recordings_is_one_this_bridge_was_written_for() {
         gone.is_empty(),
         "SHAPES names shapes no recording carries any more: {gone:?}. A shape with no recording \
          behind it is a claim about the protocol that nothing checks."
+    );
+}
+
+/// The keys a sub-agent's own figures are read from, per shape: the shape as
+/// [`shapes_of`] names it, and each key as a path into the line with what it
+/// must hold.
+///
+/// A shape can stay in the inventory above while a release stops putting one
+/// of these in it, and the bridge would then report nothing about the agent —
+/// an Activity row with no model or no step, and no error anywhere. Here a
+/// recording that lacks one fails, naming the key.
+const SUB_AGENT_KEYS: &[(&str, &[&str], Kind)] = &[
+    ("system/task_progress", &["tool_use_id"], Kind::Text),
+    ("system/task_progress", &["description"], Kind::Text),
+    (
+        "system/task_progress",
+        &["usage", "total_tokens"],
+        Kind::Count,
+    ),
+    ("system/task_notification", &["tool_use_id"], Kind::Text),
+    ("system/task_notification", &["summary"], Kind::Text),
+    (
+        "system/task_notification",
+        &["usage", "total_tokens"],
+        Kind::Count,
+    ),
+    ("assistant", &["message", "model"], Kind::Text),
+];
+
+/// What a key has to hold for the bridge to read it.
+#[derive(Debug, Clone, Copy)]
+enum Kind {
+    Text,
+    Count,
+}
+
+#[test]
+fn every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from() {
+    let mut checked = BTreeSet::new();
+    for path in recordings() {
+        for line in lines_of(&path) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            // Only a sub-agent's own messages are read for its model.
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
+                && value
+                    .get("parent_tool_use_id")
+                    .is_none_or(serde_json::Value::is_null)
+            {
+                continue;
+            }
+            let shapes = shapes_of(&line);
+            for (shape, key, kind) in SUB_AGENT_KEYS {
+                if shapes.first().map(String::as_str) != Some(*shape) {
+                    continue;
+                }
+                let held = key.iter().try_fold(&value, |cursor, part| cursor.get(part));
+                let readable = match kind {
+                    Kind::Text => held.and_then(serde_json::Value::as_str).is_some(),
+                    Kind::Count => held.and_then(serde_json::Value::as_u64).is_some(),
+                };
+                assert!(
+                    readable,
+                    "{}: a `{shape}` line has no {kind:?} at `{}`, which is where the bridge reads \
+                     a sub-agent's figures from: {line}",
+                    path.display(),
+                    key.join(".")
+                );
+                checked.insert((*shape, key.join(".")));
+            }
+        }
+    }
+    let unchecked: Vec<String> = SUB_AGENT_KEYS
+        .iter()
+        .filter(|(shape, key, _)| !checked.contains(&(*shape, key.join("."))))
+        .map(|(shape, key, _)| format!("{shape} {}", key.join(".")))
+        .collect();
+    assert!(
+        unchecked.is_empty(),
+        "no recording holds a line to check these against: {unchecked:?}"
     );
 }
 

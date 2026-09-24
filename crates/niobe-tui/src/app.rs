@@ -352,7 +352,8 @@ pub struct Entry {
 }
 
 /// A sub-agent as this shell saw it: what it was spawned to do, when it
-/// started, and how it ended if it has.
+/// started, what its backend reported about it since, and how it ended if it
+/// has.
 ///
 /// A finished agent is kept rather than dropped. What a session spawned and
 /// how it went is the record the operator reads the pane for; a list of only
@@ -367,6 +368,13 @@ pub struct SubAgent {
     pub at: Option<Stamp>,
     /// How it finished, or `None` while it is still running.
     pub outcome: Option<AgentOutcome>,
+    /// The model its own messages were answered by, where its backend said.
+    pub model: Option<String>,
+    /// The tokens in its conversation at its latest message, where its
+    /// backend counted them. A size, not what it spent.
+    pub context_tokens: Option<u64>,
+    /// The last thing it was observed doing, in its backend's words.
+    pub latest: Option<String>,
 }
 
 /// What a running turn is doing, for the line that shows the session is at
@@ -738,6 +746,9 @@ impl App {
                     label: label.clone(),
                     at: self.at,
                     outcome: None,
+                    model: None,
+                    context_tokens: None,
+                    latest: None,
                 };
                 // An id the backend hands out twice is one agent started
                 // again, not two rows: the second spawn replaces the first
@@ -745,6 +756,21 @@ impl App {
                 match self.agents.iter_mut().find(|agent| &agent.id == id) {
                     Some(existing) => *existing = spawned,
                     None => self.agents.push(spawned),
+                }
+            }
+            Event::AgentProgress {
+                id,
+                model,
+                context_tokens,
+                latest,
+            } => {
+                // A report replaces only what it speaks to: an agent's model
+                // is not forgotten because the report of its next step does
+                // not repeat it.
+                if let Some(agent) = self.agents.iter_mut().find(|agent| &agent.id == id) {
+                    agent.model = model.clone().or(agent.model.take());
+                    agent.context_tokens = context_tokens.or(agent.context_tokens);
+                    agent.latest = latest.clone().or(agent.latest.take());
                 }
             }
             Event::AgentExit { id, outcome } => {
@@ -3030,5 +3056,54 @@ mod tests {
             app.agent_label(&AgentId::new("a1")).as_deref(),
             Some("review the diff")
         );
+    }
+
+    #[test]
+    fn a_sub_agents_report_replaces_only_what_it_speaks_to() {
+        let mut app = app();
+        let id = AgentId::new("a1");
+        app.apply(&Event::AgentSpawn {
+            id: id.clone(),
+            parent: None,
+            label: "review the diff".to_owned(),
+        });
+        app.apply(&Event::AgentProgress {
+            id: id.clone(),
+            model: Some("claude-opus-5".to_owned()),
+            context_tokens: None,
+            latest: None,
+        });
+        app.apply(&Event::AgentProgress {
+            id: id.clone(),
+            model: None,
+            context_tokens: Some(12_938),
+            latest: Some("Reading catalog/cache.py".to_owned()),
+        });
+        app.apply(&Event::AgentProgress {
+            id,
+            model: None,
+            context_tokens: Some(13_009),
+            latest: None,
+        });
+
+        let [agent] = app.agents() else {
+            panic!("one agent was spawned: {:?}", app.agents());
+        };
+        assert_eq!(agent.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(agent.context_tokens, Some(13_009));
+        assert_eq!(agent.latest.as_deref(), Some("Reading catalog/cache.py"));
+    }
+
+    #[test]
+    fn a_report_about_an_agent_never_spawned_adds_no_row() {
+        let mut app = app();
+        app.apply(&Event::AgentProgress {
+            id: AgentId::new("a9"),
+            model: Some("claude-opus-5".to_owned()),
+            context_tokens: Some(1),
+            latest: None,
+        });
+
+        assert!(app.agents().is_empty());
     }
 }

@@ -56,10 +56,13 @@
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
 //!   rest is not surfaced, because no pane reads it and widening the shared
 //!   vocabulary for figures nothing draws would be a change nobody could see.
-//! * `system`/`task_progress` carries a sub-agent's running token count, as
-//!   one number with no model and no split. It is passed over with the rest
-//!   of the CLI's background-task bookkeeping, because nothing could price it
-//!   and no pane draws a sub-agent's own figures.
+//! * A sub-agent's own figures are what the CLI reports for that agent alone,
+//!   and they become [`Event::AgentProgress`]: the model its messages name,
+//!   the step `system`/`task_progress` says it is on, the first line of the
+//!   answer its `task_notification` carries, and the `usage.total_tokens` of
+//!   both. That count is one number with no model and no split, and it follows
+//!   the size of the agent's conversation rather than summing what it was
+//!   billed, so it is carried as a size and never priced.
 //! * A sub-agent's `parent_tool_use_id` says which sub-agent call a message
 //!   belongs to. Its tool calls and its tokens are folded in — they are work
 //!   done and money spent — but attributing each line of the transcript to the
@@ -225,6 +228,10 @@ pub struct Translator {
     /// The sub-agents this session has spawned, by the id of the call that
     /// spawned each, and whether each is still running.
     agents: BTreeMap<String, Running>,
+    /// The model each sub-agent was last reported answering with, by the id of
+    /// the call that spawned it, so that a model is reported when it changes
+    /// rather than with every message the agent writes.
+    agent_models: BTreeMap<String, String>,
     /// The `tool_use` ids the CLI refused and this bridge has already
     /// reported, so that the closing `result`'s list of the same refusals is
     /// not counted a second time.
@@ -251,6 +258,7 @@ impl Translator {
             tool_calls: BTreeMap::new(),
             asked: Vec::new(),
             agents: BTreeMap::new(),
+            agent_models: BTreeMap::new(),
             denied: BTreeMap::new(),
             turn: Counts::default(),
             reported: BTreeMap::new(),
@@ -421,6 +429,7 @@ impl Translator {
             }
             Some("permission_denied") => self.denied(system, out),
             Some("task_notification") => self.task_notification(system, out),
+            Some("task_progress") => self.task_progress(system, out),
             // The CLI's own request state — `requesting`, and whatever it adds
             // next. It says what the process is doing, not what the session is,
             // and the shell already shows that a turn is in flight.
@@ -439,18 +448,12 @@ impl Translator {
             // * `task_started` restates the call that started the task, which
             //   is already a spawn for a sub-agent and a tool call for anything
             //   else.
-            // * `task_progress` carries a running `usage.total_tokens` for one
-            //   sub-agent — one number across input, output and cache, with no
-            //   model and no split, so it cannot be priced or reconciled with
-            //   the bill, and no pane draws a sub-agent's own figures.
             // * `task_updated` patches the task's status by the CLI's own task
             //   id and names no call. The same end arrives as a
             //   `task_notification` that does, and that is the one read.
             // * `background_tasks_changed` lists what is running now, which is
             //   what the spawns and exits already fold to.
-            Some(
-                "task_started" | "task_progress" | "task_updated" | "background_tasks_changed",
-            ) => {}
+            Some("task_started" | "task_updated" | "background_tasks_changed") => {}
             other => out.push(unread(format!(
                 "the CLI sent a system message of subtype `{}`, which this version of Niobe \
                  does not know how to read.",
@@ -473,10 +476,61 @@ impl Translator {
     /// background, the model reads the output for itself, and the transcript
     /// the CLI writes of the same session passes it over too, so a session
     /// read back folds to what it showed live.
+    ///
+    /// What the agent answered and how large its conversation ended up are
+    /// reported before its end, because nothing is reported about an agent
+    /// after it.
     fn task_notification(&mut self, system: wire::System, out: &mut Vec<Event>) {
-        if let Some(id) = system.tool_use_id {
-            out.append(&mut self.task_stopped(&id, system.status.as_deref()));
+        let Some(id) = system.tool_use_id else { return };
+        let answer = system.summary.as_deref().and_then(opening_line);
+        self.agent_progress(&id, None, total_tokens(system.usage.as_ref()), answer, out);
+        out.append(&mut self.task_stopped(&id, system.status.as_deref()));
+    }
+
+    /// The CLI's word on a sub-agent it is running: the step it is on and how
+    /// large its conversation has grown. Passed over for a task that is not a
+    /// sub-agent this session spawned and is still running.
+    fn task_progress(&mut self, system: wire::System, out: &mut Vec<Event>) {
+        let Some(id) = system.tool_use_id else { return };
+        let step = system.description.as_deref().and_then(opening_line);
+        self.agent_progress(&id, None, total_tokens(system.usage.as_ref()), step, out);
+    }
+
+    /// Records the model a sub-agent's own message names, and reports it the
+    /// first time it is named and whenever it changes.
+    fn agent_model(&mut self, id: &str, model: String, out: &mut Vec<Event>) {
+        if !self.is_running(id) || self.agent_models.get(id) == Some(&model) {
+            return;
         }
+        self.agent_models.insert(id.to_owned(), model.clone());
+        self.agent_progress(id, Some(model), None, None, out);
+    }
+
+    /// Reports what is known about the running sub-agent spawned by call
+    /// `id`, where anything is.
+    fn agent_progress(
+        &self,
+        id: &str,
+        model: Option<String>,
+        context_tokens: Option<u64>,
+        latest: Option<String>,
+        out: &mut Vec<Event>,
+    ) {
+        if !self.is_running(id) || (model.is_none() && context_tokens.is_none() && latest.is_none())
+        {
+            return;
+        }
+        out.push(Event::AgentProgress {
+            id: AgentId::new(id.to_owned()),
+            model,
+            context_tokens,
+            latest,
+        });
+    }
+
+    /// Whether call `id` spawned a sub-agent that has not ended.
+    fn is_running(&self, id: &str) -> bool {
+        self.agents.get(id) == Some(&Running::Yes)
     }
 
     /// The events for the CLI saying that the background task call `id`
@@ -608,6 +662,12 @@ impl Translator {
     }
 
     fn assistant(&mut self, envelope: wire::Envelope, out: &mut Vec<Event>) {
+        if let (Some(agent), Some(model)) = (
+            envelope.parent_tool_use_id.as_deref(),
+            envelope.message.model.clone(),
+        ) {
+            self.agent_model(agent, model, out);
+        }
         let blocks = match envelope.message.content {
             Some(wire::Content::Blocks(blocks)) => blocks,
             Some(wire::Content::Text(text)) => {
@@ -872,8 +932,10 @@ impl Translator {
                     .model
                     .as_deref()
                     .is_some_and(|session| is_window_of(session, &model));
-                if stream.is_none() && !same_model {
-                    self.set_model(model.clone(), out);
+                match stream.as_deref() {
+                    None if !same_model => self.set_model(model.clone(), out),
+                    None => {}
+                    Some(agent) => self.agent_model(agent, model.clone(), out),
                 }
                 self.in_flight.insert(stream, model);
             }
@@ -1333,6 +1395,20 @@ fn render_content(content: wire::Content) -> String {
     }
 }
 
+/// The first line of `text` that says anything, without the marks that make
+/// it a markdown heading, or `None` where no line does.
+fn opening_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(|line| line.trim().trim_start_matches('#').trim())
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+/// The count a background task's `usage` carries, where it carries one.
+fn total_tokens(usage: Option<&wire::TaskUsage>) -> Option<u64> {
+    usage.and_then(|usage| usage.total_tokens)
+}
+
 /// What a sub-agent call was spawned to do, as the Activity pane names it:
 /// the kind of agent it asked for, where it named one, and what it was for.
 fn label_of(input: &serde_json::Value) -> Option<String> {
@@ -1478,6 +1554,66 @@ mod tests {
 
         assert!(events.is_empty(), "{events:?}");
         assert_eq!(translator.model.as_deref(), Some("opus-5"));
+    }
+
+    #[test]
+    fn a_sub_agents_streamed_messages_name_its_model_once_until_it_changes() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_task", "Agent"));
+        let start = |model: &str| {
+            format!(
+                r#"{{"type":"stream_event","parent_tool_use_id":"toolu_task","event":{{"type":"message_start","message":{{"model":"{model}"}}}}}}"#
+            )
+        };
+
+        let models: Vec<Event> = ["haiku-4-5", "haiku-4-5", "sonnet-5"]
+            .iter()
+            .flat_map(|model| translator.line(&start(model)))
+            .collect();
+
+        let named: Vec<Option<&str>> = models
+            .iter()
+            .map(|event| match event {
+                Event::AgentProgress { model, .. } => model.as_deref(),
+                other => panic!("only the agent's model is reported: {other:?}"),
+            })
+            .collect();
+        assert_eq!(named, [Some("haiku-4-5"), Some("sonnet-5")]);
+    }
+
+    #[test]
+    fn progress_on_a_task_that_is_not_a_running_sub_agent_says_nothing() {
+        let mut translator = translator();
+        let progress = r#"{"type":"system","subtype":"task_progress","tool_use_id":"toolu_bash","description":"Running build","usage":{"total_tokens":10}}"#;
+
+        assert!(translator.line(progress).is_empty());
+    }
+
+    #[test]
+    fn a_failed_sub_agent_says_why_before_it_ends() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+        translator.line(&launched("toolu_a"));
+
+        let events = translator.line(
+            r##"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_a","status":"failed","summary":"\n## Notion 404, gave up after 2 retries\n\nThe page was moved.","usage":{"total_tokens":4100}}"##,
+        );
+
+        assert_eq!(
+            events,
+            [
+                Event::AgentProgress {
+                    id: AgentId::new("toolu_a"),
+                    model: None,
+                    context_tokens: Some(4100),
+                    latest: Some("Notion 404, gave up after 2 retries".to_owned()),
+                },
+                Event::AgentExit {
+                    id: AgentId::new("toolu_a"),
+                    outcome: AgentOutcome::Failed,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1727,10 +1863,9 @@ mod tests {
     /// The CLI's bookkeeping for its background tasks, as Claude Code 2.1.278
     /// sent it for one sub-agent: each line is what the recording holds, cut
     /// to the keys that say what it is.
-    const TASK_BOOKKEEPING: [&str; 4] = [
+    const TASK_BOOKKEEPING: [&str; 3] = [
         r#"{"type":"system","subtype":"task_started","task_id":"a59795b7f983ac4a4","tool_use_id":"toolu_a","description":"Summarize catalog/cache.py","subagent_type":"quick-lookup","is_backgrounded":true,"task_type":"local_agent"}"#,
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a59795b7f983ac4a4","task_type":"local_agent","description":"Summarize catalog/cache.py"}]}"#,
-        r#"{"type":"system","subtype":"task_progress","task_id":"a59795b7f983ac4a4","tool_use_id":"toolu_a","description":"Reading catalog/cache.py","usage":{"total_tokens":5967,"tool_uses":1,"duration_ms":2818},"last_tool_name":"Read"}"#,
         r#"{"type":"system","subtype":"task_updated","task_id":"a59795b7f983ac4a4","patch":{"status":"completed","end_time":1789833985799}}"#,
     ];
 

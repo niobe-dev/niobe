@@ -429,6 +429,11 @@ impl SessionState {
                 self.peak_running_agents = self.peak_running_agents.max(running);
             }
 
+            // A sub-agent's own figures are what a pane draws beside it. Its
+            // context size is not a spend, and its tokens are already in the
+            // session's usage records, so nothing here counts them again.
+            Event::AgentProgress { .. } => {}
+
             Event::AgentExit { id, outcome } => {
                 self.running_agents.remove(id);
                 match outcome {

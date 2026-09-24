@@ -28,13 +28,13 @@
 ║                                                                            █ ║                                       ║
 ║   file         │ lines                                                     █ ║ ▾ Sub-agents                          █
 ║   ─────────────┼──────                                                     █ ║ ◆ test-writer → tests… running 1m 42s █
-║   fetch.ts     │   +38                                                     █ ║ ◇ reviewer → catalog/cache.ts    done █
-║   etag.test.ts │   +24                                                     █ ║ ✗ doc-writer → docs/etags.md   failed █
-║                                                                            █ ║ ▾ Decisions  2                        █
-║   ╭ ts                                                                     █ ║   13:39 Key the cache on the request  █
-║   │ if (res.status === 304) return cached.body;                            █ ║         URL, not the manifest id —    ║
-║                                                                            █ ║         two manifests can share an    ║
-║ ────────────────────────────────────────────────────────────────────────── ║ ║         id across catalogs.           ║
-║ >  Ask for a change, or press F1 for help                                  ║ ║   13:39 Reuse the existing LRU        ║
+║   fetch.ts     │   +38                                                     █ ║   └ Reading tests/stream.rs           █
+║   etag.test.ts │   +24                                                     █ ║ ◇ reviewer → catalog/c… done 4100 ctx █
+║                                                                            █ ║ ✗ doc-writer → docs/etags.md   failed █
+║   ╭ ts                                                                     █ ║   └ Notion 404, gave up after 2 retr… ║
+║   │ if (res.status === 304) return cached.body;                            █ ║ ▾ Decisions  2                        ║
+║                                                                            █ ║   13:39 Key the cache on the request  ║
+║ ────────────────────────────────────────────────────────────────────────── ║ ║         URL, not the manifest id —    ║
+║ >  Ask for a change, or press F1 for help                                  ║ ║         two manifests can share an    ║
 ╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

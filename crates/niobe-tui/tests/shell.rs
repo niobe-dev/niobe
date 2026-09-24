@@ -1044,10 +1044,10 @@ fn an_agent_that_finished_stays_in_the_list_with_its_outcome() {
 
 /// A running agent's status column is an elapsed time, measured from the
 /// moment it was spawned against the moment the shell is drawing at. A
-/// finished one carries no figure: its tokens are not attributed to it
-/// anywhere in the stream, and a zero would be a measurement nobody made.
+/// finished one carries the size its conversation reached where its backend
+/// reported one, and a failed one carries its state alone.
 #[test]
-fn a_running_agent_is_timed_and_a_finished_one_claims_no_figure() {
+fn a_running_agent_is_timed_and_a_finished_one_shows_its_context() {
     let frame = screen(&mut running_session(), 200, 60);
 
     let running = frame
@@ -1059,18 +1059,72 @@ fn a_running_agent_is_timed_and_a_finished_one_claims_no_figure() {
         "the session ran for 102 seconds before it was read:\n{running:?}"
     );
 
-    for (finished, word) in [("reviewer", "done"), ("doc-writer", "failed")] {
+    assert!(!running.contains("ctx"), "{running:?}");
+
+    for (finished, word) in [("reviewer", "done 4100 ctx"), ("doc-writer", "failed")] {
         let row = frame
             .lines()
             .find(|line| line.contains(finished))
             .unwrap_or_default();
-        // The state is the whole status column: nothing follows it but the
-        // pane's own border.
+        // Nothing follows the status column but the pane's own border.
         assert!(
             row.trim_end_matches(['║', ' ']).ends_with(word),
-            "{finished} claims a figure nothing reported: {row:?}"
+            "{finished} reads other than {word:?}: {row:?}"
         );
     }
+}
+
+/// The model a sub-agent's own messages named is drawn beside what it was
+/// spawned to do, shortened the way the Usage pane shortens it; an agent whose
+/// backend named none is drawn with none.
+#[test]
+fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
+    let frame = screen(&mut running_session(), 200, 60);
+    let row = |label: &str| {
+        frame
+            .lines()
+            .find(|line| line.contains(label))
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    assert!(
+        row("test-writer").contains("tests/fetch.test.ts sonnet-5"),
+        "{frame}"
+    );
+    assert!(
+        row("reviewer").contains("catalog/cache.ts haiku-4-5"),
+        "{frame}"
+    );
+    for model in ["sonnet", "haiku", "opus"] {
+        assert!(!row("doc-writer").contains(model), "{frame}");
+    }
+}
+
+/// Under an agent is the last thing it was observed doing, and under an agent
+/// that reported nothing there is nothing — not an empty `└`.
+#[test]
+fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
+    let frame = screen(&mut running_session(), 200, 60);
+    let lines: Vec<&str> = frame.lines().collect();
+    let under = |label: &str| {
+        let at = lines
+            .iter()
+            .position(|line| line.contains(label))
+            .expect("the agent has a row");
+        lines[at + 1].to_owned()
+    };
+
+    assert!(
+        under("test-writer").contains("└ Reading tests/stream.rs"),
+        "{frame}"
+    );
+    assert!(
+        under("doc-writer").contains("└ Notion 404, gave up after 2 retries"),
+        "{frame}"
+    );
+    assert!(under("reviewer").contains("✗ doc-writer"), "{frame}");
+    assert_eq!(frame.matches('└').count(), 2, "{frame}");
 }
 
 /// A decision carries the time it was recorded, in a column of its own, and

@@ -75,6 +75,23 @@ pub(crate) struct System {
     /// `stopped` in the CLI's own schema. On `status`, the CLI's request state,
     /// which is not read.
     pub(crate) status: Option<String>,
+    /// On `task_progress`: the step the task is on, worded by the CLI from
+    /// the tool call it last made — `Reading catalog/cache.py`.
+    pub(crate) description: Option<String>,
+    /// On `task_notification`: what a sub-agent answered, in full.
+    pub(crate) summary: Option<String>,
+    /// On `task_progress` and `task_notification`: what the task has used.
+    pub(crate) usage: Option<TaskUsage>,
+}
+
+/// What a background task has used, as the CLI counts it for the task alone.
+#[derive(Debug, Deserialize)]
+pub(crate) struct TaskUsage {
+    /// The tokens in a sub-agent's conversation at its latest message: input,
+    /// cache and output as one number. Measured against the recording in
+    /// `tests/fixtures/sub-agents.jsonl`, it follows the latest message's
+    /// size rather than summing the messages, so it is not what was billed.
+    pub(crate) total_tokens: Option<u64>,
 }
 
 /// What the CLI says about a context compaction.
@@ -86,13 +103,16 @@ pub(crate) struct CompactMetadata {
 
 /// An `assistant` or `user` line.
 ///
-/// The envelope also carries `parent_tool_use_id`, naming the sub-agent call
-/// whose agent produced the message. It is not read here: a complete message
-/// is folded in the same way whichever agent wrote it, and only the fragments
-/// of one need to be told apart — see [`StreamEvent`].
+/// A complete message is folded in the same way whichever agent wrote it;
+/// only the fragments of one need to be told apart — see [`StreamEvent`].
 #[derive(Debug, Deserialize)]
 pub(crate) struct Envelope {
     pub(crate) message: ApiMessage,
+    /// The sub-agent call whose agent produced the message, where a sub-agent
+    /// did. Read for what the message says about that agent — the model it
+    /// answers with — and for nothing else.
+    #[serde(default)]
+    pub(crate) parent_tool_use_id: Option<String>,
     /// On a `user` line that carries a tool result: what the tool reported
     /// about itself, in a shape of the tool's own. Kept as a value because
     /// every tool shapes it differently — an object for most, a bare string
@@ -107,6 +127,7 @@ impl Envelope {
     pub(crate) fn of(message: ApiMessage) -> Self {
         Self {
             message,
+            parent_tool_use_id: None,
             tool_use_result: None,
         }
     }
@@ -127,6 +148,9 @@ impl Envelope {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiMessage {
     pub(crate) content: Option<Content>,
+    /// The model that answered, on an `assistant` message.
+    #[serde(default)]
+    pub(crate) model: Option<String>,
 }
 
 /// A message's content, which the CLI writes as a bare string for a plain turn

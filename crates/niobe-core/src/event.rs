@@ -540,6 +540,36 @@ pub enum Event {
         label: String,
     },
 
+    /// What a sub-agent's backend reported about it after it started: the
+    /// model it answers with, how large its conversation has grown, and the
+    /// last thing it was seen doing.
+    ///
+    /// Each field is `None` where this report says nothing about it, and a
+    /// consumer keeps what an earlier report said. None of it is ever filled
+    /// in by Niobe: a model the backend did not name, or a step it did not
+    /// report, stays unknown rather than being inferred from the spawn.
+    AgentProgress {
+        /// The agent this is about.
+        id: AgentId,
+        /// The model the agent's own messages were answered by.
+        #[serde(default)]
+        model: Option<String>,
+        /// The tokens in the agent's conversation at its latest message —
+        /// its input, cache reads and writes and output, as one total the
+        /// backend counted. A size, not a spend: each message re-reads the
+        /// conversation, so what the agent was billed is larger, and the
+        /// total has no split to price it by. What it cost is in the
+        /// session's usage records, which do not say which agent spent it.
+        #[serde(default)]
+        context_tokens: Option<u64>,
+        /// One line of what the agent was last observed doing, worded by the
+        /// backend: the step it is on while it runs (`Reading
+        /// catalog/cache.py`), and the first line of its own answer once it
+        /// has stopped. Never a description of what it intends.
+        #[serde(default)]
+        latest: Option<String>,
+    },
+
     /// A sub-agent finished.
     AgentExit {
         /// The agent that finished.

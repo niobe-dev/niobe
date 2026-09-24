@@ -1426,14 +1426,14 @@ fn agent_summary(session: &SessionState, theme: &Theme) -> Vec<Span<'static>> {
     spans
 }
 
-/// A sub-agent per row: the state glyph, what it was spawned to do, and the
-/// status column.
+/// A sub-agent per row: the state glyph, what it was spawned to do, the model
+/// it answers with, and the status column — then, on a row of its own, the
+/// last thing it was seen doing.
 ///
-/// The status column carries an elapsed time while the agent runs, and the
-/// state alone once it has finished. A finished agent's tokens are not
-/// attributed to it anywhere in the stream yet, so the column has no figure to
-/// carry rather than a zero — and how long it ran is not shown in a column the
-/// tokens are going to take.
+/// The model is drawn only where the agent's own messages named one, and
+/// shortened the way the Usage pane shortens the session's. The sub-line is
+/// drawn only where the backend reported a step or an answer: an empty `└` on
+/// every agent that said nothing would be half the pane's rows saying nothing.
 fn agent_rows(
     app: &App,
     session: &SessionState,
@@ -1456,39 +1456,97 @@ fn agent_rows(
         return rows;
     }
 
-    for agent in app.agents() {
+    let models = agent_models(app.agents());
+    for (agent, model) in app.agents().iter().zip(models) {
         let (glyph, colour, word) = agent_state(agent.outcome, theme);
         let status = agent_status(agent, word, app.stamp());
 
         let room = width
             .saturating_sub(AGENT_GLYPH + text::width(&status) + AGENT_GAP)
             .max(1);
-        let label = text::truncate(&agent.label, room);
+        let (label, model) = agent_name(&agent.label, model, room);
+        let named = text::width(&label) + model.as_ref().map_or(0, |m| 1 + text::width(m));
         // What is left between the two goes between them, so the status keeps
         // the pane's right edge and the labels do not have to be one length.
         let pad = width
-            .saturating_sub(AGENT_GLYPH + text::width(&label) + text::width(&status))
+            .saturating_sub(AGENT_GLYPH + named + text::width(&status))
             .max(AGENT_GAP);
 
-        rows.push(Line::from(vec![
+        let mut row = vec![
             Span::styled(format!("{glyph} "), Style::new().fg(colour).bold()),
             Span::styled(label, Style::new().fg(theme.fg)),
-            Span::raw(" ".repeat(pad)),
-            Span::styled(status, Style::new().fg(colour)),
-        ]));
+        ];
+        if let Some(model) = model {
+            row.push(Span::styled(
+                format!(" {model}"),
+                Style::new().fg(theme.dim),
+            ));
+        }
+        row.push(Span::raw(" ".repeat(pad)));
+        row.push(Span::styled(status, Style::new().fg(colour)));
+        rows.push(Line::from(row));
+
+        if let Some(latest) = &agent.latest {
+            let room = width.saturating_sub(AGENT_SUBLINE).max(1);
+            rows.push(
+                Line::from(format!("  └ {}", text::truncate(latest, room)))
+                    .style(Style::new().fg(theme.dim)),
+            );
+        }
     }
     rows
 }
 
-/// A sub-agent's status column: `running 1m 42s`, `done`, `failed`.
+/// What each agent's model is called on its row, in the pane's order: the
+/// Usage pane's short names, which keep an id whole where two would read
+/// alike.
+fn agent_models(agents: &[SubAgent]) -> Vec<Option<String>> {
+    let named: Vec<&str> = agents
+        .iter()
+        .filter_map(|agent| agent.model.as_deref())
+        .collect();
+    let mut labels = usage::labels(named).into_iter();
+    agents
+        .iter()
+        .map(|agent| agent.model.as_ref().and_then(|_| labels.next()))
+        .collect()
+}
+
+/// An agent's label and model fitted into `room` cells.
+///
+/// The label is what the operator reads the row for, so it keeps the room:
+/// the model is dropped whole where the two do not fit with enough of the
+/// label left to say which agent this is, rather than both being cut.
+fn agent_name(label: &str, model: Option<String>, room: usize) -> (String, Option<String>) {
+    let Some(model) = model else {
+        return (text::truncate(label, room), None);
+    };
+    let left = room.saturating_sub(1 + text::width(&model));
+    match left >= AGENT_LABEL_LEAST.min(text::width(label)) && left > 0 {
+        true => (text::truncate(label, left), Some(model)),
+        false => (text::truncate(label, room), None),
+    }
+}
+
+/// A sub-agent's status column: `running 1m 42s`, `done 4100 ctx`, `failed`.
 ///
 /// The elapsed time is there only while the agent runs, and only where the
 /// shell has both the moment it started and the moment it is drawing at — a
 /// session read back from a log that kept no times has neither, and the state
 /// alone is what there is to say.
+///
+/// An agent that finished its task carries the size its conversation reached,
+/// where its backend counted one, marked `ctx` because that is what it is: the
+/// tokens the agent's latest message was answered over, not what the agent
+/// was billed. A failed or cancelled agent carries its state alone; why it
+/// stopped is on the row beneath it.
 fn agent_status(agent: &SubAgent, word: &str, now: Option<Stamp>) -> String {
-    if agent.outcome.is_some() {
-        return word.to_owned();
+    if let Some(outcome) = agent.outcome {
+        return match (outcome, agent.context_tokens) {
+            (AgentOutcome::Completed, Some(tokens)) => format!("{word} {} ctx", compact(tokens)),
+            (AgentOutcome::Completed, None)
+            | (AgentOutcome::Failed | AgentOutcome::Cancelled, _) => word.to_owned(),
+        };
     }
     match agent.at.zip(now).and_then(|(at, now)| now.since(at)) {
         Some(ran) => format!("{word} {}", clock::spent(ran)),
@@ -1502,6 +1560,14 @@ const AGENT_GLYPH: usize = 2;
 /// The least that stands between what an agent is doing and its status, so
 /// the two never run together on a row whose label fills the pane.
 const AGENT_GAP: usize = 1;
+
+/// The least of an agent's label its model is drawn beside: fewer cells than
+/// this and the model is left off, because a row that names the model and not
+/// the agent says nothing about which agent it is.
+const AGENT_LABEL_LEAST: usize = 12;
+
+/// The indent and the `└ ` an agent's sub-line opens with.
+const AGENT_SUBLINE: usize = 4;
 
 /// The Changes pane: what the repository says about the working tree, what
 /// this session says it changed, and what it has committed.

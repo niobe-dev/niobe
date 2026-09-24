@@ -331,6 +331,38 @@ It exists because of what a sub-agent call is on this release:
 - **Every cache write was bought for the hour**, and the `message_delta`s say
   so only inside `usage.iterations` — see above.
 
+### What each sub-agent reports about itself
+
+Three things arrive per agent, each keyed by the `tool_use_id` of the call
+that spawned it, and the tests in `tests/stream.rs` assert them as follows:
+
+- **Its model** is on its own `assistant` messages, as `message.model`. The
+  spawn does not carry one: neither the `Agent` call's input nor
+  `task_started` names a model. The summariser (`quick-lookup`) ran on
+  `claude-haiku-4-5-20251001` and both reviewers (`deep-reasoner`) on
+  `claude-opus-5` — which `modelUsage` bills as `claude-opus-5[1m]`.
+- **Its step** is `task_progress`'s `description`, which the CLI words from
+  the tool call the agent last made: `Reading catalog/cache.py`, `Running
+  Show fetch.py diff`. When it stops, its own answer is the `summary` of its
+  `task_notification`; the first line of it is what the Activity pane shows.
+- **Its token count** is `usage.total_tokens` on both. It is one number, and
+  it is **the size of the agent's conversation at its latest message**, not
+  what the agent was billed. The summariser's two messages report 10 + 5714 +
+  0 = 5724 and 8 + 535 + 5714 = 6257 tokens of input, cache write and cache
+  read; its reports read 5967 after the first and 6566 at the end — each one
+  its latest message's input plus that message's output, where a sum of both
+  messages would be over 12 000. The reviewers follow the same curve, and end
+  at 21508 (cache) and 25861 (fetch). What any agent cost is in `modelUsage`,
+  per model and not per agent, so the figure is drawn as a size and never
+  priced.
+
+To re-derive the counts, in the order the tests assert them:
+
+```sh
+jq -c 'select(.type=="system" and (.subtype=="task_progress" or .subtype=="task_notification"))
+       | [.tool_use_id, .usage.total_tokens]' sub-agents.jsonl
+```
+
 ## `transcripts/`
 
 A directory of session transcripts in the shape the CLI writes them: one

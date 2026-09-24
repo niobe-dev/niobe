@@ -39,9 +39,11 @@
 ║                                                                                                                                ║ ╔════════════════════════════ Activity ═════════════════════════════╗
 ║                                                                                                                                ║ ║                                                                   ║
 ║                                                                                                                                ║ ║ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    ║
-║                                                                                                                                ║ ║ ◆ test-writer → tests/fetch.test.ts                running 1m 42s ║
-║                                                                                                                                ║ ║ ◇ reviewer → catalog/cache.ts                                done ║
+║                                                                                                                                ║ ║ ◆ test-writer → tests/fetch.test.ts sonnet-5       running 1m 42s ║
+║                                                                                                                                ║ ║   └ Reading tests/stream.rs                                       ║
+║                                                                                                                                ║ ║ ◇ reviewer → catalog/cache.ts haiku-4-5             done 4100 ctx ║
 ║                                                                                                                                ║ ║ ✗ doc-writer → docs/etags.md                               failed ║
+║                                                                                                                                ║ ║   └ Notion 404, gave up after 2 retries                           ║
 ║                                                                                                                                ║ ║ ▾ Decisions  2                                                    ║
 ║                                                                                                                                ║ ║   13:39 Key the cache on the request URL, not the manifest id —   ║
 ║                                                                                                                                ║ ║         two manifests can share an id across catalogs.            ║
@@ -52,8 +54,6 @@
 ║                                                                                                                                ║ ║   Bash                 1 ━━━━         ✗ 1                         ║
 ║                                                                                                                                ║ ║   Edit                 1 ━━━━                                     ║
 ║                                                                                                                                ║ ║   Read                 1 ━━━━                                     ║
-║                                                                                                                                ║ ║                                                                   ║
-║                                                                                                                                ║ ║                                                                   ║
 ║ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ║ ║                                                                   ║
 ║ >  Ask for a change, or press F1 for help                                                                                      ║ ║                                                                   ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════════════════════════════════╝

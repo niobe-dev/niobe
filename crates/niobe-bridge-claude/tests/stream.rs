@@ -789,3 +789,110 @@ fn a_message_delta_says_its_cache_writes_were_bought_for_an_hour_inside_its_iter
         );
     }
 }
+
+/// What the recording's sub-agent reports said about each agent, per field,
+/// in the order they said it.
+fn progress_of<T>(events: &[Event], agent: &str, field: impl Fn(&Event) -> Option<T>) -> Vec<T> {
+    events
+        .iter()
+        .filter(|event| matches!(event, Event::AgentProgress { id, .. } if id.as_str() == agent))
+        .filter_map(field)
+        .collect()
+}
+
+const SUMMARISER: &str = "toolu_01Bjmsju8Kjg8jieHzs66KmX";
+const FETCH_REVIEWER: &str = "toolu_018CBLWZbbx5bZCa7U5VkDVi";
+const CACHE_REVIEWER: &str = "toolu_018oEYQ3e89jvpp8SycSyQ75";
+
+#[test]
+fn a_recorded_sub_agents_model_is_the_one_its_own_messages_name_once() {
+    let events = translated_sub_agents();
+    let model = |event: &Event| match event {
+        Event::AgentProgress { model, .. } => model.clone(),
+        _ => None,
+    };
+
+    // `message.model` on the `assistant` lines whose `parent_tool_use_id` is
+    // the agent's call — see the fixtures' README. The spawn names none.
+    assert_eq!(
+        progress_of(&events, SUMMARISER, model),
+        ["claude-haiku-4-5-20251001"]
+    );
+    assert_eq!(
+        progress_of(&events, FETCH_REVIEWER, model),
+        ["claude-opus-5"]
+    );
+    assert_eq!(
+        progress_of(&events, CACHE_REVIEWER, model),
+        ["claude-opus-5"]
+    );
+}
+
+#[test]
+fn a_recorded_sub_agents_context_is_what_the_cli_counted_for_that_agent_alone() {
+    let events = translated_sub_agents();
+    let tokens = |event: &Event| match event {
+        Event::AgentProgress { context_tokens, .. } => *context_tokens,
+        _ => None,
+    };
+
+    // `usage.total_tokens` of each `task_progress` and then the
+    // `task_notification` naming the agent's call, read off the recording
+    // with the `jq` program in the fixtures' README.
+    assert_eq!(progress_of(&events, SUMMARISER, tokens), [5967, 6566]);
+    assert_eq!(
+        progress_of(&events, CACHE_REVIEWER, tokens),
+        [12938, 13009, 15069, 15114, 17103, 18181, 21508]
+    );
+    assert_eq!(
+        progress_of(&events, FETCH_REVIEWER, tokens),
+        [
+            12980, 13023, 15088, 15136, 17455, 17567, 18457, 20235, 22634, 25861
+        ]
+    );
+}
+
+#[test]
+fn a_recorded_sub_agents_latest_line_is_its_step_and_then_its_own_answer() {
+    let events = translated_sub_agents();
+    let latest = |event: &Event| match event {
+        Event::AgentProgress { latest, .. } => latest.clone(),
+        _ => None,
+    };
+
+    assert_eq!(
+        progress_of(&events, SUMMARISER, latest),
+        [
+            "Reading catalog/cache.py",
+            "This module implements an LRU (least-recently-used) cache with a fixed capacity \
+             using OrderedDict. The `get` method retrieves values and marks them as recently \
+             used, while `put` adds or updates entries and removes the least-recently-used item \
+             when capacity is exceeded.",
+        ]
+    );
+    // A long answer is drawn from its first line, not its whole text.
+    assert_eq!(
+        progress_of(&events, CACHE_REVIEWER, latest)
+            .last()
+            .map(String::as_str),
+        Some("Three real bugs, ordered by severity.")
+    );
+}
+
+#[test]
+fn nothing_is_reported_about_a_sub_agent_after_it_has_ended() {
+    let events = translated_sub_agents();
+
+    for agent in [SUMMARISER, FETCH_REVIEWER, CACHE_REVIEWER] {
+        let ended = events
+            .iter()
+            .position(|event| matches!(event, Event::AgentExit { id, .. } if id.as_str() == agent))
+            .expect("every recorded agent ended");
+        assert!(
+            events[ended..].iter().all(
+                |event| !matches!(event, Event::AgentProgress { id, .. } if id.as_str() == agent)
+            ),
+            "{agent} was reported on after its exit"
+        );
+    }
+}

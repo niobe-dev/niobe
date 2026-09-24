@@ -24,7 +24,7 @@
 ║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║                                       ║
 ║   304 path asserts a body that is no longer sent.                          █ ║ ▾ Sub-agents                          █
 ║                                                                            █ ║ ◆ test-writer → tests… running 1m 42s ║
-║ ────────────────────────────────────────────────────────────────────────── ║ ║ ◇ reviewer → catalog/cache.ts    done ║
-║ >  Ask for a change, or press F1 for help                                  ║ ║ ✗ doc-writer → docs/etags.md   failed ║
+║ ────────────────────────────────────────────────────────────────────────── ║ ║   └ Reading tests/stream.rs           ║
+║ >  Ask for a change, or press F1 for help                                  ║ ║ ◇ reviewer → catalog/c… done 4100 ctx ║
 ╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

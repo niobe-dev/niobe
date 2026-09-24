@@ -397,6 +397,9 @@ impl Fold {
         self.fold(wire::Message::Assistant(wire::Envelope::of(
             wire::ApiMessage {
                 content: message.content,
+                // Which agent a transcript's message belongs to is not read,
+                // so the model it names says nothing about a sub-agent here.
+                model: None,
             },
         )));
 
@@ -456,7 +459,9 @@ impl Fold {
         self.fold(wire::Message::User(wire::Envelope {
             message: wire::ApiMessage {
                 content: record.message.content,
+                model: None,
             },
+            parent_tool_use_id: None,
             tool_use_result: record.tool_use_result,
         }));
     }

@@ -126,6 +126,21 @@ fn session_events() -> Vec<Event> {
             parent: None,
             label: "reviewer → catalog/cache.ts".to_owned(),
         },
+        // What each agent reported about itself, each leaving something out,
+        // so the pictures carry an agent with no step and one with no model
+        // as well as one with everything.
+        Event::AgentProgress {
+            id: "a1".into(),
+            model: Some("claude-sonnet-5".to_owned()),
+            context_tokens: Some(18_300),
+            latest: Some("Reading tests/stream.rs".to_owned()),
+        },
+        Event::AgentProgress {
+            id: "a2".into(),
+            model: Some("claude-haiku-4-5-20251001".to_owned()),
+            context_tokens: Some(4_100),
+            latest: None,
+        },
         Event::AgentExit {
             id: "a2".into(),
             outcome: AgentOutcome::Completed,
@@ -136,6 +151,12 @@ fn session_events() -> Vec<Event> {
             id: "a3".into(),
             parent: None,
             label: "doc-writer → docs/etags.md".to_owned(),
+        },
+        Event::AgentProgress {
+            id: "a3".into(),
+            model: None,
+            context_tokens: None,
+            latest: Some("Notion 404, gave up after 2 retries".to_owned()),
         },
         Event::AgentExit {
             id: "a3".into(),
