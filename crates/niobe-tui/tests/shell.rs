@@ -28,10 +28,10 @@ mod common;
 use std::path::PathBuf;
 
 use common::{
-    paint, running_session, screen, session_with_a_markdown_reply, style_at, styles,
-    unmetered_session,
+    metered_session, paint, running_session, screen, session_with_a_markdown_reply, style_at,
+    styles, unmetered_session,
 };
-use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
+use niobe_core::event::{Backend, Billing, Event, Mode, Usage, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
 use ratatui::style::{Color, Style};
@@ -726,6 +726,83 @@ fn a_profile_no_backend_meters_draws_a_usage_pane_with_no_windows_in_it() {
     assert!(!frame.contains("5h"), "{frame}");
     assert!(!frame.contains("resets"), "{frame}");
     assert_snapshot("unmetered-120x30", &frame);
+}
+
+/// Prices one model and no other, so that a pane priced by it has a model it
+/// can value and one it cannot.
+#[derive(Debug)]
+struct OnlyOpus;
+
+impl niobe_tui::Prices for OnlyOpus {
+    fn estimate(&self, usage: &niobe_core::event::Usage) -> Option<f64> {
+        (usage.model == "opus-5").then(|| usage.tokens() as f64 / 1_000.0 * 0.001)
+    }
+}
+
+/// On a metered account the money is the budget, so the pane opens with it,
+/// and each model's row says what that model cost — or an em dash where
+/// nothing reported its cost and no price covers it.
+#[test]
+fn a_metered_profile_leads_the_usage_pane_with_money_and_prices_each_model() {
+    let mut app = metered_session().with_prices(Box::new(OnlyOpus));
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(!frame.contains("5h"), "{frame}");
+    assert!(!frame.contains("extra"), "{frame}");
+    // The money comes before the models, not under them.
+    let session = frame.find("session").expect("the session's cost is drawn");
+    let model = frame.find("opus-5    ").expect("the model rows are drawn");
+    assert!(session < model, "{frame}");
+    // Haiku is priced by nothing, so the session's figure is a floor under
+    // what it cost, whatever the table made of the rest.
+    let totals = app.session().totals().clone();
+    assert!(
+        frame.contains(&format!("session ≥${:.2}", totals.reported_cost_usd)),
+        "{frame}"
+    );
+    let haiku = frame
+        .lines()
+        .find(|line| line.contains("haiku-4-5"))
+        .expect("haiku has a row");
+    assert!(
+        haiku.trim_end_matches([' ', '│', '█']).ends_with('—'),
+        "{haiku}"
+    );
+    // Opus's own reported figure plus what the table makes of what is owed.
+    let owed = totals.unsettled["opus-5"].tokens() as f64 / 1_000.0 * 0.001;
+    let opus = format!("~${:.2}", totals.reported_cost_by_model["opus-5"] + owed);
+    assert!(
+        frame
+            .lines()
+            .any(|line| line.contains("opus-5") && line.contains(&opus)),
+        "{opus}\n{frame}"
+    );
+    assert_snapshot("metered-120x30", &frame);
+}
+
+/// A budget on a metered account is money against money, so it stands with
+/// the session's cost at the head of the pane.
+#[test]
+fn a_metered_profiles_budget_stands_under_its_cost() {
+    let frame = screen(&mut metered_session().with_budget(0.50), 120, 30);
+    let session = frame.find("session ").expect("the cost is drawn");
+    let budget = frame.find("budget $").expect("the budget is drawn");
+    let model = frame.find("opus-5    ").expect("the model rows are drawn");
+    assert!(session < budget && budget < model, "{frame}");
+}
+
+/// Saying a session is on a plan changes nothing a plan's pane draws: the
+/// windows were already the headline.
+#[test]
+fn a_plan_is_drawn_as_a_session_that_did_not_say() {
+    let mut said = running_session();
+    said.apply(&Event::Billing {
+        billing: Billing::Plan,
+    });
+    assert_eq!(
+        screen(&mut said, 120, 30),
+        screen(&mut running_session(), 120, 30)
+    );
 }
 
 /// A metered profile reports no window, and a CLI version that does not emit

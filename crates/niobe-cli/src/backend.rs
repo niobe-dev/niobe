@@ -245,6 +245,7 @@ fn claude_options(
     let mut options = Options::new(root, profile.name);
     options.env = profile.profile.env().clone();
     options.args = profile.profile.args().to_vec();
+    options.billing = profile.profile.billing();
     options.settings = crate::config::settings_path(profile, home)?;
     options.resume = with.resume.clone();
     options.budget_usd = with.budget_usd;
@@ -387,6 +388,21 @@ mod tests {
         assert_eq!(options.env["A"], "1");
         assert_eq!(options.args, ["--add-dir", "/other"]);
         assert_eq!(options.resume.as_deref(), Some("s-1"));
+        assert_eq!(options.billing, None, "the profile left billing to the CLI");
+    }
+
+    #[test]
+    fn a_profile_that_says_how_it_is_billed_tells_the_bridge() {
+        let config = config("[profiles.company]\nbackend = \"claude\"\nbilling = \"metered\"\n");
+        let selected = config
+            .select(Some("company"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let options = claude_options(Path::new("/repo"), &selected, &Attach::default(), NO_HOME)
+            .expect("the profile names no settings file to be missing");
+
+        assert_eq!(options.billing, Some(niobe_core::Billing::Metered));
     }
 
     #[test]

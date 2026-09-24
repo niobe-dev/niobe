@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, CheckpointId, Context, Event, Mode, SessionMeta, ToolCallId,
+    AgentId, AgentOutcome, Billing, CheckpointId, Context, Event, Mode, SessionMeta, ToolCallId,
     ToolOutcome, Usage, UsageWindows,
 };
 
@@ -78,6 +78,13 @@ pub struct Totals {
     /// The key is the model id the backend reported, unaltered. Two ids that
     /// bill apart are two entries, even where they read alike.
     pub tokens_by_model: BTreeMap<String, u64>,
+    /// The costs backends reported, summed per model, so that they add up to
+    /// [`Totals::reported_cost_usd`].
+    ///
+    /// A model is in the map only once a cost was reported for it. One that
+    /// spent tokens and was billed nothing is absent rather than at zero: what
+    /// it cost is unknown, and a consumer prices it or says so.
+    pub reported_cost_by_model: BTreeMap<String, f64>,
     /// How many records each model in [`Totals::unsettled`] is owed for, so
     /// that a settlement takes exactly its own model's share back out of
     /// [`Totals::records_unsettled`]. Private because it is the bookkeeping
@@ -124,7 +131,13 @@ impl Totals {
         }
 
         match usage.cost_usd {
-            Some(cost) => self.reported_cost_usd += cost,
+            Some(cost) => {
+                self.reported_cost_usd += cost;
+                *self
+                    .reported_cost_by_model
+                    .entry(usage.model.clone())
+                    .or_default() += cost;
+            }
             None => self.owe(usage),
         }
     }
@@ -277,6 +290,9 @@ pub struct SessionState {
     /// `None` until one has said: a metered profile never reports these, and
     /// neither does a backend version that does not emit them.
     usage_windows: Option<UsageWindows>,
+    /// How the session is billed, as last reported. `None` until something
+    /// has said — never assumed from the backend's name.
+    billing: Option<Billing>,
     /// The main agent's last request. `None` until one has been reported.
     context: Option<Context>,
     tools: ToolTotals,
@@ -390,6 +406,8 @@ impl SessionState {
             // The last report replaces the one before it: a window is a level,
             // not a quantity, so summing two reports of it would be nonsense.
             Event::UsageWindows(windows) => self.usage_windows = Some(*windows),
+
+            Event::Billing { billing } => self.billing = Some(*billing),
 
             // A level again, and the last one stands — including after a
             // compaction, when it drops: a high-water mark would keep showing
@@ -549,6 +567,13 @@ impl SessionState {
     /// all rather than a zero, which would read as a window untouched.
     pub fn usage_windows(&self) -> Option<&UsageWindows> {
         self.usage_windows.as_ref()
+    }
+
+    /// How the session is billed, as the backend or the profile last said.
+    /// `None` where nothing has, which a consumer shows as not knowing rather
+    /// than as either mode.
+    pub fn billing(&self) -> Option<Billing> {
+        self.billing
     }
 
     /// The prompt the main agent's last request sent, and the window it went
@@ -761,6 +786,42 @@ mod tests {
             .get("opus-5")
             .expect("the new turn is owed for");
         assert_eq!((owed.input, owed.output), (200, 20));
+    }
+
+    /// What each model was billed is kept apart, so that a pane can price a
+    /// model's row without dividing the session's bill by a share of tokens —
+    /// two models bill at different rates, and a split by tokens would
+    /// invent both figures.
+    #[test]
+    fn reported_cost_is_kept_per_model() {
+        let state = SessionState::replay(&[
+            on_model("opus-5", 100, 10, Some(0.50)),
+            on_model("haiku-4-5", 300, 30, None),
+            settlement("opus-5", 0.25),
+        ]);
+
+        let totals = state.totals();
+        let opus = totals.reported_cost_by_model.get("opus-5").copied();
+        assert!(
+            opus.is_some_and(|cost| (cost - 0.75).abs() < 1e-9),
+            "{opus:?}"
+        );
+        // A model nothing billed has no figure at all, not a zero.
+        assert_eq!(totals.reported_cost_by_model.get("haiku-4-5"), None);
+    }
+
+    #[test]
+    fn nothing_says_how_a_session_is_billed_until_a_backend_does() {
+        let mut state = SessionState::new();
+        assert_eq!(state.billing(), None, "a billing mode was guessed");
+
+        state.apply(&Event::Billing {
+            billing: Billing::Plan,
+        });
+        state.apply(&Event::Billing {
+            billing: Billing::Metered,
+        });
+        assert_eq!(state.billing(), Some(Billing::Metered));
     }
 
     /// Who spent the session's tokens is a different question from what is

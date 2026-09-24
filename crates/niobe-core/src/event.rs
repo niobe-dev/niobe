@@ -133,6 +133,32 @@ pub struct SessionMeta {
     pub backend_session: Option<String>,
 }
 
+/// How the session's provider bills it, which decides what money on screen
+/// means.
+///
+/// On a flat-rate plan the fee does not move with the work, and what runs out
+/// is the plan's usage windows; a figure in dollars there is what the same
+/// work would have cost elsewhere. On a metered account every token is billed,
+/// and the dollars are the budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Billing {
+    /// A subscription at a flat fee, metered in usage windows.
+    Plan,
+    /// Billed for what is used: an API key, a cloud provider, a gateway.
+    Metered,
+}
+
+impl Billing {
+    /// The word a profile and the shell spell it with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Metered => "metered",
+        }
+    }
+}
+
 /// Where a cost a backend reported came from.
 ///
 /// A subscription plan bills a flat fee, so a per-session figure a plan
@@ -482,6 +508,19 @@ pub enum Event {
     /// out for itself would be a guess, and on a flat-rate plan it is the
     /// figure the operator steers by.
     UsageWindows(UsageWindows),
+
+    /// How the session is billed, as the backend worked it out or the
+    /// profile said.
+    ///
+    /// An event of its own rather than a field of [`SessionMeta`], because a
+    /// backend may learn it only once the session has run a turn — the
+    /// `claude` CLI names the provider that served a model in the turn's
+    /// closing report — and a fresh `SessionMeta` then would restate a model
+    /// the operator may have just moved off. The last report stands.
+    Billing {
+        /// How the session is billed from here on.
+        billing: Billing,
+    },
 
     /// How much the main agent's last request put in front of the model.
     ///
@@ -841,6 +880,20 @@ mod tests {
         assert_eq!(Mode::Auto.next(), Mode::Plan);
         assert_eq!(Mode::Plan.as_str(), "plan");
         assert_eq!(Mode::Auto.to_string(), "auto");
+    }
+
+    #[test]
+    fn how_a_session_is_billed_survives_the_round_trip() {
+        for billing in [Billing::Plan, Billing::Metered] {
+            let event = Event::Billing { billing };
+            let line = serde_json::to_string(&event).expect("an event serializes");
+            assert_eq!(
+                line,
+                format!(r#"{{"type":"billing","billing":"{}"}}"#, billing.as_str())
+            );
+            let back: Event = serde_json::from_str(&line).expect("and reads back");
+            assert_eq!(back, event);
+        }
     }
 
     #[test]

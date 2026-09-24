@@ -65,6 +65,11 @@ pub(crate) struct System {
     /// On `init`: how the CLI is gating tool calls, in its own spelling.
     #[serde(rename = "permissionMode")]
     pub(crate) permission_mode: Option<String>,
+    /// On `init`: where the credential the requests go out with came from —
+    /// `ANTHROPIC_API_KEY`, `apiKeyHelper`, `/login managed key`, or `none`
+    /// for a claude.ai login, a bearer token or a cloud provider.
+    #[serde(rename = "apiKeySource")]
+    pub(crate) api_key_source: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) compact_metadata: Option<CompactMetadata>,
     /// On `permission_denied`: the call that was refused. On
@@ -497,6 +502,10 @@ pub(crate) struct ModelUsage {
     /// messages that say `claude-opus-5`.
     #[serde(rename = "canonicalModel")]
     pub(crate) canonical_model: Option<String>,
+    /// The API that served the model: `firstParty` for Anthropic's own, and
+    /// otherwise the cloud or gateway in between — `bedrock`, `vertex`,
+    /// `foundry`, `gateway` and the rest of the CLI's list.
+    pub(crate) provider: Option<String>,
     /// The size of the model's context window in tokens, as the CLI knows it
     /// for the id this entry is keyed by.
     #[serde(rename = "contextWindow")]

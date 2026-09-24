@@ -14,8 +14,8 @@ pub mod permission;
 pub mod session;
 
 pub use event::{
-    AgentId, AgentOutcome, Backend, CheckpointId, Event, Mode, PermissionDecision, SessionMeta,
-    ToolCallId, ToolOutcome, Usage,
+    AgentId, AgentOutcome, Backend, Billing, CheckpointId, Event, Mode, PermissionDecision,
+    SessionMeta, ToolCallId, ToolOutcome, Usage,
 };
 pub use permission::{Allowlist, Rule, RuleError};
 pub use session::{

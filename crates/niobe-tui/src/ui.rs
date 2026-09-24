@@ -29,7 +29,7 @@ use ratatui::widgets::{
     Widget,
 };
 
-use niobe_core::event::{AgentOutcome, Context, Mode, UsageWindow};
+use niobe_core::event::{AgentOutcome, Billing, Context, Mode, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, ToolTotals, Totals};
 
 use crate::app::{
@@ -1363,24 +1363,30 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
 /// from it — the pane takes the rows its figures need and leaves the rest to
 /// the panes that grow with the session.
 fn usage_height(app: &App) -> u16 {
-    let budget = usize::from(app.budget().is_some());
+    let money = money_rows(app);
     let windows = window_rows(app);
     let spend = spend_rows(app);
-    // Two rows of border, the blank row under the title, a row per window the
-    // backend reported, the rule between the two blocks where both have rows,
-    // a row per model and the cache row, the session's cost and whatever
-    // budget it runs against.
     let context = context_rows(app);
-    // And the context, under a rule of its own, where there is one to show.
-    let rows = 3
-        + windows
-        + usize::from(windows > 0 && spend > 0)
-        + spend
-        + 1
-        + budget
-        + usize::from(context > 0)
-        + context;
+    // Two rows of border and the blank row under the title; the windows, the
+    // models and the money in the order the shape puts them, with a rule
+    // between the windows and the models on a plan wherever both have rows,
+    // and always under the money on a metered account; then the context,
+    // under a rule of its own, where there is one to show.
+    let blocks = match metered(app) {
+        true => money + windows + 1 + spend,
+        false => windows + usize::from(windows > 0 && spend > 0) + spend + money,
+    };
+    let rows = 3 + blocks + usize::from(context > 0) + context;
     u16::try_from(rows).unwrap_or(u16::MAX)
+}
+
+/// Whether the session is billed by use, which makes money the pane's
+/// headline.
+///
+/// Only where something said so. A session nothing has said of is drawn as a
+/// plan is, which is how it was drawn before any backend could say.
+fn metered(app: &App) -> bool {
+    app.session().billing() == Some(Billing::Metered)
 }
 
 /// The widest label a window row carries — `extra` — and a column of gap.
@@ -1500,6 +1506,10 @@ const MODEL_TOKENS: usize = 6;
 /// either side of them.
 const MODEL_SHARE: usize = 6;
 
+/// What a model's cost is drawn in on a metered account: the widest figure
+/// the pane prints for one (`≥$12.34`) and a column of gap before it.
+const MODEL_COST: usize = 8;
+
 /// The label the cache row carries. It names what its figure means, because a
 /// hit rate and a share of the session are two different questions and the
 /// column they are drawn in is the same.
@@ -1547,6 +1557,10 @@ fn models(app: &App) -> Vec<(String, u64)> {
 /// [`Theme::hot`] means *nearly gone* everywhere else in the shell, and a model
 /// that spent the most has not gone wrong — and the bar beside it already says
 /// which spent most.
+///
+/// On a metered account each model's row also says what it cost, labelled as
+/// the session's cost is. The cache row has no cost of its own to show: its
+/// reads are billed in the rows above it.
 fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
     let spent = models(app);
@@ -1564,24 +1578,42 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         + 1;
     // The meter gives up cells until the row fits, the way a window row's
     // does: how much of a bar is drawn is worth less than the figure beside it.
+    let costed = metered(app);
+    let cost_columns = match costed {
+        true => MODEL_COST,
+        false => 0,
+    };
     let cells = width
-        .saturating_sub(columns + MODEL_SHARE + MODEL_TOKENS)
+        .saturating_sub(columns + MODEL_SHARE + MODEL_TOKENS + cost_columns)
         .min(METER_CELLS);
 
-    // A label, a figure, a meter of the share that figure rounds, and a count.
-    // The meter is drawn from the share itself rather than from the whole
-    // percent beside it, so a model that spent too little to round up to one
-    // still keeps the cell the meter gives anything above nothing.
-    let row = |label: &str, figure: String, share: f64, count: String, style: Style| {
+    // A label, a figure, a meter of the share that figure rounds, a count, and
+    // on a metered account a cost. The meter is drawn from the share itself
+    // rather than from the whole percent beside it, so a model that spent too
+    // little to round up to one still keeps the cell the meter gives anything
+    // above nothing.
+    let row = |label: &str,
+               figure: String,
+               share: f64,
+               count: String,
+               cost: Option<String>,
+               style: Style| {
         let (filled, track) = meter(share, cells);
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(format!("{label:<columns$}"), dim),
             Span::styled(figure, style.bold()),
             Span::styled("  ", dim),
             Span::styled(filled, style),
             Span::styled(track, dim),
             Span::styled(format!("{count:>MODEL_TOKENS$}"), dim),
-        ])
+        ];
+        if let Some(cost) = cost {
+            spans.push(Span::styled(
+                format!("{cost:>MODEL_COST$}"),
+                Style::new().fg(theme.fg),
+            ));
+        }
+        Line::from(spans)
     };
 
     let totals = app.session().totals();
@@ -1591,12 +1623,13 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         .iter()
         .zip(labels)
         .zip(percents)
-        .map(|(((_, tokens), label), percent)| {
+        .map(|(((model, tokens), label), percent)| {
             row(
                 &label,
                 format!("{percent:>3}%"),
                 *tokens as f64 / session_tokens as f64,
                 compact(*tokens),
+                costed.then(|| model_cost(totals, model, app.prices())),
                 Style::new().fg(theme.fg),
             )
         })
@@ -1617,6 +1650,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             Some(_) => compact(totals.cache_read),
             None => String::new(),
         },
+        None,
         Style::new().fg(theme.add),
     ));
     lines
@@ -1698,8 +1732,6 @@ fn divider(width: usize, theme: &Theme) -> Line<'static> {
 }
 
 fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let session = app.session();
-    let prices = app.prices();
     // Usage has nothing to scroll and nothing to fold, so it never has the
     // keyboard.
     let block = pane("Usage", area, Border::of(false, theme), theme);
@@ -1709,42 +1741,41 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
-    let totals = session.totals();
-    let width = usize::from(inner.width);
+    let mut lines = usage_lines(app, usize::from(inner.width), theme);
+    lines.truncate(usize::from(inner.height));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
 
-    // The windows come first: on a flat-rate plan they are what the operator
-    // is spending, and everything below them is detail about how.
-    let mut lines: Vec<Line> = window_lines(app, width, theme);
+/// Everything the Usage pane draws inside its frame, in order.
+///
+/// The pane is sized from [`usage_height`] before it is drawn, so the two have
+/// to agree exactly; a test holds them together.
+fn usage_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let money = money_lines(app, theme);
+    let windows = window_lines(app, width, theme);
     let spend = spend_lines(app, width, theme);
-    if !lines.is_empty() && !spend.is_empty() {
-        lines.push(divider(width, theme));
-    }
-    lines.extend(spend);
 
-    // What the session cost, labelled for what is known about it. Which shape
-    // this pane takes on a metered profile — where the money is the headline
-    // rather than a row under the tokens — waits on the profile saying whether
-    // it is metered at all, which nothing in the stream does yet.
-    lines.push(Line::from(vec![
-        Span::styled("session ", Style::new().fg(theme.dim)),
-        Span::styled(
-            session_cost(session, prices),
-            Style::new().fg(theme.hot).bold(),
-        ),
-    ]));
-
-    let rows = usize::from(inner.height);
-
-    if let Some(budget) = app.budget() {
-        let spent = totals.reported_cost_usd;
-        lines.push(
-            Line::from(format!("budget ${spent:.2}/${budget:.2}")).style(
-                match spent >= budget * BUDGET_SHOWN_HOT {
-                    true => Style::new().fg(theme.hot).bold(),
-                    false => Style::new().fg(theme.fg),
-                },
-            ),
-        );
+    // What runs out comes first. On a flat-rate plan that is the windows, and
+    // the money is a row under the tokens; on a metered account it is the
+    // money, and a window — which such an account reports only where its
+    // provider has one — follows it.
+    let mut lines = Vec::new();
+    match metered(app) {
+        true => {
+            lines.extend(money);
+            lines.extend(windows);
+            lines.push(divider(width, theme));
+            lines.extend(spend);
+        }
+        false => {
+            let ruled = !windows.is_empty() && !spend.is_empty();
+            lines.extend(windows);
+            if ruled {
+                lines.push(divider(width, theme));
+            }
+            lines.extend(spend);
+            lines.extend(money);
+        }
     }
 
     // Last, under a rule: how full the context is answers a question about
@@ -1754,9 +1785,37 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         lines.push(divider(width, theme));
         lines.extend(context);
     }
+    lines
+}
 
-    lines.truncate(rows);
-    frame.render_widget(Paragraph::new(lines), inner);
+/// How many rows the money takes: the session's cost, and the budget where
+/// the session runs against one.
+fn money_rows(app: &App) -> usize {
+    1 + usize::from(app.budget().is_some())
+}
+
+/// What the session cost, labelled for what is known about it, and what it
+/// has spent of its budget.
+fn money_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("session ", Style::new().fg(theme.dim)),
+        Span::styled(
+            session_cost(app.session(), app.prices()),
+            Style::new().fg(theme.hot).bold(),
+        ),
+    ])];
+    if let Some(budget) = app.budget() {
+        let spent = app.session().totals().reported_cost_usd;
+        lines.push(
+            Line::from(format!("budget ${spent:.2}/${budget:.2}")).style(
+                match spent >= budget * BUDGET_SHOWN_HOT {
+                    true => Style::new().fg(theme.hot).bold(),
+                    false => Style::new().fg(theme.fg),
+                },
+            ),
+        );
+    }
+    lines
 }
 
 /// Columns a tool's name gets in the Usage pane's mix.
@@ -2781,16 +2840,49 @@ pub fn session_cost(session: &SessionState, prices: Option<&dyn Prices>) -> Stri
     if totals.records == 0 {
         return "—".to_owned();
     }
-    if totals.cost_fully_reported() {
-        return format!("${:.2}", totals.reported_cost_usd);
+    labelled(
+        totals.reported_cost_usd,
+        totals.cost_fully_reported(),
+        estimate_unsettled(totals, prices),
+    )
+    .unwrap_or_else(|| "unpriced".to_owned())
+}
+
+/// One model's cost, labelled the way [`session_cost`] labels the session's:
+/// what was reported for it, and what `prices` makes of whatever of it no
+/// reported cost covers.
+///
+/// An em dash where nothing reported the model's cost and nothing prices it —
+/// the model's row still carries its tokens, which are measured.
+fn model_cost(totals: &Totals, model: &str, prices: Option<&dyn Prices>) -> String {
+    let reported = totals.reported_cost_by_model.get(model).copied();
+    let owed = totals.unsettled.get(model);
+    if reported.is_none() && owed.is_none() {
+        return "—".to_owned();
     }
-    if let Some(estimated) = estimate_unsettled(totals, prices) {
-        return format!("~${:.2}", totals.reported_cost_usd + estimated);
+    labelled(
+        reported.unwrap_or_default(),
+        owed.is_none(),
+        owed.and_then(|owed| prices?.estimate(owed)),
+    )
+    .unwrap_or_else(|| "—".to_owned())
+}
+
+/// A cost, labelled for how much of it is known: `$` where a reported cost
+/// covers all of it, `~$` where the rest was valued at published rates, `≥$`
+/// where it could not be and the figure is a floor. `None` where nothing was
+/// reported and nothing could be valued, which each caller words its own way.
+fn labelled(reported: f64, settled: bool, estimated: Option<f64>) -> Option<String> {
+    if settled {
+        return Some(format!("${reported:.2}"));
     }
-    if totals.reported_cost_usd == 0.0 {
-        return "unpriced".to_owned();
+    if let Some(estimated) = estimated {
+        return Some(format!("~${:.2}", reported + estimated));
     }
-    format!("≥${:.2}", totals.reported_cost_usd)
+    if reported == 0.0 {
+        return None;
+    }
+    Some(format!("≥${reported:.2}"))
 }
 
 /// What the tokens no reported cost covers come to at published rates.
@@ -3311,9 +3403,9 @@ mod tests {
     /// read the same on every machine and in every month.
     const A_FRIDAY: u64 = 20_000 * 86_400;
 
-    /// A session metered against the windows a test names, read at 13:41 on
+    /// A session on a plan with the windows a test names, read at 13:41 on
     /// [`A_FRIDAY`] by a clock that never moves for daylight saving.
-    fn metered(windows: UsageWindows) -> App {
+    fn windowed(windows: UsageWindows) -> App {
         let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
         let mut app = App::new(crate::app::Repo {
             name: "niobe".to_owned(),
@@ -3330,6 +3422,72 @@ mod tests {
         app
     }
 
+    /// A model's cost carries the same labels the session's does, with an em
+    /// dash where the session would say `unpriced`: a column of figures reads
+    /// the dash as "no figure", and a word there would crowd the tokens.
+    #[test]
+    fn a_models_cost_is_labelled_for_what_is_known_of_it() {
+        let reported = SessionState::replay(&[priced(Some(0.75))]);
+        let owed = SessionState::replay(&[priced(Some(0.25)), priced(None)]);
+        let nothing = SessionState::replay(&[priced(None)]);
+        let cost = |session: &SessionState, prices: Option<&dyn Prices>| {
+            model_cost(session.totals(), "opus-5", prices)
+        };
+
+        assert_eq!(cost(&reported, None), "$0.75");
+        assert_eq!(cost(&owed, Some(&ATenthOfACentPerThousand)), "~$0.25");
+        assert_eq!(cost(&owed, Some(&NothingIsPriced)), "≥$0.25");
+        assert_eq!(cost(&nothing, Some(&NothingIsPriced)), "—");
+        assert_eq!(model_cost(reported.totals(), "haiku-4-5", None), "—");
+    }
+
+    /// The column above the pane is laid out from the height it asks for, so
+    /// a row it draws and did not count is a row cut off the bottom, and one
+    /// it counted and did not draw is a blank the other panes lose.
+    #[test]
+    fn the_usage_pane_asks_for_exactly_the_rows_it_draws() {
+        let windows = niobe_core::event::Event::UsageWindows(UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: 0.4,
+                resets_at: None,
+            }),
+            seven_day: None,
+            using_overage: true,
+        });
+        let spent = priced(Some(0.25));
+        let context = niobe_core::event::Event::Context(Context {
+            tokens: 1_000,
+            model: "opus-5".to_owned(),
+            window: Some(200_000),
+        });
+        for billing in [None, Some(Billing::Plan), Some(Billing::Metered)] {
+            for events in [
+                vec![],
+                vec![spent.clone()],
+                vec![windows.clone(), spent.clone()],
+                vec![windows.clone(), spent.clone(), context.clone()],
+            ] {
+                for budget in [None, Some(0.50)] {
+                    let mut app = App::new(crate::app::Repo::default());
+                    if let Some(budget) = budget {
+                        app = app.with_budget(budget);
+                    }
+                    if let Some(billing) = billing {
+                        app.apply(&niobe_core::event::Event::Billing { billing });
+                    }
+                    for event in &events {
+                        app.apply(event);
+                    }
+                    assert_eq!(
+                        usize::from(usage_height(&app)),
+                        usage_lines(&app, 40, &crate::theme::CLASSIC).len() + 3,
+                        "{billing:?} {events:?} {budget:?}"
+                    );
+                }
+            }
+        }
+    }
+
     fn rows_of(app: &App, width: usize) -> Vec<String> {
         window_lines(app, width, &Theme::default())
             .iter()
@@ -3339,7 +3497,7 @@ mod tests {
 
     #[test]
     fn a_window_reads_as_a_meter_its_share_and_when_it_comes_back() {
-        let app = metered(UsageWindows {
+        let app = windowed(UsageWindows {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             // Day 20_004 is a Tuesday.
             seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
@@ -3357,7 +3515,7 @@ mod tests {
 
     #[test]
     fn a_window_reported_without_a_reset_shows_the_share_and_no_reset() {
-        let app = metered(UsageWindows {
+        let app = windowed(UsageWindows {
             five_hour: Some(window(0.51, None)),
             seven_day: None,
             using_overage: false,
@@ -3373,7 +3531,7 @@ mod tests {
 
     #[test]
     fn a_reset_that_has_already_come_around_is_not_drawn_as_one_still_to_come() {
-        let app = metered(UsageWindows {
+        let app = windowed(UsageWindows {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 9 * 3_600))),
             seven_day: None,
             using_overage: false,
@@ -3399,7 +3557,7 @@ mod tests {
 
     #[test]
     fn what_the_extra_costs_is_an_em_dash_until_a_backend_reports_it() {
-        let app = metered(UsageWindows {
+        let app = windowed(UsageWindows {
             five_hour: Some(window(1.0, None)),
             seven_day: None,
             using_overage: true,
@@ -3418,7 +3576,7 @@ mod tests {
     /// nothing extra is being charged.
     #[test]
     fn a_plan_that_did_not_say_it_is_spending_extra_gets_no_extra_row() {
-        let app = metered(UsageWindows {
+        let app = windowed(UsageWindows {
             five_hour: Some(window(0.51, None)),
             seven_day: None,
             using_overage: false,
@@ -3444,7 +3602,7 @@ mod tests {
                 using_overage: true,
             },
         ] {
-            let app = metered(windows);
+            let app = windowed(windows);
             assert_eq!(window_rows(&app), rows_of(&app, 66).len(), "{windows:?}");
         }
     }
@@ -3455,7 +3613,7 @@ mod tests {
     /// the terminal would cut mid-word.
     #[test]
     fn a_row_fits_the_pane_it_is_drawn_in() {
-        let app = metered(UsageWindows {
+        let app = windowed(UsageWindows {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: true,

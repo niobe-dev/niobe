@@ -1116,6 +1116,7 @@ impl App {
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
             | Event::UsageWindows(_)
+            | Event::Billing { .. }
             | Event::Context(_)
             | Event::Checkpoint { .. } => {}
 

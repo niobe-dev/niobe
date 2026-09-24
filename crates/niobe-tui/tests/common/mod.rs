@@ -21,8 +21,8 @@
 
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
-    AgentOutcome, Backend, Context, Event, Mode, PermissionDecision, SessionMeta, ToolOutcome,
-    Usage, UsageWindow, UsageWindows,
+    AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
+    ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -526,6 +526,35 @@ pub fn unmetered_session() -> App {
         .into_iter()
         .filter(|event| !matches!(event, Event::UsageWindows(_)))
         .collect();
+    session_read_at_a_fixed_moment(&events)
+}
+
+/// The same session on a metered account: no windows, the backend having said
+/// the account is billed by use, and a second model — the small one a CLI
+/// summarises with — whose tokens no reported cost covers.
+pub fn metered_session() -> App {
+    let mut events: Vec<Event> = session_events()
+        .into_iter()
+        .filter(|event| !matches!(event, Event::UsageWindows(_)))
+        .collect();
+    events.insert(
+        1,
+        Event::Billing {
+            billing: Billing::Metered,
+        },
+    );
+    events.push(Event::Usage(Usage {
+        input: 3_000,
+        output: 200,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: 0,
+        reasoning: 0,
+        model: "haiku-4-5".to_owned(),
+        cost_usd: None,
+        cost_basis: None,
+        settles_model: false,
+    }));
     session_read_at_a_fixed_moment(&events)
 }
 

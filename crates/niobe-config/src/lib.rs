@@ -28,6 +28,12 @@
 //! when the operator asks to switch. The names are passed to the backend as
 //! written, so they are whatever that backend takes — an alias or a full id.
 //!
+//! And it may say how the account behind it is billed, `billing = "plan"` or
+//! `billing = "metered"`, which decides whether the shell leads with a plan's
+//! usage windows or with money. Left out, the backend works it out where it
+//! can: an API key or a cloud provider is metered, a claude.ai login a plan.
+//! A seat billed by use signs in as a plan does, so that is the case to set.
+//!
 //! A config also carries the standing answers to permission prompts — the
 //! rules a session made by answering "always" — which add up across files
 //! rather than replacing one another:
@@ -82,8 +88,8 @@ mod write;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use niobe_core::Backend;
 use niobe_core::permission::Allowlist;
+use niobe_core::{Backend, Billing};
 
 pub use error::ConfigError;
 pub use write::remember;
@@ -144,6 +150,7 @@ pub struct Profile {
     env: BTreeMap<String, String>,
     args: Vec<String>,
     models: Vec<String>,
+    billing: Option<Billing>,
     settings: Option<Settings>,
     auth_refresh: Option<String>,
     source: PathBuf,
@@ -178,6 +185,17 @@ impl Profile {
     /// model is whatever the backend chooses: Niobe never invents a model id.
     pub fn models(&self) -> &[String] {
         &self.models
+    }
+
+    /// How the account behind this profile is billed, where the config says.
+    ///
+    /// `None` leaves it to the backend, which can tell an API key or a cloud
+    /// provider from a plan's login but not a seat billed by use from a
+    /// flat-rate one: they sign in alike. Kept from an untrusted file too,
+    /// because it changes what the shell shows and nothing the backend runs
+    /// with.
+    pub fn billing(&self) -> Option<Billing> {
+        self.billing
     }
 
     /// The settings file the backend is to run under, where the profile names
@@ -549,6 +567,33 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
         assert!(
             parsed(EXAMPLE).profiles()["personal"].models().is_empty(),
             "a profile that names no model was given one"
+        );
+    }
+
+    #[test]
+    fn a_profile_can_say_how_it_is_billed() {
+        let config = parsed(
+            "[profiles.company]\nbackend = \"claude\"\nbilling = \"metered\"\n\n\
+             [profiles.max]\nbackend = \"claude\"\nbilling = \"plan\"\n",
+        );
+
+        assert_eq!(
+            config.profiles()["company"].billing(),
+            Some(Billing::Metered)
+        );
+        assert_eq!(config.profiles()["max"].billing(), Some(Billing::Plan));
+        assert_eq!(
+            parsed(EXAMPLE).profiles()["personal"].billing(),
+            None,
+            "a profile that says nothing was given a billing mode"
+        );
+    }
+
+    #[test]
+    fn a_billing_mode_nobody_defined_is_reported_at_its_line() {
+        assert_eq!(
+            invalid("[profiles.max]\nbackend = \"claude\"\nbilling = \"flat\"\n"),
+            "/configs/user/config.toml:3: profiles.max.billing: `flat` is not a billing mode; expected `plan` or `metered`"
         );
     }
 
@@ -961,7 +1006,7 @@ backend = "codex"
         assert_eq!(
             invalid("[profiles.work]\nbackend = \"claude\"\nenviron = { AWS_PROFILE = \"x\" }\n"),
             "/configs/user/config.toml:3: profiles.work.environ: unknown key; \
-             expected `backend`, `env`, `args`, `models`, `settings` or `auth_refresh`"
+             expected `backend`, `env`, `args`, `models`, `billing`, `settings` or `auth_refresh`"
         );
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),

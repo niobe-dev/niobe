@@ -10,7 +10,7 @@
 
 use niobe_bridge_claude::Translator;
 use niobe_core::event::{
-    AgentOutcome, Backend, CostBasis, Event, PermissionDecision, ToolOutcome, UsageWindow,
+    AgentOutcome, Backend, Billing, CostBasis, Event, PermissionDecision, ToolOutcome, UsageWindow,
 };
 use niobe_core::session::SessionState;
 
@@ -52,6 +52,26 @@ fn warnings(events: &[Event]) -> Vec<&str> {
             _ => None,
         })
         .collect()
+}
+
+/// The recording is of a claude.ai login: its `init` names no API key and its
+/// `result`s say Anthropic's own API served every model.
+#[test]
+fn the_recorded_login_is_read_as_a_plan_after_its_first_turn() {
+    let events = translated();
+    let reports: Vec<Billing> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Billing { billing } => Some(*billing),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reports,
+        [Billing::Plan],
+        "reported once, when it was learnt"
+    );
+    assert_eq!(SessionState::replay(&events).billing(), Some(Billing::Plan));
 }
 
 #[test]

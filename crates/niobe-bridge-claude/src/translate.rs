@@ -73,7 +73,7 @@ use std::path::{Path, PathBuf};
 
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Context, CostBasis, Event, Mode, PermissionDecision,
+    AgentId, AgentOutcome, Backend, Billing, Context, CostBasis, Event, Mode, PermissionDecision,
     SessionMeta, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
@@ -250,6 +250,15 @@ pub struct Translator {
     /// writes `init` again whenever the session moves model, and the release
     /// it reports there has not changed.
     checked_release: bool,
+    /// How the profile says the session is billed, which stands over anything
+    /// the stream suggests. `None` where the profile left it to the stream.
+    billed_as: Option<Billing>,
+    /// Where the CLI's credential came from, off its `init`. `None` where it
+    /// has not said, which is not the same as `none`.
+    api_key_source: Option<String>,
+    /// The billing last reported, so that it is reported when it changes
+    /// rather than with every turn.
+    billing: Option<Billing>,
 }
 
 impl Translator {
@@ -271,7 +280,22 @@ impl Translator {
             windows: BTreeMap::new(),
             context: None,
             checked_release: false,
+            billed_as: None,
+            api_key_source: None,
+            billing: None,
         }
+    }
+
+    /// The same translator, told how the session is billed by the profile it
+    /// runs under.
+    ///
+    /// Taken over what the stream suggests: the stream shows which API served
+    /// a request and where its key came from, and a seat billed by use signs
+    /// in exactly as a flat-rate plan does.
+    #[must_use]
+    pub fn billed_as(mut self, billing: Billing) -> Self {
+        self.billed_as = Some(billing);
+        self
     }
 
     /// The same translator, told where the session runs, so that the files it
@@ -403,6 +427,10 @@ impl Translator {
                 if let Some(model) = system.model {
                     self.set_model(model, out);
                 }
+                if system.api_key_source.is_some() {
+                    self.api_key_source = system.api_key_source;
+                }
+                self.report_billing(None, out);
                 if let Some(mode) = system.permission_mode {
                     match read_mode(&mode) {
                         Some(mode) => out.push(Event::ModeSelected { mode }),
@@ -1060,6 +1088,7 @@ impl Translator {
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         self.reconcile_turn(outcome.usage.as_ref(), out);
+        self.report_billing(Some(&outcome.model_usage), out);
         self.report_cost(&outcome, out);
         self.learn_windows(&outcome.model_usage, out);
 
@@ -1192,6 +1221,31 @@ impl Translator {
         }
     }
 
+    /// Reports how the session is billed, where that is known and has
+    /// changed: what the profile said, or else what the credential and the
+    /// providers that served the turn's models say.
+    fn report_billing(
+        &mut self,
+        served: Option<&BTreeMap<String, wire::ModelUsage>>,
+        out: &mut Vec<Event>,
+    ) {
+        let billing = self.billed_as.or_else(|| {
+            billing_of(
+                self.api_key_source.as_deref(),
+                served
+                    .into_iter()
+                    .flat_map(|served| served.values())
+                    .filter_map(|usage| usage.provider.as_deref()),
+            )
+        });
+        if let Some(billing) = billing
+            && self.billing != Some(billing)
+        {
+            self.billing = Some(billing);
+            out.push(Event::Billing { billing });
+        }
+    }
+
     /// Reports what the session has cost since the last turn.
     ///
     /// `modelUsage` is the session's running total per model, so each turn
@@ -1313,6 +1367,34 @@ impl Translator {
             settles_model: true,
         })
     }
+}
+
+/// How a session is billed, from where its credential came from and the
+/// providers that served its models. `None` where the two do not settle it.
+///
+/// An API key is billed per request whoever serves it. Without one, a model
+/// served by anything but Anthropic's own API is a cloud or a gateway account,
+/// billed per request too. What is left — no key, Anthropic's API — is a
+/// claude.ai login, which is a plan; but only where the CLI said there was no
+/// key, because the same provider behind a credential nobody named could be a
+/// bearer token billed like a key.
+///
+/// The spellings are the CLI's own, from the schema of Claude Code 2.1.282.
+fn billing_of<'a>(
+    api_key_source: Option<&str>,
+    providers: impl IntoIterator<Item = &'a str>,
+) -> Option<Billing> {
+    if api_key_source.is_some_and(|source| source != "none") {
+        return Some(Billing::Metered);
+    }
+    let mut first_party = false;
+    for provider in providers {
+        match provider {
+            "firstParty" => first_party = true,
+            _ => return Some(Billing::Metered),
+        }
+    }
+    (first_party && api_key_source == Some("none")).then_some(Billing::Plan)
 }
 
 /// Whether `session` is `model` with a context window selected, as in
@@ -1683,6 +1765,88 @@ mod tests {
         translator
             .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
         translator
+    }
+
+    fn billing(events: &[Event]) -> Vec<Billing> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Billing { billing } => Some(*billing),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A turn's closing report, with one model served by `provider`.
+    fn served_by(provider: &str) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","modelUsage":{{"opus-5":{{"inputTokens":1,"outputTokens":1,"costUSD":0.01,"provider":"{provider}"}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_session_on_an_api_key_is_metered_from_its_first_line() {
+        for source in ["ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key"] {
+            let mut translator = Translator::new("work");
+            let events = translator.line(&format!(
+                r#"{{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","apiKeySource":"{source}"}}"#
+            ));
+            assert_eq!(billing(&events), [Billing::Metered], "{source}");
+        }
+    }
+
+    #[test]
+    fn a_login_on_the_first_party_api_is_a_plan_once_a_turn_says_who_served_it() {
+        let mut translator = Translator::new("max");
+        let opened = translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","apiKeySource":"none"}"#,
+        );
+        // No key names a login, a bearer token and a cloud provider alike, so
+        // the first line says nothing yet.
+        assert_eq!(billing(&opened), []);
+
+        assert_eq!(
+            billing(&translator.line(&served_by("firstParty"))),
+            [Billing::Plan]
+        );
+        // Said once: the next turn repeats what the session already shows.
+        assert_eq!(billing(&translator.line(&served_by("firstParty"))), []);
+    }
+
+    #[test]
+    fn a_model_served_by_a_cloud_provider_or_a_gateway_is_metered() {
+        for provider in ["bedrock", "vertex", "foundry", "gateway"] {
+            let mut translator = Translator::new("work");
+            translator.line(
+                r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","apiKeySource":"none"}"#,
+            );
+            assert_eq!(
+                billing(&translator.line(&served_by(provider))),
+                [Billing::Metered],
+                "{provider}"
+            );
+        }
+    }
+
+    /// A CLI that does not say where its credential came from could be on a
+    /// plan or on a bearer token billed by the request, and the provider alone
+    /// cannot tell the two apart.
+    #[test]
+    fn the_first_party_api_without_a_credential_source_is_left_unsaid() {
+        let mut translator = translator();
+        assert_eq!(billing(&translator.line(&served_by("firstParty"))), []);
+    }
+
+    /// The operator knows the contract behind a login; the stream only shows
+    /// how the requests went. A seat billed by use looks like a plan in it.
+    #[test]
+    fn a_profile_that_names_its_billing_is_taken_at_its_word() {
+        let mut translator = Translator::new("company").billed_as(Billing::Metered);
+        let opened = translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","apiKeySource":"none"}"#,
+        );
+        assert_eq!(billing(&opened), [Billing::Metered]);
+        assert_eq!(billing(&translator.line(&served_by("firstParty"))), []);
     }
 
     /// One `message_delta`, which is where the counts that reconcile live.

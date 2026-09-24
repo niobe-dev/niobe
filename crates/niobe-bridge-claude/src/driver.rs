@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use niobe_core::event::{Event, Mode, PermissionDecision, ToolCallId};
+use niobe_core::event::{Billing, Event, Mode, PermissionDecision, ToolCallId};
 
 use crate::translate::Translator;
 
@@ -98,6 +98,9 @@ pub struct Options {
     pub args: Vec<String>,
     /// The profile the session runs under, for [`Event::SessionMeta`].
     pub profile: String,
+    /// How the profile says the session is billed. `None` leaves it to what
+    /// the CLI's stream shows.
+    pub billing: Option<Billing>,
     /// The model to ask for. `None` leaves the choice to the CLI.
     pub model: Option<String>,
     /// How tool calls are gated.
@@ -129,6 +132,7 @@ impl Options {
             env: BTreeMap::new(),
             args: Vec::new(),
             profile: profile.into(),
+            billing: None,
             model: None,
             mode: Mode::Ask,
             budget_usd: None,
@@ -292,6 +296,9 @@ impl Session {
 
         let (sender, events) = mpsc::channel();
         let mut translator = Translator::new(options.profile.clone()).in_dir(options.cwd.clone());
+        if let Some(billing) = options.billing {
+            translator = translator.billed_as(billing);
+        }
         let waiting: Waiting = Arc::new(Mutex::new(BTreeMap::new()));
         let asked = Arc::clone(&waiting);
         let refusals: Refusals = Arc::new(Mutex::new(Vec::new()));

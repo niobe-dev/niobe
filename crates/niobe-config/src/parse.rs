@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 
-use niobe_core::Backend;
 use niobe_core::permission::{Allowlist, Rule};
+use niobe_core::{Backend, Billing};
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
@@ -131,6 +131,7 @@ impl File<'_> {
         let mut env = BTreeMap::new();
         let mut args = Vec::new();
         let mut models = Vec::new();
+        let mut billing = None;
         let mut settings = None;
         let mut auth_refresh = None;
 
@@ -141,6 +142,7 @@ impl File<'_> {
                 "env" => env = self.env(value, &at)?,
                 "args" => args = self.strings(value, &at)?,
                 "models" => models = self.non_empty_strings(value, &at)?,
+                "billing" => billing = Some(self.billing(value, &at)?),
                 "settings" => {
                     settings = Some(Settings {
                         path: self.non_empty_string(value, &at)?.to_owned(),
@@ -155,7 +157,7 @@ impl File<'_> {
                         &key.span(),
                         &at,
                         "unknown key; expected `backend`, `env`, `args`, `models`, \
-                         `settings` or `auth_refresh`",
+                         `billing`, `settings` or `auth_refresh`",
                     ));
                 }
             }
@@ -173,6 +175,7 @@ impl File<'_> {
             env,
             args,
             models,
+            billing,
             settings,
             auth_refresh,
             source: self.path.to_path_buf(),
@@ -190,6 +193,20 @@ impl File<'_> {
                     &value.span(),
                     at,
                     &format!("`{name}` is not a backend; expected {}", backend_list()),
+                )
+            })
+    }
+
+    fn billing(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Billing, ConfigError> {
+        let name = self.string(value, at)?;
+        [Billing::Plan, Billing::Metered]
+            .into_iter()
+            .find(|billing| billing.as_str() == name)
+            .ok_or_else(|| {
+                self.invalid(
+                    &value.span(),
+                    at,
+                    &format!("`{name}` is not a billing mode; expected `plan` or `metered`"),
                 )
             })
     }
