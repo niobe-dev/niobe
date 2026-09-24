@@ -304,9 +304,10 @@ pub(crate) struct Usage {
     #[serde(default)]
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_creation: Option<CacheCreation>,
-    /// The API requests the message took, each with its own counts. Read only
-    /// for the split of the cache writes by lifetime, which Claude Code 2.1.278
-    /// puts here and not beside the total on a `message_delta`.
+    /// The API requests the message took, each with its own counts. Read for
+    /// the split of the cache writes by lifetime, which Claude Code 2.1.278
+    /// puts here and not beside the total on a `message_delta`, and for the
+    /// prompt of the last request, which the total sums with the others.
     #[serde(default)]
     pub(crate) iterations: Vec<Iteration>,
 }
@@ -319,6 +320,28 @@ impl Usage {
     /// summed over the iterations. Reading only the first would price every
     /// one-hour write on a 2.1.278 `message_delta` as a five-minute one — in
     /// the session recorded on 19 September 2026, every cache write it made.
+    /// Every prompt token of the last API request the message took: its
+    /// uncached input, cache reads and cache writes.
+    ///
+    /// The last iteration where the CLI lists them, because the total beside
+    /// them sums every request of the message and no prompt that size was
+    /// ever sent; the total where it lists none, which is then one request.
+    pub(crate) fn last_prompt(&self) -> u64 {
+        let (input, read, write) = match self.iterations.last() {
+            Some(last) => (
+                last.input_tokens,
+                last.cache_read_input_tokens,
+                last.cache_creation_input_tokens,
+            ),
+            None => (
+                self.input_tokens,
+                self.cache_read_input_tokens,
+                self.cache_creation_input_tokens,
+            ),
+        };
+        input.saturating_add(read).saturating_add(write)
+    }
+
     pub(crate) fn cache_write_1h(&self) -> u64 {
         match &self.cache_creation {
             Some(split) => split.ephemeral_1h_input_tokens,
@@ -336,6 +359,12 @@ impl Usage {
 /// One API request of a message, as its `usage` lists them.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub(crate) struct Iteration {
+    #[serde(default)]
+    pub(crate) input_tokens: u64,
+    #[serde(default)]
+    pub(crate) cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_creation: Option<CacheCreation>,
 }
 
@@ -468,6 +497,10 @@ pub(crate) struct ModelUsage {
     /// messages that say `claude-opus-5`.
     #[serde(rename = "canonicalModel")]
     pub(crate) canonical_model: Option<String>,
+    /// The size of the model's context window in tokens, as the CLI knows it
+    /// for the id this entry is keyed by.
+    #[serde(rename = "contextWindow")]
+    pub(crate) context_window: Option<u64>,
 }
 
 /// One call the CLI refused to make.

@@ -95,9 +95,20 @@ impl Cost {
 /// from an id that is not listed — not a date suffix, not a region prefix, not
 /// a context-window marker — because a near match is a guess, and a guessed
 /// price reads exactly like a real one.
+///
+/// It also carries each model's context window, under the same rule: listed
+/// ids only, each size dated from the day it took effect.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PriceTable {
     pub(crate) models: BTreeMap<String, Schedule>,
+    pub(crate) windows: BTreeMap<String, Vec<Window>>,
+}
+
+/// A context window size, in force from a day until the next one's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Window {
+    pub(crate) from: Date,
+    pub(crate) tokens: u64,
 }
 
 impl PriceTable {
@@ -128,9 +139,30 @@ impl PriceTable {
     /// This table with `over` laid on top. Every id `over` lists takes its
     /// schedule from `over` whole, so an overriding file states a model's
     /// whole price history rather than patching one date of it.
+    ///
+    /// Context windows are laid over the same way, apart from the prices: a
+    /// file that lists a model's prices and no window leaves the bundled
+    /// window in place.
     pub fn overlay(mut self, over: Self) -> Self {
         self.models.extend(over.models);
+        self.windows.extend(over.windows);
         self
+    }
+
+    /// The size of `model`'s context window on `day`, in tokens, as the
+    /// provider published it.
+    ///
+    /// `None` for a model the table does not list and for a day before its
+    /// first size: an unlisted model has no window here, the way it has no
+    /// price, because a window taken from a near match would put a percentage
+    /// on screen that nothing measured.
+    pub fn context_window(&self, model: &str, day: Date) -> Option<u64> {
+        self.windows
+            .get(model)?
+            .iter()
+            .rev()
+            .find(|window| window.from <= day)
+            .map(|window| window.tokens)
     }
 
     /// Every id the table lists, sorted.

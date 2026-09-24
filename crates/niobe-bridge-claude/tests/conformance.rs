@@ -319,6 +319,43 @@ fn every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from() 
     );
 }
 
+/// The context meter's window is the `contextWindow` of each `modelUsage`
+/// entry. A release that stopped sending it would leave the meter on the
+/// published table without anything failing, so every recorded entry is held
+/// to carrying it.
+#[test]
+fn every_recorded_model_usage_entry_carries_its_context_window() {
+    let mut checked = 0;
+    for path in recordings() {
+        for line in lines_of(&path) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if value.get("type").and_then(serde_json::Value::as_str) != Some("result") {
+                continue;
+            }
+            let Some(entries) = value
+                .get("modelUsage")
+                .and_then(serde_json::Value::as_object)
+            else {
+                continue;
+            };
+            for (model, entry) in entries {
+                assert!(
+                    entry
+                        .get("contextWindow")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some(),
+                    "{}: the `modelUsage` entry for {model} has no `contextWindow`: {line}",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "no recording holds a `modelUsage` entry");
+}
+
 /// How a recorded shell command's result says how the command exited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ShellEnding {

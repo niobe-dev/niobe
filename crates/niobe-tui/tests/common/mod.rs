@@ -21,8 +21,8 @@
 
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
-    AgentOutcome, Backend, Event, Mode, PermissionDecision, SessionMeta, ToolOutcome, Usage,
-    UsageWindow, UsageWindows,
+    AgentOutcome, Backend, Context, Event, Mode, PermissionDecision, SessionMeta, ToolOutcome,
+    Usage, UsageWindow, UsageWindows,
 };
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -113,6 +113,12 @@ fn session_events() -> Vec<Event> {
             cost_usd: Some(0.04),
             cost_basis: None,
             settles_model: false,
+        }),
+        // The prompt that request sent: its input, reads and writes.
+        Event::Context(Context {
+            tokens: 2_100 + 18_400 + 900,
+            model: "opus-5".to_owned(),
+            window: Some(200_000),
         }),
         // A plan profile: the windows are what this session is metered
         // against, so they are in the Usage pane where a budget would be.
@@ -333,6 +339,13 @@ fn session_events() -> Vec<Event> {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+        }),
+        // The later, larger prompt is the one the pane shows: 25,400 of
+        // 200,000 is 12.7%, drawn as 13%.
+        Event::Context(Context {
+            tokens: 3_400 + 22_000,
+            model: "opus-5".to_owned(),
+            window: Some(200_000),
         }),
         Event::AssistantMessage {
             text: "Etags cached in the LRU; 304s short-circuit. One test still red — the \

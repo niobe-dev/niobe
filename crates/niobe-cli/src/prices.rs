@@ -62,6 +62,10 @@ impl niobe_tui::Prices for Sheet {
         // an unlisted model stays unpriced instead of being guessed at.
         self.table.cost(usage, self.day).usd()
     }
+
+    fn context_window(&self, model: &str) -> Option<u64> {
+        self.table.context_window(model, self.day)
+    }
 }
 
 /// Reads the bundled table and the user's price file, in
@@ -210,6 +214,19 @@ cache_write = 1.25
                 "future-model      —       —           —            —         —  —           /u/prices.toml",
             ]
         );
+    }
+
+    /// The sheet hands the shell the window of the day the session opened
+    /// on, and none for a model the table does not list.
+    #[test]
+    fn the_sheet_reads_a_models_window_on_its_day() {
+        use niobe_tui::Prices as _;
+
+        let table = PriceTable::bundled().expect("the bundled table parses");
+        let sheet = Sheet::new(table, date(2026, 3, 12));
+        assert_eq!(sheet.context_window("claude-opus-4-6"), Some(200_000));
+        assert_eq!(sheet.context_window("claude-opus-4-6[1m]"), Some(1_000_000));
+        assert_eq!(sheet.context_window("not-a-model"), None);
     }
 
     #[test]

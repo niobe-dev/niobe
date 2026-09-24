@@ -1526,8 +1526,11 @@ fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
     let frame = screen(&mut app, 120, 30);
 
     assert_snapshot("activity-scrolled-120x30", &frame);
+    // The section's rows rather than its header: scrolled to its end, the
+    // pane shows the last rows it holds, and how many of them fit above the
+    // tools depends on how tall the panes over it are.
     assert!(
-        frame.contains("▾ Tools"),
+        frame.contains("Notion·*"),
         "the tools section is what the pane was scrolled to:\n{frame}"
     );
     assert!(

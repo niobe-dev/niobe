@@ -65,6 +65,33 @@ fn claude_opus_5_on_the_claude_api_matches_a_hand_computed_cost() {
 }
 
 #[test]
+fn claude_opus_5_5_reads_its_cache_at_five_percent_of_input() {
+    // Claude Opus 5.5: input $4, output $20, cache read $0.20 (5% of input,
+    // not 10%), 5-minute write $5, 1-hour write $8.
+    //   10,000 input × 4       =  40,000
+    //    2,000 output × 20     =  40,000
+    //  500,000 cache read × .2 = 100,000
+    //   20,000 5m write × 5    = 100,000
+    //   10,000 1h write × 8    =  80,000
+    //                            360,000 / 1e6 = $0.36
+    let usage = Usage {
+        input: 10_000,
+        output: 2_000,
+        cache_read: 500_000,
+        cache_write: 30_000,
+        cache_write_1h: 10_000,
+        ..usage("claude-opus-5-5")
+    };
+    let cost = usd(bundled().cost(&usage, date(2026, 9, 24)));
+    assert!((cost - 0.36).abs() < 1e-9, "{cost}");
+    assert_eq!(
+        bundled().cost(&usage, date(2026, 9, 21)).provenance(),
+        Provenance::Unpriced,
+        "priced before its release"
+    );
+}
+
+#[test]
 fn claude_sonnet_5_on_a_bedrock_eu_profile_matches_a_hand_computed_cost() {
     // Bedrock EU cross-region inference, Claude Sonnet 5: input $2.20, output
     // $11, cache read $0.22, 1-hour write $4.40 (the global rates plus 10%).

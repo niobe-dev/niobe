@@ -9,16 +9,16 @@
 ┃   115     cache.set(url, {                                                 ┃ │ haiku-4-5   4%  ▓░░░░░░░░░░░  2490    │
 ┃   116 +     etag: res.headers.get("ETag"),                                 ┃ │ cache hit  87%  ▓▓▓▓▓▓▓▓▓▓░░   51k    │
 ┃   117       body,                                                          ┃ │ session ≥$0.06                        │
-┃   └ allowed by you                                                         ┃ └───────────────────────────────────────┘
-┃                                                                            ┃ ┌─────────────── Changes ───────────────┐
-┃ ◆ claude                                                                   ┃ │                                       │
-┃   Rewriting the 304 test around the cached body.                           ┃ │ ⎇ main ↑3                             █
-┃                                                                            ┃ │ ▾ Working tree  23 files  +977 −259   │
-┃ ◆ claude                                                                   █ │   .                                   │
-┃   The notebook that demonstrates the fetcher needs the new call shape.     █ │     CHANGELOG.md                +0 −0 │
-┃                                                                            █ │   catalog/                            │
-┃ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s █ │     fetch.ts                 +149 −12 │
-┃   └ 1 failing: fetch returns the cached body on a 304                      █ │     etag.ts                   +88 −41 │
+┃   └ allowed by you                                                         ┃ │ ───────────────────────────────────── │
+┃                                                                            ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
+┃ ◆ claude                                                                   ┃ └───────────────────────────────────────┘
+┃   Rewriting the 304 test around the cached body.                           ┃ ┌─────────────── Changes ───────────────┐
+┃                                                                            ┃ │                                       │
+┃ ◆ claude                                                                   █ │ ⎇ main ↑3                             █
+┃   The notebook that demonstrates the fetcher needs the new call shape.     █ │ ▾ Working tree  23 files  +977 −259   │
+┃                                                                            █ │   .                                   │
+┃ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s █ │     CHANGELOG.md                +0 −0 │
+┃   └ 1 failing: fetch returns the cached body on a 304                      █ │   catalog/                            │
 ┃                                                                            █ └───────────────────────────────────────┘
 ┃ ◆ claude                                                                   █ ┌────────────── Activity ───────────────┐
 ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ │                                       │

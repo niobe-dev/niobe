@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) Viacheslav Shynkarenko
 
-# The prices Niobe computes API-equivalent costs from.
+# The prices Niobe computes API-equivalent costs from, and, in the `[[context]]`
+# entries at the end, the context window of each model.
 #
 # Every rate is in USD per million tokens, as the provider publishes it:
 #
@@ -67,6 +68,21 @@ output = 50.00
 cache_read = 1.00
 cache_write = 12.50
 cache_write_1h = 20.00
+
+# Claude Opus 5.5. Its cache reads are 5% of input, not the usual 10%.
+[[model]]
+ids = [
+    "claude-opus-5-5",
+    "claude-opus-5-5[1m]",
+]
+
+[[model.price]]
+from = 2026-09-22
+input = 4.00
+output = 20.00
+cache_read = 0.20
+cache_write = 5.00
+cache_write_1h = 8.00
 
 # Claude Opus 5
 [[model]]
@@ -559,3 +575,234 @@ input = 1.75
 output = 14.00
 cache_read = 0.175
 cache_write = 1.75
+
+# Context windows.
+#
+# The most tokens one request to a model can hold, prompt and reply together,
+# which is what the shell's context meter is read against. The backend's own
+# report of a window wins over this table where it gives one — the `claude`
+# CLI does, once a turn has ended — so these sizes are what the meter uses
+# before that, and for a backend that never says.
+#
+#   ids     matched exactly, as for prices; an id not listed has no window,
+#           and the meter shows the context's size with no share of anything
+#   from    the day the size took effect (UTC)
+#   tokens  the size of the window
+#
+# https://platform.claude.com/docs/en/build-with-claude/context-windows for the
+# sizes: "Claude Fable 5.1, …, Claude Fable 5, …, Claude Opus 5.5, Claude Opus
+# 5, Claude Opus 4.8, Claude Opus 4.7, Claude Opus 4.6, Claude Sonnet 5, Claude
+# Sonnet 4.6 … have a 1M-token context window … Other Claude models, including
+# Claude Sonnet 4.5, have a 200k-token context window", and "for every model
+# with a 1M-token context window, 1M is the default". The models overview
+# (https://platform.claude.com/docs/en/models/overview) lists Claude Haiku 4.5
+# at 200K. The dates are the release dates the prices above start from. A
+# window belongs to the model, so a Bedrock profile id has the window of the
+# model it routes to. OpenAI's models are not listed yet: their windows have
+# not been read from OpenAI's documentation into this table.
+
+# Claude Fable 5.1
+[[context]]
+ids = [
+    "claude-fable-5-1",
+    "claude-fable-5-1[1m]",
+]
+
+[[context.window]]
+from = 2026-09-01
+tokens = 1_000_000
+
+# Claude Opus 5.5
+[[context]]
+ids = [
+    "claude-opus-5-5",
+    "claude-opus-5-5[1m]",
+]
+
+[[context.window]]
+from = 2026-09-22
+tokens = 1_000_000
+
+# Claude Fable 5
+[[context]]
+ids = [
+    "claude-fable-5",
+    "claude-fable-5[1m]",
+    "eu.anthropic.claude-fable-5",
+    "eu.anthropic.claude-fable-5[1m]",
+    "us.anthropic.claude-fable-5",
+    "us.anthropic.claude-fable-5[1m]",
+]
+
+[[context.window]]
+from = 2026-06-09
+tokens = 1_000_000
+
+# Claude Opus 5
+[[context]]
+ids = [
+    "claude-opus-5",
+    "claude-opus-5[1m]",
+    "eu.anthropic.claude-opus-5",
+    "eu.anthropic.claude-opus-5[1m]",
+    "us.anthropic.claude-opus-5",
+    "us.anthropic.claude-opus-5[1m]",
+]
+
+[[context.window]]
+from = 2026-07-24
+tokens = 1_000_000
+
+# Claude Sonnet 5
+[[context]]
+ids = [
+    "claude-sonnet-5",
+    "claude-sonnet-5[1m]",
+    "eu.anthropic.claude-sonnet-5",
+    "eu.anthropic.claude-sonnet-5[1m]",
+    "us.anthropic.claude-sonnet-5",
+    "us.anthropic.claude-sonnet-5[1m]",
+]
+
+[[context.window]]
+from = 2026-06-30
+tokens = 1_000_000
+
+# Claude Opus 4.8
+[[context]]
+ids = [
+    "claude-opus-4-8",
+    "claude-opus-4-8[1m]",
+    "eu.anthropic.claude-opus-4-8",
+    "eu.anthropic.claude-opus-4-8[1m]",
+    "us.anthropic.claude-opus-4-8",
+    "us.anthropic.claude-opus-4-8[1m]",
+]
+
+[[context.window]]
+from = 2026-05-28
+tokens = 1_000_000
+
+# Claude Opus 4.7
+[[context]]
+ids = [
+    "claude-opus-4-7",
+    "claude-opus-4-7[1m]",
+    "eu.anthropic.claude-opus-4-7",
+    "eu.anthropic.claude-opus-4-7[1m]",
+    "us.anthropic.claude-opus-4-7",
+    "us.anthropic.claude-opus-4-7[1m]",
+]
+
+[[context.window]]
+from = 2026-04-16
+tokens = 1_000_000
+
+# Claude Opus 4.6. 200K by default, and 1M in beta under `[1m]`, until the 1M window became
+# the default on 13 March 2026.
+[[context]]
+ids = [
+    "claude-opus-4-6",
+]
+
+[[context.window]]
+from = 2026-02-05
+tokens = 200_000
+
+[[context.window]]
+from = 2026-03-13
+tokens = 1_000_000
+
+# Claude Opus 4.6 with its 1M window selected
+[[context]]
+ids = [
+    "claude-opus-4-6[1m]",
+]
+
+[[context.window]]
+from = 2026-02-05
+tokens = 1_000_000
+
+# Claude Sonnet 4.6, as for Opus 4.6.
+[[context]]
+ids = [
+    "claude-sonnet-4-6",
+]
+
+[[context.window]]
+from = 2026-02-17
+tokens = 200_000
+
+[[context.window]]
+from = 2026-03-13
+tokens = 1_000_000
+
+# Claude Sonnet 4.6 with its 1M window selected
+[[context]]
+ids = [
+    "claude-sonnet-4-6[1m]",
+]
+
+[[context.window]]
+from = 2026-02-17
+tokens = 1_000_000
+
+# Claude Opus 4.6 and Sonnet 4.6 on Amazon Bedrock, from the day the price table starts them
+[[context]]
+ids = [
+    "global.anthropic.claude-opus-4-6-v1",
+    "global.anthropic.claude-opus-4-6-v1[1m]",
+    "eu.anthropic.claude-opus-4-6-v1",
+    "eu.anthropic.claude-opus-4-6-v1[1m]",
+    "us.anthropic.claude-opus-4-6-v1",
+    "us.anthropic.claude-opus-4-6-v1[1m]",
+    "global.anthropic.claude-sonnet-4-6",
+    "global.anthropic.claude-sonnet-4-6[1m]",
+    "eu.anthropic.claude-sonnet-4-6",
+    "eu.anthropic.claude-sonnet-4-6[1m]",
+    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-sonnet-4-6[1m]",
+]
+
+[[context.window]]
+from = 2026-03-13
+tokens = 1_000_000
+
+# Claude Opus 4.5
+[[context]]
+ids = [
+    "claude-opus-4-5-20251101",
+    "claude-opus-4-5",
+]
+
+[[context.window]]
+from = 2025-11-24
+tokens = 200_000
+
+# Claude Sonnet 4.5. Its 1M-context beta was requested with a header, not an id, so no id
+# here names it.
+[[context]]
+ids = [
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-4-5",
+]
+
+[[context.window]]
+from = 2025-09-29
+tokens = 200_000
+
+# Claude Haiku 4.5
+[[context]]
+ids = [
+    "claude-haiku-4-5-20251001",
+    "claude-haiku-4-5",
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "eu.anthropic.claude-haiku-4-5",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.anthropic.claude-haiku-4-5",
+]
+
+[[context.window]]
+from = 2025-10-15
+tokens = 200_000

@@ -256,6 +256,30 @@ impl UsageWindows {
     }
 }
 
+/// The prompt the main agent's last request sent, and the window it was sent
+/// into.
+///
+/// It describes the request that went, not the one about to: that one also
+/// carries the last reply and whatever tool results come back, which no
+/// backend reports until it has been sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Context {
+    /// Every prompt token of the request — uncached input, cache reads and
+    /// cache writes, which are disjoint parts of one prompt and all count
+    /// against the window.
+    pub tokens: u64,
+    /// The model the request ran on, as the session names it: with a
+    /// window-selecting suffix such as `[1m]` where the backend uses one, since
+    /// that suffix is what the window depends on.
+    pub model: String,
+    /// The size of that model's context window in tokens, as the backend
+    /// reported it. `None` where it has not reported one — which is not a
+    /// window of any size, and a consumer that knows the model's published
+    /// window may use that instead.
+    #[serde(default)]
+    pub window: Option<u64>,
+}
+
 /// How a tool call ended. Drives waste accounting: a failed call is spend with
 /// nothing to show for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -458,6 +482,14 @@ pub enum Event {
     /// out for itself would be a guess, and on a flat-rate plan it is the
     /// figure the operator steers by.
     UsageWindows(UsageWindows),
+
+    /// How much the main agent's last request put in front of the model.
+    ///
+    /// Carried apart from [`Event::Usage`] because a usage record is money
+    /// and tokens for any agent, and this is the size of one conversation's
+    /// prompt: a sub-agent's requests are billed to the session but fill a
+    /// context of their own.
+    Context(Context),
 
     /// A tool call is waiting on the operator.
     PermissionRequest {

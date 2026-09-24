@@ -1116,6 +1116,7 @@ impl App {
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
             | Event::UsageWindows(_)
+            | Event::Context(_)
             | Event::Checkpoint { .. } => {}
 
             // The decision itself is in the session fold, which carries no

@@ -336,6 +336,11 @@ The per-turn rows are the `message_delta` usage, which equals each `result`'s
 counts both the messages and the bill reports 8 in, 12 out, 43,944 cache read
 and 51,666 cache write.
 
+Each turn is one request, so its prompt — the context it filled — is its
+`in + cache read + cache write`: **21,068** and **26,741**. The window is the
+`contextWindow` of the `modelUsage` entry keyed `claude-opus-5[1m]`,
+**1,000,000**, which the first `result` is the first to report.
+
 ## `sub-agents.jsonl`
 
 The last two turns of a real session and the two turns the CLI started on its

@@ -30,4 +30,16 @@ pub trait Prices: std::fmt::Debug {
     /// `usage` carries token counts and a model id; its `cost_usd` is always
     /// `None`, because it is what no reported cost accounts for.
     fn estimate(&self, usage: &Usage) -> Option<f64>;
+
+    /// The size of `model`'s context window in tokens, as the provider
+    /// published it, or `None` where the model's window is not known.
+    ///
+    /// The same rule as [`Prices::estimate`]: no window for a model the
+    /// implementation does not list. The shell reads this only where the
+    /// backend did not report a window of its own, and a model with neither
+    /// is drawn as a size with no share of anything.
+    fn context_window(&self, model: &str) -> Option<u64> {
+        let _ = model;
+        None
+    }
 }

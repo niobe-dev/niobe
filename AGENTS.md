@@ -47,8 +47,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
   number in its comments; `parse.rs` walks it by hand like the config, `table.rs` looks a model
-  up by exact id on a day and prices a usage record against it. `tests/prices.rs` checks the
-  table against costs computed by hand.
+  up by exact id on a day and prices a usage record against it. The same file dates each model's
+  context window in its `[[context]]` entries, which the shell's context meter falls back on where
+  the backend has not reported one. `tests/prices.rs` checks the table against costs computed by
+  hand, and `tests/contexts.rs` its windows against the published sizes.
 - **`crates/niobe-config/`** — the config: profiles, each a backend plus the environment,
   arguments and credential refresh it runs with, and the `[permissions]` rules a session answers
   prompts with before asking. `parse.rs` walks the spanned TOML document by hand so that an

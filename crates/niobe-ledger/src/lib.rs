@@ -10,7 +10,9 @@
 //! What exists so far is the price table: per-model rates with the date each
 //! came into force, bundled into the binary as `prices.toml` and overridable
 //! by the user, and the API-equivalent cost of a usage record priced against
-//! it. Attributing costs to calls, files and sessions is not implemented yet.
+//! it. The same file dates each model's context window, which is what a
+//! session's context is measured against where the backend has not said.
+//! Attributing costs to calls, files and sessions is not implemented yet.
 
 mod date;
 mod error;

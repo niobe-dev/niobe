@@ -29,7 +29,7 @@ use ratatui::widgets::{
     Widget,
 };
 
-use niobe_core::event::{AgentOutcome, Mode, UsageWindow};
+use niobe_core::event::{AgentOutcome, Context, Mode, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, ToolTotals, Totals};
 
 use crate::app::{
@@ -1356,8 +1356,8 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
 }
 
 /// The rows the Usage pane needs: its frame, whatever windows the session has
-/// been told about, a row per model and the cache, and the session's cost and
-/// its budget.
+/// been told about, a row per model and the cache, the session's cost and its
+/// budget, and how full the context is.
 ///
 /// Read before the pane is drawn, because the column above it is laid out
 /// from it — the pane takes the rows its figures need and leaves the rest to
@@ -1370,7 +1370,16 @@ fn usage_height(app: &App) -> u16 {
     // backend reported, the rule between the two blocks where both have rows,
     // a row per model and the cache row, the session's cost and whatever
     // budget it runs against.
-    let rows = 3 + windows + usize::from(windows > 0 && spend > 0) + spend + 1 + budget;
+    let context = context_rows(app);
+    // And the context, under a rule of its own, where there is one to show.
+    let rows = 3
+        + windows
+        + usize::from(windows > 0 && spend > 0)
+        + spend
+        + 1
+        + budget
+        + usize::from(context > 0)
+        + context;
     u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
@@ -1613,6 +1622,74 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
+/// The widest label the context row carries, `context`, and a column of gap.
+const CONTEXT_LABEL: usize = 8;
+
+/// How many rows the context takes: one once the main agent has sent a
+/// request, and none before — nothing has been measured, and a row at `0%`
+/// would say the context is empty.
+///
+/// The pane is sized from this before it is drawn, so it has to agree with
+/// [`context_lines`] exactly; a test holds the two together.
+fn context_rows(app: &App) -> usize {
+    usize::from(app.session().context().is_some())
+}
+
+/// How big the window the last request went into is: what the backend
+/// reported for the model, or else what the provider published for it.
+///
+/// The backend's figure wins because it is the window the session actually
+/// has — a plan or a flag can select another than the published default. With
+/// neither, there is no window, and nothing is assumed in its place.
+fn context_window(app: &App, context: &Context) -> Option<u64> {
+    context
+        .window
+        .or_else(|| app.prices()?.context_window(&context.model))
+}
+
+/// How full the context is: the prompt the main agent's last request sent,
+/// against the window it went into.
+///
+/// The row claims the last request, the reading Claude Code's own context
+/// figure has: a request's input and cache tokens against the window. The
+/// next request is larger by the last reply and whatever comes back from the
+/// calls it made, and nothing reports that until it goes.
+///
+/// A model whose window nobody knows gets the size alone — no bar, and no
+/// share of a window assumed for it. The share is never clamped: a context
+/// past its window fills the bar, and the figure says by how much.
+fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(context) = app.session().context() else {
+        return Vec::new();
+    };
+    let dim = Style::new().fg(theme.dim);
+    let label = Span::styled(format!("{:<CONTEXT_LABEL$}", "context"), dim);
+    let Some(window) = context_window(app, context) else {
+        return vec![Line::from(vec![
+            label,
+            Span::styled(compact(context.tokens), Style::new().fg(theme.fg)),
+        ])];
+    };
+
+    let share = context.tokens as f64 / window.max(1) as f64;
+    let figures = format!("  {} / {}", compact(context.tokens), compact(window));
+    let cells = width
+        .saturating_sub(CONTEXT_LABEL + WINDOW_SHARE + text::width(&figures))
+        .min(METER_CELLS);
+    let (filled, track) = meter(share, cells);
+    let style = match share >= BUDGET_SHOWN_HOT {
+        true => Style::new().fg(theme.hot),
+        false => Style::new().fg(theme.fg),
+    };
+    vec![Line::from(vec![
+        label,
+        Span::styled(filled, style),
+        Span::styled(track, dim),
+        Span::styled(format!(" {:>3}%", crate::app::percent(share)), style.bold()),
+        Span::styled(figures, dim),
+    ])]
+}
+
 /// The rule the mock draws between the pane's blocks. Its blocks answer
 /// different questions — what the plan has left, and who spent the session's
 /// tokens — and without it they read as one list.
@@ -1668,6 +1745,14 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 },
             ),
         );
+    }
+
+    // Last, under a rule: how full the context is answers a question about
+    // the next request rather than about what has been spent.
+    let context = context_lines(app, width, theme);
+    if !context.is_empty() {
+        lines.push(divider(width, theme));
+        lines.extend(context);
     }
 
     lines.truncate(rows);
@@ -3422,6 +3507,144 @@ mod tests {
             .iter()
             .map(Line::to_string)
             .collect()
+    }
+
+    /// A table of published windows with one model in it, standing in for
+    /// the bundled one.
+    #[derive(Debug)]
+    struct OpusHasTwoHundredThousand;
+
+    impl Prices for OpusHasTwoHundredThousand {
+        fn estimate(&self, _usage: &Usage) -> Option<f64> {
+            None
+        }
+
+        fn context_window(&self, model: &str) -> Option<u64> {
+            (model == "opus-5").then_some(200_000)
+        }
+    }
+
+    fn sent(app: &mut App, tokens: u64, model: &str, window: Option<u64>) {
+        app.apply(&niobe_core::event::Event::Context(
+            niobe_core::event::Context {
+                tokens,
+                model: model.to_owned(),
+                window,
+            },
+        ));
+    }
+
+    fn context_of(app: &App, width: usize) -> Vec<String> {
+        context_lines(app, width, &Theme::default())
+            .iter()
+            .map(Line::to_string)
+            .collect()
+    }
+
+    fn bare() -> App {
+        App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+            ..Default::default()
+        })
+    }
+
+    /// 76,000 of 200,000 is 38%, which twelve cells draw as five.
+    #[test]
+    fn the_context_reads_as_a_meter_its_share_and_both_figures() {
+        let mut app = bare();
+        sent(&mut app, 76_000, "opus-5", Some(200_000));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context ▓▓▓▓▓░░░░░░░  38%  76k / 200k"]
+        );
+    }
+
+    /// Nothing has been sent, so nothing has been measured: no row, where a
+    /// `0%` would say the context is empty.
+    #[test]
+    fn a_session_that_has_sent_nothing_draws_no_context_row() {
+        let app = bare().with_prices(Box::new(OpusHasTwoHundredThousand));
+        assert!(context_of(&app, 39).is_empty());
+        assert_eq!(context_rows(&app), 0);
+    }
+
+    /// The backend did not say how big the window is, so the published one
+    /// is read — and only where the table lists the model.
+    #[test]
+    fn a_window_the_backend_did_not_report_is_read_from_the_published_table() {
+        let mut app = bare().with_prices(Box::new(OpusHasTwoHundredThousand));
+        sent(&mut app, 50_000, "opus-5", None);
+        assert_eq!(
+            context_of(&app, 39),
+            ["context ▓▓▓░░░░░░░░░  25%  50k / 200k"]
+        );
+    }
+
+    /// What the backend reported for the model it is running wins over the
+    /// table: a plan can select another window than the published default.
+    #[test]
+    fn the_window_the_backend_reported_wins_over_the_published_one() {
+        let mut app = bare().with_prices(Box::new(OpusHasTwoHundredThousand));
+        sent(&mut app, 50_000, "opus-5", Some(1_000_000));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context ▓░░░░░░░░░░░   5%  50k / 1.0M"]
+        );
+    }
+
+    /// No window anywhere: the size alone, with no bar and no share, the way
+    /// an unlisted model reads `unpriced` rather than a guessed price.
+    #[test]
+    fn a_model_with_no_known_window_shows_its_context_and_no_share() {
+        let mut app = bare().with_prices(Box::new(OpusHasTwoHundredThousand));
+        sent(&mut app, 76_000, "gpt-5.6", None);
+        let rows = context_of(&app, 39);
+        assert_eq!(rows, ["context 76k"]);
+        assert!(!rows[0].contains('%'), "{rows:?}");
+    }
+
+    /// A compaction makes the next request smaller, and the row follows it
+    /// down rather than keeping the largest context the session ever had.
+    #[test]
+    fn a_compacted_context_is_drawn_at_the_size_of_the_next_request() {
+        let mut app = bare();
+        sent(&mut app, 180_000, "opus-5", Some(200_000));
+        app.apply(&niobe_core::event::Event::Notice {
+            message: "the context was compacted (auto).".to_owned(),
+        });
+        sent(&mut app, 30_000, "opus-5", Some(200_000));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context ▓▓░░░░░░░░░░  15%  30k / 200k"]
+        );
+    }
+
+    /// Past the window, the bar is full and the figure says by how much.
+    #[test]
+    fn a_context_past_its_window_is_not_clamped() {
+        let mut app = bare();
+        sent(&mut app, 210_000, "opus-5", Some(200_000));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context ▓▓▓▓▓▓▓▓▓▓▓▓ 105%  210k / 200k"]
+        );
+    }
+
+    /// The meter gives up cells before the figures give up characters.
+    #[test]
+    fn a_narrow_pane_shortens_the_meter_and_keeps_the_figures() {
+        let mut app = bare();
+        sent(&mut app, 76_000, "opus-5", Some(200_000));
+        assert_eq!(context_of(&app, 30), ["context ▓▓░░░  38%  76k / 200k"]);
+    }
+
+    #[test]
+    fn the_context_rows_the_pane_is_sized_for_are_the_rows_it_draws() {
+        let mut app = bare();
+        assert_eq!(context_rows(&app), context_of(&app, 39).len());
+        sent(&mut app, 76_000, "opus-5", None);
+        assert_eq!(context_rows(&app), context_of(&app, 39).len());
     }
 
     /// The pane is sized from the row count before the rows are built, so the

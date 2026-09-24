@@ -715,6 +715,33 @@ mod long_context {
 
         assert_eq!(models, ["claude-opus-5[1m]"]);
     }
+
+    /// Each turn's one request, as the README's table has it — 2 + 10,118 +
+    /// 10,948 and 2 + 11,854 + 14,885 — first without a window and then with
+    /// the 1,000,000 its `result` reports for `claude-opus-5[1m]`. The second
+    /// turn already knows it, so its `result` restates nothing.
+    #[test]
+    fn the_context_is_each_turns_prompt_against_the_window_the_cli_reported() {
+        let events = translated();
+        let contexts: Vec<(u64, &str, Option<u64>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Context(context) => {
+                    Some((context.tokens, context.model.as_str(), context.window))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            contexts,
+            [
+                (21_068, "claude-opus-5[1m]", None),
+                (21_068, "claude-opus-5[1m]", Some(1_000_000)),
+                (26_741, "claude-opus-5[1m]", Some(1_000_000)),
+            ]
+        );
+    }
 }
 
 fn translated_sub_agents() -> Vec<Event> {

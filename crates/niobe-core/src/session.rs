@@ -24,8 +24,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, CheckpointId, Event, Mode, SessionMeta, ToolCallId, ToolOutcome, Usage,
-    UsageWindows,
+    AgentId, AgentOutcome, CheckpointId, Context, Event, Mode, SessionMeta, ToolCallId,
+    ToolOutcome, Usage, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -277,6 +277,8 @@ pub struct SessionState {
     /// `None` until one has said: a metered profile never reports these, and
     /// neither does a backend version that does not emit them.
     usage_windows: Option<UsageWindows>,
+    /// The main agent's last request. `None` until one has been reported.
+    context: Option<Context>,
     tools: ToolTotals,
     in_flight_tools: BTreeMap<ToolCallId, String>,
     /// Whether the backend is still answering the last prompt.
@@ -388,6 +390,11 @@ impl SessionState {
             // The last report replaces the one before it: a window is a level,
             // not a quantity, so summing two reports of it would be nonsense.
             Event::UsageWindows(windows) => self.usage_windows = Some(*windows),
+
+            // A level again, and the last one stands — including after a
+            // compaction, when it drops: a high-water mark would keep showing
+            // a context the model no longer has.
+            Event::Context(context) => self.context = Some(context.clone()),
 
             Event::PermissionRequest { id, .. } => {
                 self.permission_requests += 1;
@@ -542,6 +549,13 @@ impl SessionState {
     /// all rather than a zero, which would read as a window untouched.
     pub fn usage_windows(&self) -> Option<&UsageWindows> {
         self.usage_windows.as_ref()
+    }
+
+    /// The prompt the main agent's last request sent, and the window it went
+    /// into where the backend said. `None` until a request has been reported,
+    /// which is not an empty context: nothing has been measured.
+    pub fn context(&self) -> Option<&Context> {
+        self.context.as_ref()
     }
 
     /// Tool call counters.
@@ -1225,6 +1239,33 @@ mod tests {
             Some(1_789_779_600)
         );
         assert!(!windows.using_overage);
+    }
+
+    fn context(tokens: u64) -> Event {
+        Event::Context(crate::event::Context {
+            tokens,
+            model: "opus-5".to_owned(),
+            window: Some(1_000_000),
+        })
+    }
+
+    #[test]
+    fn a_session_that_has_sent_nothing_has_no_context() {
+        assert_eq!(SessionState::new().context(), None);
+    }
+
+    /// A compaction shrinks the next prompt, and the fold follows it down:
+    /// the context is the last request's, never the largest one's.
+    #[test]
+    fn the_context_is_the_last_requests_even_when_it_shrank() {
+        let state = SessionState::replay(&[
+            context(150_000),
+            Event::Notice {
+                message: "the context was compacted (auto).".to_owned(),
+            },
+            context(20_000),
+        ]);
+        assert_eq!(state.context().map(|c| c.tokens), Some(20_000));
     }
 
     #[test]

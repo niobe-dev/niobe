@@ -14,6 +14,7 @@ use std::ops::Range;
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
+use crate::table::Window;
 use crate::{Date, LongContext, Origin, Price, PriceError, PriceTable, Rate, Rates, Schedule};
 
 type Entry<'t, 'i> = (&'t Spanned<DeString<'i>>, &'t Spanned<DeValue<'i>>);
@@ -40,30 +41,140 @@ struct Model {
 impl File<'_> {
     fn root(&self, root: &DeTable<'_>) -> Result<PriceTable, PriceError> {
         let mut models: BTreeMap<String, Schedule> = BTreeMap::new();
+        let mut windows: BTreeMap<String, Vec<Window>> = BTreeMap::new();
         for (key, value) in in_file_order(root) {
             let at = Key::root(key.get_ref());
-            if key.get_ref() != "model" {
-                return Err(self.invalid(&key.span(), &at, "unknown key; expected `model`"));
-            }
-            for (index, entry) in self.array(value, &at)?.iter().enumerate() {
-                let model = self.model(entry, &at.index(index))?;
-                let schedule = Schedule {
-                    prices: model.prices,
-                    origin: self.origin.clone(),
-                };
-                for id in model.ids {
-                    if models.contains_key(id.get_ref()) {
-                        return Err(self.invalid(
-                            &id.span(),
-                            &at.index(index).child("ids"),
-                            &format!("`{}` is listed by an earlier model", id.get_ref()),
-                        ));
-                    }
-                    models.insert(id.into_inner(), schedule.clone());
+            match key.get_ref().as_ref() {
+                "model" => self.models(value, &at, &mut models)?,
+                "context" => self.contexts(value, &at, &mut windows)?,
+                _ => {
+                    return Err(self.invalid(
+                        &key.span(),
+                        &at,
+                        "unknown key; expected `model` or `context`",
+                    ));
                 }
             }
         }
-        Ok(PriceTable { models })
+        Ok(PriceTable { models, windows })
+    }
+
+    fn models(
+        &self,
+        value: &Spanned<DeValue<'_>>,
+        at: &Key,
+        models: &mut BTreeMap<String, Schedule>,
+    ) -> Result<(), PriceError> {
+        for (index, entry) in self.array(value, at)?.iter().enumerate() {
+            let model = self.model(entry, &at.index(index))?;
+            let schedule = Schedule {
+                prices: model.prices,
+                origin: self.origin.clone(),
+            };
+            for id in model.ids {
+                if models.contains_key(id.get_ref()) {
+                    return Err(self.invalid(
+                        &id.span(),
+                        &at.index(index).child("ids"),
+                        &format!("`{}` is listed by an earlier model", id.get_ref()),
+                    ));
+                }
+                models.insert(id.into_inner(), schedule.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// The `[[context]]` entries: ids, and the window sizes they have had.
+    fn contexts(
+        &self,
+        value: &Spanned<DeValue<'_>>,
+        at: &Key,
+        windows: &mut BTreeMap<String, Vec<Window>>,
+    ) -> Result<(), PriceError> {
+        for (index, entry) in self.array(value, at)?.iter().enumerate() {
+            let at = at.index(index);
+            let mut ids = None;
+            let mut sizes = None;
+            for (key, value) in in_file_order(self.table(entry, &at)?) {
+                let at = at.child(key.get_ref());
+                match key.get_ref().as_ref() {
+                    "ids" => ids = Some(self.ids(value, &at)?),
+                    "window" => sizes = Some(self.windows(value, &at)?),
+                    _ => {
+                        return Err(self.invalid(
+                            &key.span(),
+                            &at,
+                            "unknown key; expected `ids` or `window`",
+                        ));
+                    }
+                }
+            }
+            let ids = ids.ok_or_else(|| self.invalid(&entry.span(), &at, "no `ids`"))?;
+            let sizes = sizes.ok_or_else(|| {
+                self.invalid(
+                    &entry.span(),
+                    &at,
+                    "no `window`; a context entry needs at least one",
+                )
+            })?;
+            for id in ids {
+                if windows.contains_key(id.get_ref()) {
+                    return Err(self.invalid(
+                        &id.span(),
+                        &at.child("ids"),
+                        &format!("`{}` is listed by an earlier context entry", id.get_ref()),
+                    ));
+                }
+                windows.insert(id.into_inner(), sizes.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn windows(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Vec<Window>, PriceError> {
+        let items = self.array(value, at)?;
+        if items.is_empty() {
+            return Err(self.invalid(&value.span(), at, "is empty; an entry needs a window"));
+        }
+        let mut windows: Vec<Window> = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let at = at.index(index);
+            let mut from = None;
+            let mut tokens = None;
+            for (key, value) in in_file_order(self.table(item, &at)?) {
+                let at = at.child(key.get_ref());
+                match key.get_ref().as_ref() {
+                    "from" => from = Some(self.date(value, &at)?),
+                    "tokens" => tokens = Some(self.token_count(value, &at)?),
+                    _ => {
+                        return Err(self.invalid(
+                            &key.span(),
+                            &at,
+                            "unknown key; expected `from` or `tokens`",
+                        ));
+                    }
+                }
+            }
+            let from = from.ok_or_else(|| self.invalid(&item.span(), &at, "no `from` date"))?;
+            let tokens = tokens.ok_or_else(|| {
+                self.invalid(&item.span(), &at, "no `tokens`, the size of the window")
+            })?;
+            if let Some(previous) = windows.last()
+                && from <= previous.from
+            {
+                return Err(self.invalid(
+                    &item.span(),
+                    &at.child("from"),
+                    &format!(
+                        "{from} is not after {}, the date of the window before it; list windows oldest first",
+                        previous.from
+                    ),
+                ));
+            }
+            windows.push(Window { from, tokens });
+        }
+        Ok(windows)
     }
 
     fn model(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Model, PriceError> {
@@ -583,11 +694,61 @@ mod tests {
             ),
             (
                 "models = []\n".to_owned(),
-                "p.toml:1: models: unknown key; expected `model`",
+                "p.toml:1: models: unknown key; expected `model` or `context`",
             ),
             (
                 "[[model]]\nids = [\"m\"\n".to_owned(),
                 "p.toml:2: unclosed array, expected `]`",
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(error(&text), expected, "\n{text}");
+        }
+    }
+
+    const CONTEXT: &str = "[[context]]\nids = [\"m\", \"m[1m]\"]\n\n[[context.window]]\nfrom = 2026-02-05\ntokens = 200_000\n\n[[context.window]]\nfrom = 2026-03-13\ntokens = 1_000_000\n";
+
+    fn day(year: u16, month: u8, date: u8) -> Date {
+        Date::new(year, month, date).expect("a real date")
+    }
+
+    #[test]
+    fn a_context_entry_dates_each_window_it_lists() {
+        let table = parse(CONTEXT).expect("the entry is valid");
+        assert_eq!(table.context_window("m", day(2026, 2, 4)), None);
+        assert_eq!(table.context_window("m", day(2026, 3, 12)), Some(200_000));
+        assert_eq!(
+            table.context_window("m[1m]", day(2026, 3, 13)),
+            Some(1_000_000)
+        );
+        assert_eq!(table.ids().count(), 0, "a window is not a price");
+    }
+
+    #[test]
+    fn an_invalid_context_entry_is_reported_with_its_key_and_line() {
+        let cases = [
+            (
+                "[[context]]\nids = [\"m\"]\n".to_owned(),
+                "p.toml:1: context[0]: no `window`; a context entry needs at least one",
+            ),
+            (
+                "[[context]]\nids = [\"m\"]\n[[context.window]]\nfrom = 2026-01-01\ntokens = 0\n"
+                    .to_owned(),
+                "p.toml:5: context[0].window[0].tokens: expected a positive whole number of tokens",
+            ),
+            (
+                "[[context]]\nids = [\"m\"]\n[[context.window]]\ntokens = 5\nsize = 5\n".to_owned(),
+                "p.toml:5: context[0].window[0].size: unknown key; expected `from` or `tokens`",
+            ),
+            (
+                format!(
+                    "{CONTEXT}[[context]]\nids = [\"m\"]\n[[context.window]]\nfrom = 2026-01-01\ntokens = 5\n"
+                ),
+                "p.toml:12: context[1].ids: `m` is listed by an earlier context entry",
+            ),
+            (
+                CONTEXT.replace("2026-03-13", "2026-02-05"),
+                "p.toml:8: context[0].window[1].from: 2026-02-05 is not after 2026-02-05, the date of the window before it; list windows oldest first",
             ),
         ];
         for (text, expected) in cases {

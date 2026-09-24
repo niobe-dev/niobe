@@ -73,8 +73,8 @@ use std::path::{Path, PathBuf};
 
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, CostBasis, Event, Mode, PermissionDecision, SessionMeta,
-    ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Backend, Context, CostBasis, Event, Mode, PermissionDecision,
+    SessionMeta, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
 use crate::conformance;
@@ -240,6 +240,12 @@ pub struct Translator {
     turn: Counts,
     /// Per model, everything reported for it so far this session.
     reported: BTreeMap<String, Reported>,
+    /// The context window the CLI last reported for each model id, from the
+    /// `modelUsage` of its `result`s.
+    windows: BTreeMap<String, u64>,
+    /// The main agent's last request, as last reported, so that a window that
+    /// arrives after it can be reported with it.
+    context: Option<Context>,
     /// Whether the CLI's release has been read off the first `init`. The CLI
     /// writes `init` again whenever the session moves model, and the release
     /// it reports there has not changed.
@@ -262,6 +268,8 @@ impl Translator {
             denied: BTreeMap::new(),
             turn: Counts::default(),
             reported: BTreeMap::new(),
+            windows: BTreeMap::new(),
+            context: None,
             checked_release: false,
         }
     }
@@ -1004,6 +1012,9 @@ impl Translator {
                     cost_basis: None,
                     settles_model: false,
                 }));
+                if stream.is_none() {
+                    self.report_context(usage.last_prompt(), out);
+                }
             }
 
             // A sub-agent's text is folded in when the message is complete
@@ -1050,6 +1061,7 @@ impl Translator {
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         self.reconcile_turn(outcome.usage.as_ref(), out);
         self.report_cost(&outcome, out);
+        self.learn_windows(&outcome.model_usage, out);
 
         // The closing line lists every call the turn refused, including the
         // ones already reported as they happened. Anything left is a refusal
@@ -1098,6 +1110,47 @@ impl Translator {
         // the session as working when it reads this, and a figure that came
         // after it would land in a turn the operator saw end.
         out.push(Event::TurnEnded);
+    }
+
+    /// Reports the prompt of a request the main agent made, against the
+    /// window the CLI last reported for the model the session is on.
+    ///
+    /// Keyed by the session's model rather than the message's: the messages of
+    /// a session with its 1M window selected name the family, and the window
+    /// belongs to the id with the suffix.
+    fn report_context(&mut self, tokens: u64, out: &mut Vec<Event>) {
+        let model = self.model.clone().unwrap_or_default();
+        let context = Context {
+            tokens,
+            window: self.windows.get(&model).copied(),
+            model,
+        };
+        self.context = Some(context.clone());
+        out.push(Event::Context(context));
+    }
+
+    /// Keeps the window each model's `modelUsage` entry reports, and restates
+    /// the last request against it where that changes the session's.
+    ///
+    /// The window arrives with the first `result` and the request it sizes
+    /// went before it, so without the restatement the first turn's meter would
+    /// wait for the second turn's first message to learn how big the window is.
+    fn learn_windows(
+        &mut self,
+        model_usage: &BTreeMap<String, wire::ModelUsage>,
+        out: &mut Vec<Event>,
+    ) {
+        for (model, usage) in model_usage {
+            if let Some(window) = usage.context_window {
+                self.windows.insert(model.clone(), window);
+            }
+        }
+        let Some(last) = &self.context else { return };
+        let window = self.windows.get(&last.model).copied();
+        if window != last.window {
+            let tokens = last.tokens;
+            self.report_context(tokens, out);
+        }
     }
 
     /// Checks the turn's own total against what the per-message records added
@@ -1823,6 +1876,123 @@ mod tests {
             })
             .collect();
         assert_eq!(billed, [("opus-5", 0, 0), ("opus-5[1m]", 2, 3)]);
+    }
+
+    fn contexts(events: &[Event]) -> Vec<niobe_core::event::Context> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Context(context) => Some(context.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Uncached input, cache reads and cache writes are the three parts of
+    /// one prompt, and all of it went into the window.
+    #[test]
+    fn the_context_is_every_prompt_token_of_the_main_agents_last_request() {
+        let mut translator = translator();
+        let events = translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":2,"cache_read_input_tokens":10118,"cache_creation_input_tokens":10948,"output_tokens":3}}}"#,
+        );
+        assert_eq!(
+            contexts(&events),
+            [niobe_core::event::Context {
+                tokens: 21_068,
+                model: "opus-5".to_owned(),
+                window: None,
+            }]
+        );
+    }
+
+    /// A message that took several requests sums them at the top level, and
+    /// that sum is no prompt that was ever sent. The last request's is.
+    #[test]
+    fn a_message_of_several_requests_is_sized_by_its_last() {
+        let mut translator = translator();
+        let events = translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":10,"cache_read_input_tokens":3000,"cache_creation_input_tokens":500,"output_tokens":90,"iterations":[{"input_tokens":4,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"output_tokens":40},{"input_tokens":6,"cache_read_input_tokens":2000,"cache_creation_input_tokens":300,"output_tokens":50}]}}}"#,
+        );
+        assert_eq!(
+            contexts(&events)
+                .iter()
+                .map(|c| c.tokens)
+                .collect::<Vec<_>>(),
+            [2_306]
+        );
+    }
+
+    /// A sub-agent's prompt fills a context of its own, not the session's.
+    #[test]
+    fn a_sub_agents_request_says_nothing_about_the_sessions_context() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_task","event":{"type":"message_start","message":{"model":"haiku-4-5"}}}"#,
+        );
+        let events = translator.line(
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_task","event":{"type":"message_delta","usage":{"input_tokens":5000,"output_tokens":7}}}"#,
+        );
+        assert_eq!(contexts(&events), []);
+    }
+
+    /// The window is keyed by the id the session runs under, which carries
+    /// the `[1m]` its messages leave off.
+    #[test]
+    fn the_window_the_cli_reports_is_carried_from_the_turn_it_arrives_in() {
+        let mut translator = Translator::new("max");
+        translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"claude-opus-5[1m]"}"#,
+        );
+        translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5"}}}"#,
+        );
+        let first = translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":2,"cache_read_input_tokens":98,"output_tokens":3}}}"#,
+        );
+        assert_eq!(
+            contexts(&first),
+            [niobe_core::event::Context {
+                tokens: 100,
+                model: "claude-opus-5[1m]".to_owned(),
+                window: None,
+            }]
+        );
+
+        // The first report of the window restates the last request with it,
+        // before the turn ends, so the meter does not wait a turn for it.
+        let result = before_the_end(translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"cache_read_input_tokens":98,"output_tokens":3},"modelUsage":{"claude-opus-5[1m]":{"inputTokens":2,"outputTokens":3,"cacheReadInputTokens":98,"costUSD":0.01,"contextWindow":1000000,"canonicalModel":"claude-opus-5"}},"total_cost_usd":0.01}"#,
+        ));
+        assert_eq!(
+            contexts(&result),
+            [niobe_core::event::Context {
+                tokens: 100,
+                model: "claude-opus-5[1m]".to_owned(),
+                window: Some(1_000_000),
+            }]
+        );
+
+        // A report that says the same again adds nothing.
+        translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":1,"cache_read_input_tokens":199,"output_tokens":3}}}"#,
+        );
+        let again = before_the_end(translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"cache_read_input_tokens":199,"output_tokens":3},"modelUsage":{"claude-opus-5[1m]":{"inputTokens":3,"outputTokens":6,"cacheReadInputTokens":297,"costUSD":0.02,"contextWindow":1000000,"canonicalModel":"claude-opus-5"}},"total_cost_usd":0.02}"#,
+        ));
+        assert_eq!(contexts(&again), []);
+    }
+
+    /// A window reported for a model the session is not on is not the
+    /// session's window.
+    #[test]
+    fn a_window_reported_for_another_model_is_not_the_sessions() {
+        let mut translator = translator();
+        translator.line(&delta(2, 3));
+        let events = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":3},"modelUsage":{"opus-5":{"inputTokens":2,"outputTokens":3,"costUSD":0.01},"haiku-4-5":{"inputTokens":9,"costUSD":0.001,"contextWindow":200000}},"total_cost_usd":0.011}"#,
+        );
+        assert_eq!(contexts(&events), []);
     }
 
     #[test]
