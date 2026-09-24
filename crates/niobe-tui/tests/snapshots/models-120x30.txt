@@ -1,30 +1,30 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
-╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ┌──────────────── Usage ────────────────┐
-║                                                                            ║ │                                       │
-║    45 +   }                                                                ║ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
-║    46 +   const res = await fetch(url, { ...init, headers });              ║ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
-║    47 +   if (res.status === 304 && cached) return cached.body;            ║ │ ───────────────────────────────────── │
-║    48     return res;                                                      ║ │ opus-5     79%  ▓▓▓▓▓▓▓▓▓▓░░   49k    │
-║       …                                                                    ║ │ sonnet-5   17%  ▓▓░░░░░░░░░░   10k    │
-║   115     cache.set(url, {                                                 ║ │ haiku-4-5   4%  ▓░░░░░░░░░░░  2490    │
-║   116 +     etag: res.headers.get("ETag"),                                 ║ │ cache hit  87%  ▓▓▓▓▓▓▓▓▓▓░░   51k    │
-║   117       body,                                                          ║ │ session ≥$0.06                        │
-║   └ allowed by you                                                         ║ └───────────────────────────────────────┘
-║                                                                            ║ ┌─────────────── Changes ───────────────┐
-║ ◆ claude                                                                   ║ │                                       │
-║   Rewriting the 304 test around the cached body.                           ║ │ ⎇ main ↑3                             █
-║                                                                            ║ │ ▾ Working tree  23 files  +977 −259   │
-║ ◆ claude                                                                   █ │   .                                   │
-║   The notebook that demonstrates the fetcher needs the new call shape.     █ │     CHANGELOG.md                +0 −0 │
-║                                                                            █ │   catalog/                            │
-║ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s █ │     fetch.ts                 +149 −12 │
-║   └ 1 failing: fetch returns the cached body on a 304                      █ │     etag.ts                   +88 −41 │
-║                                                                            █ └───────────────────────────────────────┘
-║ ◆ claude                                                                   █ ┌────────────── Activity ───────────────┐
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ │                                       │
-║   304 path asserts a body that is no longer sent.                          █ │ ▾ Sub-agents                          █
-║                                                                            █ │ ◆ test-writer → tests… running 1m 42s │
-║ ────────────────────────────────────────────────────────────────────────── ║ │   └ Reading tests/stream.rs           │
-║  ask  >  Ask for a change                   ▸▸ ask mode · Shift+Tab cycles ║ │ ◇ reviewer → catalog/c… done 4100 ctx │
-╚════════════════════════════════════════════════════════════════════════════╝ └───────────────────────────────────────┘
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+┃                                                                            ┃ │                                       │
+┃    45 +   }                                                                ┃ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
+┃    46 +   const res = await fetch(url, { ...init, headers });              ┃ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
+┃    47 +   if (res.status === 304 && cached) return cached.body;            ┃ │ ───────────────────────────────────── │
+┃    48     return res;                                                      ┃ │ opus-5     79%  ▓▓▓▓▓▓▓▓▓▓░░   49k    │
+┃       …                                                                    ┃ │ sonnet-5   17%  ▓▓░░░░░░░░░░   10k    │
+┃   115     cache.set(url, {                                                 ┃ │ haiku-4-5   4%  ▓░░░░░░░░░░░  2490    │
+┃   116 +     etag: res.headers.get("ETag"),                                 ┃ │ cache hit  87%  ▓▓▓▓▓▓▓▓▓▓░░   51k    │
+┃   117       body,                                                          ┃ │ session ≥$0.06                        │
+┃   └ allowed by you                                                         ┃ └───────────────────────────────────────┘
+┃                                                                            ┃ ┌─────────────── Changes ───────────────┐
+┃ ◆ claude                                                                   ┃ │                                       │
+┃   Rewriting the 304 test around the cached body.                           ┃ │ ⎇ main ↑3                             █
+┃                                                                            ┃ │ ▾ Working tree  23 files  +977 −259   │
+┃ ◆ claude                                                                   █ │   .                                   │
+┃   The notebook that demonstrates the fetcher needs the new call shape.     █ │     CHANGELOG.md                +0 −0 │
+┃                                                                            █ │   catalog/                            │
+┃ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s █ │     fetch.ts                 +149 −12 │
+┃   └ 1 failing: fetch returns the cached body on a 304                      █ │     etag.ts                   +88 −41 │
+┃                                                                            █ └───────────────────────────────────────┘
+┃ ◆ claude                                                                   █ ┌────────────── Activity ───────────────┐
+┃   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ │                                       │
+┃   304 path asserts a body that is no longer sent.                          █ │ ▾ Sub-agents                          █
+┃                                                                            █ │ ◆ test-writer → tests… running 1m 42s │
+┃ ────────────────────────────────────────────────────────────────────────── ┃ │   └ Reading tests/stream.rs           │
+┃  ask  >  Ask for a change                   ▸▸ ask mode · Shift+Tab cycles ┃ │ ◇ reviewer → catalog/c… done 4100 ctx │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

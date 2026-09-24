@@ -1,24 +1,24 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
-╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
-║                                                                              ║
-║   path asserts a body that is no longer sent.                                ║
-║                                                                              ║
-║   ┌─ ? claude asks ─────────────────────────────────────── blocks turn 1 ┐   ║
-║   │ to run Read                                                          │   ║
-║   │ /repo/notes.txt                                                      │   ║
-║   │                                                                      │   ║
-║   │ {"file_path":"/repo/notes.txt"}                                      │   ║
-║   │                                                                      │   ║
-║   │ ▶ 1. Allow once                                       this call only │   ║
-║   │   2. Always allow Read                              niobe saves Read │   ║
-║   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │   ║
-║   │   4. Deny                                      the call does not run │   ║
-║   │                                                                      │   ║
-║   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │   █
-║   │ Esc decide later                                                     │   █
-║   └──────────────────────────────────────────────────────────────────────┘   █
-║                                                                              █
-║ ──────────────────────────────────────────────────────────────────────────── ║
-║  ask  >  Ask for a change ▸▸ ask mode · Shift+Tab cycles · Alt+Enter newline ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                                                                              ┃
+┃   path asserts a body that is no longer sent.                                ┃
+┃                                                                              ┃
+┃   ┌─ ? claude asks ─────────────────────────────────────── blocks turn 1 ┐   ┃
+┃   │ to run Read                                                          │   ┃
+┃   │ /repo/notes.txt                                                      │   ┃
+┃   │                                                                      │   ┃
+┃   │ {"file_path":"/repo/notes.txt"}                                      │   ┃
+┃   │                                                                      │   ┃
+┃   │ ▶ 1. Allow once                                       this call only │   ┃
+┃   │   2. Always allow Read                              niobe saves Read │   ┃
+┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │   ┃
+┃   │   4. Deny                                      the call does not run │   ┃
+┃   │                                                                      │   ┃
+┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │   █
+┃   │ Esc decide later                                                     │   █
+┃   └──────────────────────────────────────────────────────────────────────┘   █
+┃                                                                              █
+┃ ──────────────────────────────────────────────────────────────────────────── ┃
+┃  ask  >  Ask for a change ▸▸ ask mode · Shift+Tab cycles · Alt+Enter newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit

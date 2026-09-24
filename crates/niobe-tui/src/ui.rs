@@ -222,7 +222,7 @@ fn dialog(
 
     let frame_style = Style::new().fg(theme.dialog_frame).bg(theme.dialog_bg);
     let block = Block::bordered()
-        .border_type(BorderType::Double)
+        .border_type(theme.border_focus)
         .border_style(frame_style)
         .style(Style::new().bg(theme.dialog_bg).fg(theme.dialog_fg))
         .padding(Padding::horizontal(2))
@@ -507,8 +507,9 @@ fn draw_desktop(frame: &mut Frame, strip: Rect, app: &App, theme: &Theme) {
 /// title.
 const PANE_ROOM: u16 = 2;
 
-/// How a pane's border is drawn: the pane with the keyboard in a double line
-/// of its own colour, every other pane in a single line of the frame colour.
+/// How a pane's border is drawn: the pane with the keyboard in the theme's
+/// focus line and colour, every other pane in its plain line and the frame
+/// colour.
 ///
 /// Three marks say which pane has the keyboard — the line, the colour and the
 /// inverted title — and the line is the one that survives a monochrome
@@ -527,19 +528,15 @@ struct Border {
 
 impl Border {
     fn of(focused: bool, theme: &Theme) -> Self {
-        match focused {
-            true => Border {
-                kind: BorderType::Double,
-                track: "║",
-                style: Style::new().fg(theme.frame_focus),
-                focused,
-            },
-            false => Border {
-                kind: BorderType::Plain,
-                track: "│",
-                style: Style::new().fg(theme.frame),
-                focused,
-            },
+        let (kind, colour) = match focused {
+            true => (theme.border_focus, theme.frame_focus),
+            false => (theme.border, theme.frame),
+        };
+        Border {
+            kind,
+            track: kind.to_border_set().vertical_right,
+            style: Style::new().fg(colour),
+            focused,
         }
     }
 }

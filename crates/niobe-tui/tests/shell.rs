@@ -8,10 +8,12 @@
 //! picture of the screen, so a layout change has to be looked at rather than
 //! merely compiled. Regenerate with `UPDATE_SNAPSHOTS=1 cargo test`.
 //!
-//! A theme changes no character on screen, so its pictures are of the colours
-//! instead: `neo-*` is a legend of every style the frame used and a map of
-//! which cell got which. The text pictures stay in the default theme, which is
-//! what keeps one committed picture of the layout rather than one per palette.
+//! A theme changes no character on screen but the line the focused pane is
+//! drawn in, so its pictures are of the colours instead: `<theme>-*` is a
+//! legend of every style the frame used and a map of which cell got which, and
+//! `<theme>-truecolor-*` is the same on a terminal that draws 24-bit colour.
+//! The text pictures stay in the default theme, which is what keeps one
+//! committed picture of the layout rather than one per palette.
 //!
 //! How long a redraw takes is measured in `frame_budget.rs`, a binary of its
 //! own, because the tests here run in parallel and would share its cores.
@@ -26,12 +28,13 @@ mod common;
 use std::path::PathBuf;
 
 use common::{
-    paint, running_session, screen, session_with_a_markdown_reply, style_at, unmetered_session,
+    paint, running_session, screen, session_with_a_markdown_reply, style_at, styles,
+    unmetered_session,
 };
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
-use niobe_tui::theme::{CLASSIC, NEO};
-use ratatui::style::Style;
+use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
+use ratatui::style::{Color, Style};
 
 /// The same session, stopped on a permission prompt it is waiting on.
 ///
@@ -57,6 +60,29 @@ fn empty_session() -> App {
         branch: Some("main".to_owned()),
         ..Repo::default()
     })
+}
+
+/// The line the default theme draws the pane with the keyboard in, glyph by
+/// glyph, so the tests that find a pane by its border read as the frame does.
+/// [`the_focus_glyphs_are_the_default_themes`] keeps them honest.
+const FOCUS_TOP_LEFT: char = '┏';
+const FOCUS_TOP_RIGHT: char = '┓';
+const FOCUS_BOTTOM_LEFT: char = '┗';
+const FOCUS_SIDE: char = '┃';
+const FOCUS_EDGE: char = '━';
+
+#[test]
+fn the_focus_glyphs_are_the_default_themes() {
+    let line = Theme::default().border_focus.to_border_set();
+    for (glyph, drawn) in [
+        (FOCUS_TOP_LEFT, line.top_left),
+        (FOCUS_TOP_RIGHT, line.top_right),
+        (FOCUS_BOTTOM_LEFT, line.bottom_left),
+        (FOCUS_SIDE, line.vertical_left),
+        (FOCUS_EDGE, line.horizontal_top),
+    ] {
+        assert_eq!(glyph.to_string(), drawn);
+    }
 }
 
 fn snapshot_path(name: &str) -> PathBuf {
@@ -92,15 +118,82 @@ fn assert_snapshot(name: &str, screen: &str) {
 }
 
 #[test]
-fn the_neo_theme_paints_the_shell_at_both_sizes() {
-    assert_snapshot(
-        "neo-80x24",
-        &paint(&mut running_session().with_theme(NEO), 80, 24),
-    );
-    assert_snapshot(
-        "neo-200x60",
-        &paint(&mut running_session().with_theme(NEO), 200, 60),
-    );
+fn every_theme_paints_the_shell_at_both_sizes() {
+    for theme in THEMES {
+        let name = theme.name.to_lowercase();
+        for (width, height) in [(80, 24), (200, 60)] {
+            assert_snapshot(
+                &format!("{name}-{width}x{height}"),
+                &paint(&mut running_session().with_theme(theme), width, height),
+            );
+        }
+    }
+}
+
+/// On a terminal that says it draws 24-bit colour, a designed theme is drawn
+/// in its design's own values: the committed picture is the colours the
+/// design names, cell by cell.
+#[test]
+fn the_designed_themes_paint_their_own_colours_on_a_deep_terminal() {
+    for theme in [CYBER, NEO, MODERN] {
+        let name = theme.name.to_lowercase();
+        assert_snapshot(
+            &format!("{name}-truecolor-120x30"),
+            &paint(
+                &mut running_session()
+                    .with_depth(Depth::TrueColour)
+                    .with_theme(theme),
+                120,
+                30,
+            ),
+        );
+    }
+}
+
+/// Every colour a frame is drawn in, foreground and background, cell by cell.
+fn colours_drawn(app: &mut App) -> Vec<Color> {
+    styles(app, 120, 30)
+        .into_iter()
+        .flat_map(|style| [style.fg, style.bg])
+        .flatten()
+        .collect()
+}
+
+/// A terminal that cannot draw 24-bit colour is never sent one: every theme,
+/// the designed ones included, falls back to its sixteen-colour table, and a
+/// frame of it is drawn in nothing else.
+#[test]
+fn a_terminal_without_truecolor_is_drawn_in_the_sixteen_names_only() {
+    for theme in THEMES {
+        let mut app = session_waiting_on_a_prompt()
+            .with_depth(Depth::Sixteen)
+            .with_theme(theme);
+        for colour in colours_drawn(&mut app) {
+            assert!(
+                !matches!(colour, Color::Rgb(..) | Color::Indexed(_)),
+                "{}: {colour:?} reached a sixteen-colour terminal",
+                theme.name
+            );
+        }
+    }
+}
+
+/// And a designed theme on a deep terminal draws nothing in a named colour,
+/// which a user's own scheme would repaint under the design.
+#[test]
+fn a_designed_theme_on_a_deep_terminal_draws_every_cell_in_its_design() {
+    for theme in [CYBER, NEO, MODERN] {
+        let mut app = session_waiting_on_a_prompt()
+            .with_depth(Depth::TrueColour)
+            .with_theme(theme);
+        for colour in colours_drawn(&mut app) {
+            assert!(
+                matches!(colour, Color::Rgb(..)),
+                "{}: {colour:?} is drawn in a named colour",
+                theme.name
+            );
+        }
+    }
 }
 
 /// A tenth of a cent per thousand tokens, so the figure the pane draws is one
@@ -174,18 +267,41 @@ fn a_reply_in_markdown_is_drawn_styled_in_both_themes() {
     );
 }
 
-/// A theme is a palette and nothing else: every character stays where it was,
-/// so the one committed picture of the layout covers every theme. Nothing on
-/// screen names the palette in force — `9 Theme` in the F-key row is where one
-/// is changed.
+/// A theme is a palette and the line its focused pane is drawn in, and
+/// nothing else: every character stays where it was, so the one committed
+/// picture of the layout covers every theme. Nothing on screen names the
+/// palette in force — `9 Theme` in the F-key row is where one is changed.
 #[test]
-fn a_theme_moves_no_character_on_screen() {
-    for (width, height) in [(80, 24), (200, 60)] {
-        assert_eq!(
-            screen(&mut running_session().with_theme(CLASSIC), width, height),
-            screen(&mut running_session().with_theme(NEO), width, height),
-            "the theme moved something at {width}x{height}"
+fn a_theme_moves_no_character_on_screen_but_the_focus_line() {
+    let in_the_default_line = |theme: Theme, frame: String| {
+        let (from, to) = (
+            theme.border_focus.to_border_set(),
+            Theme::default().border_focus.to_border_set(),
         );
+        let mut frame = frame;
+        for (from, to) in [
+            (from.top_left, to.top_left),
+            (from.top_right, to.top_right),
+            (from.bottom_left, to.bottom_left),
+            (from.bottom_right, to.bottom_right),
+            (from.vertical_left, to.vertical_left),
+            (from.horizontal_top, to.horizontal_top),
+        ] {
+            frame = frame.replace(from, to);
+        }
+        frame
+    };
+    for (width, height) in [(80, 24), (200, 60)] {
+        let default = screen(&mut running_session(), width, height);
+        for theme in THEMES {
+            let frame = screen(&mut running_session().with_theme(theme), width, height);
+            assert_eq!(
+                in_the_default_line(theme, frame),
+                default,
+                "{} moved something at {width}x{height}",
+                theme.name
+            );
+        }
     }
 }
 
@@ -410,7 +526,7 @@ fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
             .take(10)
             .collect::<Vec<_>>()
             .join("\n")
-            .replace('█', "║")
+            .replace('█', &FOCUS_SIDE.to_string())
     };
 
     app.apply(&Event::PermissionRequest {
@@ -529,7 +645,10 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
     ));
 
     let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("═ Model ═"), "{frame}");
+    assert!(
+        frame.contains(&format!("{FOCUS_EDGE} Model {FOCUS_EDGE}")),
+        "{frame}"
+    );
     assert!(frame.contains("opus-5"), "{frame}");
     assert!(frame.contains("sonnet-5"), "{frame}");
     assert!(
@@ -830,7 +949,11 @@ fn pane_tops(frame: &str, from: usize) -> Vec<usize> {
     frame
         .lines()
         .enumerate()
-        .filter(|(_, row)| row.chars().skip(from).any(|c| c == '╔' || c == '┌'))
+        .filter(|(_, row)| {
+            row.chars()
+                .skip(from)
+                .any(|c| c == FOCUS_TOP_LEFT || c == '┌')
+        })
         .map(|(at, _)| at)
         .collect()
 }
@@ -841,7 +964,11 @@ fn the_body_is_cut_in_the_proportions_the_layout_is_drawn_to() {
     let first = frame.lines().nth(1).unwrap_or_default();
 
     // The session pane, a column of desktop, then the right-hand stack.
-    let gap = first.chars().position(|c| c == '╗').unwrap_or(0) + 1;
+    let gap = first
+        .chars()
+        .position(|c| c == FOCUS_TOP_RIGHT)
+        .unwrap_or(0)
+        + 1;
     let session = gap;
     let right = first.chars().count() - gap - 1;
     let split = session as f64 / right as f64;
@@ -939,7 +1066,7 @@ fn gutter(frame: &str) -> String {
     let at = frame
         .lines()
         .nth(1)
-        .and_then(|border| border.chars().position(|c| c == '╗'))
+        .and_then(|border| border.chars().position(|c| c == FOCUS_TOP_RIGHT))
         .map(|at| at + 1)
         .expect("the session pane's top-right corner is on the body's first row");
     // The menu bar above the body, and the F-key bar below it.
@@ -986,13 +1113,13 @@ fn the_desktop_moves_between_the_panes_while_a_turn_runs() {
     );
 }
 
-/// The columns a row is made of: a pane's border is `║` on the pane with the
-/// keyboard and `│` on the others, or the scrollbar's thumb where one is drawn
+/// The columns a row is made of: a pane's border is [`FOCUS_SIDE`] on the
+/// pane with the keyboard and `│` on the others, or the scrollbar's thumb where one is drawn
 /// over it.
 fn borders(row: &str) -> Vec<usize> {
     row.chars()
         .enumerate()
-        .filter(|(_, c)| matches!(c, '║' | '│' | '█'))
+        .filter(|&(_, c)| c == FOCUS_SIDE || matches!(c, '│' | '█'))
         .map(|(at, _)| at)
         .collect()
 }
@@ -1027,7 +1154,9 @@ fn no_pane_draws_its_text_against_its_border() {
         // to the Usage pane at once, and both keep it blank.
         let under = frame.lines().nth(2).unwrap_or_default();
         assert!(
-            under.chars().all(|c| matches!(c, '║' | '│' | ' ')),
+            under
+                .chars()
+                .all(|c| c == FOCUS_SIDE || matches!(c, '│' | ' ')),
             "the row under the pane titles at {width}x{height} is not blank: {under:?}"
         );
     }
@@ -1271,7 +1400,10 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
     // right, every one is under an agent.
     let under_agents: usize = frame
         .lines()
-        .filter_map(|line| line.split_once("║ │").map(|(_, right)| right))
+        .filter_map(|line| {
+            line.split_once(&format!("{FOCUS_SIDE} │"))
+                .map(|(_, right)| right)
+        })
         .map(|right| right.matches('└').count())
         .sum();
     assert_eq!(under_agents, 2, "{frame}");
@@ -1368,10 +1500,13 @@ fn an_untouched_activity_pane_draws_no_zeroed_bar() {
     assert!(frame.contains("none spawned"), "{frame}");
     assert!(frame.contains("none recorded"), "{frame}");
     assert!(frame.contains("none called"), "{frame}");
-    assert!(
-        !frame.contains('━'),
-        "a bar was drawn for a tool that never ran:\n{frame}"
-    );
+    // A bar is drawn in the same heavy line the focused pane's edges are, so
+    // the rows those edges are on are not where a bar is looked for.
+    let bar = frame
+        .lines()
+        .filter(|row| !row.contains(FOCUS_TOP_LEFT) && !row.contains(FOCUS_BOTTOM_LEFT))
+        .any(|row| row.contains('━'));
+    assert!(!bar, "a bar was drawn for a tool that never ran:\n{frame}");
     assert!(
         !frame.contains('✗'),
         "no failure count where nothing failed:\n{frame}"
@@ -1647,7 +1782,7 @@ fn the_composer_still_grows_to_a_third_of_the_pane() {
         .expect("the bar is drawn");
     let bottom = rows
         .iter()
-        .rposition(|row| row.starts_with('╚'))
+        .rposition(|row| row.starts_with(FOCUS_BOTTOM_LEFT))
         .expect("the pane is closed");
     // The pane's inner rows, less the one border and padding row above.
     let inner = bottom - 2;
@@ -1666,8 +1801,8 @@ fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
         .expect("the bar is drawn");
     let said: String = rows[bar..]
         .iter()
-        .take_while(|row| !row.starts_with('╚'))
-        .map(|row| row.trim_matches(|c| c == '║' || c == ' ').to_owned())
+        .take_while(|row| !row.starts_with(FOCUS_BOTTOM_LEFT))
+        .map(|row| row.trim_matches(|c| c == FOCUS_SIDE || c == ' ').to_owned())
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
@@ -1720,11 +1855,11 @@ fn title_row<'a>(frame: &'a str, title: &str) -> &'a str {
         .unwrap_or_default()
 }
 
-/// Exactly one pane has the keyboard, and it says so three ways: a double
-/// border where the others are single, its own colour on that border, and an
-/// inverted title. The border is the one a monochrome terminal keeps.
+/// Exactly one pane has the keyboard, and it says so three ways: the theme's
+/// focus line where the others are single, its own colour on that border, and
+/// an inverted title. The border is the one a monochrome terminal keeps.
 #[test]
-fn the_pane_with_the_keyboard_is_the_one_drawn_double() {
+fn the_pane_with_the_keyboard_is_the_one_drawn_in_the_focus_line() {
     use ratatui::crossterm::event::KeyCode;
     use ratatui::style::Modifier;
 
@@ -1735,11 +1870,11 @@ fn the_pane_with_the_keyboard_is_the_one_drawn_double() {
     let frame = screen(&mut app, 120, 30);
 
     assert_snapshot("activity-focused-120x30", &frame);
-    let doubled: Vec<&str> = ["Session ─ example-app", "Usage", "Changes", "Activity"]
+    let focused: Vec<&str> = ["Session ─ example-app", "Usage", "Changes", "Activity"]
         .into_iter()
-        .filter(|title| title_row(&frame, title).contains("═ "))
+        .filter(|title| title_row(&frame, title).contains(&format!("{FOCUS_EDGE} ")))
         .collect();
-    assert_eq!(doubled, ["Activity"], "{frame}");
+    assert_eq!(focused, ["Activity"], "{frame}");
 
     let title = style_at(&mut app, 120, 30, " Activity ").expect("the title is drawn");
     assert!(

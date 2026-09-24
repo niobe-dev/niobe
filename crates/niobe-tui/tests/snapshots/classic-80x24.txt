@@ -1,0 +1,47 @@
+  a  Black on Gray
+  b  Black on Gray, bold | underlined
+  c  Black on Gray, bold
+  d  White on Blue
+  e  LightYellow on Blue, bold | reversed
+  f  LightGreen on Black
+  g  LightGreen on Black, bold
+  h  White on Black
+  i  Gray on Black
+  j  Gray on Black, bold
+  k  Gray on Blue
+  l  LightCyan on Blue, bold
+  m  LightRed on Blue, bold
+  n  LightRed on Blue
+  o  LightYellow on Blue
+  p  LightCyan on Blue
+  q  Blue on LightYellow, bold
+  r  LightYellow on Blue, bold
+  s  Blue on LightYellow
+  t  LightYellow on Gray, bold
+  u  Black on Cyan
+  v  White on Gray
+
+abaaaaaabaaaaaaaabaaaaaabaaaaaabaaaaaabaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaccccccaa
+ddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ddddffffghffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffdd
+ddddiiiijhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhdd
+ddddkkkkkkkkkkkkkkkkdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ddlllllllldddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ddlllllllldddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ddmmmmmmmmmmmmmmmmmmmmmmmmmmmmdkkkkkkkkkkkkkkkkkdddddddddddddddddnnnnnnkkkkkkkdd
+ddddkkdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo
+ddlllllllldddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo
+ddppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppdd
+ddqqqqqrrrskkkkkkkkkkkkkkkkdrrrrrrrrrrrkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkdd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+tuuuuuuvtuuuuuuvtuuuuuuvtuuuuuuvtuuuuuuvtuuuuuuvtuuuuuuvtuuuuuuvtuuuuuuvttuuuuuv

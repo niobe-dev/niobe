@@ -258,7 +258,8 @@ fn repo() -> tempfile::TempDir {
 }
 
 /// The shell, ready to run on `slave` and record into `cwd`, with no user
-/// config: the operator's own would otherwise change what these tests see.
+/// config and no `COLORTERM`: the operator's own config, and the depth their
+/// terminal announces, would otherwise change what these tests see.
 ///
 /// Standard error goes to the terminal too, the way it does for an operator:
 /// where a panic's message lands relative to the restoration is the whole
@@ -271,6 +272,7 @@ fn shell_command(slave: &File, cwd: &Path) -> Command {
     command
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
+        .env_remove("COLORTERM")
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
@@ -297,6 +299,7 @@ fn shell_reading_from(input: &File, screen: &File, cwd: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_niobe"))
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
+        .env_remove("COLORTERM")
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -546,6 +549,36 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
     drop(flagged_slave);
     terminal.drained();
     flagged.drained();
+}
+
+/// `neo`'s menu row as its design draws it, in 24-bit colour.
+const NEO_MENU_TRUECOLOR: &str = "\u{1b}[38;2;0;255;65;48;2;0;26;8m";
+
+/// A terminal that says it draws 24-bit colour gets a designed theme in its
+/// own colours, and `classic` still in the sixteen the terminal names.
+#[test]
+fn a_terminal_announcing_truecolor_gets_the_designed_colours_and_classic_stays_named() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+
+    let mut shell = shell_command(&slave, repo.path())
+        .env("COLORTERM", "truecolor")
+        .arg("--theme")
+        .arg("neo")
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(NEO_MENU_TRUECOLOR);
+    // neo → modern → cyber → classic.
+    terminal.typed(F9);
+    terminal.typed(F9);
+    terminal.typed(F9);
+    terminal.shows(CLASSIC_MENU);
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    assert!(status.success(), "the shell ended with {status}");
+
+    drop(slave);
+    terminal.drained();
 }
 
 #[test]

@@ -34,7 +34,7 @@ use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
-use niobe_tui::theme;
+use niobe_tui::theme::{self, Depth};
 use niobe_tui::{Detached, Ended, Forgotten, Theme, Unwatched};
 
 use crate::args::{Command, Invocation, Resume};
@@ -106,7 +106,11 @@ fn run(
     }: Invocation,
 ) -> Result<(), String> {
     let profile = profile.as_deref();
-    let asked = Asked { budget, theme };
+    let asked = Asked {
+        budget,
+        theme,
+        depth: Depth::from_colorterm(std::env::var("COLORTERM").ok().as_deref()),
+    };
     match command {
         Command::Shell => shell(profile, &asked),
         Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked),
@@ -130,7 +134,7 @@ fn run(
 
 /// What the command line asked of a session, beyond which one it is.
 ///
-/// Both apply to every way a session is opened — a new one, a recorded one
+/// All of it applies to every way a session is opened — a new one, a recorded one
 /// resumed, one read in from the `claude` CLI — so they travel together rather
 /// than as a widening list of arguments each of those three repeats.
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +143,10 @@ struct Asked {
     budget: Option<f64>,
     /// The palette the shell opens in.
     theme: Option<Theme>,
+    /// How many colours the terminal says it draws, which the palette is
+    /// drawn at. Read from the environment here because the shell does not
+    /// read the environment.
+    depth: Depth,
 }
 
 /// The palette a session opens in: what `--theme` asked for, or what the
@@ -181,6 +189,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
         say_prices(
             App::new(repo::describe(&cwd))
                 .with_rules(loaded.config.allowed().clone())
+                .with_depth(asked.depth)
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -258,6 +267,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
         say_prices(
             App::new(repo::describe(&cwd))
                 .with_rules(loaded.config.allowed().clone())
+                .with_depth(asked.depth)
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -366,6 +376,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
         say_prices(
             App::new(repo::describe(&cwd))
                 .with_rules(loaded.config.allowed().clone())
+                .with_depth(asked.depth)
                 .with_theme(theme),
         ),
         &loaded,
@@ -719,7 +730,8 @@ USAGE:
 OPTIONS:
     --profile <name>       Run under this profile instead of the default one
     --budget <amount>      Stop the session once it has cost this many dollars
-    --theme <name>         Draw the shell in this palette: classic, neo
+    --theme <name>         Draw the shell in this palette: cyber, classic, neo
+                           or modern
     -h, --help             Print this help
     -V, --version          Print the version
 
@@ -857,12 +869,16 @@ MODE AND MODEL:
     asked for.
 
 THEME:
-    classic is DOS blue and neo is green on black. --theme <name> opens the
-    shell in one, theme = \"neo\" at the top of a config makes it the one every
-    session opens in, and F9 cycles them while a session runs. Every colour is
-    one of the sixteen the terminal names rather than a hex value, so a session
-    looks the same over SSH and in screen, and your own colour scheme is what
-    those sixteen mean.
+    cyber is green and magenta on black, classic is DOS blue, neo is green on
+    black and modern is an editor's grey. --theme <name> opens the shell in
+    one, theme = \"neo\" at the top of a config makes it the one every session
+    opens in, and F9 cycles them while a session runs.
+
+    classic is drawn in the sixteen colours the terminal names, so your own
+    colour scheme is what they mean. cyber, neo and modern are drawn in their
+    own 24-bit colours where COLORTERM is truecolor or 24bit, and in the
+    sixteen everywhere else, so a session stays legible over SSH and in
+    screen.
 
 BUDGET:
     --budget <amount> caps what a session may spend, in dollars, and niobe says

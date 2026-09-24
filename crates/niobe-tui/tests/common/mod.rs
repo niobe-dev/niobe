@@ -619,6 +619,18 @@ fn described(style: &Style) -> String {
     described
 }
 
+/// Draws one frame and returns the style of every cell, row by row.
+pub fn styles(app: &mut App, width: u16, height: u16) -> Vec<Style> {
+    let terminal = drawn(app, width, height);
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(Cell::style)
+        .collect()
+}
+
 /// Draws one frame and returns the style of the first cell of the first place
 /// `text` appears on it, reading row by row.
 pub fn style_at(app: &mut App, width: u16, height: u16, text: &str) -> Option<Style> {

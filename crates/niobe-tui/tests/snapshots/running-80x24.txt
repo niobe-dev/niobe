@@ -1,24 +1,24 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
-╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
-║                                                                              ║
-║   116 +     etag: res.headers.get("ETag"),                                   ║
-║   117       body,                                                            ║
-║   └ allowed by you                                                           ║
-║                                                                              ║
-║ ◆ claude                                                                     ║
-║   Rewriting the 304 test around the cached body.                             ║
-║                                                                              ║
-║ ◆ claude                                                                     ║
-║   The notebook that demonstrates the fetcher needs the new call shape.       ║
-║                                                                              ║
-║ ✗ Bash                       npm test -- fetch                 exit 1 · 0.4s ║
-║   └ 1 failing: fetch returns the cached body on a 304                        █
-║                                                                              █
-║ ◆ claude                                                                     █
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304  █
-║   path asserts a body that is no longer sent.                                █
-║                                                                              █
-║ ──────────────────────────────────────────────────────────────────────────── ║
-║  ask  >  Ask for a change ▸▸ ask mode · Shift+Tab cycles · Alt+Enter newline ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                                                                              ┃
+┃   116 +     etag: res.headers.get("ETag"),                                   ┃
+┃   117       body,                                                            ┃
+┃   └ allowed by you                                                           ┃
+┃                                                                              ┃
+┃ ◆ claude                                                                     ┃
+┃   Rewriting the 304 test around the cached body.                             ┃
+┃                                                                              ┃
+┃ ◆ claude                                                                     ┃
+┃   The notebook that demonstrates the fetcher needs the new call shape.       ┃
+┃                                                                              ┃
+┃ ✗ Bash                       npm test -- fetch                 exit 1 · 0.4s ┃
+┃   └ 1 failing: fetch returns the cached body on a 304                        █
+┃                                                                              █
+┃ ◆ claude                                                                     █
+┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304  █
+┃   path asserts a body that is no longer sent.                                █
+┃                                                                              █
+┃ ──────────────────────────────────────────────────────────────────────────── ┃
+┃  ask  >  Ask for a change ▸▸ ask mode · Shift+Tab cycles · Alt+Enter newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit

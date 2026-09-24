@@ -19,12 +19,12 @@
 │                                                                            █ │     etag.ts                   +88 −41 │
 │ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s █ │     cache/lru.ts               +31 −9 │
 │   └ 1 failing: fetch returns the cached body on a 304                      █ └───────────────────────────────────────┘
-│                                                                            █ ╔══════════════ Activity ═══════════════╗
-│ ◆ claude                                                                   █ ║                                       ║
-│   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║ ▾ Sub-agents                          █
-│   304 path asserts a body that is no longer sent.                          █ ║ ◆ test-writer → tests… running 1m 42s ║
-│                                                                            █ ║   └ Reading tests/stream.rs           ║
-│ ────────────────────────────────────────────────────────────────────────── │ ║ ◇ reviewer → catalog/c… done 4100 ctx ║
-│  ask  >  Ask for a change  ▸▸ ask mode · Shift+Tab cycles · ↑↓ Enter folds │ ║ ✗ doc-writer → docs/etags.md   failed ║
-└────────────────────────────────────────────────────────────────────────────┘ ╚═══════════════════════════════════════╝
+│                                                                            █ ┏━━━━━━━━━━━━━━ Activity ━━━━━━━━━━━━━━━┓
+│ ◆ claude                                                                   █ ┃                                       ┃
+│   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ┃ ▾ Sub-agents                          █
+│   304 path asserts a body that is no longer sent.                          █ ┃ ◆ test-writer → tests… running 1m 42s ┃
+│                                                                            █ ┃   └ Reading tests/stream.rs           ┃
+│ ────────────────────────────────────────────────────────────────────────── │ ┃ ◇ reviewer → catalog/c… done 4100 ctx ┃
+│  ask  >  Ask for a change  ▸▸ ask mode · Shift+Tab cycles · ↑↓ Enter folds │ ┃ ✗ doc-writer → docs/etags.md   failed ┃
+└────────────────────────────────────────────────────────────────────────────┘ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

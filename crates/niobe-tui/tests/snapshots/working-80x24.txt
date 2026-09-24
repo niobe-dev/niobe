@@ -1,24 +1,24 @@
  Niobe  Session  Files  Tools  Usage  Options  Help           ● working 1m 15s
-╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
-║                                                                              ║
-║ > you                                                                        ║
-║   fix the etag test                                                          ║
-║                                                                              ║
-║ ⚙ Bash                       npm test -- fetch                       running ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║ ⠋ running Bash  npm test -- fetch · 1m 15s                                   ║
-║ ──────────────────────────────────────────────────────────────────────────── ║
-║  ask  >  Ask for a change                 Shift+Tab mode · Alt+Enter newline ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                                                                              ┃
+┃ > you                                                                        ┃
+┃   fix the etag test                                                          ┃
+┃                                                                              ┃
+┃ ⚙ Bash                       npm test -- fetch                       running ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃ ⠋ running Bash  npm test -- fetch · 1m 15s                                   ┃
+┃ ──────────────────────────────────────────────────────────────────────────── ┃
+┃  ask  >  Ask for a change                 Shift+Tab mode · Alt+Enter newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit

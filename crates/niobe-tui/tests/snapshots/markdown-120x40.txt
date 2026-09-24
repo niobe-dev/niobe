@@ -1,40 +1,40 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
-╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ┌──────────────── Usage ────────────────┐
-║                                                                            ║ │                                       │
-║ ◆ claude                                                                   ║ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
-║   Rewriting the 304 test around the cached body.                           ║ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
-║                                                                            ║ │ ───────────────────────────────────── │
-║ ◆ claude                                                                   ║ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
-║   The notebook that demonstrates the fetcher needs the new call shape.     ║ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
-║                                                                            ║ │ session ≥$0.04                        │
-║ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s ║ └───────────────────────────────────────┘
-║   └ 1 failing: fetch returns the cached body on a 304                      ║ ┌─────────────── Changes ───────────────┐
-║                                                                            ║ │                                       │
-║ ◆ claude                                                                   ║ │ ⎇ main ↑3                             █
-║   Etags cached in the LRU; 304s short-circuit. One test still red — the    ║ │ ▾ Working tree  23 files  +977 −259   █
-║   304 path asserts a body that is no longer sent.                          ║ │   .                                   █
-║                                                                            ║ │     CHANGELOG.md                +0 −0 █
-║ > you                                                                      ║ │   catalog/                            │
-║   What changed?                                                            ║ │     fetch.ts                 +149 −12 │
-║                                                                            ║ │     etag.ts                   +88 −41 │
-║ ◆ claude                                                                   ║ │     cache/lru.ts               +31 −9 │
-║   What changed                                                             ║ │     cache/index.ts             +12 −0 │
-║                                                                            █ │   docs/                               │
-║   How it works: the fetcher keeps the etag beside the body, so a 304 is    █ │     caching.md                +64 −22 │
-║   answered from the LRU without reading the body again.                    █ │     adr/0004-etags.md          +34 −1 │
-║   • catalog/fetch.ts keeps the etag                                        █ │     diagrams/cache.png            — — │
-║     • and sends If-None-Match                                              █ └───────────────────────────────────────┘
-║   • etag.test.ts asserts the cached body                                   █ ┌────────────── Activity ───────────────┐
-║                                                                            █ │                                       │
-║   file         │ lines                                                     █ │ ▾ Sub-agents                          █
-║   ─────────────┼──────                                                     █ │ ◆ test-writer → tests… running 1m 42s █
-║   fetch.ts     │   +38                                                     █ │   └ Reading tests/stream.rs           █
-║   etag.test.ts │   +24                                                     █ │ ◇ reviewer → catalog/c… done 4100 ctx █
-║                                                                            █ │ ✗ doc-writer → docs/etags.md   failed █
-║   ╭ ts                                                                     █ │   └ Notion 404, gave up after 2 retr… │
-║   │ if (res.status === 304) return cached.body;                            █ │ ▾ Decisions  2                        │
-║                                                                            █ │   13:39 Key the cache on the request  │
-║ ────────────────────────────────────────────────────────────────────────── ║ │         URL, not the manifest id —    │
-║  ask  >  Ask for a change                   ▸▸ ask mode · Shift+Tab cycles ║ │         two manifests can share an    │
-╚════════════════════════════════════════════════════════════════════════════╝ └───────────────────────────────────────┘
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+┃                                                                            ┃ │                                       │
+┃ ◆ claude                                                                   ┃ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
+┃   Rewriting the 304 test around the cached body.                           ┃ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
+┃                                                                            ┃ │ ───────────────────────────────────── │
+┃ ◆ claude                                                                   ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+┃   The notebook that demonstrates the fetcher needs the new call shape.     ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+┃                                                                            ┃ │ session ≥$0.04                        │
+┃ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s ┃ └───────────────────────────────────────┘
+┃   └ 1 failing: fetch returns the cached body on a 304                      ┃ ┌─────────────── Changes ───────────────┐
+┃                                                                            ┃ │                                       │
+┃ ◆ claude                                                                   ┃ │ ⎇ main ↑3                             █
+┃   Etags cached in the LRU; 304s short-circuit. One test still red — the    ┃ │ ▾ Working tree  23 files  +977 −259   █
+┃   304 path asserts a body that is no longer sent.                          ┃ │   .                                   █
+┃                                                                            ┃ │     CHANGELOG.md                +0 −0 █
+┃ > you                                                                      ┃ │   catalog/                            │
+┃   What changed?                                                            ┃ │     fetch.ts                 +149 −12 │
+┃                                                                            ┃ │     etag.ts                   +88 −41 │
+┃ ◆ claude                                                                   ┃ │     cache/lru.ts               +31 −9 │
+┃   What changed                                                             ┃ │     cache/index.ts             +12 −0 │
+┃                                                                            █ │   docs/                               │
+┃   How it works: the fetcher keeps the etag beside the body, so a 304 is    █ │     caching.md                +64 −22 │
+┃   answered from the LRU without reading the body again.                    █ │     adr/0004-etags.md          +34 −1 │
+┃   • catalog/fetch.ts keeps the etag                                        █ │     diagrams/cache.png            — — │
+┃     • and sends If-None-Match                                              █ └───────────────────────────────────────┘
+┃   • etag.test.ts asserts the cached body                                   █ ┌────────────── Activity ───────────────┐
+┃                                                                            █ │                                       │
+┃   file         │ lines                                                     █ │ ▾ Sub-agents                          █
+┃   ─────────────┼──────                                                     █ │ ◆ test-writer → tests… running 1m 42s █
+┃   fetch.ts     │   +38                                                     █ │   └ Reading tests/stream.rs           █
+┃   etag.test.ts │   +24                                                     █ │ ◇ reviewer → catalog/c… done 4100 ctx █
+┃                                                                            █ │ ✗ doc-writer → docs/etags.md   failed █
+┃   ╭ ts                                                                     █ │   └ Notion 404, gave up after 2 retr… │
+┃   │ if (res.status === 304) return cached.body;                            █ │ ▾ Decisions  2                        │
+┃                                                                            █ │   13:39 Key the cache on the request  │
+┃ ────────────────────────────────────────────────────────────────────────── ┃ │         URL, not the manifest id —    │
+┃  ask  >  Ask for a change                   ▸▸ ask mode · Shift+Tab cycles ┃ │         two manifests can share an    │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

@@ -30,7 +30,7 @@ use ratatui::style::Style;
 
 use crate::clock::{Clock, LocalTime, Stamp};
 use crate::prices::Prices;
-use crate::theme::Theme;
+use crate::theme::{Depth, Theme};
 
 /// Where the session is running, for the pane title and the Changes pane.
 ///
@@ -694,6 +694,8 @@ pub struct App {
     jump: Option<ratatui::layout::Rect>,
     profile: Option<SelectedProfile>,
     theme: Theme,
+    /// How many colours the terminal draws, which every theme is drawn at.
+    depth: Depth,
     session: SessionState,
     entries: Vec<Entry>,
     /// Where each running call is drawn: its entry, and its place among the
@@ -834,6 +836,7 @@ impl App {
             jump: None,
             profile: None,
             theme,
+            depth: Depth::default(),
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
@@ -1701,7 +1704,7 @@ impl App {
         self
     }
 
-    /// The same shell, drawn in `theme`.
+    /// The same shell, drawn in `theme` at the terminal's depth.
     ///
     /// The composer is a widget that holds its own styles rather than being
     /// handed them at draw time, so it is repainted here; everything else
@@ -1712,12 +1715,22 @@ impl App {
         self
     }
 
+    /// The same shell on a terminal that draws `depth` colours: every theme,
+    /// the one in force and each `F9` moves to, is drawn at it.
+    #[must_use]
+    pub fn with_depth(mut self, depth: Depth) -> Self {
+        self.depth = depth;
+        self.set_theme(self.theme);
+        self
+    }
+
     /// Moves to the next theme, which is what `F9` does.
     fn cycle_theme(&mut self) {
         self.set_theme(self.theme.next());
     }
 
     fn set_theme(&mut self, theme: Theme) {
+        let theme = theme.at(self.depth);
         self.theme = theme;
         paint_composer(&mut self.composer, &theme);
     }
@@ -3204,6 +3217,30 @@ mod tests {
             app.on_key(key(KeyCode::F(9)));
         }
         assert_eq!(*app.theme(), CYBER);
+    }
+
+    #[test]
+    fn a_shell_on_a_deep_terminal_draws_every_theme_at_that_depth() {
+        use crate::theme::{CLASSIC, CYBER_TRUE, Depth, MODERN_TRUE, NEO, NEO_TRUE};
+        use ratatui::crossterm::event::KeyCode;
+
+        // In either order: the depth is the terminal's, the theme the
+        // operator's, and neither is allowed to undo the other.
+        let depth_first = app().with_depth(Depth::TrueColour).with_theme(NEO);
+        assert_eq!(*depth_first.theme(), NEO_TRUE);
+        let mut app = app().with_theme(NEO).with_depth(Depth::TrueColour);
+        assert_eq!(*app.theme(), NEO_TRUE);
+        assert_eq!(
+            app.composer().style(),
+            Style::new().fg(NEO_TRUE.fg).bg(NEO_TRUE.pane_bg)
+        );
+
+        app.on_key(key(KeyCode::F(9)));
+        assert_eq!(*app.theme(), MODERN_TRUE);
+        app.on_key(key(KeyCode::F(9)));
+        assert_eq!(*app.theme(), CYBER_TRUE);
+        app.on_key(key(KeyCode::F(9)));
+        assert_eq!(*app.theme(), CLASSIC);
     }
 
     #[test]

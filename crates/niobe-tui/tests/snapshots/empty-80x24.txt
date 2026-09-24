@@ -1,24 +1,24 @@
  Niobe  Session  Files  Tools  Usage  Options  Help             ○ not attached
-╔══════════════════════════════ Session ─ niobe ═══════════════════════════════╗
-║                                                                              ║
-║                                                                              ║
-║   niobe                                                                      ║
-║   A terminal coding agent that keeps you aware of what is                    ║
-║   being built and how.                                                       ║
-║                                                                              ║
-║   What the agent did, decided and touched, what it is doing now              ║
-║   and what it cost, visible while it happens and never a guess.              ║
-║   You stay on the loop instead of in it.                                     ║
-║                                                                              ║
-║   No backend attached. `niobe profiles` shows what is defined.               ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║ ──────────────────────────────────────────────────────────────────────────── ║
-║  ask  >  Ask for a change                 Shift+Tab mode · Alt+Enter newline ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                                                                              ┃
+┃                                                                              ┃
+┃   niobe                                                                      ┃
+┃   A terminal coding agent that keeps you aware of what is                    ┃
+┃   being built and how.                                                       ┃
+┃                                                                              ┃
+┃   What the agent did, decided and touched, what it is doing now              ┃
+┃   and what it cost, visible while it happens and never a guess.              ┃
+┃   You stay on the loop instead of in it.                                     ┃
+┃                                                                              ┃
+┃   No backend attached. `niobe profiles` shows what is defined.               ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃ ──────────────────────────────────────────────────────────────────────────── ┃
+┃  ask  >  Ask for a change                 Shift+Tab mode · Alt+Enter newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit
