@@ -13,7 +13,7 @@
 ║   │   2. Always allow Read                              niobe saves Read │   ║
 ║   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │   ║
 ║   │   4. Deny                                      the call does not run │   ║
-║   │                                                                      │   █
+║   │                                                                      │   ║
 ║   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │   █
 ║   │ Esc decide later                                                     │   █
 ║   └──────────────────────────────────────────────────────────────────────┘   █

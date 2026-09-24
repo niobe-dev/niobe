@@ -771,8 +771,9 @@ fn draw_transcript(frame: &mut Frame, area: Rect, border: u16, app: &mut App, th
         return;
     }
 
+    let folded = app.calls_folded();
     let (entries, drawn) = app.entries_to_draw();
-    drawn.update(entries, width, theme);
+    drawn.update(entries, width, folded, theme);
     let above = drawn.line_count();
     let total = above + question.len();
 
@@ -800,7 +801,8 @@ fn draw_transcript(frame: &mut Frame, area: Rect, border: u16, app: &mut App, th
 /// A finished reply never changes, and parsing and wrapping every one of them
 /// on every frame is what a long session's redraw would otherwise spend its
 /// time on. An entry is drawn again when its text, the pane's width or the
-/// theme changes, which is everything its lines depend on.
+/// theme changes, or runs of calls are folded or opened, which is everything
+/// its lines depend on.
 #[derive(Debug, Default)]
 pub struct DrawnEntries {
     drawn: Vec<(u64, Vec<Line<'static>>)>,
@@ -808,14 +810,16 @@ pub struct DrawnEntries {
 
 impl DrawnEntries {
     /// Brings every entry's lines up to date.
-    fn update(&mut self, entries: &[Entry], width: usize, theme: &Theme) {
+    fn update(&mut self, entries: &[Entry], width: usize, folded: bool, theme: &Theme) {
         self.drawn.truncate(entries.len());
         for (at, entry) in entries.iter().enumerate() {
-            let key = drawn_from(entry, width, theme);
+            let key = drawn_from(entry, width, folded, theme);
             match self.drawn.get_mut(at) {
                 Some((drawn_key, _)) if *drawn_key == key => {}
-                Some(slot) => *slot = (key, entry_lines(entry, width, theme)),
-                None => self.drawn.push((key, entry_lines(entry, width, theme))),
+                Some(slot) => *slot = (key, entry_lines(entry, width, folded, theme)),
+                None => self
+                    .drawn
+                    .push((key, entry_lines(entry, width, folded, theme))),
             }
         }
     }
@@ -837,11 +841,12 @@ impl DrawnEntries {
 }
 
 /// What an entry's lines are drawn from, as one number.
-fn drawn_from(entry: &Entry, width: usize, theme: &Theme) -> u64 {
+fn drawn_from(entry: &Entry, width: usize, folded: bool, theme: &Theme) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     entry.hash(&mut hasher);
     width.hash(&mut hasher);
+    folded.hash(&mut hasher);
     theme.hash(&mut hasher);
     hasher.finish()
 }
@@ -1184,7 +1189,10 @@ fn key_rows(keys: &[(String, &str)], width: usize, theme: &Theme) -> Vec<Line<'s
 }
 
 /// One transcript entry, wrapped to the pane: a head line and its body.
-fn entry_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn entry_lines(entry: &Entry, width: usize, folded: bool, theme: &Theme) -> Vec<Line<'static>> {
+    if !entry.calls.is_empty() {
+        return crate::calls::lines(entry, width, folded, theme);
+    }
     let colour = entry.kind.colour(theme);
     let body_width = width.saturating_sub(GUTTER);
 
@@ -1205,15 +1213,9 @@ fn entry_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>>
     }
 
     let mut lines = vec![Line::from(head)];
-    let diff = entry
-        .change
-        .as_ref()
-        .map(|change| crate::hunks::lines(change, body_width, theme))
-        .unwrap_or_default();
     lines.extend(
         body_lines(entry, body_width, theme)
             .into_iter()
-            .chain(diff)
             .map(|line| {
                 let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
                 spans.extend(line.spans);
@@ -2426,7 +2428,7 @@ fn counted_row(
 /// `≥` means at least this much, and an em dash means nothing was reported. A
 /// zero here would say the session left that side of the file alone, which is
 /// a different claim from not knowing.
-fn count(sign: char, lines: u64, stated: bool) -> String {
+pub(crate) fn count(sign: char, lines: u64, stated: bool) -> String {
     match (stated, lines) {
         (true, lines) => format!("{sign}{lines}"),
         (false, 0) => "—".to_owned(),

@@ -25,6 +25,7 @@
 
 pub mod app;
 pub mod bridge;
+mod calls;
 pub mod clock;
 mod fx;
 mod hunks;
@@ -44,7 +45,8 @@ pub mod usage;
 pub mod watch;
 
 pub use app::{
-    Answer, App, Ask, Commit, Entry, EntryKind, Picker, Repo, Section, SelectedProfile, WorkingFile,
+    Answer, App, Ask, Call, Commit, Entry, EntryKind, Picker, Repo, Section, SelectedProfile,
+    WorkingFile,
 };
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use journal::{Journal, JournalError, Unrecorded};

@@ -2,39 +2,39 @@
 ╔════════════════════════════════════════════════════ Session ─ example-app ═════════════════════════════════════════════════════╗ ╔══════════════════════════════ Usage ══════════════════════════════╗
 ║                                                                                                                                ║ ║                                                                   ║
 ║                                                                                                                                ║ ║ 5h    ▓▓▓▓▓▓▓░░░░░  62% · resets 16:40                            ║
-║ ⚙ Notion·search  {} · 1.1 kB out                                                                                               ║ ║ 7d    ▓▓░░░░░░░░░░  18% · resets Tue 15:00                        ║
+║ ⚙ Notion·fetch               {}                                                                                         2.5 kB ║ ║ 7d    ▓▓░░░░░░░░░░  18% · resets Tue 15:00                        ║
 ║                                                                                                                                ║ ║ ───────────────────────────────────────────────────────────────── ║
-║ ⚙ Notion·fetch  {} · 2.5 kB out                                                                                                ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                ║
-║                                                                                                                                ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k                                ║
-║ ! Notion·update-page  {} · failed · 96 B out                                                                                   █ ║ session ≥$0.04                                                    ║
-║                                                                                                                                █ ╚═══════════════════════════════════════════════════════════════════╝
-║ ◆ claude                                                                                                                       █ ╔═════════════════════════════ Changes ═════════════════════════════╗
-║   Caching the etag beside the body so a 304 can be answered from the LRU.                                                      █ ║                                                                   ║
-║                                                                                                                                █ ║ ⎇ main ↑3                                                         █
-║ ⚙ Edit  catalog/fetch.ts · 640 B out                                                                                           █ ║ ▾ Working tree  23 files  +977 −259                               █
-║    41     const cached = cache.get(url);                                                                                       █ ║   .                                                               █
-║    42     const headers = new Headers(init.headers);                                                                           █ ║     CHANGELOG.md                                            +0 −0 █
-║    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                               █ ║   catalog/                                                        █
-║    44 -   const res = await fetch(url, init);                                                                                  █ ║     fetch.ts                                             +149 −12 █
-║    43 +   if (cached?.etag) {                                                                                                  █ ║     etag.ts                                               +88 −41 █
-║    44 +     headers.set("If-None-Match", cached.etag);                                                                         █ ║     cache/lru.ts                                           +31 −9 █
-║    45 +   }                                                                                                                    █ ║     cache/index.ts                                         +12 −0 █
-║    46 +   const res = await fetch(url, { ...init, headers });                                                                  █ ║   docs/                                                           █
-║    47 +   if (res.status === 304 && cached) return cached.body;                                                                █ ║     caching.md                                            +64 −22 █
-║    48     return res;                                                                                                          █ ║     adr/0004-etags.md                                      +34 −1 █
-║       …                                                                                                                        █ ║     diagrams/cache.png                                        — — █
-║   115     cache.set(url, {                                                                                                     █ ║   server/                                                         █
-║   116 +     etag: res.headers.get("ETag"),                                                                                     █ ║     handlers/manifest.ts                                   +97 −4 █
-║   117       body,                                                                                                              █ ║     handlers/health.ts                                     +3 −19 ║
-║   └ allowed by you                                                                                                             █ ║     middleware/etag.ts                                    +41 −37 ║
-║                                                                                                                                █ ║     index.ts                                                +8 −6 ║
-║ ◆ claude                                                                                                                       █ ║   tests/                                                          ║
-║   Rewriting the 304 test around the cached body.                                                                               █ ║     etag.test.ts                                          +122 −8 ║
-║                                                                                                                                █ ║     fetch.test.ts                                         +76 −14 ║
-║ ◆ claude                                                                                                                       █ ║     helpers.ts                                              +5 −2 ║
-║   The notebook that demonstrates the fetcher needs the new call shape.                                                         █ ║     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 ║
-║                                                                                                                                █ ║     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                                                                                █ ║   web/                                                            ║
+║ ✗ Notion·update-page         {}                                                                                         failed ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                ║
+║   └ 404 object_not_found — the page is not shared with the integration                                                         ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k                                ║
+║                                                                                                                                ║ ║ session ≥$0.04                                                    ║
+║ ◆ claude                                                                                                                       ║ ╚═══════════════════════════════════════════════════════════════════╝
+║   Caching the etag beside the body so a 304 can be answered from the LRU.                                                      ║ ╔═════════════════════════════ Changes ═════════════════════════════╗
+║                                                                                                                                ║ ║                                                                   ║
+║ ⚙ Edit                       catalog/fetch.ts                                                                     +6 −2 · 0.4s █ ║ ⎇ main ↑3                                                         █
+║    41     const cached = cache.get(url);                                                                                       █ ║ ▾ Working tree  23 files  +977 −259                               █
+║    42     const headers = new Headers(init.headers);                                                                           █ ║   .                                                               █
+║    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                               █ ║     CHANGELOG.md                                            +0 −0 █
+║    44 -   const res = await fetch(url, init);                                                                                  █ ║   catalog/                                                        █
+║    43 +   if (cached?.etag) {                                                                                                  █ ║     fetch.ts                                             +149 −12 █
+║    44 +     headers.set("If-None-Match", cached.etag);                                                                         █ ║     etag.ts                                               +88 −41 █
+║    45 +   }                                                                                                                    █ ║     cache/lru.ts                                           +31 −9 █
+║    46 +   const res = await fetch(url, { ...init, headers });                                                                  █ ║     cache/index.ts                                         +12 −0 █
+║    47 +   if (res.status === 304 && cached) return cached.body;                                                                █ ║   docs/                                                           █
+║    48     return res;                                                                                                          █ ║     caching.md                                            +64 −22 █
+║       …                                                                                                                        █ ║     adr/0004-etags.md                                      +34 −1 █
+║   115     cache.set(url, {                                                                                                     █ ║     diagrams/cache.png                                        — — █
+║   116 +     etag: res.headers.get("ETag"),                                                                                     █ ║   server/                                                         █
+║   117       body,                                                                                                              █ ║     handlers/manifest.ts                                   +97 −4 █
+║   └ allowed by you                                                                                                             █ ║     handlers/health.ts                                     +3 −19 ║
+║                                                                                                                                █ ║     middleware/etag.ts                                    +41 −37 ║
+║ ◆ claude                                                                                                                       █ ║     index.ts                                                +8 −6 ║
+║   Rewriting the 304 test around the cached body.                                                                               █ ║   tests/                                                          ║
+║                                                                                                                                █ ║     etag.test.ts                                          +122 −8 ║
+║ ◆ claude                                                                                                                       █ ║     fetch.test.ts                                         +76 −14 ║
+║   The notebook that demonstrates the fetcher needs the new call shape.                                                         █ ║     helpers.ts                                              +5 −2 ║
+║                                                                                                                                █ ║     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 ║
+║ ✗ Bash                       npm test -- fetch                                                                   exit 1 · 0.4s █ ║     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 ║
+║   └ 1 failing: fetch returns the cached body on a 304                                                                          █ ║   web/                                                            ║
 ║                                                                                                                                █ ╚═══════════════════════════════════════════════════════════════════╝
 ║ ◆ claude                                                                                                                       █ ╔════════════════════════════ Activity ═════════════════════════════╗
 ║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.        █ ║                                                                   ║
@@ -49,11 +49,11 @@
 ║   │   2. Always allow Read                              niobe saves Read │                                                     █ ║         two manifests can share an id across catalogs.            ║
 ║   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │                                                     █ ║   13:39 Reuse the existing LRU instead of a new Map — avoids a    ║
 ║   │   4. Deny                                      the call does not run │                                                     █ ║         second eviction policy.                                   ║
-║   │                                                                      │                                                     █ ║ ▾ Tools  6 calls ✗ 2 · 0 denied · 13.6 kB out                     ║
+║   │                                                                      │                                                     █ ║ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     ║
 ║   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │                                                     █ ║   Notion·*             3 ━━━━━━━━━━━━ ✗ 1                         ║
-║   │ Esc decide later                                                     │                                                     █ ║   Bash                 1 ━━━━         ✗ 1                         ║
-║   └──────────────────────────────────────────────────────────────────────┘                                                     █ ║   Edit                 1 ━━━━                                     ║
-║                                                                                                                                █ ║   Read                 1 ━━━━                                     ║
+║   │ Esc decide later                                                     │                                                     █ ║   Read                 3 ━━━━━━━━━━━━                             ║
+║   └──────────────────────────────────────────────────────────────────────┘                                                     █ ║   Bash                 1 ━━━━         ✗ 1                         ║
+║                                                                                                                                █ ║   Edit                 1 ━━━━                                     ║
 ║ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ║ ║                                                                   ║
 ║  ask  >  Ask for a change                                                   ▸▸ ask mode · Shift+Tab cycles · Alt+Enter newline ║ ║                                                                   ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════════════════════════════════╝

@@ -260,6 +260,41 @@ What the recording settles:
   `updatedInput`, and one with an empty `updatedInput`, each let a `Write` run
   as the model asked for it. The field is not what makes a call go ahead.
 
+## `shell.jsonl`
+
+One turn with two shell commands, recorded from Claude Code 2.1.281 on
+24 September 2026 through Niobe's shell, with `--permission-prompt-tool stdio`.
+The model was asked to `touch a.txt` and then `touch b.txt`; the first was
+allowed and ran, the second was refused with words in place of a choice. The
+lines are the CLI's own. The only edits: paths rewritten to `/repo`,
+`system`/`init` cut down to the keys that say what ran, the `result`'s
+`subagent_stats` dropped, and the stream events and the `system` `status` and
+`thinking_tokens` lines left out. The recording they were left out of carried
+no shape that is not already in `tests/conformance.rs`.
+
+What it settles is how a shell command's exit status is read:
+
+- **A success carries no status.** The result is `(Bash completed with no
+  output)`, `is_error: false`, and beside it the tool's report: `stdout`,
+  `stderr`, `interrupted`, `isImage`, `noOutputExpected`. The CLI's own
+  transcripts carry the same report under `toolUseResult`, and three more keys
+  the bridge reads when they are there: `returnCodeInterpretation` on a
+  non-zero status the CLI read as a success (`No matches found`),
+  `backgroundTaskId` on a command it moved to the background, and
+  `interrupted: true`. A success with none of those is a command that exited
+  zero, and the bridge says so; with any of them it names no status.
+- **A refusal made over the control channel reads as a failure here**, with
+  the refusal's words as its reason: the recording cannot say the call was
+  refused, and the driver is what tells the translator (see
+  `stdio-answers.jsonl`).
+
+A failed command's status is in `sub-agents.jsonl`: its result opens with
+`Exit code 1` on a line of its own, and the rest is the command's output. The
+CLI writes no report beside a sub-agent's successful commands, so those name
+no status. Across 18,756 shell results in 336 of the CLI's own transcripts of
+2.1.27x–2.1.281, every failed command that ran opened with `Exit code <n>` and
+no successful one did.
+
 ## `long-context.jsonl`
 
 A two-turn session on `claude-opus-5[1m]` — Opus 5 with its 1M-token window

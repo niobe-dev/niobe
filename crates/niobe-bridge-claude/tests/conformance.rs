@@ -319,6 +319,114 @@ fn every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from() 
     );
 }
 
+/// How a recorded shell command's result says how the command exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ShellEnding {
+    /// A success with the CLI's report beside it, whose `interrupted` is what
+    /// the bridge reads before it calls the command's status zero.
+    Reported,
+    /// A failure whose result opens with `Exit code <n>`, which is where the
+    /// status of a command that failed is read from.
+    ExitLine,
+}
+
+/// The tool each recorded call was made with, by its id.
+fn calls_in(lines: &[String]) -> std::collections::BTreeMap<String, String> {
+    let mut calls = std::collections::BTreeMap::new();
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        for block in blocks_of(&value) {
+            if let (Some("tool_use"), Some(id), Some(name)) = (
+                block.get("type").and_then(serde_json::Value::as_str),
+                block.get("id").and_then(serde_json::Value::as_str),
+                block.get("name").and_then(serde_json::Value::as_str),
+            ) {
+                calls.insert(id.to_owned(), name.to_owned());
+            }
+        }
+    }
+    calls
+}
+
+fn blocks_of(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| blocks.iter().collect())
+        .unwrap_or_default()
+}
+
+/// What a shell command's result carries that the bridge reads its exit
+/// status from, or `None` where it carries neither.
+///
+/// A success with no report at all is left alone: the CLI writes none beside
+/// a sub-agent's commands, and the bridge then names no status, which is the
+/// reading `translate.rs` asserts.
+fn shell_ending(value: &serde_json::Value, block: &serde_json::Value) -> Option<ShellEnding> {
+    let failed = block.get("is_error").and_then(serde_json::Value::as_bool) == Some(true);
+    let text = block
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let report = value
+        .get("tool_use_result")
+        .or_else(|| value.get("toolUseResult"))
+        .filter(|report| report.is_object());
+    match (failed, report) {
+        (true, _) => text
+            .strip_prefix("Exit code ")
+            .and_then(|rest| rest.lines().next())
+            .and_then(|status| status.trim().parse::<i32>().ok())
+            .map(|_| ShellEnding::ExitLine),
+        (false, Some(report)) => {
+            assert!(
+                report
+                    .get("interrupted")
+                    .and_then(serde_json::Value::as_bool)
+                    .is_some(),
+                "a shell command's report carries no boolean `interrupted`, which the bridge reads \
+                 before it calls a success an exit of zero: {value}"
+            );
+            Some(ShellEnding::Reported)
+        }
+        (false, None) => None,
+    }
+}
+
+#[test]
+fn every_recorded_shell_result_carries_what_its_exit_status_is_read_from() {
+    let mut seen = BTreeSet::new();
+    for path in recordings() {
+        let lines = lines_of(&path);
+        let calls = calls_in(&lines);
+        for line in &lines {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            for block in blocks_of(&value) {
+                let shell = block
+                    .get("tool_use_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|id| calls.get(id))
+                    .is_some_and(|name| name == "Bash");
+                if shell {
+                    seen.extend(shell_ending(&value, block));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        BTreeSet::from([ShellEnding::Reported, ShellEnding::ExitLine]),
+        "no recording holds a shell command that ended each way the bridge reads a status from. \
+         A release that stopped writing either would leave every command's status unnamed with \
+         nothing failing."
+    );
+}
+
 #[test]
 fn every_recording_says_which_cli_version_it_was_recorded_from() {
     for path in recordings() {

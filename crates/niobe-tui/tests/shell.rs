@@ -402,7 +402,16 @@ fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
     screen(&mut app, 120, 30);
     app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
     let before = screen(&mut app, 120, 30);
-    let top = |frame: &str| frame.lines().take(10).collect::<Vec<_>>().join("\n");
+    // The transcript grows by the question, so the scrollbar's thumb may move
+    // down its track; the lines in view are what must not.
+    let top = |frame: &str| {
+        frame
+            .lines()
+            .take(10)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace('█', "║")
+    };
 
     app.apply(&Event::PermissionRequest {
         id: "toolu_read".into(),
@@ -1255,9 +1264,13 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
         "{frame}"
     );
     assert!(under("reviewer").contains("✗ doc-writer"), "{frame}");
-    // The transcript's diff closes on a `└` of its own, saying who let the
-    // edit through; every other one is under an agent.
-    let under_agents = frame.matches('└').count() - frame.matches("└ allowed by").count();
+    // The transcript hangs rows of its own from a `└`; in the column to its
+    // right, every one is under an agent.
+    let under_agents: usize = frame
+        .lines()
+        .filter_map(|line| line.split_once("║ ║").map(|(_, right)| right))
+        .map(|right| right.matches('└').count())
+        .sum();
     assert_eq!(under_agents, 2, "{frame}");
 }
 
@@ -1282,9 +1295,10 @@ fn a_decision_is_drawn_under_the_time_it_was_recorded_at() {
         "the summary wraps under itself, not under the time: {:?}",
         rows[at + 1]
     );
-    let hang = rows[at + 1]
-        .find("two manifests")
-        .zip(rows[at].find("Key the cache"));
+    // Columns, not bytes: the transcript beside the pane draws characters
+    // wider than a byte, and the two rows carry different ones.
+    let column = |row: &str, text: &str| row.find(text).map(|at| row[..at].chars().count());
+    let hang = column(rows[at + 1], "two manifests").zip(column(rows[at], "Key the cache"));
     assert!(
         hang.map(|(a, b)| a == b).unwrap_or(false),
         "the hanging indent is the summary's own column: {hang:?}"
@@ -1658,4 +1672,38 @@ fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
         "the reply was cut:\n{frame}"
     );
     assert!(!said.contains("Ask for a change"), "{frame}");
+}
+
+/// A run of calls to one tool is one group: its row carries the run's summed
+/// figures, and Ctrl+O folds every group to that row and opens them again.
+#[test]
+fn a_run_of_calls_folds_to_its_group_row_and_opens_again() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session();
+    let open = screen(&mut app, 200, 60);
+    assert!(open.contains("▾ Read ×3"), "{open}");
+    assert!(open.contains("15.3 kB · 3.6s"), "the run's sums: {open}");
+    assert!(open.contains("├ catalog/fetch.ts"), "{open}");
+
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let folded = screen(&mut app, 200, 60);
+    assert!(folded.contains("▸ Read ×3"), "{folded}");
+    assert!(folded.contains("15.3 kB · 3.6s"), "{folded}");
+    assert!(!folded.contains("├ catalog/fetch.ts"), "{folded}");
+
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(screen(&mut app, 200, 60), open);
+}
+
+/// On a pane too narrow for everything, what the call does gives way and
+/// what it cost does not.
+#[test]
+fn a_narrow_pane_cuts_what_a_call_does_before_what_it_cost() {
+    let frame = screen(&mut running_session(), 80, 24);
+    let row = frame
+        .lines()
+        .find(|line| line.contains("✗ Bash"))
+        .expect("the failed command is in view at the tail");
+    assert!(row.contains("exit 1 · 0.4s"), "{row}");
 }

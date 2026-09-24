@@ -364,7 +364,8 @@ pub struct Entry {
     pub kind: EntryKind,
     /// The bold label: `you`, the backend's name, a tool's name.
     pub head: String,
-    /// The dim detail beside the head: a file, a byte count, an outcome.
+    /// The dim detail beside the head: what a refused call was about. Empty
+    /// on a tool call's own entry, whose figures are its [`Entry::calls`].
     pub meta: String,
     /// The body, wrapped at draw time.
     pub body: String,
@@ -374,10 +375,104 @@ pub struct Entry {
     /// shell took it off the channel, or off what the store recorded beside
     /// it. Absent where the entry came from a log that kept no times.
     pub at: Option<Stamp>,
-    /// What a tool call did to a file, where the backend reported the lines
-    /// it changed. Drawn under the call as a diff; `None` for every entry
-    /// that is not such a call, and for one whose backend sent only counts.
+    /// The tool calls this entry is, in the order they started: one for a
+    /// call on its own, more for a run of calls to the same tool, which the
+    /// transcript folds into one group. Empty for every entry that is not a
+    /// tool call.
+    ///
+    /// A run is calls to the same tool with nothing between them in the
+    /// transcript. Anything else the transcript shows breaks it — a call to
+    /// another tool, the assistant saying something, a refusal, a notice —
+    /// and so does the end of a turn, so two turns' calls are never one
+    /// group even where no words came between them.
+    pub calls: Vec<Call>,
+}
+
+/// One tool call as the transcript shows it: what it does, how it ended and
+/// what it cost.
+///
+/// Every figure is `None` until the backend or this shell's clock has said
+/// it, and stays `None` where neither did. The row draws an absent figure as
+/// absent, never as a zero.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Call {
+    /// What the call does, in one line: the backend's reading of it, or its
+    /// arguments where it had none.
+    pub what: String,
+    /// How it ended, or `None` while it runs.
+    pub outcome: Option<ToolOutcome>,
+    /// What it returned, in bytes. `None` while it runs.
+    pub bytes: Option<u64>,
+    /// The status its command exited with, where the backend reported one.
+    pub exit_code: Option<i32>,
+    /// Why it did not succeed, in the backend's words, where it said.
+    pub error: Option<String>,
+    /// The lines it added and removed, where it changed a file: `None` for a
+    /// call that changed none, and each side `None` where the backend did not
+    /// state it.
+    pub lines: Option<(Option<u64>, Option<u64>)>,
+    /// How long it ran by this shell's clock, or by the clock the store
+    /// recorded it with. `None` while it runs and wherever either end came
+    /// with no time — a log that kept none.
+    pub took: Option<Duration>,
+    /// What it did to a file, where the backend reported the lines it
+    /// changed. Drawn under the call as a diff; `None` for a call that is not
+    /// such a call, and for one whose backend sent only counts.
     pub change: Option<Change>,
+    /// When it started running: its start, or the moment it was allowed
+    /// where it waited on a question first, so that the time the operator
+    /// took to answer is not read as the time the tool took.
+    started: Option<Stamp>,
+}
+
+impl Call {
+    /// A call that has just started, at `at`.
+    fn started(what: String, at: Option<Stamp>) -> Self {
+        Self {
+            what,
+            outcome: None,
+            bytes: None,
+            exit_code: None,
+            error: None,
+            lines: None,
+            took: None,
+            change: None,
+            started: at,
+        }
+    }
+
+    /// Records how the call ended, at `at`.
+    fn ended(&mut self, ending: Ending, at: Option<Stamp>) {
+        self.outcome = Some(ending.outcome);
+        self.bytes = Some(ending.bytes);
+        self.exit_code = ending.exit_code;
+        self.error = ending.error;
+        self.took = match (self.started, at) {
+            (Some(started), Some(at)) => at.since(started),
+            _ => None,
+        };
+    }
+
+    /// Whether the call is still running.
+    pub fn running(&self) -> bool {
+        self.outcome.is_none()
+    }
+
+    /// Whether the call ran and did not succeed, or was not allowed to run.
+    pub fn failed(&self) -> bool {
+        matches!(
+            self.outcome,
+            Some(ToolOutcome::Failed | ToolOutcome::Denied)
+        )
+    }
+}
+
+/// What a call's end reported about it.
+struct Ending {
+    outcome: ToolOutcome,
+    bytes: u64,
+    exit_code: Option<i32>,
+    error: Option<String>,
 }
 
 /// The lines a call changed in a file, and how the call came to run.
@@ -507,15 +602,24 @@ pub struct App {
     theme: Theme,
     session: SessionState,
     entries: Vec<Entry>,
-    tool_entries: BTreeMap<ToolCallId, usize>,
+    /// Where each running call is drawn: its entry, and its place among the
+    /// entry's calls.
+    tool_entries: BTreeMap<ToolCallId, (usize, usize)>,
+    /// The entry a call to the same tool would join, while nothing has come
+    /// between it and the next call: see [`Entry::calls`] for what breaks a
+    /// run.
+    run: Option<usize>,
+    /// Whether a run of calls is drawn as its group row alone, rather than
+    /// with a row for each call under it.
+    calls_folded: bool,
     /// How each call the operator or a rule let through was allowed, until
     /// the call ends and its entry takes the answer.
     answered: BTreeMap<ToolCallId, PermissionDecision>,
-    /// The entry of the call that ended with the event just folded, and how
-    /// it came to run. A backend reports a file change directly after the
-    /// end of the call that made it, so this is where the change is drawn;
-    /// any other event in between clears it.
-    just_ended: Option<(usize, Option<Gate>)>,
+    /// The call that ended with the event just folded — its entry and its
+    /// place in it — and how it came to run. A backend reports a file change
+    /// directly after the end of the call that made it, so this is where the
+    /// change is drawn; any other event in between clears it.
+    just_ended: Option<(usize, usize, Option<Gate>)>,
     /// Every sub-agent the session spawned, in the order it spawned them. The
     /// session fold keeps the counts and which ids are running; the label, the
     /// moment and the outcome as this pane reads them are this shell's
@@ -625,6 +729,8 @@ impl App {
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
+            run: None,
+            calls_folded: false,
             answered: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
@@ -672,7 +778,7 @@ impl App {
                 body: text.clone(),
                 streaming: false,
                 at: self.at,
-                change: None,
+                calls: Vec::new(),
             }),
 
             Event::AssistantDelta { text } => match self.streaming_agent_entry() {
@@ -686,7 +792,7 @@ impl App {
                         body: text.clone(),
                         streaming: true,
                         at: self.at,
-                        change: None,
+                        calls: Vec::new(),
                     });
                 }
             },
@@ -705,7 +811,7 @@ impl App {
                         body: text.clone(),
                         streaming: false,
                         at: self.at,
-                        change: None,
+                        calls: Vec::new(),
                     });
                 }
             },
@@ -716,16 +822,32 @@ impl App {
                 input,
                 summary,
             } => {
-                self.tool_entries.insert(id.clone(), self.entries.len());
-                self.push(Entry {
-                    kind: EntryKind::Tool,
-                    head: tool_label(name),
-                    meta: what_it_does(summary.as_deref(), input),
-                    body: String::new(),
-                    streaming: true,
-                    at: self.at,
-                    change: None,
-                });
+                let head = tool_label(name);
+                let call = Call::started(what_it_does(summary.as_deref(), input), self.at);
+                match self.open_run(&head) {
+                    Some(at) => {
+                        if let Some(entry) = self.entries.get_mut(at) {
+                            self.tool_entries
+                                .insert(id.clone(), (at, entry.calls.len()));
+                            entry.calls.push(call);
+                            entry.streaming = true;
+                        }
+                    }
+                    None => {
+                        let at = self.entries.len();
+                        self.tool_entries.insert(id.clone(), (at, 0));
+                        self.push(Entry {
+                            kind: EntryKind::Tool,
+                            head,
+                            meta: String::new(),
+                            body: String::new(),
+                            streaming: true,
+                            at: self.at,
+                            calls: vec![call],
+                        });
+                        self.run = Some(at);
+                    }
+                }
             }
 
             Event::ToolCallEnd {
@@ -735,58 +857,71 @@ impl App {
                 bytes,
                 outcome,
                 summary,
+                exit_code,
+                error,
                 ..
             } => {
-                let meta = format!(
-                    "{} · {}",
-                    what_it_does(summary.as_deref(), input),
-                    outcome_label(*outcome, *bytes)
-                );
+                let ending = Ending {
+                    outcome: *outcome,
+                    bytes: *bytes,
+                    exit_code: *exit_code,
+                    error: error.clone(),
+                };
                 let gate = self.gate(id);
                 let started = self.tool_entries.remove(id);
-                match started.and_then(|i| self.entries.get_mut(i)) {
-                    Some(entry) => {
-                        entry.meta = meta;
-                        entry.streaming = false;
-                        if *outcome != ToolOutcome::Ok {
-                            entry.kind = EntryKind::Failure;
-                        }
-                    }
+                let ended = match started {
+                    Some((at, index)) => self.end_call(at, index, ending),
                     // An end whose start never arrived is shown, not dropped:
                     // the session fold counts it too, and a gap the operator
                     // cannot see is a gap nobody reports.
-                    None => self.push(Entry {
-                        kind: if *outcome == ToolOutcome::Ok {
-                            EntryKind::Tool
-                        } else {
-                            EntryKind::Failure
-                        },
-                        head: tool_label(name),
-                        meta,
-                        body: String::new(),
-                        streaming: false,
-                        at: self.at,
-                        change: None,
-                    }),
-                }
-                if *outcome == ToolOutcome::Ok {
-                    let at = started.unwrap_or(self.entries.len().saturating_sub(1));
-                    self.just_ended = Some((at, gate));
+                    None => {
+                        let mut call = Call::started(what_it_does(summary.as_deref(), input), None);
+                        call.ended(ending, None);
+                        self.push(Entry {
+                            kind: match call.failed() {
+                                true => EntryKind::Failure,
+                                false => EntryKind::Tool,
+                            },
+                            head: tool_label(name),
+                            meta: String::new(),
+                            body: String::new(),
+                            streaming: false,
+                            at: self.at,
+                            calls: vec![call],
+                        });
+                        Some((self.entries.len().saturating_sub(1), 0))
+                    }
+                };
+                if *outcome == ToolOutcome::Ok
+                    && let Some((at, index)) = ended
+                {
+                    self.just_ended = Some((at, index, gate));
                 }
             }
 
-            Event::FileChange { hunks, .. } => {
-                if let Some((at, gate)) = ended
-                    && !hunks.is_empty()
-                    && let Some(entry) = self.entries.get_mut(at)
+            Event::FileChange {
+                added,
+                removed,
+                hunks,
+                ..
+            } => {
+                if let Some((at, index, gate)) = ended
+                    && let Some(call) = self
+                        .entries
+                        .get_mut(at)
+                        .and_then(|entry| entry.calls.get_mut(index))
                 {
-                    entry.change = Some(Change::new(hunks.clone(), gate));
+                    call.lines = Some((*added, *removed));
+                    if !hunks.is_empty() {
+                        call.change = Some(Change::new(hunks.clone(), gate));
+                    }
                 }
             }
 
             // The working line reads the end off the fold; the transcript has
-            // already shown everything the turn said.
-            Event::TurnEnded => {}
+            // already shown everything the turn said. A turn's calls are not
+            // grouped with the next turn's.
+            Event::TurnEnded => self.run = None,
 
             Event::Error { message, fatal } => self.push(Entry {
                 kind: EntryKind::Failure,
@@ -795,7 +930,7 @@ impl App {
                 body: message.clone(),
                 streaming: false,
                 at: self.at,
-                change: None,
+                calls: Vec::new(),
             }),
 
             Event::Notice { message } => self.push(Entry {
@@ -805,7 +940,7 @@ impl App {
                 body: message.clone(),
                 streaming: false,
                 at: self.at,
-                change: None,
+                calls: Vec::new(),
             }),
 
             Event::PermissionRequest {
@@ -833,6 +968,7 @@ impl App {
                 let asked = self.forget_ask(id);
                 if decision.allowed() {
                     self.answered.insert(id.clone(), *decision);
+                    self.restart_clock(id);
                 }
                 if *decision == PermissionDecision::Deny {
                     let (tool, what) = match &asked {
@@ -855,7 +991,7 @@ impl App {
                             .unwrap_or_default(),
                         streaming: false,
                         at: self.at,
-                        change: None,
+                        calls: Vec::new(),
                     });
                 }
             }
@@ -950,6 +1086,61 @@ impl App {
 
     fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
+    }
+
+    /// The entry a call to `head` joins, where the transcript's last entry is
+    /// a run of calls to it that nothing has broken.
+    fn open_run(&self, head: &str) -> Option<usize> {
+        self.run.filter(|&at| {
+            at + 1 == self.entries.len()
+                && self
+                    .entries
+                    .get(at)
+                    .is_some_and(|entry| entry.head == head && !entry.calls.is_empty())
+        })
+    }
+
+    /// Records the end of the `index`th call of entry `at`, and hands back
+    /// where it is when it is there.
+    fn end_call(&mut self, at: usize, index: usize, ending: Ending) -> Option<(usize, usize)> {
+        let now = self.at;
+        let entry = self.entries.get_mut(at)?;
+        let call = entry.calls.get_mut(index)?;
+        call.ended(ending, now);
+        if call.failed() {
+            entry.kind = EntryKind::Failure;
+        }
+        entry.streaming = entry.calls.iter().any(Call::running);
+        Some((at, index))
+    }
+
+    /// Starts a call's clock again from now, because the operator has just
+    /// let it run: the time it spent waiting on them is not the tool's.
+    fn restart_clock(&mut self, id: &ToolCallId) {
+        let now = self.at;
+        if let Some(&(at, index)) = self.tool_entries.get(id)
+            && let Some(call) = self
+                .entries
+                .get_mut(at)
+                .and_then(|entry| entry.calls.get_mut(index))
+        {
+            call.started = now;
+        }
+    }
+
+    /// Whether a run of calls is drawn as its group row alone.
+    pub fn calls_folded(&self) -> bool {
+        self.calls_folded
+    }
+
+    /// Folds every run of calls to its group row, or opens them all again.
+    ///
+    /// One switch for the whole transcript rather than one per group: the
+    /// transcript has no cursor to say which group a key is meant for, and
+    /// a key that folded whichever group happened to be on screen would fold
+    /// one the operator was not looking at.
+    pub fn fold_calls(&mut self) {
+        self.calls_folded = !self.calls_folded;
     }
 
     /// Folds in an event the operator produced here and queues it to be kept.
@@ -1171,7 +1362,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
-            change: None,
+            calls: Vec::new(),
         });
     }
 
@@ -1188,7 +1379,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
-            change: None,
+            calls: Vec::new(),
         });
         self.scroll_to_tail();
     }
@@ -1206,7 +1397,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
-            change: None,
+            calls: Vec::new(),
         });
     }
 
@@ -1224,7 +1415,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
-            change: None,
+            calls: Vec::new(),
         });
         self.scroll_to_tail();
     }
@@ -1310,7 +1501,7 @@ impl App {
                 .to_owned(),
             streaming: false,
             at: self.at,
-            change: None,
+            calls: Vec::new(),
         });
         self.scroll_to_tail();
     }
@@ -1439,7 +1630,7 @@ impl App {
             body: body.to_owned(),
             streaming: false,
             at: self.at,
-            change: None,
+            calls: Vec::new(),
         });
         self
     }
@@ -1768,6 +1959,7 @@ impl App {
             (KeyCode::Down, KeyModifiers::SHIFT) => self.scroll_down(1),
             (KeyCode::Home, KeyModifiers::CONTROL) => self.scroll_to_head(),
             (KeyCode::End, KeyModifiers::CONTROL) => self.scroll_to_tail(),
+            (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.fold_calls(),
 
             // Shift+Tab reaches crossterm as its own code rather than as Tab
             // with a modifier, which is why it is matched on the code alone.
@@ -1945,13 +2137,12 @@ impl App {
         if !self.session.pending_permissions().is_empty() {
             return "waiting on you".to_owned();
         }
-        let running = self
-            .tool_entries
-            .values()
-            .max()
-            .and_then(|i| self.entries.get(*i));
+        let running = self.tool_entries.values().max().and_then(|&(at, index)| {
+            let entry = self.entries.get(at)?;
+            Some((&entry.head, &entry.calls.get(index)?.what))
+        });
         match (running, self.entries.last()) {
-            (Some(call), _) => format!("running {}  {}", call.head, call.meta),
+            (Some((head, what)), _) => format!("running {head}  {what}"),
             (None, Some(last)) if last.kind == EntryKind::Agent && last.streaming => {
                 "writing".to_owned()
             }
@@ -1985,7 +2176,7 @@ impl App {
                     .to_owned(),
                 streaming: false,
                 at: self.at,
-                change: None,
+                calls: Vec::new(),
             });
         }
         self.scroll_to_tail();
@@ -2005,7 +2196,7 @@ impl App {
             ),
             streaming: false,
             at: self.at,
-            change: None,
+            calls: Vec::new(),
         });
         self.scroll_to_tail();
     }
@@ -2116,7 +2307,7 @@ fn fkey_hint(n: u8) -> &'static str {
     match n {
         1 => {
             "F1 Help — the help browser is not implemented yet. The wheel and PgUp/PgDn \
-             scroll; Shift- or Option-drag selects text"
+             scroll; Ctrl+O folds runs of tool calls; Shift- or Option-drag selects text"
         }
         2 => {
             "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \
@@ -2165,15 +2356,6 @@ fn what_it_does(summary: Option<&str>, input: &str) -> String {
 /// name.
 fn one_line(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// How a finished call reads in the transcript.
-fn outcome_label(outcome: ToolOutcome, bytes: u64) -> String {
-    match outcome {
-        ToolOutcome::Ok => format!("{} out", human_bytes(bytes)),
-        ToolOutcome::Failed => format!("failed · {} out", human_bytes(bytes)),
-        ToolOutcome::Denied => "denied".to_owned(),
-    }
 }
 
 /// Bytes, short enough for a meta line.
@@ -2321,10 +2503,19 @@ mod tests {
             bytes: 4_096,
             outcome: ToolOutcome::Ok,
             summary: None,
+            exit_code: None,
+            error: None,
         });
 
         assert_eq!(app.entries().len(), 1, "the end opened a second entry");
-        assert_eq!(app.entries()[0].meta, "catalog/fetch.ts · 4.0 kB out");
+        let [call] = app.entries()[0].calls.as_slice() else {
+            panic!("one call: {:?}", app.entries()[0]);
+        };
+        assert_eq!(call.what, "catalog/fetch.ts");
+        assert_eq!(
+            (call.outcome, call.bytes),
+            (Some(ToolOutcome::Ok), Some(4_096))
+        );
         assert!(!app.entries()[0].streaming);
     }
 
@@ -2345,6 +2536,8 @@ mod tests {
             bytes: 128,
             outcome: ToolOutcome::Failed,
             summary: None,
+            exit_code: None,
+            error: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -2354,11 +2547,21 @@ mod tests {
             bytes: 0,
             outcome: ToolOutcome::Denied,
             summary: None,
+            exit_code: None,
+            error: None,
         });
 
         assert_eq!(app.entries()[0].kind, EntryKind::Failure);
         assert_eq!(app.entries().len(), 2);
-        assert_eq!(app.entries()[1].meta, "cache.ts · denied");
+        assert_eq!(app.entries()[1].head, "Edit");
+        assert_eq!(app.entries()[1].kind, EntryKind::Failure);
+        let [call] = app.entries()[1].calls.as_slice() else {
+            panic!("one call: {:?}", app.entries()[1]);
+        };
+        assert_eq!(
+            (call.what.as_str(), call.outcome),
+            ("cache.ts", Some(ToolOutcome::Denied))
+        );
     }
 
     #[test]
@@ -3176,9 +3379,9 @@ mod tests {
         app.apply(&start("t2", "Glob", r#"{"pattern":"*.rs"}"#, None));
 
         assert_eq!(app.entries()[0].head, "Notion·search");
-        assert_eq!(app.entries()[0].meta, "query: Niobe");
+        assert_eq!(app.entries()[0].calls[0].what, "query: Niobe");
         assert_eq!(
-            app.entries()[1].meta,
+            app.entries()[1].calls[0].what,
             r#"{"pattern":"*.rs"}"#,
             "with no summary the arguments are all there is to show"
         );
@@ -3571,6 +3774,8 @@ mod tests {
             bytes: 7,
             outcome: ToolOutcome::Ok,
             summary: Some("a.rs".to_owned()),
+            exit_code: None,
+            error: None,
         });
         app.apply(&Event::FileChange {
             path: "a.rs".to_owned(),
@@ -3601,7 +3806,7 @@ mod tests {
             .iter()
             .rev()
             .find(|entry| entry.kind == EntryKind::Tool)
-            .and_then(|entry| entry.change.as_ref())
+            .and_then(|entry| entry.calls.last()?.change.as_ref())
     }
 
     #[test]
@@ -3643,6 +3848,8 @@ mod tests {
             bytes: 0,
             outcome: ToolOutcome::Ok,
             summary: None,
+            exit_code: None,
+            error: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "and then".to_owned(),
@@ -3654,7 +3861,12 @@ mod tests {
             hunks: one_hunk(),
         });
 
-        assert!(app.entries().iter().all(|entry| entry.change.is_none()));
+        assert!(
+            app.entries()
+                .iter()
+                .flat_map(|entry| &entry.calls)
+                .all(|call| call.change.is_none() && call.lines.is_none())
+        );
     }
 
     fn answered(app: &mut App, decision: PermissionDecision) {
@@ -3712,5 +3924,247 @@ mod tests {
         edited(&mut app, "t1", one_hunk());
 
         assert_eq!(change_of(&app).map(Change::gate), Some(None));
+    }
+
+    /// A call's end, with the figures a row reads.
+    fn ended(id: &str, name: &str, outcome: ToolOutcome, bytes: u64) -> Event {
+        Event::ToolCallEnd {
+            id: id.into(),
+            name: name.to_owned(),
+            input: String::new(),
+            output: String::new(),
+            bytes,
+            outcome,
+            summary: None,
+            exit_code: None,
+            error: None,
+        }
+    }
+
+    fn called(app: &mut App, id: &str, name: &str) {
+        app.apply(&start(id, name, "{}", Some(id)));
+        app.apply(&ended(id, name, ToolOutcome::Ok, 10));
+    }
+
+    fn heads(app: &App) -> Vec<(String, usize)> {
+        app.entries()
+            .iter()
+            .map(|entry| (entry.head.clone(), entry.calls.len()))
+            .collect()
+    }
+
+    #[test]
+    fn calls_to_the_same_tool_one_after_another_are_one_group() {
+        let mut app = app();
+        called(&mut app, "t1", "Read");
+        called(&mut app, "t2", "Read");
+        called(&mut app, "t3", "Read");
+
+        assert_eq!(heads(&app), vec![("Read".to_owned(), 3)]);
+        let what: Vec<&str> = app.entries()[0]
+            .calls
+            .iter()
+            .map(|call| call.what.as_str())
+            .collect();
+        assert_eq!(what, ["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn calls_started_together_are_grouped_and_each_end_finds_its_own_call() {
+        let mut app = app();
+        for id in ["t1", "t2"] {
+            app.apply(&start(id, "Read", "{}", Some(id)));
+        }
+        app.apply(&ended("t2", "Read", ToolOutcome::Failed, 5));
+        assert!(
+            app.entries()[0].streaming,
+            "one of the two is still running"
+        );
+        app.apply(&ended("t1", "Read", ToolOutcome::Ok, 7));
+
+        let calls = &app.entries()[0].calls;
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| (call.outcome, call.bytes))
+                .collect::<Vec<_>>(),
+            [
+                (Some(ToolOutcome::Ok), Some(7)),
+                (Some(ToolOutcome::Failed), Some(5))
+            ]
+        );
+        assert!(!app.entries()[0].streaming);
+        assert_eq!(app.entries()[0].kind, EntryKind::Failure);
+    }
+
+    #[test]
+    fn another_tool_words_between_or_the_end_of_a_turn_break_a_run() {
+        let mut app = app();
+        called(&mut app, "t1", "Read");
+        called(&mut app, "t2", "Bash");
+        called(&mut app, "t3", "Read");
+        app.apply(&Event::AssistantMessage {
+            text: "and then".to_owned(),
+        });
+        called(&mut app, "t4", "Read");
+        app.apply(&Event::TurnEnded);
+        called(&mut app, "t5", "Read");
+
+        assert_eq!(
+            heads(&app),
+            vec![
+                ("Read".to_owned(), 1),
+                ("Bash".to_owned(), 1),
+                ("Read".to_owned(), 1),
+                ("agent".to_owned(), 0),
+                ("Read".to_owned(), 1),
+                ("Read".to_owned(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refusal_between_two_calls_breaks_their_run() {
+        let mut app = app();
+        called(&mut app, "t1", "Edit");
+        app.apply(&start("t2", "Edit", "{}", None));
+        app.apply(&Event::PermissionResponse {
+            id: "t2".into(),
+            decision: PermissionDecision::Deny,
+            message: None,
+        });
+        app.apply(&ended("t2", "Edit", ToolOutcome::Denied, 0));
+        called(&mut app, "t3", "Edit");
+
+        assert_eq!(
+            heads(&app),
+            vec![
+                ("Edit".to_owned(), 2),
+                ("denied".to_owned(), 0),
+                ("Edit".to_owned(), 1),
+            ]
+        );
+    }
+
+    fn millis(ms: u64) -> Stamp {
+        Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_millis(ms), None)
+    }
+
+    #[test]
+    fn a_call_is_timed_from_its_start_to_its_end_by_the_clock_it_was_folded_at() {
+        let mut app = app();
+        app.apply_at(&start("t1", "Bash", "{}", None), millis(1_000));
+        app.apply_at(&ended("t1", "Bash", ToolOutcome::Ok, 3), millis(1_300));
+
+        assert_eq!(
+            app.entries()[0].calls[0].took,
+            Some(Duration::from_millis(300))
+        );
+    }
+
+    #[test]
+    fn a_call_folded_in_with_no_clock_has_no_duration_rather_than_none_at_all() {
+        let mut app = app();
+        called(&mut app, "t1", "Bash");
+
+        assert_eq!(app.entries()[0].calls[0].took, None);
+        assert_eq!(app.entries()[0].calls[0].bytes, Some(10));
+    }
+
+    #[test]
+    fn the_time_a_call_waited_on_the_operator_is_not_counted_as_the_tools() {
+        let mut app = app();
+        app.apply_at(&start("t1", "Bash", "{}", None), millis(1_000));
+        app.apply_at(
+            &Event::PermissionRequest {
+                id: "t1".into(),
+                tool: "Bash".to_owned(),
+                input: "{}".to_owned(),
+                target: None,
+            },
+            millis(1_100),
+        );
+        app.apply_at(
+            &Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            },
+            millis(61_100),
+        );
+        app.apply_at(&ended("t1", "Bash", ToolOutcome::Ok, 3), millis(61_500));
+
+        assert_eq!(
+            app.entries()[0].calls[0].took,
+            Some(Duration::from_millis(400))
+        );
+    }
+
+    #[test]
+    fn every_call_keeps_its_own_bytes_and_they_add_up_to_the_sessions() {
+        let mut app = app();
+        for (id, name, bytes) in [("t1", "Read", 100), ("t2", "Read", 250), ("t3", "Bash", 7)] {
+            app.apply(&start(id, name, "{}", None));
+            app.apply(&ended(id, name, ToolOutcome::Ok, bytes));
+        }
+
+        let per_call: u64 = app
+            .entries()
+            .iter()
+            .flat_map(|entry| &entry.calls)
+            .filter_map(|call| call.bytes)
+            .sum();
+        assert_eq!(per_call, 357);
+        assert_eq!(app.session().tools().output_bytes, per_call);
+    }
+
+    #[test]
+    fn a_calls_exit_status_reason_and_line_counts_reach_its_row() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash", "{}", None));
+        app.apply(&Event::ToolCallEnd {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            output: "Exit code 2\nno such file".to_owned(),
+            bytes: 24,
+            outcome: ToolOutcome::Failed,
+            summary: None,
+            exit_code: Some(2),
+            error: Some("no such file".to_owned()),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "then".to_owned(),
+        });
+        app.apply(&start("t2", "Write", "{}", None));
+        app.apply(&ended("t2", "Write", ToolOutcome::Ok, 20));
+        app.apply(&Event::FileChange {
+            path: "a.rs".to_owned(),
+            added: Some(4),
+            removed: None,
+            hunks: Vec::new(),
+        });
+
+        let shell = &app.entries()[0].calls[0];
+        assert_eq!(
+            (shell.exit_code, shell.error.as_deref()),
+            (Some(2), Some("no such file"))
+        );
+        let write = &app.entries()[2].calls[0];
+        assert_eq!(write.lines, Some((Some(4), None)));
+        assert_eq!(write.change, None, "counts alone draw no diff");
+    }
+
+    #[test]
+    fn ctrl_o_folds_every_run_of_calls_and_opens_them_again() {
+        let mut app = app();
+        assert!(!app.calls_folded(), "a run starts open");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert!(app.calls_folded());
+        assert_eq!(app.composed(), "", "the key reached the composer");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert!(!app.calls_folded());
     }
 }

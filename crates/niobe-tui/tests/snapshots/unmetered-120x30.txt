@@ -1,24 +1,24 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
 ╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ╔════════════════ Usage ════════════════╗
 ║                                                                            ║ ║                                       ║
-║    44 +     headers.set("If-None-Match", cached.etag);                     ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
-║    45 +   }                                                                ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
-║    46 +   const res = await fetch(url, { ...init, headers });              ║ ║ session ≥$0.04                        ║
-║    47 +   if (res.status === 304 && cached) return cached.body;            ║ ╚═══════════════════════════════════════╝
-║    48     return res;                                                      ║ ╔═══════════════ Changes ═══════════════╗
-║       …                                                                    ║ ║                                       ║
-║   115     cache.set(url, {                                                 ║ ║ ⎇ main ↑3                             █
-║   116 +     etag: res.headers.get("ETag"),                                 ║ ║ ▾ Working tree  23 files  +977 −259   █
-║   117       body,                                                          ║ ║   .                                   ║
-║   └ allowed by you                                                         ║ ║     CHANGELOG.md                +0 −0 ║
-║                                                                            ║ ║   catalog/                            ║
-║ ◆ claude                                                                   ║ ║     fetch.ts                 +149 −12 ║
-║   Rewriting the 304 test around the cached body.                           █ ║     etag.ts                   +88 −41 ║
-║                                                                            █ ║     cache/lru.ts               +31 −9 ║
-║ ◆ claude                                                                   █ ║     cache/index.ts             +12 −0 ║
-║   The notebook that demonstrates the fetcher needs the new call shape.     █ ╚═══════════════════════════════════════╝
-║                                                                            █ ╔══════════════ Activity ═══════════════╗
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            █ ║                                       ║
+║    45 +   }                                                                ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
+║    46 +   const res = await fetch(url, { ...init, headers });              ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
+║    47 +   if (res.status === 304 && cached) return cached.body;            ║ ║ session ≥$0.04                        ║
+║    48     return res;                                                      ║ ╚═══════════════════════════════════════╝
+║       …                                                                    ║ ╔═══════════════ Changes ═══════════════╗
+║   115     cache.set(url, {                                                 ║ ║                                       ║
+║   116 +     etag: res.headers.get("ETag"),                                 ║ ║ ⎇ main ↑3                             █
+║   117       body,                                                          ║ ║ ▾ Working tree  23 files  +977 −259   █
+║   └ allowed by you                                                         ║ ║   .                                   ║
+║                                                                            ║ ║     CHANGELOG.md                +0 −0 ║
+║ ◆ claude                                                                   ║ ║   catalog/                            ║
+║   Rewriting the 304 test around the cached body.                           ║ ║     fetch.ts                 +149 −12 ║
+║                                                                            ║ ║     etag.ts                   +88 −41 ║
+║ ◆ claude                                                                   █ ║     cache/lru.ts               +31 −9 ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     █ ║     cache/index.ts             +12 −0 ║
+║                                                                            █ ╚═══════════════════════════════════════╝
+║ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s █ ╔══════════════ Activity ═══════════════╗
+║   └ 1 failing: fetch returns the cached body on a 304                      █ ║                                       ║
 ║                                                                            █ ║ ▾ Sub-agents                          █
 ║ ◆ claude                                                                   █ ║ ◆ test-writer → tests… running 1m 42s █
 ║   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ ║   └ Reading tests/stream.rs           █

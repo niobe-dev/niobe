@@ -45,6 +45,33 @@ fn mcp_call(name: &str, bytes: u64, outcome: ToolOutcome) -> Event {
         bytes,
         outcome,
         summary: None,
+        exit_code: None,
+        error: None,
+    }
+}
+
+/// A `Read` of `path` that started, for a run of them to end together.
+fn read_started(id: &str, path: &str) -> Event {
+    Event::ToolCallStart {
+        id: id.into(),
+        name: "Read".to_owned(),
+        input: path.to_owned(),
+        summary: Some(path.to_owned()),
+    }
+}
+
+/// The end of a `Read` of `path` that returned `bytes`.
+fn read_ended(id: &str, path: &str, bytes: u64) -> Event {
+    Event::ToolCallEnd {
+        id: id.into(),
+        name: "Read".to_owned(),
+        input: path.to_owned(),
+        output: String::new(),
+        bytes,
+        outcome: ToolOutcome::Ok,
+        summary: Some(path.to_owned()),
+        exit_code: None,
+        error: None,
     }
 }
 
@@ -67,21 +94,14 @@ fn session_events() -> Vec<Event> {
                    test file."
                 .to_owned(),
         },
-        Event::ToolCallStart {
-            id: "t1".into(),
-            name: "Read".to_owned(),
-            input: "catalog/fetch.ts".to_owned(),
-            summary: None,
-        },
-        Event::ToolCallEnd {
-            id: "t1".into(),
-            name: "Read".to_owned(),
-            input: "catalog/fetch.ts".to_owned(),
-            output: "212 lines".to_owned(),
-            bytes: 7_412,
-            outcome: ToolOutcome::Ok,
-            summary: None,
-        },
+        // Three reads started together, as a model asks for them in one
+        // message: the run the transcript folds into one group.
+        read_started("t1", "catalog/fetch.ts"),
+        read_started("t1b", "catalog/cache.ts"),
+        read_started("t1c", "tests/fetch.test.ts"),
+        read_ended("t1", "catalog/fetch.ts", 7_412),
+        read_ended("t1b", "catalog/cache.ts", 3_210),
+        read_ended("t1c", "tests/fetch.test.ts", 5_020),
         Event::Usage(Usage {
             input: 2_100,
             output: 180,
@@ -183,11 +203,19 @@ fn session_events() -> Vec<Event> {
             2_600,
             ToolOutcome::Ok,
         ),
-        mcp_call(
-            "mcp__claude_ai_Notion__notion-update-page",
-            96,
-            ToolOutcome::Failed,
-        ),
+        Event::ToolCallEnd {
+            id: "mcp__claude_ai_Notion__notion-update-page".into(),
+            name: "mcp__claude_ai_Notion__notion-update-page".to_owned(),
+            input: "{}".to_owned(),
+            output: "404 object_not_found — the page is not shared with the integration".to_owned(),
+            bytes: 96,
+            outcome: ToolOutcome::Failed,
+            summary: None,
+            exit_code: None,
+            error: Some(
+                "404 object_not_found — the page is not shared with the integration".to_owned(),
+            ),
+        },
         Event::AssistantMessage {
             text: "Caching the etag beside the body so a 304 can be answered from the LRU."
                 .to_owned(),
@@ -217,6 +245,8 @@ fn session_events() -> Vec<Event> {
             bytes: 640,
             outcome: ToolOutcome::Ok,
             summary: None,
+            exit_code: None,
+            error: None,
         },
         // Two hunks, as the backend reports a change: what the transcript
         // draws under the call, numbered on each side, with the lines between
@@ -275,14 +305,22 @@ fn session_events() -> Vec<Event> {
             removed: None,
             hunks: Vec::new(),
         },
+        Event::ToolCallStart {
+            id: "t3".into(),
+            name: "Bash".to_owned(),
+            input: "npm test -- fetch".to_owned(),
+            summary: None,
+        },
         Event::ToolCallEnd {
             id: "t3".into(),
             name: "Bash".to_owned(),
             input: "npm test -- fetch".to_owned(),
-            output: "1 failing".to_owned(),
+            output: "Exit code 1\n1 failing: fetch returns the cached body on a 304".to_owned(),
             bytes: 2_048,
             outcome: ToolOutcome::Failed,
             summary: None,
+            exit_code: Some(1),
+            error: Some("1 failing: fetch returns the cached body on a 304".to_owned()),
         },
         Event::Usage(Usage {
             input: 3_400,
@@ -429,19 +467,39 @@ pub fn running_session() -> App {
     session_read_at_a_fixed_moment(&session_events())
 }
 
+/// How far apart a tool call's start and end land for each event between
+/// them, so that every row in the transcript has a duration to draw.
+/// The question that gates a call steps with it, because an answer starts
+/// the call's clock again.
+const CALL_STEP_MS: u64 = 400;
+
 /// The session folded at a fixed moment and read at a fixed moment.
 ///
 /// The events land a hundred and two seconds before the shell reads them, so
 /// the figures measured between the two — the time a decision was recorded at,
 /// how long the agent still running has been running — are real durations in
-/// the pictures rather than zeroes.
+/// the pictures rather than zeroes. A tool call's start and end, and the
+/// question between them, are the exception: each lands [`CALL_STEP_MS`]
+/// later for every event folded in before it, so how long a call ran is a
+/// real duration too, while every figure the panes read stays at the one
+/// moment.
 fn session_read_at_a_fixed_moment(events: &[Event]) -> App {
     let clock = Clock::fixed(0).expect("UTC is an offset");
     let mut app = App::new(read_repository()).with_clock(clock.clone());
-    let moment = |secs| clock.at(UNIX_EPOCH + Duration::from_secs(secs));
-    app.tick(Instant::now(), Some(moment(READ_AT - RAN_FOR)));
-    app.extend(events);
-    app.tick(Instant::now(), Some(moment(READ_AT)));
+    let moment = |millis| clock.at(UNIX_EPOCH + Duration::from_millis(millis));
+    let folded = (READ_AT - RAN_FOR) * 1_000;
+    app.tick(Instant::now(), Some(moment(folded)));
+    for (step, event) in (0..).zip(events) {
+        let at = match event {
+            Event::ToolCallStart { .. }
+            | Event::ToolCallEnd { .. }
+            | Event::PermissionRequest { .. }
+            | Event::PermissionResponse { .. } => folded + step * CALL_STEP_MS,
+            _ => folded,
+        };
+        app.apply_at(event, moment(at));
+    }
+    app.tick(Instant::now(), Some(moment(READ_AT * 1_000)));
     app
 }
 

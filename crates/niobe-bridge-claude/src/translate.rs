@@ -803,6 +803,11 @@ impl Translator {
                 ToolOutcome::Ok => self.file_change(&name, &arguments, &output, reported.as_ref()),
                 ToolOutcome::Failed | ToolOutcome::Denied => None,
             };
+            let exit_code = exit_code(&name, outcome, &output, reported.as_ref());
+            let error = match outcome {
+                ToolOutcome::Ok => None,
+                ToolOutcome::Failed | ToolOutcome::Denied => failure_reason(&output, exit_code),
+            };
 
             out.push(Event::ToolCallEnd {
                 id: ToolCallId::new(tool_use_id),
@@ -812,6 +817,8 @@ impl Translator {
                 bytes,
                 outcome,
                 summary,
+                exit_code,
+                error,
             });
             out.extend(change);
         }
@@ -1329,9 +1336,80 @@ const EDIT_TOOL: &str = "Edit";
 const WRITE_TOOL: &str = "Write";
 const NOTEBOOK_TOOL: &str = "NotebookEdit";
 
+/// The CLI's tool that runs a shell command, which is the one call that has
+/// an exit status.
+const SHELL_TOOL: &str = "Bash";
+
+/// How the CLI opens a failed shell command's result.
+const EXIT_CODE_PREFIX: &str = "Exit code ";
+
 /// How the CLI opens the result of a `Write` that made a file that was not
 /// there, as against one that replaced a file that was.
 const CREATED_PREFIX: &str = "File created successfully at:";
+
+/// The status a shell command exited with, where the CLI said.
+///
+/// The CLI writes the status only into a failure, as the result's first line:
+/// in 18,756 shell results across 336 of its own transcripts on the machine
+/// this was written on, every failed command that ran began `Exit code <n>`
+/// and no successful one did. A success it reports with no status at all, and
+/// it reports three things as successes that did not exit zero or did not
+/// exit yet: an interrupted command, one moved to the background, and one
+/// whose non-zero status it read as a success of its own accord — the 283
+/// results that carried a `returnCodeInterpretation`, all of them `grep`
+/// finding nothing or `cmp` finding a difference. A success with none of
+/// those is one the CLI let through because it exited zero. A success with
+/// no report beside it at all is not read as anything.
+fn exit_code(
+    name: &str,
+    outcome: ToolOutcome,
+    output: &str,
+    reported: Option<&serde_json::Value>,
+) -> Option<i32> {
+    if name != SHELL_TOOL {
+        return None;
+    }
+    match outcome {
+        ToolOutcome::Failed => reported_status(output),
+        ToolOutcome::Ok => {
+            let report: wire::ShellReport = serde_json::from_value(reported?.clone()).ok()?;
+            let finished = !report.interrupted
+                && report.background_task_id.is_none()
+                && report.return_code_interpretation.is_none();
+            finished.then_some(0)
+        }
+        ToolOutcome::Denied => None,
+    }
+}
+
+/// The status in a failed command's `Exit code <n>` line, where it opens the
+/// result.
+fn reported_status(output: &str) -> Option<i32> {
+    output
+        .lines()
+        .next()?
+        .strip_prefix(EXIT_CODE_PREFIX)?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Why a call did not succeed, as the CLI told the model, without the
+/// `<tool_use_error>` markup it wraps its own refusals in and without the
+/// status line that [`exit_code`] has already taken.
+fn failure_reason(output: &str, exit_code: Option<i32>) -> Option<String> {
+    let text = output.trim();
+    let text = text
+        .strip_prefix("<tool_use_error>")
+        .and_then(|inner| inner.strip_suffix("</tool_use_error>"))
+        .unwrap_or(text);
+    let text = match exit_code {
+        Some(_) => text.split_once('\n').map_or("", |(_, rest)| rest),
+        None => text,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
 
 /// The report beside a file tool's result, where it is about `path`.
 ///
@@ -3079,5 +3157,136 @@ mod tests {
                 "{events:?}"
             );
         }
+    }
+
+    /// What the one call's end in `events` says about how it ended: its exit
+    /// status and its reason.
+    fn ending(events: &[Event]) -> (Option<i32>, Option<String>) {
+        let ends: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ToolCallEnd {
+                    exit_code, error, ..
+                } => Some((*exit_code, error.clone())),
+                _ => None,
+            })
+            .collect();
+        let [ending] = ends.as_slice() else {
+            panic!("one call ended: {events:?}");
+        };
+        ending.clone()
+    }
+
+    /// The report the CLI writes beside a shell command's result, with the
+    /// keys it carried in every transcript recorded on this machine.
+    fn shell_report(extra: &str) -> String {
+        format!(
+            r#"{{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false{extra}}}"#
+        )
+    }
+
+    fn shell_call(translator: &mut Translator) {
+        translator.line(&call("t1", "Bash", r#"{"command":"cargo test"}"#));
+    }
+
+    #[test]
+    fn a_shell_command_that_failed_carries_the_status_it_exited_with_and_its_reason() {
+        let mut translator = translator();
+        shell_call(&mut translator);
+
+        let events = translator.line(&result(
+            "t1",
+            "Exit code 101\nerror: test failed, to rerun pass `--lib`",
+            true,
+        ));
+
+        assert_eq!(
+            ending(&events),
+            (
+                Some(101),
+                Some("error: test failed, to rerun pass `--lib`".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn a_shell_command_the_cli_reported_a_plain_success_for_exited_zero() {
+        let mut translator = translator();
+        shell_call(&mut translator);
+
+        let events = translator.line(&result_with("t1", "ok", &shell_report("")));
+
+        assert_eq!(ending(&events), (Some(0), None));
+    }
+
+    #[test]
+    fn a_success_the_cli_read_a_status_as_names_no_status_it_did_not_report() {
+        // `grep` finding nothing exits 1, and the CLI reports it as a success
+        // with its reading of the status beside it — not the status itself.
+        for extra in [
+            r#","returnCodeInterpretation":"No matches found""#,
+            r#","backgroundTaskId":"b1""#,
+        ] {
+            let mut translator = translator();
+            shell_call(&mut translator);
+
+            let events = translator.line(&result_with("t1", "", &shell_report(extra)));
+
+            assert_eq!(ending(&events), (None, None), "{extra}");
+        }
+
+        let mut translator = translator();
+        shell_call(&mut translator);
+        let interrupted =
+            shell_report("").replace(r#""interrupted":false"#, r#""interrupted":true"#);
+        let events = translator.line(&result_with("t1", "", &interrupted));
+        assert_eq!(ending(&events), (None, None), "an interrupted command");
+    }
+
+    #[test]
+    fn a_shell_command_with_no_report_beside_it_has_no_status() {
+        let mut translator = translator();
+        shell_call(&mut translator);
+
+        let events = translator.line(&result("t1", "ok", false));
+
+        assert_eq!(ending(&events), (None, None));
+    }
+
+    #[test]
+    fn a_shell_command_the_cli_would_not_run_has_a_reason_and_no_status() {
+        let mut translator = translator();
+        shell_call(&mut translator);
+
+        let events = translator.line(&result(
+            "t1",
+            "<tool_use_error>Blocked: sleep 60 followed by: ls</tool_use_error>",
+            true,
+        ));
+
+        assert_eq!(
+            ending(&events),
+            (None, Some("Blocked: sleep 60 followed by: ls".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_failure_that_came_back_with_no_words_has_no_reason() {
+        let mut translator = translator();
+        translator.line(&call("t1", "Read", r#"{"file_path":"/repo/a"}"#));
+
+        let events = translator.line(&result("t1", "  \n", true));
+
+        assert_eq!(ending(&events), (None, None));
+    }
+
+    #[test]
+    fn only_a_shell_command_has_an_exit_status() {
+        let mut translator = translator();
+        translator.line(&call("t1", "Read", r#"{"file_path":"/repo/a"}"#));
+
+        let events = translator.line(&result_with("t1", "Exit code 3", &shell_report("")));
+
+        assert_eq!(ending(&events), (None, None));
     }
 }

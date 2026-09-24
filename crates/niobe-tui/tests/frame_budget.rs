@@ -123,6 +123,8 @@ fn a_long_session_of_diffs_redraws_inside_a_frame_budget() {
             bytes: 64,
             outcome: niobe_core::event::ToolOutcome::Ok,
             summary: Some(path.clone()),
+            exit_code: None,
+            error: None,
         });
         app.apply(&Event::FileChange {
             path,
@@ -260,6 +262,8 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
             bytes: 1_024,
             outcome: niobe_core::event::ToolOutcome::Ok,
             summary: None,
+            exit_code: None,
+            error: None,
         });
     }
     let _ = screen(&mut app, 200, 60);

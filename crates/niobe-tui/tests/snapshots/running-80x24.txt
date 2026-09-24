@@ -1,7 +1,6 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
 ╔═══════════════════════════ Session ─ example-app ════════════════════════════╗
 ║                                                                              ║
-║   115     cache.set(url, {                                                   ║
 ║   116 +     etag: res.headers.get("ETag"),                                   ║
 ║   117       body,                                                            ║
 ║   └ allowed by you                                                           ║
@@ -12,7 +11,8 @@
 ║ ◆ claude                                                                     ║
 ║   The notebook that demonstrates the fetcher needs the new call shape.       ║
 ║                                                                              ║
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                              █
+║ ✗ Bash                       npm test -- fetch                 exit 1 · 0.4s ║
+║   └ 1 failing: fetch returns the cached body on a 304                        █
 ║                                                                              █
 ║ ◆ claude                                                                     █
 ║   Etags cached in the LRU; 304s short-circuit. One test still red — the 304  █

@@ -69,6 +69,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   scheme is honoured — `text.rs` wraps and truncates, `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
+  `calls.rs` draws a tool call as a row of a table — its name in a fixed column, what it does,
+  and on the right what it cost, by what the backend reported and the shell's own clock — and a
+  run of calls to one tool as one group that Ctrl+O folds,
   and `fx.rs` is what the desktop between the panes does while a turn is running: a pure
   function of the theme, the strip's height and how long the turn has run, so a frame of it can
   be asserted rather than merely observed to move. Snapshot pictures of the screen live in
@@ -87,7 +90,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   including the `git diff --numstat` figures the per-file `+`/`−` counts are checked against;
   `tests/conformance.rs` asserts those recordings' shape inventory — message types, `system`
   subtypes, stream events, content blocks, deltas — against a checked-in list, so a shape the
-  bridge silently passes over cannot arrive with a new CLI release unnoticed;
+  bridge silently passes over cannot arrive with a new CLI release unnoticed, and checks that the
+  recordings still carry what a sub-agent's figures and a shell command's exit status are read
+  from;
   `tests/answers.rs` answers a recorded pair of permission prompts through a running `Session`,
   against a stand-in `claude` that waits for each answer as the CLI does.
   The codex bridge names its binary and does not spawn it yet.

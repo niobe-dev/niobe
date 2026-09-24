@@ -169,6 +169,30 @@ pub(crate) struct FileReport {
     pub(crate) structured_patch: Vec<PatchHunk>,
 }
 
+/// What the `Bash` tool reports about itself beside its result, as read in
+/// the CLI's own transcripts of 2.1.27x–2.1.281 and recorded live from
+/// 2.1.281.
+///
+/// It never carries the status the command exited with. What it carries is
+/// what decides whether a success can be read as one: a command that was
+/// interrupted, moved to the background, or whose non-zero status the CLI
+/// read as a success of its own accord (`grep` finding nothing) all come back
+/// as successes. `interrupted` is required so that a report of another tool is
+/// not read as this one.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ShellReport {
+    pub(crate) interrupted: bool,
+    /// The CLI's reading of a status it did not treat as a failure:
+    /// `No matches found`, `Files differ`.
+    #[serde(default)]
+    pub(crate) return_code_interpretation: Option<String>,
+    /// Set where the command went on running in the background, so the
+    /// result is of its launch and not of its end.
+    #[serde(default)]
+    pub(crate) background_task_id: Option<String>,
+}
+
 /// One hunk of a [`FileReport`]: a unified diff's `@@` header and the lines
 /// under it, each still carrying its ` `, `-` or `+`.
 #[derive(Debug, Deserialize)]

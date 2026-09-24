@@ -944,3 +944,88 @@ fn nothing_is_reported_about_a_sub_agent_after_it_has_ended() {
         );
     }
 }
+
+/// A live session in which a shell command ran and a second was refused, as
+/// `tests/fixtures/README.md` sets out for `shell.jsonl`, and a sub-agent's
+/// commands that failed.
+mod shell {
+    use super::*;
+
+    const SHELL: &str = include_str!("fixtures/shell.jsonl");
+
+    /// How each call in `recording` ended: its outcome, exit status and
+    /// reason, in order.
+    fn endings(recording: &str) -> Vec<(ToolOutcome, Option<i32>, Option<String>)> {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        recording
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .filter_map(|event| match event {
+                Event::ToolCallEnd {
+                    outcome,
+                    exit_code,
+                    error,
+                    ..
+                } => Some((outcome, exit_code, error)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_command_the_cli_reported_a_plain_success_for_exited_zero_and_a_refusal_says_why() {
+        assert_eq!(
+            endings(SHELL),
+            vec![
+                (ToolOutcome::Ok, Some(0), None),
+                // Refused over the control channel, which the recording
+                // cannot say on its own: the driver tells the translator, and
+                // `tests/answers.rs` is where that is checked.
+                (
+                    ToolOutcome::Failed,
+                    None,
+                    Some(
+                        "The operator denied this call in Niobe and answered instead: Do not \
+                         create b.txt. Instead reply with exactly the word: pineapple"
+                            .to_owned()
+                    )
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sub_agents_failed_commands_carry_their_status_and_its_successes_name_none() {
+        // The reason keeps every line the CLI wrote after the status; the
+        // first is enough to tell the two apart.
+        let shell: Vec<_> = endings(SUB_AGENTS)
+            .into_iter()
+            .filter(|(_, exit_code, _)| exit_code.is_some())
+            .map(|(outcome, exit_code, error)| {
+                let first = error.and_then(|error| error.lines().next().map(str::to_owned));
+                (outcome, exit_code, first)
+            })
+            .collect();
+        assert_eq!(
+            shell,
+            vec![
+                (
+                    ToolOutcome::Failed,
+                    Some(1),
+                    Some("(eval):1: no matches found: --include=*.py".to_owned())
+                ),
+                (
+                    ToolOutcome::Failed,
+                    Some(1),
+                    Some(
+                        "catalog/cache.py:1:\"\"\"A bounded least-recently-used cache.\"\"\""
+                            .to_owned()
+                    )
+                ),
+            ],
+            "the CLI wrote no report beside a sub-agent's successful commands, so none of them \
+             names a status"
+        );
+    }
+}

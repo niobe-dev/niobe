@@ -930,6 +930,8 @@ mod tests {
             bytes: 4_096,
             outcome: ToolOutcome::Ok,
             summary: None,
+            exit_code: None,
+            error: None,
         });
         state.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -939,6 +941,8 @@ mod tests {
             bytes: 128,
             outcome: ToolOutcome::Failed,
             summary: None,
+            exit_code: None,
+            error: None,
         });
 
         let tools = state.tools();

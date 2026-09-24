@@ -425,6 +425,19 @@ pub enum Event {
         /// reason `name` and `input` are.
         #[serde(default)]
         summary: Option<String>,
+        /// The status a shell command exited with, where the backend reported
+        /// one. `None` for a call that runs no command, and for one whose
+        /// command did not finish or whose status the backend did not say: a
+        /// status is never inferred from the output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        /// Why a call that did not succeed did not, in the backend's words and
+        /// without the parts of them that other fields already carry — the
+        /// exit status, the markup the model reads them in. `None` for a call
+        /// that succeeded, and for a failure the backend gave no reason for,
+        /// which is shown as exactly that rather than as a reason made up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     /// The backend finished answering the operator's last prompt: every call
@@ -840,6 +853,41 @@ mod tests {
                 message: None,
             }
         );
+        assert_eq!(
+            serde_json::to_string(&read).expect("an event serializes"),
+            plain
+        );
+    }
+
+    #[test]
+    fn a_calls_exit_code_and_reason_survive_the_round_trip_and_an_older_end_has_neither() {
+        let ended = Event::ToolCallEnd {
+            id: "toolu_1".into(),
+            name: "Bash".to_owned(),
+            input: "{}".to_owned(),
+            output: "Exit code 2\nno such file".to_owned(),
+            bytes: 24,
+            outcome: ToolOutcome::Failed,
+            summary: None,
+            exit_code: Some(2),
+            error: Some("no such file".to_owned()),
+        };
+        let line = serde_json::to_string(&ended).expect("an event serializes");
+        let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+        assert_eq!(read, ended, "{line}");
+
+        // A log written before a call's end carried either reads as a call
+        // that reported neither, and one that reports neither is written
+        // exactly as those were.
+        let plain = r#"{"type":"tool_call_end","id":"toolu_1","name":"Read","input":"{}","output":"","bytes":0,"outcome":"ok","summary":null}"#;
+        let read: Event = serde_json::from_str(plain).expect("an older record reads");
+        let Event::ToolCallEnd {
+            exit_code, error, ..
+        } = &read
+        else {
+            panic!("the record is a call's end: {read:?}");
+        };
+        assert_eq!((exit_code, error), (&None, &None));
         assert_eq!(
             serde_json::to_string(&read).expect("an event serializes"),
             plain

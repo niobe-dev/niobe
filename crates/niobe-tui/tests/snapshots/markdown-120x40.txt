@@ -1,14 +1,14 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
 ╔══════════════════════════ Session ─ example-app ═══════════════════════════╗ ╔════════════════ Usage ════════════════╗
 ║                                                                            ║ ║                                       ║
-║                                                                            ║ ║ 5h    ▓▓▓▓░░░  62% · resets 16:40     ║
-║ ◆ claude                                                                   ║ ║ 7d    ▓░░░░░░  18% · resets Tue 15:00 ║
-║   Rewriting the 304 test around the cached body.                           ║ ║ ───────────────────────────────────── ║
-║                                                                            ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
-║ ◆ claude                                                                   ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
-║   The notebook that demonstrates the fetcher needs the new call shape.     ║ ║ session ≥$0.04                        ║
-║                                                                            ║ ╚═══════════════════════════════════════╝
-║ ! Bash  npm test -- fetch · failed · 2.0 kB out                            ║ ╔═══════════════ Changes ═══════════════╗
+║ ◆ claude                                                                   ║ ║ 5h    ▓▓▓▓░░░  62% · resets 16:40     ║
+║   Rewriting the 304 test around the cached body.                           ║ ║ 7d    ▓░░░░░░  18% · resets Tue 15:00 ║
+║                                                                            ║ ║ ───────────────────────────────────── ║
+║ ◆ claude                                                                   ║ ║ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    ║
+║   The notebook that demonstrates the fetcher needs the new call shape.     ║ ║ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    ║
+║                                                                            ║ ║ session ≥$0.04                        ║
+║ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s ║ ╚═══════════════════════════════════════╝
+║   └ 1 failing: fetch returns the cached body on a 304                      ║ ╔═══════════════ Changes ═══════════════╗
 ║                                                                            ║ ║                                       ║
 ║ ◆ claude                                                                   ║ ║ ⎇ main ↑3                             █
 ║   Etags cached in the LRU; 304s short-circuit. One test still red — the    ║ ║ ▾ Working tree  23 files  +977 −259   █
@@ -18,7 +18,7 @@
 ║   What changed?                                                            ║ ║     fetch.ts                 +149 −12 ║
 ║                                                                            ║ ║     etag.ts                   +88 −41 ║
 ║ ◆ claude                                                                   ║ ║     cache/lru.ts               +31 −9 ║
-║   What changed                                                             █ ║     cache/index.ts             +12 −0 ║
+║   What changed                                                             ║ ║     cache/index.ts             +12 −0 ║
 ║                                                                            █ ║   docs/                               ║
 ║   How it works: the fetcher keeps the etag beside the body, so a 304 is    █ ║     caching.md                +64 −22 ║
 ║   answered from the LRU without reading the body again.                    █ ║     adr/0004-etags.md          +34 −1 ║

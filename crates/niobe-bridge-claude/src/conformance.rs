@@ -25,7 +25,7 @@
 /// is added here only once a recording of it is checked in and the conformance
 /// test over the recordings is green, which is what makes this list a claim
 /// about evidence rather than about intent.
-pub const RECORDED: &[&str] = &["2.1.275", "2.1.277", "2.1.278"];
+pub const RECORDED: &[&str] = &["2.1.275", "2.1.277", "2.1.278", "2.1.281"];
 
 /// Whether `version` is a release these recordings cover.
 ///
