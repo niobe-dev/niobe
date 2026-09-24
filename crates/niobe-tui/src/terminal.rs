@@ -51,7 +51,8 @@ static TERMINAL_ENTERED: AtomicBool = AtomicBool::new(false);
 ///
 /// Written by hand rather than with crossterm's `EnableMouseCapture`, which
 /// also asks for every movement of the pointer: the shell reads only the
-/// wheel, and a report per movement would wake the event loop for nothing.
+/// wheel and a click, and a report per movement would wake the event loop for
+/// nothing.
 const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
 
 /// Takes [`MOUSE_ON`] back. Harmless on a terminal that was never asked, which
@@ -91,7 +92,7 @@ pub struct TerminalGuard<W: Write> {
 
 impl<W: Write> TerminalGuard<W> {
     /// Enters raw mode and the alternate screen, hides the cursor and asks for
-    /// the mouse wheel.
+    /// the mouse wheel and clicks.
     pub fn enter(out: W) -> io::Result<Self> {
         enable_raw_mode()?;
 

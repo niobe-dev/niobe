@@ -62,9 +62,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   SQLite (`store.rs`; the triggers in its schema refuse an update or a delete). `recorder.rs` is
   the write side a running session holds; `jsonl.rs` reads a JSON Lines event log.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
-  `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
+  including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
+  go to — `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
-  enters and restores the terminal and the mouse it takes for the wheel, `theme.rs` is the
+  enters and restores the terminal and the mouse it takes for the wheel and clicks, `theme.rs` is the
   palette — one table entry per theme, every colour one of the sixteen ANSI names so a user's own
   scheme is honoured — `text.rs` wraps and truncates, `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays

@@ -1,30 +1,30 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                                                     ○ not attached
-╔═════════════════════════════ Session ─ niobe ══════════════════════════════╗ ╔════════════════ Usage ════════════════╗
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║ no tokens reported yet                ║
-║   niobe                                                                    ║ ║ session —                             ║
-║   A terminal coding agent that keeps you aware of what is                  ║ ╚═══════════════════════════════════════╝
-║   being built and how.                                                     ║ ╔═══════════════ Changes ═══════════════╗
-║                                                                            ║ ║                                       ║
-║   What the agent did, decided and touched, what it is doing now            ║ ║ ⎇ main                                ║
-║   and what it cost, visible while it happens and never a guess.            ║ ║ ▾ Working tree  —                     ║
-║   You stay on the loop instead of in it.                                   ║ ║   not read yet                        ║
-║                                                                            ║ ║ ▾ Commits  —                          ║
-║   No backend attached. `niobe profiles` shows what is defined.             ║ ║ ▾ This session  no files  +0 −0       ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ╚═══════════════════════════════════════╝
-║                                                                            ║ ╔══════════════ Activity ═══════════════╗
-║                                                                            ║ ║                                       ║
-║                                                                            ║ ║ ▾ Sub-agents  0 running · 0 spawned   ║
-║                                                                            ║ ║   none spawned                        ║
-║                                                                            ║ ║ ▾ Decisions  0                        ║
-║                                                                            ║ ║   none recorded                       ║
-║                                                                            ║ ║ ▾ Tools  0 calls · 0 denied · 0 B out ║
-║ ────────────────────────────────────────────────────────────────────────── ║ ║   none called                         ║
-║  ask  >  Ask for a change               Shift+Tab mode · Alt+Enter newline ║ ║                                       ║
-╚════════════════════════════════════════════════════════════════════════════╝ ╚═══════════════════════════════════════╝
+╔═════════════════════════════ Session ─ niobe ══════════════════════════════╗ ┌──────────────── Usage ────────────────┐
+║                                                                            ║ │                                       │
+║                                                                            ║ │ no tokens reported yet                │
+║   niobe                                                                    ║ │ session —                             │
+║   A terminal coding agent that keeps you aware of what is                  ║ └───────────────────────────────────────┘
+║   being built and how.                                                     ║ ┌─────────────── Changes ───────────────┐
+║                                                                            ║ │                                       │
+║   What the agent did, decided and touched, what it is doing now            ║ │ ⎇ main                                │
+║   and what it cost, visible while it happens and never a guess.            ║ │ ▾ Working tree  —                     │
+║   You stay on the loop instead of in it.                                   ║ │   not read yet                        │
+║                                                                            ║ │ ▾ Commits  —                          │
+║   No backend attached. `niobe profiles` shows what is defined.             ║ │ ▾ This session  no files  +0 −0       │
+║                                                                            ║ │                                       │
+║                                                                            ║ │                                       │
+║                                                                            ║ │                                       │
+║                                                                            ║ │                                       │
+║                                                                            ║ │                                       │
+║                                                                            ║ └───────────────────────────────────────┘
+║                                                                            ║ ┌────────────── Activity ───────────────┐
+║                                                                            ║ │                                       │
+║                                                                            ║ │ ▾ Sub-agents  0 running · 0 spawned   │
+║                                                                            ║ │   none spawned                        │
+║                                                                            ║ │ ▾ Decisions  0                        │
+║                                                                            ║ │   none recorded                       │
+║                                                                            ║ │ ▾ Tools  0 calls · 0 denied · 0 B out │
+║ ────────────────────────────────────────────────────────────────────────── ║ │   none called                         │
+║  ask  >  Ask for a change   Shift+Tab mode · Alt+Enter newline · Tab panes ║ │                                       │
+╚════════════════════════════════════════════════════════════════════════════╝ └───────────────────────────────────────┘
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

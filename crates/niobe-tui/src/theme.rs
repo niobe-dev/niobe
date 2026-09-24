@@ -49,6 +49,11 @@ pub struct Theme {
     pub pane_bg: Color,
     /// Pane borders.
     pub frame: Color,
+    /// The border of the pane that has the keyboard. It is one of three
+    /// marks the focused pane carries — its border is double where the others
+    /// are single, and its title is inverted — so a terminal that collapses
+    /// this colour into [`Theme::frame`] still shows which pane it is.
+    pub frame_focus: Color,
     /// Pane titles.
     pub title: Color,
     /// Body text.
@@ -129,6 +134,7 @@ pub const CLASSIC: Theme = Theme {
 
     pane_bg: Color::Blue,
     frame: Color::LightCyan,
+    frame_focus: Color::White,
     title: Color::LightYellow,
     fg: Color::White,
     dim: Color::Gray,
@@ -183,6 +189,7 @@ pub const NEO: Theme = Theme {
 
     pane_bg: Color::Black,
     frame: Color::Green,
+    frame_focus: Color::LightGreen,
     title: Color::LightGreen,
     fg: Color::LightGreen,
     dim: Color::Green,
@@ -232,11 +239,17 @@ pub const NEO: Theme = Theme {
 /// apart in the
 /// design and are both black here, which is what makes the gutter between the
 /// panes a place the desktop's motion can be seen in at all.
+///
+/// The design draws the frames in a dark green and the focused pane's in the
+/// bright one, so the frames take the plain green of the sixteen and the
+/// focused frame the bright green: the pane with the keyboard is the one that
+/// lights up.
 pub const CYBER: Theme = Theme {
     name: "CYBER",
 
     pane_bg: Color::Black,
-    frame: Color::LightGreen,
+    frame: Color::Green,
+    frame_focus: Color::LightGreen,
     title: Color::LightMagenta,
     fg: Color::White,
     dim: Color::Green,
@@ -292,6 +305,7 @@ pub const MODERN: Theme = Theme {
 
     pane_bg: Color::Black,
     frame: Color::DarkGray,
+    frame_focus: Color::LightBlue,
     title: Color::LightYellow,
     fg: Color::White,
     dim: Color::Gray,
@@ -377,10 +391,11 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 26] {
+    fn colours(t: &Theme) -> [Color; 27] {
         [
             t.pane_bg,
             t.frame,
+            t.frame_focus,
             t.title,
             t.fg,
             t.dim,
@@ -442,6 +457,10 @@ mod tests {
                 (t.fg, t.pane_bg, "body text"),
                 (t.dim, t.pane_bg, "secondary text"),
                 (t.frame, t.pane_bg, "a pane border"),
+                (t.frame_focus, t.pane_bg, "the focused pane's border"),
+                // The focused pane's title is inverted: the pane background
+                // on the title colour.
+                (t.pane_bg, t.title, "the focused pane's title"),
                 (t.title, t.pane_bg, "a pane title"),
                 (t.hot, t.pane_bg, "the accent"),
                 (t.add, t.pane_bg, "an added line"),
@@ -485,6 +504,16 @@ mod tests {
         for t in THEMES {
             assert_ne!(t.user, t.agent, "{}", t.name);
             assert_ne!(t.agent, t.del, "{}", t.name);
+        }
+    }
+
+    /// The focused pane's border is brighter than the others'. The double
+    /// border and the inverted title say which pane it is on their own; the
+    /// colour is what makes it the first thing the eye finds.
+    #[test]
+    fn every_theme_draws_the_focused_pane_in_a_frame_of_its_own() {
+        for t in THEMES {
+            assert_ne!(t.frame_focus, t.frame, "{}", t.name);
         }
     }
 

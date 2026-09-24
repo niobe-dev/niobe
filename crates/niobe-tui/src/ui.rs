@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -33,8 +33,8 @@ use niobe_core::event::{AgentOutcome, Mode, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, ToolTotals, Totals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, AskFocus, Entry, EntryKind, Pane, Picker, Section, SelectedProfile,
-    SubAgent, tool_label,
+    Activity, Answer, App, Ask, AskFocus, Entry, EntryKind, Focus, Pane, Picker, Section,
+    SelectedProfile, SubAgent, tool_label,
 };
 use crate::clock::{self, Stamp};
 use crate::fx;
@@ -448,7 +448,8 @@ fn segment_spans(segments: Vec<Segment>) -> Vec<Span<'static>> {
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     if area.width < WIDE_COLUMNS {
-        draw_session(frame, area, app, theme);
+        app.right_stack_hidden();
+        draw_session(frame, area, false, app, theme);
         return;
     }
 
@@ -460,7 +461,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         .spacing(1)
         .areas(area);
 
-    draw_session(frame, left, app, theme);
+    draw_session(frame, left, true, app, theme);
     draw_desktop(
         frame,
         Rect::new(left.right(), area.y, 1, area.height),
@@ -506,30 +507,80 @@ fn draw_desktop(frame: &mut Frame, strip: Rect, app: &App, theme: &Theme) {
 /// title.
 const PANE_ROOM: u16 = 2;
 
-/// The pane frame every pane shares: double borders in the frame colour, the
-/// title centred on the top edge, and room between the border and what is
-/// written inside it.
+/// How a pane's border is drawn: the pane with the keyboard in a double line
+/// of its own colour, every other pane in a single line of the frame colour.
+///
+/// Three marks say which pane has the keyboard — the line, the colour and the
+/// inverted title — and the line is the one that survives a monochrome
+/// terminal, the way the window with the keyboard in Turbo Vision was the one
+/// with the double frame. The design's glow has no cell to be drawn in, and
+/// the three marks carry what it said.
+#[derive(Debug, Clone, Copy)]
+struct Border {
+    kind: BorderType,
+    /// The scrollbar's track, which is drawn over the border and has to read
+    /// as the same line.
+    track: &'static str,
+    style: Style,
+    focused: bool,
+}
+
+impl Border {
+    fn of(focused: bool, theme: &Theme) -> Self {
+        match focused {
+            true => Border {
+                kind: BorderType::Double,
+                track: "║",
+                style: Style::new().fg(theme.frame_focus),
+                focused,
+            },
+            false => Border {
+                kind: BorderType::Plain,
+                track: "│",
+                style: Style::new().fg(theme.frame),
+                focused,
+            },
+        }
+    }
+}
+
+/// The pane frame every pane shares: the border [`Border`] says, the title
+/// centred on the top edge, and room between the border and what is written
+/// inside it.
 ///
 /// A column either side always, and a blank row under the title where the
 /// pane is tall enough to spare one. The blank row is the first thing a short
 /// pane gives up: at the smallest terminal the shell draws in, a row of the
 /// changed files is worth more than the room above them.
-fn pane(title: impl Into<String>, area: Rect, theme: &Theme) -> Block<'static> {
+fn pane(title: impl Into<String>, area: Rect, border: Border, theme: &Theme) -> Block<'static> {
     // Two rows of border, the blank row itself, and PANE_ROOM left over.
     let top = u16::from(area.height > 2 + PANE_ROOM);
+    // Reversed rather than painted, so that a terminal with no colour still
+    // draws the focused title as a solid bar.
+    let title_style = match border.focused {
+        true => Style::new()
+            .fg(theme.title)
+            .bg(theme.pane_bg)
+            .add_modifier(Modifier::REVERSED)
+            .bold(),
+        false => Style::new().fg(theme.title).bold(),
+    };
     Block::bordered()
-        .border_type(BorderType::Double)
-        .border_style(Style::new().fg(theme.frame))
+        .border_type(border.kind)
+        .border_style(border.style)
         .style(Style::new().bg(theme.pane_bg).fg(theme.fg))
         .padding(Padding::new(1, 1, top, 0))
         .title_top(
             Line::from(format!(" {} ", title.into()))
-                .style(Style::new().fg(theme.title).bold())
+                .style(title_style)
                 .centered(),
         )
 }
 
-fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+/// The session pane: the transcript, and the composer under it. `panes` is
+/// whether the right-hand stack is on screen beside it, which decides whether
+/// Tab has anywhere to go.
+fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme: &Theme) {
     let repo = &app.repo().name;
     let title = if repo.is_empty() {
         "Session".to_owned()
@@ -537,21 +588,10 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         format!("Session ─ {repo}")
     };
 
-    let mut block = pane(title, area, theme);
-    if !app.follows_tail() {
-        // A question arriving while the operator reads back does not move the
-        // view; it is said here instead, where the way back down is.
-        let said = match app.asking() {
-            Some(_) => " ↑ scrolled back · a question is waiting below · PgDn returns to it ",
-            None => " ↑ scrolled back · PgDn returns to the newest line ",
-        };
-        block = block.title_bottom(
-            Line::from(said)
-                .style(Style::new().fg(theme.dim))
-                .centered(),
-        );
-    }
-
+    app.measured_session(area);
+    app.drew_jump(None);
+    let border = Border::of(app.focus() == Focus::Session, theme);
+    let block = pane(title, area, border, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -562,7 +602,7 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     // so a long prompt is editable without hiding the transcript behind it.
     // The shell's own reply wraps in the bar rather than being cut, and takes
     // a row of its own only while it is too long for one.
-    let said = bar_says(app, theme, bar_room(app, inner.width));
+    let said = bar_says(app, panes, theme, bar_room(app, inner.width));
     let typed = app.composed().lines().count().max(said.len()).max(1);
     let cap = usize::from(inner.height / 3).max(1);
     let composer_rows = u16::try_from(typed.min(cap)).unwrap_or(1);
@@ -580,7 +620,7 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_transcript(
         frame,
         transcript,
-        area.right().saturating_sub(1),
+        (area.right().saturating_sub(1), border),
         app,
         theme,
     );
@@ -678,7 +718,7 @@ fn editor_needs(app: &App) -> usize {
 /// The shell's own reply is wrapped, since it is a sentence the operator asked
 /// for. The key hints are one row and give way whole, the last first, because
 /// half a key reads as a different key.
-fn bar_says(app: &App, theme: &Theme, room: usize) -> Vec<Line<'static>> {
+fn bar_says(app: &App, panes: bool, theme: &Theme, room: usize) -> Vec<Line<'static>> {
     if room == 0 {
         return Vec::new();
     }
@@ -688,7 +728,18 @@ fn bar_says(app: &App, theme: &Theme, room: usize) -> Vec<Line<'static>> {
             .map(|line| Line::from(line).style(Style::new().fg(theme.hot)))
             .collect();
     }
-    let hints = fitted_hints(key_hints(app.session().mode(), theme), room);
+    // A question holding the keyboard takes Tab for writing its answer, so
+    // while it does, Tab is not offered as the way between the panes.
+    let question_holds = app.asking().is_some() && app.ask_focus() != AskFocus::Deferred;
+    let hints = fitted_hints(
+        key_hints(
+            app.session().mode(),
+            app.focus(),
+            panes && !question_holds,
+            theme,
+        ),
+        room,
+    );
     let mut spans = Vec::with_capacity(hints.len() * 2);
     for (i, hint) in hints.into_iter().enumerate() {
         if i > 0 {
@@ -701,24 +752,40 @@ fn bar_says(app: &App, theme: &Theme, room: usize) -> Vec<Line<'static>> {
 
 /// The mode the session gates tool calls in, and the keys the bar answers
 /// to, most important first.
-fn key_hints(mode: Option<Mode>, theme: &Theme) -> Vec<Segment> {
+///
+/// With a right-hand pane focused, the keys that differ are that pane's: the
+/// arrows and Enter are not the composer's while it has them. `panes` is
+/// whether there is a pane beside the session for Tab to move to.
+fn key_hints(mode: Option<Mode>, focus: Focus, panes: bool, theme: &Theme) -> Vec<Segment> {
     let key = |text: &str| Segment {
         text: text.to_owned(),
         style: Style::new().fg(theme.dim),
     };
-    match mode {
+    let mut hints = match mode {
         Some(mode) => vec![
             Segment {
                 text: format!("\u{25b8}\u{25b8} {mode} mode"),
                 style: Style::new().fg(theme.hot).bold(),
             },
             key("Shift+Tab cycles"),
-            key("Alt+Enter newline"),
         ],
         // Nothing has said how this session gates tool calls, so nothing
         // claims to know: the key that sets it is what is left to say.
-        None => vec![key("Shift+Tab mode"), key("Alt+Enter newline")],
+        None => vec![key("Shift+Tab mode")],
+    };
+    match focus {
+        Focus::Session => {
+            hints.push(key("Alt+Enter newline"));
+            if panes {
+                hints.push(key("Tab panes"));
+            }
+        }
+        Focus::Pane(_) => {
+            hints.push(key("↑↓ Enter folds"));
+            hints.push(key("Esc back"));
+        }
     }
+    hints
 }
 
 /// The hints that fit in `room` columns, separators included, whole ones only.
@@ -733,7 +800,15 @@ fn fitted_hints(mut hints: Vec<Segment>, room: usize) -> Vec<Segment> {
     hints
 }
 
-fn draw_transcript(frame: &mut Frame, area: Rect, border: u16, app: &mut App, theme: &Theme) {
+/// The transcript, in `area`, with its scrollbar drawn over the pane border at
+/// column `border.0` and, while it is scrolled back, the way back down.
+fn draw_transcript(
+    frame: &mut Frame,
+    area: Rect,
+    border: (u16, Border),
+    app: &mut App,
+    theme: &Theme,
+) {
     // A running turn keeps the bottom row, whatever is scrolled into view
     // above it: whether the session is at work is the question the operator
     // looks down to answer, and a line that scrolled away would not answer it.
@@ -793,6 +868,44 @@ fn draw_transcript(frame: &mut Frame, area: Rect, border: u16, app: &mut App, th
         area,
     );
     draw_scrollbar(frame, area, border, (start, total, height), theme);
+    if !app.follows_tail() {
+        let at = draw_jump(frame, area, app.asking().is_some(), theme);
+        app.drew_jump(at);
+    }
+}
+
+/// The way back down to the newest line, as a button at the bottom right of
+/// the transcript, drawn only while the view is not there.
+///
+/// A question that arrives while the operator reads back does not move the
+/// view, so the button says it is waiting: this is where the way to it is.
+/// The words give way to the arrow on a pane too narrow for them. Returns
+/// where it was drawn, so a click on it can be recognised.
+fn draw_jump(frame: &mut Frame, area: Rect, waiting: bool, theme: &Theme) -> Option<Rect> {
+    let said = [
+        (waiting, " A question is waiting · Jump to bottom ↓ "),
+        (true, " Jump to bottom ↓ "),
+        (true, " ↓ "),
+    ]
+    .into_iter()
+    .filter(|(offered, _)| *offered)
+    .map(|(_, said)| said)
+    .find(|said| text::width(said) <= usize::from(area.width))?;
+    let width = u16::try_from(text::width(said)).ok()?;
+    if area.height == 0 {
+        return None;
+    }
+    let at = Rect::new(
+        area.right().saturating_sub(width),
+        area.bottom().saturating_sub(1),
+        width,
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(said).style(Style::new().fg(theme.pane_bg).bg(theme.hot).bold())),
+        at,
+    );
+    Some(at)
 }
 
 /// Every transcript entry's lines as they were last drawn, with what they were
@@ -857,7 +970,7 @@ fn drawn_from(entry: &Entry, width: usize, folded: bool, theme: &Theme) -> u64 {
 fn draw_scrollbar(
     frame: &mut Frame,
     area: Rect,
-    border: u16,
+    border: (u16, Border),
     extent: (usize, usize, usize),
     theme: &Theme,
 ) {
@@ -865,7 +978,8 @@ fn draw_scrollbar(
     if lines <= height || area.height == 0 {
         return;
     }
-    let border = Rect::new(border, area.y, 1, area.height);
+    let (column, border) = border;
+    let track = Rect::new(column, area.y, 1, area.height);
     let mut state = ScrollbarState::new(lines.saturating_sub(height))
         .viewport_content_length(height)
         .position(start);
@@ -873,11 +987,11 @@ fn draw_scrollbar(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
-            .track_symbol(Some("║"))
-            .track_style(Style::new().fg(theme.frame))
+            .track_symbol(Some(border.track))
+            .track_style(border.style)
             .thumb_symbol("█")
             .thumb_style(Style::new().fg(theme.hot)),
-        border,
+        track,
         &mut state,
     );
 }
@@ -1512,7 +1626,9 @@ fn divider(width: usize, theme: &Theme) -> Line<'static> {
 fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let session = app.session();
     let prices = app.prices();
-    let block = pane("Usage", area, theme);
+    // Usage has nothing to scroll and nothing to fold, so it never has the
+    // keyboard.
+    let block = pane("Usage", area, Border::of(false, theme), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -1640,11 +1756,15 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 
 /// Every row the Activity pane has, folded sections included as their header
 /// alone.
-fn activity_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn activity_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let session = app.session();
-    let mut rows = agent_rows(app, session, width, theme);
-    rows.extend(decision_rows(app, session, width, theme));
-    rows.extend(tool_rows(app, session, width, theme));
+    let mut rows = PaneRows::default();
+    rows.section(Section::SubAgents, agent_rows(app, session, width, theme));
+    rows.section(
+        Section::Decisions,
+        decision_rows(app, session, width, theme),
+    );
+    rows.section(Section::Tools, tool_rows(app, session, width, theme));
     rows
 }
 
@@ -1858,18 +1978,23 @@ fn draw_scrolling_pane(
     which: Pane,
     title: &str,
     theme: &Theme,
-    rows: fn(&App, usize, &Theme) -> Vec<Line<'static>>,
+    rows: fn(&App, usize, &Theme) -> PaneRows,
 ) {
-    let block = pane(title, area, theme);
+    let border = Border::of(app.focus() == Focus::Pane(which), theme);
+    let block = pane(title, area, border, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
         return;
     }
 
-    let rows = rows(app, usize::from(inner.width), theme);
+    let PaneRows { mut rows, headers } = rows(app, usize::from(inner.width), theme);
     let held = rows.len();
     app.measured_pane(which, inner, held, usize::from(inner.height));
+    app.measured_sections(which, headers.clone());
+    if let Some(cursor) = app.section_cursor(which) {
+        mark_cursor(&mut rows, &headers, cursor);
+    }
     let at = app.pane_scroll(which);
     // Saturating rather than wrapping: a pane scrolled further than a `u16`
     // can say would come back to the top.
@@ -1883,31 +2008,74 @@ fn draw_scrolling_pane(
     draw_scrollbar(
         frame,
         inner,
-        area.right().saturating_sub(1),
+        (area.right().saturating_sub(1), border),
         (at, held, usize::from(inner.height)),
         theme,
     );
 }
 
+/// A scrolling pane's rows, with the row each section's header is on.
+#[derive(Default)]
+struct PaneRows {
+    rows: Vec<Line<'static>>,
+    headers: Vec<(Section, usize)>,
+}
+
+impl PaneRows {
+    /// Rows that belong to no section, such as the branch above them.
+    fn extend(&mut self, rows: impl IntoIterator<Item = Line<'static>>) {
+        self.rows.extend(rows);
+    }
+
+    /// A section's rows, the first of which is its header.
+    fn section(&mut self, section: Section, rows: Vec<Line<'static>>) {
+        if !rows.is_empty() {
+            self.headers.push((section, self.rows.len()));
+        }
+        self.rows.extend(rows);
+    }
+}
+
+/// Draws the section cursor: the header's marker and name as a solid bar.
+///
+/// Reversed rather than painted, like the focused pane's title, so the cursor
+/// is there on a terminal with no colour.
+fn mark_cursor(rows: &mut [Line<'static>], headers: &[(Section, usize)], cursor: Section) {
+    let span = headers
+        .iter()
+        .find(|(section, _)| *section == cursor)
+        .and_then(|(_, row)| rows.get_mut(*row))
+        .and_then(|line| line.spans.first_mut());
+    if let Some(span) = span {
+        span.style = span.style.add_modifier(Modifier::REVERSED);
+    }
+}
+
 /// Every row the pane has, folded sections included as their header alone.
-fn changes_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let repo = app.repo();
     let session = app.session();
-    let mut rows: Vec<Line> = Vec::new();
+    let mut rows = PaneRows::default();
 
     // A directory that is not a repository has no branch and no commits, and
     // sections drawn empty would say it had none rather than that there is no
     // repository to have any.
     let in_repository = repo.branch.is_some();
     if let Some(branch) = &repo.branch {
-        rows.push(branch_row(branch, repo, width, theme));
+        rows.extend([branch_row(branch, repo, width, theme)]);
     }
 
     if in_repository {
-        rows.extend(working_tree_rows(app, repo, width, theme));
-        rows.extend(commit_rows(app, repo, width, theme));
+        rows.section(
+            Section::WorkingTree,
+            working_tree_rows(app, repo, width, theme),
+        );
+        rows.section(Section::Commits, commit_rows(app, repo, width, theme));
     }
-    rows.extend(session_file_rows(app, session, width, theme));
+    rows.section(
+        Section::Edited,
+        session_file_rows(app, session, width, theme),
+    );
     rows
 }
 

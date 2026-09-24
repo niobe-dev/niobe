@@ -422,7 +422,7 @@ fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
     let after = screen(&mut app, 120, 30);
 
     assert_eq!(top(&before), top(&after), "the question moved the view");
-    assert!(after.contains("a question is waiting below"), "{after}");
+    assert!(after.contains("A question is waiting"), "{after}");
 }
 
 /// A prompt sent from this shell, with a call of its turn still running, a
@@ -806,8 +806,9 @@ fn the_right_stack_collapses_below_a_hundred_columns() {
     let wide = screen(&mut running_session(), 100, 30);
 
     // Matched on the border the title sits in, so the menu bar's own `Usage`
-    // and `Files` entries cannot stand in for a pane.
-    for pane in ["═ Usage ", "═ Activity ", "═ Changes "] {
+    // and `Files` entries cannot stand in for a pane. None of them has the
+    // keyboard, so each is in a single line.
+    for pane in ["─ Usage ", "─ Activity ", "─ Changes "] {
         assert!(
             !narrow.contains(pane),
             "the {pane:?} pane is still drawn at 99 columns:\n{narrow}"
@@ -823,12 +824,13 @@ fn the_right_stack_collapses_below_a_hundred_columns() {
     assert!(wide.contains("Session ─ example-app"));
 }
 
-/// The rows a pane's top border is on, in the order they appear.
+/// The rows a pane's top border is on, in the order they appear, whether the
+/// pane has the keyboard or not.
 fn pane_tops(frame: &str, from: usize) -> Vec<usize> {
     frame
         .lines()
         .enumerate()
-        .filter(|(_, row)| row.chars().skip(from).any(|c| c == '╔'))
+        .filter(|(_, row)| row.chars().skip(from).any(|c| c == '╔' || c == '┌'))
         .map(|(at, _)| at)
         .collect()
 }
@@ -903,14 +905,14 @@ fn every_size_between_the_two_renders_without_a_panic_or_an_overrun() {
 fn scrolling_back_moves_the_transcript_and_says_that_it_did() {
     let mut app = running_session();
     let tail = screen(&mut app, 80, 24);
-    assert!(!tail.contains("scrolled back"));
+    assert!(!tail.contains("Jump to bottom"));
 
     app.scroll_to_head();
     let head = screen(&mut app, 80, 24);
     assert_ne!(head, tail, "paging to the top drew the same frame");
     assert!(
-        head.contains("scrolled back"),
-        "the pane did not say it was scrolled back:\n{head}"
+        head.contains("Jump to bottom ↓"),
+        "the pane did not offer the way back down:\n{head}"
     );
 
     app.scroll_to_tail();
@@ -984,12 +986,13 @@ fn the_desktop_moves_between_the_panes_while_a_turn_runs() {
     );
 }
 
-/// The columns a row is made of: a pane's border is `║`, or the scrollbar's
-/// thumb where one is drawn over it.
+/// The columns a row is made of: a pane's border is `║` on the pane with the
+/// keyboard and `│` on the others, or the scrollbar's thumb where one is drawn
+/// over it.
 fn borders(row: &str) -> Vec<usize> {
     row.chars()
         .enumerate()
-        .filter(|(_, c)| *c == '║' || *c == '█')
+        .filter(|(_, c)| matches!(c, '║' | '│' | '█'))
         .map(|(at, _)| at)
         .collect()
 }
@@ -1024,7 +1027,7 @@ fn no_pane_draws_its_text_against_its_border() {
         // to the Usage pane at once, and both keep it blank.
         let under = frame.lines().nth(2).unwrap_or_default();
         assert!(
-            under.chars().all(|c| c == '║' || c == ' '),
+            under.chars().all(|c| matches!(c, '║' | '│' | ' ')),
             "the row under the pane titles at {width}x{height} is not blank: {under:?}"
         );
     }
@@ -1139,7 +1142,7 @@ fn wheel_at(column: u16, row: u16) -> ratatui::crossterm::event::MouseEvent {
 fn the_activity_pane_holds_the_sub_agents_the_decisions_and_the_tools() {
     let frame = screen(&mut running_session(), 200, 60);
 
-    assert!(frame.contains("═ Activity "), "{frame}");
+    assert!(frame.contains("─ Activity "), "{frame}");
     for section in ["▾ Sub-agents", "▾ Decisions", "▾ Tools"] {
         assert!(frame.contains(section), "{section} is missing:\n{frame}");
     }
@@ -1208,7 +1211,7 @@ fn a_running_agent_is_timed_and_a_finished_one_shows_its_context() {
             .unwrap_or_default();
         // Nothing follows the status column but the pane's own border.
         assert!(
-            row.trim_end_matches(['║', ' ']).ends_with(word),
+            row.trim_end_matches(['│', ' ']).ends_with(word),
             "{finished} reads other than {word:?}: {row:?}"
         );
     }
@@ -1268,7 +1271,7 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
     // right, every one is under an agent.
     let under_agents: usize = frame
         .lines()
-        .filter_map(|line| line.split_once("║ ║").map(|(_, right)| right))
+        .filter_map(|line| line.split_once("║ │").map(|(_, right)| right))
         .map(|right| right.matches('└').count())
         .sum();
     assert_eq!(under_agents, 2, "{frame}");
@@ -1706,4 +1709,172 @@ fn a_narrow_pane_cuts_what_a_call_does_before_what_it_cost() {
         .find(|line| line.contains("✗ Bash"))
         .expect("the failed command is in view at the tail");
     assert!(row.contains("exit 1 · 0.4s"), "{row}");
+}
+
+/// The row a pane's title is on, and whether its border there is the double
+/// line the pane with the keyboard is drawn in.
+fn title_row<'a>(frame: &'a str, title: &str) -> &'a str {
+    frame
+        .lines()
+        .find(|row| row.contains(&format!(" {title} ")))
+        .unwrap_or_default()
+}
+
+/// Exactly one pane has the keyboard, and it says so three ways: a double
+/// border where the others are single, its own colour on that border, and an
+/// inverted title. The border is the one a monochrome terminal keeps.
+#[test]
+fn the_pane_with_the_keyboard_is_the_one_drawn_double() {
+    use ratatui::crossterm::event::KeyCode;
+    use ratatui::style::Modifier;
+
+    let mut app = running_session();
+    let _ = screen(&mut app, 120, 30);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    let frame = screen(&mut app, 120, 30);
+
+    assert_snapshot("activity-focused-120x30", &frame);
+    let doubled: Vec<&str> = ["Session ─ example-app", "Usage", "Changes", "Activity"]
+        .into_iter()
+        .filter(|title| title_row(&frame, title).contains("═ "))
+        .collect();
+    assert_eq!(doubled, ["Activity"], "{frame}");
+
+    let title = style_at(&mut app, 120, 30, " Activity ").expect("the title is drawn");
+    assert!(
+        title.add_modifier.contains(Modifier::REVERSED),
+        "the focused title is not inverted: {title:?}"
+    );
+    let other = style_at(&mut app, 120, 30, " Changes ").expect("the title is drawn");
+    assert!(
+        !other.add_modifier.contains(Modifier::REVERSED),
+        "{other:?}"
+    );
+
+    // The section cursor is on the pane's first header, drawn the same way,
+    // and nowhere in the pane that does not have the keyboard.
+    let cursor = style_at(&mut app, 120, 30, "▾ Sub-agents").expect("the header is drawn");
+    assert!(
+        cursor.add_modifier.contains(Modifier::REVERSED),
+        "{cursor:?}"
+    );
+    let header = style_at(&mut app, 120, 30, "▾ Working tree").expect("the header is drawn");
+    assert!(
+        !header.add_modifier.contains(Modifier::REVERSED),
+        "{header:?}"
+    );
+}
+
+/// The focused pane's border is drawn in the theme's focused colour, and the
+/// panes without the keyboard in the plain frame colour.
+#[test]
+fn the_focused_border_is_in_the_colour_the_theme_keeps_for_it() {
+    let mut app = running_session().with_theme(CLASSIC);
+    let session = style_at(&mut app, 120, 30, "╔").expect("the session pane is focused");
+    let usage = style_at(&mut app, 120, 30, "┌").expect("the other panes are single");
+
+    assert_eq!(session.fg, Some(CLASSIC.frame_focus));
+    assert_eq!(usage.fg, Some(CLASSIC.frame));
+}
+
+/// The arrows walk the focused pane's section headers and Enter folds the one
+/// under the cursor, leaving the transcript and the composer alone.
+#[test]
+fn a_focused_pane_folds_the_section_under_its_cursor() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    let _ = screen(&mut app, 200, 60);
+    press(&mut app, KeyCode::Tab);
+    let _ = screen(&mut app, 200, 60);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    let frame = screen(&mut app, 200, 60);
+
+    // The cursor scrolled the pane down to the commits, below the files, and
+    // folding them keeps their header in view.
+    assert!(frame.contains("▸ Commits"), "{frame}");
+    assert!(
+        !app.folded(Section::WorkingTree),
+        "one section, the one under the cursor"
+    );
+    assert_eq!(app.composed(), "", "Enter folded rather than typed");
+}
+
+/// Below a hundred columns there is no pane beside the session, so Tab has
+/// nowhere to go and the bar does not offer it.
+#[test]
+fn a_session_alone_on_screen_keeps_the_keyboard() {
+    use niobe_tui::app::Focus;
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    let frame = screen(&mut app, 80, 24);
+    press(&mut app, KeyCode::Tab);
+
+    assert_eq!(app.focus(), Focus::Session);
+    assert!(!frame.contains("Tab panes"), "{frame}");
+    let wide = screen(&mut app, 200, 60);
+    assert!(wide.contains("Tab panes"), "{wide}");
+
+    // A question takes Tab for writing its answer, so while it holds the
+    // keyboard the bar does not offer Tab for anything else.
+    let asking = screen(&mut session_waiting_on_a_prompt(), 200, 60);
+    assert!(!asking.contains("Tab panes"), "{asking}");
+}
+
+/// Scrolled back, the transcript offers the way down as a button at its
+/// bottom right; a click on it returns to the newest line, and the button
+/// goes with the need for it.
+#[test]
+fn the_way_back_down_is_a_button_that_returns_to_the_newest_line() {
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = running_session();
+    let tail = screen(&mut app, 120, 30);
+    app.scroll_to_head();
+    let head = screen(&mut app, 120, 30);
+
+    let (row, line) = head
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("Jump to bottom ↓"))
+        .expect("scrolled back, the button is drawn");
+    assert!(
+        !head.contains("scrolled back"),
+        "the old hint is gone, not kept beside the button:\n{head}"
+    );
+    let column = line
+        .chars()
+        .position(|c| c == '↓')
+        .expect("the button has its arrow");
+
+    app.on_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: u16::try_from(column).expect("the screen is 120 wide"),
+        row: u16::try_from(row).expect("the screen is 30 high"),
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(app.follows_tail());
+    assert_eq!(screen(&mut app, 120, 30), tail);
+}
+
+/// A transcript that fits its pane has nothing to scroll back to, and a key
+/// that would scroll it does not leave it claiming it has.
+#[test]
+fn a_transcript_too_short_to_scroll_never_offers_the_way_back_down() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = empty_session();
+    let _ = screen(&mut app, 120, 30);
+    press(&mut app, KeyCode::PageUp);
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(!frame.contains("Jump to bottom"), "{frame}");
+    assert!(
+        !frame.contains('█'),
+        "no scrollbar where nothing scrolls:\n{frame}"
+    );
 }

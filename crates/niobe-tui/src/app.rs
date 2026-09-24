@@ -116,6 +116,32 @@ pub enum Pane {
     Activity,
 }
 
+/// Which pane has the keyboard: the one the scroll keys and the wheel move.
+///
+/// Exactly one pane has it at a time. Typing is not something focus decides —
+/// a key the focused pane does not take goes to the composer wherever the
+/// focus is, and takes the focus back to the session with it, so that the
+/// Enter that follows sends what was typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// The session pane: the transcript scrolls, and the composer is right
+    /// under it.
+    Session,
+    /// One of the right-hand panes: it scrolls, and its section headers take
+    /// the arrows and Enter.
+    Pane(Pane),
+}
+
+impl Focus {
+    /// The order Tab walks the panes in: down the screen, left column first,
+    /// and back round to the session.
+    const ORDER: [Focus; 3] = [
+        Focus::Session,
+        Focus::Pane(Pane::Changes),
+        Focus::Pane(Pane::Activity),
+    ];
+}
+
 /// A section of the Changes or Activity pane, which folds on its own.
 ///
 /// Each names one claim about the work, and two of them are claims about the
@@ -163,13 +189,18 @@ impl Section {
 ///
 /// Each pane scrolls independently of the transcript and of the other, so each
 /// keeps its own offset; `area` is where it was drawn last frame, which is how
-/// a wheel notch can tell which pane the pointer was over.
+/// a wheel notch can tell which pane the pointer was over, and `None` when it
+/// was not drawn at all, which is how focus knows to pass it by.
 #[derive(Debug, Clone, Default)]
 struct Scroller {
     scroll: usize,
     content: usize,
     viewport: usize,
     area: Option<ratatui::layout::Rect>,
+    /// Each section header the last frame drew, and the row it is on.
+    headers: Vec<(Section, usize)>,
+    /// The section the arrows last moved to, while the pane has had focus.
+    cursor: Option<Section>,
 }
 
 impl Scroller {
@@ -199,6 +230,46 @@ impl Scroller {
     fn holds(&self, column: u16, row: u16) -> bool {
         self.area
             .is_some_and(|area| area.contains((column, row).into()))
+    }
+
+    /// The section under the cursor, where the last frame drew it: the one
+    /// the arrows moved to, or the first when that one is no longer drawn.
+    fn cursor(&self) -> Option<(usize, Section, usize)> {
+        let at = self
+            .headers
+            .iter()
+            .position(|(section, _)| Some(*section) == self.cursor)
+            .unwrap_or(0);
+        self.headers
+            .get(at)
+            .map(|(section, row)| (at, *section, *row))
+    }
+
+    /// Moves the cursor to the next section down, or up, stopping at either
+    /// end, and scrolls the pane so that its header is in view.
+    fn move_cursor(&mut self, down: bool) {
+        let Some((at, _, _)) = self.cursor() else {
+            return;
+        };
+        let to = match down {
+            true => (at + 1).min(self.headers.len().saturating_sub(1)),
+            false => at.saturating_sub(1),
+        };
+        if let Some((section, row)) = self.headers.get(to).copied() {
+            self.cursor = Some(section);
+            self.reveal(row);
+        }
+    }
+
+    /// Scrolls just far enough that `row` is in view.
+    fn reveal(&mut self, row: usize) {
+        let viewport = self.viewport.max(1);
+        if row < self.scroll {
+            self.scroll = row;
+        } else if row >= self.scroll.saturating_add(viewport) {
+            self.scroll = (row + 1).saturating_sub(viewport);
+        }
+        self.scroll = self.scroll.min(self.max_scroll());
     }
 }
 
@@ -612,6 +683,15 @@ pub struct App {
     folded: std::collections::BTreeSet<Section>,
     changes: Scroller,
     activity: Scroller,
+    /// The pane the operator gave the keyboard to. A question that holds the
+    /// keyboard overrides it without changing it: see [`App::focus`].
+    focus: Focus,
+    /// Where the session pane was drawn last frame, so a click or a wheel
+    /// notch over it can be told from one over the panes beside it.
+    session_area: Option<ratatui::layout::Rect>,
+    /// Where the way back down to the newest line was drawn last frame, while
+    /// the transcript is scrolled back.
+    jump: Option<ratatui::layout::Rect>,
     profile: Option<SelectedProfile>,
     theme: Theme,
     session: SessionState,
@@ -716,6 +796,17 @@ pub struct App {
     should_quit: bool,
 }
 
+/// How a scroll key or a wheel notch moves the pane it goes to.
+#[derive(Debug, Clone, Copy)]
+enum Scroll {
+    PageUp,
+    PageDown,
+    Up(usize),
+    Down(usize),
+    Head,
+    Tail,
+}
+
 /// The share of a budget at which the shell says so.
 ///
 /// Four fifths: far enough in that the warning means something, and far enough
@@ -738,6 +829,9 @@ impl App {
             folded: std::collections::BTreeSet::new(),
             changes: Scroller::default(),
             activity: Scroller::default(),
+            focus: Focus::Session,
+            session_area: None,
+            jump: None,
             profile: None,
             theme,
             session: SessionState::new(),
@@ -1723,6 +1817,177 @@ impl App {
         self.scroller_mut(pane).scroll_by(lines);
     }
 
+    /// Which section header of `pane` the last frame drew on which of its
+    /// rows, top to bottom. The draw builds the rows, so only it knows; the
+    /// cursor walks these.
+    pub fn measured_sections(&mut self, pane: Pane, headers: Vec<(Section, usize)>) {
+        self.scroller_mut(pane).headers = headers;
+    }
+
+    /// The section of `pane` the cursor is on, while `pane` has the keyboard.
+    ///
+    /// `None` when another pane has it: a cursor drawn in a pane the arrows do
+    /// not reach would say that they do.
+    pub fn section_cursor(&self, pane: Pane) -> Option<Section> {
+        if self.focus() != Focus::Pane(pane) {
+            return None;
+        }
+        self.scroller(pane).cursor().map(|(_, section, _)| section)
+    }
+
+    /// Which pane has the keyboard.
+    ///
+    /// A question the operator is answering is in the session pane and takes
+    /// the arrows and Enter, so while it holds the keyboard the session is
+    /// where the focus is, whichever pane had it before. Put off, the
+    /// question gives it back.
+    pub fn focus(&self) -> Focus {
+        match self.asking() {
+            Some(_) if self.ask_focus != AskFocus::Deferred => Focus::Session,
+            _ => self.focus,
+        }
+    }
+
+    /// Gives the keyboard to the next pane on screen, round to the session.
+    fn focus_next(&mut self) {
+        let at = Focus::ORDER
+            .iter()
+            .position(|focus| *focus == self.focus)
+            .unwrap_or(0);
+        self.focus = (1..Focus::ORDER.len())
+            .filter_map(|step| Focus::ORDER.get((at + step) % Focus::ORDER.len()))
+            .copied()
+            .find(|focus| self.on_screen(*focus))
+            .unwrap_or(Focus::Session);
+    }
+
+    fn on_screen(&self, focus: Focus) -> bool {
+        match focus {
+            Focus::Session => true,
+            Focus::Pane(pane) => self.scroller(pane).area.is_some(),
+        }
+    }
+
+    /// What the last frame drew the session pane as, so the mouse can tell it
+    /// from the panes beside it.
+    pub fn measured_session(&mut self, area: ratatui::layout::Rect) {
+        self.session_area = Some(area);
+    }
+
+    /// Told by a frame too narrow for the right-hand stack: its panes are not
+    /// on screen, so none of them can be focused or scrolled by the mouse.
+    pub fn right_stack_hidden(&mut self) {
+        for pane in [Pane::Changes, Pane::Activity] {
+            self.scroller_mut(pane).area = None;
+        }
+        if let Focus::Pane(_) = self.focus {
+            self.focus = Focus::Session;
+        }
+    }
+
+    /// Where the last frame drew the way back down to the newest line, or
+    /// `None` when it drew none because the transcript was at its end.
+    pub fn drew_jump(&mut self, at: Option<ratatui::layout::Rect>) {
+        self.jump = at;
+    }
+
+    /// The pane under a point on the screen, if the point is on one that
+    /// scrolls.
+    fn pane_at(&self, column: u16, row: u16) -> Option<Focus> {
+        if let Some(pane) = [Pane::Changes, Pane::Activity]
+            .into_iter()
+            .find(|pane| self.scroller(*pane).holds(column, row))
+        {
+            return Some(Focus::Pane(pane));
+        }
+        self.session_area
+            .filter(|area| area.contains((column, row).into()))
+            .map(|_| Focus::Session)
+    }
+
+    /// Scrolls whichever pane has the keyboard, if `key` is one of the keys
+    /// that scroll. Returns whether it was.
+    fn scroll_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let how = match (key.code, key.modifiers) {
+            (KeyCode::PageUp, _) => Scroll::PageUp,
+            (KeyCode::PageDown, _) => Scroll::PageDown,
+            (KeyCode::Up, KeyModifiers::SHIFT) => Scroll::Up(1),
+            (KeyCode::Down, KeyModifiers::SHIFT) => Scroll::Down(1),
+            (KeyCode::Home, KeyModifiers::CONTROL) => Scroll::Head,
+            (KeyCode::End, KeyModifiers::CONTROL) => Scroll::Tail,
+            _ => return false,
+        };
+        self.scroll_focused(how);
+        true
+    }
+
+    fn scroll_focused(&mut self, how: Scroll) {
+        match self.focus() {
+            Focus::Session => {
+                let page = self.viewport_lines.max(1);
+                match how {
+                    Scroll::PageUp => self.scroll_up(page),
+                    Scroll::PageDown => self.scroll_down(page),
+                    Scroll::Up(lines) => self.scroll_up(lines),
+                    Scroll::Down(lines) => self.scroll_down(lines),
+                    Scroll::Head => self.scroll_to_head(),
+                    Scroll::Tail => self.scroll_to_tail(),
+                }
+            }
+            Focus::Pane(pane) => {
+                let scroller = self.scroller_mut(pane);
+                let page = isize::try_from(scroller.viewport.max(1)).unwrap_or(isize::MAX);
+                let lines = |n: usize| isize::try_from(n).unwrap_or(isize::MAX);
+                match how {
+                    Scroll::PageUp => scroller.scroll_by(-page),
+                    Scroll::PageDown => scroller.scroll_by(page),
+                    Scroll::Up(n) => scroller.scroll_by(-lines(n)),
+                    Scroll::Down(n) => scroller.scroll_by(lines(n)),
+                    Scroll::Head => scroller.scroll = 0,
+                    Scroll::Tail => scroller.scroll = scroller.max_scroll(),
+                }
+            }
+        }
+    }
+
+    /// One key, while a right-hand pane has the keyboard: the arrows walk its
+    /// section headers, Enter folds the one under the cursor, and Esc gives
+    /// the keyboard back to the session. Returns whether the pane took it.
+    fn on_pane_key(&mut self, pane: Pane, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        if key.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+        match key.code {
+            KeyCode::Up => self.scroller_mut(pane).move_cursor(false),
+            KeyCode::Down => self.scroller_mut(pane).move_cursor(true),
+            KeyCode::Enter => self.fold_under_cursor(pane),
+            KeyCode::Esc => self.focus = Focus::Session,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Folds the section under `pane`'s cursor, or opens it again.
+    ///
+    /// Unlike [`App::fold`], which puts the pane back at its top, this keeps
+    /// the header in view: the operator is looking at it, and nothing above
+    /// it changed height.
+    fn fold_under_cursor(&mut self, pane: Pane) {
+        let scroller = self.scroller_mut(pane);
+        let Some((_, section, row)) = scroller.cursor() else {
+            return;
+        };
+        scroller.cursor = Some(section);
+        scroller.scroll = scroller.scroll.min(row);
+        if !self.folded.remove(&section) {
+            self.folded.insert(section);
+        }
+    }
+
     /// Replaces what the shell knows about the repository with a fresh read.
     ///
     /// Called from the event loop with whatever [`crate::watch::Watch`] has
@@ -1849,10 +2114,11 @@ impl App {
         self.transcript_lines.saturating_sub(self.viewport_lines)
     }
 
-    /// Moves the transcript up by `lines`, which unpins it from the tail.
+    /// Moves the transcript up by `lines`, which unpins it from the tail —
+    /// unless it is still there, as a transcript that fits its pane always is.
     pub fn scroll_up(&mut self, lines: usize) {
         self.scroll = self.scroll().saturating_sub(lines);
-        self.follow = false;
+        self.follow = self.scroll >= self.max_scroll();
     }
 
     /// Moves the transcript down by `lines`, re-pinning it at the bottom.
@@ -1869,7 +2135,7 @@ impl App {
     /// Jumps to the oldest line.
     pub fn scroll_to_head(&mut self) {
         self.scroll = 0;
-        self.follow = false;
+        self.follow = self.max_scroll() == 0;
     }
 
     /// Jumps to the newest line and stays there as the session grows.
@@ -1882,24 +2148,38 @@ impl App {
     /// their own scrollback.
     const WHEEL_LINES: usize = 3;
 
-    /// Handles one mouse report: the wheel scrolls the transcript. Nothing
+    /// Handles one mouse report: a click or a wheel notch gives the keyboard
+    /// to the pane under the pointer, the wheel then scrolls it, and a click on
+    /// the way back down returns the transcript to its newest line. Nothing
     /// else the mouse does means anything to the shell yet.
     pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
-        use ratatui::crossterm::event::MouseEventKind;
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 
-        // The wheel goes to whatever the pointer is over. Three panes scroll
-        // now, and a notch that always moved the transcript would move the
-        // thing the operator was not looking at.
-        let over = [Pane::Changes, Pane::Activity]
-            .into_iter()
-            .find(|pane| self.scroller(*pane).holds(mouse.column, mouse.row));
-        let lines = Self::WHEEL_LINES;
-
-        match (mouse.kind, over) {
-            (MouseEventKind::ScrollUp, Some(pane)) => self.scroll_pane(pane, -(lines as isize)),
-            (MouseEventKind::ScrollDown, Some(pane)) => self.scroll_pane(pane, lines as isize),
-            (MouseEventKind::ScrollUp, None) => self.scroll_up(lines),
-            (MouseEventKind::ScrollDown, None) => self.scroll_down(lines),
+        // The wheel goes to whatever the pointer is over, and takes the focus
+        // there with it: a notch that moved one pane while another stayed
+        // marked as the one the keys move would make the mark a lie. Over
+        // anything that does not scroll, it moves the pane that has the keys.
+        let over = self.pane_at(mouse.column, mouse.row);
+        let wheel = |app: &mut App, how: Scroll| {
+            if let Some(focus) = over {
+                app.focus = focus;
+            }
+            app.scroll_focused(how);
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollUp => wheel(self, Scroll::Up(Self::WHEEL_LINES)),
+            MouseEventKind::ScrollDown => wheel(self, Scroll::Down(Self::WHEEL_LINES)),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let jump = self
+                    .jump
+                    .is_some_and(|at| at.contains((mouse.column, mouse.row).into()));
+                if jump {
+                    self.focus = Focus::Session;
+                    self.scroll_to_tail();
+                } else if let Some(focus) = over {
+                    self.focus = focus;
+                }
+            }
             _ => {}
         }
     }
@@ -1913,7 +2193,6 @@ impl App {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         self.hint = None;
-        let page = self.viewport_lines.max(1);
 
         // Quitting is always available: a session with a prompt up is still a
         // session the operator may need to leave, and the backend is told the
@@ -1961,18 +2240,26 @@ impl App {
             return;
         }
 
+        if self.scroll_key(key) {
+            return;
+        }
+        if let Focus::Pane(pane) = self.focus
+            && self.on_pane_key(pane, key)
+        {
+            return;
+        }
+
         match (key.code, key.modifiers) {
+            // Tab has nothing to do in a prompt, and Shift+Tab already cycles
+            // the mode, so the plain key is the one that moves the focus.
+            (KeyCode::Tab, KeyModifiers::NONE) => self.focus_next(),
             // Alt+Enter opens a line; Enter sends. The other way round would
             // make the common action the awkward one.
-            (KeyCode::Enter, KeyModifiers::ALT) => self.composer.insert_newline(),
+            (KeyCode::Enter, KeyModifiers::ALT) => {
+                self.focus = Focus::Session;
+                self.composer.insert_newline();
+            }
             (KeyCode::Enter, _) => self.submit(),
-
-            (KeyCode::PageUp, _) => self.scroll_up(page),
-            (KeyCode::PageDown, _) => self.scroll_down(page),
-            (KeyCode::Up, KeyModifiers::SHIFT) => self.scroll_up(1),
-            (KeyCode::Down, KeyModifiers::SHIFT) => self.scroll_down(1),
-            (KeyCode::Home, KeyModifiers::CONTROL) => self.scroll_to_head(),
-            (KeyCode::End, KeyModifiers::CONTROL) => self.scroll_to_tail(),
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.fold_calls(),
 
             // Shift+Tab reaches crossterm as its own code rather than as Tab
@@ -1982,16 +2269,19 @@ impl App {
             // question it is pressed for is when the windows come back, and
             // the session fold knows that.
             (KeyCode::F(5), _) => self.hint = Some(self.cost_hint(self.read_at())),
-            // The two sections the F-key bar already names. The bar has no key
-            // for the others, and inventing one here would be a keyboard the
-            // bar does not describe.
+            // The two sections the F-key bar already names fold from anywhere;
+            // every section, these two included, also folds under the cursor
+            // of the pane that has the keyboard.
             (KeyCode::F(6), _) => self.fold(Section::WorkingTree),
             (KeyCode::F(7), _) => self.fold(Section::Tools),
             (KeyCode::F(8), _) => self.pick_model(),
             (KeyCode::F(9), _) => self.cycle_theme(),
             (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
 
+            // What was typed goes where typing always goes, and the keyboard
+            // follows it back: the Enter after it has to send it.
             _ => {
+                self.focus = Focus::Session;
                 self.composer.input(Input::from(key));
             }
         }
@@ -2005,17 +2295,8 @@ impl App {
     /// something else while a question was being asked would be a key nobody
     /// meant.
     fn on_ask_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
-        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-
-        let page = self.viewport_lines.max(1);
-        match (key.code, key.modifiers) {
-            (KeyCode::PageUp, _) => return self.scroll_up(page),
-            (KeyCode::PageDown, _) => return self.scroll_down(page),
-            (KeyCode::Up, KeyModifiers::SHIFT) => return self.scroll_up(1),
-            (KeyCode::Down, KeyModifiers::SHIFT) => return self.scroll_down(1),
-            (KeyCode::Home, KeyModifiers::CONTROL) => return self.scroll_to_head(),
-            (KeyCode::End, KeyModifiers::CONTROL) => return self.scroll_to_tail(),
-            _ => {}
+        if self.scroll_key(key) {
+            return;
         }
         // The question is the last thing in the transcript. Scrolled back,
         // the operator cannot see it, and a key that answered it then would
@@ -2320,8 +2601,10 @@ fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
 fn fkey_hint(n: u8) -> &'static str {
     match n {
         1 => {
-            "F1 Help — the help browser is not implemented yet. The wheel and PgUp/PgDn \
-             scroll; Ctrl+O folds runs of tool calls; Shift- or Option-drag selects text"
+            "F1 Help — the help browser is not implemented yet. Tab or a click moves the \
+             keyboard between the panes; the wheel and PgUp/PgDn scroll the one that has it, \
+             and in the right-hand panes ↑↓ and Enter fold a section; Ctrl+End returns to the \
+             newest line; Ctrl+O folds runs of tool calls; Shift- or Option-drag selects text"
         }
         2 => {
             "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \
@@ -2467,6 +2750,214 @@ mod tests {
         app.measured_pane(Pane::Changes, Rect::new(0, 0, 40, 10), 20, 10);
 
         assert_eq!(app.pane_scroll(Pane::Changes), 10);
+    }
+
+    /// The shell as a wide frame lays it out: the session pane on the left and
+    /// the two scrolling panes stacked on the right, each holding more than it
+    /// shows.
+    fn laid_out() -> App {
+        let mut app = app();
+        app.measured_session(Rect::new(0, 1, 60, 28));
+        app.measured(100, 20);
+        app.measured_pane(Pane::Changes, Rect::new(62, 8, 30, 10), 40, 10);
+        app.measured_pane(Pane::Activity, Rect::new(62, 20, 30, 8), 30, 8);
+        app
+    }
+
+    fn click_at(column: u16, row: u16) -> MouseEvent {
+        use ratatui::crossterm::event::MouseButton;
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn the_session_has_the_keyboard_and_tab_walks_the_panes_round_to_it() {
+        let mut app = laid_out();
+        assert_eq!(app.focus(), Focus::Session);
+
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Changes));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Activity));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Session, "the cycle wraps");
+    }
+
+    #[test]
+    fn a_pane_that_is_not_on_screen_is_never_given_the_keyboard() {
+        let mut app = app();
+        app.measured(100, 20);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Session, "nothing else is drawn");
+
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Changes));
+        // The terminal narrowed and the right-hand stack went with it.
+        app.right_stack_hidden();
+        assert_eq!(app.focus(), Focus::Session);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Session);
+    }
+
+    #[test]
+    fn the_scroll_keys_move_the_focused_pane_and_nothing_else() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Tab));
+
+        app.on_key(key(KeyCode::PageDown));
+        assert_eq!(
+            app.pane_scroll(Pane::Changes),
+            10,
+            "a page is the pane's height"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(app.pane_scroll(Pane::Changes), 9);
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+        assert_eq!(app.pane_scroll(Pane::Changes), 30);
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+        assert_eq!(app.pane_scroll(Pane::Changes), 0);
+
+        assert!(
+            app.follows_tail(),
+            "the transcript was not the focused pane"
+        );
+        assert_eq!(app.pane_scroll(Pane::Activity), 0);
+
+        // And with the keyboard back, the transcript pages as it always has.
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::PageUp));
+        assert_eq!(app.scroll(), 60);
+        assert_eq!(app.pane_scroll(Pane::Changes), 0);
+    }
+
+    #[test]
+    fn a_wheel_notch_gives_the_pane_it_scrolls_the_keyboard() {
+        let mut app = laid_out();
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 70,
+            row: 22,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.focus(), Focus::Pane(Pane::Activity));
+        assert_eq!(app.pane_scroll(Pane::Activity), 3);
+        assert!(app.follows_tail());
+    }
+
+    #[test]
+    fn a_click_on_a_pane_gives_it_the_keyboard() {
+        let mut app = laid_out();
+
+        app.on_mouse(click_at(70, 10));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Changes));
+
+        app.on_mouse(click_at(10, 10));
+        assert_eq!(app.focus(), Focus::Session);
+    }
+
+    #[test]
+    fn typing_needs_no_focus_moved_and_takes_the_keyboard_back_with_it() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Tab));
+
+        app.on_key(key(KeyCode::Char('h')));
+        app.on_key(key(KeyCode::Char('i')));
+
+        assert_eq!(app.composed(), "hi");
+        assert_eq!(
+            app.focus(),
+            Focus::Session,
+            "Enter must send what was typed, not fold a section"
+        );
+    }
+
+    #[test]
+    fn the_arrows_walk_a_focused_panes_sections_and_enter_folds_the_one_under_the_cursor() {
+        let mut app = laid_out();
+        app.measured_sections(
+            Pane::Changes,
+            vec![
+                (Section::WorkingTree, 1),
+                (Section::Commits, 12),
+                (Section::Edited, 25),
+            ],
+        );
+        assert_eq!(app.section_cursor(Pane::Changes), None, "not focused");
+
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(
+            app.section_cursor(Pane::Changes),
+            Some(Section::WorkingTree)
+        );
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.section_cursor(Pane::Changes), Some(Section::Edited));
+        assert_eq!(
+            app.pane_scroll(Pane::Changes),
+            16,
+            "the section under the cursor is scrolled into view"
+        );
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(
+            app.section_cursor(Pane::Changes),
+            Some(Section::Edited),
+            "the last section is as far as it goes"
+        );
+
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.folded(Section::Commits));
+        assert!(app.entries().is_empty(), "Enter folded rather than sent");
+        assert!(
+            app.pane_scroll(Pane::Changes) <= 12,
+            "the folded header stays in view"
+        );
+    }
+
+    #[test]
+    fn a_question_holding_the_keyboard_is_where_the_focus_is() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Tab));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        assert_eq!(app.focus(), Focus::Session);
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.focus(),
+            Focus::Pane(Pane::Changes),
+            "put off, the question gives the keyboard back where it was"
+        );
+    }
+
+    #[test]
+    fn paging_up_a_transcript_that_fits_leaves_it_on_the_newest_line() {
+        let mut app = app();
+        app.measured(4, 20);
+
+        app.scroll_up(20);
+        assert!(app.follows_tail(), "there was nothing to scroll back to");
+        app.scroll_to_head();
+        assert!(app.follows_tail());
+    }
+
+    #[test]
+    fn clicking_the_way_back_down_returns_to_the_newest_line() {
+        let mut app = laid_out();
+        app.scroll_to_head();
+        app.drew_jump(Some(Rect::new(40, 18, 18, 1)));
+
+        app.on_mouse(click_at(45, 18));
+
+        assert!(app.follows_tail());
+        assert_eq!(app.scroll(), 80);
     }
 
     #[test]
