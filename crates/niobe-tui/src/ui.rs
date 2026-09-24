@@ -1383,8 +1383,9 @@ fn usage_height(app: &App) -> u16 {
 /// Whether the session is billed by use, which makes money the pane's
 /// headline.
 ///
-/// Only where something said so. A session nothing has said of is drawn as a
-/// plan is, which is how it was drawn before any backend could say.
+/// Only where something said so. A session nothing has said of keeps the
+/// plan's order, windows first where there are any, and shows no dollar
+/// figure at all: see [`money_lines`].
 fn metered(app: &App) -> bool {
     app.session().billing() == Some(Billing::Metered)
 }
@@ -1796,14 +1797,29 @@ fn money_rows(app: &App) -> usize {
 
 /// What the session cost, labelled for what is known about it, and what it
 /// has spent of its budget.
+///
+/// What the figure is depends on how the session is billed. On a metered
+/// account it is the bill, drawn as the headline. On a plan no money moves
+/// with the work, and the same figure — the CLI prices a plan's work at list
+/// prices — is what the work would have cost on the API: kept on screen so a
+/// plan user sees what they consume, but dim and named for what it is, never
+/// as the session's cost. Where nothing has said which it is, it is neither,
+/// and the row says so rather than showing a figure it cannot vouch for.
 fn money_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled("session ", Style::new().fg(theme.dim)),
-        Span::styled(
-            session_cost(app.session(), app.prices()),
-            Style::new().fg(theme.hot).bold(),
-        ),
-    ])];
+    let dim = Style::new().fg(theme.dim);
+    let cost = || session_cost(app.session(), app.prices());
+    let mut lines = vec![match app.session().billing() {
+        Some(Billing::Metered) => Line::from(vec![
+            Span::styled("session ", dim),
+            Span::styled(cost(), Style::new().fg(theme.hot).bold()),
+        ]),
+        Some(Billing::Plan) => Line::from(format!("API-equivalent {}", cost())).style(dim),
+        None => Line::from(vec![
+            Span::styled("session ", dim),
+            Span::styled("—", Style::new().fg(theme.fg)),
+            Span::styled(" · billing not known", dim),
+        ]),
+    }];
     if let Some(budget) = app.budget() {
         let spent = app.session().totals().reported_cost_usd;
         lines.push(

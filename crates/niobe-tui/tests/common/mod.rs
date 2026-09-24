@@ -83,6 +83,11 @@ fn session_events() -> Vec<Event> {
             model: "opus-5".to_owned(),
             backend_session: None,
         }),
+        // A plan, as the Claude bridge reports a claude.ai login once a turn
+        // has said which API served it.
+        Event::Billing {
+            billing: Billing::Plan,
+        },
         Event::ModeSelected { mode: Mode::Ask },
         Event::UserMessage {
             text: "add etag support to the catalog fetcher so we stop re-downloading \
@@ -516,15 +521,17 @@ fn session_read_at_a_fixed_moment(events: &[Event]) -> App {
     app
 }
 
-/// The same session on a profile no backend meters: every event above except
-/// the one that reports the plan's windows.
+/// The same session with nothing said about how it is billed: every event
+/// above except the one that reports the plan's windows and the one that says
+/// it is a plan.
 ///
-/// A metered profile has no windows, and neither has a CLI release that does
-/// not report them. What the pane must not do is stand a `0%` in for either.
+/// A backend that cannot tell, on a profile that does not say, reports
+/// neither. What the pane must not do is stand a `0%` in for a window, or a
+/// dollar figure it cannot say is money spent.
 pub fn unmetered_session() -> App {
     let events: Vec<Event> = session_events()
         .into_iter()
-        .filter(|event| !matches!(event, Event::UsageWindows(_)))
+        .filter(|event| !matches!(event, Event::UsageWindows(_) | Event::Billing { .. }))
         .collect();
     session_read_at_a_fixed_moment(&events)
 }
@@ -535,7 +542,7 @@ pub fn unmetered_session() -> App {
 pub fn metered_session() -> App {
     let mut events: Vec<Event> = session_events()
         .into_iter()
-        .filter(|event| !matches!(event, Event::UsageWindows(_)))
+        .filter(|event| !matches!(event, Event::UsageWindows(_) | Event::Billing { .. }))
         .collect();
     events.insert(
         1,

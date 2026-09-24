@@ -7,6 +7,7 @@
 //! Every figure is read off the same fold the shell's panes read, and the cost
 //! carries the same label the Usage pane gives it.
 
+use niobe_core::Billing;
 use niobe_core::session::SessionState;
 use niobe_tui::app::App;
 
@@ -16,6 +17,7 @@ pub fn lines(app: &App) -> Vec<String> {
     vec![
         format!("tokens      {}", tokens(session)),
         format!("cost        {}", cost(session, app.prices())),
+        format!("billing     {}", billing(session)),
         format!("tool calls  {}", tool_calls(session)),
         format!(
             "messages    {} from you · {} from the agent",
@@ -51,9 +53,17 @@ fn tokens(session: &SessionState) -> String {
 
 /// The pane's label, and the reason a figure is an estimate, a floor or
 /// missing.
+///
+/// On a plan the figure is named for what it is, as the pane names it.
 fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> String {
     let t = session.totals();
-    let label = niobe_tui::session_cost(session, prices);
+    let label = match session.billing() {
+        Some(Billing::Plan) if t.records > 0 => format!(
+            "API-equivalent {}",
+            niobe_tui::session_cost(session, prices)
+        ),
+        Some(Billing::Plan | Billing::Metered) | None => niobe_tui::session_cost(session, prices),
+    };
     if t.records == 0 || t.cost_fully_reported() {
         return label;
     }
@@ -62,6 +72,26 @@ fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> Strin
         grouped(t.records_unsettled),
         grouped(t.records)
     )
+}
+
+/// How the session is billed, and what that makes the cost line above it.
+///
+/// Printed where the pane has no room to: the pane shows no dollar figure for
+/// a session nothing described, and this says why and what would.
+fn billing(session: &SessionState) -> String {
+    match session.billing() {
+        Some(Billing::Plan) => {
+            "plan — the cost is what the work would have cost on the API; no money moved \
+             with it"
+                .to_owned()
+        }
+        Some(Billing::Metered) => {
+            "metered — every token is billed, so the cost is money spent".to_owned()
+        }
+        None => "not known — the backend did not say and the profile does not set `billing`, \
+                 so the cost may be money spent or what a plan's work would have cost"
+            .to_owned(),
+    }
 }
 
 /// The files the session changed and by how much, with the same floor marks
@@ -188,7 +218,7 @@ mod tests {
 
     #[test]
     fn a_session_that_changed_nothing_says_so_with_a_dash() {
-        assert_eq!(lines(&folded(&[]))[4], "files       —");
+        assert_eq!(lines(&folded(&[]))[5], "files       —");
     }
 
     #[test]
@@ -198,7 +228,7 @@ mod tests {
             changed("notes.md", Some(1), None),
         ]));
         assert_eq!(
-            summary[4],
+            summary[5],
             "files       2 changed — +39 −9 (a floor: 1 of them changed by an amount the \
              backend did not state)"
         );
@@ -207,7 +237,33 @@ mod tests {
     #[test]
     fn a_session_whose_every_change_was_stated_gives_the_bare_figures() {
         let summary = lines(&folded(&[changed("src/fetch.rs", Some(38), Some(9))]));
-        assert_eq!(summary[4], "files       1 changed — +38 −9");
+        assert_eq!(summary[5], "files       1 changed — +38 −9");
+    }
+
+    fn billed(billing: Billing) -> Event {
+        Event::Billing { billing }
+    }
+
+    #[test]
+    fn the_billing_mode_is_printed_with_the_cost_it_explains() {
+        let plan = lines(&folded(&[billed(Billing::Plan), usage(Some(0.25))]));
+        assert_eq!(plan[1], "cost        API-equivalent $0.25");
+        assert!(plan[2].starts_with("billing     plan — "), "{}", plan[2]);
+
+        let metered = lines(&folded(&[billed(Billing::Metered), usage(Some(0.25))]));
+        assert_eq!(metered[1], "cost        $0.25");
+        assert!(
+            metered[2].starts_with("billing     metered — "),
+            "{}",
+            metered[2]
+        );
+
+        let unsaid = lines(&folded(&[usage(Some(0.25))]));
+        assert!(
+            unsaid[2].starts_with("billing     not known — "),
+            "{}",
+            unsaid[2]
+        );
     }
 
     #[test]

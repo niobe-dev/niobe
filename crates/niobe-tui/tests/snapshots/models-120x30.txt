@@ -8,7 +8,7 @@
 ┃       …                                                                    ┃ │ sonnet-5   17%  ▓▓░░░░░░░░░░   10k    │
 ┃   115     cache.set(url, {                                                 ┃ │ haiku-4-5   4%  ▓░░░░░░░░░░░  2490    │
 ┃   116 +     etag: res.headers.get("ETag"),                                 ┃ │ cache hit  87%  ▓▓▓▓▓▓▓▓▓▓░░   51k    │
-┃   117       body,                                                          ┃ │ session ≥$0.06                        │
+┃   117       body,                                                          ┃ │ API-equivalent ≥$0.06                 │
 ┃   └ allowed by you                                                         ┃ │ ───────────────────────────────────── │
 ┃                                                                            ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
 ┃ ◆ claude                                                                   ┃ └───────────────────────────────────────┘

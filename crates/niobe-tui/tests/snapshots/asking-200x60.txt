@@ -6,7 +6,7 @@
 ┃                                                                                                                                ┃ │ ───────────────────────────────────────────────────────────────── │
 ┃ ✗ Notion·update-page         {}                                                                                         failed ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                │
 ┃   └ 404 object_not_found — the page is not shared with the integration                                                         ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k                                │
-┃                                                                                                                                ┃ │ session ≥$0.04                                                    │
+┃                                                                                                                                ┃ │ API-equivalent ≥$0.04                                             │
 ┃ ◆ claude                                                                                                                       ┃ │ ───────────────────────────────────────────────────────────────── │
 ┃   Caching the etag beside the body so a 304 can be answered from the LRU.                                                      ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k                             │
 ┃                                                                                                                                ┃ └───────────────────────────────────────────────────────────────────┘

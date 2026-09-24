@@ -31,7 +31,7 @@ use common::{
     metered_session, paint, running_session, screen, session_with_a_markdown_reply, style_at,
     styles, unmetered_session,
 };
-use niobe_core::event::{Backend, Billing, Event, Mode, Usage, UsageWindow, UsageWindows};
+use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
 use ratatui::style::{Color, Style};
@@ -717,11 +717,11 @@ fn the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back() {
     );
 }
 
-/// The picture of a pane with no windows in it, so that what a metered
-/// profile's Usage pane looks like is something a change has to be read
-/// against rather than something nobody has seen.
+/// The picture of a pane with no windows in it and no word on how the session
+/// is billed, so that what such a session shows is something a change has to
+/// be read against rather than something nobody has seen.
 #[test]
-fn a_profile_no_backend_meters_draws_a_usage_pane_with_no_windows_in_it() {
+fn a_session_with_no_windows_and_no_billing_draws_neither() {
     let frame = screen(&mut unmetered_session(), 120, 30);
     assert!(!frame.contains("5h"), "{frame}");
     assert!(!frame.contains("resets"), "{frame}");
@@ -791,18 +791,30 @@ fn a_metered_profiles_budget_stands_under_its_cost() {
     assert!(session < budget && budget < model, "{frame}");
 }
 
-/// Saying a session is on a plan changes nothing a plan's pane draws: the
-/// windows were already the headline.
+/// On a plan no money moves with the work, so what the CLI prices it at is
+/// what the same work would have cost on the API: shown, labelled so, dimmed,
+/// and never as the session's cost.
 #[test]
-fn a_plan_is_drawn_as_a_session_that_did_not_say() {
-    let mut said = running_session();
-    said.apply(&Event::Billing {
-        billing: Billing::Plan,
-    });
+fn a_plan_shows_what_the_work_would_have_cost_as_api_equivalent_and_dim() {
+    let mut app = running_session();
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("API-equivalent ≥$0.04"), "{frame}");
+    assert!(!frame.contains("session "), "{frame}");
+    let dim = app.theme().dim;
     assert_eq!(
-        screen(&mut said, 120, 30),
-        screen(&mut running_session(), 120, 30)
+        style_at(&mut app, 120, 30, "≥$0.04").and_then(|style| style.fg),
+        Some(dim)
     );
+}
+
+/// A session whose billing nothing has said and the profile does not set
+/// shows no dollar figure: whether it is money spent or money not spent is
+/// the one thing the figure cannot say for itself.
+#[test]
+fn a_session_nobody_said_the_billing_of_shows_no_dollar_figure() {
+    let frame = screen(&mut unmetered_session(), 120, 30);
+    assert!(frame.contains("session — · billing not known"), "{frame}");
+    assert!(!frame.contains("$0."), "{frame}");
 }
 
 /// A metered profile reports no window, and a CLI version that does not emit

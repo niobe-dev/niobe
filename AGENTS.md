@@ -111,6 +111,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `tests/pty.rs` runs it on a real terminal; `tests/permission.rs` walks a recorded permission
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
+  `tests/billing.rs` folds the bridge's recordings into the shell and compares the Usage pane
+  with the pictures in its `tests/snapshots/`, one per way a session is billed.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
   `version.rs` is the workspace version: the eight places the root manifest writes it, and
   what the conventional-commit subjects since the last release tag call for (§8).

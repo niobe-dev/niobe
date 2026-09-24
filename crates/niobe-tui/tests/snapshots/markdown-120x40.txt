@@ -6,7 +6,7 @@
 ┃                                                                            ┃ │ ───────────────────────────────────── │
 ┃ ◆ claude                                                                   ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
 ┃   The notebook that demonstrates the fetcher needs the new call shape.     ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
-┃                                                                            ┃ │ session ≥$0.04                        │
+┃                                                                            ┃ │ API-equivalent ≥$0.04                 │
 ┃ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s ┃ │ ───────────────────────────────────── │
 ┃   └ 1 failing: fetch returns the cached body on a 304                      ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
 ┃                                                                            ┃ └───────────────────────────────────────┘

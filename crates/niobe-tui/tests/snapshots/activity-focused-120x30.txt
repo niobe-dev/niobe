@@ -6,7 +6,7 @@
 │    47 +   if (res.status === 304 && cached) return cached.body;            │ │ ───────────────────────────────────── │
 │    48     return res;                                                      │ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
 │       …                                                                    │ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
-│   115     cache.set(url, {                                                 │ │ session ≥$0.04                        │
+│   115     cache.set(url, {                                                 │ │ API-equivalent ≥$0.04                 │
 │   116 +     etag: res.headers.get("ETag"),                                 │ │ ───────────────────────────────────── │
 │   117       body,                                                          │ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
 │   └ allowed by you                                                         │ └───────────────────────────────────────┘

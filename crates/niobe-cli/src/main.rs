@@ -768,6 +768,14 @@ PROFILES:
     a profile that names none has nothing to switch between, because niobe
     never invents a model id.
 
+    billing says how the account behind a profile is billed, \"plan\" or
+    \"metered\". It decides what the Usage pane leads with: a plan's usage
+    windows, with the CLI's dollar figure dimmed as API-equivalent, or the
+    money a metered account is spending. Left out, the backend works it out
+    where it can — an API key or a cloud provider is metered, a claude.ai
+    login a plan — and until it has, the pane shows no dollar figure. A seat
+    billed by use signs in exactly as a plan does, so that is the one to set.
+
     settings names a file the backend runs under, passed to the claude CLI as
     --settings <path>: its own settings file, which that CLI reads in front of
     the one it would otherwise use. That is what keeps a second account on a

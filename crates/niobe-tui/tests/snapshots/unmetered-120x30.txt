@@ -3,7 +3,7 @@
 ┃                                                                            ┃ │                                       │
 ┃    45 +   }                                                                ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
 ┃    46 +   const res = await fetch(url, { ...init, headers });              ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
-┃    47 +   if (res.status === 304 && cached) return cached.body;            ┃ │ session ≥$0.04                        │
+┃    47 +   if (res.status === 304 && cached) return cached.body;            ┃ │ session — · billing not known         │
 ┃    48     return res;                                                      ┃ │ ───────────────────────────────────── │
 ┃       …                                                                    ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
 ┃   115     cache.set(url, {                                                 ┃ └───────────────────────────────────────┘

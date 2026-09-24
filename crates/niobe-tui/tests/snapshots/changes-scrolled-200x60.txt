@@ -6,7 +6,7 @@
 ┃                                                                                                                                ┃ │ ───────────────────────────────────────────────────────────────── │
 ┃ ◆ claude                                                                                                                       ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                │
 ┃   Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                               ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k                                │
-┃                                                                                                                                ┃ │ session ≥$0.04                                                    │
+┃                                                                                                                                ┃ │ API-equivalent ≥$0.04                                             │
 ┃ ▾ Read ×3                    catalog/fetch.ts, catalog/cache.ts, tests/fetch.test.ts                            15.3 kB · 3.6s ┃ │ ───────────────────────────────────────────────────────────────── │
 ┃   ├ catalog/fetch.ts                                                                                             7.2 kB · 1.2s ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k                             │
 ┃   ├ catalog/cache.ts                                                                                             3.1 kB · 1.2s ┃ └───────────────────────────────────────────────────────────────────┘
