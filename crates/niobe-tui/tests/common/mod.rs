@@ -19,6 +19,7 @@
     reason = "shared by two test binaries, neither of which uses all of it"
 )]
 
+use niobe_core::TestCounts;
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
     AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
@@ -483,6 +484,44 @@ pub fn hunk(old_start: u64, new_start: u64, lines: &[&str]) -> Hunk {
 
 pub fn running_session() -> App {
     session_read_at_a_fixed_moment(&session_events())
+}
+
+/// The same session with `cargo test` run once more at its end for each of
+/// `runs`, each reporting the counts and the exit status it is given.
+pub fn session_with_test_runs(runs: &[(Option<TestCounts>, Option<i32>)]) -> App {
+    let mut events = session_events();
+    for (n, (counts, exit_code)) in (0..).zip(runs) {
+        let id = format!("cargo-test-{n}");
+        let outcome = match exit_code {
+            Some(0) => ToolOutcome::Ok,
+            _ => ToolOutcome::Failed,
+        };
+        events.extend([
+            Event::ToolCallStart {
+                id: id.as_str().into(),
+                name: "Bash".to_owned(),
+                input: "cargo test".to_owned(),
+                summary: Some("cargo test".to_owned()),
+            },
+            Event::ToolCallEnd {
+                id: id.as_str().into(),
+                name: "Bash".to_owned(),
+                input: "cargo test".to_owned(),
+                output: String::new(),
+                bytes: 61_440,
+                outcome,
+                summary: Some("cargo test".to_owned()),
+                exit_code: *exit_code,
+                error: None,
+            },
+            Event::TestRun {
+                id: id.as_str().into(),
+                counts: *counts,
+                exit_code: *exit_code,
+            },
+        ]);
+    }
+    session_read_at_a_fixed_moment(&events)
 }
 
 /// How far apart a tool call's start and end land for each event between

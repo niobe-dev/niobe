@@ -12,6 +12,7 @@ pub mod diff;
 pub mod event;
 pub mod permission;
 pub mod session;
+pub mod test_run;
 
 pub use event::{
     AgentId, AgentOutcome, Backend, Billing, CheckpointId, Event, Mode, PermissionDecision,
@@ -19,8 +20,9 @@ pub use event::{
 };
 pub use permission::{Allowlist, Rule, RuleError};
 pub use session::{
-    CheckpointRecord, DecisionRecord, FileChanges, SessionState, ToolTotals, Totals,
+    CheckpointRecord, DecisionRecord, FileChanges, SessionState, TestRunRecord, ToolTotals, Totals,
 };
+pub use test_run::TestCounts;
 
 /// The name the binary is installed as, and the directory name used under
 /// `~/.config` and in a repo.

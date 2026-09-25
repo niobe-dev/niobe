@@ -28,9 +28,10 @@ mod common;
 use std::path::PathBuf;
 
 use common::{
-    metered_session, paint, running_session, screen, session_with_a_markdown_reply, style_at,
-    styles, unmetered_session,
+    metered_session, paint, running_session, screen, session_with_a_markdown_reply,
+    session_with_test_runs, style_at, styles, unmetered_session,
 };
+use niobe_core::TestCounts;
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
@@ -1297,6 +1298,101 @@ fn the_changes_pane_scrolls_to_what_is_below_the_files() {
         frame.contains("9f2c1ab"),
         "a commit the session made is drawn with its short hash"
     );
+}
+
+const GREEN: TestCounts = TestCounts {
+    passed: 637,
+    failed: 0,
+    ignored: 0,
+    suites: 30,
+};
+
+/// The Changes pane's rows, scrolled to the bottom, where the Tests section
+/// is drawn.
+fn changes_scrolled_down(app: &mut App, width: u16, height: u16) -> String {
+    let _ = screen(app, width, height);
+    app.scroll_pane(Pane::Changes, isize::MAX / 2);
+    screen(app, width, height)
+}
+
+/// The test run the agent made, as its own summary reported it, at the foot
+/// of the Changes pane and dated by when its call finished.
+#[test]
+fn the_agents_own_test_run_is_drawn_with_its_counts_and_its_age() {
+    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0))]);
+    let frame = changes_scrolled_down(&mut app, 200, 60);
+
+    assert_snapshot("tests-200x60", &frame);
+    assert!(
+        frame.contains("▾ Tests  637 passed · 0 failed · 30 suites · 1m ago"),
+        "{frame}"
+    );
+    assert_eq!(
+        style_at(&mut app, 200, 60, "637 passed").and_then(|style| style.fg),
+        Some(CLASSIC.add),
+        "a run that passed says so in the colour of an addition"
+    );
+}
+
+#[test]
+fn a_session_that_ran_no_tests_draws_no_tests_section() {
+    // The session does run `npm test`, which is not a format this shell
+    // reads, so it is not a test run as far as the pane is concerned.
+    let mut app = running_session();
+    let frame = changes_scrolled_down(&mut app, 200, 60);
+
+    assert!(!frame.contains("Tests"), "{frame}");
+    assert!(!frame.contains("0 passed"), "{frame}");
+}
+
+#[test]
+fn a_failing_run_is_drawn_as_failing_with_its_own_count() {
+    let failing = TestCounts {
+        passed: 612,
+        failed: 3,
+        ignored: 2,
+        suites: 30,
+    };
+    let mut app = session_with_test_runs(&[(Some(failing), Some(101))]);
+    let frame = changes_scrolled_down(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("612 passed · 3 failed · 2 ignored · 30 suites · 1m ago"),
+        "{frame}"
+    );
+    assert_eq!(
+        style_at(&mut app, 200, 60, "3 failed").and_then(|style| style.fg),
+        Some(CLASSIC.del)
+    );
+    assert_ne!(
+        style_at(&mut app, 200, 60, "612 passed").and_then(|style| style.fg),
+        Some(CLASSIC.add),
+        "a failing run does not colour its passes as if all were well"
+    );
+}
+
+#[test]
+fn a_run_whose_result_was_not_read_says_so_and_gives_no_count() {
+    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0)), (None, Some(101))]);
+    let frame = changes_scrolled_down(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("▾ Tests  exit 101 · result not read · 1m ago"),
+        "{frame}"
+    );
+    assert!(
+        !frame.contains("passed"),
+        "the earlier run's counts are not the latest run's"
+    );
+}
+
+#[test]
+fn a_narrow_pane_keeps_the_counts_and_sheds_the_rest() {
+    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0))]);
+    let frame = changes_scrolled_down(&mut app, 120, 30);
+
+    assert!(frame.contains("▾ Tests  637 passed · 0 failed"), "{frame}");
+    assert!(!frame.contains("30 suites"), "{frame}");
 }
 
 /// A directory that is not a repository has no branch and no commits, and the

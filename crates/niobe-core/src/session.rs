@@ -21,6 +21,7 @@
 //! far. That record says so ([`crate::event::Usage::settles_model`]), and the
 //! records it covers stop being owed for.
 
+use crate::test_run::TestCounts;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
@@ -274,6 +275,16 @@ pub struct CheckpointRecord {
     pub label: String,
 }
 
+/// The latest test run the session made, as it reported itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestRunRecord {
+    /// What its summary counted. `None` where its output did not hold the
+    /// whole run, so its result was not read.
+    pub counts: Option<TestCounts>,
+    /// The status the command exited with, where the backend reported one.
+    pub exit_code: Option<i32>,
+}
+
 /// Everything derivable from a session's events.
 ///
 /// Built by folding [`SessionState::apply`] over a stream, or in one go with
@@ -313,6 +324,9 @@ pub struct SessionState {
     files_at: BTreeMap<String, usize>,
     decisions: Vec<DecisionRecord>,
     checkpoints: Vec<CheckpointRecord>,
+    /// The latest test run, which replaces the one before it: an earlier
+    /// run's result says nothing about the code as it is now.
+    test_run: Option<TestRunRecord>,
     agents_spawned: u64,
     agents_completed: u64,
     agents_failed: u64,
@@ -447,6 +461,15 @@ impl SessionState {
                 id: id.clone(),
                 label: label.clone(),
             }),
+
+            Event::TestRun {
+                counts, exit_code, ..
+            } => {
+                self.test_run = Some(TestRunRecord {
+                    counts: *counts,
+                    exit_code: *exit_code,
+                });
+            }
 
             Event::AgentSpawn { id, .. } => {
                 self.agents_spawned += 1;
@@ -647,6 +670,12 @@ impl SessionState {
     /// The checkpoints taken, in order.
     pub fn checkpoints(&self) -> &[CheckpointRecord] {
         &self.checkpoints
+    }
+
+    /// The latest test run the session made. `None` where it has made none,
+    /// which is not a run of no tests.
+    pub fn test_run(&self) -> Option<TestRunRecord> {
+        self.test_run
     }
 
     /// How many sub-agents were spawned.
@@ -1165,6 +1194,36 @@ mod tests {
             removed,
             hunks: Vec::new(),
         }
+    }
+
+    fn tested(counts: Option<TestCounts>, exit_code: Option<i32>) -> Event {
+        Event::TestRun {
+            id: ToolCallId::new("t"),
+            counts,
+            exit_code,
+        }
+    }
+
+    #[test]
+    fn the_latest_test_run_is_the_one_the_session_reports() {
+        assert_eq!(SessionState::replay(&[]).test_run(), None);
+
+        let failing = TestCounts {
+            passed: 3,
+            failed: 1,
+            ignored: 0,
+            suites: 1,
+        };
+        let state =
+            SessionState::replay(&[tested(Some(failing), Some(101)), tested(None, Some(0))]);
+        assert_eq!(
+            state.test_run(),
+            Some(TestRunRecord {
+                counts: None,
+                exit_code: Some(0),
+            }),
+            "an earlier run's counts are not carried over a run that was not read"
+        );
     }
 
     #[test]

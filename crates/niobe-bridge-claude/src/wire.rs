@@ -196,6 +196,10 @@ pub(crate) struct ShellReport {
     /// result is of its launch and not of its end.
     #[serde(default)]
     pub(crate) background_task_id: Option<String>,
+    /// Set where the output was too large to hand the model whole: the CLI
+    /// wrote it to this file and the result carries only its first part.
+    #[serde(default)]
+    pub(crate) persisted_output_path: Option<String>,
 }
 
 /// One hunk of a [`FileReport`]: a unified diff's `@@` header and the lines

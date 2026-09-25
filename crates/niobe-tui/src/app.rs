@@ -23,7 +23,7 @@ use niobe_core::event::{
     UsageWindow,
 };
 use niobe_core::permission::{Allowlist, Rule};
-use niobe_core::session::{DecisionRecord, SessionState};
+use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
 use ratatui_textarea::{Input, TextArea, WrapMode};
 
 use ratatui::style::Style;
@@ -157,6 +157,8 @@ pub enum Section {
     Commits,
     /// What this session's edit tools said they changed.
     Edited,
+    /// What the session's latest test run reported.
+    Tests,
     /// The sub-agents the session spawned, running and finished.
     SubAgents,
     /// The decisions the session recorded.
@@ -167,10 +169,11 @@ pub enum Section {
 
 impl Section {
     /// Every section, in the order the panes draw them.
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 7] = [
         Section::WorkingTree,
         Section::Commits,
         Section::Edited,
+        Section::Tests,
         Section::SubAgents,
         Section::Decisions,
         Section::Tools,
@@ -179,7 +182,9 @@ impl Section {
     /// The pane this section is drawn in.
     pub fn pane(self) -> Pane {
         match self {
-            Section::WorkingTree | Section::Commits | Section::Edited => Pane::Changes,
+            Section::WorkingTree | Section::Commits | Section::Edited | Section::Tests => {
+                Pane::Changes
+            }
             Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
         }
     }
@@ -726,6 +731,10 @@ pub struct App {
     /// same order, so a pane reads the two together and cannot pair a decision
     /// with another one's time.
     decided_at: Vec<Option<Stamp>>,
+    /// When the call that ran [`SessionState::test_run`] finished, which is
+    /// what the run's age is counted from. Kept beside it for the reason
+    /// [`App::decided_at`] is.
+    tested_at: Option<Stamp>,
     composer: TextArea<'static>,
     /// First transcript line drawn, in wrapped lines.
     scroll: usize,
@@ -846,6 +855,7 @@ impl App {
             just_ended: None,
             agents: Vec::new(),
             decided_at: Vec::new(),
+            tested_at: None,
             composer,
             scroll: 0,
             follow: true,
@@ -1123,6 +1133,10 @@ impl App {
             // The decision itself is in the session fold, which carries no
             // times; when it was made is kept here, beside it.
             Event::Decision { .. } => self.decided_at.push(self.at),
+
+            // Straight after its call's end, so in the same tick and at the
+            // same clock: the moment the call finished.
+            Event::TestRun { .. } => self.tested_at = self.at,
 
             Event::AgentSpawn { id, label, .. } => {
                 let spawned = SubAgent {
@@ -2058,6 +2072,13 @@ impl App {
             .copied()
             .chain(std::iter::repeat(None));
         self.session.decisions().iter().zip(times)
+    }
+
+    /// The session's latest test run, with the moment its call finished where
+    /// the shell had a clock at the time. `None` where the session has run no
+    /// tests.
+    pub fn test_run(&self) -> Option<(TestRunRecord, Option<Stamp>)> {
+        self.session.test_run().map(|run| (run, self.tested_at))
     }
 
     /// When a sub-agent was spawned, where the shell had a clock at the time.
@@ -4120,6 +4141,29 @@ mod tests {
             Some(at(50_700, 14, 5)),
             "a live entry carries no time the shell could draw"
         );
+    }
+
+    #[test]
+    fn the_latest_test_run_is_kept_with_the_moment_its_call_finished() {
+        let run = |id: &str, passed: u64| Event::TestRun {
+            id: ToolCallId::new(id),
+            counts: Some(niobe_core::TestCounts {
+                passed,
+                failed: 0,
+                ignored: 0,
+                suites: 1,
+            }),
+            exit_code: Some(0),
+        };
+        let mut app = app();
+        assert_eq!(app.test_run(), None, "no run is not a run of nothing");
+
+        app.apply_at(&run("t1", 3), at(1_000, 9, 30));
+        app.apply_at(&run("t2", 5), at(1_060, 9, 31));
+
+        let (latest, finished) = app.test_run().expect("the session ran its tests");
+        assert_eq!(latest.counts.map(|counts| counts.passed), Some(5));
+        assert_eq!(finished, Some(at(1_060, 9, 31)));
     }
 
     #[test]

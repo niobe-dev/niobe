@@ -615,6 +615,27 @@ pub enum Event {
         hunks: Vec<crate::diff::Hunk>,
     },
 
+    /// A shell command the session ran was a test run, and this is what it
+    /// reported.
+    ///
+    /// Recognised and read by [`crate::test_run`], whichever backend ran it.
+    /// Arrives directly after the [`Event::ToolCallEnd`] of the call, and only
+    /// for a call that ran: a refused one ran no tests.
+    TestRun {
+        /// The call that ran the tests.
+        id: ToolCallId,
+        /// The counts the run's own summary gave, summed over its test
+        /// binaries. `None` where its output did not hold the whole run — it
+        /// was filtered, cut short or did not build — or its exit status did
+        /// not say it ran to the end: a run whose result was not read, never
+        /// one of no tests.
+        counts: Option<crate::test_run::TestCounts>,
+        /// The status the command exited with, where the backend reported
+        /// one, as [`Event::ToolCallEnd`] carries it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+
     /// A structured `decide` record: why a plan, a model, a file or a declined
     /// scope was chosen. Surfaced in the changes pane and exported into commit
     /// and PR bodies.

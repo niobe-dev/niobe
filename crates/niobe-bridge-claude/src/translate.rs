@@ -76,6 +76,7 @@ use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, Context, CostBasis, Event, Mode, PermissionDecision,
     SessionMeta, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
+use niobe_core::test_run::{self, TestCounts};
 
 use crate::conformance;
 use crate::wire;
@@ -845,8 +846,22 @@ impl Translator {
                 ToolOutcome::Failed | ToolOutcome::Denied => failure_reason(&output, exit_code),
             };
 
+            let tested = test_run(
+                &name,
+                &arguments,
+                outcome,
+                &output,
+                reported.as_ref(),
+                exit_code,
+            );
+            let id = ToolCallId::new(tool_use_id);
+            let tested = tested.map(|(counts, exit_code)| Event::TestRun {
+                id: id.clone(),
+                counts,
+                exit_code,
+            });
             out.push(Event::ToolCallEnd {
-                id: ToolCallId::new(tool_use_id),
+                id,
                 name,
                 input,
                 output,
@@ -857,6 +872,7 @@ impl Translator {
                 error,
             });
             out.extend(change);
+            out.extend(tested);
         }
     }
 
@@ -1478,6 +1494,14 @@ const SHELL_TOOL: &str = "Bash";
 /// How the CLI opens a failed shell command's result.
 const EXIT_CODE_PREFIX: &str = "Exit code ";
 
+/// How the CLI opens a result it saved to a file for being too large, and
+/// carries only the first part of.
+const PERSISTED_PREFIX: &str = "<persisted-output>";
+
+/// How the CLI ends the line it puts in place of the lines it cut out of the
+/// middle of a long result: `... (1033 lines truncated)`.
+const TRUNCATED_SUFFIX: &str = " lines truncated)";
+
 /// How the CLI opens the result of a `Write` that made a file that was not
 /// there, as against one that replaced a file that was.
 const CREATED_PREFIX: &str = "File created successfully at:";
@@ -1515,6 +1539,52 @@ fn exit_code(
         }
         ToolOutcome::Denied => None,
     }
+}
+
+/// What a shell call that ran `cargo test` reported, where it was one: the
+/// counts, where its output held the whole run, and the status it exited with.
+///
+/// A refused call ran nothing and is not a test run. The counts are read
+/// only from output the CLI handed over whole: one it cut in the middle —
+/// a `... (<n> lines truncated)` line where the lines were — or saved to a
+/// file and gave the first part of, or a command it interrupted, is a run
+/// whose result was not read. A cut can fall between two test binaries and
+/// leave every remaining block whole, so the shape of what is left cannot be
+/// trusted to show it.
+fn test_run(
+    name: &str,
+    arguments: &serde_json::Value,
+    outcome: ToolOutcome,
+    output: &str,
+    reported: Option<&serde_json::Value>,
+    exit_code: Option<i32>,
+) -> Option<(Option<TestCounts>, Option<i32>)> {
+    let ran = match outcome {
+        ToolOutcome::Ok | ToolOutcome::Failed => name == SHELL_TOOL,
+        ToolOutcome::Denied => false,
+    };
+    if !ran || !test_run::is_test_run(string_at(arguments, "command")?) {
+        return None;
+    }
+    let counts = match cut_by_the_cli(output, reported) {
+        true => None,
+        false => test_run::counts(output, exit_code),
+    };
+    Some((counts, exit_code))
+}
+
+/// Whether the CLI handed a shell command's output over in part.
+fn cut_by_the_cli(output: &str, reported: Option<&serde_json::Value>) -> bool {
+    let report = reported
+        .and_then(|report| serde_json::from_value::<wire::ShellReport>(report.clone()).ok());
+    let reported_cut =
+        report.is_some_and(|report| report.interrupted || report.persisted_output_path.is_some());
+    let marked_cut = output.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with(PERSISTED_PREFIX)
+            || (line.starts_with("... (") && line.ends_with(TRUNCATED_SUFFIX))
+    });
+    reported_cut || marked_cut
 }
 
 /// The status in a failed command's `Exit code <n>` line, where it opens the
@@ -3521,6 +3591,122 @@ mod tests {
 
     fn shell_call(translator: &mut Translator) {
         translator.line(&call("t1", "Bash", r#"{"command":"cargo test"}"#));
+    }
+
+    /// A `cargo test` run of one test binary, whole, as the shell tool
+    /// captures it with its standard error in it.
+    const TEST_RUN: &str =
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (target/debug/deps/demo-760e00b68511d171)
+
+running 3 tests
+test tests::adds ... ok
+test tests::slow ... ignored
+test tests::wrong ... FAILED
+
+test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`";
+
+    /// Every test run the events report, as its counts and exit status.
+    fn test_runs(events: &[Event]) -> Vec<(Option<TestCounts>, Option<i32>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::TestRun {
+                    counts, exit_code, ..
+                } => Some((*counts, *exit_code)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_test_run_reports_its_own_counts_straight_after_the_call_ends() {
+        let mut translator = translator();
+        shell_call(&mut translator);
+
+        let events = translator.line(&result("t1", &format!("Exit code 101\n{TEST_RUN}"), true));
+
+        let counts = TestCounts {
+            passed: 1,
+            failed: 1,
+            ignored: 1,
+            suites: 1,
+        };
+        assert_eq!(test_runs(&events), [(Some(counts), Some(101))]);
+        let at = events
+            .iter()
+            .position(|event| matches!(event, Event::TestRun { .. }))
+            .expect("the run is reported");
+        assert!(
+            matches!(
+                events.get(at.wrapping_sub(1)),
+                Some(Event::ToolCallEnd { .. })
+            ),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_test_run_the_cli_handed_over_in_part_is_not_read() {
+        let cut = TEST_RUN.replace(
+            "test tests::slow ... ignored\n",
+            "... (1 lines truncated)\n",
+        );
+        let preview = format!(
+            "<persisted-output>\nOutput too large (55.6KB). Full output saved to: /x.txt\n\n\
+             Preview (first 2KB):\n{TEST_RUN}\n</persisted-output>"
+        );
+        for (output, reported) in [
+            (cut.as_str(), shell_report("")),
+            (preview.as_str(), shell_report("")),
+            (
+                TEST_RUN,
+                shell_report(r#","persistedOutputPath":"/x.txt","persistedOutputSize":56907"#),
+            ),
+            (
+                TEST_RUN,
+                shell_report("").replace(r#""interrupted":false"#, r#""interrupted":true"#),
+            ),
+        ] {
+            let mut translator = translator();
+            shell_call(&mut translator);
+
+            let events = translator.line(&result_with("t1", output, &reported));
+
+            let counts: Vec<_> = test_runs(&events).into_iter().map(|(c, _)| c).collect();
+            assert_eq!(counts, [None], "{output}\n{reported}");
+        }
+    }
+
+    #[test]
+    fn a_test_run_filtered_down_to_its_summaries_happened_and_is_not_read() {
+        let mut translator = translator();
+        translator.line(&call(
+            "t1",
+            "Bash",
+            r#"{"command":"cargo test 2>&1 | grep 'test result'"}"#,
+        ));
+
+        let summary = "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s";
+        let events = translator.line(&result_with("t1", summary, &shell_report("")));
+
+        assert_eq!(test_runs(&events), [(None, Some(0))]);
+    }
+
+    #[test]
+    fn a_refused_test_run_or_another_command_is_no_test_run() {
+        let mut other = translator();
+        other.line(&call("t1", "Bash", r#"{"command":"cat log.txt"}"#));
+        let events = other.line(&result_with("t1", TEST_RUN, &shell_report("")));
+        assert_eq!(test_runs(&events), []);
+
+        let mut refused = translator();
+        shell_call(&mut refused);
+        refused.refused(&ToolCallId::new("t1"));
+        let events = refused.line(&result("t1", "The operator denied this call", true));
+        assert_eq!(test_runs(&events), []);
     }
 
     #[test]

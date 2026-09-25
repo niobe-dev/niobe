@@ -2233,6 +2233,7 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
         Section::Edited,
         session_file_rows(app, session, width, theme),
     );
+    rows.section(Section::Tests, test_rows(app, width, theme));
     rows
 }
 
@@ -2425,6 +2426,101 @@ fn session_file_rows(
         }
     }
     rows
+}
+
+/// `▾ Tests  637 passed · 0 failed · 30 suites · 4.2s ago`: what the
+/// session's latest test run said about itself, and how long ago its call
+/// finished. No section at all where the session has run no tests, which is
+/// not a run that passed nothing.
+///
+/// A run whose output did not hold the whole run says that it ran and that
+/// its result was not read, with the status it exited with where that was a
+/// failure — never a count it did not find. Where the pane is too narrow for
+/// all of it, the suites go first and then the age: the counts are what the
+/// section is for.
+fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let Some((run, at)) = app.test_run() else {
+        return Vec::new();
+    };
+    let dim = Style::new().fg(theme.dim);
+    let said = match run.counts {
+        Some(counts) => test_counts(counts, theme),
+        None => test_not_read(run.exit_code, theme),
+    };
+    let suites = run
+        .counts
+        .map(|counts| Span::styled(format!(" · {}", suites_said(counts.suites)), dim));
+    let age = at
+        .zip(app.stamp())
+        .and_then(|(at, now)| now.since(at))
+        .map(|age| Span::styled(format!(" · {} ago", clock::ago(age)), dim));
+
+    let room = width.saturating_sub(text::width("▾ Tests") + 2);
+    let fits = |spans: &[Span<'static>]| {
+        spans.iter().map(|s| text::width(&s.content)).sum::<usize>() <= room
+    };
+    let whole: Vec<Span<'static>> = said
+        .iter()
+        .cloned()
+        .chain(suites.clone())
+        .chain(age.clone())
+        .collect();
+    let aged: Vec<Span<'static>> = said.iter().cloned().chain(age).collect();
+    let summary = [whole, aged]
+        .into_iter()
+        .find(|spans| fits(spans))
+        .unwrap_or(said);
+    vec![section_header(
+        app.folded(Section::Tests),
+        "Tests",
+        summary,
+        width,
+        theme,
+    )]
+}
+
+/// `637 passed · 0 failed`, with a failing run's failures in the failure
+/// colour and its passes no longer in the colour that says all is well.
+fn test_counts(counts: niobe_core::TestCounts, theme: &Theme) -> Vec<Span<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let (passed, failed) = match counts.failing() {
+        true => (Style::new().fg(theme.fg), Style::new().fg(theme.del).bold()),
+        false => (Style::new().fg(theme.add), dim),
+    };
+    let mut spans = vec![
+        Span::styled(format!("{} passed", counts.passed), passed),
+        Span::styled(" · ", dim),
+        Span::styled(format!("{} failed", counts.failed), failed),
+    ];
+    if counts.ignored > 0 {
+        spans.push(Span::styled(format!(" · {} ignored", counts.ignored), dim));
+    }
+    spans
+}
+
+/// `exit 101 · result not read`: a run that happened and whose counts are not
+/// known. A zero status is not drawn, because a command whose output was
+/// filtered exits with the filter's status rather than the run's.
+fn test_not_read(exit_code: Option<i32>, theme: &Theme) -> Vec<Span<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let mut spans = Vec::new();
+    if let Some(code) = exit_code.filter(|code| *code != 0) {
+        spans.push(Span::styled(
+            format!("exit {code}"),
+            Style::new().fg(theme.del),
+        ));
+        spans.push(Span::styled(" · ", dim));
+    }
+    spans.push(Span::styled("result not read", dim));
+    spans
+}
+
+/// `1 suite`, `30 suites`.
+fn suites_said(suites: u64) -> String {
+    match suites {
+        1 => "1 suite".to_owned(),
+        n => format!("{n} suites"),
+    }
 }
 
 /// The commits the session has made, newest first.

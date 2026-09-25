@@ -42,7 +42,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   numbers from; `permission.rs` is the standing answer to a permission prompt (`Rule`,
   `Allowlist`), which the shell matches and the config stores; `diff.rs` is the line arithmetic
   every backend counts a file change with, so two bridges cannot disagree about what a changed
-  line is, and the `Hunk` a change's lines travel in where the backend reported them. Depends on no other workspace crate and on no wire format.
+  line is, and the `Hunk` a change's lines travel in where the backend reported them; `test_run.rs` recognises a shell
+  command that runs `cargo test` and reads the counts out of its output, only where the output
+  holds the whole run, so every backend reads a test run the same way. Depends on no other workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
