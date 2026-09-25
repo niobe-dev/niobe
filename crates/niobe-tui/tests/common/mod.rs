@@ -19,12 +19,12 @@
     reason = "shared by two test binaries, neither of which uses all of it"
 )]
 
-use niobe_core::TestCounts;
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
     AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
     ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
+use niobe_core::{TestCounts, TestRunRecord};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use niobe_tui::app::{App, Commit, Repo, WorkingFile};
@@ -497,8 +497,24 @@ pub fn running_session() -> App {
 /// `runs`, each reporting the counts, the exit status and whether it is known
 /// to have failed as it is given.
 pub fn session_with_test_runs(runs: &[(Option<TestCounts>, Option<i32>, bool)]) -> App {
+    let runs: Vec<_> = runs
+        .iter()
+        .map(|&(counts, exit_code, failed)| TestRunRecord::new(counts, exit_code, failed, None))
+        .collect();
+    session_with_test_records(&runs)
+}
+
+/// The same session with `cargo test` run once more at its end for each of
+/// `runs`, each reporting what its record holds, the tests it named included.
+pub fn session_with_test_records(runs: &[TestRunRecord]) -> App {
     let mut events = session_events();
-    for (n, (counts, exit_code, failed)) in (0..).zip(runs) {
+    for (n, run) in (0..).zip(runs) {
+        let TestRunRecord {
+            counts,
+            exit_code,
+            failed,
+            failures,
+        } = run;
         let id = format!("cargo-test-{n}");
         let outcome = match exit_code {
             Some(0) => ToolOutcome::Ok,
@@ -527,6 +543,7 @@ pub fn session_with_test_runs(runs: &[(Option<TestCounts>, Option<i32>, bool)]) 
                 counts: *counts,
                 exit_code: *exit_code,
                 failed: *failed,
+                failures: failures.clone(),
             },
         ]);
     }

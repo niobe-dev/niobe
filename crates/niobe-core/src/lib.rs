@@ -23,7 +23,7 @@ pub use session::{
     CheckpointRecord, DecisionRecord, FileChanges, SessionState, TestRunRecord, ToolTotals, Totals,
     TurnRecord,
 };
-pub use test_run::TestCounts;
+pub use test_run::{FailedTests, TestCounts};
 
 /// The name the binary is installed as, and the directory name used under
 /// `~/.config` and in a repo.

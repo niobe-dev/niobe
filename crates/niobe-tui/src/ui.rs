@@ -32,6 +32,7 @@ use ratatui::widgets::{
 
 use niobe_core::event::{AgentOutcome, Billing, Context, Mode, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, TestRunRecord, ToolTotals, Totals};
+use niobe_core::test_run::FailedTests;
 
 use crate::app::{
     Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker, Section,
@@ -2844,13 +2845,50 @@ fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         return Vec::new();
     };
     let age = at.zip(app.stamp()).and_then(|(at, now)| now.since(at));
-    vec![section_header(
-        app.folded(Section::Tests),
+    let folded = app.folded(Section::Tests);
+    let mut rows = vec![section_header(
+        folded,
         "Tests",
-        test_figures(&run, age, theme),
+        test_figures(run, age, theme),
         width,
         theme,
-    )]
+    )];
+    if let Some(failures) = run.failures.as_ref().filter(|_| !folded) {
+        rows.extend(failure_rows(failures, width, theme));
+    }
+    rows
+}
+
+/// The most failing tests the section names one to a row; the rest are
+/// counted on a row of their own.
+const NAMED_FAILURES: usize = 8;
+
+/// `failing in --test cli`, then a row per test that binary listed failing.
+///
+/// Labelled as the binary's because that is all they are: a run that went on
+/// past a failing binary, or whose output was cut, may have failed in another
+/// one too.
+fn failure_rows(failures: &FailedTests, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let mut rows = vec![Line::from(Span::styled(
+        text::truncate(&format!("  failing in {}", failures.binary), width),
+        dim,
+    ))];
+    let room = width.saturating_sub(text::width("  ✗ "));
+    rows.extend(failures.tests.iter().take(NAMED_FAILURES).map(|test| {
+        Line::from(vec![
+            Span::styled("  ✗ ", Style::new().fg(theme.del)),
+            Span::styled(text::truncate(test, room), Style::new().fg(theme.del)),
+        ])
+    }));
+    let more = failures.tests.len().saturating_sub(NAMED_FAILURES);
+    if more > 0 {
+        rows.push(Line::from(Span::styled(
+            format!("    … {more} more"),
+            dim.italic(),
+        )));
+    }
+    rows
 }
 
 /// Every figure a test run's header can carry, ranked for [`narrowed`].
@@ -4686,16 +4724,19 @@ mod tests {
             }),
             exit_code: Some(101),
             failed: true,
+            failures: None,
         };
         let uncounted = TestRunRecord {
             counts: None,
             exit_code: Some(101),
             failed: true,
+            failures: None,
         };
         let unread = TestRunRecord {
             counts: None,
             exit_code: Some(101),
             failed: false,
+            failures: None,
         };
         let age = Some(Duration::from_secs(95));
         vec![

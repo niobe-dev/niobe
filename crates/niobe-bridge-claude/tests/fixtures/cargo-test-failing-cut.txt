@@ -1,0 +1,175 @@
+Exit code 101
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/ledger-c0402f8e2e181b31)
+
+running 200 tests
+test tests::rounds_an_amount_of_001_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_002_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_003_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_004_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_005_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_006_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_007_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_008_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_009_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_010_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_011_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_012_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_013_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_014_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_015_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_016_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_017_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_018_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_019_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_020_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_021_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_022_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_023_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_024_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_025_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_026_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_027_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_028_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_029_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_030_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_031_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_032_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_033_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_034_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_035_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_036_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_037_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_038_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_039_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_040_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_041_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_042_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_043_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_044_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_045_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_046_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_047_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_048_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_049_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_050_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_051_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_052_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_053_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_054_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_055_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_056_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_057_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_058_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_059_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_060_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_061_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_062_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_063_cents_up_to_the_next_whole_unit ... ok
+test tests::rounds_an_amount_of_064_cents_up_to_the_next_whole_unit ... ok
+test tests::roun
+
+... [12901 characters truncated] ...
+
+ED
+test a_statement_line_046_rounds_like_the_ledger ... ok
+test a_statement_line_047_rounds_like_the_ledger ... ok
+test a_statement_line_048_rounds_like_the_ledger ... ok
+test a_statement_line_049_rounds_like_the_ledger ... ok
+test a_statement_line_050_rounds_like_the_ledger ... ok
+test a_statement_line_051_rounds_like_the_ledger ... ok
+test a_statement_line_052_rounds_like_the_ledger ... ok
+test a_statement_line_053_rounds_like_the_ledger ... ok
+test a_statement_line_054_rounds_like_the_ledger ... ok
+test a_statement_line_055_rounds_like_the_ledger ... ok
+test a_statement_line_056_rounds_like_the_ledger ... ok
+test a_statement_line_057_rounds_like_the_ledger ... ok
+test a_statement_line_058_rounds_like_the_ledger ... ok
+test a_statement_line_059_rounds_like_the_ledger ... ok
+test a_statement_line_060_rounds_like_the_ledger ... ok
+test a_statement_line_061_rounds_like_the_ledger ... ok
+test a_statement_line_062_rounds_like_the_ledger ... ok
+test a_statement_line_063_rounds_like_the_ledger ... ok
+test a_statement_line_064_rounds_like_the_ledger ... ok
+test a_statement_line_065_rounds_like_the_ledger ... ok
+test a_statement_line_066_rounds_like_the_ledger ... ok
+test a_statement_line_067_rounds_like_the_ledger ... ok
+test a_statement_line_068_rounds_like_the_ledger ... ok
+test a_statement_line_069_rounds_like_the_ledger ... ok
+test a_statement_line_070_rounds_like_the_ledger ... ok
+test a_statement_line_071_rounds_like_the_ledger ... ok
+test a_statement_line_072_rounds_like_the_ledger ... ok
+test a_statement_line_073_rounds_like_the_ledger ... ok
+test a_statement_line_074_rounds_like_the_ledger ... ok
+test a_statement_line_075_rounds_like_the_ledger ... ok
+test a_statement_line_076_rounds_like_the_ledger ... ok
+test a_statement_line_077_rounds_like_the_ledger ... ok
+test a_statement_line_078_rounds_like_the_ledger ... ok
+test a_statement_line_079_rounds_like_the_ledger ... ok
+test a_statement_line_080_rounds_like_the_ledger ... ok
+test a_statement_line_081_rounds_like_the_ledger ... ok
+test a_statement_line_082_rounds_like_the_ledger ... ok
+test a_statement_line_083_rounds_like_the_ledger ... ok
+test a_statement_line_084_rounds_like_the_ledger ... ok
+test a_statement_line_085_rounds_like_the_ledger ... ok
+test a_statement_line_086_rounds_like_the_ledger ... ok
+test a_statement_line_087_rounds_like_the_ledger ... ok
+test a_statement_line_088_rounds_like_the_ledger ... FAILED
+test a_statement_line_089_rounds_like_the_ledger ... ok
+test a_statement_line_090_rounds_like_the_ledger ... ok
+test a_statement_line_091_rounds_like_the_ledger ... ok
+test a_statement_line_092_rounds_like_the_ledger ... ok
+test a_statement_line_093_rounds_like_the_ledger ... ok
+test a_statement_line_094_rounds_like_the_ledger ... ok
+test a_statement_line_095_rounds_like_the_ledger ... ok
+test a_statement_line_096_rounds_like_the_ledger ... ok
+test a_statement_line_097_rounds_like_the_ledger ... ok
+test a_statement_line_098_rounds_like_the_ledger ... ok
+test a_statement_line_099_rounds_like_the_ledger ... ok
+test a_statement_line_100_rounds_like_the_ledger ... ok
+test a_statement_line_101_rounds_like_the_ledger ... ok
+test a_statement_line_102_rounds_like_the_ledger ... ok
+test a_statement_line_103_rounds_like_the_ledger ... ok
+test a_statement_line_104_rounds_like_the_ledger ... ok
+test a_statement_line_105_rounds_like_the_ledger ... ok
+test a_statement_line_106_rounds_like_the_ledger ... ok
+test a_statement_line_107_rounds_like_the_ledger ... ok
+test a_statement_line_108_rounds_like_the_ledger ... ok
+test a_statement_line_109_rounds_like_the_ledger ... ok
+test a_statement_line_110_rounds_like_the_ledger ... ok
+test a_statement_line_111_rounds_like_the_ledger ... ok
+test a_statement_line_112_rounds_like_the_ledger ... ok
+test a_statement_line_113_rounds_like_the_ledger ... ok
+test a_statement_line_114_rounds_like_the_ledger ... ok
+test a_statement_line_115_rounds_like_the_ledger ... ok
+test a_statement_line_116_rounds_like_the_ledger ... ok
+test a_statement_line_117_rounds_like_the_ledger ... ok
+test a_statement_line_118_rounds_like_the_ledger ... ok
+test a_statement_line_119_rounds_like_the_ledger ... ok
+test a_statement_line_120_rounds_like_the_ledger ... ok
+
+failures:
+
+---- a_statement_line_037_rounds_like_the_ledger stdout ----
+
+thread 'a_statement_line_037_rounds_like_the_ledger' (405838857) panicked at tests/statement.rs:39:60:
+assertion `left == right` failed
+  left: 37
+ right: 38
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_statement_line_088_rounds_like_the_ledger stdout ----
+
+thread 'a_statement_line_088_rounds_like_the_ledger' (405838908) panicked at tests/statement.rs:90:60:
+assertion `left == right` failed
+  left: 88
+ right: 89
+
+
+failures:
+    a_statement_line_037_rounds_like_the_ledger
+    a_statement_line_088_rounds_like_the_ledger
+
+test result: FAILED. 118 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test statement`

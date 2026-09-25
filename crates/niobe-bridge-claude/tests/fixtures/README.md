@@ -350,6 +350,35 @@ also exits with, but only after saying a crate could not compile and before
 any binary runs. That is a run that failed after its tests started, and it is
 what the bridge reports, with no count.
 
+## `cargo-test-failing-cut.txt`
+
+The result a failing `cargo test` came back as from Claude Code 2.1.282, on
+25 September 2026, recorded byte for byte (which is why it carries no
+header). The crate it ran was made for the recording: 200 passing unit tests
+and an integration test file `tests/statement.rs` of 120 tests, two of which
+fail. Its output was 22,888 bytes, under the 30,000 or so characters the CLI
+keeps of a failed command, so the CLI cut only its middle: `Exit code 101`,
+then 10,040 characters in all with a line `... [12901 characters truncated]
+...` in them. `tests/transcript.rs` folds it as the result of the same call
+as `cargo-test-workspace-cut.txt`.
+
+Here the part after the cut is the end of the run. It holds the failing
+binary's `failures:` list, its summary and the line cargo names it with:
+
+```text
+failures:
+    a_statement_line_037_rounds_like_the_ledger
+    a_statement_line_088_rounds_like_the_ledger
+
+test result: FAILED. 118 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test statement`
+```
+
+Two names, and the summary says two failed, so the list is whole; the bridge
+reports those two as the failures of `--test statement`. The unit tests'
+summary was in the part cut out, so no count of the run is read.
+
 ## `long-context.jsonl`
 
 A two-turn session on `claude-opus-5[1m]` — Opus 5 with its 1M-token window

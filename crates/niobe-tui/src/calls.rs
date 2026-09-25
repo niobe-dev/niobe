@@ -36,6 +36,7 @@ use crate::theme::Theme;
 use crate::ui::count;
 use niobe_core::event::ToolOutcome;
 use niobe_core::session::TestRunRecord;
+use niobe_core::test_run::FailedTests;
 
 /// How much of a tool-call entry the operator has asked to see: the two
 /// switches that hold for the whole transcript.
@@ -195,17 +196,18 @@ fn under(
     let room = width.saturating_sub(text::width(&lead));
     let tested = call
         .tested
+        .as_ref()
         .filter(|run| !call.failed() || run.counts.is_some() || run.failed);
     let body = match (&call.printed, tested, call.failed(), &call.change) {
         (Some(printed), _, _, _) => {
             let mut lines: Vec<_> = tested
-                .map(|run| test_line(&run, room, theme))
+                .map(|run| test_line(run, room, theme))
                 .into_iter()
                 .collect();
             lines.extend(printed_lines(call, printed, room, theme));
             lines
         }
-        (None, Some(run), _, _) => vec![test_line(&run, room, theme)],
+        (None, Some(run), _, _) => vec![test_line(run, room, theme)],
         (None, None, true, _) => vec![reason(call, room, theme)],
         (None, None, false, Some(change)) => {
             crate::hunks::lines(change, room, detail.diffs_open, theme)
@@ -256,13 +258,19 @@ fn printed_lines(
 }
 
 /// What a test run reported, hung under its call: `637 passed · 0 failed`,
-/// with the failures in the failure colour where there are any.
+/// with the failures in the failure colour where there are any, and the first
+/// test the last failing binary listed, where its list was left.
 ///
-/// Where the room runs out, the ignored go first and then the passed: the
-/// failures are what the line is for. A run whose counts were not read says
-/// that, and whether it is still known to have failed.
+/// Where the room runs out, the ignored go first, then the passed and then
+/// the failing test's name: the failures are what the line is for. A run
+/// whose counts were not read says that, and whether it is still known to
+/// have failed.
 fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
+    let named = run.failures.as_ref().map(|failures| {
+        let said = failing_within(failures, usize::MAX).unwrap_or_default();
+        (NAMED, Span::styled(said, theme_del(theme)))
+    });
     let mut figures = match run.counts {
         Some(counts) => {
             let (passed, failed) = match counts.failing() {
@@ -270,24 +278,46 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
                 false => (Style::new().fg(theme.add), dim),
             };
             let mut figures = vec![
-                (1, Span::styled(format!("{} passed", counts.passed), passed)),
+                (2, Span::styled(format!("{} passed", counts.passed), passed)),
                 (0, Span::styled(format!("{} failed", counts.failed), failed)),
             ];
+            figures.extend(named);
             if counts.ignored > 0 {
-                figures.push((2, Span::styled(format!("{} ignored", counts.ignored), dim)));
+                figures.push((3, Span::styled(format!("{} ignored", counts.ignored), dim)));
             }
             figures
         }
-        None if run.failed => vec![
-            (0, Span::styled("tests failed", theme_del(theme).bold())),
-            (1, Span::styled("counts not read", dim)),
-        ],
+        None if run.failed => {
+            let mut figures = vec![(0, Span::styled("tests failed", theme_del(theme).bold()))];
+            figures.extend(named);
+            figures.push((2, Span::styled("counts not read", dim)));
+            figures
+        }
         None => vec![(0, Span::styled("test result not read", dim.italic()))],
     };
     let room = room.saturating_sub(text::width(LAST_BRANCH));
     while figures.len() > 1 && figures_width(&figures) > room {
-        if let Some(least) = (0..figures.len()).max_by_key(|&at| figures[at].0) {
-            figures.remove(least);
+        let Some(least) = (0..figures.len()).max_by_key(|&at| figures[at].0) else {
+            break;
+        };
+        // The name gives up its own end before the figure goes: which binary
+        // it is from is what keeps it from reading as the run's whole list.
+        let excess = figures_width(&figures).saturating_sub(room);
+        let shortened = (figures[least].0 == NAMED)
+            .then_some(run.failures.as_ref())
+            .flatten()
+            .and_then(|failures| {
+                let columns = text::width(&figures[least].1.content).saturating_sub(excess);
+                failing_within(failures, columns)
+            });
+        match shortened {
+            Some(said) => {
+                figures[least].1.content = said.into();
+                break;
+            }
+            None => {
+                figures.remove(least);
+            }
         }
     }
     let mut spans = vec![Span::styled(LAST_BRANCH, dim)];
@@ -298,6 +328,29 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
         spans.push(figure);
     }
     Line::from(spans)
+}
+
+/// Where the failing test's name ranks among a test line's figures: after the
+/// failures, ahead of everything else.
+const NAMED: u8 = 1;
+
+/// The shortest a failing test's name is cut to before it is given up: fewer
+/// columns than this name nothing.
+const NAME_AT_LEAST: usize = 8;
+
+/// `tests::wrong in --lib`, or `tests::wrong +2 in --lib` where the binary
+/// listed more — the first of them, and whose list it was — in `columns` at
+/// most. The name is cut to fit and the rest is kept whole; `None` where that
+/// leaves less than [`NAME_AT_LEAST`] of the name.
+fn failing_within(failures: &FailedTests, columns: usize) -> Option<String> {
+    let first = failures.tests.first()?;
+    let whose = match failures.tests.len().saturating_sub(1) {
+        0 => format!(" in {}", failures.binary),
+        more => format!(" +{more} in {}", failures.binary),
+    };
+    let room = columns.saturating_sub(text::width(&whose));
+    (room >= NAME_AT_LEAST.min(text::width(first)))
+        .then(|| format!("{}{whose}", text::truncate(first, room)))
 }
 
 /// How wide a row of figures is drawn, with the separators between them.
@@ -640,6 +693,17 @@ mod tests {
 
     /// A `cargo test` call that ended with `status`, and the run it reported.
     fn tested(app: &mut App, status: i32, counts: Option<niobe_core::TestCounts>, failed: bool) {
+        tested_naming(app, status, counts, failed, None);
+    }
+
+    /// The same, with the tests the last failing binary named.
+    fn tested_naming(
+        app: &mut App,
+        status: i32,
+        counts: Option<niobe_core::TestCounts>,
+        failed: bool,
+        failures: Option<niobe_core::FailedTests>,
+    ) {
         let outcome = match status {
             0 => ToolOutcome::Ok,
             _ => ToolOutcome::Failed,
@@ -661,6 +725,7 @@ mod tests {
             counts,
             exit_code: Some(status),
             failed,
+            failures,
         });
     }
 
@@ -743,6 +808,93 @@ mod tests {
             lines(&app.entries()[0], 28, Detail::default(), &Theme::default()).swap_remove(1);
         let under: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(under.trim(), "└ 630 passed · 7 failed");
+    }
+
+    fn named(binary: &str, tests: &[&str]) -> Option<niobe_core::FailedTests> {
+        Some(niobe_core::FailedTests {
+            binary: binary.to_owned(),
+            tests: tests.iter().map(|&test| test.to_owned()).collect(),
+        })
+    }
+
+    const STATEMENT: [&str; 2] = [
+        "a_statement_line_037_rounds_like_the_ledger",
+        "a_statement_line_088_rounds_like_the_ledger",
+    ];
+
+    #[test]
+    fn a_failed_run_names_the_first_test_its_last_failing_binary_listed_and_that_binary() {
+        let mut app = app();
+        tested_naming(
+            &mut app,
+            101,
+            None,
+            true,
+            named("--test statement", &STATEMENT),
+        );
+
+        let under = |width| {
+            let line = lines(
+                &app.entries()[0],
+                width,
+                Detail::default(),
+                &Theme::default(),
+            )
+            .swap_remove(1);
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        };
+        assert_eq!(
+            under(120),
+            "└ tests failed · a_statement_line_037_rounds_like_the_ledger +1 in --test statement \
+             · counts not read"
+        );
+        assert_eq!(
+            under(80),
+            "└ tests failed · a_statement_line_037_rounds_like_the_… +1 in --test statement",
+            "the name gives up its end, and never whose list it was"
+        );
+        assert_eq!(under(40), "└ tests failed");
+    }
+
+    #[test]
+    fn a_counted_failing_run_names_what_failed_ahead_of_what_passed() {
+        let mut app = app();
+        tested_naming(
+            &mut app,
+            101,
+            counts(3, 1, 1),
+            true,
+            named("--lib", &["tests::wrong"]),
+        );
+
+        assert_eq!(
+            drawn(&app, false)[1].trim(),
+            "└ 3 passed · 1 failed · tests::wrong in --lib · 1 ignored"
+        );
+        let line =
+            lines(&app.entries()[0], 36, Detail::default(), &Theme::default()).swap_remove(1);
+        let under: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(under.trim(), "└ 1 failed · tests::wrong in --lib");
+    }
+
+    #[test]
+    fn a_named_failure_is_drawn_in_the_failure_colour() {
+        let mut app = app();
+        tested_naming(&mut app, 101, None, true, named("--lib", &["tests::wrong"]));
+
+        let theme = Theme::default();
+        let line = lines(&app.entries()[0], 80, Detail::default(), &theme).swap_remove(1);
+        let name = line
+            .spans
+            .iter()
+            .find(|span| span.content.starts_with("tests::wrong"))
+            .expect("the name is a span of its own");
+        assert_eq!(name.style.fg, Some(theme.del));
     }
 
     #[test]

@@ -21,7 +21,7 @@
 //! far. That record says so ([`crate::event::Usage::settles_model`]), and the
 //! records it covers stop being owed for.
 
-use crate::test_run::TestCounts;
+use crate::test_run::{FailedTests, TestCounts};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
@@ -276,7 +276,7 @@ pub struct CheckpointRecord {
 }
 
 /// A test run the session made, as it reported itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TestRunRecord {
     /// What its summary counted. `None` where its output did not hold the
     /// whole run, so its result was not read.
@@ -286,16 +286,25 @@ pub struct TestRunRecord {
     /// Whether the run is known to have failed after its tests started,
     /// counted or not. A run whose counts say a test failed always has.
     pub failed: bool,
+    /// The tests the last failing binary named, where its whole list was
+    /// left: that binary's, never the run's whole list.
+    pub failures: Option<FailedTests>,
 }
 
 impl TestRunRecord {
     /// The run an [`Event::TestRun`] reported, with `failed` set wherever its
     /// counts say a test failed, whatever the event said.
-    pub fn new(counts: Option<TestCounts>, exit_code: Option<i32>, failed: bool) -> Self {
+    pub fn new(
+        counts: Option<TestCounts>,
+        exit_code: Option<i32>,
+        failed: bool,
+        failures: Option<FailedTests>,
+    ) -> Self {
         Self {
             counts,
             exit_code,
             failed: failed || counts.is_some_and(|counts| counts.failing()),
+            failures,
         }
     }
 }
@@ -556,9 +565,15 @@ impl SessionState {
                 counts,
                 exit_code,
                 failed,
+                failures,
                 ..
             } => {
-                self.test_run = Some(TestRunRecord::new(*counts, *exit_code, *failed));
+                self.test_run = Some(TestRunRecord::new(
+                    *counts,
+                    *exit_code,
+                    *failed,
+                    failures.clone(),
+                ));
             }
 
             Event::AgentSpawn { id, .. } => {
@@ -821,8 +836,8 @@ impl SessionState {
 
     /// The latest test run the session made. `None` where it has made none,
     /// which is not a run of no tests.
-    pub fn test_run(&self) -> Option<TestRunRecord> {
-        self.test_run
+    pub fn test_run(&self) -> Option<&TestRunRecord> {
+        self.test_run.as_ref()
     }
 
     /// How many sub-agents were spawned.
@@ -1362,6 +1377,7 @@ mod tests {
             counts,
             exit_code,
             failed: false,
+            failures: None,
         }
     }
 
@@ -1379,10 +1395,11 @@ mod tests {
             SessionState::replay(&[tested(Some(failing), Some(101)), tested(None, Some(0))]);
         assert_eq!(
             state.test_run(),
-            Some(TestRunRecord {
+            Some(&TestRunRecord {
                 counts: None,
                 exit_code: Some(0),
                 failed: false,
+                failures: None,
             }),
             "an earlier run's counts are not carried over a run that was not read"
         );
@@ -1407,14 +1424,36 @@ mod tests {
             counts: None,
             exit_code: Some(101),
             failed: true,
+            failures: None,
         };
         assert_eq!(
             SessionState::replay(&[cut]).test_run(),
-            Some(TestRunRecord {
+            Some(&TestRunRecord {
                 counts: None,
                 exit_code: Some(101),
                 failed: true,
+                failures: None,
             })
+        );
+    }
+
+    #[test]
+    fn the_tests_a_failing_run_named_are_kept_with_it() {
+        let named = FailedTests {
+            binary: "--test statement".to_owned(),
+            tests: vec!["a_line_rounds".to_owned()],
+        };
+        let cut = Event::TestRun {
+            id: ToolCallId::new("t"),
+            counts: None,
+            exit_code: Some(101),
+            failed: true,
+            failures: Some(named.clone()),
+        };
+        let state = SessionState::replay(&[cut]);
+        assert_eq!(
+            state.test_run().and_then(|run| run.failures.as_ref()),
+            Some(&named)
         );
     }
 

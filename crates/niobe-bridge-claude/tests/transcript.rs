@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use niobe_bridge_claude::transcript;
 use niobe_core::event::{AgentOutcome, Backend, CostBasis, Event, Mode, SessionMeta, ToolOutcome};
 use niobe_core::session::SessionState;
-use niobe_core::test_run::TestCounts;
+use niobe_core::test_run::{FailedTests, TestCounts};
 
 /// The session in the fixture, as the CLI names it.
 const SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
@@ -485,9 +485,13 @@ const CUT_RUN: [&str; 2] = [
     r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":{cut},"is_error":true,"tool_use_id":"toolu_01Gbjs71jH54b1JBB9hdcxBr"}]}}"#,
 ];
 
+/// What a test run reported: its counts, its exit status, whether it failed
+/// and the tests it named.
+type Reported = (Option<TestCounts>, Option<i32>, bool, Option<FailedTests>);
+
 /// The test run a transcript of [`CUT_RUN`] reports, with `cut` as the
-/// result, as its counts, its exit status and whether it failed.
-fn cut_test_runs(cut: &str) -> Vec<(Option<TestCounts>, Option<i32>, bool)> {
+/// result.
+fn cut_test_runs(cut: &str) -> Vec<Reported> {
     let dir = tempfile::tempdir().expect("a temporary directory can be made");
     let path = dir
         .path()
@@ -507,16 +511,22 @@ fn cut_test_runs(cut: &str) -> Vec<(Option<TestCounts>, Option<i32>, bool)> {
                 counts,
                 exit_code,
                 failed,
+                failures,
                 ..
-            } => Some((counts, exit_code, failed)),
+            } => Some((counts, exit_code, failed, failures)),
             _ => None,
         })
         .collect()
 }
 
 fn recorded_cut() -> String {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-test-workspace-cut.txt");
+    fixture("cargo-test-workspace-cut.txt")
+}
+
+fn fixture(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
     std::fs::read_to_string(path).expect("the fixture is there")
 }
 
@@ -529,7 +539,31 @@ fn a_failing_run_the_cli_cut_is_failed_and_counts_nothing() {
         "the result the CLI handed over"
     );
 
-    assert_eq!(cut_test_runs(&cut), [(None, Some(101), true)]);
+    assert_eq!(
+        cut_test_runs(&cut),
+        [(None, Some(101), true, None)],
+        "the list of what failed was cut away with the end of the run"
+    );
+}
+
+#[test]
+fn a_failing_run_the_cli_cut_names_the_tests_its_kept_end_lists() {
+    let cut = fixture("cargo-test-failing-cut.txt");
+    assert_eq!(
+        cut.chars().count(),
+        10_040,
+        "the result the CLI handed over"
+    );
+    assert!(cut.contains("... [12901 characters truncated] ..."));
+
+    let named = FailedTests {
+        binary: "--test statement".to_owned(),
+        tests: vec![
+            "a_statement_line_037_rounds_like_the_ledger".to_owned(),
+            "a_statement_line_088_rounds_like_the_ledger".to_owned(),
+        ],
+    };
+    assert_eq!(cut_test_runs(&cut), [(None, Some(101), true, Some(named))]);
 }
 
 #[test]
@@ -541,7 +575,7 @@ fn a_cut_run_that_shows_no_test_binary_starting_is_not_failed() {
         .split_once("     Running unittests")
         .expect("the recording starts a test binary");
 
-    assert_eq!(cut_test_runs(built), [(None, Some(101), false)]);
+    assert_eq!(cut_test_runs(built), [(None, Some(101), false, None)]);
 }
 
 #[test]

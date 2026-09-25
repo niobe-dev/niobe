@@ -77,7 +77,8 @@ use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, Context, CostBasis, Event, Mode, PermissionDecision,
     SessionMeta, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
-use niobe_core::test_run::{self, TestCounts};
+use niobe_core::session::TestRunRecord;
+use niobe_core::test_run;
 
 use crate::conformance;
 use crate::wire;
@@ -930,11 +931,12 @@ impl Translator {
                 self.read_spilled,
             );
             let id = ToolCallId::new(tool_use_id);
-            let tested = tested.map(|(counts, exit_code, failed)| Event::TestRun {
+            let tested = tested.map(|run| Event::TestRun {
                 id: id.clone(),
-                counts,
-                exit_code,
-                failed,
+                counts: run.counts,
+                exit_code: run.exit_code,
+                failed: run.failed,
+                failures: run.failures,
             });
             out.push(Event::ToolCallEnd {
                 id,
@@ -1625,7 +1627,8 @@ fn exit_code(
 
 /// What a shell call that ran `cargo test` reported, where it was one: the
 /// counts, where its output held the whole run, the status it exited with,
-/// and whether it is known to have failed after its tests started.
+/// whether it is known to have failed after its tests started and, where it
+/// did, the tests the last failing binary named.
 ///
 /// A refused call ran nothing and is not a test run. The counts are read
 /// only from the whole of the output, which is what [`whole_output`] finds.
@@ -1633,7 +1636,8 @@ fn exit_code(
 /// could not be taken whatever they said. Whether it failed is read from
 /// whatever the CLI handed over, whole or not: a failed command's output past
 /// about 30,000 characters loses its end before it is cut from the middle,
-/// and the start of a run is all that says its tests ran.
+/// and the start of a run is all that says its tests ran. A shorter one keeps
+/// its end, and with it the last failing binary's list of what failed.
 fn test_run(
     name: &str,
     arguments: &serde_json::Value,
@@ -1642,7 +1646,7 @@ fn test_run(
     reported: Option<&serde_json::Value>,
     exit_code: Option<i32>,
     read_spilled: Option<ReadSpilled>,
-) -> Option<(Option<TestCounts>, Option<i32>, bool)> {
+) -> Option<TestRunRecord> {
     let ran = match outcome {
         ToolOutcome::Ok | ToolOutcome::Failed => name == SHELL_TOOL,
         ToolOutcome::Denied => false,
@@ -1658,7 +1662,8 @@ fn test_run(
         Some(counts) => counts.failing(),
         None => test_run::failed(command, output, exit_code),
     };
-    Some((counts, exit_code, failed))
+    let failures = failed.then(|| test_run::failures(output)).flatten();
+    Some(TestRunRecord::new(counts, exit_code, failed, failures))
 }
 
 /// The whole of what a shell command printed, where it can be had.
@@ -1938,6 +1943,8 @@ fn read_window(window: Option<wire::Window>) -> Option<UsageWindow> {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    use niobe_core::test_run::TestCounts;
 
     use super::*;
 

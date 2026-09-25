@@ -29,11 +29,11 @@ use std::path::PathBuf;
 
 use common::{
     at_work, metered_session, paint, running_session, screen, session_with_a_long_write,
-    session_with_a_markdown_reply, session_with_finished_turns, session_with_test_runs, style_at,
-    styles, unmetered_session,
+    session_with_a_markdown_reply, session_with_finished_turns, session_with_test_records,
+    session_with_test_runs, style_at, styles, unmetered_session,
 };
-use niobe_core::TestCounts;
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
+use niobe_core::{FailedTests, TestCounts, TestRunRecord};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
 use niobe_tui::ui;
@@ -1758,6 +1758,54 @@ fn a_run_known_to_have_failed_without_counts_says_it_failed_and_gives_no_count()
     );
 }
 
+/// A failed run whose output still held the last failing binary's list of
+/// what failed names those tests under the section's header, as that
+/// binary's: an earlier binary's failures may be in the part that was cut.
+#[test]
+fn the_tests_a_failed_run_named_are_listed_as_the_failures_of_their_binary() {
+    let run = TestRunRecord::new(
+        None,
+        Some(101),
+        true,
+        Some(FailedTests {
+            binary: "--test statement".to_owned(),
+            tests: vec![
+                "a_statement_line_037_rounds_like_the_ledger".to_owned(),
+                "a_statement_line_088_rounds_like_the_ledger".to_owned(),
+            ],
+        }),
+    );
+    let mut app = session_with_test_records(&[run]);
+    let frame = changes_scrolled_down(&mut app, 200, 60);
+
+    let row = |text: &str| {
+        frame
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{text:?} is drawn:\n{frame}"))
+    };
+    let header = row("▾ Tests  failed · exit 101 · counts not read · 1m ago");
+    assert_eq!(
+        [
+            row("│   failing in --test statement "),
+            row("│   ✗ a_statement_line_037_rounds_like_the_ledger "),
+            row("│   ✗ a_statement_line_088_rounds_like_the_ledger "),
+        ],
+        [header + 1, header + 2, header + 3],
+        "{frame}"
+    );
+    assert_eq!(
+        style_at(&mut app, 200, 60, "✗ a_statement_line_037").and_then(|style| style.fg),
+        Some(CLASSIC.del)
+    );
+
+    app.fold(Section::Tests);
+    let folded = changes_scrolled_down(&mut app, 200, 60);
+    assert!(folded.contains("▸ Tests  failed"), "{folded}");
+    assert!(!folded.contains("failing in --test statement"), "{folded}");
+    assert!(!folded.contains("✗ a_statement_line_037"), "{folded}");
+}
+
 #[test]
 fn a_narrow_pane_keeps_the_counts_and_sheds_the_rest() {
     let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false)]);
@@ -3024,6 +3072,51 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                 if *run == id && counts.passed == 2
         )),
         "the run is not read: {produced:?}"
+    );
+}
+
+#[test]
+fn a_failing_cargo_test_run_with_bang_names_what_its_binary_listed_failing() {
+    let mut app = session_that_runs_commands();
+    let id = run_command(&mut app, "cargo test");
+    app.take_produced();
+    let output = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (target/debug/deps/demo-760e00b68511d171)
+
+running 2 tests
+test tests::adds ... ok
+test tests::wrong ... FAILED
+
+failures:
+
+failures:
+    tests::wrong
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+";
+    app.ran(niobe_tui::Ran {
+        id: id.clone(),
+        output: output.to_owned(),
+        bytes: u64::try_from(output.len()).expect("the output is short"),
+        whole: true,
+        exit_code: Some(101),
+        error: None,
+    });
+
+    let named = FailedTests {
+        binary: "--lib".to_owned(),
+        tests: vec!["tests::wrong".to_owned()],
+    };
+    let produced = app.take_produced();
+    assert!(
+        produced.iter().any(|event| matches!(
+            event,
+            Event::TestRun { id: run, failed: true, failures: Some(failures), .. }
+                if *run == id && *failures == named
+        )),
+        "the failures are not named: {produced:?}"
     );
 }
 

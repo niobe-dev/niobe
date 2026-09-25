@@ -652,6 +652,12 @@ pub enum Event {
         /// it. A build that failed ran no tests and is not a failed run.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         failed: bool,
+        /// The tests the last failing binary named, where the run failed and
+        /// what is left of its output holds that binary's whole list, as
+        /// [`crate::test_run::failures`] reads it. That binary's, never the
+        /// run's whole list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failures: Option<crate::test_run::FailedTests>,
     },
 
     /// A structured `decide` record: why a plan, a model, a file or a declined
@@ -822,12 +828,37 @@ mod tests {
             counts: None,
             exit_code: Some(101),
             failed,
+            failures: None,
         };
         for failed in [true, false] {
             let line = serde_json::to_string(&run(failed)).expect("a test run record");
             let read: Event = serde_json::from_str(&line).expect("what was written reads back");
             assert_eq!(read, run(failed));
             assert_eq!(line.contains("failed"), failed, "{line}");
+        }
+    }
+
+    #[test]
+    fn the_tests_a_run_named_survive_the_round_trip_and_none_writes_nothing() {
+        let run = |failures| Event::TestRun {
+            id: ToolCallId::new("t"),
+            counts: None,
+            exit_code: Some(101),
+            failed: true,
+            failures,
+        };
+        let named = crate::test_run::FailedTests {
+            binary: "--test statement".to_owned(),
+            tests: vec![
+                "a_line_rounds".to_owned(),
+                "src/lib.rs - add (line 3)".to_owned(),
+            ],
+        };
+        for failures in [Some(named), None] {
+            let line = serde_json::to_string(&run(failures.clone())).expect("a test run record");
+            let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+            assert_eq!(read, run(failures.clone()));
+            assert_eq!(line.contains("failures"), failures.is_some(), "{line}");
         }
     }
 

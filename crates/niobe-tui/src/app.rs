@@ -1384,6 +1384,7 @@ impl App {
                 counts,
                 exit_code,
                 failed,
+                failures,
                 ..
             } => {
                 self.tested_at = self.at;
@@ -1393,7 +1394,12 @@ impl App {
                         .get_mut(at)
                         .and_then(|entry| entry.calls.get_mut(index))
                 {
-                    call.tested = Some(TestRunRecord::new(*counts, *exit_code, *failed));
+                    call.tested = Some(TestRunRecord::new(
+                        *counts,
+                        *exit_code,
+                        *failed,
+                        failures.clone(),
+                    ));
                 }
             }
 
@@ -2400,7 +2406,7 @@ impl App {
     /// The session's latest test run, with the moment its call finished where
     /// the shell had a clock at the time. `None` where the session has run no
     /// tests.
-    pub fn test_run(&self) -> Option<(TestRunRecord, Option<Stamp>)> {
+    pub fn test_run(&self) -> Option<(&TestRunRecord, Option<Stamp>)> {
         self.session.test_run().map(|run| (run, self.tested_at))
     }
 
@@ -2610,6 +2616,9 @@ impl App {
                 counts,
                 exit_code: ran.exit_code,
                 failed,
+                failures: failed
+                    .then(|| niobe_core::test_run::failures(&ran.output))
+                    .flatten(),
             }
         });
         self.produce(Event::ToolCallEnd {
@@ -5098,6 +5107,7 @@ mod tests {
             }),
             exit_code: Some(0),
             failed: false,
+            failures: None,
         };
         let mut app = app();
         assert_eq!(app.test_run(), None, "no run is not a run of nothing");
