@@ -92,7 +92,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
   `translate.rs` turns one message of it into events and owns no process, `driver.rs` spawns the
   binary, keeps its standard input open for the life of the session and answers the permission
-  prompts the CLI stops turns on; `transcript.rs` reads the session files the CLI keeps for
+  prompts the CLI stops turns on; `spilled.rs` reads the file the CLI saves a shell output
+  too large to hand over to, so a whole test run is counted from it rather than from the
+  preview, and both the driver and the transcript reader hand it to the translator;
+  `transcript.rs` reads the session files the CLI keeps for
   itself, so a session started in plain Claude Code can be listed and carried on — it writes
   nothing back, and folds through the same `translate.rs` as the live stream; `conformance.rs`
   names the CLI releases every shape in the crate was recorded from, which is what a session says
@@ -251,7 +254,8 @@ Every file that can carry a comment starts with the SPDX header, followed by a b
 - Markdown: the two lines inside a leading `<!-- … -->` block.
 
 Exempt, because the format has no comments or the bytes are compared exactly: `LICENSE`,
-`CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures and `tests/snapshots/*.txt`. The list lives in
+`CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt` and recorded output
+under `tests/fixtures/` as `*.txt`. The list lives in
 `xtask/src/main.rs`; a file type with neither a rule nor an exemption fails the check, so a new
 kind of file forces a decision. Run `cargo xtask headers`.
 

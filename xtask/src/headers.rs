@@ -38,8 +38,12 @@ pub enum Rule {
 pub fn rule_for(path: &str) -> Option<Rule> {
     let name = path.rsplit('/').next().unwrap_or(path);
 
-    let is_snapshot = path.contains("/tests/snapshots/") && name.ends_with(".txt");
-    if EXEMPT_NAMES.contains(&name) || is_snapshot || name.ends_with(".jsonl") {
+    // A snapshot is a picture compared cell for cell, and a recorded output
+    // under `fixtures/` is read against the byte count recorded beside it.
+    let is_recorded_text = (path.contains("/tests/snapshots/")
+        || path.contains("/tests/fixtures/"))
+        && name.ends_with(".txt");
+    if EXEMPT_NAMES.contains(&name) || is_recorded_text || name.ends_with(".jsonl") {
         return Some(Rule::Exempt);
     }
     if name == ".gitignore" {
@@ -120,6 +124,11 @@ mod tests {
             rule_for("crates/niobe-tui/tests/snapshots/empty-80x24.txt"),
             Some(Rule::Exempt)
         );
+        assert_eq!(
+            rule_for("crates/niobe-bridge-claude/tests/fixtures/tool-results/run.txt"),
+            Some(Rule::Exempt)
+        );
+        assert_eq!(rule_for("crates/niobe-tui/src/notes.txt"), None);
     }
 
     #[test]

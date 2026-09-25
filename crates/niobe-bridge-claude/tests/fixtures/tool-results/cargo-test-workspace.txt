@@ -1,0 +1,1233 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s
+     Running unittests src/lib.rs (target/debug/deps/niobe_bridge_claude-6eb70ea3aac9fd8d)
+
+running 151 tests
+test conformance::tests::a_version_this_bridge_cannot_read_is_not_covered ... ok
+test conformance::tests::a_patch_release_of_a_recorded_series_is_covered ... ok
+test conformance::tests::every_recorded_release_is_a_release_this_bridge_covers ... ok
+test conformance::tests::the_warning_names_the_release_that_is_running_and_the_ones_recorded ... ok
+test conformance::tests::a_release_outside_the_recorded_series_is_not_covered ... ok
+test driver::tests::a_session_that_says_nothing_about_signing_in_is_reported_as_it_stands ... ok
+test driver::tests::a_refusal_in_the_operators_own_words_hands_the_agent_those_words ... ok
+test driver::tests::a_profiles_own_arguments_come_last_so_they_can_reach_a_flag_niobe_does_not_model ... ok
+test driver::tests::a_refusal_says_who_refused_because_the_model_is_told_it_as_an_error ... ok
+test driver::tests::a_session_with_no_budget_passes_no_budget_flag ... ok
+test driver::tests::a_resumed_session_and_its_settings_are_passed_through ... ok
+test driver::tests::an_approval_sends_back_the_arguments_that_were_shown ... ok
+test driver::tests::changing_the_mode_and_the_model_are_requests_the_cli_answers_by_id ... ok
+test driver::tests::every_mode_the_shell_offers_is_spelt_the_way_the_cli_takes_it ... ok
+test driver::tests::nothing_asks_over_stdio_unless_something_is_answering ... ok
+test driver::tests::the_spawn_line_asks_for_every_message_the_bridge_reads ... ok
+test driver::tests::the_spawn_line_carries_the_mode_and_the_budget_the_session_runs_under ... ok
+test tests::drives_the_official_binary ... ok
+test transcript::tests::a_mode_niobe_has_no_word_for_is_named_rather_than_shown_as_one_it_has ... ok
+test transcript::tests::a_record_this_version_cannot_read_is_shown_and_the_rest_is_kept ... ok
+test transcript::tests::a_cost_the_cli_could_not_finish_is_said_to_be_short ... ok
+test transcript::tests::a_message_the_cli_wrote_itself_does_not_rename_the_model_the_session_runs_on ... ok
+test transcript::tests::a_session_the_cli_has_not_closed_is_counted_from_its_own_messages ... ok
+test transcript::tests::a_background_sub_agent_in_a_transcript_ends_where_the_cli_wrote_that_it_stopped ... ok
+test driver::tests::a_binary_that_is_not_installed_says_so_and_says_what_to_do ... ok
+test transcript::tests::a_working_directory_names_the_directory_the_cli_writes_it_to ... ok
+test transcript::tests::an_imported_edit_carries_the_hunks_the_cli_wrote_beside_it ... ok
+test transcript::tests::an_unclosed_sessions_cache_writes_keep_the_lifetime_they_were_bought_for ... ok
+test transcript::tests::a_directory_the_cli_has_never_written_to_holds_no_sessions ... ok
+test transcript::tests::the_cli_keeps_its_transcripts_where_its_own_variable_says ... ok
+test transcript::tests::the_cli_saying_background_work_stopped_is_not_the_operator_speaking ... ok
+test transcript::tests::the_clis_title_is_reported_when_it_changes_and_not_on_every_record ... ok
+test transcript::tests::the_mode_is_reported_when_it_changes_and_not_on_every_record ... ok
+test spilled::tests::a_saved_output_that_changed_size_is_not_read ... ok
+test transcript::tests::the_records_the_cli_keeps_for_its_own_screen_are_passed_over_in_silence ... ok
+test transcript::tests::the_turns_the_cli_wrote_for_itself_are_not_the_operators ... ok
+test spilled::tests::a_saved_output_of_the_size_the_cli_reported_is_read_whole ... ok
+test translate::tests::a_call_is_summed_up_in_the_words_a_person_would_use_for_it ... ok
+test translate::tests::a_background_sub_agent_ends_when_the_cli_says_its_task_stopped ... ok
+test transcript::tests::a_session_recorded_by_a_recorded_cli_release_says_nothing_about_it ... ok
+test transcript::tests::a_transcript_the_cli_never_titled_is_titled_by_the_first_prompt_the_operator_typed ... ok
+test translate::tests::a_call_refused_here_reads_as_denied_and_is_not_reported_twice ... ok
+test translate::tests::a_call_that_edits_nothing_changes_no_file ... ok
+test translate::tests::a_call_to_the_agent_tool_spawns_a_sub_agent_labelled_with_its_kind ... ok
+test spilled::tests::a_missing_unreadable_or_oversized_output_is_not_read ... ok
+test translate::tests::a_call_with_no_arguments_worth_reading_has_no_summary ... ok
+test translate::tests::a_call_that_was_refused_is_denied_rather_than_failed ... ok
+test translate::tests::a_calls_target_is_whichever_argument_names_what_it_acts_on ... ok
+test translate::tests::a_cli_that_does_not_say_which_release_it_is_is_taken_at_its_word ... ok
+test translate::tests::a_control_request_this_bridge_does_not_answer_is_left_to_the_cli ... ok
+test translate::tests::a_created_file_is_one_hunk_of_the_lines_it_was_created_with ... ok
+test translate::tests::a_failed_sub_agent_says_why_before_it_ends ... ok
+test translate::tests::a_failed_test_run_the_cli_cut_by_characters_is_not_read ... ok
+test translate::tests::a_failure_that_came_back_with_no_words_has_no_reason ... ok
+test translate::tests::a_finished_call_repeats_the_summary_it_started_with ... ok
+test translate::tests::a_file_outside_the_session_directory_keeps_the_path_the_cli_gave ... ok
+test translate::tests::a_family_billed_in_its_own_right_keeps_its_own_messages ... ok
+test translate::tests::a_login_on_the_first_party_api_is_a_plan_once_a_turn_says_who_served_it ... ok
+test transcript::tests::a_session_recorded_by_a_cli_release_nobody_recorded_says_so_once ... ok
+test translate::tests::a_message_of_a_known_type_that_does_not_parse_is_still_an_error ... ok
+test translate::tests::a_message_of_several_requests_is_sized_by_its_last ... ok
+test translate::tests::a_message_type_the_bridge_does_not_know_is_a_notice_and_not_an_error ... ok
+test translate::tests::a_missing_newline_note_is_not_taken_for_a_line ... ok
+test translate::tests::a_model_served_by_a_cloud_provider_or_a_gateway_is_metered ... ok
+test translate::tests::a_model_the_session_moves_to_is_announced_once ... ok
+test translate::tests::a_notebook_changed_by_cell_says_it_changed_and_not_by_how_much ... ok
+test translate::tests::a_patch_any_hunk_of_which_disagrees_with_its_header_carries_no_hunks_at_all ... ok
+test translate::tests::a_permission_mode_niobe_does_not_model_is_reported_rather_than_guessed_at ... ok
+test translate::tests::a_plan_spending_beyond_its_flat_fee_says_so ... ok
+test translate::tests::a_patch_reported_for_another_file_is_not_taken_for_this_one ... ok
+test translate::tests::a_pricing_basis_the_bridge_does_not_know_is_reported_and_still_not_called_measured ... ok
+test transcript::tests::a_transcript_the_cli_titled_is_titled_by_the_cli_alone ... ok
+test translate::tests::a_profile_that_names_its_billing_is_taken_at_its_word ... ok
+test translate::tests::a_prompt_with_nothing_to_address_an_answer_to_is_shown_and_not_queued ... ok
+test translate::tests::a_rate_limit_event_becomes_the_windows_it_reported ... ok
+test translate::tests::a_rate_limit_with_no_windows_in_it_reports_nothing ... ok
+test translate::tests::a_refusal_is_recorded_when_it_happens_and_not_again_at_the_end_of_the_turn ... ok
+test translate::tests::a_refusal_the_cli_only_lists_at_the_end_is_still_recorded ... ok
+test translate::tests::a_refused_test_run_or_another_command_is_no_test_run ... ok
+test transcript::tests::a_session_that_said_nothing_is_listed_without_a_prompt ... ok
+test translate::tests::a_replacement_made_everywhere_is_counted_from_the_hunks_the_cli_reported ... ok
+test translate::tests::a_replacement_the_cli_applied_everywhere_states_no_count ... ok
+test translate::tests::a_request_niobe_made_that_the_cli_refused_is_reported_rather_than_dropped ... ok
+test translate::tests::a_result_for_a_call_that_was_never_announced_is_counted_and_reported ... ok
+test translate::tests::a_result_that_priced_the_session_without_splitting_it_by_model_still_reports_the_cost ... ok
+test translate::tests::a_running_guess_at_the_thinking_tokens_is_recognised_and_never_counted ... ok
+test transcript::tests::the_prompt_a_session_is_listed_by_is_the_first_the_cli_did_not_write ... ok
+test translate::tests::a_saved_test_run_is_not_read_by_a_translator_handed_no_reader ... ok
+test translate::tests::a_session_on_a_cli_release_nobody_recorded_says_so_once ... ok
+test translate::tests::a_session_on_an_api_key_is_metered_from_its_first_line ... ok
+test translate::tests::a_session_on_a_recorded_cli_release_says_nothing_about_it ... ok
+test translate::tests::a_saved_test_run_whose_file_is_not_the_whole_run_is_not_read ... ok
+test translate::tests::a_session_total_that_disagrees_with_its_parts_is_reported ... ok
+test translate::tests::a_saved_file_is_read_once_and_only_for_a_test_run ... ok
+test translate::tests::a_shell_command_that_failed_carries_the_status_it_exited_with_and_its_reason ... ok
+test translate::tests::a_shell_command_the_cli_reported_a_plain_success_for_exited_zero ... ok
+test translate::tests::a_shell_command_the_cli_would_not_run_has_a_reason_and_no_status ... ok
+test translate::tests::a_shell_command_with_no_report_beside_it_has_no_status ... ok
+test translate::tests::a_sub_agent_that_notifies_again_after_it_ended_is_not_ended_twice ... ok
+test translate::tests::a_sub_agent_whose_launch_failed_has_failed ... ok
+test translate::tests::a_sub_agents_model_does_not_become_the_sessions ... ok
+test translate::tests::a_sub_agent_launched_in_the_background_is_still_running_when_its_call_returns ... ok
+test translate::tests::a_sub_agent_whose_call_returned_its_answer_has_finished ... ok
+test translate::tests::a_sub_agents_request_says_nothing_about_the_sessions_context ... ok
+test translate::tests::a_sub_agents_tokens_are_billed_to_the_model_that_produced_them ... ok
+test translate::tests::a_sub_agents_streamed_messages_name_its_model_once_until_it_changes ... ok
+test translate::tests::a_success_the_cli_read_a_status_as_names_no_status_it_did_not_report ... ok
+test translate::tests::a_system_subtype_the_bridge_does_not_know_is_a_notice_and_not_an_error ... ok
+test translate::tests::a_task_notification_for_something_that_is_not_a_sub_agent_is_passed_over ... ok
+test translate::tests::a_test_run_filtered_down_to_its_summaries_happened_and_is_not_read ... ok
+test translate::tests::a_test_run_reports_its_own_counts_straight_after_the_call_ends ... ok
+test translate::tests::a_tool_with_neither_name_is_an_ordinary_call ... ok
+test translate::tests::a_turn_niobe_wrote_is_not_folded_in_again_when_the_cli_echoes_it ... ok
+test translate::tests::a_test_run_the_cli_saved_to_a_file_is_read_from_that_file ... ok
+test translate::tests::a_turn_that_failed_does_not_end_the_session ... ok
+test translate::tests::a_turn_the_cli_gave_no_total_for_is_not_reported_as_one_that_does_not_add_up ... ok
+test translate::tests::a_window_is_a_bracketed_suffix_on_the_same_id ... ok
+test translate::tests::a_turn_the_budget_stopped_is_reported_in_the_clis_own_words ... ok
+test translate::tests::a_test_run_the_cli_handed_over_in_part_is_not_read ... ok
+test translate::tests::a_window_reported_for_another_model_is_not_the_sessions ... ok
+test translate::tests::a_turn_whose_messages_do_not_add_up_is_reported_rather_than_corrected ... ok
+test translate::tests::a_written_file_that_was_not_there_removed_nothing ... ok
+test translate::tests::an_edit_is_counted_from_the_text_it_replaced_and_the_text_it_wrote ... ok
+test translate::tests::a_written_file_that_was_already_there_states_no_removal ... ok
+test translate::tests::an_edit_carries_the_hunks_the_cli_reported ... ok
+test translate::tests::every_report_of_a_window_is_passed_on ... ok
+test translate::tests::an_edit_that_did_not_run_changed_no_file ... ok
+test translate::tests::an_overwritten_file_is_counted_and_drawn_from_the_hunks_the_cli_reported ... ok
+test translate::tests::every_mode_niobe_models_is_read_back_from_the_cli_spelling ... ok
+test translate::tests::an_edit_whose_result_reported_no_patch_carries_no_hunks ... ok
+test translate::tests::progress_on_a_task_that_is_not_a_running_sub_agent_says_nothing ... ok
+test translate::tests::only_a_shell_command_has_an_exit_status ... ok
+test translate::tests::the_mode_the_cli_started_in_reaches_the_session ... ok
+test translate::tests::the_context_is_every_prompt_token_of_the_main_agents_last_request ... ok
+test translate::tests::the_first_party_api_without_a_credential_source_is_left_unsaid ... ok
+test translate::tests::the_clis_bookkeeping_for_its_background_tasks_is_passed_over ... ok
+test translate::tests::the_result_line_ends_the_turn_after_everything_it_reports ... ok
+test wire::tests::a_known_message_that_grew_a_field_still_parses ... ok
+test wire::tests::a_permission_request_is_read_from_inside_its_request ... ok
+test wire::tests::a_turn_written_as_a_bare_string_parses_like_one_written_as_blocks ... ok
+test translate::tests::the_tools_other_name_spawns_a_sub_agent_too ... ok
+test translate::tests::the_turns_tally_starts_again_at_every_result ... ok
+test wire::tests::a_type_this_bridge_does_not_know_parses_as_unknown ... ok
+test wire::tests::cache_writes_without_a_reported_split_are_no_one_hour_writes ... ok
+test wire::tests::a_window_the_cli_named_without_measuring_carries_no_share ... ok
+test translate::tests::the_window_the_cli_reports_is_carried_from_the_turn_it_arrives_in ... ok
+test wire::tests::the_one_hour_share_is_read_past_the_five_minute_one_beside_it ... ok
+test wire::tests::the_one_hour_share_is_read_from_the_iterations_where_the_total_carries_no_split ... ok
+test transcript::tests::sessions_are_listed_newest_first_with_what_they_were_asked ... ok
+test driver::tests::an_answer_to_a_call_the_cli_never_asked_about_is_refused_rather_than_written ... ok
+test driver::tests::each_request_is_addressed_by_an_id_of_its_own ... ok
+
+test result: ok. 151 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/answers.rs (target/debug/deps/answers-760e1585baf3f386)
+
+running 3 tests
+test an_approval_hands_back_the_arguments_the_cli_asked_about ... ok
+test a_refusal_made_here_reads_as_denied_though_the_cli_never_announces_it ... ok
+test each_prompt_is_answered_by_the_request_id_the_cli_asked_under ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-73be61ddc3757ade)
+
+running 6 tests
+test every_recording_says_which_cli_version_it_was_recorded_from ... ok
+test every_shape_in_the_recordings_is_one_this_bridge_was_written_for ... ok
+test every_recorded_model_usage_entry_carries_its_context_window ... ok
+test every_recorded_shell_result_carries_what_its_exit_status_is_read_from ... ok
+test every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from ... ok
+test the_installed_cli_is_a_release_these_recordings_cover ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/stream.rs (target/debug/deps/stream-8d303e170535bc11)
+
+running 38 tests
+test a_plan_backends_cost_is_api_equivalent_and_never_measured ... ok
+test a_prompt_with_no_answer_in_the_recording_stays_pending ... ok
+test a_message_type_the_bridge_does_not_know_is_a_notice_and_not_a_crash ... ok
+test a_prompt_the_cli_is_waiting_on_is_asked_and_kept_to_be_answered ... ok
+test a_recorded_stream_folds_into_the_totals_the_cli_reported ... ok
+test a_compaction_is_a_notice_rather_than_a_failure ... ok
+test a_session_cost_that_runs_on_is_reported_as_what_the_turn_added ... ok
+test a_call_the_cli_refused_is_recorded_once_though_it_is_reported_twice ... ok
+test a_task_call_is_a_sub_agent_as_well_as_a_tool_call ... ok
+test each_message_says_which_lifetime_its_cache_writes_were_bought_for ... ok
+test a_turn_in_flight_says_which_tokens_no_cost_covers ... ok
+test edits::a_write_the_cli_refused_put_nothing_in_the_change_set ... ok
+test edits::a_count_the_stream_does_not_carry_is_marked_rather_than_filled_in ... ok
+test long_context::a_session_billed_under_another_id_than_its_messages_counts_each_token_once ... ok
+test long_context::the_context_is_each_turns_prompt_against_the_window_the_cli_reported ... ok
+test edits::each_file_carries_the_models_own_words_from_just_before_it_changed ... ok
+test long_context::the_cost_is_reported_under_the_id_the_cli_billed ... ok
+test long_context::the_session_stays_on_the_model_with_its_window ... ok
+test edits::the_files_a_session_edited_are_counted_the_way_git_counts_them ... ok
+test reported_hunks::a_recorded_edit_carries_the_hunk_the_cli_reported_beside_its_result ... ok
+test a_message_delta_says_its_cache_writes_were_bought_for_an_hour_inside_its_iterations ... ok
+test a_recorded_sub_agents_context_is_what_the_cli_counted_for_that_agent_alone ... ok
+test shell::a_command_the_cli_reported_a_plain_success_for_exited_zero_and_a_refusal_says_why ... ok
+test the_per_message_tokens_add_up_to_what_the_cli_reported_for_the_turn ... ok
+test a_recorded_sub_agents_latest_line_is_its_step_and_then_its_own_answer ... ok
+test a_recorded_agent_call_is_a_sub_agent_named_for_its_kind_and_its_task ... ok
+test the_recorded_login_is_read_as_a_plan_after_its_first_turn ... ok
+test a_recorded_session_that_runs_sub_agents_carries_no_error_entry ... ok
+test the_transcript_reads_as_the_session_happened ... ok
+test tool_calls_and_their_results_reach_the_timeline_in_full ... ok
+test the_recorded_usage_windows_are_what_the_session_is_metered_against ... ok
+test what_the_session_ran_comes_from_the_cli_not_from_the_profile ... ok
+test a_recorded_sub_agents_model_is_the_one_its_own_messages_name_once ... ok
+test usage_is_folded_from_the_stream_events_not_from_the_assistant_snapshot ... ok
+test the_cli_lists_the_sub_agent_tool_under_one_name_and_the_model_calls_it_by_the_other ... ok
+test nothing_is_reported_about_a_sub_agent_after_it_has_ended ... ok
+test recorded_background_sub_agents_end_when_the_cli_says_they_stopped ... ok
+test shell::a_sub_agents_failed_commands_carry_their_status_and_its_successes_name_none ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/transcript.rs (target/debug/deps/transcript-910937ad6504e69c)
+
+running 8 tests
+test a_transcript_is_listed_by_the_id_that_continues_it_and_by_what_was_asked ... ok
+test a_transcript_folds_into_what_the_session_said_and_did ... ok
+test a_transcript_is_captioned_by_the_title_the_cli_gave_it ... ok
+test a_transcript_says_what_it_ran_as_and_what_it_ran_on ... ok
+test an_imported_session_folds_into_the_totals_the_cli_recorded ... ok
+test an_imported_cost_is_api_equivalent_and_never_measured ... ok
+test a_priced_session_is_counted_from_the_accounting_the_cli_closed_it_with ... ok
+test a_record_this_version_cannot_read_is_shown_and_not_a_lost_history ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/niobe_bridge_codex-b91f387b2be0003f)
+
+running 1 test
+test tests::drives_the_official_binary ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/niobe-92056e2543b42bbf)
+
+running 109 tests
+test args::tests::no_arguments_opens_the_shell ... ok
+test args::tests::an_unknown_argument_is_named ... ok
+test args::tests::prices_takes_an_optional_model ... ok
+test args::tests::help_and_version_win_over_anything_after_them ... ok
+test args::tests::a_theme_applies_only_where_a_session_runs ... ok
+test args::tests::resume_without_an_id_at_all_points_at_the_session_list ... ok
+test args::tests::a_budget_applies_only_where_a_session_runs ... ok
+test args::tests::an_id_that_is_not_one_of_niobes_numbers_is_one_the_claude_cli_holds ... ok
+test args::tests::resume_takes_the_id_as_the_next_argument_or_after_an_equals_sign ... ok
+test args::tests::subcommands_take_nothing_extra ... ok
+test args::tests::replay_takes_a_file ... ok
+test args::tests::a_budget_that_is_not_an_amount_to_spend_is_refused ... ok
+test args::tests::a_theme_flag_that_names_no_palette_lists_the_ones_there_are ... ok
+test args::tests::the_budget_flag_takes_an_amount_either_way_round ... ok
+test args::tests::the_profile_flag_is_given_once_and_only_where_a_session_runs ... ok
+test args::tests::the_profile_flag_may_stand_anywhere_and_takes_a_name_either_way ... ok
+test args::tests::the_profile_flag_without_a_name_points_at_the_profile_list ... ok
+test args::tests::the_theme_flag_names_a_palette_either_way_round_and_ignores_its_case ... ok
+test args::tests::trust_and_untrust_name_this_repositorys_config_and_nothing_else ... ok
+test backend::tests::a_backend_that_cannot_be_started_names_the_profile_it_came_from ... ok
+test backend::tests::a_machine_that_says_nothing_about_the_cli_has_no_sessions_of_its_own_to_offer ... ok
+test backend::tests::a_session_under_no_profile_is_attached_to_nothing ... ok
+test backend::tests::a_backend_with_no_bridge_leaves_the_session_attached_to_nothing ... ok
+test backend::tests::a_session_that_says_nothing_about_its_mode_starts_where_the_shell_shows_it ... ok
+test backend::tests::a_profile_that_says_how_it_is_billed_tells_the_bridge ... ok
+test backend::tests::a_sessions_budget_and_mode_reach_the_binary_that_enforces_them ... ok
+test backend::tests::a_profile_that_names_no_settings_file_passes_no_settings_argument ... ok
+test backend::tests::a_profile_from_a_file_nobody_trusted_starts_the_cli_with_nothing_of_its_own ... ok
+test backend::tests::a_profile_that_moves_the_clis_configuration_directory_moves_its_sessions_with_it ... ok
+test backend::tests::an_untrusted_profile_cannot_move_where_the_clis_own_sessions_are_looked_for ... ok
+test config::tests::a_relative_config_home_is_ignored ... ok
+test config::tests::a_profile_that_names_no_settings_file_runs_its_backend_under_none ... ok
+test backend::tests::a_claude_session_is_told_to_ask_because_the_shell_answers ... ok
+test config::tests::other_user_files_sit_beside_the_config ... ok
+test config::tests::a_settings_path_under_a_home_nothing_names_is_reported_rather_than_guessed ... ok
+test config::tests::the_user_config_is_under_xdg_config_home_or_else_under_the_home_directory ... ok
+test config::tests::the_shell_is_told_which_models_the_selected_profile_offers ... ok
+test prices::tests::a_model_with_no_price_in_force_yet_reads_as_dashes_not_zeros ... ok
+test prices::tests::the_sheet_reads_a_models_window_on_its_day ... ok
+test prices::tests::with_no_user_file_to_look_in_only_the_bundled_table_is_named ... ok
+test profiles::tests::a_claude_profile_with_no_settings_file_says_what_the_machine_runs_it_on ... ok
+test profiles::tests::an_untrusted_profile_says_so_and_says_what_trusting_would_put_in_force ... ok
+test profiles::tests::an_untrusted_settings_file_is_named_among_what_is_not_in_force ... ok
+test profiles::tests::no_value_of_a_variable_is_printed ... ok
+test profiles::tests::rows_are_aligned_and_the_selected_profile_is_marked ... ok
+test profiles::tests::the_models_a_profile_offers_are_listed_so_the_shell_key_has_something_to_show ... ok
+test profiles::tests::the_settings_file_a_profile_runs_its_backend_under_is_listed ... ok
+test profiles::tests::with_no_profiles_the_files_looked_in_are_named ... ok
+test repo::tests::a_branch_with_an_upstream_reports_how_far_it_has_drifted ... ok
+test config::tests::a_settings_file_that_is_not_there_is_reported_at_its_key_and_its_line ... ok
+test repo::tests::a_branch_with_no_upstream_is_not_ahead_of_anything ... ok
+test repo::tests::a_commit_whose_date_will_not_parse_keeps_everything_else ... ok
+test repo::tests::a_detached_head_is_named_by_the_commit_it_is_on ... ok
+test backend::tests::a_settings_file_that_is_not_there_stops_the_session_before_anything_is_spawned ... ok
+test repo::tests::a_directory_outside_a_repository_has_no_branch ... ok
+test journal::tests::nothing_is_created_until_the_first_event ... ok
+test repo::tests::a_file_git_counts_no_lines_in_reports_no_counts_rather_than_zero ... ok
+test backend::tests::a_profile_that_names_a_settings_file_starts_the_cli_under_it ... ok
+test config::tests::a_settings_path_is_expanded_against_the_home_directory ... ok
+test config::tests::a_settings_path_that_is_not_under_the_home_directory_is_taken_as_written ... ok
+test backend::tests::settings_that_put_every_session_on_this_machine_on_bedrock_are_found ... ok
+test repo::tests::a_log_is_read_as_a_hash_and_the_first_line_of_its_message ... ok
+test repo::tests::a_numstat_record_is_a_path_and_what_the_tree_did_to_it ... ok
+test repo::tests::a_renamed_file_is_shown_as_where_it_came_from_and_where_it_went ... ok
+test repo::tests::a_repository_with_no_commits_has_no_head_and_keeps_its_branch ... ok
+test repo::tests::a_git_file_that_names_no_gitdir_leaves_the_branch_unknown ... ok
+test repo::tests::a_gitdir_pointer_is_resolved_against_the_file_that_holds_it ... ok
+test repo::tests::a_new_store_comes_with_an_ignore_file_for_the_store_alone ... ok
+test journal::tests::prompts_sent_in_the_shell_come_back_after_a_restart ... ok
+test backend::tests::settings_that_do_not_turn_bedrock_on_are_no_note_to_print ... ok
+test journal::tests::a_resumed_journal_appends_after_what_was_there ... ok
+test repo::tests::an_ignore_file_the_operator_wrote_is_left_alone ... ok
+test repo::tests::asking_what_the_repository_looks_like_never_waits_for_the_answer ... ok
+test repo::tests::looking_for_a_store_that_is_not_there_creates_nothing ... ok
+test repo::tests::the_branch_is_read_from_the_repository_this_test_runs_in ... ok
+test repo::tests::a_worktrees_branch_is_read_through_its_gitdir_pointer ... ok
+test journal::tests::a_session_read_back_shows_the_times_the_store_recorded_it_at ... ok
+test repo::tests::a_directory_that_is_not_a_repository_is_a_failed_read_and_not_a_panic ... ok
+test repo::tests::the_root_is_the_nearest_repository_or_the_directory_itself ... ok
+test rules::tests::a_config_nobody_trusted_is_not_trusted_by_a_rule_being_written_into_it ... ok
+test rules::tests::a_config_that_cannot_be_written_is_reported_as_the_operator_reads_it ... ok
+test rules::tests::a_rule_is_written_into_the_repositorys_own_config ... ok
+test sessions::tests::a_long_or_multiline_prompt_is_cut_to_one_line ... ok
+test sessions::tests::the_claude_list_says_how_to_carry_one_on_and_marks_what_it_was_not_told ... ok
+test sessions::tests::the_table_aligns_under_its_header ... ok
+test sessions::tests::times_print_in_utc_to_the_minute ... ok
+test summary::tests::a_fully_reported_cost_is_the_bare_figure ... ok
+test summary::tests::a_partly_reported_cost_says_why_it_is_a_floor ... ok
+test summary::tests::a_session_that_changed_nothing_says_so_with_a_dash ... ok
+test summary::tests::a_session_whose_every_change_was_stated_gives_the_bare_figures ... ok
+test summary::tests::counts_are_grouped_in_thousands ... ok
+test summary::tests::a_session_without_usage_shows_dashes_not_zeros ... ok
+test summary::tests::the_billing_mode_is_printed_with_the_cost_it_explains ... ok
+test summary::tests::the_files_line_adds_up_what_the_backend_stated_and_marks_what_it_did_not ... ok
+test tests::a_failure_is_written_to_standard_error_and_fails ... ok
+test tests::a_failure_that_could_not_be_written_fails_with_a_status_of_its_own ... ok
+test tests::a_shell_whose_config_needs_no_trust_opens_on_nothing ... ok
+test tests::durations_print_in_milliseconds_to_two_decimals ... ok
+test tests::the_shell_opens_saying_why_an_untrusted_config_is_not_in_force_and_how_to_trust_it ... ok
+test rules::tests::a_trusted_config_stays_trusted_when_niobe_writes_a_rule_into_it ... ok
+test repo::tests::a_watch_on_a_directory_that_is_not_a_repository_hands_over_nothing ... ok
+test repo::tests::a_repository_with_no_commits_reads_without_failing ... ok
+test repo::tests::a_branch_with_no_upstream_has_pushed_none_of_its_commits ... ok
+test repo::tests::a_detached_head_is_read_as_the_commit_it_is_sitting_on ... ok
+test repo::tests::a_watch_hands_over_the_repository_it_is_started_in ... ok
+test repo::tests::a_working_tree_is_measured_from_the_repository_file_by_file ... ok
+test repo::tests::a_linked_worktree_reads_its_own_branch_and_its_own_working_tree ... ok
+test repo::tests::an_upstream_the_repository_cannot_find_leaves_pushed_unknown ... ok
+test repo::tests::the_commits_a_session_made_are_listed_and_say_whether_they_are_pushed ... ok
+
+test result: ok. 109 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.55s
+
+     Running tests/billing.rs (target/debug/deps/billing-ffeae3933eef8323)
+
+running 2 tests
+test the_same_login_on_a_profile_billed_by_use_leads_with_money ... ok
+test a_recorded_max_session_shows_windows_and_tokens_and_no_dollar_total ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/cache_lifetime.rs (target/debug/deps/cache_lifetime-33091664fd19b144)
+
+running 3 tests
+test a_one_hour_write_and_a_five_minute_one_are_priced_at_their_own_rates ... ok
+test the_recorded_sessions_writes_price_at_the_lifetimes_the_cli_reported ... ok
+test dropping_the_lifetime_prices_every_write_at_the_five_minute_rate ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/cli.rs (target/debug/deps/cli-4f76766536d72002)
+
+running 36 tests
+test a_budget_that_is_not_an_amount_is_refused_before_anything_is_started ... ok
+test a_log_with_a_bad_line_names_the_line ... ok
+test a_claude_session_this_repository_does_not_have_names_where_it_was_looked_for ... ok
+test a_repository_config_that_sets_no_environment_needs_no_trust ... ok
+test a_claude_session_folds_into_the_history_and_the_bill_the_cli_recorded ... ok
+test a_profile_no_config_defines_is_an_error_that_lists_the_ones_there_are ... ok
+test a_failure_reported_onto_a_closed_standard_error_ends_as_a_reported_failure ... ok
+test a_repository_config_that_has_not_been_trusted_sets_no_environment ... ok
+test a_theme_that_does_not_exist_is_refused_before_anything_is_started ... ok
+test a_model_no_price_table_lists_is_unpriced ... ok
+test a_user_price_file_replaces_the_schedule_of_each_model_it_lists ... ok
+test a_profile_from_the_users_own_config_needs_no_trust ... ok
+test a_resumed_session_shows_the_totals_the_log_it_recorded_folds_to ... ok
+test a_profile_with_no_settings_file_says_what_this_machines_own_settings_run_it_on ... ok
+test a_repository_config_can_be_untrusted_again ... ok
+test a_config_that_is_not_toml_names_the_line ... ok
+test resuming_a_session_that_does_not_exist_says_which_and_fails ... ok
+test repo_config_overrides_user_config ... ok
+test the_profile_flag_selects_the_profile ... ok
+test replaying_the_fixture_prints_its_totals_inside_the_budget ... ok
+test a_models_price_history_is_listed_with_the_date_each_price_took_effect ... ok
+test the_profile_list_shows_each_profile_its_backend_and_where_it_was_defined ... ok
+test the_help_says_how_the_mode_the_model_the_budget_and_the_theme_are_changed ... ok
+test the_profile_list_names_the_settings_file_a_profile_runs_its_backend_under ... ok
+test there_is_nothing_to_trust_where_a_repository_has_no_config ... ok
+test the_session_list_shows_what_the_store_holds ... ok
+test listing_sessions_where_nothing_was_recorded_creates_nothing ... ok
+test the_session_list_is_the_same_from_a_subdirectory_of_the_repository ... ok
+test an_invalid_price_file_errors_with_the_key_and_the_line ... ok
+test the_price_list_shows_the_bundled_rates_in_force_today ... ok
+test the_session_list_names_the_claude_sessions_this_repository_can_carry_on ... ok
+test editing_a_trusted_repository_config_makes_it_untrusted_again ... ok
+test an_invalid_config_errors_with_the_key_and_the_line ... ok
+test where_no_config_defines_a_profile_the_list_says_where_it_looked ... ok
+test commands_that_run_no_session_do_not_read_the_config ... ok
+test trusting_a_repository_config_puts_its_environment_in_force ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.54s
+
+     Running tests/install.rs (target/debug/deps/install-5e17ba4235d3dcdb)
+
+running 4 tests
+test a_release_that_cannot_be_downloaded_says_which_file_and_installs_nothing ... ok
+test an_archive_that_does_not_match_its_checksum_installs_nothing ... ok
+test an_install_directory_that_is_not_on_path_is_named_with_the_line_that_adds_it ... ok
+test the_installer_puts_a_working_niobe_in_the_install_directory ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+
+     Running tests/permission.rs (target/debug/deps/permission-3476f9f4e3f28683)
+
+running 7 tests
+test an_answer_written_at_the_prompt_is_the_answer_the_call_gets ... ok
+test a_rule_covers_the_target_it_names_and_nothing_else ... ok
+test always_this_tool_answers_every_call_to_it ... ok
+test allowing_the_prompt_answers_the_call_it_gates_and_leaves_no_rule ... ok
+test denying_the_prompt_is_visible_in_the_timeline ... ok
+test a_recorded_prompt_stops_the_shell_and_shows_what_would_run ... ok
+test an_always_answer_survives_a_restart ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/pty.rs (target/debug/deps/pty-0fc68875031e945b)
+
+running 14 tests
+test a_failure_that_cannot_be_reported_ends_as_a_failure_rather_than_a_crash ... ok
+test a_config_naming_a_theme_that_does_not_exist_stops_the_session_at_its_line ... ok
+test a_shell_whose_terminal_went_away_ends_the_session_rather_than_failing ... ok
+test a_panic_hands_the_terminal_back ... ok
+test a_sigterm_hands_the_terminal_back ... ok
+test a_settings_file_a_profile_names_and_this_machine_has_not_stops_the_session ... ok
+test a_clean_quit_hands_the_terminal_back ... ok
+test a_terminal_that_goes_away_while_the_shell_draws_ends_the_session_rather_than_failing ... ok
+test a_hangup_ends_the_session_as_a_terminal_that_went_away_rather_than_as_a_quit ... ok
+test a_terminal_announcing_truecolor_gets_the_designed_colours_and_classic_stays_named ... ok
+test a_claude_session_read_in_is_a_niobe_session_from_then_on ... ok
+test the_shell_ends_when_the_terminal_it_draws_on_goes_away ... ok
+test a_theme_is_selected_by_the_flag_by_the_config_and_by_f9 ... ok
+test a_session_whose_terminal_went_away_is_still_there_to_resume ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s
+
+     Running unittests src/lib.rs (target/debug/deps/niobe_config-12fbbcf1a7dd4570)
+
+running 64 tests
+test parse::tests::a_key_is_quoted_only_when_it_could_not_be_written_bare ... ok
+test parse::tests::a_settings_key_is_spelt_the_way_the_file_spells_it ... ok
+test parse::tests::the_backends_are_listed_the_way_a_sentence_lists_them ... ok
+test parse::tests::lines_count_from_one ... ok
+test tests::a_default_profile_that_is_not_defined_is_reported_where_it_was_set ... ok
+test tests::a_models_list_that_is_not_a_list_of_names_is_reported_at_its_line ... ok
+test parse::tests::a_syntax_error_quotes_the_text_it_stopped_at_when_that_is_short ... ok
+test tests::a_billing_mode_nobody_defined_is_reported_at_its_line ... ok
+test tests::a_default_set_by_one_file_may_name_a_profile_another_defines ... ok
+test tests::a_file_still_says_it_is_worth_trusting_once_its_values_are_gone ... ok
+test tests::a_layer_without_a_default_keeps_the_one_beneath_it ... ok
+test tests::a_config_with_no_permissions_allows_nothing_by_itself ... ok
+test tests::a_profile_can_name_the_settings_file_its_backend_runs_under ... ok
+test tests::a_profile_that_puts_nothing_in_front_of_a_backend_withholds_nothing ... ok
+test tests::a_profile_without_a_backend_is_reported_at_its_name ... ok
+test tests::a_profile_is_a_backend_plus_an_environment_arguments_and_a_refresh_command ... ok
+test tests::a_requested_profile_that_is_not_defined_lists_the_ones_that_are ... ok
+test tests::a_settings_path_that_is_not_there_is_reported_at_its_key_and_its_line ... ok
+test tests::a_syntax_error_names_the_line ... ok
+test tests::a_theme_is_carried_as_written_with_the_line_it_was_written_on ... ok
+test tests::a_rule_that_is_not_one_is_reported_at_its_line ... ok
+test tests::a_theme_is_not_what_trust_gates_and_the_last_file_to_name_one_wins ... ok
+test tests::a_theme_that_says_nothing_is_a_mistake_in_the_file ... ok
+test tests::an_effects_switch_that_is_not_a_boolean_is_reported_at_its_line ... ok
+test tests::an_empty_file_is_a_config_with_nothing_in_it ... ok
+test tests::a_settings_path_that_says_nothing_is_reported_at_its_line ... ok
+test tests::a_profile_can_say_how_it_is_billed ... ok
+test tests::an_unknown_backend_names_the_key_the_line_and_the_backends_there_are ... ok
+test tests::a_value_of_the_wrong_type_names_the_key_and_the_line ... ok
+test tests::a_requested_profile_wins_over_the_default ... ok
+test tests::a_variable_that_cannot_be_set_in_an_environment_is_rejected ... ok
+test tests::an_unknown_key_is_an_error_rather_than_ignored ... ok
+test tests::empty_strings_where_a_name_or_a_command_is_needed_are_rejected ... ok
+test tests::an_untrusted_file_names_no_settings_file_for_a_backend_to_run_under ... ok
+test tests::permissions_and_the_default_profile_are_not_what_trust_gates ... ok
+test tests::repo_config_overrides_user_config ... ok
+test tests::an_untrusted_file_sets_no_environment_no_arguments_and_no_refresh_command ... ok
+test tests::without_a_request_or_a_default_no_profile_is_selected ... ok
+test tests::the_first_error_in_the_file_is_the_one_reported ... ok
+test tests::the_desktop_moves_unless_a_config_turns_it_off_and_the_last_file_to_say_wins ... ok
+test tests::standing_answers_are_read_as_rules_and_add_up_across_files ... ok
+test tests::the_environment_passes_through_exactly_as_written ... ok
+test tests::the_models_a_profile_offers_are_kept_in_the_order_they_were_written ... ok
+test trust::tests::a_comment_that_the_parser_ignores_is_still_a_change_to_the_file ... ok
+test trust::tests::a_digest_is_the_published_sha_256_of_the_files_text ... ok
+test trust::tests::a_file_is_trusted_at_the_contents_it_was_trusted_at_and_at_no_others ... ok
+test trust::tests::a_path_a_line_cannot_hold_is_refused_rather_than_written_as_two ... ok
+test trust::tests::a_record_that_is_not_one_is_reported_at_its_line ... ok
+test trust::tests::what_was_written_reads_back_and_a_forgotten_file_is_gone ... ok
+test tests::reading_a_file_that_does_not_exist_is_no_config ... ok
+test tests::an_unreadable_config_names_the_file ... ok
+test write::tests::a_file_with_no_permissions_table_gets_one_at_the_end ... ok
+test write::tests::an_empty_file_is_written_without_a_blank_line_at_the_top ... ok
+test write::tests::a_rule_that_would_not_read_back_is_escaped ... ok
+test write::tests::a_permissions_table_niobe_does_not_understand_is_left_alone ... ok
+test write::tests::an_inline_permissions_table_is_spliced_like_any_other ... ok
+test write::tests::everything_but_the_array_survives_being_written ... ok
+test trust::tests::a_record_that_is_not_there_trusts_nothing ... ok
+test tests::a_file_that_is_invalid_stops_the_load ... ok
+test write::tests::a_rule_already_in_the_file_is_not_written_again ... ok
+test tests::loading_lays_later_files_over_earlier_ones ... ok
+test write::tests::a_config_that_does_not_load_is_not_written_to ... ok
+test trust::tests::writing_the_record_makes_the_config_directory_it_belongs_in ... ok
+test write::tests::a_first_rule_creates_the_file_and_its_directory ... ok
+
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/lib.rs (target/debug/deps/niobe_core-654d9a9741fbc0f8)
+
+running 101 tests
+test diff::tests::a_hunk_whose_lines_match_its_header_is_kept ... ok
+test diff::tests::a_hunk_whose_lines_disagree_with_its_header_is_refused ... ok
+test diff::tests::a_created_file_is_one_hunk_of_added_lines_and_an_empty_one_is_none ... ok
+test diff::tests::a_line_replaced_by_two_reads_as_two_added_and_one_removed ... ok
+test diff::tests::a_moved_line_is_one_removal_and_one_addition ... ok
+test diff::tests::lines_kept_in_the_middle_are_not_counted_as_changed ... ok
+test diff::tests::a_trailing_newline_terminates_the_last_line_rather_than_starting_one ... ok
+test diff::tests::hunks_are_counted_by_the_same_arithmetic_as_two_texts ... ok
+test diff::tests::unchanged_text_changes_nothing ... ok
+test event::tests::allowed_covers_every_allow_variant ... ok
+test event::tests::an_unreported_cost_is_none_not_zero ... ok
+test event::tests::ids_are_opaque_strings ... ok
+test event::tests::a_plan_backends_cost_survives_the_round_trip_labelled ... ok
+test event::tests::how_a_session_is_billed_survives_the_round_trip ... ok
+test event::tests::a_session_whose_backend_has_no_id_of_its_own_reads_as_none ... ok
+test event::tests::a_window_the_backend_did_not_report_is_absent_rather_than_untouched ... ok
+test event::tests::a_usage_record_without_one_hour_writes_reads_them_as_zero ... ok
+test event::tests::a_record_from_before_the_basis_field_reads_as_unlabelled ... ok
+test event::tests::a_chosen_mode_and_model_survive_the_round_trip ... ok
+test event::tests::an_answer_in_the_operators_own_words_is_kept_and_a_plain_one_reads_as_before ... ok
+test event::tests::a_calls_exit_code_and_reason_survive_the_round_trip_and_an_older_end_has_neither ... ok
+test event::tests::usage_tokens_counts_cache_traffic ... ok
+test event::tests::modes_cycle_in_the_order_the_shell_shows_them ... ok
+test event::tests::usage_windows_survive_the_round_trip_with_their_reset_times ... ok
+test event::tests::one_hour_cache_writes_are_a_share_of_cache_write_not_more_tokens ... ok
+test permission::tests::a_list_with_no_rules_asks_about_everything ... ok
+test permission::tests::a_rule_already_covered_does_not_grow_the_list ... ok
+test permission::tests::a_rule_reads_back_the_way_it_was_written ... ok
+test permission::tests::a_rule_for_a_tool_covers_every_call_to_it ... ok
+test permission::tests::a_rule_survives_the_round_trip_as_the_string_a_config_writes ... ok
+test permission::tests::a_target_with_brackets_of_its_own_survives_being_written_down ... ok
+test permission::tests::a_targeted_rule_covers_that_target_and_nothing_near_it ... ok
+test permission::tests::a_targeted_rule_does_not_cover_a_call_with_no_target ... ok
+test permission::tests::a_trailing_star_matches_by_prefix ... ok
+test permission::tests::allowlists_add_up_rather_than_replacing_one_another ... ok
+test permission::tests::an_allowlist_answers_for_whichever_rule_covers_the_call ... ok
+test session::tests::a_fatal_error_between_turns_closes_no_turn ... ok
+test permission::tests::text_that_is_not_a_rule_is_reported_with_what_was_written ... ok
+test session::tests::a_fatal_error_ends_the_turn_and_a_recoverable_one_does_not ... ok
+test session::tests::a_fatal_error_is_kept_apart_from_the_count ... ok
+test session::tests::a_session_nobody_has_spoken_in_has_no_caption ... ok
+test session::tests::a_session_that_has_sent_nothing_has_no_context ... ok
+test diff::tests::a_replacement_too_large_to_compare_exactly_is_refused_not_guessed ... ok
+test session::tests::a_title_or_prompt_of_nothing_but_whitespace_is_no_caption ... ok
+test session::tests::a_turn_runs_from_the_prompt_until_the_backend_says_it_ended ... ok
+test session::tests::a_turn_whose_report_dropped_the_five_hour_window_has_no_share ... ok
+test session::tests::a_turn_a_fatal_error_ended_is_recorded_with_its_numbers ... ok
+test session::tests::a_turn_still_running_has_no_record ... ok
+test session::tests::a_turn_the_window_was_not_reported_in_has_no_share ... ok
+test session::tests::a_settlement_prices_the_records_it_covers ... ok
+test session::tests::a_change_that_did_not_say_how_much_it_removed_leaves_that_side_a_floor ... ok
+test session::tests::a_file_changed_before_the_model_said_anything_has_no_why_invented_for_it ... ok
+test session::tests::a_file_changed_again_takes_the_newer_explanation ... ok
+test session::tests::a_change_of_wholly_unstated_size_is_still_a_file_the_session_changed ... ok
+test session::tests::a_settlement_leaves_another_models_records_unsettled ... ok
+test session::tests::a_files_changes_add_up_across_the_calls_that_made_them ... ok
+test session::tests::a_turns_window_share_is_what_the_window_moved_across_it ... ok
+test session::tests::a_window_reported_without_its_reset_gives_no_share ... ok
+test session::tests::an_end_with_no_prompt_before_it_counts_from_the_last_end ... ok
+test session::tests::an_untitled_session_is_captioned_by_the_first_line_of_its_first_prompt ... ok
+test session::tests::a_window_that_started_over_during_the_turn_gives_no_share ... ok
+test session::tests::deltas_assemble_and_a_complete_message_replaces_them ... ok
+test session::tests::denied_permissions_are_counted_and_stop_pending ... ok
+test session::tests::each_turn_counts_only_the_tokens_it_spent ... ok
+test session::tests::meta_is_taken_from_the_stream_and_updated_by_it ... ok
+test session::tests::nothing_says_how_a_session_is_billed_until_a_backend_does ... ok
+test session::tests::one_hour_cache_writes_are_summed_as_a_share_of_the_writes_not_beside_them ... ok
+test session::tests::parallel_agents_report_their_peak ... ok
+test session::tests::replaying_the_same_events_twice_lands_in_the_same_place ... ok
+test diff::tests::a_small_edit_inside_a_large_file_is_still_counted ... ok
+test session::tests::reported_cost_is_kept_per_model ... ok
+test session::tests::the_backends_latest_title_captions_the_session_over_the_first_prompt ... ok
+test session::tests::the_context_is_the_last_requests_even_when_it_shrank ... ok
+test session::tests::the_latest_test_run_is_the_one_the_session_reports ... ok
+test session::tests::the_mode_a_session_is_in_is_the_last_one_chosen ... ok
+test session::tests::the_model_the_operator_chose_stands_until_the_backend_says_what_it_ran ... ok
+test session::tests::the_per_model_tokens_sum_to_the_sessions_own_total ... ok
+test session::tests::the_usage_windows_a_session_shows_are_the_last_ones_reported ... ok
+test session::tests::the_why_beside_a_file_is_the_last_thing_the_model_said_before_changing_it ... ok
+test session::tests::tokens_are_kept_per_model_whether_or_not_the_cost_has_settled ... ok
+test session::tests::tokens_reported_after_a_settlement_are_unsettled_again ... ok
+test session::tests::tool_calls_pair_up_and_the_unpaired_ones_are_visible ... ok
+test session::tests::totals_sum_reported_cost_and_count_what_was_not_reported ... ok
+test test_run::tests::a_build_that_failed_ran_no_tests_and_is_not_read ... ok
+test test_run::tests::a_clean_pass_is_read_as_the_sum_of_its_binaries ... ok
+test test_run::tests::a_filtered_run_is_not_read_as_the_summaries_that_survived ... ok
+test test_run::tests::a_command_that_runs_no_tests_is_not_a_test_run ... ok
+test test_run::tests::a_line_ending_in_a_carriage_return_reads_as_the_line ... ok
+test test_run::tests::a_run_cut_out_of_its_middle_is_not_read ... ok
+test test_run::tests::a_run_interrupted_after_a_whole_binary_is_not_read_as_that_binary ... ok
+test test_run::tests::a_run_killed_between_two_binaries_is_not_read_as_the_binaries_before ... ok
+test test_run::tests::a_run_that_kept_going_past_a_failure_counts_every_binary ... ok
+test test_run::tests::a_run_with_a_failure_is_read_as_failing_with_its_own_count ... ok
+test test_run::tests::a_summary_that_does_not_add_up_to_its_binary_is_not_read ... ok
+test test_run::tests::a_verdict_that_disagrees_with_the_failures_is_not_read ... ok
+test test_run::tests::an_interrupted_run_is_not_read ... ok
+test test_run::tests::an_unrelated_commands_output_is_not_read ... ok
+test test_run::tests::output_with_no_test_binary_in_it_is_not_read ... ok
+test test_run::tests::cargo_test_is_a_test_run_however_it_is_invoked ... ok
+test test_run::tests::counts_the_status_disagrees_with_are_not_read ... ok
+test tests::app_name_is_the_binary_name ... ok
+
+test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/replay.rs (target/debug/deps/replay-e36933116cf1b041)
+
+running 7 tests
+test the_gaps_log_exercises_what_no_producer_emits ... ok
+test the_recording_exercises_the_awkward_cases_a_live_session_has ... ok
+test the_recorded_session_replays_inside_the_budget ... ok
+test a_recorded_log_replays_into_the_derived_totals ... ok
+test the_recorded_session_is_six_hundred_and_three_events ... ok
+test replaying_event_by_event_matches_replaying_the_whole_log ... ok
+test every_event_in_the_logs_round_trips_through_its_wire_form ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/niobe_ledger-04d5e5d7ed434568)
+
+running 25 tests
+test date::tests::dates_order_chronologically ... ok
+test date::tests::only_days_that_exist_are_dates ... ok
+test date::tests::a_time_is_read_as_its_utc_day ... ok
+test date::tests::a_time_outside_the_calendar_is_clamped_to_its_ends ... ok
+test price::tests::a_cost_saturates_instead_of_wrapping ... ok
+test price::tests::each_kind_of_token_is_billed_at_its_own_rate ... ok
+test price::tests::long_context_rates_apply_only_past_the_threshold_and_then_to_every_token ... ok
+test price::tests::more_one_hour_writes_than_writes_are_read_as_all_writes_being_one_hour ... ok
+test price::tests::a_rate_prints_as_dollars_with_only_the_digits_it_has ... ok
+test price::tests::one_hour_writes_with_no_one_hour_rate_have_no_cost ... ok
+test parse::tests::decimal_prices_are_read_exactly ... ok
+test parse::tests::a_price_that_is_not_a_plain_decimal_is_refused ... ok
+test table::tests::origins_name_the_bundled_table_and_files_by_path ... ok
+test tests::provenance_variants_are_distinct ... ok
+test parse::tests::an_empty_file_is_an_empty_table ... ok
+test table::tests::every_id_of_a_model_has_its_schedule ... ok
+test parse::tests::a_long_context_tier_parses ... ok
+test parse::tests::a_context_entry_dates_each_window_it_lists ... ok
+test parse::tests::a_complete_price_parses_and_an_optional_rate_may_be_left_out ... ok
+test table::tests::the_price_of_a_day_is_the_latest_one_from_on_or_before_it ... ok
+test table::tests::an_overlay_replaces_the_whole_schedule_of_each_id_it_lists_and_no_other ... ok
+test parse::tests::an_invalid_context_entry_is_reported_with_its_key_and_line ... ok
+test table::tests::a_cost_carries_its_provenance ... ok
+test table::tests::a_missing_price_file_is_none_and_an_unreadable_one_is_an_error ... ok
+test parse::tests::an_invalid_price_is_reported_with_its_key_and_line ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/contexts.rs (target/debug/deps/contexts-ff0f01e3cf6eac8b)
+
+running 5 tests
+test the_claude_5_models_have_a_million_token_window ... ok
+test a_model_has_no_window_before_it_was_released ... ok
+test a_model_the_table_does_not_list_has_no_window ... ok
+test opus_4_6_had_two_hundred_thousand_by_default_until_its_million_came_out_of_beta ... ok
+test haiku_4_5_and_sonnet_4_5_have_two_hundred_thousand ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/prices.rs (target/debug/deps/prices-adacaf46f8da050d)
+
+running 11 tests
+test claude_sonnet_5_on_a_bedrock_eu_profile_matches_a_hand_computed_cost ... ok
+test a_model_the_table_does_not_list_is_unpriced ... ok
+test a_session_from_before_a_model_was_priced_is_unpriced ... ok
+test gpt_5_6_sol_matches_a_hand_computed_cost_at_the_price_in_force_that_day ... ok
+test one_hour_writes_on_a_model_with_no_one_hour_rate_are_unpriced_not_guessed ... ok
+test bedrock_eu_model_ids_resolve ... ok
+test claude_opus_5_on_the_claude_api_matches_a_hand_computed_cost ... ok
+test every_bedrock_rate_is_the_claude_api_rate_plus_ten_percent_in_a_region_and_equal_globally ... ok
+test claude_opus_4_6_prices_a_long_prompt_by_the_rule_in_force_that_day ... ok
+test claude_haiku_4_5_on_a_bedrock_eu_profile_matches_a_hand_computed_cost ... ok
+test claude_opus_5_5_reads_its_cache_at_five_percent_of_input ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/niobe_store-7aa10ec94433c6b2)
+
+running 5 tests
+test store::tests::a_clock_before_the_epoch_reads_as_the_epoch ... ok
+test store::tests::wall_clock_millis_round_trip ... ok
+test store::tests::a_session_id_is_the_number_the_list_prints ... ok
+test jsonl::tests::blank_lines_are_skipped ... ok
+test jsonl::tests::a_bad_line_is_reported_by_the_line_an_editor_shows ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/store.rs (target/debug/deps/store-dc0c23c5ddd199c7)
+
+running 13 tests
+test an_unknown_session_is_an_error_not_an_empty_timeline ... ok
+test a_recorder_creates_its_session_on_the_first_event_and_not_before ... ok
+test sessions_are_listed_newest_first_with_their_first_prompt_and_size ... ok
+test sequence_numbers_count_per_session ... ok
+test events_come_back_in_the_order_they_were_appended_with_sequence_numbers ... ok
+test a_new_store_lists_no_sessions ... ok
+test a_store_from_a_newer_niobe_is_refused_rather_than_misread ... ok
+test an_unreadable_row_names_the_session_and_the_sequence_number ... ok
+test a_resumed_recorder_appends_to_the_session_it_resumed ... ok
+test the_database_itself_refuses_to_edit_or_delete_an_event ... ok
+test a_stored_session_loads_and_replays_inside_the_budget ... ok
+test a_restart_shows_the_same_timeline_and_the_same_totals ... ok
+test reported_costs_come_back_bit_for_bit ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running unittests src/lib.rs (target/debug/deps/niobe_tui-960eb76e1f745b30)
+
+running 306 tests
+test app::tests::a_click_on_a_pane_gives_it_the_keyboard ... ok
+test app::tests::a_decision_folded_in_without_a_clock_is_still_paired_with_its_own_row ... ok
+test app::tests::a_decision_is_handed_out_with_the_time_it_was_made ... ok
+test app::tests::a_fold_with_no_clock_behind_it_leaves_no_times_rather_than_invented_ones ... ok
+test app::tests::a_change_reported_only_as_counts_leaves_the_call_as_its_summary_line ... ok
+test app::tests::a_call_folded_in_with_no_clock_has_no_duration_rather_than_none_at_all ... ok
+test app::tests::a_call_is_timed_from_its_start_to_its_end_by_the_clock_it_was_folded_at ... ok
+test app::tests::a_call_read_back_without_an_answer_makes_no_claim_about_how_it_ran ... ok
+test app::tests::a_call_sent_from_here_that_nobody_was_asked_about_ran_in_the_mode ... ok
+test app::tests::a_failed_call_is_recoloured_and_an_unmatched_end_still_shows ... ok
+test app::tests::a_calls_exit_status_reason_and_line_counts_reach_its_row ... ok
+test app::tests::a_model_list_the_operator_left_asks_for_nothing ... ok
+test app::tests::a_call_whose_ends_the_clock_cannot_tell_apart_was_not_timed ... ok
+test app::tests::a_change_that_does_not_follow_the_end_of_its_call_is_not_put_under_another_call ... ok
+test app::tests::a_change_the_backend_reported_the_lines_of_is_drawn_under_the_call_that_made_it ... ok
+test app::tests::a_key_meant_for_a_question_out_of_view_brings_it_into_view_first ... ok
+test app::tests::a_moment_read_without_a_clock_has_no_time_of_day_at_all ... ok
+test app::tests::a_number_past_the_last_option_selects_nothing ... ok
+test app::tests::a_moment_an_event_named_is_read_in_the_clock_the_loop_handed_over ... ok
+test app::tests::a_pane_taller_than_what_it_holds_does_not_scroll_at_all ... ok
+test app::tests::a_pane_that_shrank_under_the_scroll_comes_back_to_what_it_holds ... ok
+test app::tests::a_prompt_keeps_the_keyboard_from_the_model_list ... ok
+test app::tests::a_pane_that_is_not_on_screen_is_never_given_the_keyboard ... ok
+test app::tests::a_prompt_takes_the_keyboard_from_the_composer ... ok
+test app::tests::a_prompt_sent_from_here_shows_the_session_working_until_the_turn_ends ... ok
+test app::tests::a_prompt_that_never_reached_the_backend_is_not_shown_as_working ... ok
+test app::tests::a_prompt_waits_on_the_operator_and_is_answered_once ... ok
+test app::tests::a_prompt_with_no_target_has_no_target_option_to_select ... ok
+test app::tests::a_question_holding_the_keyboard_is_where_the_focus_is ... ok
+test app::tests::a_question_names_the_turn_it_is_blocking ... ok
+test app::tests::a_recorded_event_keeps_the_moment_it_was_recorded_at ... ok
+test app::tests::a_refusal_between_two_calls_breaks_their_run ... ok
+test app::tests::a_refusal_is_visible_in_the_transcript ... ok
+test app::tests::a_report_about_an_agent_never_spawned_adds_no_row ... ok
+test app::tests::a_running_sub_agent_carries_the_moment_it_was_spawned ... ok
+test app::tests::a_section_folds_and_opens_again ... ok
+test app::tests::a_session_no_backend_has_reported_a_mode_for_cycles_from_asking ... ok
+test app::tests::a_session_with_no_budget_is_never_warned_about_one ... ok
+test app::tests::a_shell_on_a_deep_terminal_draws_every_theme_at_that_depth ... ok
+test app::tests::a_shell_opened_on_a_theme_draws_its_composer_in_it ... ok
+test app::tests::a_standing_rule_answers_a_prompt_without_showing_it ... ok
+test app::tests::a_sub_agents_report_replaces_only_what_it_speaks_to ... ok
+test app::tests::a_submitted_prompt_is_handed_out_once_to_be_kept ... ok
+test app::tests::a_tool_call_fills_in_its_own_entry_when_it_ends ... ok
+test app::tests::a_tool_is_named_the_way_a_person_would_name_it ... ok
+test app::tests::a_transcript_shorter_than_the_pane_never_scrolls ... ok
+test app::tests::a_tool_line_reads_as_what_the_call_does_rather_than_its_arguments ... ok
+test app::tests::a_turn_an_error_ended_is_ruled_off_under_the_error_with_its_numbers ... ok
+test app::tests::a_turn_from_a_log_with_no_times_says_what_it_spent_and_nothing_else ... ok
+test app::tests::a_turn_is_ruled_off_where_it_ended_with_what_it_spent_and_took ... ok
+test app::tests::a_turn_read_back_from_a_record_is_not_shown_as_working ... ok
+test app::tests::a_turn_waiting_on_a_prompt_says_it_is_waiting_on_the_operator ... ok
+test app::tests::a_wheel_notch_gives_the_pane_it_scrolls_the_keyboard ... ok
+test app::tests::a_whole_recorded_stream_is_folded_at_the_times_it_was_recorded_at ... ok
+test app::tests::a_window_reads_as_the_share_the_backend_reported_and_no_other ... ok
+test app::tests::a_window_that_has_since_come_back_is_not_counted_down_from_nothing ... ok
+test app::tests::an_empty_composer_sends_nothing ... ok
+test app::tests::always_this_tool_and_always_this_target_store_the_rule_they_name ... ok
+test app::tests::an_empty_written_answer_sends_nothing_and_esc_goes_back_to_the_options ... ok
+test app::tests::an_event_is_stamped_with_the_clock_the_tick_that_took_it_read ... ok
+test app::tests::an_event_that_could_not_be_kept_says_so_in_the_transcript ... ok
+test app::tests::another_tool_words_between_or_the_end_of_a_turn_break_a_run ... ok
+test app::tests::arrows_and_vi_keys_move_the_selection_and_wrap_at_either_end ... ok
+test app::tests::bytes_read_short ... ok
+test app::tests::calls_to_the_same_tool_one_after_another_are_one_group ... ok
+test app::tests::ctrl_o_folds_every_run_of_calls_and_opens_them_again ... ok
+test app::tests::clicking_the_way_back_down_returns_to_the_newest_line ... ok
+test app::tests::calls_started_together_are_grouped_and_each_end_finds_its_own_call ... ok
+test app::tests::deltas_accumulate_into_one_entry_and_the_message_replaces_them ... ok
+test app::tests::enter_confirms_the_selection_and_the_next_prompt_starts_on_the_first ... ok
+test app::tests::esc_puts_the_question_off_and_leaves_it_waiting_in_the_transcript ... ok
+test app::tests::f5_on_a_session_with_no_windows_says_what_the_key_does_not_do_yet ... ok
+test app::tests::events_folded_in_from_elsewhere_are_not_handed_out_again ... ok
+test app::tests::f8_offers_the_models_the_profile_names_and_picking_one_asks_for_it ... ok
+test app::tests::f9_moves_to_the_next_theme_and_takes_the_composer_with_it ... ok
+test app::tests::f5_reads_out_both_windows_and_when_each_comes_back ... ok
+test app::tests::every_call_keeps_its_own_bytes_and_they_add_up_to_the_sessions ... ok
+test app::tests::f8_under_a_profile_that_names_no_model_says_so_rather_than_opening_an_empty_list ... ok
+test app::tests::four_fifths_of_a_budget_is_warned_about_once_and_says_the_stop_can_overshoot ... ok
+test app::tests::folding_a_section_puts_the_pane_back_at_its_top ... ok
+test app::tests::numbers_go_to_the_panes_and_not_to_the_transcript ... ok
+test app::tests::paging_up_a_transcript_that_fits_leaves_it_on_the_newest_line ... ok
+test app::tests::paging_up_unpins_the_tail_and_paging_back_down_repins_it ... ok
+test app::tests::prompts_are_answered_in_the_order_they_arrived ... ok
+test app::tests::quitting_works_with_a_prompt_on_screen ... ok
+test app::tests::shift_tab_cycles_the_mode_and_hands_the_change_out_to_be_kept ... ok
+test app::tests::submitting_records_the_prompt_and_says_nothing_is_listening ... ok
+test app::tests::tab_writes_an_answer_that_reaches_the_backend_as_the_answer ... ok
+test app::tests::the_arrows_walk_a_focused_panes_sections_and_enter_folds_the_one_under_the_cursor ... ok
+test app::tests::the_changes_pane_never_scrolls_past_either_end ... ok
+test app::tests::the_latest_test_run_is_kept_with_the_moment_its_call_finished ... ok
+test app::tests::the_options_are_numbered_in_the_order_they_are_offered ... ok
+test app::tests::the_diff_says_whether_the_operator_or_a_standing_rule_let_the_call_through ... ok
+test app::tests::the_scroll_keys_move_the_focused_pane_and_nothing_else ... ok
+test app::tests::the_session_has_the_keyboard_and_tab_walks_the_panes_round_to_it ... ok
+test app::tests::the_time_a_call_waited_on_the_operator_is_not_counted_as_the_tools ... ok
+test app::tests::the_wheel_scrolls_the_transcript_and_back_down_to_the_tail ... ok
+test app::tests::time_left_reads_in_the_two_units_that_say_anything ... ok
+test app::tests::typing_needs_no_focus_moved_and_takes_the_keyboard_back_with_it ... ok
+test calls::tests::a_call_still_running_says_so_in_place_of_a_cost ... ok
+test calls::tests::a_duration_reads_in_the_unit_that_says_anything ... ok
+test clock::tests::a_duration_reads_as_seconds_then_minutes_then_hours ... ok
+test clock::tests::a_clock_at_a_fixed_offset_resolves_the_day_the_offset_puts_it_on ... ok
+test clock::tests::a_machine_that_named_no_timezone_has_nothing_to_render ... ok
+test clock::tests::a_time_of_day_is_two_digits_and_two_digits ... ok
+test clock::tests::an_age_is_one_unit_and_gets_coarser_as_it_gets_older ... ok
+test clock::tests::an_age_under_ten_seconds_keeps_its_tenths_and_one_over_it_does_not ... ok
+test clock::tests::an_hour_or_a_minute_off_the_clock_is_no_time_at_all ... ok
+test clock::tests::something_coming_around_later_today_reads_as_a_clock_time ... ok
+test clock::tests::something_that_has_already_come_around_is_not_upcoming ... ok
+test calls::tests::a_change_whose_removal_went_unstated_reads_as_a_dash_and_its_sum_as_a_floor ... ok
+test clock::tests::something_coming_around_on_another_day_carries_the_weekday ... ok
+test calls::tests::a_failure_with_no_reason_says_the_backend_gave_none ... ok
+test calls::tests::a_run_sums_its_figures_and_marks_a_time_one_call_has_none_of ... ok
+test calls::tests::a_failure_shows_the_first_line_of_its_reason ... ok
+test clock::tests::the_first_day_of_1970_was_a_thursday_and_the_week_runs_on_from_it ... ok
+test fx::tests::a_cell_off_the_screen_is_never_drawn ... ok
+test fx::tests::a_screen_with_no_room_draws_nothing ... ok
+test fx::tests::the_frame_advances_at_the_pace_of_the_motion ... ok
+test fx::tests::the_radar_ring_is_its_top_and_bottom_and_its_far_corners ... ok
+test fx::tests::the_rain_falls_a_row_a_frame_and_every_third_column_at_half_speed ... ok
+test fx::tests::the_radar_turns_an_eighth_a_frame_about_its_centre ... ok
+test fx::tests::the_rule_sweeps_down_the_screen_a_row_a_frame ... ok
+test fx::tests::the_scanline_travels_down_the_screen_and_wraps ... ok
+test hunks::tests::a_change_nobody_can_say_was_gated_has_no_footer ... ok
+test hunks::tests::a_diff_longer_than_the_cap_says_how_many_rows_it_left_out ... ok
+test hunks::tests::a_long_line_is_cut_and_keeps_one_number ... ok
+test hunks::tests::every_row_has_a_sign_cell_of_one_column_even_where_it_is_blank ... ok
+test hunks::tests::removed_and_added_lines_are_numbered_each_on_their_own_side ... ok
+test hunks::tests::the_diff_is_drawn_on_its_own_background_and_not_the_panes ... ok
+test hunks::tests::the_footer_says_who_let_the_call_through ... ok
+test hunks::tests::two_hunks_are_separated_by_an_elision_row_and_numbered_from_their_own_start ... ok
+test hunks::tests::unchanged_lines_far_from_a_change_are_one_elision_row ... ok
+test input::tests::a_descriptor_that_is_gone_is_a_hangup ... ok
+test input::tests::a_hangup_is_a_hangup_even_with_the_end_of_file_to_read ... ok
+test fx::tests::the_same_frame_is_the_same_picture_however_often_it_is_asked_for ... ok
+test input::tests::a_terminal_whose_other_end_has_gone_reads_as_a_hangup ... ok
+test fx::tests::a_still_theme_leaves_the_desktop_alone ... ok
+test input::tests::a_terminal_with_nothing_typed_into_it_is_idle ... ok
+test input::tests::nothing_reported_is_idle ... ok
+test markdown::tests::a_bullet_wraps_under_its_own_text_rather_than_under_the_bullet ... ok
+test markdown::tests::a_code_block_keeps_its_lines_behind_a_gutter_and_cuts_only_what_overflows ... ok
+test clock::tests::a_stamp_a_minute_later_reads_a_minute_later_on_the_clock ... ok
+test clock::tests::how_long_apart_two_stamps_are_is_how_long_the_later_one_waited ... ok
+test clock::tests::a_stamp_has_a_time_of_day_exactly_when_the_machine_named_a_timezone ... ok
+test clock::tests::a_stamp_earlier_than_the_one_it_is_measured_from_is_no_duration_at_all ... ok
+test markdown::tests::a_link_reads_as_its_text_underlined ... ok
+test markdown::tests::a_heading_is_bold_in_the_title_colour_with_no_hashes ... ok
+test markdown::tests::a_quote_sits_behind_a_bar_and_a_rule_spans_the_width ... ok
+test markdown::tests::a_reply_cut_off_mid_stream_still_draws_what_has_arrived ... ok
+test markdown::tests::a_table_lines_up_its_columns_under_a_ruled_header ... ok
+test markdown::tests::a_task_list_shows_its_boxes ... ok
+test markdown::tests::a_table_too_wide_for_the_pane_wraps_its_wide_cells_rather_than_cutting_them ... ok
+test markdown::tests::emphasis_and_code_are_styled_and_their_marks_are_gone ... ok
+test markdown::tests::a_word_that_spans_styles_is_not_broken_between_them ... ok
+test markdown::tests::numbered_and_nested_lists_keep_their_numbers_and_their_depth ... ok
+test meter::tests::a_meter_with_no_room_is_no_meter ... ok
+test markdown::tests::paragraphs_are_a_blank_line_apart_and_a_list_follows_its_sentence ... ok
+test meter::tests::a_part_used_window_fills_its_share_of_the_cells ... ok
+test meter::tests::a_share_that_is_not_a_share_draws_nothing_filled ... ok
+test meter::tests::a_window_barely_touched_still_shows_a_cell ... ok
+test meter::tests::a_window_reported_past_its_end_fills_the_track_it_has ... ok
+test meter::tests::a_window_that_is_gone_leaves_no_track ... ok
+test meter::tests::an_untouched_window_is_all_track_and_no_bar ... ok
+test fx::tests::a_theme_that_moves_draws_something_different_from_one_frame_to_the_next ... ok
+test run::tests::a_backend_that_will_not_take_a_turn_says_so_rather_than_looking_busy ... ok
+test run::tests::a_change_the_backend_would_not_take_says_the_session_is_running_as_it_was ... ok
+test run::tests::a_clean_quit_that_handed_the_terminal_back_is_a_quit ... ok
+test run::tests::a_decision_reaches_the_backend_the_call_is_waiting_in ... ok
+test run::tests::a_decision_the_backend_would_not_take_says_the_call_is_still_waiting ... ok
+test run::tests::a_file_the_session_changed_asks_the_repository_to_be_read_again ... ok
+test run::tests::a_journal_that_refuses_leaves_a_failure_on_screen ... ok
+test run::tests::a_loop_that_failed_on_a_terminal_that_is_still_there_is_reported_with_its_error ... ok
+test run::tests::a_loop_that_failed_on_a_terminal_that_is_gone_lost_its_terminal ... ok
+test run::tests::a_mode_and_a_model_the_operator_chose_reach_the_backend_and_the_journal ... ok
+test run::tests::a_prompt_a_rule_already_answers_is_never_put_in_front_of_the_operator ... ok
+test run::tests::a_read_that_has_not_come_back_leaves_what_the_shell_had ... ok
+test run::tests::a_reply_is_looked_for_often_enough_to_read_as_it_arrives ... ok
+test run::tests::a_rule_that_could_not_be_kept_says_it_will_not_outlive_the_session ... ok
+test run::tests::a_sent_prompt_reaches_the_journal_and_the_backend ... ok
+test run::tests::a_session_whose_terminal_went_away_did_not_fail ... ok
+test run::tests::a_session_with_nothing_attached_does_not_try_to_send ... ok
+test run::tests::a_terminal_that_could_not_be_handed_back_is_reported_with_its_error ... ok
+test run::tests::a_tick_that_drained_nothing_is_not_a_backend_producing ... ok
+test run::tests::a_turn_that_changed_no_file_leaves_the_repository_unread ... ok
+test run::tests::an_always_answer_is_kept_so_the_prompt_does_not_come_back ... ok
+test run::tests::folding_a_recorded_session_answers_nothing_by_itself ... ok
+test run::tests::what_the_backend_produces_is_folded_in_and_kept ... ok
+test terminal::tests::dropping_the_guard_restores_the_screen ... ok
+test terminal::tests::restoring_twice_restores_once ... ok
+test tests::minimum_size_is_the_classic_terminal ... ok
+test tests::the_right_stack_needs_a_hundred_columns ... ok
+test text::tests::a_first_word_wider_than_the_room_is_cut_inside_it ... ok
+test text::tests::a_path_too_long_for_its_row_keeps_its_end ... ok
+test text::tests::a_phrase_of_wide_characters_is_cut_by_cells ... ok
+test terminal::tests::sighup_says_the_terminal_went_away_rather_than_that_a_stop_was_asked_for ... ok
+test terminal::tests::sigterm_asks_the_event_loop_to_stop ... ok
+test terminal::tests::a_shutdown_starts_unrequested ... ok
+test text::tests::a_phrase_too_long_for_its_room_is_cut_between_words ... ok
+test text::tests::a_zero_width_pane_produces_no_lines ... ok
+test text::tests::a_word_wider_than_the_line_is_split_rather_than_overflowing ... ok
+test text::tests::empty_text_occupies_no_lines_at_all ... ok
+test text::tests::explicit_newlines_and_blank_lines_survive ... ok
+test text::tests::truncation_marks_what_it_cut ... ok
+test text::tests::wide_characters_count_as_two_cells ... ok
+test text::tests::words_break_on_whitespace ... ok
+test theme::tests::a_designed_theme_on_a_deep_terminal_is_drawn_in_nothing_but_its_design ... ok
+test theme::tests::a_terminal_is_deep_when_colorterm_says_so_and_sixteen_otherwise ... ok
+test theme::tests::a_theme_is_selected_by_its_name_however_it_is_capitalised ... ok
+test theme::tests::classic_is_the_sixteen_colours_however_deep_the_terminal_is ... ok
+test theme::tests::cycling_from_a_truecolor_palette_moves_to_the_next_theme ... ok
+test theme::tests::cycling_reaches_every_theme_and_comes_back_to_where_it_started ... ok
+test theme::tests::every_colour_of_every_sixteen_colour_table_is_one_of_the_sixteen_names ... ok
+test theme::tests::every_motion_moves_at_its_own_pace_and_none_outruns_the_redraw ... ok
+test theme::tests::every_palette_keeps_the_distinctions_the_panes_rely_on ... ok
+test theme::tests::every_theme_draws_the_focused_pane_in_a_frame_of_its_own ... ok
+test theme::tests::every_theme_draws_the_focused_pane_in_a_line_of_its_own ... ok
+test theme::tests::every_theme_tells_the_operator_their_own_messages_from_the_agents ... ok
+test theme::tests::every_theme_that_moves_has_a_head_its_trail_is_not ... ok
+test theme::tests::every_tone_of_a_motion_shows_on_the_desktop_it_is_drawn_on ... ok
+test theme::tests::the_default_theme_is_cyber ... ok
+test theme::tests::the_border_is_the_designs_turbo_vision_doubles_and_editor_single_lines ... ok
+test theme::tests::nothing_any_theme_draws_is_drawn_on_top_of_its_own_colour ... ok
+test theme::tests::the_designed_themes_draw_their_own_colours_where_the_terminal_can ... ok
+test theme::tests::the_names_are_listed_the_way_a_sentence_lists_them ... ok
+test theme::tests::every_truecolor_palette_draws_its_text_legibly ... ok
+test tree::tests::a_directory_is_written_once_and_its_files_keep_what_is_left ... ok
+test tree::tests::a_file_in_the_repository_root_sits_under_a_group_of_its_own ... ok
+test terminal::tests::an_unwinding_panic_still_restores ... ok
+test tree::tests::a_group_takes_the_deepest_prefix_every_file_in_it_shares ... ok
+test tree::tests::a_renamed_file_keeps_both_halves_of_what_git_called_it ... ok
+test tree::tests::one_file_out_of_the_run_shortens_the_prefix_for_the_whole_group ... ok
+test tree::tests::nothing_changed_is_no_rows_at_all ... ok
+test tree::tests::the_order_the_repository_gave_is_the_order_the_rows_are_in ... ok
+test turns::tests::a_figure_nobody_measured_is_left_off_not_zeroed ... ok
+test turns::tests::a_move_under_one_point_is_not_drawn_as_none ... ok
+test turns::tests::a_rule_that_fits_says_every_figure_and_runs_to_the_edge ... ok
+test turns::tests::the_tokens_are_the_last_figure_to_give_way ... ok
+test ui::tests::a_backend_that_has_started_and_not_yet_spoken_is_starting_not_absent ... ok
+test fx::tests::a_drop_of_rain_is_a_run_of_twelve_brightest_at_the_head ... ok
+test ui::tests::a_caption_longer_than_its_pane_is_cut_between_words_inside_the_margin ... ok
+test ui::tests::a_commit_the_upstream_has_not_got_is_marked_and_not_only_coloured ... ok
+test turns::tests::a_narrow_rule_drops_whole_figures_and_never_cuts_one ... ok
+test ui::tests::a_compacted_context_is_drawn_at_the_size_of_the_next_request ... ok
+test ui::tests::a_file_row_reads_as_the_counts_the_session_can_defend ... ok
+test ui::tests::a_count_no_call_stated_is_an_em_dash_and_never_a_zero ... ok
+test ui::tests::a_context_past_its_window_is_not_clamped ... ok
+test ui::tests::a_file_that_changed_by_no_lines_is_not_the_same_as_one_with_no_count ... ok
+test ui::tests::a_model_the_table_does_not_list_is_unpriced_rather_than_estimated ... ok
+test ui::tests::a_model_that_spent_nothing_gets_no_row ... ok
+test ui::tests::a_model_with_no_known_window_shows_its_context_and_no_share ... ok
+test ui::tests::a_models_cost_is_labelled_for_what_is_known_of_it ... ok
+test ui::tests::a_narrow_pane_shortens_the_meter_and_keeps_the_figures ... ok
+test ui::tests::a_narrowing_row_drops_whole_segments_from_the_right ... ok
+test ui::tests::a_partly_reported_cost_reads_as_a_floor ... ok
+test ui::tests::a_path_too_long_for_the_pane_gives_way_to_its_counts ... ok
+test ui::tests::a_plan_that_did_not_say_it_is_spending_extra_gets_no_extra_row ... ok
+test ui::tests::a_reset_that_has_already_come_around_is_not_drawn_as_one_still_to_come ... ok
+test ui::tests::a_selected_profile_is_named_until_a_backend_says_what_it_runs ... ok
+test ui::tests::a_row_fits_the_pane_it_is_drawn_in ... ok
+test ui::tests::a_running_turn_fills_the_glyph_and_an_idle_one_does_not ... ok
+test ui::tests::a_session_is_titled_by_what_it_is_about ... ok
+test ui::tests::a_session_no_backend_metered_draws_no_window_row_at_all ... ok
+test ui::tests::a_session_that_has_sent_nothing_draws_no_context_row ... ok
+test ui::tests::a_session_that_hit_errors_says_so_without_a_pane_being_opened ... ok
+test ui::tests::a_session_with_no_usage_shows_a_dash_not_a_zero ... ok
+test ui::tests::a_settled_turn_is_the_backends_own_figure_and_carries_no_mark ... ok
+test ui::tests::a_session_with_nothing_said_is_titled_by_its_repository ... ok
+test ui::tests::a_shell_that_has_not_been_told_the_time_draws_none_rather_than_a_guess ... ok
+test ui::tests::a_window_nearly_gone_is_marked_the_way_a_budget_nearly_spent_is ... ok
+test ui::tests::a_turn_the_backend_has_not_priced_is_estimated_rather_than_left_unpriced ... ok
+test ui::tests::a_window_the_backend_did_not_report_is_read_from_the_published_table ... ok
+test ui::tests::a_window_reads_as_a_meter_its_share_and_when_it_comes_back ... ok
+test ui::tests::a_token_row_fits_the_pane_it_is_drawn_in ... ok
+test ui::tests::a_window_reported_without_a_reset_shows_the_share_and_no_reset ... ok
+test ui::tests::an_unstarted_session_names_no_model_it_was_never_told_about ... ok
+test ui::tests::the_cache_row_reads_an_em_dash_before_anything_was_eligible ... ok
+test ui::tests::the_context_rows_the_pane_is_sized_for_are_the_rows_it_draws ... ok
+test ui::tests::the_menu_row_says_what_the_session_is_on_and_what_it_runs_under ... ok
+test ui::tests::the_context_reads_as_a_meter_its_share_and_both_figures ... ok
+test ui::tests::the_pane_that_shows_what_a_session_used_is_called_usage_everywhere ... ok
+test ui::tests::the_rows_the_pane_is_sized_for_are_the_rows_it_draws ... ok
+test ui::tests::the_token_rows_the_pane_is_sized_for_are_the_rows_it_draws ... ok
+test ui::tests::the_window_the_backend_reported_wins_over_the_published_one ... ok
+test ui::tests::token_counts_stay_short ... ok
+test ui::tests::what_the_extra_costs_is_an_em_dash_until_a_backend_reports_it ... ok
+test usage::tests::a_billing_suffix_survives_the_shortening ... ok
+test usage::tests::a_cache_write_is_a_miss_and_counts_against_the_rate ... ok
+test usage::tests::a_session_with_no_input_reported_has_no_rate_at_all ... ok
+test usage::tests::a_tiny_share_is_still_a_share ... ok
+test usage::tests::a_session_that_cached_nothing_reads_zero_rather_than_nothing ... ok
+test usage::tests::a_vendor_prefix_and_a_release_date_are_not_what_a_row_is_read_for ... ok
+test ui::tests::the_usage_pane_asks_for_exactly_the_rows_it_draws ... ok
+test usage::tests::an_id_with_nothing_to_drop_is_left_exactly_as_reported ... ok
+test usage::tests::nothing_spent_apportions_nothing ... ok
+test usage::tests::one_count_takes_the_whole_hundred ... ok
+test usage::tests::output_and_reasoning_are_not_in_the_denominator ... ok
+test usage::tests::two_ids_that_shorten_alike_both_keep_their_full_ids ... ok
+test usage::tests::the_percent_nobody_was_given_goes_to_the_shares_cut_by_most ... ok
+test usage::tests::the_hit_rate_is_reads_over_everything_the_prompt_could_have_cached ... ok
+test watch::tests::a_session_that_is_watching_nothing_is_never_handed_a_read ... ok
+test usage::tests::three_shares_add_up_to_a_hundred ... ok
+test fx::tests::nothing_is_drawn_in_a_colour_the_theme_does_not_name ... ok
+test fx::tests::a_drifting_column_reads_as_the_words_it_carries ... ok
+test fx::tests::every_column_of_a_moving_theme_shows_the_motion_within_a_lap ... ok
+test input::tests::a_terminal_with_a_line_waiting_is_ready ... ok
+
+test result: ok. 306 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+     Running tests/frame_budget.rs (target/debug/deps/frame_budget-585465a7f1725388)
+
+running 6 tests
+test a_large_working_tree_redraws_inside_a_frame_budget ... ok
+test a_busy_activity_pane_redraws_inside_a_frame_budget ... ok
+test a_running_turn_redraws_inside_a_frame_budget_in_every_theme ... ok
+test a_long_session_of_diffs_redraws_inside_a_frame_budget ... ok
+test a_long_session_of_markdown_redraws_inside_a_frame_budget ... ok
+test a_resize_redraws_inside_a_frame_budget ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.27s
+
+     Running tests/shell.rs (target/debug/deps/shell-fcf0fe8eeda6cab4)
+
+running 90 tests
+test a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not ... ok
+test a_decision_from_a_log_with_no_times_is_drawn_without_one ... ok
+test a_metered_profiles_budget_stands_under_its_cost ... ok
+test a_model_the_operator_moved_to_is_what_the_menu_row_names ... ok
+test a_decision_is_drawn_under_the_time_it_was_recorded_at ... ok
+test a_long_request_wraps_inside_the_question ... ok
+test a_narrow_pane_cuts_what_a_call_does_before_what_it_cost ... ok
+test a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it ... ok
+test a_designed_theme_on_a_deep_terminal_draws_every_cell_in_its_design ... ok
+test a_narrow_pane_keeps_the_counts_and_sheds_the_rest ... ok
+test a_question_put_off_stays_in_the_transcript_and_says_it_is_waiting ... ok
+test a_plan_spending_beyond_its_flat_fee_is_marked_in_the_usage_pane ... ok
+test a_price_sheet_puts_a_running_figure_in_the_cost_pane ... ok
+test a_plan_shows_what_the_work_would_have_cost_as_api_equivalent_and_dim ... ok
+test a_metered_profile_leads_the_usage_pane_with_money_and_prices_each_model ... ok
+test a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut ... ok
+test a_question_arriving_while_scrolled_back_does_not_move_the_view ... ok
+test a_focused_pane_folds_the_section_under_its_cursor ... ok
+test a_finished_turn_is_ruled_off_with_what_it_spent ... ok
+test a_selected_profile_is_named_in_the_menu_row_with_nothing_yet_listening ... ok
+test a_running_agent_is_timed_and_a_finished_one_shows_its_context ... ok
+test a_session_no_backend_reported_a_window_for_shows_no_window_at_all ... ok
+test a_session_nobody_said_the_billing_of_shows_no_dollar_figure ... ok
+test a_session_outside_a_repository_draws_no_branch_and_no_commits ... ok
+test a_session_on_one_model_gets_one_row_and_nothing_beside_it ... ok
+test a_run_whose_result_was_not_read_says_so_and_gives_no_count ... ok
+test a_session_with_nothing_reported_yet_draws_no_share_and_no_rate ... ok
+test a_frame_of_each_motion_is_drawn_on_the_desktop_between_the_panes ... ok
+test a_run_of_calls_folds_to_its_group_row_and_opens_again ... ok
+test a_session_alone_on_screen_keeps_the_keyboard ... ok
+test a_standing_answer_too_long_for_its_column_is_repeated_whole ... ok
+test a_recorded_prompt_puts_the_question_in_the_transcript_at_both_sizes ... ok
+test a_session_with_no_windows_and_no_billing_draws_neither ... ok
+test a_session_that_ran_no_tests_draws_no_tests_section ... ok
+test a_transcript_too_short_to_scroll_never_offers_the_way_back_down ... ok
+test a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do ... ok
+test a_window_under_the_minimum_says_so_instead_of_drawing_a_broken_shell ... ok
+test a_sub_agents_state_is_legible_without_its_colour ... ok
+test a_wheel_notch_over_the_activity_pane_moves_only_that_pane ... ok
+test an_answer_being_written_is_shown_in_the_question_with_where_it_goes ... ok
+test a_terminal_without_truecolor_is_drawn_in_the_sixteen_names_only ... ok
+test an_untouched_activity_pane_draws_no_zeroed_bar ... ok
+test an_agent_that_finished_stays_in_the_list_with_its_outcome ... ok
+test a_wheel_notch_over_the_changes_pane_leaves_the_transcript_where_it_was ... ok
+test scrolling_back_moves_the_transcript_and_says_that_it_did ... ok
+test nothing_the_backends_did_not_report_appears_as_a_number ... ok
+test the_activity_pane_folds_a_section_away ... ok
+test no_pane_draws_its_text_against_its_border ... ok
+test the_activity_pane_holds_the_sub_agents_the_decisions_and_the_tools ... ok
+test a_reply_in_markdown_is_drawn_styled_in_both_themes ... ok
+test a_theme_moves_no_character_on_screen_but_the_focus_line ... ok
+test a_turn_at_work_says_so_under_the_transcript_until_it_ends ... ok
+test the_body_is_cut_in_the_proportions_the_layout_is_drawn_to ... ok
+test the_activity_pane_scrolls_to_what_is_below_the_agents ... ok
+test the_bar_names_the_mode_once_a_backend_has_said_it ... ok
+test the_composer_still_grows_to_a_third_of_the_pane ... ok
+test an_empty_session_renders_at_both_sizes ... ok
+test the_cache_row_is_a_hit_rate_and_says_so ... ok
+test the_focus_glyphs_are_the_default_themes ... ok
+test the_desktop_moves_between_the_panes_while_a_turn_runs ... ok
+test the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands ... ok
+test the_focused_border_is_in_the_colour_the_theme_keeps_for_it ... ok
+test the_changes_pane_folds_a_section_away ... ok
+test the_changes_pane_scrolls_to_what_is_below_the_files ... ok
+test the_newest_decision_is_the_one_under_the_header ... ok
+test the_designed_themes_paint_their_own_colours_on_a_deep_terminal ... ok
+test the_placeholder_names_only_what_the_composer_does_today ... ok
+test a_failing_run_is_drawn_as_failing_with_its_own_count ... ok
+test the_question_shows_what_would_run_and_every_way_to_answer_it ... ok
+test the_per_model_shares_on_screen_add_up_to_a_hundred ... ok
+test the_right_stack_collapses_below_a_hundred_columns ... ok
+test the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back ... ok
+test the_shells_reply_is_said_in_the_bar_without_taking_a_row ... ok
+test the_agents_own_test_run_is_drawn_with_its_counts_and_its_age ... ok
+test the_tools_of_one_mcp_server_are_counted_as_one_family ... ok
+test the_ask_bar_wears_its_badge_in_every_theme ... ok
+test the_shell_renders_at_eighty_by_twentyfour ... ok
+test the_shell_renders_at_two_hundred_by_sixty ... ok
+test every_theme_paints_the_shell_at_both_sizes ... ok
+test the_usage_pane_splits_the_sessions_tokens_by_the_model_that_spent_them ... ok
+test typing_takes_room_from_the_hints_rather_than_writing_over_them ... ok
+test the_way_back_down_is_a_button_that_returns_to_the_newest_line ... ok
+test the_pane_with_the_keyboard_is_the_one_drawn_in_the_focus_line ... ok
+test under_each_agent_is_the_last_thing_it_was_seen_doing ... ok
+test with_effects_off_the_desktop_is_empty_while_a_turn_runs ... ok
+test the_selected_answer_is_a_solid_bar_as_well_as_a_mark ... ok
+test the_session_pane_is_titled_by_what_the_session_is_about_at_every_width ... ok
+test a_narrowing_bar_drops_whole_hints_and_never_cuts_one ... ok
+test the_motion_never_touches_a_cell_a_pane_owns ... ok
+test every_size_between_the_two_renders_without_a_panic_or_an_overrun ... ok
+
+test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.25s
+
+     Running unittests src/main.rs (target/debug/deps/xtask-326b9845dec9961b)
+
+running 24 tests
+test version::tests::a_bump_clears_the_components_below_it ... ok
+test headers::tests::a_markdown_header_sits_in_an_html_comment ... ok
+test headers::tests::files_that_cannot_carry_a_header_are_exempt ... ok
+test headers::tests::a_rust_file_with_the_header_passes ... ok
+test headers::tests::each_file_type_gets_its_comment_syntax ... ok
+test headers::tests::an_unknown_file_type_has_no_rule ... ok
+test headers::tests::the_header_must_be_followed_by_a_blank_line ... ok
+test headers::tests::a_shell_script_carries_the_header_under_its_shebang ... ok
+test version::tests::a_body_that_merely_mentions_a_break_is_not_one ... ok
+test version::tests::a_feature_moves_the_minor_and_a_fix_the_patch ... ok
+test version::tests::a_break_is_marked_by_a_bang_or_said_in_the_body ... ok
+test headers::tests::a_missing_or_partial_header_fails ... ok
+test version::tests::a_manifest_whose_sites_disagree_is_reported_as_the_site_that_drifted ... ok
+test version::tests::a_manifest_with_no_workspace_package_version_is_rejected ... ok
+test version::tests::a_release_that_only_touches_the_repository_moves_nothing ... ok
+test version::tests::a_rewrite_moves_every_site_and_leaves_the_rest_of_the_file_alone ... ok
+test version::tests::a_scope_does_not_hide_the_type ... ok
+test version::tests::a_version_reads_back_as_it_was_written ... ok
+test version::tests::a_version_that_is_not_three_numbers_is_rejected ... ok
+test version::tests::after_one_point_zero_a_break_moves_the_major ... ok
+test version::tests::before_one_point_zero_a_break_moves_the_minor ... ok
+test version::tests::every_workspace_version_site_is_found_and_no_other ... ok
+test version::tests::the_largest_bump_in_the_log_wins ... ok
+test version::tests::the_workspace_manifest_agrees_with_itself ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests niobe_bridge_claude
+
+running 1 test
+test crates/niobe-bridge-claude/src/lib.rs - (line 32) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests niobe_bridge_codex
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests niobe_config
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests niobe_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests niobe_ledger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests niobe_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests niobe_tui
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

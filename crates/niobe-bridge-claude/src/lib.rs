@@ -13,7 +13,9 @@
 //!
 //! * [`Translator`] turns one line of stream-json into [`Event`]s. It owns no
 //!   process and does no I/O, so a recorded log exercises exactly the code a
-//!   live session runs.
+//!   live session runs. The one file it needs — the whole of a shell result
+//!   the CLI saved for being too large — is read by a function the session
+//!   and the transcript reader hand it.
 //! * [`Session`] spawns the CLI, keeps its standard input open for the life of
 //!   the session, and reads its output through a [`Translator`] on a thread.
 //! * [`transcript`] reads the session files the CLI keeps for itself, so that
@@ -41,6 +43,7 @@
 //! [`Event`]: niobe_core::event::Event
 
 mod driver;
+mod spilled;
 mod translate;
 mod wire;
 

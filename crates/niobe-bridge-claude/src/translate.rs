@@ -68,6 +68,7 @@
 //!   done and money spent — but attributing each line of the transcript to the
 //!   agent that wrote it needs a pane that can show two agents at once.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -260,7 +261,19 @@ pub struct Translator {
     /// The billing last reported, so that it is reported when it changes
     /// rather than with every turn.
     billing: Option<Billing>,
+    /// What reads a shell result the CLI saved to a file, where the caller
+    /// handed one in. `None` leaves every such result unread.
+    read_spilled: Option<ReadSpilled>,
 }
+
+/// Reads the whole of a shell result the CLI saved to a file for being too
+/// large: the file at the path the CLI named, as long as it still holds the
+/// number of bytes the CLI said it wrote. `None` where it does not, or cannot
+/// be read.
+///
+/// Handed in rather than done here, so that the translator does no I/O of its
+/// own and a recorded log exercises exactly the code a live session runs.
+pub(crate) type ReadSpilled = fn(&Path, u64) -> Option<String>;
 
 impl Translator {
     /// A translator for a session running under `profile`.
@@ -284,6 +297,7 @@ impl Translator {
             billed_as: None,
             api_key_source: None,
             billing: None,
+            read_spilled: None,
         }
     }
 
@@ -304,6 +318,18 @@ impl Translator {
     #[must_use]
     pub fn in_dir(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// The same translator, reading a shell result the CLI saved to a file
+    /// with `read`.
+    ///
+    /// Only a `cargo test` run's result is read, and only once, when its call
+    /// ends: the CLI hands the model the first 2 KB of an output past about
+    /// 30 KB, and a whole workspace's test run is past that.
+    #[must_use]
+    pub(crate) fn reading_spilled_with(mut self, read: ReadSpilled) -> Self {
+        self.read_spilled = Some(read);
         self
     }
 
@@ -853,6 +879,7 @@ impl Translator {
                 &output,
                 reported.as_ref(),
                 exit_code,
+                self.read_spilled,
             );
             let id = ToolCallId::new(tool_use_id);
             let tested = tested.map(|(counts, exit_code)| Event::TestRun {
@@ -1502,6 +1529,12 @@ const PERSISTED_PREFIX: &str = "<persisted-output>";
 /// middle of a long result: `... (1033 lines truncated)`.
 const TRUNCATED_SUFFIX: &str = " lines truncated)";
 
+/// How the CLI ends the line it puts in place of the characters it cut out of
+/// the middle of a long failure: `... [20014 characters truncated] ...`. It
+/// cuts a failed command's output to about 10 KB this way, mid-line at both
+/// ends, and saves none of it to a file.
+const CHARACTERS_TRUNCATED_SUFFIX: &str = " characters truncated] ...";
+
 /// How the CLI opens the result of a `Write` that made a file that was not
 /// there, as against one that replaced a file that was.
 const CREATED_PREFIX: &str = "File created successfully at:";
@@ -1545,12 +1578,9 @@ fn exit_code(
 /// counts, where its output held the whole run, and the status it exited with.
 ///
 /// A refused call ran nothing and is not a test run. The counts are read
-/// only from output the CLI handed over whole: one it cut in the middle —
-/// a `... (<n> lines truncated)` line where the lines were — or saved to a
-/// file and gave the first part of, or a command it interrupted, is a run
-/// whose result was not read. A cut can fall between two test binaries and
-/// leave every remaining block whole, so the shape of what is left cannot be
-/// trusted to show it.
+/// only from the whole of the output, which is what [`whole_output`] finds.
+/// Nothing is read for a run whose status is not known, because its counts
+/// could not be taken whatever they said.
 fn test_run(
     name: &str,
     arguments: &serde_json::Value,
@@ -1558,6 +1588,7 @@ fn test_run(
     output: &str,
     reported: Option<&serde_json::Value>,
     exit_code: Option<i32>,
+    read_spilled: Option<ReadSpilled>,
 ) -> Option<(Option<TestCounts>, Option<i32>)> {
     let ran = match outcome {
         ToolOutcome::Ok | ToolOutcome::Failed => name == SHELL_TOOL,
@@ -1566,25 +1597,45 @@ fn test_run(
     if !ran || !test_run::is_test_run(string_at(arguments, "command")?) {
         return None;
     }
-    let counts = match cut_by_the_cli(output, reported) {
-        true => None,
-        false => test_run::counts(output, exit_code),
-    };
+    let counts = exit_code
+        .and_then(|_| whole_output(output, reported, read_spilled))
+        .and_then(|whole| test_run::counts(&whole, exit_code));
     Some((counts, exit_code))
 }
 
-/// Whether the CLI handed a shell command's output over in part.
-fn cut_by_the_cli(output: &str, reported: Option<&serde_json::Value>) -> bool {
+/// The whole of what a shell command printed, where it can be had.
+///
+/// That is the result itself where the CLI handed it over whole, and the file
+/// it saved it to where the output was too large to hand over — read with
+/// `read_spilled`, never from the preview beside it. `None` where the CLI cut
+/// it in the middle — a `... (<n> lines truncated)` line where the lines were,
+/// or `... [<n> characters truncated] ...` where the characters were — where
+/// it interrupted the command, and where a saved output cannot be read whole.
+/// A cut can fall between two test binaries and leave every remaining block
+/// whole, so the shape of what is left cannot be trusted to show it.
+fn whole_output<'a>(
+    output: &'a str,
+    reported: Option<&serde_json::Value>,
+    read_spilled: Option<ReadSpilled>,
+) -> Option<Cow<'a, str>> {
     let report = reported
         .and_then(|report| serde_json::from_value::<wire::ShellReport>(report.clone()).ok());
-    let reported_cut =
-        report.is_some_and(|report| report.interrupted || report.persisted_output_path.is_some());
+    if let Some(report) = report {
+        if report.interrupted {
+            return None;
+        }
+        if let Some(path) = report.persisted_output_path {
+            let read = read_spilled?;
+            return read(Path::new(&path), report.persisted_output_size?).map(Cow::Owned);
+        }
+    }
     let marked_cut = output.lines().any(|line| {
         let line = line.trim();
         line.starts_with(PERSISTED_PREFIX)
             || (line.starts_with("... (") && line.ends_with(TRUNCATED_SUFFIX))
+            || (line.starts_with("... [") && line.ends_with(CHARACTERS_TRUNCATED_SUFFIX))
     });
-    reported_cut || marked_cut
+    (!marked_cut).then_some(Cow::Borrowed(output))
 }
 
 /// The status in a failed command's `Exit code <n>` line, where it opens the
@@ -1828,6 +1879,8 @@ fn read_window(window: Option<wire::Window>) -> Option<UsageWindow> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     fn translator() -> Translator {
@@ -3678,6 +3731,141 @@ error: test failed, to rerun pass `--lib`";
             let counts: Vec<_> = test_runs(&events).into_iter().map(|(c, _)| c).collect();
             assert_eq!(counts, [None], "{output}\n{reported}");
         }
+    }
+
+    /// A `cargo test` run of one test binary that passed, whole.
+    const PASSING_RUN: &str =
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (target/debug/deps/demo-760e00b68511d171)
+
+running 2 tests
+test tests::adds ... ok
+test tests::subtracts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+
+    /// How many times [`read_spilled`] was asked for a file, by the tests
+    /// that hand it to a translator. Each such test names its own file, so
+    /// that tests running at once count apart.
+    static READS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// Stands in for the file system: `/whole.txt` holds [`PASSING_RUN`],
+    /// `/preview.txt` holds its first part, and nothing else exists.
+    fn read_spilled(path: &Path, size: u64) -> Option<String> {
+        READS
+            .lock()
+            .expect("no test panics holding it")
+            .push(path.to_owned());
+        let text = match path.to_str()? {
+            "/whole.txt" | "/once.txt" => PASSING_RUN,
+            "/preview.txt" => PASSING_RUN.get(..200)?,
+            _ => return None,
+        };
+        (text.len() as u64 == size).then(|| text.to_owned())
+    }
+
+    fn reads_of(path: &str) -> usize {
+        READS
+            .lock()
+            .expect("no test panics holding it")
+            .iter()
+            .filter(|read| read.as_os_str() == path)
+            .count()
+    }
+
+    /// The result of a passing run the CLI saved to `path`, with the preview
+    /// it hands the model in its place.
+    fn spilled(path: &str, size: usize) -> String {
+        let preview = format!(
+            "<persisted-output>\nOutput too large (55.6KB). Full output saved to: {path}\n\n\
+             Preview (first 2KB):\n{}\n</persisted-output>",
+            PASSING_RUN.get(..200).expect("the run is longer than that")
+        );
+        result_with(
+            "t1",
+            &preview,
+            &shell_report(&format!(
+                r#","persistedOutputPath":"{path}","persistedOutputSize":{size}"#
+            )),
+        )
+    }
+
+    #[test]
+    fn a_test_run_the_cli_saved_to_a_file_is_read_from_that_file() {
+        let mut translator = translator().reading_spilled_with(read_spilled);
+        shell_call(&mut translator);
+
+        let events = translator.line(&spilled("/whole.txt", PASSING_RUN.len()));
+
+        let counts = TestCounts {
+            passed: 2,
+            failed: 0,
+            ignored: 0,
+            suites: 1,
+        };
+        assert_eq!(test_runs(&events), [(Some(counts), Some(0))]);
+    }
+
+    #[test]
+    fn a_saved_test_run_whose_file_is_not_the_whole_run_is_not_read() {
+        for (path, size) in [
+            ("/missing.txt", PASSING_RUN.len()),
+            ("/whole.txt", PASSING_RUN.len() + 1),
+            ("/preview.txt", 200),
+        ] {
+            let mut translator = translator().reading_spilled_with(read_spilled);
+            shell_call(&mut translator);
+
+            let events = translator.line(&spilled(path, size));
+
+            assert_eq!(test_runs(&events), [(None, Some(0))], "{path} {size}");
+        }
+    }
+
+    #[test]
+    fn a_saved_test_run_is_not_read_by_a_translator_handed_no_reader() {
+        let mut translator = translator();
+        shell_call(&mut translator);
+
+        let events = translator.line(&spilled("/whole.txt", PASSING_RUN.len()));
+
+        assert_eq!(test_runs(&events), [(None, Some(0))]);
+    }
+
+    #[test]
+    fn a_saved_file_is_read_once_and_only_for_a_test_run() {
+        let mut translator = translator().reading_spilled_with(read_spilled);
+        shell_call(&mut translator);
+        translator.line(&spilled("/once.txt", PASSING_RUN.len()));
+        // The same result again finds no call waiting on it.
+        translator.line(&spilled("/once.txt", PASSING_RUN.len()));
+        translator.line(&call("t2", "Bash", r#"{"command":"cat big.log"}"#));
+        translator.line(&spilled("/other.txt", PASSING_RUN.len()).replace(r#""t1""#, r#""t2""#));
+
+        assert_eq!(reads_of("/once.txt"), 1);
+        assert_eq!(reads_of("/other.txt"), 0);
+    }
+
+    /// How the CLI cuts a failed command's output: by characters, from the
+    /// middle of one line to the middle of another, around a line of its own.
+    /// Recorded from 2.1.282 on a `cargo test --workspace`. What is left can
+    /// read as a whole run of fewer binaries, as it does here.
+    #[test]
+    fn a_failed_test_run_the_cli_cut_by_characters_is_not_read() {
+        let cut = format!(
+            "Exit code 101\n{}",
+            TEST_RUN.replace(
+                "\nerror: test failed",
+                "\n... [20014 characters truncated] ...\n\nrror: test failed"
+            )
+        );
+        let mut translator = translator();
+        shell_call(&mut translator);
+
+        let events = translator.line(&result("t1", &cut, true));
+
+        assert_eq!(test_runs(&events), [(None, Some(101))]);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use niobe_bridge_claude::transcript;
 use niobe_core::event::{Backend, CostBasis, Event, Mode, SessionMeta, ToolOutcome};
 use niobe_core::session::SessionState;
+use niobe_core::test_run::TestCounts;
 
 /// The session in the fixture, as the CLI names it.
 const SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
@@ -252,4 +253,81 @@ fn a_record_this_version_cannot_read_is_shown_and_not_a_lost_history() {
     let complaints = warnings(&events);
     assert_eq!(complaints.len(), 1, "{complaints:?}");
     assert!(complaints[0].contains("could not read"), "{complaints:?}");
+}
+
+/// A `cargo test --workspace` whose output the CLI saved to a file, as its own
+/// transcript records the call and the result: Claude Code 2.1.282, with the
+/// records cut down to what the bridge reads, the preview shortened to its
+/// first lines and the report's copy of the output left out. `{saved}` and
+/// `{size}` stand for where the file is and how many bytes the CLI said it
+/// wrote.
+const SAVED_RUN: [&str; 2] = [
+    r#"{"type":"assistant","message":{"id":"msg_011CfQUVCNkDYs9dh6ZLTxNa","model":"claude-opus-5-5","role":"assistant","content":[{"type":"tool_use","id":"toolu_01JeJeYUUENSCaXAuZhZP2qH","name":"Bash","input":{"command":"cargo test --workspace","description":"Run workspace tests","timeout":600000}}]}}"#,
+    r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01JeJeYUUENSCaXAuZhZP2qH","type":"tool_result","content":"<persisted-output>\nOutput too large (86KB). Full output saved to: {saved}\n\nPreview (first 2KB):\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s\n     Running unittests src/lib.rs (target/debug/deps/niobe_bridge_claude-6eb70ea3aac9fd8d)\n\nrunning 151 tests\n</persisted-output>","is_error":false}]},"toolUseResult":{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,"persistedOutputPath":"{saved}","persistedOutputSize":{size}}}"#,
+];
+
+/// The bytes the CLI reported writing for that run, which is the size of the
+/// file it saved.
+const SAVED_BYTES: u64 = 88_059;
+
+/// The file the CLI saved that run to, recorded whole.
+fn saved_run() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tool-results/cargo-test-workspace.txt")
+}
+
+/// The test runs a transcript of [`SAVED_RUN`] reports, with its report
+/// naming `saved` and `size`.
+fn saved_test_runs(saved: &Path, size: u64) -> Vec<(Option<TestCounts>, Option<i32>)> {
+    let dir = tempfile::tempdir().expect("a temporary directory can be made");
+    let path = dir
+        .path()
+        .join("f9e80817-ed99-446a-ad84-62e8d1cc9018.jsonl");
+    let saved = saved.to_str().expect("the fixture path is UTF-8");
+    let text: String = SAVED_RUN
+        .iter()
+        .map(|record| {
+            record
+                .replace("{saved}", saved)
+                .replace("{size}", &size.to_string())
+                + "\n"
+        })
+        .collect();
+    std::fs::write(&path, text).expect("the temporary directory is writable");
+
+    transcript::events(&path, "max", Path::new("/repo"))
+        .expect("the transcript reads")
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::TestRun {
+                counts, exit_code, ..
+            } => Some((counts, exit_code)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_test_run_the_cli_saved_to_a_file_is_counted_from_the_file() {
+    let runs = saved_test_runs(&saved_run(), SAVED_BYTES);
+
+    let counts = TestCounts {
+        passed: 1040,
+        failed: 0,
+        ignored: 0,
+        suites: 32,
+    };
+    assert_eq!(runs, [(Some(counts), Some(0))]);
+}
+
+#[test]
+fn a_saved_test_run_whose_file_is_gone_or_changed_is_not_read() {
+    let gone = saved_run().with_file_name("b8u0w4de3.txt");
+
+    assert_eq!(saved_test_runs(&gone, SAVED_BYTES), [(None, Some(0))]);
+    assert_eq!(
+        saved_test_runs(&saved_run(), SAVED_BYTES - 1),
+        [(None, Some(0))],
+        "the file holds more than the CLI wrote"
+    );
 }

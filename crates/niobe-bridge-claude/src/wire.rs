@@ -200,6 +200,10 @@ pub(crate) struct ShellReport {
     /// wrote it to this file and the result carries only its first part.
     #[serde(default)]
     pub(crate) persisted_output_path: Option<String>,
+    /// How many bytes the CLI wrote to that file, which is what tells the
+    /// file it wrote from one that has since changed.
+    #[serde(default)]
+    pub(crate) persisted_output_size: Option<u64>,
 }
 
 /// One hunk of a [`FileReport`]: a unified diff's `@@` header and the lines

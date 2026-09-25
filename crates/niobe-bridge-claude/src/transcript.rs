@@ -59,6 +59,7 @@ use serde::Deserialize;
 use niobe_core::event::Event;
 
 use crate::conformance;
+use crate::spilled;
 use crate::translate::{self, Translator};
 use crate::wire;
 
@@ -361,7 +362,10 @@ struct Fold {
 impl Fold {
     fn new(profile: &str, cwd: &Path, id: String, priced: bool) -> Self {
         Self {
-            translator: Translator::new(profile).in_dir(cwd).of_session(id),
+            translator: Translator::new(profile)
+                .in_dir(cwd)
+                .of_session(id)
+                .reading_spilled_with(spilled::read),
             out: Vec::new(),
             priced,
             counted: BTreeMap::new(),

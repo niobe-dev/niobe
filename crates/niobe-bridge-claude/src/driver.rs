@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use niobe_core::event::{Billing, Event, Mode, PermissionDecision, ToolCallId};
 
+use crate::spilled;
 use crate::translate::Translator;
 
 /// The binary this bridge drives, as looked up on `PATH`.
@@ -295,7 +296,9 @@ impl Session {
         };
 
         let (sender, events) = mpsc::channel();
-        let mut translator = Translator::new(options.profile.clone()).in_dir(options.cwd.clone());
+        let mut translator = Translator::new(options.profile.clone())
+            .in_dir(options.cwd.clone())
+            .reading_spilled_with(spilled::read);
         if let Some(billing) = options.billing {
             translator = translator.billed_as(billing);
         }

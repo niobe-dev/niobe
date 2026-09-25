@@ -295,6 +295,34 @@ no status. Across 18,756 shell results in 336 of the CLI's own transcripts of
 2.1.27x–2.1.281, every failed command that ran opened with `Exit code <n>` and
 no successful one did.
 
+## `tool-results/cargo-test-workspace.txt`
+
+The whole output of a `cargo test --workspace` on this repository, as Claude
+Code 2.1.282 saved it for being too large to hand the model: 88,059 bytes,
+exactly the `persistedOutputSize` its report named, recorded byte for byte
+(which is why it carries no header). The CLI keeps such files in its session's
+`tool-results/` directory and gives the model a `<persisted-output>` block
+with the first 2 KB in their place. `tests/transcript.rs` folds the call and
+its result as the CLI's own transcript recorded them, pointed at this file.
+
+It does this only for a command that succeeded. A failed command's output is
+cut to about 10 KB instead, by characters and from the middle, around a line
+`... [<n> characters truncated] ...`, and its report is the error text alone,
+naming no file. Across the CLI's transcripts on the machine this was recorded
+on, every report that named a saved file was of a success, and each of the 16
+character cuts was of a failure. A failing run past that size is not read.
+
+### The counts the tests assert
+
+```sh
+grep '^test result:' tool-results/cargo-test-workspace.txt |
+  awk '{p+=$4; f+=$6; i+=$8; n++} END {print p, f, i, n}'
+# 1040 0 0 32
+```
+
+That is 1,040 passed, none failed or ignored, in 32 suites — one per
+`Running` or `Doc-tests` header, of which there are also 32.
+
 ## `long-context.jsonl`
 
 A two-turn session on `claude-opus-5[1m]` — Opus 5 with its 1M-token window
