@@ -1,0 +1,136 @@
+Exit code 101
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running unittests src/lib.rs (target/debug/deps/niobe_bridge_claude-6eb70ea3aac9fd8d)
+
+running 150 tests
+test conformance::tests::a_version_this_bridge_cannot_read_is_not_covered ... ok
+test driver::tests::a_session_that_says_nothing_about_signing_in_is_reported_as_it_stands ... ok
+test conformance::tests::a_release_outside_the_recorded_series_is_not_covered ... ok
+test conformance::tests::a_patch_release_of_a_recorded_series_is_covered ... ok
+test conformance::tests::the_warning_names_the_release_that_is_running_and_the_ones_recorded ... ok
+test conformance::tests::every_recorded_release_is_a_release_this_bridge_covers ... ok
+test driver::tests::every_mode_the_shell_offers_is_spelt_the_way_the_cli_takes_it ... ok
+test driver::tests::a_session_with_no_budget_passes_no_budget_flag ... ok
+test driver::tests::the_spawn_line_asks_for_every_message_the_bridge_reads ... ok
+test driver::tests::a_profiles_own_arguments_come_last_so_they_can_reach_a_flag_niobe_does_not_model ... ok
+test driver::tests::a_resumed_session_and_its_settings_are_passed_through ... ok
+test driver::tests::nothing_asks_over_stdio_unless_something_is_answering ... ok
+test driver::tests::the_spawn_line_carries_the_mode_and_the_budget_the_session_runs_under ... ok
+test driver::tests::a_refusal_in_the_operators_own_words_hands_the_agent_those_words ... ok
+test driver::tests::a_refusal_says_who_refused_because_the_model_is_told_it_as_an_error ... ok
+test tests::drives_the_official_binary ... ok
+test driver::tests::changing_the_mode_and_the_model_are_requests_the_cli_answers_by_id ... ok
+test driver::tests::an_approval_sends_back_the_arguments_that_were_shown ... ok
+test transcript::tests::a_mode_niobe_has_no_word_for_is_named_rather_than_shown_as_one_it_has ... ok
+test transcript::tests::a_record_this_version_cannot_read_is_shown_and_the_rest_is_kept ... ok
+test transcript::tests::a_cost_the_cli_could_not_finish_is_said_to_be_short ... ok
+test transcript::tests::a_message_the_cli_wrote_itself_does_not_rename_the_model_the_session_runs_on ... ok
+test transcript::tests::a_session_the_cli_has_not_closed_is_counted_from_its_own_messages ... ok
+test transcript::tests::a_background_sub_agent_in_a_transcript_ends_where_the_cli_wrote_that_it_stopped ... ok
+test driver::tests::a_binary_that_is_not_installed_says_so_and_says_what_to_do ... ok
+test transcript::tests::a_working_directory_names_the_directory_the_cli_writes_it_to ... ok
+test transcript::tests::an_imported_edit_carries_the_hunks_the_cli_wrote_beside_it ... ok
+test transcript::tests::an_unclosed_sessions_cache_writes_keep_the_lifetime_they_were_bought_for ... ok
+test transcript::tests::a_directory_the_cli_has_never_written_to_holds_no_sessions ... ok
+test transcript::tests::the_cli_keeps_its_transcripts_where_its_own_variable_says ... ok
+test transcript::tests::the_cli_saying_background_work_stopped_is_not_the_operator_speaking ... ok
+test transcript::tests::the_clis_title_is_reported_when_it_changes_and_not_on_every_record ... ok
+test transcript::tests::the_mode_is_reported_when_it_changes_and_not_on_every_record ... ok
+test spilled::tests::a_saved_output_of_the_size_the_cli_reported_is_read_whole ... ok
+test transcript::tests::the_records_the_cli_keeps_for_its_own_screen_are_passed_over_in_silence ... ok
+test transcript::tests::the_turns_the_cli_wrote_for_itself_are_not_the_operators ... ok
+test translate::tests::a_background_sub_agent_ends_when_the_cli_says_its_task_stopped ... ok
+test spilled::tests::a_missing_unreadable_or_oversized_output_is_not_read ... ok
+test translate::tests::a_call_refused_here_reads_as_denied_and_is_not_reported_twice ... ok
+test translate::tests::a_call_is_summed_up_in_the_words_a_person_would_use_for_it ... ok
+test translate::tests::a_call_that_was_refused_is_denied_rather_than_failed ... ok
+test translate::tests::a_call_that_edits_nothing_changes_no_file ... ok
+test spilled::tests::a_saved_output_that_changed_size_is_not_read ... ok
+test translate::tests::a_call_to_the_agent_tool_spawns_a_sub_agent_labelled_with_its_kind ... ok
+test translate::tests::a_call_with_no_arguments_worth_reading_has_no_summary ... ok
+test translate::tests::a_calls_target_is_whichever_argument_names_what_it_acts_on ... ok
+test translate::tests::a_cli_that_does_not_say_which_release_it_is_is_taken_at_its_word ... ok
+test translate::tests::a_control_request_this_bridge_does_not_answer_is_left_to_the_cli ... ok
+test translate::tests::a_created_file_is_one_hunk_of_the_lines_it_was_created_with ... ok
+test translate::tests::a_failure_that_came_back_with_no_words_has_no_reason ... ok
+test translate::tests::a_failed_sub_agent_says_why_before_it_ends ... ok
+test translate::tests::a_family_billed_in_its_own_right_keeps_its_own_messages ... ok
+test translate::tests::a_file_outside_the_session_directory_keeps_the_path_the_cli_gave ... ok
+test translate::tests::a_finished_call_repeats_the_summary_it_started_wi
+
+... [20014 characters truncated] ...
+
+nal::tests::a_resumed_journal_appends_after_what_was_there ... ok
+test journal::tests::a_session_read_back_shows_the_times_the_store_recorded_it_at ... ok
+test repo::tests::asking_what_the_repository_looks_like_never_waits_for_the_answer ... ok
+test repo::tests::looking_for_a_store_that_is_not_there_creates_nothing ... ok
+test repo::tests::the_branch_is_read_from_the_repository_this_test_runs_in ... ok
+test repo::tests::a_worktrees_branch_is_read_through_its_gitdir_pointer ... ok
+test repo::tests::an_ignore_file_the_operator_wrote_is_left_alone ... ok
+test repo::tests::the_root_is_the_nearest_repository_or_the_directory_itself ... ok
+test rules::tests::a_config_nobody_trusted_is_not_trusted_by_a_rule_being_written_into_it ... ok
+test repo::tests::a_directory_that_is_not_a_repository_is_a_failed_read_and_not_a_panic ... ok
+test rules::tests::a_config_that_cannot_be_written_is_reported_as_the_operator_reads_it ... ok
+test sessions::tests::a_long_or_multiline_prompt_is_cut_to_one_line ... ok
+test sessions::tests::the_claude_list_says_how_to_carry_one_on_and_marks_what_it_was_not_told ... ok
+test sessions::tests::the_table_aligns_under_its_header ... ok
+test sessions::tests::times_print_in_utc_to_the_minute ... ok
+test rules::tests::a_rule_is_written_into_the_repositorys_own_config ... ok
+test summary::tests::a_fully_reported_cost_is_the_bare_figure ... ok
+test summary::tests::a_partly_reported_cost_says_why_it_is_a_floor ... ok
+test summary::tests::a_session_that_changed_nothing_says_so_with_a_dash ... ok
+test summary::tests::a_session_whose_every_change_was_stated_gives_the_bare_figures ... ok
+test summary::tests::a_session_without_usage_shows_dashes_not_zeros ... ok
+test summary::tests::counts_are_grouped_in_thousands ... ok
+test summary::tests::the_billing_mode_is_printed_with_the_cost_it_explains ... ok
+test tests::a_failure_is_written_to_standard_error_and_fails ... ok
+test summary::tests::the_files_line_adds_up_what_the_backend_stated_and_marks_what_it_did_not ... ok
+test tests::a_failure_that_could_not_be_written_fails_with_a_status_of_its_own ... ok
+test tests::durations_print_in_milliseconds_to_two_decimals ... ok
+test tests::a_shell_whose_config_needs_no_trust_opens_on_nothing ... ok
+test tests::the_shell_opens_saying_why_an_untrusted_config_is_not_in_force_and_how_to_trust_it ... ok
+test rules::tests::a_trusted_config_stays_trusted_when_niobe_writes_a_rule_into_it ... ok
+test repo::tests::a_repository_with_no_commits_reads_without_failing ... ok
+test repo::tests::a_watch_on_a_directory_that_is_not_a_repository_hands_over_nothing ... ok
+test repo::tests::a_branch_with_no_upstream_has_pushed_none_of_its_commits ... ok
+test repo::tests::a_watch_hands_over_the_repository_it_is_started_in ... ok
+test repo::tests::a_detached_head_is_read_as_the_commit_it_is_sitting_on ... ok
+test repo::tests::a_working_tree_is_measured_from_the_repository_file_by_file ... ok
+test repo::tests::a_linked_worktree_reads_its_own_branch_and_its_own_working_tree ... ok
+test repo::tests::an_upstream_the_repository_cannot_find_leaves_pushed_unknown ... ok
+test repo::tests::the_commits_a_session_made_are_listed_and_say_whether_they_are_pushed ... ok
+
+test result: ok. 109 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.92s
+
+     Running tests/billing.rs (target/debug/deps/billing-ffeae3933eef8323)
+
+running 2 tests
+test the_same_login_on_a_profile_billed_by_use_leads_with_money ... ok
+test a_recorded_max_session_shows_windows_and_tokens_and_no_dollar_total ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/cache_lifetime.rs (target/debug/deps/cache_lifetime-33091664fd19b144)
+
+running 3 tests
+test dropping_the_lifetime_prices_every_write_at_the_five_minute_rate ... ok
+test the_recorded_sessions_writes_price_at_the_lifetimes_the_cli_reported ... ok
+test a_one_hour_write_and_a_five_minute_one_are_priced_at_their_own_rates ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/cli.rs (target/debug/deps/cli-4f76766536d72002)
+
+running 36 tests
+test a_models_price_history_is_listed_with_the_date_each_price_took_effect ... ok
+test a_log_with_a_bad_line_names_the_line ... ok
+test a_claude_session_folds_into_the_history_and_the_bill_the_cli_recorded ... ok
+test a_config_that_is_not_toml_names_the_line ... ok
+test a_failure_reported_onto_a_closed_standard_error_ends_as_a_reported_failure ... ok
+test a_profile_from_the_users_own_config_needs_no_trust ... ok
+test a_budget_that_is_not_an_amount_is_refused_before_anything_is_started ... ok
+test a_claude_session_this_repository_does_not_have_names_where_it_was_looked_for ... ok
+test a_model_no_price_table_lists_is_unpriced ... ok
+test a_resumed_session_shows_the_totals_the_log_it_recorded_folds_to ... ok
+test a_profile_no_config_defines_is_an_error_that_lists_the_ones_there_are ... ok
+test a_repository_config_that_has_not_been_trusted_sets_n

@@ -313,7 +313,8 @@ cut to about 10 KB instead, by characters and from the middle, around a line
 `... [<n> characters truncated] ...`, and its report is the error text alone,
 naming no file. Across the CLI's transcripts on the machine this was recorded
 on, every report that named a saved file was of a success, and each of the 16
-character cuts was of a failure. A failing run past that size is not read.
+character cuts was of a failure. A failing run past that size is not
+counted; `cargo-test-workspace-cut.txt` is one.
 
 ### The counts the tests assert
 
@@ -325,6 +326,29 @@ grep '^test result:' tool-results/cargo-test-workspace.txt |
 
 That is 1,040 passed, none failed or ignored, in 32 suites — one per
 `Running` or `Doc-tests` header, of which there are also 32.
+
+## `cargo-test-workspace-cut.txt`
+
+The result a failing `cargo test --workspace` on this repository came back
+as from Claude Code 2.1.282, recorded byte for byte (which is why it carries
+no header): `Exit code 101`, then 10,040 characters in all with a line
+`... [20014 characters truncated] ...` in their middle. `tests/transcript.rs`
+folds the call and this result as the CLI's own transcript recorded them.
+
+The part after the cut is not the end of the run. It stops mid-word, inside
+`tests/cli.rs`, and holds neither a failure nor the binary that failed: the CLI keeps only the first 30,000 or so characters of a failed
+command's output and cuts the middle out of those. Of the 16 character cuts
+in the CLI's transcripts on the machine this was recorded on, 2.1.243 to
+2.1.282, the five whose kept and cut characters come to about 30,000 all end
+mid-line; the eleven that come to less end where the command's output did.
+So a long failing run's failures list and summaries never reach the model,
+and no count can be read from what does.
+
+What it still shows is the build finishing and the first test binary
+starting, after which `cargo test` exited 101 — which a build that failed
+also exits with, but only after saying a crate could not compile and before
+any binary runs. That is a run that failed after its tests started, and it is
+what the bridge reports, with no count.
 
 ## `long-context.jsonl`
 

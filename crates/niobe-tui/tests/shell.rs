@@ -1506,7 +1506,7 @@ fn changes_scrolled_down(app: &mut App, width: u16, height: u16) -> String {
 /// of the Changes pane and dated by when its call finished.
 #[test]
 fn the_agents_own_test_run_is_drawn_with_its_counts_and_its_age() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0))]);
+    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false)]);
     let frame = changes_scrolled_down(&mut app, 200, 60);
 
     assert_snapshot("tests-200x60", &frame);
@@ -1540,7 +1540,7 @@ fn a_failing_run_is_drawn_as_failing_with_its_own_count() {
         ignored: 2,
         suites: 30,
     };
-    let mut app = session_with_test_runs(&[(Some(failing), Some(101))]);
+    let mut app = session_with_test_runs(&[(Some(failing), Some(101), true)]);
     let frame = changes_scrolled_down(&mut app, 200, 60);
 
     assert!(
@@ -1560,7 +1560,8 @@ fn a_failing_run_is_drawn_as_failing_with_its_own_count() {
 
 #[test]
 fn a_run_whose_result_was_not_read_says_so_and_gives_no_count() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0)), (None, Some(101))]);
+    let mut app =
+        session_with_test_runs(&[(Some(GREEN), Some(0), false), (None, Some(101), false)]);
     let frame = changes_scrolled_down(&mut app, 200, 60);
 
     assert!(
@@ -1573,9 +1574,30 @@ fn a_run_whose_result_was_not_read_says_so_and_gives_no_count() {
     );
 }
 
+/// A failing run whose output the backend could not read whole — the Claude
+/// CLI cuts a long failure and keeps none of it — says it failed, apart from
+/// a run whose result was simply not read, and still gives no count.
+#[test]
+fn a_run_known_to_have_failed_without_counts_says_it_failed_and_gives_no_count() {
+    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false), (None, Some(101), true)]);
+    let frame = changes_scrolled_down(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("▾ Tests  failed · exit 101 · counts not read · 1m ago"),
+        "{frame}"
+    );
+    assert!(!frame.contains("passed"), "{frame}");
+    assert!(!frame.contains("result not read"), "{frame}");
+    assert_eq!(
+        style_at(&mut app, 200, 60, "failed · exit").and_then(|style| style.fg),
+        Some(CLASSIC.del),
+        "a failure is drawn in the failure colour"
+    );
+}
+
 #[test]
 fn a_narrow_pane_keeps_the_counts_and_sheds_the_rest() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0))]);
+    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false)]);
     let frame = changes_scrolled_down(&mut app, 120, 30);
 
     assert!(frame.contains("▾ Tests  637 passed · 0 failed"), "{frame}");

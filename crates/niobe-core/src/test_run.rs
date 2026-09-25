@@ -28,6 +28,11 @@
 //! whole run of fewer. What says it finished is the status it exited with,
 //! which has to agree with the counts — `0` for a run with no failures, `101`
 //! for one with any — or the counts are not read.
+//!
+//! A run whose counts cannot be read can still be known to have failed:
+//! [`failed`] reads that from the start of its output and its status, which
+//! is what survives when a long failing output is cut. It says nothing about
+//! how many tests failed.
 
 use serde::{Deserialize, Serialize};
 
@@ -120,8 +125,52 @@ pub fn counts(output: &str, exit_code: Option<i32>) -> Option<TestCounts> {
     }
 }
 
+/// Whether a `cargo test` run failed after its tests started, as far as what
+/// is left of its output shows, even where its counts cannot be read.
+///
+/// That is a run that exited `101` whose output shows the build finishing and
+/// a test binary starting after it. The start of a run is what survives when
+/// the output is cut from the middle or from the end, so this holds where the
+/// failures list and the summaries were lost. A build that failed exits `101`
+/// as well and runs no tests, so the build has to be seen finishing, and an
+/// output saying a crate could not compile is never a failed run.
+///
+/// The status has to be `cargo test`'s own, so `command` must end in it: the
+/// status of `cargo test && cargo clippy` may be clippy's, which also exits
+/// `101`. Nothing here says how many tests failed, or which.
+pub fn failed(command: &str, output: &str, exit_code: Option<i32>) -> bool {
+    exit_code == Some(FAILED_STATUS) && ends_in_cargo_test(command) && tests_started(output)
+}
+
 /// The status `cargo test` exits with when a test failed.
 const FAILED_STATUS: i32 = 101;
+
+/// Whether the last simple command in `command` is `cargo test`, so that the
+/// status the whole command exited with is the run's.
+fn ends_in_cargo_test(command: &str) -> bool {
+    command
+        .split(['&', '|', ';', '\n', '(', ')'])
+        .rfind(|simple| !simple.trim().is_empty())
+        .is_some_and(|simple| runs_cargo_test(simple.split_whitespace()))
+}
+
+/// Whether an output shows a build finishing and a test binary starting after
+/// it, and no crate failing to compile.
+fn tests_started(output: &str) -> bool {
+    let mut built = false;
+    let mut started = false;
+    for line in output.lines() {
+        if line.trim_start().starts_with("error: could not compile ") {
+            return false;
+        }
+        match Line::of(line) {
+            Line::Finished => built = true,
+            Line::Header => started |= built,
+            Line::Running(_) | Line::Result(_) | Line::Other => {}
+        }
+    }
+    started
+}
 
 /// The counts in an output that holds a whole run, however it ended.
 fn whole_run(output: &str) -> Option<TestCounts> {
@@ -574,6 +623,64 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "",
         ] {
             assert!(!is_test_run(command), "{command:?} runs no tests");
+        }
+    }
+
+    /// A long failing run as the Claude CLI hands it over: its first part, a
+    /// line in place of the characters cut out, and a part that stops
+    /// mid-line and holds neither a failure nor the last summary.
+    fn cut(output: &str) -> String {
+        let (head, _) = output
+            .split_once("test tests::adds ... ok")
+            .expect("the recording has a passing test");
+        format!("{head}test tests::add\n\n... [20014 characters truncated] ...\n\nsult: ok. 1 pas")
+    }
+
+    #[test]
+    fn a_run_that_exited_failing_after_its_tests_started_failed_though_it_was_cut() {
+        let kept = cut(FAILED);
+        assert_eq!(counts(&kept, Some(101)), None, "no count survives the cut");
+        assert!(failed("cargo test --workspace", &kept, Some(101)));
+        assert!(failed("cd crates/x && cargo test", &kept, Some(101)));
+    }
+
+    #[test]
+    fn a_whole_failing_run_failed_too() {
+        assert!(failed("cargo test", FAILED, Some(101)));
+        assert!(failed("cargo test", FAILED_EVERY_BINARY, Some(101)));
+    }
+
+    #[test]
+    fn a_build_that_failed_is_not_a_failed_run() {
+        assert!(!failed("cargo test", BUILD_FAILED, Some(101)));
+        // Two runs in one command, the first passing and the second not
+        // building: the status is the second's, and it ran no tests.
+        let then_unbuilt = format!("{PASSED}{BUILD_FAILED}");
+        assert!(!failed(
+            "cargo test && cargo test -p other",
+            &then_unbuilt,
+            Some(101)
+        ));
+    }
+
+    #[test]
+    fn a_run_that_did_not_exit_failing_did_not_fail() {
+        let kept = cut(FAILED);
+        for status in [None, Some(0), Some(1), Some(143)] {
+            assert!(!failed("cargo test", &kept, status), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_status_that_may_be_another_commands_says_nothing_about_the_run() {
+        let kept = cut(PASSED);
+        for command in [
+            "cargo test && cargo clippy --all-targets -- -D warnings",
+            "cargo test; cargo build",
+            "cargo test 2>&1 | tail -20",
+            "cargo build",
+        ] {
+            assert!(!failed(command, &kept, Some(101)), "{command:?}");
         }
     }
 

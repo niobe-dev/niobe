@@ -487,10 +487,11 @@ pub fn running_session() -> App {
 }
 
 /// The same session with `cargo test` run once more at its end for each of
-/// `runs`, each reporting the counts and the exit status it is given.
-pub fn session_with_test_runs(runs: &[(Option<TestCounts>, Option<i32>)]) -> App {
+/// `runs`, each reporting the counts, the exit status and whether it is known
+/// to have failed as it is given.
+pub fn session_with_test_runs(runs: &[(Option<TestCounts>, Option<i32>, bool)]) -> App {
     let mut events = session_events();
-    for (n, (counts, exit_code)) in (0..).zip(runs) {
+    for (n, (counts, exit_code, failed)) in (0..).zip(runs) {
         let id = format!("cargo-test-{n}");
         let outcome = match exit_code {
             Some(0) => ToolOutcome::Ok,
@@ -518,6 +519,7 @@ pub fn session_with_test_runs(runs: &[(Option<TestCounts>, Option<i32>)]) -> App
                 id: id.as_str().into(),
                 counts: *counts,
                 exit_code: *exit_code,
+                failed: *failed,
             },
         ]);
     }

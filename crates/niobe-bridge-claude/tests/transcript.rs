@@ -320,6 +320,75 @@ fn a_test_run_the_cli_saved_to_a_file_is_counted_from_the_file() {
     assert_eq!(runs, [(Some(counts), Some(0))]);
 }
 
+/// A failing `cargo test --workspace` whose output the CLI cut, as its own
+/// transcript records the call and the result: Claude Code 2.1.282, with the
+/// records cut down to what the bridge reads. `{cut}` stands for the result
+/// the CLI handed the model, which is the fixture
+/// `cargo-test-workspace-cut.txt`, byte for byte.
+const CUT_RUN: [&str; 2] = [
+    r#"{"type":"assistant","message":{"id":"msg_011CfQUDWDMVUkNFbtZKYet1","model":"claude-opus-5-5","role":"assistant","content":[{"type":"tool_use","id":"toolu_01Gbjs71jH54b1JBB9hdcxBr","name":"Bash","input":{"command":"cargo test --workspace","description":"Run workspace tests","timeout":600000}}]}}"#,
+    r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":{cut},"is_error":true,"tool_use_id":"toolu_01Gbjs71jH54b1JBB9hdcxBr"}]}}"#,
+];
+
+/// The test run a transcript of [`CUT_RUN`] reports, with `cut` as the
+/// result, as its counts, its exit status and whether it failed.
+fn cut_test_runs(cut: &str) -> Vec<(Option<TestCounts>, Option<i32>, bool)> {
+    let dir = tempfile::tempdir().expect("a temporary directory can be made");
+    let path = dir
+        .path()
+        .join("762e36f1-b86c-4ff7-a551-056eeb6ece36.jsonl");
+    let cut = serde_json::Value::String(cut.to_owned()).to_string();
+    let text: String = CUT_RUN
+        .iter()
+        .map(|record| record.replace("{cut}", &cut) + "\n")
+        .collect();
+    std::fs::write(&path, text).expect("the temporary directory is writable");
+
+    transcript::events(&path, "max", Path::new("/repo"))
+        .expect("the transcript reads")
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::TestRun {
+                counts,
+                exit_code,
+                failed,
+                ..
+            } => Some((counts, exit_code, failed)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn recorded_cut() -> String {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-test-workspace-cut.txt");
+    std::fs::read_to_string(path).expect("the fixture is there")
+}
+
+#[test]
+fn a_failing_run_the_cli_cut_is_failed_and_counts_nothing() {
+    let cut = recorded_cut();
+    assert_eq!(
+        cut.chars().count(),
+        10_040,
+        "the result the CLI handed over"
+    );
+
+    assert_eq!(cut_test_runs(&cut), [(None, Some(101), true)]);
+}
+
+#[test]
+fn a_cut_run_that_shows_no_test_binary_starting_is_not_failed() {
+    // The same result stopped where the first test binary would have
+    // started: exit 101 with nothing to say a test ran.
+    let cut = recorded_cut();
+    let (built, _) = cut
+        .split_once("     Running unittests")
+        .expect("the recording starts a test binary");
+
+    assert_eq!(cut_test_runs(built), [(None, Some(101), false)]);
+}
+
 #[test]
 fn a_saved_test_run_whose_file_is_gone_or_changed_is_not_read() {
     let gone = saved_run().with_file_name("b8u0w4de3.txt");

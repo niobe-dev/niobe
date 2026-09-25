@@ -4355,6 +4355,7 @@ mod tests {
                 suites: 1,
             }),
             exit_code: Some(0),
+            failed: false,
         };
         let mut app = app();
         assert_eq!(app.test_run(), None, "no run is not a run of nothing");

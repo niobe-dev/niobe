@@ -646,6 +646,12 @@ pub enum Event {
         /// one, as [`Event::ToolCallEnd`] carries it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// Whether the run is known to have failed after its tests started:
+        /// its counts say a test failed or, where they were not read, what is
+        /// left of its output says so, as [`crate::test_run::failed`] reads
+        /// it. A build that failed ran no tests and is not a failed run.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        failed: bool,
     },
 
     /// A structured `decide` record: why a plan, a model, a file or a declined
@@ -797,6 +803,32 @@ mod tests {
             usage.cost_basis, None,
             "a cost whose producer said nothing about it was read as a measurement"
         );
+    }
+
+    #[test]
+    fn a_test_run_from_before_the_failed_field_reads_as_not_known_to_have_failed() {
+        let json = r#"{"type":"test_run","id":"t","counts":null,"exit_code":101}"#;
+        let event: Event = serde_json::from_str(json).expect("a record from before the field");
+        let Event::TestRun { failed, .. } = event else {
+            panic!("the record is a test run: {event:?}");
+        };
+        assert!(!failed);
+    }
+
+    #[test]
+    fn a_failed_run_survives_the_round_trip_and_a_run_not_known_to_have_failed_writes_nothing() {
+        let run = |failed| Event::TestRun {
+            id: ToolCallId::new("t"),
+            counts: None,
+            exit_code: Some(101),
+            failed,
+        };
+        for failed in [true, false] {
+            let line = serde_json::to_string(&run(failed)).expect("a test run record");
+            let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+            assert_eq!(read, run(failed));
+            assert_eq!(line.contains("failed"), failed, "{line}");
+        }
     }
 
     #[test]

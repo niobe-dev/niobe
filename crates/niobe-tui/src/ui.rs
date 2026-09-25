@@ -2468,7 +2468,9 @@ fn session_file_rows(
 ///
 /// A run whose output did not hold the whole run says that it ran and that
 /// its result was not read, with the status it exited with where that was a
-/// failure — never a count it did not find. Where the pane is too narrow for
+/// failure — never a count it did not find. One the backend still knows
+/// failed after its tests started says that it failed, and that its counts
+/// were not read. Where the pane is too narrow for
 /// all of it, the suites go first and then the age: the counts are what the
 /// section is for.
 fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
@@ -2476,9 +2478,10 @@ fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         return Vec::new();
     };
     let dim = Style::new().fg(theme.dim);
-    let said = match run.counts {
-        Some(counts) => test_counts(counts, theme),
-        None => test_not_read(run.exit_code, theme),
+    let said = match (run.counts, run.failed) {
+        (Some(counts), _) => test_counts(counts, theme),
+        (None, true) => test_failed_uncounted(run.exit_code, theme),
+        (None, false) => test_not_read(run.exit_code, theme),
     };
     let suites = run
         .counts
@@ -2545,6 +2548,23 @@ fn test_not_read(exit_code: Option<i32>, theme: &Theme) -> Vec<Span<'static>> {
         spans.push(Span::styled(" · ", dim));
     }
     spans.push(Span::styled("result not read", dim));
+    spans
+}
+
+/// `failed · exit 101 · counts not read`: a run known to have failed after its
+/// tests started, whose output did not hold the counts — how many failed, or
+/// how many ran, is not something the rest of it can say.
+fn test_failed_uncounted(exit_code: Option<i32>, theme: &Theme) -> Vec<Span<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let mut spans = vec![Span::styled("failed", Style::new().fg(theme.del).bold())];
+    if let Some(code) = exit_code {
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled(
+            format!("exit {code}"),
+            Style::new().fg(theme.del),
+        ));
+    }
+    spans.push(Span::styled(" · counts not read", dim));
     spans
 }
 

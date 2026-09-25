@@ -283,6 +283,9 @@ pub struct TestRunRecord {
     pub counts: Option<TestCounts>,
     /// The status the command exited with, where the backend reported one.
     pub exit_code: Option<i32>,
+    /// Whether the run is known to have failed after its tests started,
+    /// counted or not. A run whose counts say a test failed always has.
+    pub failed: bool,
 }
 
 /// One finished turn's own figures: what it spent between the prompt that
@@ -538,11 +541,15 @@ impl SessionState {
             }),
 
             Event::TestRun {
-                counts, exit_code, ..
+                counts,
+                exit_code,
+                failed,
+                ..
             } => {
                 self.test_run = Some(TestRunRecord {
                     counts: *counts,
                     exit_code: *exit_code,
+                    failed: *failed || counts.is_some_and(|counts| counts.failing()),
                 });
             }
 
@@ -1346,6 +1353,7 @@ mod tests {
             id: ToolCallId::new("t"),
             counts,
             exit_code,
+            failed: false,
         }
     }
 
@@ -1366,8 +1374,39 @@ mod tests {
             Some(TestRunRecord {
                 counts: None,
                 exit_code: Some(0),
+                failed: false,
             }),
             "an earlier run's counts are not carried over a run that was not read"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_counts_say_it_failed_failed_whatever_the_backend_said() {
+        let failing = TestCounts {
+            passed: 3,
+            failed: 1,
+            ignored: 0,
+            suites: 1,
+        };
+        let recorded = SessionState::replay(&[tested(Some(failing), Some(101))]);
+        assert_eq!(recorded.test_run().map(|run| run.failed), Some(true));
+    }
+
+    #[test]
+    fn a_run_known_to_have_failed_is_kept_as_failed_without_counts() {
+        let cut = Event::TestRun {
+            id: ToolCallId::new("t"),
+            counts: None,
+            exit_code: Some(101),
+            failed: true,
+        };
+        assert_eq!(
+            SessionState::replay(&[cut]).test_run(),
+            Some(TestRunRecord {
+                counts: None,
+                exit_code: Some(101),
+                failed: true,
+            })
         );
     }
 

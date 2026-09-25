@@ -882,10 +882,11 @@ impl Translator {
                 self.read_spilled,
             );
             let id = ToolCallId::new(tool_use_id);
-            let tested = tested.map(|(counts, exit_code)| Event::TestRun {
+            let tested = tested.map(|(counts, exit_code, failed)| Event::TestRun {
                 id: id.clone(),
                 counts,
                 exit_code,
+                failed,
             });
             out.push(Event::ToolCallEnd {
                 id,
@@ -1575,12 +1576,16 @@ fn exit_code(
 }
 
 /// What a shell call that ran `cargo test` reported, where it was one: the
-/// counts, where its output held the whole run, and the status it exited with.
+/// counts, where its output held the whole run, the status it exited with,
+/// and whether it is known to have failed after its tests started.
 ///
 /// A refused call ran nothing and is not a test run. The counts are read
 /// only from the whole of the output, which is what [`whole_output`] finds.
 /// Nothing is read for a run whose status is not known, because its counts
-/// could not be taken whatever they said.
+/// could not be taken whatever they said. Whether it failed is read from
+/// whatever the CLI handed over, whole or not: a failed command's output past
+/// about 30,000 characters loses its end before it is cut from the middle,
+/// and the start of a run is all that says its tests ran.
 fn test_run(
     name: &str,
     arguments: &serde_json::Value,
@@ -1589,18 +1594,23 @@ fn test_run(
     reported: Option<&serde_json::Value>,
     exit_code: Option<i32>,
     read_spilled: Option<ReadSpilled>,
-) -> Option<(Option<TestCounts>, Option<i32>)> {
+) -> Option<(Option<TestCounts>, Option<i32>, bool)> {
     let ran = match outcome {
         ToolOutcome::Ok | ToolOutcome::Failed => name == SHELL_TOOL,
         ToolOutcome::Denied => false,
     };
-    if !ran || !test_run::is_test_run(string_at(arguments, "command")?) {
+    let command = string_at(arguments, "command")?;
+    if !ran || !test_run::is_test_run(command) {
         return None;
     }
     let counts = exit_code
         .and_then(|_| whole_output(output, reported, read_spilled))
         .and_then(|whole| test_run::counts(&whole, exit_code));
-    Some((counts, exit_code))
+    let failed = match counts {
+        Some(counts) => counts.failing(),
+        None => test_run::failed(command, output, exit_code),
+    };
+    Some((counts, exit_code, failed))
 }
 
 /// The whole of what a shell command printed, where it can be had.
@@ -3661,6 +3671,17 @@ test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; 
 
 error: test failed, to rerun pass `--lib`";
 
+    /// Whether each test run the events report is known to have failed.
+    fn failed_runs(events: &[Event]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::TestRun { failed, .. } => Some(*failed),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every test run the events report, as its counts and exit status.
     fn test_runs(events: &[Event]) -> Vec<(Option<TestCounts>, Option<i32>)> {
         events
@@ -3866,6 +3887,41 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let events = translator.line(&result("t1", &cut, true));
 
         assert_eq!(test_runs(&events), [(None, Some(101))]);
+        assert_eq!(
+            failed_runs(&events),
+            [true],
+            "a run that exited 101 after its tests started failed, counted or not"
+        );
+    }
+
+    #[test]
+    fn a_test_run_whose_build_failed_is_not_a_failed_run() {
+        let build_failed = "Exit code 101
+   Compiling demo v0.1.0 (/work/demo)
+error[E0308]: mismatched types
+ --> src/lib.rs:7:52
+
+error: could not compile `demo` (lib test) due to 1 previous error";
+        let mut translator = translator();
+        shell_call(&mut translator);
+
+        let events = translator.line(&result("t1", build_failed, true));
+
+        assert_eq!(test_runs(&events), [(None, Some(101))]);
+        assert_eq!(failed_runs(&events), [false]);
+    }
+
+    #[test]
+    fn a_counted_run_is_failed_exactly_where_its_counts_say_so() {
+        let mut failing = translator();
+        shell_call(&mut failing);
+        let events = failing.line(&result("t1", &format!("Exit code 101\n{TEST_RUN}"), true));
+        assert_eq!(failed_runs(&events), [true]);
+
+        let mut passing = translator();
+        shell_call(&mut passing);
+        let events = passing.line(&result_with("t1", PASSING_RUN, &shell_report("")));
+        assert_eq!(failed_runs(&events), [false]);
     }
 
     #[test]
