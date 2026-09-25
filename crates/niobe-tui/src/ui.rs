@@ -751,15 +751,19 @@ const ASK_BADGE: &str = " ask ";
 /// The badge the bar wears while it is searching the transcript.
 const FIND_BADGE: &str = " find ";
 
+/// The badge the bar wears while it holds a command for the operator's shell.
+const SHELL_BADGE: &str = " shell ";
+
 /// What the bar puts between its hints.
 const HINT_SEPARATOR: &str = " · ";
 
 /// The badge and the marker in front of what the bar is editing: the prompt,
 /// or a search through the transcript.
 fn bar_lead(app: &App) -> (&'static str, &'static str) {
-    match app.finding() {
-        Some(_) => (FIND_BADGE, " / "),
-        None => (ASK_BADGE, " > "),
+    match (app.finding(), app.shell_mode()) {
+        (Some(_), _) => (FIND_BADGE, " / "),
+        (None, true) => (SHELL_BADGE, " $ "),
+        (None, false) => (ASK_BADGE, " > "),
     }
 }
 
@@ -866,6 +870,13 @@ fn bar_says(app: &App, panes: bool, theme: &Theme, room: usize) -> Vec<Line<'sta
     }
     let hints = match app.find_marks() {
         Some((found, current)) => find_hints(app, found.len(), current, theme),
+        None if app.shell_mode() => ["Enter runs", "Esc back"]
+            .into_iter()
+            .map(|key| Segment {
+                text: key.to_owned(),
+                style: Style::new().fg(theme.dim),
+            })
+            .collect(),
         None => {
             // A question holding the keyboard takes Tab for writing its
             // answer, so while it does, Tab is not offered as the way between

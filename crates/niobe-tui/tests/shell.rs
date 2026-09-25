@@ -2678,3 +2678,208 @@ fn a_session_with_no_files_to_name_does_not_offer_to_name_one() {
     type_keys(&mut app, "@");
     assert!(file_list(&screen(&mut app, 120, 30)).is_empty());
 }
+
+/// A session that runs the operator's commands, in a repository with files.
+fn session_that_runs_commands() -> App {
+    session_with_files().runs_commands()
+}
+
+/// The row the bar is drawn on while it holds a command.
+fn shell_row(frame: &str) -> String {
+    frame
+        .lines()
+        .find(|row| row.contains(" shell ") && row.contains(" $ "))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("no command in the bar:\n{frame}"))
+}
+
+/// Types `command` after `!` and runs it; returns the call it was recorded
+/// as, which is what the loop hands the shell.
+fn run_command(app: &mut App, command: &str) -> niobe_core::event::ToolCallId {
+    use ratatui::crossterm::event::KeyCode;
+
+    press(app, KeyCode::Char('!'));
+    type_keys(app, command);
+    press(app, KeyCode::Enter);
+    let mut commands = app.take_commands();
+    assert_eq!(commands.len(), 1, "one command was run");
+    let (id, ran) = commands.remove(0);
+    assert_eq!(ran, command);
+    id
+}
+
+#[test]
+fn bang_runs_a_command_that_is_recorded_as_a_call_and_shows_what_it_printed() {
+    use niobe_core::event::ToolOutcome;
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_that_runs_commands();
+    assert!(bar_row(&screen(&mut app, 200, 60)).contains("! shell"));
+
+    press(&mut app, KeyCode::Char('!'));
+    let row = shell_row(&screen(&mut app, 120, 30));
+    assert!(
+        row.contains("the agent does not see what it prints"),
+        "the bar does not say where the output goes:\n{row}"
+    );
+    let wide = shell_row(&screen(&mut app, 200, 60));
+    assert!(wide.contains("Enter runs · Esc back"), "{wide}");
+
+    type_keys(&mut app, "git status --short");
+    press(&mut app, KeyCode::Enter);
+    let commands = app.take_commands();
+    let [(id, command)] = commands.as_slice() else {
+        panic!("one command is handed out to be run: {commands:?}");
+    };
+    assert_eq!(command, "git status --short");
+    assert!(app.composed().is_empty());
+    assert!(!app.shell_mode(), "one `!` runs one command");
+
+    let produced = app.take_produced();
+    assert!(
+        !produced
+            .iter()
+            .any(|event| matches!(event, Event::UserMessage { .. })),
+        "the command was sent to the agent as a prompt: {produced:?}"
+    );
+    assert!(
+        matches!(
+            produced.as_slice(),
+            [Event::ToolCallStart { id: started, name, input, .. }]
+                if started == id && name == niobe_tui::OPERATOR_SHELL && input == "git status --short"
+        ),
+        "the command is not recorded as the start of a call: {produced:?}"
+    );
+
+    app.ran(niobe_tui::Ran {
+        id: id.clone(),
+        output: " M catalog/fetch.ts\n?? notes.md\n".to_owned(),
+        bytes: 32,
+        whole: true,
+        exit_code: Some(0),
+        error: None,
+    });
+    let produced = app.take_produced();
+    assert!(
+        matches!(
+            produced.as_slice(),
+            [Event::ToolCallEnd { id: ended, name, outcome: ToolOutcome::Ok, exit_code: Some(0), .. }]
+                if ended == id && name == niobe_tui::OPERATOR_SHELL
+        ),
+        "the end is not recorded as the end of the call: {produced:?}"
+    );
+
+    let frame = screen(&mut app, 120, 30);
+    let at = frame
+        .lines()
+        .position(|row| row.contains("! shell") && row.contains("git status --short"))
+        .unwrap_or_else(|| panic!("the call is not in the transcript:\n{frame}"));
+    let under: Vec<&str> = frame.lines().skip(at + 1).take(2).collect();
+    assert!(under[0].contains("M catalog/fetch.ts"), "{frame}");
+    assert!(under[1].contains("?? notes.md"), "{frame}");
+}
+
+#[test]
+fn a_command_that_failed_shows_its_status_and_what_it_printed_rather_than_a_made_up_reason() {
+    let mut app = session_that_runs_commands();
+    let id = run_command(&mut app, "ls nowhere");
+    app.ran(niobe_tui::Ran {
+        id,
+        output: "ls: nowhere: No such file or directory\n".to_owned(),
+        bytes: 39,
+        whole: true,
+        exit_code: Some(1),
+        error: None,
+    });
+
+    let frame = screen(&mut app, 120, 30);
+    let row = frame
+        .lines()
+        .find(|row| row.contains("ls nowhere"))
+        .unwrap_or_else(|| panic!("the call is not in the transcript:\n{frame}"));
+    assert!(row.contains("exit 1"), "{row}");
+    assert!(frame.contains("No such file or directory"), "{frame}");
+    assert!(!frame.contains("backend said nothing"), "{frame}");
+}
+
+#[test]
+fn a_command_that_could_not_start_is_a_failed_call_that_says_why() {
+    let mut app = session_that_runs_commands();
+    let id = run_command(&mut app, "make");
+    app.not_run(&id, "cannot start sh: not found");
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("not run: cannot start sh: not found"),
+        "{frame}"
+    );
+}
+
+#[test]
+fn a_cargo_test_run_with_bang_is_read_for_its_counts() {
+    let mut app = session_that_runs_commands();
+    let id = run_command(&mut app, "cargo test");
+    app.take_produced();
+    let output = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (target/debug/deps/demo-760e00b68511d171)
+
+running 2 tests
+test tests::adds ... ok
+test tests::wrong ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+";
+    app.ran(niobe_tui::Ran {
+        id: id.clone(),
+        output: output.to_owned(),
+        bytes: u64::try_from(output.len()).expect("the output is short"),
+        whole: true,
+        exit_code: Some(0),
+        error: None,
+    });
+
+    let produced = app.take_produced();
+    assert!(
+        produced.iter().any(|event| matches!(
+            event,
+            Event::TestRun { id: run, counts: Some(counts), failed: false, .. }
+                if *run == id && counts.passed == 2
+        )),
+        "the run is not read: {produced:?}"
+    );
+}
+
+#[test]
+fn a_bang_anywhere_but_the_start_of_a_prompt_is_a_bang() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_that_runs_commands();
+    type_keys(&mut app, "ship it!");
+    assert!(!app.shell_mode());
+    assert_eq!(app.composed(), "ship it!");
+
+    let mut app = session_that_runs_commands();
+    type_keys(&mut app, "!!important");
+    assert!(!app.shell_mode(), "a second `!` leaves the command");
+    assert_eq!(
+        app.composed(),
+        "!important",
+        "and starts the prompt with one"
+    );
+
+    let mut app = session_that_runs_commands();
+    press(&mut app, KeyCode::Char('!'));
+    press(&mut app, KeyCode::Backspace);
+    assert!(!app.shell_mode(), "backspace on an empty command leaves it");
+
+    let mut app = session_with_files();
+    let row = bar_row(&screen(&mut app, 200, 60));
+    assert!(
+        !row.contains("! shell"),
+        "a session with nothing to run commands offers to run them:\n{row}"
+    );
+    type_keys(&mut app, "!x");
+    assert!(!app.shell_mode());
+    assert_eq!(app.composed(), "!x");
+}

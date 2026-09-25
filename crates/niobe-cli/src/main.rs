@@ -16,6 +16,7 @@
 
 mod args;
 mod backend;
+mod commands;
 mod config;
 mod journal;
 mod prices;
@@ -35,7 +36,7 @@ use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
 use niobe_tui::theme::{self, Depth};
-use niobe_tui::{Detached, Ended, Forgotten, Theme, Unwatched};
+use niobe_tui::{Detached, Ended, Forgotten, NoShell, Theme, Unwatched};
 
 use crate::args::{Command, Invocation, Resume};
 use crate::journal::StoreJournal;
@@ -226,18 +227,23 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     } else {
         app
     };
+    // A command typed after `!` runs whether or not a backend does: it is the
+    // operator's, not the agent's.
+    let app = app.runs_commands();
 
     let mut journal = StoreJournal::Pending(root.clone());
     let mut rules = ConfigRules::at(&root);
     // Started with the shell and stopped with it: the thread behind it reads
     // the repository while the session runs, and a piped run never gets here.
     let mut watching = repo::watch(&cwd);
+    let mut commands = commands::Commands::at(&cwd);
     let ended = niobe_tui::run(
         app,
         &mut journal,
         backend.bridge(),
         &mut rules,
         &mut watching,
+        &mut commands,
     )
     .map_err(|e| e.to_string())?;
 
@@ -337,16 +343,21 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
     } else {
         app
     };
+    // A command typed after `!` runs whether or not a backend does: it is the
+    // operator's, not the agent's.
+    let app = app.runs_commands();
 
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&cwd);
+    let mut commands = commands::Commands::at(&cwd);
     niobe_tui::run(
         app,
         &mut journal,
         backend.bridge(),
         &mut rules,
         &mut watching,
+        &mut commands,
     )
     .map_err(|e| e.to_string())
     .map(|_| ())
@@ -430,16 +441,21 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
     } else {
         app
     };
+    // A command typed after `!` runs whether or not a backend does: it is the
+    // operator's, not the agent's.
+    let app = app.runs_commands();
 
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&cwd);
+    let mut commands = commands::Commands::at(&cwd);
     let ended = niobe_tui::run(
         app,
         &mut journal,
         backend.bridge(),
         &mut rules,
         &mut watching,
+        &mut commands,
     )
     .map_err(|e| e.to_string())?;
 
@@ -691,6 +707,7 @@ fn replay(log: &Path) -> Result<(), String> {
         &mut Detached,
         &mut Forgotten,
         &mut Unwatched,
+        &mut NoShell,
     )
     .map_err(|e| e.to_string())
     .map(|_| ())
@@ -857,6 +874,16 @@ IN THE SHELL:
                            under the session's directory: Up / Down choose,
                            Tab or Enter put the path in the prompt, Esc leaves
                            the word as typed
+    !                      On an empty composer, run a command in the
+                           session's directory instead of sending a prompt:
+                           Enter runs it, Esc goes back, and a second ! types
+                           a prompt that starts with one
+
+    A command run with ! is yours: no rule is consulted and no mode applies,
+    as in any other terminal. It has no terminal of its own and nothing to
+    read, runs until it ends or niobe quits, and is kept in the session as a
+    call, with the end of what it printed shown under it. The agent is not
+    told it ran and does not see what it printed.
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
     F8                     Pick a model from the ones the profile names
     F9                     Cycle the palette the shell draws in

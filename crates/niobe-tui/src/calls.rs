@@ -165,10 +165,11 @@ fn child(branch: &str, call: &Call, width: usize, theme: &Theme) -> Line<'static
 /// each line led by `lead`.
 fn under(call: &Call, lead: String, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let room = width.saturating_sub(text::width(&lead));
-    let body = match (call.failed(), &call.change) {
-        (true, _) => vec![reason(call, room, theme)],
-        (false, Some(change)) => crate::hunks::lines(change, room, theme),
-        (false, None) => Vec::new(),
+    let body = match (&call.printed, call.failed(), &call.change) {
+        (Some(printed), _, _) => printed_lines(call, printed, room, theme),
+        (None, true, _) => vec![reason(call, room, theme)],
+        (None, false, Some(change)) => crate::hunks::lines(change, room, theme),
+        (None, false, None) => Vec::new(),
     };
     body.into_iter()
         .map(|line| {
@@ -177,6 +178,40 @@ fn under(call: &Call, lead: String, width: usize, theme: &Theme) -> Vec<Line<'st
             Line::from(spans)
         })
         .collect()
+}
+
+/// What a command the operator ran printed, the last lines of it, under its
+/// row; and above them why it ended without an exit of its own, where it did.
+///
+/// A command that failed by exiting non-zero says so in its row, and what it
+/// printed is the reason — so no reason line is made up for it.
+fn printed_lines(
+    call: &Call,
+    printed: &crate::app::Printed,
+    room: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let mut lines = Vec::new();
+    if call.error.is_some() {
+        lines.push(reason(call, room, theme));
+    }
+    if printed.above > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("… {} lines above", printed.above),
+            dim.italic(),
+        )));
+    }
+    lines.extend(printed.tail.iter().map(|line| {
+        Line::from(Span::styled(
+            text::truncate(line, room),
+            Style::new().fg(theme.fg),
+        ))
+    }));
+    if lines.is_empty() && !call.running() {
+        lines.push(Line::from(Span::styled("printed nothing", dim.italic())));
+    }
+    lines
 }
 
 /// The first line of the backend's reason for a call that did not succeed,

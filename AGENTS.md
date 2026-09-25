@@ -75,7 +75,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
   and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps and truncates, `find.rs` finds a query in the transcript as it is drawn and marks
-  where, `mention.rs` completes an `@` word from the files the CLI listed, `markdown.rs` draws the assistant's replies
+  where, `mention.rs` completes an `@` word from the files the CLI listed, `shell.rs` is the trait the loop
+  hands the operator's `!` commands to, and where who allows them and what they reach is written
+  down, `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   `calls.rs` draws a tool call as a row of a table — its name in a fixed column, what it does,
@@ -116,7 +118,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the TUI, and the only one that wires the others together: it finds the config files and opens
   the shell under the selected profile, with the session store as its journal and the
   repository's config as the place a standing answer is kept, and where `niobe trust` records
-  that a repository's config may start a backend with what it names. `backend.rs` is the only module
+  that a repository's config may start a backend with what it names. `commands.rs` runs the
+  operator's `!` commands, off the draw path, and stops them when the session ends. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
   `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal; `tests/permission.rs` walks a recorded permission

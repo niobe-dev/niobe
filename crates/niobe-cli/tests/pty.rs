@@ -922,3 +922,49 @@ fn a_hangup_ends_the_session_as_a_terminal_that_went_away_rather_than_as_a_quit(
          {drawn:?}"
     );
 }
+
+/// A command typed after `!` runs in the directory the session was opened
+/// in, what it printed is drawn in the transcript, and it is kept in the
+/// session store as a call like any other.
+#[test]
+fn a_command_typed_after_a_bang_runs_here_and_is_kept_as_a_call() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(b"echo kept > proof.txt; echo printed-$((6*7))\r");
+    terminal.shows("printed-42");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    terminal.drained();
+    assert!(status.success(), "the shell ended with {status}");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("proof.txt")).expect("the command wrote here"),
+        "kept\n"
+    );
+
+    recorded(repo.path(), 2);
+    let store =
+        Store::open(&repo.path().join(".niobe").join("sessions.db")).expect("the session was kept");
+    let session: SessionId = "1".parse().expect("1 is a session id");
+    let events = store.events(session).expect("the session's events read");
+    let ended = events.iter().find_map(|recorded| match &recorded.event {
+        niobe_core::event::Event::ToolCallEnd {
+            name,
+            output,
+            exit_code,
+            ..
+        } => Some((name.clone(), output.clone(), *exit_code)),
+        _ => None,
+    });
+    assert_eq!(
+        ended,
+        Some(("! shell".to_owned(), "printed-42\n".to_owned(), Some(0))),
+        "{events:?}"
+    );
+}

@@ -525,6 +525,11 @@ pub struct Call {
     /// changed. Drawn under the call as a diff; `None` for a call that is not
     /// such a call, and for one whose backend sent only counts.
     pub change: Option<Change>,
+    /// The end of what it printed, for a command the operator ran with `!`,
+    /// whose output is what they ran it to see. `None` for every call the
+    /// agent made: the agent reads its calls' output, and the transcript
+    /// shows what the call did rather than repeating it.
+    pub printed: Option<Printed>,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -543,6 +548,7 @@ impl Call {
             lines: None,
             took: None,
             change: None,
+            printed: None,
             started: at,
         }
     }
@@ -571,6 +577,48 @@ impl Call {
             Some(ToolOutcome::Failed | ToolOutcome::Denied)
         )
     }
+}
+
+/// The last lines a command the operator ran printed, as the transcript shows
+/// them under the call.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Printed {
+    /// How many lines it printed above the ones kept.
+    pub above: usize,
+    /// The last lines, as they would read on a terminal: a line a carriage
+    /// return rewrote is what it was rewritten to, and nothing that would
+    /// move a terminal's cursor or change its colours is left in.
+    pub tail: Vec<String>,
+}
+
+impl Printed {
+    /// How many of a command's last lines the transcript keeps under it: a
+    /// glance at how it ended, not a scrollback. The whole output is in the
+    /// session store.
+    const LINES: usize = 12;
+
+    /// The end of `output`.
+    fn of(output: &str) -> Self {
+        let lines: Vec<&str> = output.lines().collect();
+        let above = lines.len().saturating_sub(Self::LINES);
+        let tail = lines
+            .iter()
+            .skip(above)
+            .map(|line| terminal_line(line))
+            .collect();
+        Self { above, tail }
+    }
+}
+
+/// A line of output as a terminal would have left it: what follows the last
+/// carriage return, tabs as spaces, and no control characters.
+fn terminal_line(line: &str) -> String {
+    let shown = line.rsplit('\r').next().unwrap_or(line);
+    shown
+        .replace('\t', "    ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 /// The shortest time between a call's start and its end that this shell can
@@ -784,6 +832,20 @@ pub struct App {
     mention_closed: Option<(usize, usize)>,
     /// Which of the files offered for the `@` word Enter would take.
     mention_selected: usize,
+    /// Whether a [`crate::shell::Shell`] is there to run the operator's
+    /// commands. Without one, `!` is a character like any other.
+    runs_commands: bool,
+    /// Whether what is in the composer is a command for the operator's own
+    /// shell rather than a prompt: set by `!` on an empty composer.
+    shell_mode: bool,
+    /// Commands the operator ran that have not been handed out to be run.
+    commands: Vec<(ToolCallId, String)>,
+    /// Each command handed out to be run and not yet ended, by the call it is
+    /// recorded as, so its end can repeat what it ran.
+    running_commands: BTreeMap<ToolCallId, String>,
+    /// How many commands this shell has started, which keeps each one's call
+    /// id apart from the others started in the same second.
+    commands_started: u64,
     /// Prompts waiting on the operator, oldest first. The transcript shows
     /// the front one; the rest wait behind it, because a backend can gate two
     /// calls of the same turn and answering them out of order would put the
@@ -912,7 +974,7 @@ impl App {
         // A prompt is prose, so it wraps rather than scrolling sideways, and a
         // path or a URL longer than the pane falls back to breaking mid-word.
         composer.set_wrap_mode(WrapMode::WordOrGlyph);
-        composer.set_placeholder_text(placeholder(usize::MAX, false));
+        composer.set_placeholder_text(placeholder(usize::MAX, false, false));
         paint_composer(&mut composer, &theme);
 
         Self {
@@ -946,6 +1008,11 @@ impl App {
             find: None,
             mention_closed: None,
             mention_selected: 0,
+            runs_commands: false,
+            shell_mode: false,
+            commands: Vec::new(),
+            running_commands: BTreeMap::new(),
+            commands_started: 0,
             asks: VecDeque::new(),
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
@@ -1102,12 +1169,12 @@ impl App {
                 id,
                 name,
                 input,
+                output,
                 bytes,
                 outcome,
                 summary,
                 exit_code,
                 error,
-                ..
             } => {
                 let ending = Ending {
                     outcome: *outcome,
@@ -1140,6 +1207,15 @@ impl App {
                         Some((self.entries.len().saturating_sub(1), 0))
                     }
                 };
+                if name == crate::shell::OPERATOR_SHELL
+                    && let Some(call) = ended.and_then(|(at, index)| {
+                        self.entries
+                            .get_mut(at)
+                            .and_then(|entry| entry.calls.get_mut(index))
+                    })
+                {
+                    call.printed = Some(Printed::of(output));
+                }
                 if *outcome == ToolOutcome::Ok
                     && let Some((at, index)) = ended
                 {
@@ -1893,6 +1969,14 @@ impl App {
         }
     }
 
+    /// The same shell, with something to run the operator's `!` commands:
+    /// the event loop is handed a [`crate::shell::Shell`] that runs them.
+    #[must_use]
+    pub fn runs_commands(mut self) -> Self {
+        self.runs_commands = true;
+        self
+    }
+
     /// The same shell, opening on a line from the shell itself.
     ///
     /// For what the operator has to know before the first prompt and would
@@ -2265,7 +2349,10 @@ impl App {
     /// advertises before what the bar says beside it: the mode a session is in
     /// matters more than a reminder of a key.
     pub(crate) fn fit_placeholder(&mut self, columns: usize) {
-        let said = placeholder(columns, !self.repo.files.is_empty());
+        let said = match self.shell_mode {
+            true => SHELL_PLACEHOLDER.to_owned(),
+            false => placeholder(columns, !self.repo.files.is_empty(), self.runs_commands),
+        };
         if self.composer.placeholder_text() != said {
             self.composer.set_placeholder_text(said);
         }
@@ -2276,6 +2363,7 @@ impl App {
     /// composer, and not for a word the list was closed for.
     fn mention(&self) -> Option<crate::mention::Mention> {
         let typing = self.focus() == Focus::Session
+            && !self.shell_mode
             && self.find.is_none()
             && self.picking.is_none()
             && !self
@@ -2342,6 +2430,139 @@ impl App {
         }
         self.composer.insert_str(format!("{file} "));
         self.mention_selected = 0;
+    }
+
+    /// Whether the composer holds a command for the operator's own shell
+    /// rather than a prompt for the agent.
+    pub fn shell_mode(&self) -> bool {
+        self.shell_mode
+    }
+
+    /// One key, while the composer holds a command. Returns whether it was
+    /// the command's: Enter runs it, and Esc, or Backspace on nothing, goes
+    /// back to writing a prompt. `!` on nothing goes back too and types
+    /// itself, which is how a prompt starts with one. Everything else is
+    /// typing.
+    fn on_shell_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        if !self.shell_mode || self.focus() != Focus::Session {
+            return false;
+        }
+        let empty = self.composer.is_empty();
+        match (key.code, key.modifiers) {
+            (KeyCode::Enter, KeyModifiers::ALT) => return false,
+            (KeyCode::Enter, _) => self.run_command(),
+            (KeyCode::Esc, _) => self.shell_mode = false,
+            (KeyCode::Backspace, _) if empty => self.shell_mode = false,
+            (KeyCode::Char('!'), KeyModifiers::NONE | KeyModifiers::SHIFT) if empty => {
+                self.shell_mode = false;
+                self.composer.insert_char('!');
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Runs what is in the composer as a command: records it as a call that
+    /// has started, and queues it for [`App::take_commands`].
+    fn run_command(&mut self) {
+        let command = self.composed();
+        if command.trim().is_empty() {
+            return;
+        }
+        self.composer.clear();
+        self.shell_mode = false;
+        self.commands_started = self.commands_started.saturating_add(1);
+        let id = ToolCallId::new(format!(
+            "shell-{}-{}",
+            self.read_at(),
+            self.commands_started
+        ));
+        self.produce(Event::ToolCallStart {
+            id: id.clone(),
+            name: crate::shell::OPERATOR_SHELL.to_owned(),
+            input: command.clone(),
+            summary: None,
+        });
+        self.running_commands.insert(id.clone(), command.clone());
+        self.commands.push((id, command));
+        self.scroll_to_tail();
+    }
+
+    /// The commands the operator ran since the last call, oldest first, for
+    /// the event loop to hand to a [`crate::shell::Shell`].
+    pub fn take_commands(&mut self) -> Vec<(ToolCallId, String)> {
+        std::mem::take(&mut self.commands)
+    }
+
+    /// Records how a command the operator ran ended, as the end of its call
+    /// and, where it ran `cargo test`, the run it reported.
+    pub fn ran(&mut self, ran: crate::shell::Ran) {
+        let command = self.running_commands.remove(&ran.id).unwrap_or_default();
+        let outcome = match ran.exit_code {
+            Some(0) => ToolOutcome::Ok,
+            _ => ToolOutcome::Failed,
+        };
+        let tested = niobe_core::test_run::is_test_run(&command).then(|| {
+            let counts = ran
+                .whole
+                .then(|| niobe_core::test_run::counts(&ran.output, ran.exit_code))
+                .flatten();
+            let failed = match counts {
+                Some(counts) => counts.failing(),
+                None => niobe_core::test_run::failed(&command, &ran.output, ran.exit_code),
+            };
+            Event::TestRun {
+                id: ran.id.clone(),
+                counts,
+                exit_code: ran.exit_code,
+                failed,
+            }
+        });
+        self.produce(Event::ToolCallEnd {
+            id: ran.id,
+            name: crate::shell::OPERATOR_SHELL.to_owned(),
+            input: command,
+            output: ran.output,
+            bytes: ran.bytes,
+            outcome,
+            summary: None,
+            exit_code: ran.exit_code,
+            error: ran.error,
+        });
+        if let Some(tested) = tested {
+            self.produce(tested);
+        }
+    }
+
+    /// Ends the call of every command still running, as stopped by the
+    /// session ending, which is what stops it.
+    pub fn abandon_commands(&mut self) {
+        let running: Vec<ToolCallId> = self.running_commands.keys().cloned().collect();
+        for id in running {
+            self.ran(crate::shell::Ran {
+                id,
+                output: String::new(),
+                bytes: 0,
+                whole: false,
+                exit_code: None,
+                error: Some("stopped: the session ended before the command did".to_owned()),
+            });
+        }
+    }
+
+    /// Records that a command the operator ran could not be started, as a
+    /// call that failed with the reason.
+    pub fn not_run(&mut self, id: &ToolCallId, error: &str) {
+        self.ran(crate::shell::Ran {
+            id: id.clone(),
+            output: String::new(),
+            bytes: 0,
+            whole: true,
+            exit_code: None,
+            error: Some(format!("not run: {error}")),
+        });
     }
 
     /// What is being looked for in the transcript, while a search is open.
@@ -2638,6 +2859,9 @@ impl App {
         if self.on_find_key(key) {
             return;
         }
+        if self.on_shell_key(key) {
+            return;
+        }
         if self.on_mention_key(key) {
             return;
         }
@@ -2683,6 +2907,14 @@ impl App {
             {
                 self.focus = Focus::Session;
                 self.open_find();
+            }
+            // `!` runs a command where it would start a prompt, for the same
+            // reason `/` searches only there.
+            (KeyCode::Char('!'), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                if self.composer.is_empty() && self.runs_commands =>
+            {
+                self.focus = Focus::Session;
+                self.shell_mode = true;
             }
             // What was typed goes where typing always goes, and the keyboard
             // follows it back: the Enter after it has to send it.
@@ -2992,7 +3224,16 @@ pub fn percent(utilization: f64) -> u64 {
 
 /// What an empty composer says it is for, and after it what else it does,
 /// each only once it works.
-const PLACEHOLDER: [&str; 3] = ["Ask for a change", "/ search transcript", "@ file"];
+const PLACEHOLDER: [&str; 4] = [
+    "Ask for a change",
+    "/ search transcript",
+    "@ file",
+    "! shell",
+];
+
+/// What an empty composer says while it holds a command: where it runs, and
+/// the one thing about it an operator could not guess.
+const SHELL_PLACEHOLDER: &str = "A command to run here; the agent does not see what it prints";
 
 /// How many files the list under an `@` word offers at once.
 const MENTION_ROWS: usize = 8;
@@ -3002,13 +3243,15 @@ const MENTION_ROWS: usize = 8;
 ///
 /// `@ file` is left out where there are no files to name — a session outside
 /// a repository, or one whose repository has not been read yet — since it
-/// would be advertising a list that cannot open.
-fn placeholder(columns: usize, files: bool) -> String {
+/// would be advertising a list that cannot open; `! shell` where nothing runs
+/// commands, as in a recorded log being looked at.
+fn placeholder(columns: usize, files: bool, commands: bool) -> String {
     let mut said = PLACEHOLDER[0].to_owned();
-    for more in PLACEHOLDER[1..]
-        .iter()
-        .filter(|more| files || **more != "@ file")
-    {
+    for more in PLACEHOLDER[1..].iter().filter(|more| match **more {
+        "@ file" => files,
+        "! shell" => commands,
+        _ => true,
+    }) {
         let longer = format!("{said} · {more}");
         if crate::text::width(&longer) > columns {
             break;

@@ -22,6 +22,7 @@ use crate::bridge::Bridge;
 use crate::input::{Input, Wait};
 use crate::journal::Journal;
 use crate::rules::Rules;
+use crate::shell::Shell;
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 use crate::ui;
 use crate::watch::Watch;
@@ -54,6 +55,17 @@ struct Machine<'a> {
     clock: &'a crate::clock::Clock,
 }
 
+/// Everything the loop hands what the operator does to, and takes what
+/// happens elsewhere from: one value, because the loop hands every tick's work
+/// to all of them.
+struct Around<'a> {
+    journal: &'a mut dyn Journal,
+    backend: &'a mut dyn Bridge,
+    rules: &'a mut dyn Rules,
+    watch: &'a mut dyn Watch,
+    shell: &'a mut dyn Shell,
+}
+
 /// How a session ended.
 ///
 /// The caller needs the difference to know whether there is still a terminal
@@ -75,7 +87,8 @@ pub enum Ended {
 /// `watch` is where the state of the repository comes from. It is asked once a
 /// tick and never waited on, so a read that is slow, that failed, or that has
 /// nothing new to say costs the frame nothing and leaves the last one on
-/// screen.
+/// screen. `shell` runs the commands the operator types after `!`, and is
+/// asked how they ended the same way.
 ///
 /// `app` may already hold a session: a resumed one is folded in by the caller
 /// before the shell opens.
@@ -89,6 +102,7 @@ pub fn run(
     backend: &mut dyn Bridge,
     rules: &mut dyn Rules,
     watch: &mut dyn Watch,
+    shell: &mut dyn Shell,
 ) -> io::Result<Ended> {
     install_panic_hook();
     let shutdown = Shutdown::install()?;
@@ -111,10 +125,13 @@ pub fn run(
     let ended = event_loop(
         &mut terminal,
         &mut app,
-        journal,
-        backend,
-        rules,
-        watch,
+        Around {
+            journal,
+            backend,
+            rules,
+            watch,
+            shell,
+        },
         &Machine {
             shutdown: &shutdown,
             wait: &wait,
@@ -173,12 +190,16 @@ fn outcome(ended: io::Result<Ended>, restored: io::Result<()>) -> io::Result<End
 fn event_loop<B: Backend<Error = io::Error>>(
     terminal: &mut Terminal<B>,
     app: &mut App,
-    journal: &mut dyn Journal,
-    backend: &mut dyn Bridge,
-    rules: &mut dyn Rules,
-    watch: &mut dyn Watch,
+    around: Around<'_>,
     machine: &Machine<'_>,
 ) -> io::Result<Ended> {
+    let Around {
+        journal,
+        backend,
+        rules,
+        watch,
+        shell,
+    } = around;
     let mut ended = Ended::Quit;
 
     while !app.should_quit() {
@@ -187,6 +208,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // read this pass, rather than with the one before it.
         app.tick(std::time::Instant::now(), Some(machine.clock.now()));
         let producing = fold_backend(app, journal, backend, watch);
+        fold_commands(app, shell);
         // Whatever a read of the repository has finished with since the last
         // tick. Nothing is waited on here: an unfinished or failed read says
         // nothing and the pane keeps what it had.
@@ -200,6 +222,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // session has spent under the budget this run was given, not about
         // what a recording being read back spent under one it knew nothing of.
         app.settle_budget();
+        run_commands(app, shell);
         send_produced(app, journal, backend, rules);
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -207,6 +230,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         match machine.wait.input(tick)? {
             Input::Ready => {
                 read_input(app)?;
+                run_commands(app, shell);
                 send_produced(app, journal, backend, rules);
             }
             Input::Idle => {}
@@ -232,6 +256,13 @@ fn event_loop<B: Backend<Error = io::Error>>(
             }
         }
     }
+
+    // A command still running is stopped as the session ends, when whatever
+    // runs it is dropped; its call is ended here, so a session read back does
+    // not show it running for ever.
+    fold_commands(app, shell);
+    app.abandon_commands();
+    send_produced(app, journal, backend, rules);
 
     Ok(ended)
 }
@@ -326,6 +357,29 @@ fn send_produced(
     }
 }
 
+/// Hands the commands the operator ran to `shell`, and records a command it
+/// would not start as a call that failed, so that nothing typed after `!` is
+/// left looking as though it were running.
+///
+/// Before [`send_produced`], so a command that would not start is kept as a
+/// start and a failed end in the one pass, in that order.
+fn run_commands(app: &mut App, shell: &mut dyn Shell) {
+    for (id, command) in app.take_commands() {
+        if let Err(error) = shell.run(&id, &command) {
+            app.not_run(&id, &error.to_string());
+        }
+    }
+}
+
+/// Records how each command that has ended since the last tick ended. What
+/// that produces is kept with everything else the operator produced, by the
+/// next [`send_produced`].
+fn fold_commands(app: &mut App, shell: &mut dyn Shell) {
+    for ran in shell.drain() {
+        app.ran(ran);
+    }
+}
+
 /// Folds in everything the backend has produced and keeps it, and says whether
 /// there was any so that the loop can look again sooner while a reply arrives.
 ///
@@ -369,7 +423,7 @@ mod tests {
     use crate::journal::JournalError;
     use crate::rules::{Forgotten, RulesError};
     use crate::watch::{Unwatched, Watch};
-    use niobe_core::event::{Mode, PermissionDecision, ToolCallId};
+    use niobe_core::event::{Mode, PermissionDecision, ToolCallId, ToolOutcome};
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::VecDeque;
@@ -480,6 +534,121 @@ mod tests {
         fn changed(&mut self) {
             self.nudges += 1;
         }
+    }
+
+    /// A shell that starts every command, or refuses every one, and ends
+    /// whatever it is told to.
+    #[derive(Debug, Default)]
+    struct Running {
+        started: Vec<(ToolCallId, String)>,
+        ends: Vec<crate::shell::Ran>,
+        refuse: bool,
+    }
+
+    impl Shell for Running {
+        fn run(&mut self, id: &ToolCallId, command: &str) -> Result<(), crate::shell::ShellError> {
+            if self.refuse {
+                return Err("cannot start sh".into());
+            }
+            self.started.push((id.clone(), command.to_owned()));
+            Ok(())
+        }
+
+        fn drain(&mut self) -> Vec<crate::shell::Ran> {
+            std::mem::take(&mut self.ends)
+        }
+    }
+
+    /// A session that runs commands, with `command` typed after `!` and run.
+    fn app_that_ran(command: &str) -> App {
+        let mut app = App::new(Repo::default()).runs_commands();
+        app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        for c in command.chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app
+    }
+
+    fn ended_calls(kept: &Kept) -> Vec<(ToolOutcome, Option<String>)> {
+        kept.events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::ToolCallEnd { outcome, error, .. } => Some((*outcome, error.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_command_goes_to_the_shell_and_its_start_and_end_are_kept() {
+        let mut app = app_that_ran("make check");
+        let mut kept = Kept::default();
+        let mut shell = Running::default();
+
+        run_commands(&mut app, &mut shell);
+        send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
+        let [(id, command)] = shell.started.as_slice() else {
+            panic!("the command did not reach the shell: {:?}", shell.started);
+        };
+        assert_eq!(command, "make check");
+        assert!(matches!(
+            kept.events.as_slice(),
+            [SessionEvent::ToolCallStart { name, .. }] if name == crate::shell::OPERATOR_SHELL
+        ));
+
+        shell.ends.push(crate::shell::Ran {
+            id: id.clone(),
+            output: "ok\n".to_owned(),
+            bytes: 3,
+            whole: true,
+            exit_code: Some(0),
+            error: None,
+        });
+        fold_commands(&mut app, &mut shell);
+        send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
+
+        assert_eq!(ended_calls(&kept), [(ToolOutcome::Ok, None)]);
+    }
+
+    #[test]
+    fn a_command_the_shell_would_not_start_is_kept_as_a_call_that_failed() {
+        let mut app = app_that_ran("make check");
+        let mut kept = Kept::default();
+        let mut shell = Running {
+            refuse: true,
+            ..Running::default()
+        };
+
+        run_commands(&mut app, &mut shell);
+        send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
+
+        assert_eq!(
+            ended_calls(&kept),
+            [(
+                ToolOutcome::Failed,
+                Some("not run: cannot start sh".to_owned())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_command_still_running_as_the_session_ends_is_kept_as_stopped() {
+        let mut app = app_that_ran("sleep 60");
+        let mut kept = Kept::default();
+        let mut shell = Running::default();
+        run_commands(&mut app, &mut shell);
+
+        app.abandon_commands();
+        send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
+
+        assert_eq!(
+            ended_calls(&kept),
+            [(
+                ToolOutcome::Failed,
+                Some("stopped: the session ended before the command did".to_owned())
+            )]
+        );
     }
 
     /// A session stopped on a prompt the operator has not answered.
