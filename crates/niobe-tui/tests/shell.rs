@@ -828,6 +828,114 @@ fn a_metered_profile_leads_the_usage_pane_with_money_and_prices_each_model() {
     assert_snapshot("metered-120x30", &frame);
 }
 
+/// A metered session that has worked for a measured time says how fast it
+/// spends, beside what it has spent and on the same terms: a floor under the
+/// cost gives a floor under the rate.
+#[test]
+fn a_metered_session_that_worked_a_measured_time_shows_its_spend_rate() {
+    let mut app = metered_session();
+    let frame = screen(&mut app, 120, 30);
+    let worked = app
+        .worked()
+        .expect("the fixture's turn is stamped at both ends");
+    let spent = app.session().totals().reported_cost_usd;
+    let rate = spent / worked.as_secs_f64() * 3_600.0;
+    assert!(
+        frame.contains(&format!("session ≥${spent:.2} · ≥${rate:.2}/h worked")),
+        "{frame}"
+    );
+}
+
+/// A metered session and the moments it ran at.
+fn metered_turn(worked_seconds: u64, cost_usd: Option<f64>) -> App {
+    let clock = niobe_tui::clock::Clock::fixed(0).expect("UTC is an offset");
+    let at = |seconds| clock.at(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
+    let mut app = App::new(Repo::default()).with_clock(clock.clone());
+    app.tick(std::time::Instant::now(), Some(at(0)));
+    let billing = Event::Billing {
+        billing: niobe_core::Billing::Metered,
+    };
+    let prompt = Event::UserMessage {
+        text: "go".to_owned(),
+    };
+    // A million tokens, which `OnlyOpus` values at a dollar.
+    let usage = Event::Usage(Usage {
+        input: 500_000,
+        output: 500_000,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: 0,
+        reasoning: 0,
+        model: "opus-5".to_owned(),
+        cost_usd,
+        cost_basis: cost_usd.map(|_| niobe_core::event::CostBasis::Measured),
+        settles_model: false,
+    });
+    for event in [&billing, &prompt, &usage] {
+        app.apply_at(event, at(0));
+    }
+    app.apply_at(&Event::TurnEnded, at(worked_seconds));
+    app.tick(std::time::Instant::now(), Some(at(worked_seconds)));
+    app
+}
+
+#[test]
+fn a_rate_is_the_cost_over_the_hours_worked() {
+    let frame = screen(&mut metered_turn(1_800, Some(0.50)), 120, 30);
+    assert!(frame.contains("session $0.50 · $1.00/h worked"), "{frame}");
+}
+
+/// An estimated cost gives an estimated rate.
+#[test]
+fn a_rate_over_an_estimated_cost_is_an_estimate() {
+    let mut app = metered_turn(1_800, None).with_prices(Box::new(OnlyOpus));
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("session ~$1.00 · ~$2.00/h worked"),
+        "{frame}"
+    );
+}
+
+/// Over the first seconds of a session one request's price is the whole
+/// figure, and multiplied up to an hour it reads as a rate nobody is paying.
+#[test]
+fn a_session_that_has_worked_under_a_minute_shows_no_rate() {
+    let frame = screen(&mut metered_turn(59, Some(0.05)), 120, 30);
+    assert!(frame.contains("session $0.05"), "{frame}");
+    assert!(!frame.contains("/h"), "{frame}");
+}
+
+/// A session folded with no clock behind it — an imported transcript, a log —
+/// has spent a measured amount over no measured time, and a rate over a
+/// guessed time is a fabricated figure. Nothing is drawn, not a zero.
+#[test]
+fn a_session_with_no_measured_time_shows_no_rate() {
+    let mut app = App::new(Repo::default());
+    app.extend(&[
+        Event::Billing {
+            billing: niobe_core::Billing::Metered,
+        },
+        Event::UserMessage {
+            text: "go".to_owned(),
+        },
+        Event::TurnEnded,
+    ]);
+    let frame = screen(&mut app, 120, 30);
+    assert!(!frame.contains("/h"), "{frame}");
+}
+
+/// On a plan no money moves with the work, so there is no rate of spending it.
+#[test]
+fn a_plan_shows_no_spend_rate() {
+    let mut app = metered_turn(1_800, Some(0.50));
+    app.apply(&Event::Billing {
+        billing: niobe_core::Billing::Plan,
+    });
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("API-equivalent $0.50"), "{frame}");
+    assert!(!frame.contains("/h"), "{frame}");
+}
+
 /// A budget on a metered account is money against money, so it stands with
 /// the session's cost at the head of the pane.
 #[test]

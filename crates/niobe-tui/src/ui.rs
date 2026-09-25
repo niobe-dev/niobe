@@ -2022,7 +2022,7 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// The pane is sized from [`usage_height`] before it is drawn, so the two have
 /// to agree exactly; a test holds them together.
 fn usage_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let money = money_lines(app, theme);
+    let money = money_lines(app, width, theme);
     let windows = window_lines(app, width, theme);
     let spend = spend_lines(app, width, theme);
 
@@ -2075,14 +2075,24 @@ fn money_rows(app: &App) -> usize {
 /// plan user sees what they consume, but dim and named for what it is, never
 /// as the session's cost. Where nothing has said which it is, it is neither,
 /// and the row says so rather than showing a figure it cannot vouch for.
-fn money_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
+fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
     let cost = || session_cost(app.session(), app.prices());
     let mut lines = vec![match app.session().billing() {
-        Some(Billing::Metered) => Line::from(vec![
-            Span::styled("session ", dim),
-            Span::styled(cost(), Style::new().fg(theme.hot).bold()),
-        ]),
+        Some(Billing::Metered) => {
+            let cost = cost();
+            let mut spans = vec![
+                Span::styled("session ", dim),
+                Span::styled(cost.clone(), Style::new().fg(theme.hot).bold()),
+            ];
+            let rate = spend_rate(app).map(|rate| format!(" · {rate}/h worked"));
+            if let Some(rate) = rate.filter(|rate| {
+                text::width("session ") + text::width(&cost) + text::width(rate) <= width
+            }) {
+                spans.push(Span::styled(rate, dim));
+            }
+            Line::from(spans)
+        }
         Some(Billing::Plan) => Line::from(format!("API-equivalent {}", cost())).style(dim),
         None => Line::from(vec![
             Span::styled("session ", dim),
@@ -3413,6 +3423,38 @@ pub fn session_cost(session: &SessionState, prices: Option<&dyn Prices>) -> Stri
     .unwrap_or_else(|| "unpriced".to_owned())
 }
 
+/// The least time worked a spend rate is drawn over.
+///
+/// Over the first seconds of a session one request's price is the whole
+/// figure — a five-cent first reply ten seconds in reads eighteen dollars an
+/// hour — and multiplying it up to an hour sells one request as a rate. A
+/// minute of work spans several requests, where the figure starts to describe
+/// the session rather than its first reply.
+const RATED: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What the session costs per hour the agent worked, labelled as the
+/// session's cost is: a floor under the cost is a floor under the rate, an
+/// estimate an estimated rate.
+///
+/// Worked, not elapsed: the idle between turns is the operator's, and a rate
+/// that fell every time they stepped away would say nothing about the agent.
+/// `None` wherever the time worked was not measured throughout, before a
+/// minute of it, and wherever the cost has no figure — never a zero standing
+/// in for a rate nobody measured.
+fn spend_rate(app: &App) -> Option<String> {
+    let worked = app.worked().filter(|worked| *worked >= RATED)?;
+    let totals = app.session().totals();
+    if totals.records == 0 {
+        return None;
+    }
+    let (label, usd) = known_cost(
+        totals.reported_cost_usd,
+        totals.cost_fully_reported(),
+        estimate_unsettled(totals, app.prices()),
+    )?;
+    Some(label.format(usd / worked.as_secs_f64() * 3_600.0))
+}
+
 /// One model's cost, labelled the way [`session_cost`] labels the session's:
 /// what was reported for it, and what `prices` makes of whatever of it no
 /// reported cost covers.
@@ -3438,16 +3480,44 @@ fn model_cost(totals: &Totals, model: &str, prices: Option<&dyn Prices>) -> Stri
 /// where it could not be and the figure is a floor. `None` where nothing was
 /// reported and nothing could be valued, which each caller words its own way.
 fn labelled(reported: f64, settled: bool, estimated: Option<f64>) -> Option<String> {
+    known_cost(reported, settled, estimated).map(|(label, usd)| label.format(usd))
+}
+
+/// How much of a cost is known, which is what its figure is prefixed with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CostLabel {
+    /// Reported in full.
+    Reported,
+    /// Reported, and the rest valued at published rates.
+    Estimate,
+    /// Reported in part, and the rest could not be valued.
+    Floor,
+}
+
+impl CostLabel {
+    fn format(self, usd: f64) -> String {
+        let prefix = match self {
+            Self::Reported => "",
+            Self::Estimate => "~",
+            Self::Floor => "≥",
+        };
+        format!("{prefix}${usd:.2}")
+    }
+}
+
+/// The figure [`labelled`] draws and how it is labelled, kept apart so that a
+/// figure derived from the cost — a rate — carries the same label.
+fn known_cost(reported: f64, settled: bool, estimated: Option<f64>) -> Option<(CostLabel, f64)> {
     if settled {
-        return Some(format!("${reported:.2}"));
+        return Some((CostLabel::Reported, reported));
     }
     if let Some(estimated) = estimated {
-        return Some(format!("~${:.2}", reported + estimated));
+        return Some((CostLabel::Estimate, reported + estimated));
     }
     if reported == 0.0 {
         return None;
     }
-    Some(format!("≥${reported:.2}"))
+    Some((CostLabel::Floor, reported))
 }
 
 /// What the tokens no reported cost covers come to at published rates.
@@ -4713,5 +4783,48 @@ mod tests {
             .position(holds_a_cut_diff)
             .expect("the long write is cut");
         assert_eq!(changed, vec![long]);
+    }
+
+    /// A metered session that spent `cost` over one turn of `seconds`.
+    fn metered_for(seconds: u64, cost: f64) -> App {
+        use niobe_core::event::Event;
+        let at = |seconds| {
+            crate::clock::Stamp::new(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                None,
+            )
+        };
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply_at(
+            &Event::Billing {
+                billing: Billing::Metered,
+            },
+            at(0),
+        );
+        app.apply_at(
+            &Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            at(0),
+        );
+        app.apply_at(&priced(Some(cost)), at(0));
+        app.apply_at(&Event::TurnEnded, at(seconds));
+        app
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_rate_keeps_the_cost_and_drops_the_rate() {
+        let app = metered_for(1_800, 0.5);
+        let wide: Vec<String> = money_lines(&app, 40, &crate::theme::CLASSIC)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(wide[0], "session $0.50 · $1.00/h worked");
+
+        let narrow: Vec<String> = money_lines(&app, 29, &crate::theme::CLASSIC)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(narrow[0], "session $0.50");
     }
 }

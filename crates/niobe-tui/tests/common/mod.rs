@@ -586,7 +586,9 @@ pub fn unmetered_session() -> App {
 
 /// The same session on a metered account: no windows, the backend having said
 /// the account is billed by use, and a second model — the small one a CLI
-/// summarises with — whose tokens no reported cost covers.
+/// summarises with — whose tokens no reported cost covers. Its turn ends at
+/// the moment it is read, so the session has worked a measured [`RAN_FOR`]
+/// and the pane has a time to divide its spending by.
 pub fn metered_session() -> App {
     let mut events: Vec<Event> = session_events()
         .into_iter()
@@ -610,7 +612,9 @@ pub fn metered_session() -> App {
         cost_basis: None,
         settles_model: false,
     }));
-    session_read_at_a_fixed_moment(&events)
+    let mut app = session_read_at_a_fixed_moment(&events);
+    app.apply(&Event::TurnEnded);
+    app
 }
 
 /// A reply written the way the assistant writes one: a heading, emphasis,

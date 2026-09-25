@@ -916,6 +916,15 @@ pub struct App {
     /// was stamped with: what a turn's duration is counted from. `None`
     /// between turns, and for a turn whose prompt came with no time.
     turn_began_at: Option<Stamp>,
+    /// How long the turns that have ended ran, each from its first prompt to
+    /// its end by the clocks they were folded at. `None` from the first turn
+    /// that ended without both ends stamped — an imported transcript, a log
+    /// folded with no clock — because a sum missing a turn is not the time
+    /// the session worked, and a rate over it would overstate the spend.
+    turns_took: Option<Duration>,
+    /// The stamp the last event folded in carried: where a turn read back
+    /// unfinished is known to have got to.
+    last_folded_at: Option<Stamp>,
     /// When the running turn was first seen running by that clock.
     working_since: Option<Instant>,
     /// When the session was first seen not running by that clock. The mirror
@@ -1047,6 +1056,8 @@ impl App {
             now: None,
             at: None,
             turn_began_at: None,
+            turns_took: Some(Duration::ZERO),
+            last_folded_at: None,
             working_since: None,
             idle_since: None,
             drawn: crate::ui::DrawnEntries::default(),
@@ -1062,6 +1073,7 @@ impl App {
             self.turn_began_at = self.at;
         }
         self.session.apply(event);
+        self.last_folded_at = self.at;
         let ended = self.just_ended.take();
         self.fold_into_transcript(event, ended);
         if self.session.turns().len() > turns {
@@ -1076,10 +1088,15 @@ impl App {
         let Some(turn) = self.session.turns().last() else {
             return;
         };
-        let took = match (began, self.at) {
-            (Some(began), Some(ended)) => ended.since(began).filter(|took| *took >= TIMED),
+        let measured = match (began, self.at) {
+            (Some(began), Some(ended)) => ended.since(began),
             _ => None,
         };
+        self.turns_took = self
+            .turns_took
+            .zip(measured)
+            .map(|(sum, took)| sum.saturating_add(took));
+        let took = measured.filter(|took| *took >= TIMED);
         let rule = TurnRule {
             number: turn.number,
             ended: self.at.and_then(Stamp::local),
@@ -3077,6 +3094,27 @@ impl App {
                 self.idle_since = self.idle_since.or(Some(now));
             }
         }
+    }
+
+    /// How long the agent has worked in this session: every turn from its
+    /// first prompt to its end, the idle between turns left out.
+    ///
+    /// A turn still running counts to now while it is being worked on from
+    /// here, and to the last thing it did where it was read back unfinished,
+    /// which nothing is running now. `None` where any turn's span was not
+    /// measured, or before the first turn: what the session spent cannot be
+    /// divided by a time that leaves part of the spending out.
+    pub fn worked(&self) -> Option<Duration> {
+        let ended = self.turns_took?;
+        if !self.session.turn_running() {
+            return (!self.session.turns().is_empty()).then_some(ended);
+        }
+        let reached = match self.working() {
+            true => self.at,
+            false => self.last_folded_at,
+        };
+        let running = reached?.since(self.turn_began_at?)?;
+        Some(ended.saturating_add(running))
     }
 
     /// The time of day, as the event loop last read it.
@@ -5523,6 +5561,66 @@ mod tests {
 
     fn millis(ms: u64) -> Stamp {
         Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_millis(ms), None)
+    }
+
+    fn said(text: &str) -> Event {
+        Event::UserMessage {
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_time_worked_is_every_turn_from_its_prompt_to_its_end() {
+        let mut app = app();
+        app.apply_at(&said("one"), millis(1_000));
+        app.apply_at(&Event::TurnEnded, millis(61_000));
+        // The idle between turns is not work.
+        app.apply_at(&said("two"), millis(600_000));
+        app.apply_at(&Event::TurnEnded, millis(630_000));
+
+        assert_eq!(app.worked(), Some(Duration::from_secs(90)));
+    }
+
+    #[test]
+    fn a_turn_still_running_counts_to_now_while_it_is_worked_on_here() {
+        let mut app = app().attached();
+        app.tick(Instant::now(), Some(millis(1_000)));
+        typed_then_enter(
+            &mut app,
+            "go",
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        );
+        app.tick(Instant::now(), Some(millis(46_000)));
+
+        assert_eq!(app.worked(), Some(Duration::from_secs(45)));
+    }
+
+    #[test]
+    fn a_turn_read_back_unfinished_counts_to_the_last_thing_it_did() {
+        let mut app = app();
+        app.apply_at(&said("go"), millis(1_000));
+        app.apply_at(&start("t1", "Bash", "{}", None), millis(21_000));
+        // Read back three days later: the turn was not running all that time.
+        app.tick(Instant::now(), Some(millis(259_200_000)));
+
+        assert_eq!(app.worked(), Some(Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn a_session_with_a_turn_nobody_timed_has_worked_for_no_known_time() {
+        let mut app = app();
+        // Folded with no clock, as an imported transcript is.
+        app.apply(&said("one"));
+        app.apply(&Event::TurnEnded);
+        app.apply_at(&said("two"), millis(1_000));
+        app.apply_at(&Event::TurnEnded, millis(61_000));
+
+        assert_eq!(app.worked(), None);
+    }
+
+    #[test]
+    fn a_session_with_no_turn_has_worked_for_no_known_time() {
+        assert_eq!(app().worked(), None);
     }
 
     #[test]
