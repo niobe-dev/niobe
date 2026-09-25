@@ -206,9 +206,10 @@ pub fn watch(cwd: &Path) -> Watcher {
     let (reads, from_reads) = channel();
     let (nudge, nudged) = channel();
     let root = root(cwd);
+    let here = cwd.to_path_buf();
     let name = describe(cwd).name;
 
-    std::thread::spawn(move || keep_reading(&root, &name, &reads, &nudged));
+    std::thread::spawn(move || keep_reading(&root, &here, &name, &reads, &nudged));
 
     Watcher {
         reads: from_reads,
@@ -221,7 +222,7 @@ pub fn watch(cwd: &Path) -> Watcher {
 /// A read that failed sends nothing, which is what leaves the last read that
 /// worked on screen: an emptied pane and a repository with nothing in it would
 /// look the same, and only one of them would be true.
-fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver<()>) {
+fn keep_reading(root: &Path, here: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver<()>) {
     // The commit the session started on, taken from the first read that
     // worked. `Some(None)` is a repository that had no commits then.
     let mut started_on: Option<Option<String>> = None;
@@ -235,7 +236,7 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver
         };
 
         let began = Instant::now();
-        if let Ok(read) = read(root, name, since) {
+        if let Ok(read) = read(root, here, name, since) {
             started_on.get_or_insert(read.head);
             if last.as_ref() != Some(&read.repo) {
                 if reads.send(read.repo.clone()).is_err() {
@@ -256,8 +257,9 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver
     }
 }
 
-/// Everything the shell shows about the repository at `root`, in one pass.
-fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
+/// Everything the shell shows about the repository at `root`, in one pass,
+/// for a session running in `here`.
+fn read(root: &Path, here: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
     let status = branch_status(&git(
         root,
         // The per-file lines are discarded — what the tree did to each file is
@@ -298,6 +300,18 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
     };
 
     let commits = pushed(root, listed, &status)?;
+    // Listed from where the session runs rather than from the root, so each
+    // path is the one the agent, which runs there too, would name the file by.
+    let files = files(&git(
+        here,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?);
     Ok(Read {
         repo: Repo {
             name: name.to_owned(),
@@ -307,9 +321,22 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
             behind: status.behind,
             working,
             commits,
+            files,
         },
         head: status.head,
     })
+}
+
+/// The paths `git ls-files -z` printed, in the order it printed them, each
+/// once: a file with a merge conflict is listed once per side.
+fn files(listed: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for path in listed.split('\0').filter(|path| !path.is_empty()) {
+        if files.last().map(String::as_str) != Some(path) {
+            files.push(path.to_owned());
+        }
+    }
+    files
 }
 
 /// Says, for each of `listed`, whether the branch's upstream already has it.
@@ -674,7 +701,7 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\ne\n").expect("the file is written");
 
-        let read = read(&work, "work", Since::Nothing).expect("the repository reads");
+        let read = read(&work, &work, "work", Since::Nothing).expect("the repository reads");
 
         assert_eq!(read.repo.branch.as_deref(), Some("main"));
         assert_eq!(read.repo.ahead, Some(0));
@@ -694,10 +721,35 @@ mod tests {
     }
 
     #[test]
+    fn a_read_lists_the_files_under_the_sessions_directory_that_git_does_not_ignore() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let docs = work.join("docs");
+        std::fs::create_dir_all(&docs).expect("the directory can be made");
+        std::fs::write(docs.join("guide.md"), "new\n").expect("the file is written");
+        std::fs::write(work.join("scratch.log"), "noise\n").expect("the file is written");
+        std::fs::write(work.join(".gitignore"), "*.log\n").expect("the file is written");
+
+        let whole = read(&work, &work, "work", Since::Nothing).expect("the repository reads");
+        let below = read(&work, &docs, "docs", Since::Nothing).expect("the repository reads");
+
+        assert_eq!(
+            whole.repo.files,
+            [".gitignore", "docs/guide.md", "kept.txt"],
+            "committed and new files, and not the ignored one"
+        );
+        assert_eq!(
+            below.repo.files,
+            ["guide.md"],
+            "a session started in a subdirectory names files the way its agent does"
+        );
+    }
+
+    #[test]
     fn the_commits_a_session_made_are_listed_and_say_whether_they_are_pushed() {
         let dir = repository();
         let work = dir.path().join("work");
-        let started_on = read(&work, "work", Since::Nothing)
+        let started_on = read(&work, &work, "work", Since::Nothing)
             .expect("the repository reads")
             .head
             .expect("the repository has a commit");
@@ -710,7 +762,8 @@ mod tests {
         std::fs::write(work.join("kept.txt"), "a\n").expect("the file is written");
         run(&work, &["commit", "-am", "fourth"]);
 
-        let read = read(&work, "work", Since::Commit(&started_on)).expect("the repository reads");
+        let read =
+            read(&work, &work, "work", Since::Commit(&started_on)).expect("the repository reads");
 
         let subjects: Vec<(&str, Option<bool>)> = read
             .repo
@@ -741,7 +794,7 @@ mod tests {
         run(&work, &["add", "a.txt"]);
         run(&work, &["commit", "-m", "only"]);
 
-        let read = read(&work, "work", Since::Everything).expect("the repository reads");
+        let read = read(&work, &work, "work", Since::Everything).expect("the repository reads");
 
         assert_eq!(read.repo.ahead, None);
         assert_eq!(read.repo.commits.len(), 1);
@@ -754,7 +807,8 @@ mod tests {
         run(dir.path(), &["init", "--initial-branch=main", "."]);
         std::fs::write(dir.path().join("new.txt"), "a\n").expect("the file is written");
 
-        let read = read(dir.path(), "work", Since::Everything).expect("the repository reads");
+        let read =
+            read(dir.path(), dir.path(), "work", Since::Everything).expect("the repository reads");
 
         assert_eq!(read.head, None);
         assert_eq!(read.repo.branch.as_deref(), Some("main"));
@@ -766,7 +820,8 @@ mod tests {
     fn a_directory_that_is_not_a_repository_is_a_failed_read_and_not_a_panic() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
 
-        let failed = read(dir.path(), "work", Since::Nothing).expect_err("there is no repository");
+        let failed = read(dir.path(), dir.path(), "work", Since::Nothing)
+            .expect_err("there is no repository");
 
         assert!(failed.starts_with("git status"), "{failed}");
     }
@@ -815,7 +870,7 @@ mod tests {
         );
         std::fs::write(checkout.join("kept.txt"), "a\n").expect("the file is written");
 
-        let read = read(&checkout, "wt", Since::Nothing).expect("the worktree reads");
+        let read = read(&checkout, &checkout, "wt", Since::Nothing).expect("the worktree reads");
 
         assert_eq!(read.repo.branch.as_deref(), Some("side"));
         assert_eq!(
@@ -830,13 +885,13 @@ mod tests {
     fn a_detached_head_is_read_as_the_commit_it_is_sitting_on() {
         let dir = repository();
         let work = dir.path().join("work");
-        let head = read(&work, "work", Since::Nothing)
+        let head = read(&work, &work, "work", Since::Nothing)
             .expect("the repository reads")
             .head
             .expect("the repository has a commit");
         run(&work, &["checkout", "--detach", &head]);
 
-        let read = read(&work, "work", Since::Nothing).expect("a detached head reads");
+        let read = read(&work, &work, "work", Since::Nothing).expect("a detached head reads");
 
         assert_eq!(read.repo.branch.as_deref(), Some(&head[..7]));
         assert_eq!(read.repo.ahead, None, "a commit has no upstream");
@@ -847,7 +902,7 @@ mod tests {
     fn an_upstream_the_repository_cannot_find_leaves_pushed_unknown() {
         let dir = repository();
         let work = dir.path().join("work");
-        let started_on = read(&work, "work", Since::Nothing)
+        let started_on = read(&work, &work, "work", Since::Nothing)
             .expect("the repository reads")
             .head
             .expect("the repository has a commit");
@@ -857,7 +912,7 @@ mod tests {
         // git names it and refuses to say how far apart the two are.
         run(&work, &["update-ref", "-d", "refs/remotes/origin/main"]);
 
-        let read = read(&work, "work", Since::Commit(&started_on))
+        let read = read(&work, &work, "work", Since::Commit(&started_on))
             .expect("a missing upstream is not a failed read");
 
         assert_eq!(read.repo.ahead, None);

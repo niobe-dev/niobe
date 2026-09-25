@@ -640,6 +640,60 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     );
 
     draw_ask_bar(frame, composer, said, app, theme);
+    draw_mention(frame, transcript, composer, app, theme);
+}
+
+/// The files an `@` word could name, as a list standing on the divider above
+/// the bar, over the foot of the transcript, lined up with what is typed.
+fn draw_mention(frame: &mut Frame, transcript: Rect, bar: Rect, app: &App, theme: &Theme) {
+    let (files, selected) = app.mention_files();
+    if files.is_empty() {
+        return;
+    }
+    let lead = u16::try_from(lead_width(app)).unwrap_or(u16::MAX);
+    let x = bar.x.saturating_add(lead).min(transcript.right());
+    let room = transcript.right().saturating_sub(x);
+    // A border either side, and a column of padding inside each.
+    let widest = files
+        .iter()
+        .map(|file| text::width(file))
+        .max()
+        .unwrap_or(0);
+    let width = u16::try_from(widest + 4).unwrap_or(u16::MAX).min(room);
+    let rows = files
+        .len()
+        .min(usize::from(transcript.height.saturating_sub(2)));
+    if rows == 0 || width < 5 {
+        return;
+    }
+    let height = u16::try_from(rows + 2).unwrap_or(u16::MAX);
+    let area = Rect::new(x, transcript.bottom().saturating_sub(height), width, height);
+
+    let inside = usize::from(width.saturating_sub(4));
+    let lines: Vec<Line<'static>> = files
+        .iter()
+        .take(rows)
+        .enumerate()
+        .map(|(at, file)| {
+            // The name is the end of the path, so a path too long for the list
+            // keeps that and gives up its leading directories.
+            let shown = format!(" {:<inside$} ", text::truncate_start(file, inside));
+            if at == selected {
+                Line::from(shown).style(Style::new().fg(theme.pane_bg).bg(theme.hot).bold())
+            } else {
+                Line::from(shown).style(Style::new().fg(theme.fg))
+            }
+        })
+        .collect();
+    let block = Block::bordered()
+        .border_type(theme.border)
+        .border_style(Style::new().fg(theme.frame).bg(theme.pane_bg))
+        .style(Style::new().bg(theme.pane_bg))
+        .title_top(Line::from(" @ file ").style(Style::new().fg(theme.title).bold()));
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Gives the placeholder the room the bar leaves once its first hint — the

@@ -33,6 +33,7 @@ mod hunks;
 mod input;
 pub mod journal;
 mod markdown;
+mod mention;
 mod meter;
 pub mod prices;
 pub mod rules;

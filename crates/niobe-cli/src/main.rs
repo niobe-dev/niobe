@@ -853,6 +853,10 @@ IN THE SHELL:
                            Enter step to the match above, Down to the one
                            below, Esc puts the view back where it was, and a
                            second / types a prompt that starts with one
+    @                      At the start of a word, offer the files git lists
+                           under the session's directory: Up / Down choose,
+                           Tab or Enter put the path in the prompt, Esc leaves
+                           the word as typed
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
     F8                     Pick a model from the ones the profile names
     F9                     Cycle the palette the shell draws in

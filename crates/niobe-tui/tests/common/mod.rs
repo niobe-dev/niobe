@@ -455,6 +455,13 @@ fn read_repository() -> Repo {
                 pushed: Some(true),
             },
         ],
+        // The files a read lists for `@` include every one the working tree
+        // changed, which is all a picture of the screen needs of them.
+        files: working_tree()
+            .into_iter()
+            .map(|file| file.path)
+            .filter(|path| !path.contains(" => "))
+            .collect(),
     }
 }
 

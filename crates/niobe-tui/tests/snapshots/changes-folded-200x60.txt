@@ -55,6 +55,6 @@
 ┃                                                                                                                                ┃ │   Read                 3 ━━━━━━━━━━━━                             │
 ┃                                                                                                                                ┃ │   Bash                 1 ━━━━         ✗ 1                         │
 ┃ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃ │   Edit                 1 ━━━━                                     │
-┃  ask  >  Ask for a change · / search transcript                 ▸▸ ask mode · Shift+Tab cycles · Alt+Enter newline · Tab panes ┃ │                                                                   │
+┃  ask  >  Ask for a change · / search transcript · @ file        ▸▸ ask mode · Shift+Tab cycles · Alt+Enter newline · Tab panes ┃ │                                                                   │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────────────────────────────────┘
 1Help               2Plan               3Diff               4Undo               5Usage              6Files              7Tools              8Model              9Theme              10Quit

@@ -2051,12 +2051,11 @@ fn the_placeholder_names_only_what_the_composer_does_today() {
     let row = bar_row(&screen(&mut app, 120, 30));
     assert!(row.contains("Ask for a change"), "{row}");
     assert!(row.contains("/ search transcript"), "{row}");
-    for promise in ["@ file", "! shell"] {
-        assert!(
-            !row.contains(promise),
-            "the bar promises `{promise}`, which the composer does not do:\n{row}"
-        );
-    }
+    assert!(row.contains("@ file"), "{row}");
+    assert!(
+        !row.contains("! shell"),
+        "the bar promises `! shell`, which the composer does not do:\n{row}"
+    );
 
     app.type_into_composer(ratatui_textarea::Input {
         key: ratatui_textarea::Key::Char('x'),
@@ -2559,4 +2558,123 @@ fn a_slash_anywhere_but_the_start_of_a_prompt_is_a_slash() {
         "backspace on an empty search leaves it"
     );
     assert!(app.composed().is_empty());
+}
+
+/// A session in a repository the binary has listed the files of.
+fn session_with_files() -> App {
+    let mut app = empty_session();
+    app.set_repo(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        files: [
+            "README.md",
+            "catalog/fetch.ts",
+            "catalog/etag.ts",
+            "catalog/cache/lru.ts",
+            "tests/fetch.test.ts",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        ..Repo::default()
+    });
+    app
+}
+
+/// The rows of the list of files standing over the transcript, each trimmed
+/// to what is inside its border.
+fn file_list(frame: &str) -> Vec<String> {
+    let rows: Vec<&str> = frame.lines().collect();
+    let Some(top) = rows.iter().position(|row| row.contains(" @ file ")) else {
+        return Vec::new();
+    };
+    rows[top + 1..]
+        .iter()
+        .take_while(|row| !row.contains('└'))
+        .map(|row| {
+            let inside = row.split('│').nth(1).unwrap_or_default();
+            inside.trim().to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn at_the_start_of_a_word_offers_the_files_the_repository_listed_and_enter_names_one() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_files();
+    assert!(
+        bar_row(&screen(&mut app, 120, 30)).contains("@ file"),
+        "a session with files to name says it can name them"
+    );
+
+    type_keys(&mut app, "keep the cache in @fetch");
+    let frame = screen(&mut app, 120, 30);
+    assert_eq!(
+        file_list(&frame),
+        ["catalog/fetch.ts", "tests/fetch.test.ts"],
+        "{frame}"
+    );
+    let theme = app.theme().to_owned();
+    let chosen = style_at(&mut app, 120, 30, " catalog/fetch.ts").expect("the list is drawn");
+    assert_eq!(
+        (chosen.fg, chosen.bg),
+        (Some(theme.pane_bg), Some(theme.hot)),
+        "the file Enter would take is marked as a chip"
+    );
+
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.composed(), "keep the cache in @tests/fetch.test.ts ");
+    assert!(
+        app.take_produced().is_empty(),
+        "the Enter that named a file sent the prompt"
+    );
+    assert!(file_list(&screen(&mut app, 120, 30)).is_empty());
+
+    type_keys(&mut app, "and @lru");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        app.composed(),
+        "keep the cache in @tests/fetch.test.ts and @catalog/cache/lru.ts "
+    );
+}
+
+#[test]
+fn an_at_inside_a_word_is_an_at_and_esc_leaves_the_word_as_typed() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_files();
+    type_keys(&mut app, "mail ops@etag");
+    assert!(
+        file_list(&screen(&mut app, 120, 30)).is_empty(),
+        "an address opened the list of files"
+    );
+
+    let mut app = session_with_files();
+    type_keys(&mut app, "@cat");
+    assert!(!file_list(&screen(&mut app, 120, 30)).is_empty());
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "s");
+    assert!(
+        file_list(&screen(&mut app, 120, 30)).is_empty(),
+        "the list came back for the word it was closed on"
+    );
+    assert_eq!(app.composed(), "@cats");
+
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        !app.take_produced().is_empty(),
+        "with the list closed, Enter sends"
+    );
+}
+
+#[test]
+fn a_session_with_no_files_to_name_does_not_offer_to_name_one() {
+    let mut app = empty_session();
+    let row = bar_row(&screen(&mut app, 120, 30));
+    assert!(!row.contains("@ file"), "{row}");
+
+    type_keys(&mut app, "@");
+    assert!(file_list(&screen(&mut app, 120, 30)).is_empty());
 }

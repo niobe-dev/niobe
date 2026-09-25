@@ -65,6 +65,11 @@ pub struct Repo {
     pub working: Vec<WorkingFile>,
     /// The commits made since the session started, newest first.
     pub commits: Vec<Commit>,
+    /// Every file under the directory the session runs in that the repository
+    /// has or would take — committed, staged, or new and not ignored — by the
+    /// path the agent names it by, relative to that directory. What `@`
+    /// completes a file from.
+    pub files: Vec<String>,
 }
 
 /// One file the working tree has changed, measured from the repository.
@@ -773,6 +778,12 @@ pub struct App {
     hint: Option<String>,
     /// The search through the transcript, while it is open.
     find: Option<Find>,
+    /// The `@` word the operator closed the list of files for, by its line
+    /// and the column of its `@`, so the list stays closed while the cursor
+    /// is still in that word.
+    mention_closed: Option<(usize, usize)>,
+    /// Which of the files offered for the `@` word Enter would take.
+    mention_selected: usize,
     /// Prompts waiting on the operator, oldest first. The transcript shows
     /// the front one; the rest wait behind it, because a backend can gate two
     /// calls of the same turn and answering them out of order would put the
@@ -901,7 +912,7 @@ impl App {
         // A prompt is prose, so it wraps rather than scrolling sideways, and a
         // path or a URL longer than the pane falls back to breaking mid-word.
         composer.set_wrap_mode(WrapMode::WordOrGlyph);
-        composer.set_placeholder_text(placeholder(usize::MAX));
+        composer.set_placeholder_text(placeholder(usize::MAX, false));
         paint_composer(&mut composer, &theme);
 
         Self {
@@ -933,6 +944,8 @@ impl App {
             viewport_lines: 0,
             hint: None,
             find: None,
+            mention_closed: None,
+            mention_selected: 0,
             asks: VecDeque::new(),
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
@@ -2252,10 +2265,83 @@ impl App {
     /// advertises before what the bar says beside it: the mode a session is in
     /// matters more than a reminder of a key.
     pub(crate) fn fit_placeholder(&mut self, columns: usize) {
-        let said = placeholder(columns);
+        let said = placeholder(columns, !self.repo.files.is_empty());
         if self.composer.placeholder_text() != said {
             self.composer.set_placeholder_text(said);
         }
+    }
+
+    /// The `@` word at the end of which the cursor sits, while the list of
+    /// files for it is open: only while the operator is typing into the
+    /// composer, and not for a word the list was closed for.
+    fn mention(&self) -> Option<crate::mention::Mention> {
+        let typing = self.focus() == Focus::Session
+            && self.find.is_none()
+            && self.picking.is_none()
+            && !self
+                .asking()
+                .is_some_and(|_| self.ask_focus != AskFocus::Deferred);
+        if !typing {
+            return None;
+        }
+        let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
+        crate::mention::at_cursor(self.composer.lines(), (row, column))
+            .filter(|mention| self.mention_closed != Some((mention.row, mention.at)))
+    }
+
+    /// The files the list under the `@` word offers, likeliest first, and
+    /// which of them Enter would take. Empty where no list is open.
+    pub fn mention_files(&self) -> (Vec<&str>, usize) {
+        let Some(mention) = self.mention() else {
+            return (Vec::new(), 0);
+        };
+        let files = crate::mention::candidates(&self.repo.files, &mention.typed, MENTION_ROWS);
+        let selected = self.mention_selected.min(files.len().saturating_sub(1));
+        (files, selected)
+    }
+
+    /// One key, while the list of files under an `@` word is open. Returns
+    /// whether the list took it.
+    ///
+    /// The arrows move through the list, Tab and Enter put the file in the
+    /// prompt, and Esc closes the list and leaves the word as typed. Every
+    /// other key is typing, and goes to the composer.
+    fn on_mention_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let (files, selected) = self.mention_files();
+        let count = files.len();
+        let chosen = files.get(selected).map(|file| (*file).to_owned());
+        let Some(chosen) = chosen else {
+            return false;
+        };
+        match (key.code, key.modifiers) {
+            (KeyCode::Up, KeyModifiers::NONE) => {
+                self.mention_selected = (selected + count - 1) % count;
+            }
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                self.mention_selected = (selected + 1) % count;
+            }
+            (KeyCode::Tab | KeyCode::Enter, KeyModifiers::NONE) => self.name_file(&chosen),
+            (KeyCode::Esc, _) => {
+                self.mention_closed = self.mention().map(|mention| (mention.row, mention.at));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Replaces what was typed after the `@` with `file`, and a space after
+    /// it so the next word is not taken for more of the path.
+    fn name_file(&mut self, file: &str) {
+        let Some(mention) = self.mention() else {
+            return;
+        };
+        for _ in mention.typed.chars() {
+            self.composer.delete_char();
+        }
+        self.composer.insert_str(format!("{file} "));
+        self.mention_selected = 0;
     }
 
     /// What is being looked for in the transcript, while a search is open.
@@ -2552,6 +2638,9 @@ impl App {
         if self.on_find_key(key) {
             return;
         }
+        if self.on_mention_key(key) {
+            return;
+        }
         if let Focus::Pane(pane) = self.focus
             && self.on_pane_key(pane, key)
         {
@@ -2599,7 +2688,9 @@ impl App {
             // follows it back: the Enter after it has to send it.
             _ => {
                 self.focus = Focus::Session;
-                self.composer.input(Input::from(key));
+                if self.composer.input(Input::from(key)) {
+                    self.mention_selected = 0;
+                }
             }
         }
     }
@@ -2901,13 +2992,23 @@ pub fn percent(utilization: f64) -> u64 {
 
 /// What an empty composer says it is for, and after it what else it does,
 /// each only once it works.
-const PLACEHOLDER: [&str; 2] = ["Ask for a change", "/ search transcript"];
+const PLACEHOLDER: [&str; 3] = ["Ask for a change", "/ search transcript", "@ file"];
+
+/// How many files the list under an `@` word offers at once.
+const MENTION_ROWS: usize = 8;
 
 /// The placeholder in at most `columns` columns: as many of the things the
 /// composer does as fit whole, and what it is for however narrow it is.
-fn placeholder(columns: usize) -> String {
+///
+/// `@ file` is left out where there are no files to name — a session outside
+/// a repository, or one whose repository has not been read yet — since it
+/// would be advertising a list that cannot open.
+fn placeholder(columns: usize, files: bool) -> String {
     let mut said = PLACEHOLDER[0].to_owned();
-    for more in &PLACEHOLDER[1..] {
+    for more in PLACEHOLDER[1..]
+        .iter()
+        .filter(|more| files || **more != "@ file")
+    {
         let longer = format!("{said} · {more}");
         if crate::text::width(&longer) > columns {
             break;

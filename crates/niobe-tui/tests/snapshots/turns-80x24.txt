@@ -19,6 +19,6 @@
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃ ──────────────────────────────────────────────────────────────────────────── ┃
-┃  ask  >  Ask for a change · / search transcript               Shift+Tab mode ┃
+┃  ask  >  Ask for a change · / search transcript · @ file      Shift+Tab mode ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit
