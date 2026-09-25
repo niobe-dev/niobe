@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use common::{
     metered_session, paint, running_session, screen, session_with_a_markdown_reply,
-    session_with_test_runs, style_at, styles, unmetered_session,
+    session_with_finished_turns, session_with_test_runs, style_at, styles, unmetered_session,
 };
 use niobe_core::TestCounts;
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
@@ -244,6 +244,29 @@ fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
 
 /// A reply's markdown is drawn, not shown: no asterisks, backticks or pipes
 /// reach the screen, and the picture in each theme is the committed one.
+/// Each finished turn is ruled off with what it spent. The first has no
+/// window share, because nothing was reported before it, and says nothing in
+/// its place; at 80 columns the pane is too narrow for every figure, and the
+/// ones that give way go whole.
+#[test]
+fn a_finished_turn_is_ruled_off_with_what_it_spent() {
+    let frame = screen(&mut session_with_finished_turns(), 120, 30);
+    assert!(
+        frame.contains("── turn 1 13:36 · 6400 tok · 22s ──"),
+        "{frame}"
+    );
+    assert!(
+        frame.contains("── turn 2 13:37 · 22k tok · 1% of 5h · 38s ──"),
+        "{frame}"
+    );
+    assert_snapshot("turns-120x30", &frame);
+
+    let frame = screen(&mut session_with_finished_turns(), 80, 24);
+    assert!(frame.contains("── turn 2"), "{frame}");
+    assert!(!frame.contains("0% of 5h"), "{frame}");
+    assert_snapshot("turns-80x24", &frame);
+}
+
 #[test]
 fn a_reply_in_markdown_is_drawn_styled_in_both_themes() {
     let frame = screen(&mut session_with_a_markdown_reply(), 120, 40);

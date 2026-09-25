@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
     AgentId, AgentOutcome, Billing, CheckpointId, Context, Event, Mode, SessionMeta, ToolCallId,
-    ToolOutcome, Usage, UsageWindows,
+    ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -285,6 +285,43 @@ pub struct TestRunRecord {
     pub exit_code: Option<i32>,
 }
 
+/// One finished turn's own figures: what it spent between the prompt that
+/// opened it and the end that closed it.
+///
+/// No time is in here, because the event model carries none: how long a turn
+/// took is read off whatever clock the consumer stamped the two ends with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TurnRecord {
+    /// Which turn this was, counted from one in the order turns ended.
+    pub number: u64,
+    /// Every token the turn spent, cache traffic included, on the definition
+    /// [`Totals::tokens`] uses: the session's total when the turn ended less
+    /// its total when the turn began.
+    pub tokens: u64,
+    /// How far the five-hour window moved across the turn, as a share of the
+    /// window: `0.01` is one percent of it.
+    ///
+    /// The difference between the level last reported before the turn began
+    /// and the level last reported by its end. `None` wherever that is not a
+    /// measurement: nothing was reported before the turn, nothing was
+    /// reported during it — the level at its end would be the one it began
+    /// with, read again — either report left the window out or gave no reset,
+    /// the reset moved so the window started over in between, or the level
+    /// went down. Never a zero standing in for any of those.
+    ///
+    /// The window is the account's, not the session's: anything else the
+    /// account ran during the turn moved it too.
+    pub five_hour_share: Option<f64>,
+}
+
+/// Where a turn began: what the session had spent, and the window as last
+/// reported, at that moment.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct TurnMark {
+    tokens: u64,
+    five_hour: Option<UsageWindow>,
+}
+
 /// Everything derivable from a session's events.
 ///
 /// Built by folding [`SessionState::apply`] over a stream, or in one go with
@@ -310,6 +347,16 @@ pub struct SessionState {
     in_flight_tools: BTreeMap<ToolCallId, String>,
     /// Whether the backend is still answering the last prompt.
     turn_running: bool,
+    /// Every turn that has ended, oldest first.
+    turns: Vec<TurnRecord>,
+    /// Where the running turn began. `None` between turns, and for a turn the
+    /// fold never saw begin.
+    turn_began: Option<TurnMark>,
+    /// Where the last turn ended, which is where a turn that ends without
+    /// having been seen to begin is counted from.
+    turn_last_ended: TurnMark,
+    /// Whether a window has been reported since the last turn began or ended.
+    window_reported: bool,
     user_messages: u64,
     assistant_messages: u64,
     pending_assistant: String,
@@ -372,12 +419,18 @@ impl SessionState {
             // choice did not land.
             Event::ModelSelected { model } => self.model = Some(model.clone()),
 
+            // A prompt sent while a turn runs joins it: the turn began with
+            // the first one.
             Event::UserMessage { .. } => {
                 self.user_messages += 1;
+                if !self.turn_running {
+                    self.turn_began = Some(self.mark());
+                    self.window_reported = false;
+                }
                 self.turn_running = true;
             }
 
-            Event::TurnEnded => self.turn_running = false,
+            Event::TurnEnded => self.end_turn(),
 
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
 
@@ -419,7 +472,10 @@ impl SessionState {
 
             // The last report replaces the one before it: a window is a level,
             // not a quantity, so summing two reports of it would be nonsense.
-            Event::UsageWindows(windows) => self.usage_windows = Some(*windows),
+            Event::UsageWindows(windows) => {
+                self.usage_windows = Some(*windows);
+                self.window_reported = true;
+            }
 
             Event::Billing { billing } => self.billing = Some(*billing),
 
@@ -496,7 +552,12 @@ impl SessionState {
                 self.errors += 1;
                 if *fatal {
                     self.fatal_error = Some(message.clone());
-                    self.turn_running = false;
+                    // The turn it cut short spent what it spent, and is
+                    // recorded with it; with no turn running there is none
+                    // to end.
+                    if self.turn_running {
+                        self.end_turn();
+                    }
                 }
             }
 
@@ -504,6 +565,33 @@ impl SessionState {
             // numbers around it, and the transcript is where it is read.
             Event::Notice { .. } => {}
         }
+    }
+
+    /// Where the session stands now, as a turn beginning or ending here would
+    /// be measured from.
+    fn mark(&self) -> TurnMark {
+        TurnMark {
+            tokens: self.totals.tokens(),
+            five_hour: self.usage_windows.and_then(|windows| windows.five_hour),
+        }
+    }
+
+    /// Ends the running turn, and records what it spent.
+    fn end_turn(&mut self) {
+        let ended = self.mark();
+        let began = self.turn_began.take().unwrap_or(self.turn_last_ended);
+        let five_hour_share = match self.window_reported {
+            true => window_share(began.five_hour, ended.five_hour),
+            false => None,
+        };
+        self.turns.push(TurnRecord {
+            number: self.turns.len() as u64 + 1,
+            tokens: ended.tokens.saturating_sub(began.tokens),
+            five_hour_share,
+        });
+        self.turn_last_ended = ended;
+        self.window_reported = false;
+        self.turn_running = false;
     }
 
     /// Folds one file change in, against the file's running totals.
@@ -626,6 +714,12 @@ impl SessionState {
         self.turn_running
     }
 
+    /// Every turn that has ended, oldest first. A turn still running is not
+    /// in it: its figures are not final until it ends.
+    pub fn turns(&self) -> &[TurnRecord] {
+        &self.turns
+    }
+
     /// How many prompts the operator sent.
     pub fn user_messages(&self) -> u64 {
         self.user_messages
@@ -719,6 +813,19 @@ impl SessionState {
     }
 }
 
+/// How far a window moved between two reports of it, where the two are
+/// reports of the same window: both give the moment it starts over, and it is
+/// the same moment. A level that went down is a window that started over
+/// without saying so, and is no measurement of what was spent.
+fn window_share(before: Option<UsageWindow>, after: Option<UsageWindow>) -> Option<f64> {
+    let (before, after) = (before?, after?);
+    if before.resets_at.is_none() || before.resets_at != after.resets_at {
+        return None;
+    }
+    let moved = after.utilization - before.utilization;
+    (moved.is_finite() && moved >= 0.0).then_some(moved)
+}
+
 /// The first line of a message that has anything on it.
 ///
 /// A model opens a turn with a sentence and then goes on; that sentence is the
@@ -731,7 +838,7 @@ fn first_line(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Backend, Mode, PermissionDecision};
+    use crate::event::{Backend, Mode, PermissionDecision, UsageWindow};
 
     fn usage(input: u64, output: u64, cost: Option<f64>) -> Event {
         on_model("opus-5", input, output, cost)
@@ -1402,5 +1509,199 @@ mod tests {
             },
         ];
         assert_eq!(SessionState::replay(&events), SessionState::replay(&events));
+    }
+
+    fn prompt() -> Event {
+        Event::UserMessage {
+            text: "go on".to_owned(),
+        }
+    }
+
+    /// A usage record with cache traffic in it, so that a turn's tokens are
+    /// seen to count every kind, as the session's total does.
+    fn cached(input: u64, output: u64, cache_read: u64, cache_write: u64) -> Event {
+        Event::Usage(Usage {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: "opus-5".to_owned(),
+            cost_usd: None,
+            cost_basis: None,
+            settles_model: false,
+        })
+    }
+
+    fn five_hour(used: f64, resets_at: Option<u64>) -> Event {
+        Event::UsageWindows(UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: used,
+                resets_at,
+            }),
+            seven_day: None,
+            using_overage: false,
+        })
+    }
+
+    const RESET: Option<u64> = Some(1_789_779_600);
+
+    #[test]
+    fn each_turn_counts_only_the_tokens_it_spent() {
+        // Turn one: 1 200 + 300 + 8 000 + 500 = 10 000 and 20 + 5 = 25, so
+        // 10 025. Turn two: 40 + 7 + 9 000 = 9 047. Summed by hand, not by
+        // the fold: the session's total is 19 072 and neither turn is it.
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(1_200, 300, 8_000, 500),
+            cached(20, 5, 0, 0),
+            Event::TurnEnded,
+            prompt(),
+            cached(40, 7, 9_000, 0),
+            Event::TurnEnded,
+        ]);
+
+        let turns = state.turns();
+        assert_eq!(turns.len(), 2);
+        assert_eq!((turns[0].number, turns[0].tokens), (1, 10_025));
+        assert_eq!((turns[1].number, turns[1].tokens), (2, 9_047));
+        assert_eq!(state.totals().tokens(), 19_072);
+    }
+
+    #[test]
+    fn a_turn_still_running_has_no_record() {
+        let state = SessionState::replay(&[prompt(), cached(100, 10, 0, 0)]);
+        assert!(state.turns().is_empty(), "{:?}", state.turns());
+    }
+
+    #[test]
+    fn a_turn_a_fatal_error_ended_is_recorded_with_its_numbers() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(100, 10, 0, 0),
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+        ]);
+        assert_eq!(state.turns().len(), 1);
+        assert_eq!(state.turns()[0].tokens, 110);
+    }
+
+    #[test]
+    fn a_fatal_error_between_turns_closes_no_turn() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::TurnEnded,
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+        ]);
+        assert_eq!(state.turns().len(), 1, "{:?}", state.turns());
+    }
+
+    /// The window moved from 14 % to 15 % across turn two, and the turn is
+    /// what it moved across. Turn one has no report before it, so it has no
+    /// share rather than a share of everything reported so far.
+    #[test]
+    fn a_turns_window_share_is_what_the_window_moved_across_it() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.15, RESET),
+            Event::TurnEnded,
+        ]);
+        let turns = state.turns();
+        assert_eq!(turns[0].five_hour_share, None);
+        let share = turns[1].five_hour_share.expect("both ends were reported");
+        assert!((share - 0.01).abs() < 1e-9, "{share}");
+    }
+
+    #[test]
+    fn a_turn_the_window_was_not_reported_in_has_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            prompt(),
+            cached(100, 10, 0, 0),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(
+            state.turns()[1].five_hour_share,
+            None,
+            "a level nobody reported during the turn was read as its end"
+        );
+    }
+
+    #[test]
+    fn a_window_that_started_over_during_the_turn_gives_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.02, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.05, Some(1_789_797_600)),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns()[1].five_hour_share, None);
+    }
+
+    #[test]
+    fn a_window_reported_without_its_reset_gives_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.02, None),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.05, None),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(
+            state.turns()[1].five_hour_share,
+            None,
+            "a window with no reset cannot be told from one that started over"
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_report_dropped_the_five_hour_window_has_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            prompt(),
+            Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: Some(UsageWindow {
+                    utilization: 0.4,
+                    resets_at: RESET,
+                }),
+                using_overage: false,
+            }),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns()[1].five_hour_share, None);
+    }
+
+    /// A backend that ends a turn it was never seen to start — a second
+    /// prompt queued behind the first, a record that begins mid-turn — has
+    /// its tokens counted from the end of the turn before, so no token is in
+    /// two turns.
+    #[test]
+    fn an_end_with_no_prompt_before_it_counts_from_the_last_end() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(100, 0, 0, 0),
+            Event::TurnEnded,
+            cached(30, 0, 0, 0),
+            Event::TurnEnded,
+        ]);
+        let tokens: Vec<u64> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [100, 30]);
     }
 }

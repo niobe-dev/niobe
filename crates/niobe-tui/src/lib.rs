@@ -40,6 +40,7 @@ pub mod terminal;
 mod text;
 pub mod theme;
 mod tree;
+mod turns;
 pub mod ui;
 pub mod usage;
 pub mod watch;

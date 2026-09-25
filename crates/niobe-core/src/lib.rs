@@ -21,6 +21,7 @@ pub use event::{
 pub use permission::{Allowlist, Rule, RuleError};
 pub use session::{
     CheckpointRecord, DecisionRecord, FileChanges, SessionState, TestRunRecord, ToolTotals, Totals,
+    TurnRecord,
 };
 pub use test_run::TestCounts;
 

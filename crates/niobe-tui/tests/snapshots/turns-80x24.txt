@@ -1,0 +1,24 @@
+ Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                                                                              ┃
+┃ > you                                                                        ┃
+┃   what does the fetcher do with a 304?                                       ┃
+┃                                                                              ┃
+┃ ◆ claude                                                                     ┃
+┃   It treats it as an error and downloads the manifest again.                 ┃
+┃                                                                              ┃
+┃ ── turn 1 13:36 · 6400 tok · 22s ─────────────────────────────────────────── ┃
+┃                                                                              ┃
+┃ > you                                                                        ┃
+┃   keep the cached copy on a 304 instead                                      ┃
+┃                                                                              ┃
+┃ ◆ claude                                                                     ┃
+┃   Done: a 304 now returns the cached manifest.                               ┃
+┃                                                                              ┃
+┃ ── turn 2 13:37 · 22k tok · 1% of 5h · 38s ───────────────────────────────── ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃ ──────────────────────────────────────────────────────────────────────────── ┃
+┃  ask  >  Ask for a change                 Shift+Tab mode · Alt+Enter newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit

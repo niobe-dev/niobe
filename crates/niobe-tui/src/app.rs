@@ -407,6 +407,29 @@ pub enum EntryKind {
     Failure,
     /// The shell itself, explaining something.
     Notice,
+    /// The rule drawn where a turn ended, with what the turn spent on it.
+    Turn(TurnRule),
+}
+
+/// What the rule under a finished turn says about it.
+///
+/// Every figure is one the session fold or this shell's clock measured, and
+/// each is `None` where neither did; the rule leaves an absent figure out
+/// rather than standing a zero in for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TurnRule {
+    /// Which turn it was, counted from one.
+    pub number: u64,
+    /// When it ended, by the clock the shell stamped its end with.
+    pub ended: Option<LocalTime>,
+    /// Every token it spent, cache traffic included.
+    pub tokens: u64,
+    /// How far the five-hour window moved across it, in whole points of the
+    /// window as the Usage pane rounds them. `Some(0)` is a move under one
+    /// point, which is not the same as no move at all and is drawn as such.
+    pub five_hour_points: Option<u64>,
+    /// How long it ran, from the prompt that opened it to its end.
+    pub took: Option<Duration>,
 }
 
 impl EntryKind {
@@ -418,6 +441,7 @@ impl EntryKind {
             Self::Tool => "⚙",
             Self::Failure => "!",
             Self::Notice => "·",
+            Self::Turn(_) => "─",
         }
     }
 
@@ -428,7 +452,7 @@ impl EntryKind {
             Self::Agent => theme.agent,
             Self::Tool => theme.tool,
             Self::Failure => theme.del,
-            Self::Notice => theme.dim,
+            Self::Notice | Self::Turn(_) => theme.dim,
         }
     }
 }
@@ -796,6 +820,10 @@ pub struct App {
     /// what a fold with no clock behind it — a JSON Lines log — leaves behind:
     /// no time at all, rather than the moment the log was parsed.
     at: Option<Stamp>,
+    /// When the running turn's first prompt was folded in, by the clock it
+    /// was stamped with: what a turn's duration is counted from. `None`
+    /// between turns, and for a turn whose prompt came with no time.
+    turn_began_at: Option<Stamp>,
     /// When the running turn was first seen running by that clock.
     working_since: Option<Instant>,
     /// When the session was first seen not running by that clock. The mirror
@@ -878,6 +906,7 @@ impl App {
             clock: None,
             now: None,
             at: None,
+            turn_began_at: None,
             working_since: None,
             idle_since: None,
             drawn: crate::ui::DrawnEntries::default(),
@@ -888,9 +917,51 @@ impl App {
     /// Folds one event in: the session totals the panes read, and the
     /// transcript entry it produces, if it produces one.
     pub fn apply(&mut self, event: &Event) {
+        let turns = self.session.turns().len();
+        if matches!(event, Event::UserMessage { .. }) && !self.session.turn_running() {
+            self.turn_began_at = self.at;
+        }
         self.session.apply(event);
         let ended = self.just_ended.take();
+        self.fold_into_transcript(event, ended);
+        if self.session.turns().len() > turns {
+            self.rule_turn();
+        }
+    }
 
+    /// Draws the rule under the turn the fold has just ended, below whatever
+    /// the event that ended it put in the transcript.
+    fn rule_turn(&mut self) {
+        let began = self.turn_began_at.take();
+        let Some(turn) = self.session.turns().last() else {
+            return;
+        };
+        let took = match (began, self.at) {
+            (Some(began), Some(ended)) => ended.since(began).filter(|took| *took >= TIMED),
+            _ => None,
+        };
+        let rule = TurnRule {
+            number: turn.number,
+            ended: self.at.and_then(Stamp::local),
+            tokens: turn.tokens,
+            five_hour_points: turn.five_hour_share.map(percent),
+            took,
+        };
+        self.push(Entry {
+            kind: EntryKind::Turn(rule),
+            head: String::new(),
+            meta: String::new(),
+            body: String::new(),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+        });
+    }
+
+    /// Puts what `event` says in the transcript, where it says anything there.
+    /// `ended` is the call that ended with the event before it, which a file
+    /// change is drawn under.
+    fn fold_into_transcript(&mut self, event: &Event, ended: Option<(usize, usize, Option<Gate>)>) {
         match event {
             Event::UserMessage { text } => self.push(Entry {
                 kind: EntryKind::User,
@@ -4128,6 +4199,116 @@ mod tests {
         )
     }
 
+    fn tokens(input: u64) -> Event {
+        Event::Usage(niobe_core::Usage {
+            input,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: "opus-5".to_owned(),
+            cost_usd: None,
+            cost_basis: None,
+            settles_model: false,
+        })
+    }
+
+    fn rules(app: &App) -> Vec<(usize, TurnRule)> {
+        app.entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(at, entry)| {
+                let EntryKind::Turn(rule) = entry.kind else {
+                    return None;
+                };
+                Some((at, rule))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_turn_is_ruled_off_where_it_ended_with_what_it_spent_and_took() {
+        let mut app = app();
+        app.apply_at(
+            &Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            at(50_662, 14, 4),
+        );
+        app.apply_at(&tokens(4_100), at(50_680, 14, 4));
+        assert!(rules(&app).is_empty(), "a running turn was ruled off");
+
+        app.apply_at(&Event::TurnEnded, at(50_700, 14, 5));
+        let [(place, rule)] = rules(&app)[..] else {
+            panic!("one turn ended: {:?}", app.entries());
+        };
+        assert_eq!(
+            place + 1,
+            app.entries().len(),
+            "the rule is not under the turn"
+        );
+        assert_eq!(
+            rule,
+            TurnRule {
+                number: 1,
+                ended: LocalTime::new(14, 5),
+                tokens: 4_100,
+                five_hour_points: None,
+                took: Some(Duration::from_secs(38)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_turn_an_error_ended_is_ruled_off_under_the_error_with_its_numbers() {
+        let mut app = app();
+        app.apply_at(
+            &Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            at(50_000, 13, 53),
+        );
+        app.apply_at(&tokens(900), at(50_010, 13, 53));
+        app.apply_at(
+            &Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+            at(50_012, 13, 53),
+        );
+
+        let [(place, rule)] = rules(&app)[..] else {
+            panic!("the failed turn was not ruled off: {:?}", app.entries());
+        };
+        assert_eq!(
+            app.entries().get(place - 1).map(|entry| entry.kind),
+            Some(EntryKind::Failure)
+        );
+        assert_eq!(
+            (rule.tokens, rule.took),
+            (900, Some(Duration::from_secs(12)))
+        );
+    }
+
+    /// A log that kept no times has turns that ended at no time and took no
+    /// time anyone measured; what they spent is still in the log.
+    #[test]
+    fn a_turn_from_a_log_with_no_times_says_what_it_spent_and_nothing_else() {
+        let mut app = app();
+        app.extend(&[
+            Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            tokens(300),
+            Event::TurnEnded,
+        ]);
+        let [(_, rule)] = rules(&app)[..] else {
+            panic!("the turn was not ruled off");
+        };
+        assert_eq!((rule.ended, rule.took, rule.tokens), (None, None, 300));
+    }
+
     #[test]
     fn an_event_is_stamped_with_the_clock_the_tick_that_took_it_read() {
         let mut app = app();
@@ -4606,6 +4787,8 @@ mod tests {
                 ("Read".to_owned(), 1),
                 ("agent".to_owned(), 0),
                 ("Read".to_owned(), 1),
+                // The rule the turn's end is drawn as, which has no head.
+                (String::new(), 0),
                 ("Read".to_owned(), 1),
             ]
         );

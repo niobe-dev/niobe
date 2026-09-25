@@ -1304,6 +1304,9 @@ fn entry_lines(entry: &Entry, width: usize, folded: bool, theme: &Theme) -> Vec<
     if !entry.calls.is_empty() {
         return crate::calls::lines(entry, width, folded, theme);
     }
+    if let EntryKind::Turn(rule) = &entry.kind {
+        return crate::turns::lines(rule, width, theme);
+    }
     let colour = entry.kind.colour(theme);
     let body_width = width.saturating_sub(GUTTER);
 
@@ -1346,6 +1349,8 @@ fn entry_lines(entry: &Entry, width: usize, folded: bool, theme: &Theme) -> Vec<
 fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     match entry.kind {
         EntryKind::Agent => crate::markdown::render(entry.body.trim_end(), width, theme),
+        // The rule carries its figures on its one line and has no body.
+        EntryKind::Turn(_) => Vec::new(),
         EntryKind::User | EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
             text::wrap(entry.body.trim_end(), width)
                 .into_iter()
@@ -3013,7 +3018,7 @@ fn estimate_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Option<f6
 
 /// Token counts, short enough for a column of them: thousands above ten
 /// thousand, millions above a million.
-fn compact(n: u64) -> String {
+pub(crate) fn compact(n: u64) -> String {
     match n {
         0..=9_999 => n.to_string(),
         10_000..=999_999 => format!("{:.0}k", n as f64 / 1_000.0),

@@ -39,7 +39,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 
 - **`crates/niobe-core/`** — the shared vocabulary. `event.rs` is the event model, the one type
   every backend produces into; `session.rs` is `SessionState`, the fold every consumer derives its
-  numbers from; `permission.rs` is the standing answer to a permission prompt (`Rule`,
+  numbers from, for each turn that has ended as well as for the whole session; `permission.rs` is the standing answer to a permission prompt (`Rule`,
   `Allowlist`), which the shell matches and the config stores; `diff.rs` is the line arithmetic
   every backend counts a file change with, so two bridges cannot disagree about what a changed
   line is, and the `Hunk` a change's lines travel in where the backend reported them; `test_run.rs` recognises a shell
@@ -78,7 +78,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   `calls.rs` draws a tool call as a row of a table — its name in a fixed column, what it does,
   and on the right what it cost, by what the backend reported and the shell's own clock — and a
-  run of calls to one tool as one group that Ctrl+O folds,
+  run of calls to one tool as one group that Ctrl+O folds, `turns.rs` draws the rule under a
+  finished turn with what that turn spent — its tokens, how far it moved the five-hour window and
+  how long it took — giving up whole figures where the pane is narrow,
   and `fx.rs` is what the desktop between the panes does while a turn is running: a pure
   function of the theme, the strip's height and how long the turn has run, so a frame of it can
   be asserted rather than merely observed to move. Snapshot pictures of the screen live in

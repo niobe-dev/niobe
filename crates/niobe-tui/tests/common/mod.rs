@@ -638,6 +638,94 @@ pub fn session_with_a_markdown_reply() -> App {
     app
 }
 
+/// Two turns that have both ended, on a plan whose five-hour window each of
+/// them reported: the first spent 1 200 + 300 + 4 900 = 6 400 tokens in 22
+/// seconds, the second 2 100 + 180 + 18 400 + 900 = 21 580 in 38, and moved
+/// the window from 14 % to 15 %. The first has no share: nothing was reported
+/// before it.
+pub fn session_with_finished_turns() -> App {
+    let clock = Clock::fixed(0).expect("UTC is an offset");
+    let mut app = App::new(read_repository()).with_clock(clock.clone());
+    let moment = |seconds| clock.at(UNIX_EPOCH + Duration::from_secs(seconds));
+    let began = READ_AT - 5 * 60;
+    let window = |used| {
+        Event::UsageWindows(UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: used,
+                resets_at: Some(READ_AT + 2 * 3_600 + 59 * 60),
+            }),
+            seven_day: None,
+            using_overage: false,
+        })
+    };
+    let spent = |input, output, cache_read, cache_write| {
+        Event::Usage(Usage {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: "opus-5".to_owned(),
+            cost_usd: None,
+            cost_basis: None,
+            settles_model: false,
+        })
+    };
+    let turns = [
+        (
+            0,
+            Event::SessionMeta(SessionMeta {
+                backend: Backend::Claude,
+                profile: "default".to_owned(),
+                model: "opus-5".to_owned(),
+                backend_session: None,
+            }),
+        ),
+        (
+            0,
+            Event::Billing {
+                billing: Billing::Plan,
+            },
+        ),
+        (
+            0,
+            Event::UserMessage {
+                text: "what does the fetcher do with a 304?".to_owned(),
+            },
+        ),
+        (
+            20,
+            Event::AssistantMessage {
+                text: "It treats it as an error and downloads the manifest again.".to_owned(),
+            },
+        ),
+        (20, spent(1_200, 300, 4_900, 0)),
+        (20, window(0.14)),
+        (22, Event::TurnEnded),
+        (
+            60,
+            Event::UserMessage {
+                text: "keep the cached copy on a 304 instead".to_owned(),
+            },
+        ),
+        (
+            96,
+            Event::AssistantMessage {
+                text: "Done: a 304 now returns the cached manifest.".to_owned(),
+            },
+        ),
+        (96, spent(2_100, 180, 18_400, 900)),
+        (96, window(0.15)),
+        (98, Event::TurnEnded),
+    ];
+    for (after, event) in &turns {
+        app.apply_at(event, moment(began + after));
+    }
+    app.tick(Instant::now(), Some(moment(READ_AT)));
+    app
+}
+
 /// Draws one frame and returns the screen as text, one line per row.
 pub fn screen(app: &mut App, width: u16, height: u16) -> String {
     render(drawn(app, width, height).backend().buffer())
