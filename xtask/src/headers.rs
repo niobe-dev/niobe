@@ -39,11 +39,17 @@ pub fn rule_for(path: &str) -> Option<Rule> {
     let name = path.rsplit('/').next().unwrap_or(path);
 
     // A snapshot is a picture compared cell for cell, and a recorded output
-    // under `fixtures/` is read against the byte count recorded beside it.
+    // under `fixtures/` is read against the byte count recorded beside it. A
+    // JSON file under `fixtures/` is one a CLI wrote, and JSON has no comments.
     let is_recorded_text = (path.contains("/tests/snapshots/")
         || path.contains("/tests/fixtures/"))
         && name.ends_with(".txt");
-    if EXEMPT_NAMES.contains(&name) || is_recorded_text || name.ends_with(".jsonl") {
+    let is_recorded_json = path.contains("/tests/fixtures/") && name.ends_with(".json");
+    if EXEMPT_NAMES.contains(&name)
+        || is_recorded_text
+        || is_recorded_json
+        || name.ends_with(".jsonl")
+    {
         return Some(Rule::Exempt);
     }
     if name == ".gitignore" {
@@ -128,7 +134,14 @@ mod tests {
             rule_for("crates/niobe-bridge-claude/tests/fixtures/tool-results/run.txt"),
             Some(Rule::Exempt)
         );
+        assert_eq!(
+            rule_for(
+                "crates/niobe-bridge-claude/tests/fixtures/transcripts/s/subagents/agent-a.meta.json"
+            ),
+            Some(Rule::Exempt)
+        );
         assert_eq!(rule_for("crates/niobe-tui/src/notes.txt"), None);
+        assert_eq!(rule_for("crates/niobe-tui/src/palette.json"), None);
     }
 
     #[test]

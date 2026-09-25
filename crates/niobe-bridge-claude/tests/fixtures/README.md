@@ -474,8 +474,10 @@ jq -c 'select(.type=="system" and (.subtype=="task_progress" or .subtype=="task_
 
 A directory of session transcripts in the shape the CLI writes them: one
 directory per working directory it has run in, one JSON Lines file per session,
-named by the id the CLI's own `--resume` takes. It holds one session,
-`2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42`, recorded in `/repo`.
+named by the id the CLI's own `--resume` takes. It holds two sessions recorded
+in `/repo`: `2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42`, which is described first,
+and `7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73`, which ran sub-agents and is
+described under [its own heading](#a-session-that-ran-sub-agents).
 
 The **shapes** are those of twenty-five transcripts recorded by Claude Code
 2.1.277 on 18 September 2026 — every key here appeared in them, and no key of
@@ -558,4 +560,62 @@ jq -R -s 'split("\n") | map(fromjson? // empty)
              cache_write: (map(.cache_creation_input_tokens)|add),
              cache_write_1h: (map(.cache_creation.ephemeral_1h_input_tokens)|add)}' \
   transcripts/2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42.jsonl
+```
+
+### A session that ran sub-agents
+
+`7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73.jsonl` and the directory named after it.
+The **shapes** are those of a session driven over the stream by Claude Code
+2.1.278 on 19 September 2026 — the twin, in the CLI's own store, of the
+session `sub-agents.jsonl` was recorded from — and its three agents' files; the
+**content** is written by hand, and the records carry only the keys the real
+ones did.
+
+It exists because the session's own file says almost nothing about a
+sub-agent:
+
+- **The spawn is all it has.** The `Agent` call, and a result saying the agent
+  was launched in the background. None of its messages are in the session's
+  file.
+- **The agent's messages are in a file of its own**,
+  `<session>/subagents/agent-<id>.jsonl`, beside `agent-<id>.meta.json`, whose
+  `toolUseId` names the call that spawned it. Every one of the 455 agents'
+  files on the machine this was recorded on, from 2.1.246 to 2.1.280, had one.
+  The model the agent ran on is `message.model` on its messages, as on the
+  live stream: the summariser ran on `claude-haiku-4-5-20251001` and both
+  reviewers on `claude-opus-5`.
+- **How the agent ended is the CLI's notice, in one of two places.** The fetch
+  reviewer ended between turns, and its `<task-notification>` is a `user` turn
+  whose `origin.kind` says so. The summariser ended while a turn was running,
+  and the CLI folded its notice into that turn as an `attachment` of type
+  `queued_command`, with `commandMode` `task-notification` — the
+  `queue-operation` records around it are the CLI's queue, and are passed
+  over. It is not the rare case: 1,841 such attachments, from 2.1.241 to
+  2.1.281, stood in the transcripts on the machine this was recorded on.
+- **The notice's `<summary>` is the CLI's, not the agent's.** It reads `Agent
+  "Summarize catalog/cache.py" finished` for every agent. What the Activity
+  pane shows under a finished agent is the first line of the agent's own last
+  message: `The cache is a bounded least-recently-used map over an
+  OrderedDict.` and `fetch() stores a 304 response's empty body over the cached
+  page.`
+- **An agent the file never says ended is still running.** The cache
+  reviewer's own file stops on a `Grep` call, after a line saying what it was
+  about to do; it shows its model and no answer, because words said before a
+  call are what an agent meant to do, not what it found.
+- **No token figure is read back.** The notice carries
+  `<usage><subagent_tokens>`, which is not the size the live stream reports:
+  on the recording this session is modelled on, the summariser's notice said
+  6609 where its last message came to 8 + 5701 + 520 + 262 = 6491 tokens. A
+  figure that cannot be checked against what it claims to be is left out, so a
+  read-back agent's row has none.
+
+To re-derive what each agent's file says — its call, its last model, and
+whether its last message called a tool:
+
+```sh
+for meta in transcripts/7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73/subagents/*.meta.json; do
+  jq -r .toolUseId "$meta"
+  jq -c 'select(.type=="assistant") | [.message.model, [.message.content[].type]]' \
+    "${meta%.meta.json}.jsonl" | tail -1
+done
 ```

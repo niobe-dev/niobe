@@ -42,6 +42,11 @@
 //!   read. The one piece of furniture that is read is the CLI's title for the
 //!   session, which becomes [`Event::Titled`]; a transcript the CLI never
 //!   titled is titled by the first prompt the operator typed.
+//! * **A sub-agent's messages are not in it.** The CLI writes each agent's
+//!   conversation to a transcript of its own, in a directory named after the
+//!   session, and the session's file says only that the agent was launched
+//!   and, later, that it stopped. The model an agent ran on and the answer it
+//!   gave are read from its own file; see [`recorded_agents`].
 //!
 //! [`Event::Titled`]: niobe_core::event::Event::Titled
 //!
@@ -60,7 +65,7 @@ use niobe_core::event::Event;
 
 use crate::conformance;
 use crate::spilled;
-use crate::translate::{self, Translator};
+use crate::translate::{self, RecordedAgent, Translator};
 use crate::wire;
 
 /// The directory under the CLI's own configuration directory that holds one
@@ -94,6 +99,24 @@ const TASK_NOTIFICATION: &str = "task-notification";
 /// request failed, and the like. Read off the transcripts above, where it
 /// stands against exactly the messages no model produced.
 const NO_MODEL: &str = "<synthetic>";
+
+/// The directory beside a session's transcript, named after the session, that
+/// holds its sub-agents' own transcripts.
+const SUB_AGENTS: &str = "subagents";
+
+/// What the CLI ends the name of a sub-agent's description file with. The
+/// transcript beside it has the same name with [`EXTENSION`] in its place.
+const META: &str = ".meta.json";
+
+/// The `commandMode` of the attachment the CLI writes when background work
+/// stops while a turn is running, and the notification is folded into that
+/// turn rather than starting one of its own.
+///
+/// Read off the transcripts on the machine this was written on, 25 September
+/// 2026: 1,841 such attachments from 2.1.241 to 2.1.281, 1,609 of them naming a
+/// call in `<tool-use-id>`. Without it, an agent that finished while its
+/// session was working would read back as running for ever.
+const QUEUED_NOTIFICATION: &str = "task-notification";
 
 /// The variable the CLI takes its configuration directory from.
 pub const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
@@ -267,7 +290,7 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         .iter()
         .any(|(_, record)| matches!(record, Ok(Line::CostState(_))));
 
-    let mut fold = Fold::new(profile, cwd, id, priced);
+    let mut fold = Fold::new(profile, cwd, id, priced, recorded_agents(path));
     // A session the CLI never titled is captioned by what the operator first
     // asked. Said here rather than left to the first message, because the
     // first message in a transcript may be one the CLI wrote itself.
@@ -294,6 +317,80 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         fold.record(line, record);
     }
     Ok(fold.out)
+}
+
+/// What each sub-agent's own transcript says about it, by the id of the call
+/// that spawned it, for the session whose transcript is at `path`.
+///
+/// The CLI keeps each agent in `<session>/subagents/agent-<id>.jsonl`, beside
+/// a `.meta.json` that names the call that spawned it in `toolUseId`. Read off
+/// the machine this was written on, 25 September 2026: 455 agents' files from
+/// 2.1.246 to 2.1.280, every one of them with a description naming its call.
+///
+/// An agent whose files are missing or cannot be read is left out, and shows
+/// what the session's own file says about it and no more: the session's
+/// history does not depend on them.
+fn recorded_agents(path: &Path) -> BTreeMap<String, RecordedAgent> {
+    #[derive(Deserialize)]
+    struct Meta {
+        #[serde(rename = "toolUseId")]
+        tool_use_id: Option<String>,
+    }
+
+    let dir = path.with_extension("").join(SUB_AGENTS);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return BTreeMap::new();
+    };
+    let mut recorded = BTreeMap::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(META)) else {
+            continue;
+        };
+        let Some(call) = std::fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|text| serde_json::from_str::<Meta>(&text).ok())
+            .and_then(|meta| meta.tool_use_id)
+        else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{stem}.{EXTENSION}"))) else {
+            continue;
+        };
+        recorded.insert(call, recorded_agent(&text));
+    }
+    recorded
+}
+
+/// What one sub-agent's transcript says about it: the model its latest
+/// message names, and the text of its last message where no call followed it.
+///
+/// An agent's last message is its answer only once it has stopped; while it
+/// works, its text is what it says before its next call, and the call is
+/// what follows. So a call clears the answer, and a transcript cut off
+/// mid-step has none.
+fn recorded_agent(text: &str) -> RecordedAgent {
+    let mut agent = RecordedAgent::default();
+    for line in text.lines() {
+        let Ok(Line::Assistant(Assistant { message })) = serde_json::from_str::<Line>(line) else {
+            continue;
+        };
+        if let Some(model) = message.model.filter(|model| model != NO_MODEL) {
+            agent.model = Some(model);
+        }
+        let Some(wire::Content::Blocks(blocks)) = message.content else {
+            continue;
+        };
+        if blocks
+            .iter()
+            .any(|block| matches!(block, wire::Block::ToolUse { .. }))
+        {
+            agent.answer = None;
+        } else if let Some(said) = said(&wire::Content::Blocks(blocks)) {
+            agent.answer = Some(said);
+        }
+    }
+    agent
 }
 
 /// The CLI release a transcript was written by, off the first record that says.
@@ -360,12 +457,19 @@ struct Fold {
 }
 
 impl Fold {
-    fn new(profile: &str, cwd: &Path, id: String, priced: bool) -> Self {
+    fn new(
+        profile: &str,
+        cwd: &Path,
+        id: String,
+        priced: bool,
+        agents: BTreeMap<String, RecordedAgent>,
+    ) -> Self {
         Self {
             translator: Translator::new(profile)
                 .in_dir(cwd)
                 .of_session(id)
-                .reading_spilled_with(spilled::read),
+                .reading_spilled_with(spilled::read)
+                .knowing_agents(agents),
             out: Vec::new(),
             priced,
             counted: BTreeMap::new(),
@@ -381,6 +485,7 @@ impl Fold {
             Ok(Line::CostState(record)) => self.cost(record),
             Ok(Line::PermissionMode(record)) => self.mode(record),
             Ok(Line::AiTitle(record)) => self.title(record),
+            Ok(Line::Attachment(record)) => self.attachment(record),
             Ok(Line::Aside) => {}
             Ok(Line::Unknown) => self.out.push(translate::unread(format!(
                 "the transcript holds a record of type `{}`, which this version of Niobe does \
@@ -473,11 +578,8 @@ impl Fold {
             .and_then(|origin| origin.get("kind"))
             .and_then(serde_json::Value::as_str);
         if kind == Some(TASK_NOTIFICATION) {
-            if let Some(text) = record.message.content.as_ref().and_then(said)
-                && let Some(id) = tag(&text, "tool-use-id")
-            {
-                let mut ended = self.translator.task_stopped(id, tag(&text, "status"));
-                self.out.append(&mut ended);
+            if let Some(text) = record.message.content.as_ref().and_then(said) {
+                self.notified(&text);
             }
             return;
         }
@@ -494,6 +596,34 @@ impl Fold {
             parent_tool_use_id: None,
             tool_use_result: record.tool_use_result,
         }));
+    }
+
+    /// What the CLI attached to a running turn. The one attachment read is a
+    /// notification that background work stopped while the turn ran; the
+    /// rest is context the CLI gave the model, and says nothing about what
+    /// the session did.
+    fn attachment(&mut self, record: Attachment) {
+        let Some(attached) = record.attachment else {
+            return;
+        };
+        let field = |key: &str| attached.get(key).and_then(serde_json::Value::as_str);
+        if field("type") == Some("queued_command")
+            && field("commandMode") == Some(QUEUED_NOTIFICATION)
+            && let Some(text) = field("prompt")
+        {
+            let text = text.to_owned();
+            self.notified(&text);
+        }
+    }
+
+    /// The CLI's word, in its own markup, that background work stopped. What
+    /// it says about a sub-agent is how it ended; its `<summary>` is the
+    /// CLI's wording and not the agent's, and is not read.
+    fn notified(&mut self, text: &str) {
+        if let Some(id) = tag(text, "tool-use-id") {
+            let mut ended = self.translator.task_stopped(id, tag(text, "status"));
+            self.out.append(&mut ended);
+        }
     }
 
     fn cost(&mut self, record: CostState) {
@@ -617,10 +747,13 @@ enum Line {
     /// The CLI's own title for the session.
     #[serde(rename = "ai-title")]
     AiTitle(AiTitle),
+    /// Something the CLI attached to a turn: mostly context it gave the
+    /// model, and once in a while the notice that a sub-agent stopped.
+    #[serde(rename = "attachment")]
+    Attachment(Attachment),
     /// Records that say nothing about what the session did, changed or cost:
     /// the name the CLI gives a sub-agent's session (`agent-name`), the prompt it offers to repeat
-    /// (`last-prompt`), the context it attached to a turn (`attachment`), the
-    /// file snapshots a rewind would restore (`file-history-snapshot`,
+    /// (`last-prompt`), the file snapshots a rewind would restore (`file-history-snapshot`,
     /// `file-history-delta`), its queue (`queue-operation`), its editing mode
     /// (`mode`, which is not the permission mode), its own notes to the screen
     /// (`system`), its latched status line (`atis-latch`), the pull request it
@@ -629,16 +762,15 @@ enum Line {
     ///
     /// Read off every record type present across the transcripts on the
     /// machine this was written on — sixteen in all — rather than off the
-    /// types one session happened to produce. Five of them are read
-    /// (`assistant`, `user`, `cost-state`, `permission-mode`, `ai-title`) and
-    /// the other eleven are here. A type left out is a warning entry per record in front
+    /// types one session happened to produce. Six of them are read
+    /// (`assistant`, `user`, `cost-state`, `permission-mode`, `ai-title`,
+    /// `attachment`) and the other ten are here. A type left out is a warning entry per record in front
     /// of the operator, for a record that says nothing: `bridge-session` alone
     /// stood in fifteen thousand of them.
     #[serde(
         rename = "system",
         alias = "agent-name",
         alias = "atis-latch",
-        alias = "attachment",
         alias = "bridge-session",
         alias = "file-history-delta",
         alias = "file-history-snapshot",
@@ -692,6 +824,16 @@ struct User {
 #[derive(Debug, Deserialize)]
 struct UserBody {
     content: Option<wire::Content>,
+}
+
+/// Something the CLI attached to a turn.
+#[derive(Debug, Deserialize)]
+struct Attachment {
+    /// What was attached, which takes a different shape for every kind of
+    /// attachment; read as a value, so that a kind this cannot type is passed
+    /// over rather than reported as a record that could not be read.
+    #[serde(default)]
+    attachment: Option<serde_json::Value>,
 }
 
 /// What the session has cost, per model and in total.
@@ -867,14 +1009,213 @@ mod tests {
 
     /// Folds `lines` as the transcript of a session in `/repo`.
     fn folded(lines: &[&str]) -> Vec<Event> {
+        folded_knowing(lines, BTreeMap::new())
+    }
+
+    /// Folds `lines` as the transcript of a session in `/repo` whose
+    /// sub-agents' own transcripts say `agents`.
+    fn folded_knowing(lines: &[&str], agents: BTreeMap<String, RecordedAgent>) -> Vec<Event> {
         let priced = lines
             .iter()
             .any(|line| line.contains(r#""type":"cost-state""#));
-        let mut fold = Fold::new("max", Path::new("/repo"), "s-1".to_owned(), priced);
+        let mut fold = Fold::new("max", Path::new("/repo"), "s-1".to_owned(), priced, agents);
         for line in lines {
             fold.record(line, serde_json::from_str::<Line>(line));
         }
         fold.out
+    }
+
+    /// A call to the sub-agent tool, as the transcript writes it.
+    const AGENT_CALL: &str = r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"quick-lookup","description":"Summarize catalog/cache.py","prompt":"Summarize it."}}]}}"#;
+
+    /// What a sub-agent's own transcript said: it ran on Haiku and answered.
+    fn answered() -> BTreeMap<String, RecordedAgent> {
+        BTreeMap::from([(
+            "toolu_a".to_owned(),
+            RecordedAgent {
+                model: Some("claude-haiku-4-5".to_owned()),
+                answer: Some("## The cache is an LRU map.\nIt evicts the oldest entry.".to_owned()),
+            },
+        )])
+    }
+
+    /// The model, context size and latest line of each report on `toolu_a`,
+    /// and whether it ended, in order.
+    fn agent_story(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentSpawn { .. } => Some("spawn".to_owned()),
+                Event::AgentProgress {
+                    model,
+                    context_tokens,
+                    latest,
+                    ..
+                } => Some(format!("{model:?} {context_tokens:?} {latest:?}")),
+                Event::AgentExit { outcome, .. } => Some(format!("exit {outcome:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_sub_agent_that_ran_in_the_foreground_reports_its_recorded_answer_before_its_end() {
+        let events = folded_knowing(
+            &[
+                AGENT_CALL,
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"The cache is an LRU map."}]}}"#,
+            ],
+            answered(),
+        );
+
+        assert_eq!(
+            agent_story(&events),
+            [
+                "spawn",
+                r#"Some("claude-haiku-4-5") None None"#,
+                r#"None None Some("The cache is an LRU map.")"#,
+                "exit Completed",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_that_failed_shows_no_answer() {
+        let events = folded_knowing(
+            &[
+                AGENT_CALL,
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Agent crashed","is_error":true}]}}"#,
+            ],
+            answered(),
+        );
+
+        assert_eq!(
+            agent_story(&events),
+            [
+                "spawn",
+                r#"Some("claude-haiku-4-5") None None"#,
+                "exit Failed",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_with_no_transcript_of_its_own_reports_nothing_more() {
+        let events = folded(&[
+            AGENT_CALL,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"done"}]}}"#,
+        ]);
+
+        assert_eq!(agent_story(&events), ["spawn", "exit Completed"]);
+    }
+
+    /// A notification the CLI folded into a running turn as an attachment,
+    /// and the context it attaches to every turn, which is passed over.
+    #[test]
+    fn a_notification_attached_to_a_running_turn_ends_its_agent() {
+        let events = folded(&[
+            AGENT_CALL,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Async agent launched successfully."}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a1"}}"#,
+            r#"{"type":"attachment","attachment":{"type":"date","date":"2026-09-19"}}"#,
+            r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"<tool-use-id>toolu_a</tool-use-id><status>completed</status>"}}"#,
+        ]);
+        assert_eq!(
+            agent_story(&events),
+            ["spawn"],
+            "only a notification ends it"
+        );
+
+        let events = folded(&[
+            AGENT_CALL,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Async agent launched successfully."}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a1"}}"#,
+            r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<tool-use-id>toolu_a</tool-use-id>\n<status>completed</status>\n<summary>Agent \"Summarize catalog/cache.py\" finished</summary>\n</task-notification>"}}"#,
+        ]);
+        assert_eq!(agent_story(&events), ["spawn", "exit Completed"]);
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, Event::Error { .. } | Event::Notice { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn an_agents_answer_is_its_last_message_where_no_call_followed_it() {
+        let line = |content: &str, model: &str| {
+            format!(
+                r#"{{"type":"assistant","isSidechain":true,"message":{{"model":"{model}","content":{content}}}}}"#
+            )
+        };
+        let thinking = r#"[{"type":"thinking","thinking":"…","signature":"s"}]"#;
+        let call = r#"[{"type":"tool_use","id":"t","name":"Read","input":{}}]"#;
+        let text = |said: &str| format!(r#"[{{"type":"text","text":"{said}"}}]"#);
+
+        let finished = [
+            line(&text("Let me read it."), "claude-opus-5"),
+            line(call, "claude-opus-5"),
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"x"}]}}"#.to_owned(),
+            line(thinking, "claude-opus-5"),
+            line(&text("It is an LRU map."), "claude-opus-5"),
+            line(&text("An error the CLI wrote."), NO_MODEL),
+        ]
+        .join("\n");
+        assert_eq!(
+            recorded_agent(&finished),
+            RecordedAgent {
+                model: Some("claude-opus-5".to_owned()),
+                answer: Some("An error the CLI wrote.".to_owned()),
+            },
+            "a message no model wrote names no model, and is still the last thing said"
+        );
+
+        let cut_off = [
+            line(&text("Let me read it."), "claude-opus-5"),
+            line(call, "claude-opus-5"),
+        ]
+        .join("\n");
+        assert_eq!(recorded_agent(&cut_off).answer, None);
+    }
+
+    #[test]
+    fn each_agents_transcript_is_found_by_the_call_its_description_names() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let session = dir.path().join("s.jsonl");
+        let agents = dir.path().join("s").join(SUB_AGENTS);
+        std::fs::create_dir_all(&agents).expect("the sub-agents' directory is made");
+        let answer = r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Done."}]}}"#;
+        for (name, meta) in [
+            (
+                "agent-a1",
+                r#"{"agentType":"quick-lookup","toolUseId":"toolu_a"}"#,
+            ),
+            // A description that names no call has no agent to go with.
+            ("agent-a2", r#"{"agentType":"quick-lookup"}"#),
+        ] {
+            std::fs::write(agents.join(format!("{name}{META}")), meta).expect("written");
+            std::fs::write(agents.join(format!("{name}.{EXTENSION}")), answer).expect("written");
+        }
+        // A description whose transcript is gone.
+        std::fs::write(
+            agents.join(format!("agent-a3{META}")),
+            r#"{"toolUseId":"toolu_c"}"#,
+        )
+        .expect("written");
+
+        assert_eq!(
+            recorded_agents(&session),
+            BTreeMap::from([(
+                "toolu_a".to_owned(),
+                RecordedAgent {
+                    model: Some("claude-haiku-4-5".to_owned()),
+                    answer: Some("Done.".to_owned()),
+                }
+            )])
+        );
+        assert_eq!(
+            recorded_agents(&dir.path().join("none.jsonl")),
+            BTreeMap::new(),
+            "a session with no sub-agents"
+        );
     }
 
     #[test]

@@ -15,12 +15,16 @@
 use std::path::{Path, PathBuf};
 
 use niobe_bridge_claude::transcript;
-use niobe_core::event::{Backend, CostBasis, Event, Mode, SessionMeta, ToolOutcome};
+use niobe_core::event::{AgentOutcome, Backend, CostBasis, Event, Mode, SessionMeta, ToolOutcome};
 use niobe_core::session::SessionState;
 use niobe_core::test_run::TestCounts;
 
 /// The session in the fixture, as the CLI names it.
 const SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
+
+/// The session in the fixture that spawned three sub-agents, whose own
+/// transcripts are kept beside it.
+const WITH_AGENTS: &str = "7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73";
 
 /// A directory of transcripts in the shape the CLI writes one.
 fn transcripts() -> PathBuf {
@@ -29,12 +33,55 @@ fn transcripts() -> PathBuf {
 
 /// Every event the fixture folds to, in order, for a session in `/repo`.
 fn folded() -> Vec<Event> {
+    folded_session(SESSION)
+}
+
+/// Every event session `id` in the fixture folds to, in order.
+fn folded_session(id: &str) -> Vec<Event> {
     transcript::events(
-        &transcripts().join(format!("{SESSION}.jsonl")),
+        &transcripts().join(format!("{id}.jsonl")),
         "max",
         Path::new("/repo"),
     )
     .expect("the transcript reads")
+}
+
+/// What was reported about sub-agent `id`, in order: each report's model,
+/// context size and latest line.
+type Reports = Vec<(Option<String>, Option<u64>, Option<String>)>;
+
+fn reports_on(events: &[Event], id: &str) -> Reports {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentProgress {
+                id: agent,
+                model,
+                context_tokens,
+                latest,
+            } if agent.as_str() == id => Some((model.clone(), *context_tokens, latest.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Where in `events` the sub-agent `id` was spawned, reported on and ended.
+fn positions(events: &[Event], id: &str) -> (Option<usize>, Vec<usize>, Option<usize>) {
+    let spawn = events.iter().position(
+        |event| matches!(event, Event::AgentSpawn { id: agent, .. } if agent.as_str() == id),
+    );
+    let reports = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            matches!(event, Event::AgentProgress { id: agent, .. } if agent.as_str() == id)
+        })
+        .map(|(at, _)| at)
+        .collect();
+    let exit = events.iter().position(
+        |event| matches!(event, Event::AgentExit { id: agent, .. } if agent.as_str() == id),
+    );
+    (spawn, reports, exit)
 }
 
 fn usage_records(events: &[Event]) -> Vec<&niobe_core::Usage> {
@@ -64,10 +111,15 @@ fn warnings(events: &[Event]) -> Vec<&str> {
 fn a_transcript_is_listed_by_the_id_that_continues_it_and_by_what_was_asked() {
     let listed = transcript::list(&transcripts()).expect("the directory lists");
 
-    let [only] = listed.as_slice() else {
-        panic!("one transcript: {listed:?}");
-    };
-    assert_eq!(only.id, SESSION);
+    // The directory the CLI keeps a session's sub-agents in is not a session
+    // of its own.
+    let mut ids: Vec<&str> = listed.iter().map(|found| found.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [SESSION, WITH_AGENTS], "{listed:?}");
+    let only = listed
+        .iter()
+        .find(|found| found.id == SESSION)
+        .expect("the session is listed");
     assert_eq!(
         only.first_prompt.as_deref(),
         Some("add an etag to the catalog response"),
@@ -253,6 +305,109 @@ fn a_record_this_version_cannot_read_is_shown_and_not_a_lost_history() {
     let complaints = warnings(&events);
     assert_eq!(complaints.len(), 1, "{complaints:?}");
     assert!(complaints[0].contains("could not read"), "{complaints:?}");
+}
+
+/// Each sub-agent's model is read off its own messages, which the CLI keeps in
+/// a transcript of their own beside the session's. The spawn names none.
+#[test]
+fn a_read_back_sub_agent_is_named_by_the_model_its_own_transcript_names() {
+    let events = folded_session(WITH_AGENTS);
+
+    for (id, model) in [
+        ("toolu_sum", "claude-haiku-4-5-20251001"),
+        ("toolu_fetch", "claude-opus-5"),
+        ("toolu_cache", "claude-opus-5"),
+    ] {
+        let named: Vec<String> = reports_on(&events, id)
+            .into_iter()
+            .filter_map(|(model, _, _)| model)
+            .collect();
+        assert_eq!(named, [model], "{id}: {events:?}");
+        let (spawn, reports, _) = positions(&events, id);
+        let spawn = spawn.expect("the agent was spawned");
+        assert!(
+            reports.iter().all(|at| *at > spawn),
+            "{id} was reported on before it was spawned"
+        );
+    }
+    assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+}
+
+/// A finished agent's line is the first line of its own last message — the
+/// answer it gave — and never the CLI's word that it finished. One that never
+/// finished has no answer to show, and the step it was on is not read back.
+#[test]
+fn a_read_back_sub_agent_that_finished_shows_its_own_answer() {
+    let events = folded_session(WITH_AGENTS);
+
+    for (id, answer) in [
+        (
+            "toolu_sum",
+            Some("The cache is a bounded least-recently-used map over an OrderedDict."),
+        ),
+        (
+            "toolu_fetch",
+            Some("fetch() stores a 304 response's empty body over the cached page."),
+        ),
+        ("toolu_cache", None),
+    ] {
+        let lines: Vec<String> = reports_on(&events, id)
+            .into_iter()
+            .filter_map(|(_, _, latest)| latest)
+            .collect();
+        assert_eq!(lines, answer.into_iter().collect::<Vec<_>>(), "{id}");
+        assert!(
+            lines.iter().all(|line| !line.contains("finished")),
+            "{id} shows the CLI's notice: {lines:?}"
+        );
+    }
+}
+
+/// Both ways the CLI writes an agent's end are read: as a turn of its own
+/// when the agent finished between turns, and as an attachment to the running
+/// turn when it finished during one. An agent the transcript never says ended
+/// is still running; its answer is reported before its end.
+#[test]
+fn a_read_back_sub_agent_ends_where_the_transcript_says_it_did() {
+    let events = folded_session(WITH_AGENTS);
+
+    for id in ["toolu_sum", "toolu_fetch"] {
+        let (_, reports, exit) = positions(&events, id);
+        let exit = exit.unwrap_or_else(|| panic!("{id} ended: {events:?}"));
+        assert!(
+            matches!(
+                &events[exit],
+                Event::AgentExit {
+                    outcome: AgentOutcome::Completed,
+                    ..
+                }
+            ),
+            "{id}"
+        );
+        assert!(
+            reports.iter().all(|at| *at < exit),
+            "{id} reported after its end"
+        );
+    }
+    let (_, _, exit) = positions(&events, "toolu_cache");
+    assert_eq!(exit, None, "the cache reviewer never finished");
+}
+
+/// The transcript holds no per-agent figure the live stream's context size
+/// can be checked against — the CLI's own count in a notification is not what
+/// the agent's messages add up to — so a read-back agent reports none.
+#[test]
+fn a_read_back_sub_agent_reports_no_token_figure() {
+    let events = folded_session(WITH_AGENTS);
+
+    for id in ["toolu_sum", "toolu_fetch", "toolu_cache"] {
+        assert!(
+            reports_on(&events, id)
+                .iter()
+                .all(|(_, tokens, _)| tokens.is_none()),
+            "{id}"
+        );
+    }
 }
 
 /// A `cargo test --workspace` whose output the CLI saved to a file, as its own

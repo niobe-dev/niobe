@@ -101,7 +101,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   preview, and both the driver and the transcript reader hand it to the translator;
   `transcript.rs` reads the session files the CLI keeps for
   itself, so a session started in plain Claude Code can be listed and carried on — it writes
-  nothing back, and folds through the same `translate.rs` as the live stream; `conformance.rs`
+  nothing back, and folds through the same `translate.rs` as the live stream; a sub-agent's
+  model and answer are read from the file the CLI keeps for that agent beside the session's; `conformance.rs`
   names the CLI releases every shape in the crate was recorded from, which is what a session says
   once when it is driving a release nobody recorded. `tests/stream.rs` and `tests/transcript.rs`
   fold the recordings in `tests/fixtures/`, whose README carries the arithmetic the tests assert —
@@ -259,9 +260,9 @@ Every file that can carry a comment starts with the SPDX header, followed by a b
 - Markdown: the two lines inside a leading `<!-- … -->` block.
 
 Exempt, because the format has no comments or the bytes are compared exactly: `LICENSE`,
-`CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt` and recorded output
-under `tests/fixtures/` as `*.txt`. The list lives in
-`xtask/src/main.rs`; a file type with neither a rule nor an exemption fails the check, so a new
+`CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt`, and recorded output
+under `tests/fixtures/` as `*.txt` or `*.json`. The list lives in
+`xtask/src/headers.rs`; a file type with neither a rule nor an exemption fails the check, so a new
 kind of file forces a decision. Run `cargo xtask headers`.
 
 The project is licensed under Apache-2.0 (`LICENSE`); `license = "Apache-2.0"` is inherited by

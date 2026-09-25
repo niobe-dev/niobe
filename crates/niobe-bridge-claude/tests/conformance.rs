@@ -102,6 +102,7 @@ const SHAPES: &[&str] = &[
     "mode",
     "permission-mode",
     "pr-link",
+    "queue-operation",
     "system/local_command",
 ];
 
@@ -317,6 +318,51 @@ fn every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from() 
         unchecked.is_empty(),
         "no recording holds a line to check these against: {unchecked:?}"
     );
+}
+
+/// A read-back sub-agent's model and answer come from its own transcript,
+/// which is found by the call its `.meta.json` names in `toolUseId`, and its
+/// model from `message.model` on its messages. A release that stopped writing
+/// either would leave every read-back agent with label and state only, and
+/// nothing failing.
+#[test]
+fn every_recorded_sub_agent_transcript_names_its_call_and_its_model() {
+    let agents: Vec<PathBuf> = recordings()
+        .into_iter()
+        .filter(|path| path.parent().is_some_and(|dir| dir.ends_with("subagents")))
+        .collect();
+    assert!(
+        !agents.is_empty(),
+        "no recording holds a sub-agent's transcript"
+    );
+    for path in agents {
+        let meta = path.with_extension("meta.json");
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&meta).expect("a sub-agent's transcript has a description"),
+        )
+        .expect("the description is JSON");
+        assert!(
+            meta.get("toolUseId")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "{}: its description names no `toolUseId`",
+            path.display()
+        );
+        for line in lines_of(&path) {
+            let value: serde_json::Value = serde_json::from_str(&line).expect("a recorded line");
+            if value.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+                continue;
+            }
+            assert!(
+                value
+                    .pointer("/message/model")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some(),
+                "{}: a message names no model: {line}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// The context meter's window is the `contextWindow` of each `modelUsage`

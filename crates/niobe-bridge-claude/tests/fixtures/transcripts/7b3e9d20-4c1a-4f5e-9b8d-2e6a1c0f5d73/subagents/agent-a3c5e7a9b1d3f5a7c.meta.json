@@ -1,0 +1,1 @@
+{"agentType":"deep-reasoner","description":"Review catalog/cache.py for bugs","toolUseId":"toolu_cache","spawnDepth":1,"requestShape":"background","requestNonInteractive":true}

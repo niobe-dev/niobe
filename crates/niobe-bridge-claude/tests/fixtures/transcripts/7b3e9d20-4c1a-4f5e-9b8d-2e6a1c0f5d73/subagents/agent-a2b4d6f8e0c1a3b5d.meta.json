@@ -1,0 +1,1 @@
+{"agentType":"deep-reasoner","description":"Review catalog/fetch.py for bugs","toolUseId":"toolu_fetch","spawnDepth":1,"requestShape":"background","requestNonInteractive":true}
