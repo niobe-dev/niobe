@@ -309,6 +309,15 @@ pub struct TurnRecord {
     /// the reset moved so the window started over in between, or the level
     /// went down. Never a zero standing in for any of those.
     ///
+    /// It is the turn's own to within one request and one point. The `claude`
+    /// CLI reports the level with an API response, read from the response's
+    /// headers, so a report cannot count the output of the request it came
+    /// with: both ends lag by that one request, which shifts a request's
+    /// worth from each turn to the next rather than a turn's. And the CLI
+    /// reports only when the level moves a whole point, so a turn that moved
+    /// it less is reported nothing and has no share, and one that is drawn as
+    /// a point may have spent less than a point that crossed one.
+    ///
     /// The window is the account's, not the session's: anything else the
     /// account ran during the turn moved it too.
     pub five_hour_share: Option<f64>,
@@ -1701,6 +1710,44 @@ mod tests {
         assert_eq!(turns[0].five_hour_share, None);
         let share = turns[1].five_hour_share.expect("both ends were reported");
         assert!((share - 0.01).abs() < 1e-9, "{share}");
+    }
+
+    /// Five turns as the `claude` CLI reported them live: a report at the end
+    /// of a request, and only when the level moved a whole point. Turn one
+    /// moved it 14 → 15 but nothing was reported before it; turn two
+    /// 15 → 16 → 17; turn three 17 → 18; turn four made four requests and
+    /// moved it under a point, so nothing was reported; turn five 18 → 19.
+    /// The shares that are measured add up to the session's 15 → 19.
+    #[test]
+    fn several_reports_in_a_turn_measure_it_from_the_last_before_to_the_last_in_it() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(2, 88, 28_859, 0),
+            five_hour(0.14, RESET),
+            cached(2, 249, 117_066, 458),
+            five_hour(0.15, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.16, RESET),
+            five_hour(0.17, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.18, RESET),
+            Event::TurnEnded,
+            prompt(),
+            cached(2, 90, 117_524, 427),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.19, RESET),
+            Event::TurnEnded,
+        ]);
+
+        let shares: Vec<Option<u64>> = state
+            .turns()
+            .iter()
+            .map(|turn| turn.five_hour_share.map(|s| (s * 100.0).round() as u64))
+            .collect();
+        assert_eq!(shares, [None, Some(2), Some(1), None, Some(1)]);
     }
 
     #[test]

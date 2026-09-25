@@ -87,8 +87,11 @@ did not produce, and it carries the cases that are easy to get wrong:
   is the only crate that may name the bridge and the price table at once;
 - a `rate_limit_event`, which is how much of the plan's five-hour and seven-day
   windows is gone. On a flat-rate plan that is the budget, and it is the one
-  figure in the stream that is a level rather than a total: the CLI reports it
-  several times a session, each report replacing the last;
+  figure in the stream that is a level rather than a total, each report
+  replacing the last. The CLI reads it from an API response's headers and
+  emits it after that response, only when the level has moved a whole point
+  (or the window's status or reset changed) — so a process can report it
+  once, several times, or not at all;
 - `system`/`thinking_tokens`, the CLI's running *estimate* of the thinking
   tokens of the message in flight — a guess, and already a share of the output
   tokens the turn is billed for, so it is counted nowhere;
