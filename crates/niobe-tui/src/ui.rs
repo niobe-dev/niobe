@@ -19,6 +19,7 @@
 //! shows the tool mix instead, which is measured.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -30,7 +31,7 @@ use ratatui::widgets::{
 };
 
 use niobe_core::event::{AgentOutcome, Billing, Context, Mode, UsageWindow};
-use niobe_core::session::{FileChanges, SessionState, ToolTotals, Totals};
+use niobe_core::session::{FileChanges, SessionState, TestRunRecord, ToolTotals, Totals};
 
 use crate::app::{
     Activity, Answer, App, Ask, AskFocus, Entry, EntryKind, Focus, Pane, Picker, Section,
@@ -2177,24 +2178,44 @@ fn agent_state(
 /// many were spawned in all, and how many failed.
 ///
 /// A count that is zero is left out rather than drawn: `0 failed` is a line
-/// the operator has to read to learn nothing.
-fn agent_summary(session: &SessionState, theme: &Theme) -> Vec<Span<'static>> {
-    let running = session.running_agents().len();
-    let mut spans = vec![Span::styled(
-        format!("{running} running"),
-        Style::new().fg(theme.fg),
-    )];
-    let mut said = format!(" · {} spawned", session.agents_spawned());
-    for (count, word) in [
-        (session.agents_failed(), "failed"),
-        (session.agents_cancelled(), "cancelled"),
-    ] {
+/// the operator has to read to learn nothing. Where the pane is narrow what is
+/// running now is kept longest, and what failed after it: the total spawned
+/// and the cancellations are history the rows below already tell.
+fn agent_summary(session: &SessionState, theme: &Theme) -> Vec<Figure> {
+    agent_figures(
+        session.running_agents().len(),
+        session.agents_spawned(),
+        session.agents_failed(),
+        session.agents_cancelled(),
+        theme,
+    )
+}
+
+fn agent_figures(
+    running: usize,
+    spawned: u64,
+    failed: u64,
+    cancelled: u64,
+    theme: &Theme,
+) -> Vec<Figure> {
+    let dim = Style::new().fg(theme.dim);
+    let mut figures = vec![
+        Figure::lead(
+            0,
+            Span::styled(format!("{running} running"), Style::new().fg(theme.fg)),
+        ),
+        Figure::after(" · ", 3, Span::styled(format!("{spawned} spawned"), dim)),
+    ];
+    for (count, word, rank) in [(failed, "failed", 1), (cancelled, "cancelled", 2)] {
         if count > 0 {
-            said.push_str(&format!(" · {count} {word}"));
+            figures.push(Figure::after(
+                " · ",
+                rank,
+                Span::styled(format!("{count} {word}"), dim),
+            ));
         }
     }
-    spans.push(Span::styled(said, Style::new().fg(theme.dim)));
-    spans
+    figures
 }
 
 /// A sub-agent per row: the state glyph, what it was spawned to do, the model
@@ -2493,7 +2514,85 @@ fn branch_row(branch: &str, repo: &crate::app::Repo, width: usize, theme: &Theme
     ])
 }
 
-/// A section's header: the fold marker, its name, and what it summarises.
+/// One figure in a section header's summary — `✗ 2`, `+977`, `4s ago` — and
+/// how much the operator needs it when the header cannot carry them all.
+///
+/// `rank` 0 is what the section is read for; a higher rank gives way first.
+/// `sep` is what sets it off from the figure before it, and is dropped with
+/// it, so a summary that lost a figure has no doubled or dangling separator.
+#[derive(Debug, Clone)]
+struct Figure {
+    rank: u8,
+    sep: &'static str,
+    spans: Vec<Span<'static>>,
+}
+
+impl Figure {
+    /// The first figure of a summary, which nothing precedes.
+    fn lead(rank: u8, span: Span<'static>) -> Self {
+        Self {
+            rank,
+            sep: "",
+            spans: vec![span],
+        }
+    }
+
+    /// A figure after another, set off by `sep`.
+    fn after(sep: &'static str, rank: u8, span: Span<'static>) -> Self {
+        Self {
+            rank,
+            sep,
+            spans: vec![span],
+        }
+    }
+
+    fn width(&self, first: bool) -> usize {
+        let sep = if first { 0 } else { text::width(self.sep) };
+        sep + self
+            .spans
+            .iter()
+            .map(|span| text::width(&span.content))
+            .sum::<usize>()
+    }
+}
+
+/// What the figures take drawn in order, the first without its separator.
+fn figures_width(figures: &[Figure]) -> usize {
+    figures
+        .iter()
+        .enumerate()
+        .map(|(i, figure)| figure.width(i == 0))
+        .sum()
+}
+
+/// The figures of a summary that fit `room`, in the order they were given.
+///
+/// **The rule: the least important figure is dropped until the rest fit, the
+/// rightmost first between two of the same rank, and a figure is kept whole or
+/// not at all.** A number cut anywhere is a different number — `+14` cut to
+/// `+1` is a lie — so no span is ever truncated. Dropping the whole summary
+/// when it does not fit, the alternative this replaces, left a narrow pane's
+/// headers reading `▾ Tools` with the failure count that is the reason to read
+/// it gone along with the byte count nobody needed. Nothing marks a summary
+/// that lost figures: an ellipsis would spend the columns that are short, and
+/// what is left is a whole, true statement on its own.
+fn narrowed(mut figures: Vec<Figure>, room: usize) -> Vec<Figure> {
+    while figures_width(&figures) > room {
+        let Some(least) = figures
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, figure)| (figure.rank, *i))
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        figures.remove(least);
+    }
+    figures
+}
+
+/// A section's header: the fold marker, its name, and what it summarises —
+/// as many of the summary's figures as fit, by [`narrowed`]'s rule.
 ///
 /// The marker is the fold's only affordance, so it is drawn whether or not the
 /// section has a key: a section that is folded must say so even when the way
@@ -2501,7 +2600,7 @@ fn branch_row(branch: &str, repo: &crate::app::Repo, width: usize, theme: &Theme
 fn section_header(
     folded: bool,
     name: &str,
-    summary: Vec<Span<'static>>,
+    summary: Vec<Figure>,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
@@ -2514,10 +2613,18 @@ fn section_header(
         Style::new().fg(theme.title).bold(),
     )];
     let room = width.saturating_sub(text::width(marker) + text::width(name) + 2);
-    let said: usize = summary.iter().map(|span| text::width(&span.content)).sum();
-    if said <= room {
+    let kept = narrowed(summary, room);
+    if !kept.is_empty() {
         spans.push(Span::raw("  "));
-        spans.extend(summary);
+    }
+    for (i, figure) in kept.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(match figure.sep.trim().is_empty() {
+                true => Span::raw(figure.sep),
+                false => Span::styled(figure.sep, Style::new().fg(theme.dim)),
+            });
+        }
+        spans.extend(figure.spans);
     }
     Line::from(spans)
 }
@@ -2541,14 +2648,16 @@ fn working_tree_rows(
         )
     });
     let summary = match repo.read {
-        false => vec![Span::styled("—", Style::new().fg(theme.dim))],
-        true => vec![
-            Span::styled(files_said(repo.working.len()), Style::new().fg(theme.fg)),
-            Span::raw("  "),
-            Span::styled(format!("+{added}"), Style::new().fg(theme.add)),
-            Span::raw(" "),
-            Span::styled(format!("−{removed}"), Style::new().fg(theme.del)),
-        ],
+        false => vec![Figure::lead(
+            0,
+            Span::styled("—", Style::new().fg(theme.dim)),
+        )],
+        true => changed_figures(
+            repo.working.len(),
+            format!("+{added}"),
+            format!("−{removed}"),
+            theme,
+        ),
     };
 
     let folded = app.folded(Section::WorkingTree);
@@ -2614,16 +2723,12 @@ fn session_file_rows(
     let removed: u64 = files.iter().fold(0, |r, f| r.saturating_add(f.removed));
     let added_stated = files.iter().all(FileChanges::added_stated);
     let removed_stated = files.iter().all(FileChanges::removed_stated);
-    let summary = vec![
-        Span::styled(files_said(files.len()), Style::new().fg(theme.fg)),
-        Span::raw("  "),
-        Span::styled(count('+', added, added_stated), Style::new().fg(theme.add)),
-        Span::raw(" "),
-        Span::styled(
-            count('−', removed, removed_stated),
-            Style::new().fg(theme.del),
-        ),
-    ];
+    let summary = changed_figures(
+        files.len(),
+        count('+', added, added_stated),
+        count('−', removed, removed_stated),
+        theme,
+    );
 
     let folded = app.folded(Section::Edited);
     let mut rows = vec![section_header(
@@ -2668,102 +2773,112 @@ fn session_file_rows(
 /// its result was not read, with the status it exited with where that was a
 /// failure — never a count it did not find. One the backend still knows
 /// failed after its tests started says that it failed, and that its counts
-/// were not read. Where the pane is too narrow for
-/// all of it, the suites go first and then the age: the counts are what the
-/// section is for.
+/// were not read. Where the pane is too narrow for all of it, the suites go
+/// first, then the age, then the ignored and the passed: the failures are what
+/// the section is for.
 fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let Some((run, at)) = app.test_run() else {
         return Vec::new();
     };
-    let dim = Style::new().fg(theme.dim);
-    let said = match (run.counts, run.failed) {
-        (Some(counts), _) => test_counts(counts, theme),
-        (None, true) => test_failed_uncounted(run.exit_code, theme),
-        (None, false) => test_not_read(run.exit_code, theme),
-    };
-    let suites = run
-        .counts
-        .map(|counts| Span::styled(format!(" · {}", suites_said(counts.suites)), dim));
-    let age = at
-        .zip(app.stamp())
-        .and_then(|(at, now)| now.since(at))
-        .map(|age| Span::styled(format!(" · {} ago", clock::ago(age)), dim));
-
-    let room = width.saturating_sub(text::width("▾ Tests") + 2);
-    let fits = |spans: &[Span<'static>]| {
-        spans.iter().map(|s| text::width(&s.content)).sum::<usize>() <= room
-    };
-    let whole: Vec<Span<'static>> = said
-        .iter()
-        .cloned()
-        .chain(suites.clone())
-        .chain(age.clone())
-        .collect();
-    let aged: Vec<Span<'static>> = said.iter().cloned().chain(age).collect();
-    let summary = [whole, aged]
-        .into_iter()
-        .find(|spans| fits(spans))
-        .unwrap_or(said);
+    let age = at.zip(app.stamp()).and_then(|(at, now)| now.since(at));
     vec![section_header(
         app.folded(Section::Tests),
         "Tests",
-        summary,
+        test_figures(&run, age, theme),
         width,
         theme,
     )]
 }
 
+/// Every figure a test run's header can carry, ranked for [`narrowed`].
+fn test_figures(run: &TestRunRecord, age: Option<Duration>, theme: &Theme) -> Vec<Figure> {
+    let dim = Style::new().fg(theme.dim);
+    let mut figures = match (run.counts, run.failed) {
+        (Some(counts), _) => test_counts(counts, theme),
+        (None, true) => test_failed_uncounted(run.exit_code, theme),
+        (None, false) => test_not_read(run.exit_code, theme),
+    };
+    if let Some(counts) = run.counts {
+        figures.push(Figure::after(
+            " · ",
+            4,
+            Span::styled(suites_said(counts.suites), dim),
+        ));
+    }
+    if let Some(age) = age {
+        figures.push(Figure::after(
+            " · ",
+            3,
+            Span::styled(format!("{} ago", clock::ago(age)), dim),
+        ));
+    }
+    figures
+}
+
 /// `637 passed · 0 failed`, with a failing run's failures in the failure
 /// colour and its passes no longer in the colour that says all is well.
-fn test_counts(counts: niobe_core::TestCounts, theme: &Theme) -> Vec<Span<'static>> {
+fn test_counts(counts: niobe_core::TestCounts, theme: &Theme) -> Vec<Figure> {
     let dim = Style::new().fg(theme.dim);
     let (passed, failed) = match counts.failing() {
         true => (Style::new().fg(theme.fg), Style::new().fg(theme.del).bold()),
         false => (Style::new().fg(theme.add), dim),
     };
-    let mut spans = vec![
-        Span::styled(format!("{} passed", counts.passed), passed),
-        Span::styled(" · ", dim),
-        Span::styled(format!("{} failed", counts.failed), failed),
+    let mut figures = vec![
+        Figure::lead(1, Span::styled(format!("{} passed", counts.passed), passed)),
+        Figure::after(
+            " · ",
+            0,
+            Span::styled(format!("{} failed", counts.failed), failed),
+        ),
     ];
     if counts.ignored > 0 {
-        spans.push(Span::styled(format!(" · {} ignored", counts.ignored), dim));
+        figures.push(Figure::after(
+            " · ",
+            2,
+            Span::styled(format!("{} ignored", counts.ignored), dim),
+        ));
     }
-    spans
+    figures
 }
 
 /// `exit 101 · result not read`: a run that happened and whose counts are not
 /// known. A zero status is not drawn, because a command whose output was
 /// filtered exits with the filter's status rather than the run's.
-fn test_not_read(exit_code: Option<i32>, theme: &Theme) -> Vec<Span<'static>> {
-    let dim = Style::new().fg(theme.dim);
-    let mut spans = Vec::new();
-    if let Some(code) = exit_code.filter(|code| *code != 0) {
-        spans.push(Span::styled(
-            format!("exit {code}"),
-            Style::new().fg(theme.del),
-        ));
-        spans.push(Span::styled(" · ", dim));
+fn test_not_read(exit_code: Option<i32>, theme: &Theme) -> Vec<Figure> {
+    let not_read = Span::styled("result not read", Style::new().fg(theme.dim));
+    match exit_code.filter(|code| *code != 0) {
+        Some(code) => vec![
+            Figure::lead(
+                0,
+                Span::styled(format!("exit {code}"), Style::new().fg(theme.del)),
+            ),
+            Figure::after(" · ", 1, not_read),
+        ],
+        None => vec![Figure::lead(0, not_read)],
     }
-    spans.push(Span::styled("result not read", dim));
-    spans
 }
 
 /// `failed · exit 101 · counts not read`: a run known to have failed after its
 /// tests started, whose output did not hold the counts — how many failed, or
 /// how many ran, is not something the rest of it can say.
-fn test_failed_uncounted(exit_code: Option<i32>, theme: &Theme) -> Vec<Span<'static>> {
-    let dim = Style::new().fg(theme.dim);
-    let mut spans = vec![Span::styled("failed", Style::new().fg(theme.del).bold())];
+fn test_failed_uncounted(exit_code: Option<i32>, theme: &Theme) -> Vec<Figure> {
+    let mut figures = vec![Figure::lead(
+        0,
+        Span::styled("failed", Style::new().fg(theme.del).bold()),
+    )];
     if let Some(code) = exit_code {
-        spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled(
-            format!("exit {code}"),
-            Style::new().fg(theme.del),
+        figures.push(Figure::after(
+            " · ",
+            1,
+            Span::styled(format!("exit {code}"), Style::new().fg(theme.del)),
         ));
     }
-    spans.push(Span::styled(" · counts not read", dim));
-    spans
+    figures.push(Figure::after(
+        " · ",
+        2,
+        Span::styled("counts not read", Style::new().fg(theme.dim)),
+    ));
+    figures
 }
 
 /// `1 suite`, `30 suites`.
@@ -2781,35 +2896,18 @@ fn commit_rows(
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let unknown = repo.commits.iter().any(|commit| commit.pushed.is_none());
-    let unpushed = repo
-        .commits
-        .iter()
-        .filter(|commit| commit.pushed == Some(false))
-        .count();
-    let mut summary = vec![Span::styled(
-        match (repo.read, repo.commits.len()) {
-            (false, _) => "—".to_owned(),
-            (true, 0) => "none this session".to_owned(),
-            (true, n) => format!("{n} this session"),
-        },
-        Style::new().fg(match repo.read {
-            true => theme.fg,
-            false => theme.dim,
-        }),
-    )];
-    if !repo.commits.is_empty() {
-        summary.push(Span::raw("  "));
-        summary.push(Span::styled(
-            // An upstream the repository could not compare against leaves this
-            // not known, and a count would be a guess dressed as a figure.
-            match unknown {
-                true => "unpushed —".to_owned(),
-                false => format!("{unpushed} unpushed"),
-            },
-            Style::new().fg(theme.hot),
-        ));
-    }
+    // An upstream the repository could not compare against leaves the count
+    // not known, and a count would be a guess dressed as a figure.
+    let unpushed = match repo.commits.iter().any(|commit| commit.pushed.is_none()) {
+        true => None,
+        false => Some(
+            repo.commits
+                .iter()
+                .filter(|commit| commit.pushed == Some(false))
+                .count(),
+        ),
+    };
+    let summary = commit_figures(repo.read, repo.commits.len(), unpushed, theme);
 
     let folded = app.folded(Section::Commits);
     let mut rows = vec![section_header(folded, "Commits", summary, width, theme)];
@@ -2828,6 +2926,44 @@ fn commit_rows(
         rows.push(commit_row(commit, &age, column, width, theme));
     }
     rows
+}
+
+/// `2 this session  1 unpushed`. What has not reached the upstream is what the
+/// operator acts on, so it is kept where the count of commits gives way.
+fn commit_figures(
+    read: bool,
+    commits: usize,
+    unpushed: Option<usize>,
+    theme: &Theme,
+) -> Vec<Figure> {
+    let mut figures = vec![Figure::lead(
+        1,
+        Span::styled(
+            match (read, commits) {
+                (false, _) => "—".to_owned(),
+                (true, 0) => "none this session".to_owned(),
+                (true, n) => format!("{n} this session"),
+            },
+            Style::new().fg(match read {
+                true => theme.fg,
+                false => theme.dim,
+            }),
+        ),
+    )];
+    if commits > 0 {
+        figures.push(Figure::after(
+            "  ",
+            0,
+            Span::styled(
+                match unpushed {
+                    None => "unpushed —".to_owned(),
+                    Some(n) => format!("{n} unpushed"),
+                },
+                Style::new().fg(theme.hot),
+            ),
+        ));
+    }
+    figures
 }
 
 /// How long ago a commit was made, or an em dash where that cannot be told: a
@@ -2907,9 +3043,12 @@ fn decision_rows(
     let mut rows = vec![section_header(
         folded,
         "Decisions",
-        vec![Span::styled(
-            session.decisions().len().to_string(),
-            Style::new().fg(theme.fg),
+        vec![Figure::lead(
+            0,
+            Span::styled(
+                session.decisions().len().to_string(),
+                Style::new().fg(theme.fg),
+            ),
         )],
         width,
         theme,
@@ -3011,30 +3150,55 @@ fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> 
 
 /// The tools section's header: the calls, the failures in the error colour,
 /// and the rest dimmed, because a failure is the one figure in the line the
-/// operator has to notice without looking for it.
-fn tool_summary(tools: &ToolTotals, theme: &Theme) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled(
-        match tools.finished {
-            1 => "1 call".to_owned(),
-            calls => format!("{calls} calls"),
-        },
-        Style::new().fg(theme.fg),
+/// operator has to notice without looking for it — and so the last to give
+/// way where the pane is narrow, with the bytes out the first.
+fn tool_summary(tools: &ToolTotals, theme: &Theme) -> Vec<Figure> {
+    let dim = Style::new().fg(theme.dim);
+    let mut figures = vec![Figure::lead(
+        1,
+        Span::styled(
+            match tools.finished {
+                1 => "1 call".to_owned(),
+                calls => format!("{calls} calls"),
+            },
+            Style::new().fg(theme.fg),
+        ),
     )];
     if tools.failed > 0 {
-        spans.push(Span::styled(
-            format!(" ✗ {}", tools.failed),
-            Style::new().fg(theme.del),
+        figures.push(Figure::after(
+            " ",
+            0,
+            Span::styled(format!("✗ {}", tools.failed), Style::new().fg(theme.del)),
         ));
     }
-    spans.push(Span::styled(
-        format!(
-            " · {} denied · {} out",
-            tools.denied,
-            crate::app::human_bytes(tools.output_bytes)
-        ),
-        Style::new().fg(theme.dim),
+    figures.push(Figure::after(
+        " · ",
+        2,
+        Span::styled(format!("{} denied", tools.denied), dim),
     ));
-    spans
+    figures.push(Figure::after(
+        " · ",
+        3,
+        Span::styled(
+            format!("{} out", crate::app::human_bytes(tools.output_bytes)),
+            dim,
+        ),
+    ));
+    figures
+}
+
+/// `23 files  +977 −259`: a changes section's summary. The line counts are
+/// what it is read for, so the file count gives way first; the two counts
+/// share a rank, and a pane too narrow for both keeps the lines added.
+fn changed_figures(files: usize, added: String, removed: String, theme: &Theme) -> Vec<Figure> {
+    vec![
+        Figure::lead(
+            1,
+            Span::styled(files_said(files), Style::new().fg(theme.fg)),
+        ),
+        Figure::after("  ", 0, Span::styled(added, Style::new().fg(theme.add))),
+        Figure::after(" ", 0, Span::styled(removed, Style::new().fg(theme.del))),
+    ]
 }
 
 /// `23 files`, `1 file`, `no files`.
@@ -4297,5 +4461,159 @@ mod tests {
         assert!(cache.contains('—'), "{rows:?}");
         assert!(!cache.contains('%'), "{rows:?}");
         assert!(!cache.contains('0'), "{rows:?}");
+    }
+
+    /// Every section's header, each at its fullest: every figure it can
+    /// carry, with the failures, cancellations and ignored tests that a quiet
+    /// session leaves out.
+    fn every_header(theme: &Theme) -> Vec<(&'static str, Vec<Figure>)> {
+        let tools = ToolTotals {
+            finished: 1234,
+            failed: 17,
+            denied: 3,
+            output_bytes: 168_000,
+            ..ToolTotals::default()
+        };
+        let counted = TestRunRecord {
+            counts: Some(niobe_core::TestCounts {
+                passed: 637,
+                failed: 2,
+                ignored: 4,
+                suites: 30,
+            }),
+            exit_code: Some(101),
+            failed: true,
+        };
+        let uncounted = TestRunRecord {
+            counts: None,
+            exit_code: Some(101),
+            failed: true,
+        };
+        let unread = TestRunRecord {
+            counts: None,
+            exit_code: Some(101),
+            failed: false,
+        };
+        let age = Some(Duration::from_secs(95));
+        vec![
+            ("Sub-agents", agent_figures(2, 13, 4, 1, theme)),
+            (
+                "Working tree",
+                changed_figures(23, "+9770".to_owned(), "−2590".to_owned(), theme),
+            ),
+            (
+                "This session",
+                changed_figures(3, "+≥3000".to_owned(), "−≥200".to_owned(), theme),
+            ),
+            ("Commits", commit_figures(true, 12, Some(11), theme)),
+            ("Commits", commit_figures(true, 12, None, theme)),
+            ("Tools", tool_summary(&tools, theme)),
+            ("Tests", test_figures(&counted, age, theme)),
+            ("Tests", test_figures(&uncounted, age, theme)),
+            ("Tests", test_figures(&unread, age, theme)),
+        ]
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn figure_text(figure: &Figure) -> String {
+        figure
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// The header drawn from exactly `kept`, in order, each whole and set off
+    /// by its own separator.
+    fn header_of(name: &str, kept: &[&Figure]) -> String {
+        let mut said = format!("▾ {name}");
+        for (i, figure) in kept.iter().enumerate() {
+            said.push_str(match i {
+                0 => "  ",
+                _ => figure.sep,
+            });
+            said.push_str(&figure_text(figure));
+        }
+        said
+    }
+
+    /// Which of `figures` the drawn header kept, read back by rebuilding the
+    /// header from every subset in order until one matches exactly.
+    fn kept_by<'a>(name: &str, figures: &'a [Figure], drawn: &str) -> Option<Vec<&'a Figure>> {
+        (0u32..1 << figures.len()).find_map(|mask| {
+            let kept: Vec<&Figure> = figures
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, figure)| figure)
+                .collect();
+            (header_of(name, &kept) == drawn).then_some(kept)
+        })
+    }
+
+    #[test]
+    fn a_narrow_header_keeps_whole_figures_and_the_one_it_is_read_for() {
+        let theme = Theme::default();
+        for (name, figures) in every_header(&theme) {
+            let line = section_header(false, name, figures.clone(), 39, &theme);
+            let drawn = line_text(&line);
+            assert!(text::width(&drawn) <= 39, "{drawn:?} overflows 39 columns");
+            let kept = kept_by(name, &figures, &drawn)
+                .unwrap_or_else(|| panic!("{drawn:?} is not whole figures of {name}"));
+            assert!(
+                kept.iter().any(|figure| figure.rank == 0),
+                "{drawn:?} lost the figure {name} is read for"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tools_header_too_narrow_for_its_bytes_keeps_its_failures() {
+        let theme = Theme::default();
+        let tools = ToolTotals {
+            finished: 6,
+            failed: 2,
+            denied: 0,
+            output_bytes: 168_000,
+            ..ToolTotals::default()
+        };
+        let line = section_header(false, "Tools", tool_summary(&tools, &theme), 34, &theme);
+        assert_eq!(line_text(&line), "▾ Tools  6 calls ✗ 2 · 0 denied");
+        let line = section_header(false, "Tools", tool_summary(&tools, &theme), 19, &theme);
+        assert_eq!(line_text(&line), "▾ Tools  ✗ 2");
+    }
+
+    #[test]
+    fn no_header_figure_is_ever_cut_at_any_width() {
+        let theme = Theme::default();
+        for (name, figures) in every_header(&theme) {
+            for width in 0..=120 {
+                let line = section_header(false, name, figures.clone(), width, &theme);
+                let drawn = line_text(&line);
+                assert!(
+                    kept_by(name, &figures, &drawn).is_some(),
+                    "{drawn:?} at {width} columns is not whole figures of {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_least_important_figure_gives_way_first_and_the_rest_keep_their_order() {
+        let theme = Theme::default();
+        let figures = agent_figures(2, 13, 4, 1, &theme);
+        let full = section_header(false, "Sub-agents", figures.clone(), 200, &theme);
+        assert_eq!(
+            line_text(&full),
+            "▾ Sub-agents  2 running · 13 spawned · 4 failed · 1 cancelled"
+        );
+        let narrow = section_header(false, "Sub-agents", figures, 39, &theme);
+        assert_eq!(line_text(&narrow), "▾ Sub-agents  2 running · 4 failed");
     }
 }

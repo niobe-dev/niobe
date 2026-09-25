@@ -27,7 +27,7 @@
 ┃   • etag.test.ts asserts the cached body                                   █ └───────────────────────────────────────┘
 ┃                                                                            █ ┌────────────── Activity ───────────────┐
 ┃   file         │ lines                                                     █ │                                       │
-┃   ─────────────┼──────                                                     █ │ ▾ Sub-agents                          █
+┃   ─────────────┼──────                                                     █ │ ▾ Sub-agents  1 running · 1 failed    █
 ┃   fetch.ts     │   +38                                                     █ │ ◆ test-writer → tests… running 1m 42s █
 ┃   etag.test.ts │   +24                                                     █ │   └ Reading tests/stream.rs           █
 ┃                                                                            █ │ ◇ reviewer → catalog/c… done 4100 ctx █

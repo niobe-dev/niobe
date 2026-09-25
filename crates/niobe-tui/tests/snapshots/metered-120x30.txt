@@ -21,7 +21,7 @@
 ┃   └ 1 failing: fetch returns the cached body on a 304                      █ └───────────────────────────────────────┘
 ┃                                                                            █ ┌────────────── Activity ───────────────┐
 ┃ ◆ claude                                                                   █ │                                       │
-┃   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ │ ▾ Sub-agents                          █
+┃   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ │ ▾ Sub-agents  1 running · 1 failed    █
 ┃   304 path asserts a body that is no longer sent.                          █ │ ◆ test-writer → tests… running 1m 42s │
 ┃                                                                            █ │   └ Reading tests/stream.rs           │
 ┃ ────────────────────────────────────────────────────────────────────────── ┃ │ ◇ reviewer → catalog/c… done 4100 ctx │

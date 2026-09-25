@@ -20,7 +20,7 @@
 ┃ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s █ └───────────────────────────────────────┘
 ┃   └ 1 failing: fetch returns the cached body on a 304                      █ ┌────────────── Activity ───────────────┐
 ┃                                                                            █ │                                       │
-┃ ◆ claude                                                                   █ │ ▾ Sub-agents                          █
+┃ ◆ claude                                                                   █ │ ▾ Sub-agents  1 running · 1 failed    █
 ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the    █ │ ◆ test-writer → tests… running 1m 42s █
 ┃   304 path asserts a body that is no longer sent.                          █ │   └ Reading tests/stream.rs           │
 ┃                                                                            █ │ ◇ reviewer → catalog/c… done 4100 ctx │
