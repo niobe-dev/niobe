@@ -29,6 +29,11 @@
 //! which has to agree with the counts — `0` for a run with no failures, `101`
 //! for one with any — or the counts are not read.
 //!
+//! A hook that rewrites the command before it runs leaves the command the
+//! agent wrote in the call, so a run whose output was replaced by another
+//! tool's summary of it is still a test run, and one whose result was not
+//! read: that summary is not the run's own output.
+//!
 //! A run whose counts cannot be read can still be known to have failed:
 //! [`failed`] reads that from the start of its output and its status, which
 //! is what survives when a long failing output is cut. It says nothing about
@@ -541,6 +546,15 @@ error: could not compile `demo` (lib test) due to 1 previous error
     #[test]
     fn a_filtered_run_is_not_read_as_the_summaries_that_survived() {
         assert_eq!(counts(TAILED, Some(0)), None);
+    }
+
+    #[test]
+    fn a_summary_another_tool_printed_in_place_of_the_run_is_not_read() {
+        // What came back, verbatim, for `cargo test -p niobe-core --lib -q`
+        // run under a hook that rewrote the command before it ran; the call
+        // still named `cargo test`.
+        let replaced = "cargo test: 111 passed (1 suite, 0.00s)";
+        assert_eq!(counts(replaced, Some(0)), None);
     }
 
     #[test]
