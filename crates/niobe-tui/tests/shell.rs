@@ -1637,6 +1637,17 @@ fn changes_scrolled_down(app: &mut App, width: u16, height: u16) -> String {
     screen(app, width, height)
 }
 
+/// The Tests section's header row, from its name to the pane's edge: the
+/// transcript beside it draws each run's own figures under its call, and
+/// those are not what the section says.
+fn tests_header(frame: &str) -> &str {
+    frame
+        .lines()
+        .find_map(|line| line.split_once("▾ Tests").map(|(_, header)| header))
+        .and_then(|header| header.split('│').next())
+        .expect("the frame draws the Tests section")
+}
+
 /// The test run the agent made, as its own summary reported it, at the foot
 /// of the Changes pane and dated by when its call finished.
 #[test]
@@ -1704,7 +1715,7 @@ fn a_run_whose_result_was_not_read_says_so_and_gives_no_count() {
         "{frame}"
     );
     assert!(
-        !frame.contains("passed"),
+        !tests_header(&frame).contains("passed"),
         "the earlier run's counts are not the latest run's"
     );
 }
@@ -1721,8 +1732,9 @@ fn a_run_known_to_have_failed_without_counts_says_it_failed_and_gives_no_count()
         frame.contains("▾ Tests  failed · exit 101 · counts not read · 1m ago"),
         "{frame}"
     );
-    assert!(!frame.contains("passed"), "{frame}");
-    assert!(!frame.contains("result not read"), "{frame}");
+    let header = tests_header(&frame);
+    assert!(!header.contains("passed"), "{header}");
+    assert!(!header.contains("result not read"), "{header}");
     assert_eq!(
         style_at(&mut app, 200, 60, "failed · exit").and_then(|style| style.fg),
         Some(CLASSIC.del),

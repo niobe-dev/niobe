@@ -17,6 +17,10 @@
 //! clock saw both ends. A call that did not succeed says so instead, and draws
 //! the backend's reason for it under the row, or that it gave none.
 //!
+//! A call that ran the tests says under its row what the run reported: its
+//! counts where its output held the whole run, and otherwise that the result
+//! was not read — never a number the output did not give.
+//!
 //! A run of calls to the same tool is one group: a row with the run's summed
 //! figures, and a row for each call under it unless the operator has folded
 //! the runs away.
@@ -31,6 +35,7 @@ use crate::text;
 use crate::theme::Theme;
 use crate::ui::count;
 use niobe_core::event::ToolOutcome;
+use niobe_core::session::TestRunRecord;
 
 /// How much of a tool-call entry the operator has asked to see: the two
 /// switches that hold for the whole transcript.
@@ -173,8 +178,13 @@ fn child(branch: &str, call: &Call, width: usize, theme: &Theme) -> Line<'static
     Line::from(spans)
 }
 
-/// What is drawn under a call's row: why it failed, or the lines it changed,
-/// each line led by `lead`.
+/// What is drawn under a call's row: what its test run reported, why it
+/// failed, or the lines it changed, each line led by `lead`.
+///
+/// A test run that is known to have failed says so in place of the reason
+/// the call failed, which is only the status the row already shows. One that
+/// failed without its tests failing — a build that did not compile — keeps
+/// the reason, which is the part that says what went wrong.
 fn under(
     call: &Call,
     lead: String,
@@ -183,11 +193,24 @@ fn under(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let room = width.saturating_sub(text::width(&lead));
-    let body = match (&call.printed, call.failed(), &call.change) {
-        (Some(printed), _, _) => printed_lines(call, printed, room, theme),
-        (None, true, _) => vec![reason(call, room, theme)],
-        (None, false, Some(change)) => crate::hunks::lines(change, room, detail.diffs_open, theme),
-        (None, false, None) => Vec::new(),
+    let tested = call
+        .tested
+        .filter(|run| !call.failed() || run.counts.is_some() || run.failed);
+    let body = match (&call.printed, tested, call.failed(), &call.change) {
+        (Some(printed), _, _, _) => {
+            let mut lines: Vec<_> = tested
+                .map(|run| test_line(&run, room, theme))
+                .into_iter()
+                .collect();
+            lines.extend(printed_lines(call, printed, room, theme));
+            lines
+        }
+        (None, Some(run), _, _) => vec![test_line(&run, room, theme)],
+        (None, None, true, _) => vec![reason(call, room, theme)],
+        (None, None, false, Some(change)) => {
+            crate::hunks::lines(change, room, detail.diffs_open, theme)
+        }
+        (None, None, false, None) => Vec::new(),
     };
     body.into_iter()
         .map(|line| {
@@ -230,6 +253,61 @@ fn printed_lines(
         lines.push(Line::from(Span::styled("printed nothing", dim.italic())));
     }
     lines
+}
+
+/// What a test run reported, hung under its call: `637 passed · 0 failed`,
+/// with the failures in the failure colour where there are any.
+///
+/// Where the room runs out, the ignored go first and then the passed: the
+/// failures are what the line is for. A run whose counts were not read says
+/// that, and whether it is still known to have failed.
+fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
+    let dim = Style::new().fg(theme.dim);
+    let mut figures = match run.counts {
+        Some(counts) => {
+            let (passed, failed) = match counts.failing() {
+                true => (Style::new().fg(theme.fg), theme_del(theme).bold()),
+                false => (Style::new().fg(theme.add), dim),
+            };
+            let mut figures = vec![
+                (1, Span::styled(format!("{} passed", counts.passed), passed)),
+                (0, Span::styled(format!("{} failed", counts.failed), failed)),
+            ];
+            if counts.ignored > 0 {
+                figures.push((2, Span::styled(format!("{} ignored", counts.ignored), dim)));
+            }
+            figures
+        }
+        None if run.failed => vec![
+            (0, Span::styled("tests failed", theme_del(theme).bold())),
+            (1, Span::styled("counts not read", dim)),
+        ],
+        None => vec![(0, Span::styled("test result not read", dim.italic()))],
+    };
+    let room = room.saturating_sub(text::width(LAST_BRANCH));
+    while figures.len() > 1 && figures_width(&figures) > room {
+        if let Some(least) = (0..figures.len()).max_by_key(|&at| figures[at].0) {
+            figures.remove(least);
+        }
+    }
+    let mut spans = vec![Span::styled(LAST_BRANCH, dim)];
+    for (at, (_, figure)) in figures.into_iter().enumerate() {
+        if at > 0 {
+            spans.push(Span::styled(" · ", dim));
+        }
+        spans.push(figure);
+    }
+    Line::from(spans)
+}
+
+/// How wide a row of figures is drawn, with the separators between them.
+fn figures_width(figures: &[(u8, Span<'static>)]) -> usize {
+    let separators = figures.len().saturating_sub(1) * text::width(" · ");
+    figures
+        .iter()
+        .map(|(_, span)| text::width(&span.content))
+        .sum::<usize>()
+        + separators
 }
 
 /// The first line of the backend's reason for a call that did not succeed,
@@ -558,6 +636,113 @@ mod tests {
         app.apply(&start("t1", "Bash"));
 
         assert!(drawn(&app, false)[0].ends_with("running"));
+    }
+
+    /// A `cargo test` call that ended with `status`, and the run it reported.
+    fn tested(app: &mut App, status: i32, counts: Option<niobe_core::TestCounts>, failed: bool) {
+        let outcome = match status {
+            0 => ToolOutcome::Ok,
+            _ => ToolOutcome::Failed,
+        };
+        app.apply(&start("t1", "Bash"));
+        app.apply(&Event::ToolCallEnd {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            output: String::new(),
+            bytes: 1_024,
+            outcome,
+            summary: Some("cargo test".to_owned()),
+            exit_code: Some(status),
+            error: (status != 0).then(|| format!("Exit code {status}")),
+        });
+        app.apply(&Event::TestRun {
+            id: "t1".into(),
+            counts,
+            exit_code: Some(status),
+            failed,
+        });
+    }
+
+    fn counts(passed: u64, failed: u64, ignored: u64) -> Option<niobe_core::TestCounts> {
+        Some(niobe_core::TestCounts {
+            passed,
+            failed,
+            ignored,
+            suites: 3,
+        })
+    }
+
+    #[test]
+    fn a_test_run_whose_result_was_read_shows_its_counts_under_its_call() {
+        let mut app = app();
+        tested(&mut app, 0, counts(637, 0, 2), false);
+
+        let rows = drawn(&app, false);
+        assert!(rows[0].starts_with("⚙ Bash"), "{rows:?}");
+        assert_eq!(rows[1].trim(), "└ 637 passed · 0 failed · 2 ignored");
+    }
+
+    #[test]
+    fn a_failing_test_run_shows_its_failures_in_the_failure_colour_in_place_of_its_status() {
+        let mut app = app();
+        tested(&mut app, 101, counts(630, 7, 0), false);
+
+        let theme = Theme::default();
+        let detail = Detail::default();
+        let lines = lines(&app.entries()[0], 80, detail, &theme);
+        let under: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(under.trim(), "└ 630 passed · 7 failed");
+        let failed = lines[1]
+            .spans
+            .iter()
+            .find(|span| span.content == "7 failed")
+            .expect("the failures are a span of their own");
+        assert_eq!(failed.style.fg, Some(theme.del));
+        assert!(!under.contains("Exit code"), "the counts say why it failed");
+    }
+
+    #[test]
+    fn a_test_run_whose_result_was_not_read_says_so_and_gives_no_number() {
+        let mut app = app();
+        tested(&mut app, 0, None, false);
+
+        let rows = drawn(&app, false);
+        assert_eq!(rows[1].trim(), "└ test result not read");
+        assert!(
+            !rows[1].chars().any(|c| c.is_ascii_digit()),
+            "a filtered run has no count: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_test_run_known_to_have_failed_uncounted_says_so_without_a_count() {
+        let mut app = app();
+        tested(&mut app, 101, None, true);
+
+        assert_eq!(
+            drawn(&app, false)[1].trim(),
+            "└ tests failed · counts not read"
+        );
+    }
+
+    #[test]
+    fn a_test_run_whose_build_failed_keeps_the_reason_the_call_failed() {
+        let mut app = app();
+        tested(&mut app, 101, None, false);
+
+        assert_eq!(drawn(&app, false)[1].trim(), "└ Exit code 101");
+    }
+
+    #[test]
+    fn a_test_run_on_a_narrow_pane_gives_up_whole_figures_and_keeps_its_failures() {
+        let mut app = app();
+        tested(&mut app, 101, counts(630, 7, 1), false);
+
+        let line =
+            lines(&app.entries()[0], 28, Detail::default(), &Theme::default()).swap_remove(1);
+        let under: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(under.trim(), "└ 630 passed · 7 failed");
     }
 
     #[test]

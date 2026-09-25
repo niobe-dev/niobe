@@ -275,8 +275,8 @@ pub struct CheckpointRecord {
     pub label: String,
 }
 
-/// The latest test run the session made, as it reported itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A test run the session made, as it reported itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TestRunRecord {
     /// What its summary counted. `None` where its output did not hold the
     /// whole run, so its result was not read.
@@ -286,6 +286,18 @@ pub struct TestRunRecord {
     /// Whether the run is known to have failed after its tests started,
     /// counted or not. A run whose counts say a test failed always has.
     pub failed: bool,
+}
+
+impl TestRunRecord {
+    /// The run an [`Event::TestRun`] reported, with `failed` set wherever its
+    /// counts say a test failed, whatever the event said.
+    pub fn new(counts: Option<TestCounts>, exit_code: Option<i32>, failed: bool) -> Self {
+        Self {
+            counts,
+            exit_code,
+            failed: failed || counts.is_some_and(|counts| counts.failing()),
+        }
+    }
 }
 
 /// One finished turn's own figures: what it spent between the prompt that
@@ -546,11 +558,7 @@ impl SessionState {
                 failed,
                 ..
             } => {
-                self.test_run = Some(TestRunRecord {
-                    counts: *counts,
-                    exit_code: *exit_code,
-                    failed: *failed || counts.is_some_and(|counts| counts.failing()),
-                });
+                self.test_run = Some(TestRunRecord::new(*counts, *exit_code, *failed));
             }
 
             Event::AgentSpawn { id, .. } => {

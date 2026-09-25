@@ -530,6 +530,10 @@ pub struct Call {
     /// agent made: the agent reads its calls' output, and the transcript
     /// shows what the call did rather than repeating it.
     pub printed: Option<Printed>,
+    /// What it reported, where it was a test run: its counts where its
+    /// output held the whole run, and otherwise that it ran and whether it is
+    /// known to have failed. `None` for every call that was not one.
+    pub tested: Option<TestRunRecord>,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -549,6 +553,7 @@ impl Call {
             took: None,
             change: None,
             printed: None,
+            tested: None,
             started: at,
         }
     }
@@ -809,8 +814,8 @@ pub struct App {
     answered: BTreeMap<ToolCallId, PermissionDecision>,
     /// The call that ended with the event just folded — its entry and its
     /// place in it — and how it came to run. A backend reports a file change
-    /// directly after the end of the call that made it, so this is where the
-    /// change is drawn; any other event in between clears it.
+    /// or a test run directly after the end of the call that made it, so this
+    /// is where either is drawn; any other event in between clears it.
     just_ended: Option<(usize, usize, Option<Gate>)>,
     /// Every sub-agent the session spawned, in the order it spawned them. The
     /// session fold keeps the counts and which ids are running; the label, the
@@ -1250,9 +1255,9 @@ impl App {
                 {
                     call.printed = Some(Printed::of(output));
                 }
-                if *outcome == ToolOutcome::Ok
-                    && let Some((at, index)) = ended
-                {
+                // A failed call is kept too: a test run that failed ended
+                // its call with a failing status.
+                if let Some((at, index)) = ended {
                     self.just_ended = Some((at, index, gate));
                 }
             }
@@ -1268,6 +1273,7 @@ impl App {
                         .entries
                         .get_mut(at)
                         .and_then(|entry| entry.calls.get_mut(index))
+                    && call.outcome == Some(ToolOutcome::Ok)
                 {
                     call.lines = Some((*added, *removed));
                     if !hunks.is_empty() {
@@ -1374,7 +1380,22 @@ impl App {
 
             // Straight after its call's end, so in the same tick and at the
             // same clock: the moment the call finished.
-            Event::TestRun { .. } => self.tested_at = self.at,
+            Event::TestRun {
+                counts,
+                exit_code,
+                failed,
+                ..
+            } => {
+                self.tested_at = self.at;
+                if let Some((at, index, _)) = ended
+                    && let Some(call) = self
+                        .entries
+                        .get_mut(at)
+                        .and_then(|entry| entry.calls.get_mut(index))
+                {
+                    call.tested = Some(TestRunRecord::new(*counts, *exit_code, *failed));
+                }
+            }
 
             Event::AgentSpawn { id, label, .. } => {
                 let spawned = SubAgent {
