@@ -41,6 +41,16 @@ pub const CONTEXT_LINES: usize = 2;
 /// each side — and cap the one that is not at less than a screen.
 pub const MAX_ROWS: usize = 20;
 
+/// The key that opens every diff cut at [`MAX_ROWS`] and cuts them again,
+/// as the marker under a cut diff names it. [`crate::app::App`] binds it.
+pub const OPEN_KEY: &str = "Ctrl+T";
+
+/// Whether a change of `hunks` has more rows than [`MAX_ROWS`], and so is
+/// drawn cut unless the operator has opened the diffs.
+pub(crate) fn is_cut(hunks: &[Hunk]) -> bool {
+    rows(hunks).len() > MAX_ROWS
+}
+
 /// One row of a diff before it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row<'a> {
@@ -108,7 +118,16 @@ fn near_a_change(lines: &[DiffLine]) -> Vec<bool> {
 
 /// A change's rows, fitted to `width` cells, and the row under them that says
 /// how the call was let through.
-pub(crate) fn lines(change: &Change, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+///
+/// A change longer than [`MAX_ROWS`] stops there and says how many rows it
+/// left out, unless `open`, when it draws every row and says how to cut it
+/// again.
+pub(crate) fn lines(
+    change: &Change,
+    width: usize,
+    open: bool,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let rows = rows(change.hunks());
     let number_width = rows
         .iter()
@@ -119,18 +138,18 @@ pub(crate) fn lines(change: &Change, width: usize, theme: &Theme) -> Vec<Line<'s
         .max()
         .unwrap_or(1);
 
+    let shown = match open {
+        true => rows.len(),
+        false => MAX_ROWS,
+    };
     let mut lines: Vec<Line<'static>> = rows
         .iter()
-        .take(MAX_ROWS)
+        .take(shown)
         .map(|row| draw_row(*row, number_width, width, theme))
         .collect();
-    let left_out = rows.len().saturating_sub(MAX_ROWS);
-    if left_out > 0 {
-        let said = format!("… {left_out} more {}", plural(left_out, "row", "rows"));
-        lines.push(Line::from(Span::styled(
-            pad(&text::truncate(&said, width), width),
-            Style::new().fg(theme.dim).bg(theme.diff_bg),
-        )));
+    let beyond = rows.len().saturating_sub(MAX_ROWS);
+    if beyond > 0 {
+        lines.push(marker(beyond, open, width, theme));
     }
     if let Some(gate) = change.gate() {
         lines.push(footer(gate, width, theme));
@@ -171,6 +190,34 @@ fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> L
         Span::styled(pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
     ])
     .style(Style::new().bg(bg))
+}
+
+/// The row under a diff longer than [`MAX_ROWS`]: how many rows are beyond
+/// the cut, and the key that shows or hides them.
+///
+/// The key gives way whole where the pane is too narrow for it, so what is
+/// left still reads as a count rather than as half an instruction.
+fn marker(beyond: usize, open: bool, width: usize, theme: &Theme) -> Line<'static> {
+    let rows = plural(beyond, "row", "rows");
+    let (said, key) = match open {
+        false => (
+            format!("… {beyond} more {rows}"),
+            format!(" · {OPEN_KEY} shows them"),
+        ),
+        true => (
+            format!("▴ the last {beyond} {rows} are shown"),
+            format!(" · {OPEN_KEY} hides them"),
+        ),
+    };
+    let whole = format!("{said}{key}");
+    let said = match text::width(&whole) <= width {
+        true => whole,
+        false => text::truncate(&said, width),
+    };
+    Line::from(Span::styled(
+        pad(&said, width),
+        Style::new().fg(theme.dim).bg(theme.diff_bg),
+    ))
 }
 
 /// `└ allowed by you`: who let the call through, in the words of what
@@ -245,7 +292,11 @@ mod tests {
     }
 
     fn drawn(change: &Change, width: usize) -> Vec<String> {
-        lines(change, width, &CLASSIC)
+        drawn_as(change, width, false)
+    }
+
+    fn drawn_as(change: &Change, width: usize, open: bool) -> Vec<String> {
+        lines(change, width, open, &CLASSIC)
             .iter()
             .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
@@ -403,6 +454,50 @@ mod tests {
         assert_eq!(rows[MAX_ROWS].trim_end(), "… 10 more rows");
     }
 
+    fn thirty_lines() -> Change {
+        let created = Hunk::created(&(1..=30).map(|n| format!("line {n}\n")).collect::<String>())
+            .expect("thirty lines");
+        change(vec![created], Some(Gate::Rule))
+    }
+
+    #[test]
+    fn a_cut_diff_names_the_key_that_shows_the_rest_where_it_fits() {
+        let rows = drawn(&thirty_lines(), 50);
+
+        assert_eq!(
+            rows[MAX_ROWS].trim_end(),
+            "… 10 more rows · Ctrl+T shows them"
+        );
+    }
+
+    #[test]
+    fn an_opened_diff_draws_every_row_then_says_how_to_cut_it_again() {
+        let rows = drawn_as(&thirty_lines(), 50, true);
+
+        assert_eq!(rows.len(), 30 + 2, "every line, the marker and the footer");
+        assert_eq!(rows[29].trim_end(), "30 + line 30");
+        assert_eq!(
+            rows[30].trim_end(),
+            "▴ the last 10 rows are shown · Ctrl+T hides them"
+        );
+        assert_eq!(rows[31], "└ allowed by a standing rule");
+    }
+
+    #[test]
+    fn a_marker_too_wide_for_the_pane_drops_the_key_before_the_count() {
+        let rows = drawn(&thirty_lines(), 24);
+
+        assert_eq!(rows[MAX_ROWS].trim_end(), "… 10 more rows");
+    }
+
+    #[test]
+    fn a_diff_that_fits_is_the_same_opened_or_not() {
+        let diff = change(vec![hunk(1, 1, vec![removed("a"), added("b")])], None);
+
+        assert!(!is_cut(diff.hunks()));
+        assert_eq!(drawn_as(&diff, 20, true), drawn(&diff, 20));
+    }
+
     #[test]
     fn the_footer_says_who_let_the_call_through() {
         let one = || vec![hunk(1, 1, vec![removed("a"), added("b")])];
@@ -432,7 +527,7 @@ mod tests {
     #[test]
     fn the_diff_is_drawn_on_its_own_background_and_not_the_panes() {
         let diff = change(vec![hunk(1, 1, vec![context("a"), added("b")])], None);
-        for line in lines(&diff, 20, &CLASSIC) {
+        for line in lines(&diff, 20, false, &CLASSIC) {
             assert_eq!(background(&line), Some(CLASSIC.diff_bg));
             assert_ne!(background(&line), Some(CLASSIC.pane_bg));
         }

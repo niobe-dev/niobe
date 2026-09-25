@@ -28,8 +28,9 @@ mod common;
 use std::path::PathBuf;
 
 use common::{
-    at_work, metered_session, paint, running_session, screen, session_with_a_markdown_reply,
-    session_with_finished_turns, session_with_test_runs, style_at, styles, unmetered_session,
+    at_work, metered_session, paint, running_session, screen, session_with_a_long_write,
+    session_with_a_markdown_reply, session_with_finished_turns, session_with_test_runs, style_at,
+    styles, unmetered_session,
 };
 use niobe_core::TestCounts;
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
@@ -266,6 +267,28 @@ fn a_finished_turn_is_ruled_off_with_what_it_spent() {
     assert!(frame.contains("── turn 2"), "{frame}");
     assert!(!frame.contains("0% of 5h"), "{frame}");
     assert_snapshot("turns-80x24", &frame);
+}
+
+#[test]
+fn a_diff_cut_at_twenty_rows_opens_in_place_and_cuts_again() {
+    let mut app = session_with_a_long_write();
+
+    let cut = screen(&mut app, 120, 40);
+    assert!(cut.contains("… 10 more rows · Ctrl+T shows them"), "{cut}");
+    assert!(!cut.contains("etag30"), "{cut}");
+    assert_snapshot("diff-cut-120x40", &cut);
+
+    app.open_diffs();
+    let open = screen(&mut app, 120, 40);
+    assert!(open.contains("etag30"), "{open}");
+    assert!(
+        open.contains("▴ the last 10 rows are shown · Ctrl+T hides them"),
+        "{open}"
+    );
+    assert_snapshot("diff-open-120x40", &open);
+
+    app.open_diffs();
+    assert_eq!(screen(&mut app, 120, 40), cut);
 }
 
 #[test]

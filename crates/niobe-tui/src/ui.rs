@@ -34,9 +34,10 @@ use niobe_core::event::{AgentOutcome, Billing, Context, Mode, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, TestRunRecord, ToolTotals, Totals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, AskFocus, Entry, EntryKind, Focus, Pane, Picker, Section,
+    Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker, Section,
     SelectedProfile, SubAgent, tool_label,
 };
+use crate::calls::Detail;
 use crate::clock::{self, Stamp};
 use crate::fx;
 use crate::meter::meter;
@@ -723,9 +724,9 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
     let Some(query) = app.find_query() else {
         return;
     };
-    let folded = app.calls_folded();
+    let detail = transcript_detail(app);
     let (entries, drawn) = app.entries_to_draw();
-    drawn.update(entries, usize::from(width), folded, theme);
+    drawn.update(entries, usize::from(width), detail, theme);
     let found = crate::find::Query::new(&query)
         .map(|query| drawn.find(&query))
         .unwrap_or_default();
@@ -1039,9 +1040,9 @@ fn draw_transcript(
         return;
     }
 
-    let folded = app.calls_folded();
+    let detail = transcript_detail(app);
     let (entries, drawn) = app.entries_to_draw();
-    drawn.update(entries, width, folded, theme);
+    drawn.update(entries, width, detail, theme);
     let above = drawn.line_count();
     let total = above + question.len();
 
@@ -1142,8 +1143,9 @@ fn mark_found(
 /// A finished reply never changes, and parsing and wrapping every one of them
 /// on every frame is what a long session's redraw would otherwise spend its
 /// time on. An entry is drawn again when its text, the pane's width or the
-/// theme changes, or runs of calls are folded or opened, which is everything
-/// its lines depend on.
+/// theme changes, runs of calls are folded or opened, or — for an entry with
+/// a diff longer than it draws unopened — the diffs are opened or cut, which
+/// is everything its lines depend on.
 #[derive(Debug, Default)]
 pub struct DrawnEntries {
     drawn: Vec<(u64, Vec<Line<'static>>)>,
@@ -1151,16 +1153,16 @@ pub struct DrawnEntries {
 
 impl DrawnEntries {
     /// Brings every entry's lines up to date.
-    fn update(&mut self, entries: &[Entry], width: usize, folded: bool, theme: &Theme) {
+    fn update(&mut self, entries: &[Entry], width: usize, detail: Detail, theme: &Theme) {
         self.drawn.truncate(entries.len());
         for (at, entry) in entries.iter().enumerate() {
-            let key = drawn_from(entry, width, folded, theme);
+            let key = drawn_from(entry, width, detail, theme);
             match self.drawn.get_mut(at) {
                 Some((drawn_key, _)) if *drawn_key == key => {}
-                Some(slot) => *slot = (key, entry_lines(entry, width, folded, theme)),
+                Some(slot) => *slot = (key, entry_lines(entry, width, detail, theme)),
                 None => self
                     .drawn
-                    .push((key, entry_lines(entry, width, folded, theme))),
+                    .push((key, entry_lines(entry, width, detail, theme))),
             }
         }
     }
@@ -1192,14 +1194,36 @@ impl DrawnEntries {
 }
 
 /// What an entry's lines are drawn from, as one number.
-fn drawn_from(entry: &Entry, width: usize, folded: bool, theme: &Theme) -> u64 {
+///
+/// Whether the diffs are open goes in only for an entry that holds a diff it
+/// would cut, so opening them lays out again those entries and no other.
+fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     entry.hash(&mut hasher);
     width.hash(&mut hasher);
-    folded.hash(&mut hasher);
+    detail.folded.hash(&mut hasher);
+    if holds_a_cut_diff(entry) {
+        detail.diffs_open.hash(&mut hasher);
+    }
     theme.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Whether any call of `entry` changed more rows than a diff draws unopened.
+fn holds_a_cut_diff(entry: &Entry) -> bool {
+    entry
+        .calls
+        .iter()
+        .any(|call| call.change.as_ref().is_some_and(Change::is_cut))
+}
+
+/// The switches the transcript is drawn under, as the operator last set them.
+fn transcript_detail(app: &App) -> Detail {
+    Detail {
+        folded: app.calls_folded(),
+        diffs_open: app.diffs_open(),
+    }
 }
 
 /// Where the view is in a transcript longer than the pane, drawn over the
@@ -1541,9 +1565,9 @@ fn key_rows(keys: &[(String, &str)], width: usize, theme: &Theme) -> Vec<Line<'s
 }
 
 /// One transcript entry, wrapped to the pane: a head line and its body.
-fn entry_lines(entry: &Entry, width: usize, folded: bool, theme: &Theme) -> Vec<Line<'static>> {
+fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Vec<Line<'static>> {
     if !entry.calls.is_empty() {
-        return crate::calls::lines(entry, width, folded, theme);
+        return crate::calls::lines(entry, width, detail, theme);
     }
     if let EntryKind::Turn(rule) = &entry.kind {
         return crate::turns::lines(rule, width, theme);
@@ -4629,5 +4653,65 @@ mod tests {
         );
         let narrow = section_header(false, "Sub-agents", figures, 39, &theme);
         assert_eq!(line_text(&narrow), "▾ Sub-agents  2 running · 4 failed");
+    }
+
+    /// An edit of `lines` lines to `path`, as the transcript's own entry.
+    fn edited(app: &mut App, id: &str, lines: usize) {
+        use niobe_core::event::{Event, ToolOutcome};
+        let path = format!("{id}.rs");
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Write".to_owned(),
+            input: path.clone(),
+            summary: Some(path.clone()),
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Write".to_owned(),
+            input: path.clone(),
+            output: String::new(),
+            bytes: 64,
+            outcome: ToolOutcome::Ok,
+            summary: Some(path.clone()),
+            exit_code: None,
+            error: None,
+        });
+        let written: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
+        app.apply(&Event::FileChange {
+            path,
+            added: Some(lines as u64),
+            removed: Some(0),
+            hunks: vec![niobe_core::diff::Hunk::created(&written).expect("lines to write")],
+        });
+        app.apply(&Event::AssistantMessage {
+            text: format!("wrote {id}"),
+        });
+    }
+
+    #[test]
+    fn opening_the_diffs_lays_out_again_only_the_entries_that_hold_a_cut_one() {
+        let mut app = App::new(crate::app::Repo::default());
+        edited(&mut app, "short", 3);
+        edited(&mut app, "long", crate::hunks::MAX_ROWS + 10);
+        let keys = |detail: Detail| -> Vec<u64> {
+            app.entries()
+                .iter()
+                .map(|entry| drawn_from(entry, 120, detail, &Theme::default()))
+                .collect()
+        };
+
+        let cut = keys(Detail::default());
+        let open = keys(Detail {
+            diffs_open: true,
+            ..Detail::default()
+        });
+
+        let changed: Vec<usize> = (0..cut.len()).filter(|&at| cut[at] != open[at]).collect();
+        let long = app
+            .entries()
+            .iter()
+            .position(holds_a_cut_diff)
+            .expect("the long write is cut");
+        assert_eq!(changed, vec![long]);
     }
 }

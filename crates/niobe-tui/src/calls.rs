@@ -32,6 +32,17 @@ use crate::theme::Theme;
 use crate::ui::count;
 use niobe_core::event::ToolOutcome;
 
+/// How much of a tool-call entry the operator has asked to see: the two
+/// switches that hold for the whole transcript.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Detail {
+    /// Every run of calls is drawn as its group row alone.
+    pub(crate) folded: bool,
+    /// Every diff is drawn whole rather than cut at
+    /// [`crate::hunks::MAX_ROWS`].
+    pub(crate) diffs_open: bool,
+}
+
 /// The glyph and the space after it, which every row of the transcript starts
 /// with.
 const GUTTER: usize = 2;
@@ -54,13 +65,13 @@ const STEM: &str = "│ ";
 pub(crate) fn lines(
     entry: &Entry,
     width: usize,
-    folded: bool,
+    detail: Detail,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let colour = entry.kind.colour(theme);
     let mut lines = match entry.calls.as_slice() {
-        [call] => single(&entry.head, call, width, colour, theme),
-        calls => group(&entry.head, calls, width, folded, colour, theme),
+        [call] => single(&entry.head, call, width, detail, colour, theme),
+        calls => group(&entry.head, calls, width, detail, colour, theme),
     };
     lines.push(Line::from(""));
     lines
@@ -72,6 +83,7 @@ fn single(
     head: &str,
     call: &Call,
     width: usize,
+    detail: Detail,
     colour: Color,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
@@ -88,7 +100,7 @@ fn single(
         colour,
         theme,
     )];
-    lines.extend(under(call, " ".repeat(GUTTER), width, theme));
+    lines.extend(under(call, " ".repeat(GUTTER), width, detail, theme));
     lines
 }
 
@@ -98,11 +110,11 @@ fn group(
     head: &str,
     calls: &[Call],
     width: usize,
-    folded: bool,
+    detail: Detail,
     colour: Color,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let glyph = match folded {
+    let glyph = match detail.folded {
         true => "▸",
         false => "▾",
     };
@@ -121,7 +133,7 @@ fn group(
         colour,
         theme,
     )];
-    if folded {
+    if detail.folded {
         return lines;
     }
 
@@ -131,7 +143,7 @@ fn group(
         let branch = if last { LAST_BRANCH } else { BRANCH };
         let stem = if last { "  " } else { STEM };
         lines.push(child(branch, call, width, theme));
-        lines.extend(under(call, format!("{indent}{stem}"), width, theme));
+        lines.extend(under(call, format!("{indent}{stem}"), width, detail, theme));
     }
     lines
 }
@@ -163,12 +175,18 @@ fn child(branch: &str, call: &Call, width: usize, theme: &Theme) -> Line<'static
 
 /// What is drawn under a call's row: why it failed, or the lines it changed,
 /// each line led by `lead`.
-fn under(call: &Call, lead: String, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn under(
+    call: &Call,
+    lead: String,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let room = width.saturating_sub(text::width(&lead));
     let body = match (&call.printed, call.failed(), &call.change) {
         (Some(printed), _, _) => printed_lines(call, printed, room, theme),
         (None, true, _) => vec![reason(call, room, theme)],
-        (None, false, Some(change)) => crate::hunks::lines(change, room, theme),
+        (None, false, Some(change)) => crate::hunks::lines(change, room, detail.diffs_open, theme),
         (None, false, None) => Vec::new(),
     };
     body.into_iter()
@@ -444,7 +462,11 @@ mod tests {
 
     /// The first entry of `app` as the transcript draws it, one string a row.
     fn drawn(app: &App, folded: bool) -> Vec<String> {
-        lines(&app.entries()[0], 80, folded, &Theme::default())
+        let detail = Detail {
+            folded,
+            diffs_open: false,
+        };
+        lines(&app.entries()[0], 80, detail, &Theme::default())
             .into_iter()
             .map(|line| {
                 line.spans

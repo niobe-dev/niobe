@@ -636,6 +636,40 @@ if (res.status === 304) return cached.body;
 
 /// The running session after one more prompt, answered in [`MARKDOWN_REPLY`],
 /// scrolled to the reply.
+/// The running session with a file of thirty lines written at its end: a
+/// diff longer than the transcript draws unopened.
+pub fn session_with_a_long_write() -> App {
+    let mut app = running_session();
+    let path = "catalog/fixtures.ts".to_owned();
+    app.apply(&Event::ToolCallStart {
+        id: "w1".into(),
+        name: "Write".to_owned(),
+        input: path.clone(),
+        summary: Some(path.clone()),
+    });
+    app.apply(&Event::ToolCallEnd {
+        id: "w1".into(),
+        name: "Write".to_owned(),
+        input: path.clone(),
+        output: String::new(),
+        bytes: 900,
+        outcome: ToolOutcome::Ok,
+        summary: Some(path.clone()),
+        exit_code: None,
+        error: None,
+    });
+    let written: String = (1..=30)
+        .map(|n| format!("export const etag{n:02} = \"W/\\\"{n:04}\\\"\";\n"))
+        .collect();
+    app.apply(&Event::FileChange {
+        path,
+        added: Some(30),
+        removed: Some(0),
+        hunks: vec![Hunk::created(&written).expect("thirty lines")],
+    });
+    app
+}
+
 pub fn session_with_a_markdown_reply() -> App {
     let mut app = running_session();
     app.apply(&Event::UserMessage {

@@ -653,6 +653,10 @@ pub struct Change {
     /// ten times a second — measured at a millisecond of a 16 ms frame for
     /// fifty diffs.
     fingerprint: u64,
+    /// Whether the change is longer than a diff draws unopened, worked out
+    /// once for the same reason: only an entry holding such a change is laid
+    /// out again when the operator opens the diffs.
+    cut: bool,
 }
 
 impl Change {
@@ -662,10 +666,17 @@ impl Change {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         hunks.hash(&mut hasher);
         Self {
+            cut: crate::hunks::is_cut(&hunks),
             hunks,
             gate,
             fingerprint: hasher.finish(),
         }
+    }
+
+    /// Whether the change has more rows than [`crate::hunks::MAX_ROWS`], and
+    /// so is drawn cut unless the diffs are open.
+    pub fn is_cut(&self) -> bool {
+        self.cut
     }
 
     /// The hunks, as the backend reported them. Never empty for a change a
@@ -792,6 +803,7 @@ pub struct App {
     /// Whether a run of calls is drawn as its group row alone, rather than
     /// with a row for each call under it.
     calls_folded: bool,
+    diffs_open: bool,
     /// How each call the operator or a rule let through was allowed, until
     /// the call ends and its entry takes the answer.
     answered: BTreeMap<ToolCallId, PermissionDecision>,
@@ -997,6 +1009,7 @@ impl App {
             tool_entries: BTreeMap::new(),
             run: None,
             calls_folded: false,
+            diffs_open: false,
             answered: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
@@ -1476,6 +1489,20 @@ impl App {
     /// one the operator was not looking at.
     pub fn fold_calls(&mut self) {
         self.calls_folded = !self.calls_folded;
+    }
+
+    /// Whether every diff longer than [`crate::hunks::MAX_ROWS`] is drawn
+    /// whole rather than cut there.
+    pub fn diffs_open(&self) -> bool {
+        self.diffs_open
+    }
+
+    /// Opens every cut diff to all its rows, or cuts them all again.
+    ///
+    /// One switch for the whole transcript, as [`App::fold_calls`] is and
+    /// for its reason: nothing says which diff a key would be meant for.
+    pub fn open_diffs(&mut self) {
+        self.diffs_open = !self.diffs_open;
     }
 
     /// Folds in an event the operator produced here and queues it to be kept.
@@ -2684,7 +2711,7 @@ impl App {
 
     /// One key, while a search is open. Returns whether the search took it.
     ///
-    /// The F-keys, Shift+Tab and Ctrl+O still do what they do everywhere;
+    /// The F-keys, Shift+Tab, Ctrl+O and Ctrl+T still do what they do everywhere;
     /// every other key is the search's, so nothing typed at it lands in the
     /// composer behind it. The key that opened it, pressed again on an empty
     /// query, closes it and types itself: that is how a prompt starts with a
@@ -2697,7 +2724,8 @@ impl App {
         };
         let empty = find.query.is_empty();
         match (key.code, key.modifiers) {
-            (KeyCode::F(_) | KeyCode::BackTab, _) | (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+            (KeyCode::F(_) | KeyCode::BackTab, _)
+            | (KeyCode::Char('o' | 't'), KeyModifiers::CONTROL) => {
                 return false;
             }
             (KeyCode::Esc, _) => self.close_find(),
@@ -2910,6 +2938,7 @@ impl App {
             }
             (KeyCode::Enter, _) => self.submit(),
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.fold_calls(),
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.open_diffs(),
 
             // Shift+Tab reaches crossterm as its own code rather than as Tab
             // with a modifier, which is why it is matched on the code alone.
@@ -2956,13 +2985,21 @@ impl App {
 
     /// One key, while a prompt has the keyboard.
     ///
-    /// Scrolling still scrolls, because the work that led to the question is
+    /// Scrolling still scrolls and a cut diff still opens, because the work that led to the question is
     /// what the operator reads to answer it. Anything else that is not about
     /// the question is swallowed rather than passed on: a key that did
     /// something else while a question was being asked would be a key nobody
     /// meant.
     fn on_ask_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
         if self.scroll_key(key) {
+            return;
+        }
+        // Opening a cut diff is reading too: the change a question is about
+        // may be the one that was cut.
+        if (key.code, key.modifiers) == (KeyCode::Char('t'), KeyModifiers::CONTROL) {
+            self.open_diffs();
             return;
         }
         // The question is the last thing in the transcript. Scrolled back,
@@ -3319,7 +3356,8 @@ fn fkey_hint(n: u8) -> &'static str {
             "F1 Help — the help browser is not implemented yet. Tab or a click moves the \
              keyboard between the panes; the wheel and PgUp/PgDn scroll the one that has it, \
              and in the right-hand panes ↑↓ and Enter fold a section; Ctrl+End returns to the \
-             newest line; Ctrl+O folds runs of tool calls; Shift- or Option-drag selects text"
+             newest line; Ctrl+O folds runs of tool calls; Ctrl+T shows the rows of a diff cut \
+             short; Shift- or Option-drag selects text"
         }
         2 => {
             "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \
@@ -5626,5 +5664,47 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(!app.calls_folded());
+    }
+
+    fn ctrl_t(app: &mut App) {
+        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn ctrl_t_opens_every_cut_diff_and_cuts_them_again() {
+        let mut app = app();
+        assert!(!app.diffs_open(), "a diff starts cut");
+
+        ctrl_t(&mut app);
+        assert!(app.diffs_open());
+        assert_eq!(app.composed(), "", "the key reached the composer");
+
+        ctrl_t(&mut app);
+        assert!(!app.diffs_open());
+    }
+
+    #[test]
+    fn ctrl_t_opens_the_diffs_while_a_search_is_open_and_leaves_the_query_alone() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('x'));
+
+        ctrl_t(&mut app);
+
+        assert!(app.diffs_open());
+        assert_eq!(app.find_query().as_deref(), Some("x"));
+    }
+
+    /// The change a question is about may be the one that was cut, so the
+    /// key reads the diff rather than being swallowed with the others.
+    #[test]
+    fn ctrl_t_opens_the_diffs_while_a_question_waits_and_answers_nothing() {
+        let mut app = asked(Some("ls"));
+
+        ctrl_t(&mut app);
+
+        assert!(app.diffs_open());
+        assert!(app.asking().is_some(), "the key answered the question");
+        assert!(app.take_produced().is_empty(), "{:?}", app.take_produced());
     }
 }

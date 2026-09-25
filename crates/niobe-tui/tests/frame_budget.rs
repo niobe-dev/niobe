@@ -106,6 +106,42 @@ fn a_long_session_of_diffs_redraws_inside_a_frame_budget() {
     let _alone = ALONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = session_of_diffs();
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame of {LONG_SESSION_DIFFS} diffs at 200x60 took {median:?}, over the \
+         {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// The same redraw with every diff opened to all its rows: each of these is
+/// two hunks one row past the cut, so every entry holds more rows, and the
+/// frame still costs only what its visible rows cost.
+#[test]
+fn a_long_session_of_opened_diffs_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = session_of_diffs();
+    app.open_diffs();
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame of {LONG_SESSION_DIFFS} opened diffs at 200x60 took {median:?}, over \
+         the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// A running session with [`LONG_SESSION_DIFFS`] edits in it, each drawn
+/// under its call as the lines it changed.
+fn session_of_diffs() -> App {
     let mut app = running_session();
     for n in 0..LONG_SESSION_DIFFS {
         let id = format!("edit-{n}");
@@ -134,15 +170,7 @@ fn a_long_session_of_diffs_redraws_inside_a_frame_budget() {
             hunks: vec![edit_hunk(40), edit_hunk(210)],
         });
     }
-    let _ = screen(&mut app, 200, 60);
-
-    let median = median_frame(&mut app, &[(200, 60)]);
-
-    assert!(
-        median <= FRAME_BUDGET,
-        "the median frame of {LONG_SESSION_DIFFS} diffs at 200x60 took {median:?}, over the \
-         {FRAME_BUDGET:?} budget"
-    );
+    app
 }
 
 /// Three lines of context each side of two removed lines and four added ones,
