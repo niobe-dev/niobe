@@ -1,40 +1,40 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
-┏━━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌──────────────── Usage ────────────────┐
-┃                                                                            ┃ │                                       │
-┃ ◆ claude                                                                   ┃ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
-┃   The notebook that demonstrates the fetcher needs the new call shape.     ┃ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
-┃                                                                            ┃ │ ───────────────────────────────────── │
-┃ ✗ Bash                       npm test -- fetch               exit 1 · 0.4s ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
-┃   └ 1 failing: fetch returns the cached body on a 304                      ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
-┃                                                                            ┃ │ API-equivalent ≥$0.04                 │
-┃ ◆ claude                                                                   ┃ │ ───────────────────────────────────── │
-┃   Etags cached in the LRU; 304s short-circuit. One test still red — the    ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
-┃   304 path asserts a body that is no longer sent.                          ┃ └───────────────────────────────────────┘
-┃                                                                            ┃ ┌─────────────── Changes ───────────────┐
-┃ ⚙ Write                      catalog/fixtures.ts                    +30 −0 ┃ │                                       │
-┃    1 + export const etag01 = "W/\"0001\"";                                 ┃ │ ⎇ main ↑3                             █
-┃    2 + export const etag02 = "W/\"0002\"";                                 ┃ │ ▾ Working tree  23 files  +977 −259   █
-┃    3 + export const etag03 = "W/\"0003\"";                                 ┃ │   .                                   █
-┃    4 + export const etag04 = "W/\"0004\"";                                 ┃ │     CHANGELOG.md                +0 −0 │
-┃    5 + export const etag05 = "W/\"0005\"";                                 ┃ │   catalog/                            │
-┃    6 + export const etag06 = "W/\"0006\"";                                 ┃ │     fetch.ts                 +149 −12 │
-┃    7 + export const etag07 = "W/\"0007\"";                                 ┃ │     etag.ts                   +88 −41 │
-┃    8 + export const etag08 = "W/\"0008\"";                                 █ │     cache/lru.ts               +31 −9 │
-┃    9 + export const etag09 = "W/\"0009\"";                                 █ │     cache/index.ts             +12 −0 │
-┃   10 + export const etag10 = "W/\"0010\"";                                 █ │   docs/                               │
-┃   11 + export const etag11 = "W/\"0011\"";                                 █ │     caching.md                +64 −22 │
-┃   12 + export const etag12 = "W/\"0012\"";                                 █ │     adr/0004-etags.md          +34 −1 │
-┃   13 + export const etag13 = "W/\"0013\"";                                 █ └───────────────────────────────────────┘
-┃   14 + export const etag14 = "W/\"0014\"";                                 █ ┌────────────── Activity ───────────────┐
-┃   15 + export const etag15 = "W/\"0015\"";                                 █ │                                       │
-┃   16 + export const etag16 = "W/\"0016\"";                                 █ │ ▾ Sub-agents  1 running · 1 failed    █
-┃   17 + export const etag17 = "W/\"0017\"";                                 █ │ ◆ test-writer → tests… running 1m 42s █
-┃   18 + export const etag18 = "W/\"0018\"";                                 █ │   └ Reading tests/stream.rs           █
-┃   19 + export const etag19 = "W/\"0019\"";                                 █ │ ◇ reviewer → catalog/c… done 4100 ctx █
-┃   20 + export const etag20 = "W/\"0020\"";                                 █ │ ✗ doc-writer → docs/etags.md   failed │
-┃   … 10 more rows · Ctrl+T shows them                                       █ │   └ Notion 404, gave up after 2 retr… │
-┃                                                                            █ │ ▾ Decisions  2                        │
-┃ ────────────────────────────────────────────────────────────────────────── ┃ │   13:39 Key the cache on the request  │
-┃  ask  >  Ask for a change · / search transcript · @ file       ▸▸ ask mode ┃ │         URL, not the manifest id —    │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+ ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃                                                                          ┃ │                                       │
+ ┃ ◆ claude                                                                 ┃ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.   ┃ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
+ ┃                                                                          ┃ │ ───────────────────────────────────── │
+ ┃ ✗ Bash                       npm test -- fetch             exit 1 · 0.4s ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃   └ 1 failing: fetch returns the cached body on a 304                    ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃                                                                          ┃ │ API-equivalent ≥$0.04                 │
+ ┃ ◆ claude                                                                 ┃ │ ───────────────────────────────────── │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
+ ┃   304 path asserts a body that is no longer sent.                        ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌─────────────── Changes ───────────────┐
+ ┃ ⚙ Write                      catalog/fixtures.ts                  +30 −0 ┃ │                                       │
+ ┃    1 + export const etag01 = "W/\"0001\"";                               ┃ │ ⎇ main ↑3                             █
+ ┃    2 + export const etag02 = "W/\"0002\"";                               ┃ │ ▾ Working tree  23 files  +977 −259   █
+ ┃    3 + export const etag03 = "W/\"0003\"";                               ┃ │   .                                   █
+ ┃    4 + export const etag04 = "W/\"0004\"";                               ┃ │     CHANGELOG.md                +0 −0 │
+ ┃    5 + export const etag05 = "W/\"0005\"";                               ┃ │   catalog/                            │
+ ┃    6 + export const etag06 = "W/\"0006\"";                               ┃ │     fetch.ts                 +149 −12 │
+ ┃    7 + export const etag07 = "W/\"0007\"";                               ┃ │     etag.ts                   +88 −41 │
+ ┃    8 + export const etag08 = "W/\"0008\"";                               ┃ │     cache/lru.ts               +31 −9 │
+ ┃    9 + export const etag09 = "W/\"0009\"";                               █ │     cache/index.ts             +12 −0 │
+ ┃   10 + export const etag10 = "W/\"0010\"";                               █ │   docs/                               │
+ ┃   11 + export const etag11 = "W/\"0011\"";                               █ │     caching.md                +64 −22 │
+ ┃   12 + export const etag12 = "W/\"0012\"";                               █ │     adr/0004-etags.md          +34 −1 │
+ ┃   13 + export const etag13 = "W/\"0013\"";                               █ └───────────────────────────────────────┘
+ ┃   14 + export const etag14 = "W/\"0014\"";                               █ ┌────────────── Activity ───────────────┐
+ ┃   15 + export const etag15 = "W/\"0015\"";                               █ │                                       │
+ ┃   16 + export const etag16 = "W/\"0016\"";                               █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   17 + export const etag17 = "W/\"0017\"";                               █ │ ◆ test-writer → tests… running 1m 42s █
+ ┃   18 + export const etag18 = "W/\"0018\"";                               █ │   └ Reading tests/stream.rs           █
+ ┃   19 + export const etag19 = "W/\"0019\"";                               █ │ ◇ reviewer → catalog/c… done 4100 ctx █
+ ┃   20 + export const etag20 = "W/\"0020\"";                               █ │ ✗ doc-writer → docs/etags.md   failed │
+ ┃   … 10 more rows · Ctrl+T shows them                                     █ │   └ Notion 404, gave up after 2 retr… │
+ ┃                                                                          █ │ ▾ Decisions  2                        │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   13:39 Key the cache on the request  │
+ ┃  ask  >  Ask for a change · / search transcript · @ file     ▸▸ ask mode ┃ │         URL, not the manifest id —    │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

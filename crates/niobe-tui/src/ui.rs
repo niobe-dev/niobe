@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -54,6 +54,10 @@ pub const MIN_SIZE: (u16, u16) = (80, 24);
 /// the session pane takes the whole body: three more panes squeezed into forty
 /// columns each is less readable than the transcript they were taken from.
 pub const WIDE_COLUMNS: u16 = 100;
+
+/// Columns of desktop the wide layout leaves at each edge of the body and
+/// between its panes.
+const DESKTOP_MARGIN: u16 = 1;
 
 /// Columns the transcript gives to an entry's glyph.
 const GUTTER: usize = 2;
@@ -459,9 +463,20 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     // them. The transcript is what a session is read in; the panes beside it
     // are figures, and a figure needs a fraction of the width a paragraph
     // does.
-    let [left, right] = Layout::horizontal([Constraint::Fill(19), Constraint::Fill(10)])
-        .spacing(1)
+    let [_, stack] = Layout::horizontal([Constraint::Fill(19), Constraint::Fill(10)])
+        .spacing(DESKTOP_MARGIN)
         .areas(area);
+
+    // And a column of desktop at each edge of the screen, so the motion
+    // behind the panes shows in three places rather than one seam. Both come
+    // out of the session pane: its prose rewraps a column narrower, where the
+    // right stack's rows are as wide as their figures need and a column less
+    // would cost the context meter a cell. Narrow, the columns are worth more
+    // as transcript.
+    let panes = area.inner(Margin::new(DESKTOP_MARGIN, 0));
+    let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(stack.width)])
+        .spacing(DESKTOP_MARGIN)
+        .areas(panes);
 
     draw_session(frame, left, true, app, theme);
 

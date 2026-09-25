@@ -109,8 +109,8 @@ impl Field {
         // A drop that has fallen out of the bottom waits a while before the
         // next one enters at the top, and how long is the column's own. No
         // longer than a quarter of the screen: where the only desktop the
-        // panes leave is one column, a long wait is a long stretch of a
-        // running turn that looks like a stopped one.
+        // panes leave is a few single columns, a long wait is a long stretch
+        // of a running turn that looks like a stopped one.
         let pause = scramble(column, 1) % (rows / 4 + 1);
         let lap = rows + RAIN_TRAIL + pause;
         let at = steps.wrapping_add(scramble(column, 2)) % lap;
@@ -368,8 +368,9 @@ mod tests {
         }
     }
 
-    /// Only the gutter between the panes may be uncovered, so the motion has
-    /// to show in any one column, not just somewhere on the screen.
+    /// Only a column at each edge and the one between the panes may be
+    /// uncovered, so the motion has to show in any one column, not just
+    /// somewhere on the screen.
     #[test]
     fn every_column_of_a_moving_theme_shows_the_motion_within_a_lap() {
         for theme in THEMES {

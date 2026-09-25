@@ -1208,6 +1208,7 @@ fn the_session_pane_is_titled_by_what_the_session_is_about_at_every_width() {
             .position(|&c| c == FOCUS_TOP_RIGHT)
             .unwrap_or_else(|| panic!("no top-right corner at {width}:\n{frame}"));
         let edge: String = top[..=corner].iter().collect();
+        let edge = edge.trim_start();
 
         assert!(
             edge.starts_with(&format!("{FOCUS_TOP_LEFT}{FOCUS_EDGE}"))
@@ -1405,14 +1406,16 @@ fn the_desktop_moves_between_the_panes_while_a_turn_runs() {
     );
 }
 
-/// The cells of the body that are desktop in `frame`: in a column no pane
-/// draws anything in, from the first row of the body to the last. A pane
-/// always draws its border at its top, so no column a pane is in qualifies.
-fn desktop_columns(frame: &str) -> Vec<usize> {
+/// The cells of the body that are desktop in a `width`-column `frame`: in a
+/// column no pane draws anything in, from the first row of the body to the
+/// last. A pane always draws its border at its top, so no column a pane is in
+/// qualifies. A frame's rows are trimmed of trailing blanks, so a cell past
+/// the end of its row is blank.
+fn desktop_columns(frame: &str, width: u16) -> Vec<usize> {
     let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
     let body = &rows[1..rows.len() - 1];
-    (0..rows[0].len())
-        .filter(|&x| body.iter().all(|row| row.get(x) == Some(&' ')))
+    (0..usize::from(width))
+        .filter(|&x| body.iter().all(|row| row.get(x).is_none_or(|&c| c == ' ')))
         .collect()
 }
 
@@ -1441,9 +1444,17 @@ fn the_motion_never_touches_a_cell_a_pane_owns() {
                     };
                     let (mut on, mut off) = (dressed(true), dressed(false));
                     let still = screen(&mut off, width, height);
-                    let desktop = desktop_columns(&still);
+                    let desktop = desktop_columns(&still, width);
+                    // Wide, a column at each edge of the screen and one
+                    // between the session pane and the right stack; narrow,
+                    // the session pane takes the whole body.
                     let wide = width >= ui::WIDE_COLUMNS;
-                    assert_eq!(desktop.len(), usize::from(wide), "{width}x{height}");
+                    assert_eq!(desktop.len(), 3 * usize::from(wide), "{width}x{height}");
+                    if wide {
+                        let edges = (desktop.first(), desktop.last());
+                        let last = usize::from(width) - 1;
+                        assert_eq!(edges, (Some(&0), Some(&last)), "{width}x{height}");
+                    }
                     let (moving, moving_styles) = (
                         screen(&mut on, width, height),
                         styles(&mut on, width, height),
@@ -1494,7 +1505,12 @@ fn with_effects_off_the_desktop_is_empty_while_a_turn_runs() {
         );
         let frame = screen(&mut app, 120, 30);
         let desk = gutter(&frame);
-        assert_eq!(desktop_columns(&frame).len(), 1, "{}: {frame}", theme.name);
+        assert_eq!(
+            desktop_columns(&frame, 120).len(),
+            3,
+            "{}: {frame}",
+            theme.name
+        );
         assert!(
             desk.chars().all(char::is_whitespace),
             "{}: {desk:?}",

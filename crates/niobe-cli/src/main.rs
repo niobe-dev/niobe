@@ -930,8 +930,8 @@ THEME:
 
     While a turn runs, the desktop behind the panes moves: rain in neo,
     drifting words in cyber, a radar in modern; classic stays still. You see
-    it between the panes. effects = false at the top of a config keeps it
-    still in every theme.
+    it between the panes and at the screen's edges. effects = false at the top
+    of a config keeps it still in every theme.
 
 BUDGET:
     --budget <amount> caps what a session may spend, in dollars, and niobe says
