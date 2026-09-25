@@ -1,5 +1,5 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+┏━━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌──────────────── Usage ────────────────┐
 ┃                                                                            ┃ │                                       │
 ┃    45 +   }                                                                ┃ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
 ┃    46 +   const res = await fetch(url, { ...init, headers });              ┃ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │

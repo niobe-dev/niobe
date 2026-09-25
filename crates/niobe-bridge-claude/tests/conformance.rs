@@ -91,7 +91,7 @@ const SHAPES: &[&str] = &[
     "delta/input_json_delta",
     "delta/signature_delta",
     // The transcript's own records: what the session cost, how it was gating
-    // calls, and the CLI's furniture.
+    // calls, what the CLI titled it, and the CLI's furniture.
     "agent-name",
     "ai-title",
     "attachment",

@@ -1,5 +1,5 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┏━━━━━━━━━━━━━━━━━━━━ what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━━━┓
 ┃                                                                              ┃
 ┃ > you                                                                        ┃
 ┃   what does the fetcher do with a 304?                                       ┃

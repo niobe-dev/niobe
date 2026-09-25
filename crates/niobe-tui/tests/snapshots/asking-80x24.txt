@@ -1,5 +1,5 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┏━━━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━━━┓
 ┃                                                                              ┃
 ┃   path asserts a body that is no longer sent.                                ┃
 ┃                                                                              ┃

@@ -130,6 +130,24 @@ fn a_transcript_folds_into_what_the_session_said_and_did() {
 }
 
 #[test]
+fn a_transcript_is_captioned_by_the_title_the_cli_gave_it() {
+    let events = folded();
+
+    let titles: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Titled { title } => Some(title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(titles, ["Etag on the catalog response"]);
+    assert_eq!(
+        SessionState::replay(&events).caption().as_deref(),
+        Some("Etag on the catalog response")
+    );
+}
+
+#[test]
 fn a_transcript_says_what_it_ran_as_and_what_it_ran_on() {
     let events = folded();
 

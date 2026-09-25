@@ -1,5 +1,5 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+┏━━━━━━━━━━━━━━━━━━━ what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
 ┃                                                                            ┃ │                                       │
 ┃ > you                                                                      ┃ │ 5h    ▓▓░░░░░░░░░  15% · resets 16:40 │
 ┃   what does the fetcher do with a 304?                                     ┃ │ ───────────────────────────────────── │

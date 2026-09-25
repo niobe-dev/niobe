@@ -578,12 +578,7 @@ fn pane(title: impl Into<String>, area: Rect, border: Border, theme: &Theme) -> 
 /// whether the right-hand stack is on screen beside it, which decides whether
 /// Tab has anywhere to go.
 fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme: &Theme) {
-    let repo = &app.repo().name;
-    let title = if repo.is_empty() {
-        "Session".to_owned()
-    } else {
-        format!("Session ─ {repo}")
-    };
+    let title = session_caption(app.session(), &app.repo().name, area.width);
 
     app.measured_session(area);
     app.drew_jump(None);
@@ -629,6 +624,26 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     );
 
     draw_ask_bar(frame, composer, said, app, theme);
+}
+
+/// The border cells a pane's title leaves on its top edge: a corner and a
+/// cell of the edge either side, so the pane still reads as framed, and the
+/// space either side of the title itself.
+const TITLE_MARGIN: u16 = 6;
+
+/// The session pane's title on a pane `width` wide: what the session is about
+/// where it says ([`SessionState::caption`]), and the repository it runs in
+/// where it does not yet.
+///
+/// Cut between words where it is longer than the edge has room for, so that
+/// the corners and a cell of the edge either side survive at every width.
+fn session_caption(session: &SessionState, repo: &str, width: u16) -> String {
+    let title = match session.caption() {
+        Some(caption) => caption,
+        None if repo.is_empty() => "Session".to_owned(),
+        None => format!("Session ─ {repo}"),
+    };
+    text::truncate_words(&title, usize::from(width.saturating_sub(TITLE_MARGIN)))
 }
 
 /// The badge in front of the composer: what the bar is for, as a chip.
@@ -3065,6 +3080,46 @@ mod tests {
     impl Prices for NothingIsPriced {
         fn estimate(&self, _usage: &Usage) -> Option<f64> {
             None
+        }
+    }
+
+    fn said(text: &str) -> niobe_core::event::Event {
+        niobe_core::event::Event::UserMessage {
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_session_with_nothing_said_is_titled_by_its_repository() {
+        let session = SessionState::new();
+        assert_eq!(session_caption(&session, "niobe", 80), "Session ─ niobe");
+        assert_eq!(session_caption(&session, "", 80), "Session");
+    }
+
+    #[test]
+    fn a_session_is_titled_by_what_it_is_about() {
+        let session = SessionState::replay(&[said("Cost floors and replay pricing")]);
+        assert_eq!(
+            session_caption(&session, "niobe", 80),
+            "Cost floors and replay pricing"
+        );
+    }
+
+    #[test]
+    fn a_caption_longer_than_its_pane_is_cut_between_words_inside_the_margin() {
+        let session = SessionState::replay(&[said("Cost floors and replay pricing")]);
+        // Thirty columns of caption and six of margin: one short, and the
+        // last word goes whole.
+        assert_eq!(
+            session_caption(&session, "niobe", 35),
+            "Cost floors and replay…"
+        );
+        for width in 0..=40 {
+            let caption = session_caption(&session, "niobe", width);
+            assert!(
+                text::width(&caption) <= usize::from(width.saturating_sub(TITLE_MARGIN)),
+                "{width}: {caption}"
+            );
         }
     }
 

@@ -451,8 +451,9 @@ It carries what the transcript does differently from the live stream:
   token of the session twice;
 - a model that never produced a message of its own (`claude-haiku-4-5`) and
   whose tokens and cost therefore arrive only in `modelUsage`;
-- the CLI's own furniture — `mode`, `permission-mode`, `ai-title`,
-  `agent-name`, `last-prompt`, `pr-link`, `attachment`,
+- the CLI's own title for the session, `ai-title` — `Etag on the catalog
+  response` — which is read as the session's caption;
+- the CLI's own furniture — `mode`, `permission-mode`, `agent-name`, `last-prompt`, `pr-link`, `attachment`,
   `file-history-snapshot`, `bridge-session`, `system` — which is read for
   nothing and must not be reported as records Niobe cannot read. The last three
   of those were missing when the shape inventory was first taken across every

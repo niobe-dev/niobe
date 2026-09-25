@@ -1,5 +1,5 @@
  Niobe  Session  Files  Tools  Usage  Options  Help           ● working 1m 15s
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ fix the etag test ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃                                                                              ┃
 ┃ > you                                                                        ┃
 ┃   fix the etag test                                                          ┃

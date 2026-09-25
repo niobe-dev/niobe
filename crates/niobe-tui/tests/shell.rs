@@ -1052,8 +1052,45 @@ fn the_right_stack_collapses_below_a_hundred_columns() {
     }
 
     // The session pane is what the room goes to.
-    assert!(narrow.contains("Session ─ example-app"));
-    assert!(wide.contains("Session ─ example-app"));
+    assert!(narrow.contains(" add etag support "));
+    assert!(wide.contains(" add etag support "));
+}
+
+#[test]
+fn the_session_pane_is_titled_by_what_the_session_is_about_at_every_width() {
+    let mut app = empty_session();
+    app.apply(&Event::UserMessage {
+        text: "Price the replayed sessions against the dated table and show the cost floor"
+            .to_owned(),
+    });
+
+    for width in 80..=200 {
+        let frame = screen(&mut app, width, 24);
+        let top: Vec<char> = frame.lines().nth(1).unwrap_or_default().chars().collect();
+        let corner = top
+            .iter()
+            .position(|&c| c == FOCUS_TOP_RIGHT)
+            .unwrap_or_else(|| panic!("no top-right corner at {width}:\n{frame}"));
+        let edge: String = top[..=corner].iter().collect();
+
+        assert!(
+            edge.starts_with(&format!("{FOCUS_TOP_LEFT}{FOCUS_EDGE}"))
+                && edge.ends_with(&format!("{FOCUS_EDGE}{FOCUS_TOP_RIGHT}")),
+            "the edge is broken at {width}: {edge}"
+        );
+        assert!(
+            edge.contains(" Price the replayed "),
+            "no caption at {width}: {edge}"
+        );
+        assert!(
+            edge.contains("cost floor ") || edge.contains("… "),
+            "the caption is cut without saying so at {width}: {edge}"
+        );
+        assert!(
+            !edge.contains("Session ─"),
+            "the repository stands in for a caption at {width}: {edge}"
+        );
+    }
 }
 
 /// The rows a pane's top border is on, in the order they appear, whether the
@@ -2081,7 +2118,7 @@ fn the_pane_with_the_keyboard_is_the_one_drawn_in_the_focus_line() {
     let frame = screen(&mut app, 120, 30);
 
     assert_snapshot("activity-focused-120x30", &frame);
-    let focused: Vec<&str> = ["Session ─ example-app", "Usage", "Changes", "Activity"]
+    let focused: Vec<&str> = ["add etag support", "Usage", "Changes", "Activity"]
         .into_iter()
         .filter(|title| title_row(&frame, title).contains(&format!("{FOCUS_EDGE} ")))
         .collect();

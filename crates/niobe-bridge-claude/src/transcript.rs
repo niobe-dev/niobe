@@ -35,11 +35,15 @@
 //!   the id its messages named. A session that has one is therefore counted
 //!   from it alone, and one the CLI has not closed yet is counted from its
 //!   messages; see [`Fold::assistant`] for why the two cannot be added.
-//! * **Most records are the CLI's own furniture.** Titles, attachments, file
+//! * **Most records are the CLI's own furniture.** Attachments, file
 //!   snapshots and queue operations say nothing about what the session did,
 //!   what it changed or what it cost. They are named here so that they are
 //!   passed over in silence rather than reported as messages Niobe cannot
-//!   read.
+//!   read. The one piece of furniture that is read is the CLI's title for the
+//!   session, which becomes [`Event::Titled`]; a transcript the CLI never
+//!   titled is titled by the first prompt the operator typed.
+//!
+//! [`Event::Titled`]: niobe_core::event::Event::Titled
 //!
 //! [`Event::UserMessage`]: niobe_core::event::Event::UserMessage
 
@@ -263,6 +267,19 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         .any(|(_, record)| matches!(record, Ok(Line::CostState(_))));
 
     let mut fold = Fold::new(profile, cwd, id, priced);
+    // A session the CLI never titled is captioned by what the operator first
+    // asked. Said here rather than left to the first message, because the
+    // first message in a transcript may be one the CLI wrote itself.
+    let titled = read
+        .iter()
+        .any(|(_, record)| matches!(record, Ok(Line::AiTitle(_))));
+    if !titled
+        && let Some(title) = read
+            .iter()
+            .find_map(|(_, record)| record.as_ref().ok().and_then(prompt))
+    {
+        fold.out.push(Event::Titled { title });
+    }
     // Before anything is folded: what was recorded by a release nobody has
     // read is read at the operator's own risk, and a session imported from one
     // is read without anyone watching it happen.
@@ -295,26 +312,31 @@ fn release_of(text: &str) -> Option<String> {
 }
 
 /// The first turn of the transcript at `path` that the CLI did not write
-/// itself, on one line.
+/// itself.
 fn first_prompt(path: &Path) -> Option<String> {
     let file = BufReader::new(File::open(path).ok()?);
     for line in file.lines() {
         let Ok(record) = serde_json::from_str::<Line>(&line.ok()?) else {
             continue;
         };
-        let Line::User(user) = record else { continue };
-        if user.is_meta {
-            continue;
+        if let Some(said) = prompt(&record) {
+            return Some(said);
         }
-        let Some(said) = user.message.content.as_ref().and_then(said) else {
-            continue;
-        };
-        if CLI_WROTE_IT.iter().any(|mark| said.starts_with(mark)) {
-            continue;
-        }
-        return Some(said);
     }
     None
+}
+
+/// What the operator said in `record`, where it is a turn they typed rather
+/// than one the CLI wrote itself.
+fn prompt(record: &Line) -> Option<String> {
+    let Line::User(user) = record else {
+        return None;
+    };
+    if user.is_meta {
+        return None;
+    }
+    let said = user.message.content.as_ref().and_then(said)?;
+    (!CLI_WROTE_IT.iter().any(|mark| said.starts_with(mark))).then_some(said)
 }
 
 /// Folds one transcript into events.
@@ -332,6 +354,8 @@ struct Fold {
     /// CLI writes the mode out again whenever it writes anything, so only a
     /// change is worth an event.
     mode: Option<String>,
+    /// The title the CLI last gave the session, for the same reason.
+    title: Option<String>,
 }
 
 impl Fold {
@@ -342,6 +366,7 @@ impl Fold {
             priced,
             counted: BTreeMap::new(),
             mode: None,
+            title: None,
         }
     }
 
@@ -351,6 +376,7 @@ impl Fold {
             Ok(Line::User(record)) => self.user(record),
             Ok(Line::CostState(record)) => self.cost(record),
             Ok(Line::PermissionMode(record)) => self.mode(record),
+            Ok(Line::AiTitle(record)) => self.title(record),
             Ok(Line::Aside) => {}
             Ok(Line::Unknown) => self.out.push(translate::unread(format!(
                 "the transcript holds a record of type `{}`, which this version of Niobe does \
@@ -497,6 +523,19 @@ impl Fold {
         }));
     }
 
+    /// The CLI's title, whenever it differs from the last one: the CLI writes
+    /// the same title out again and again, and only a change is news.
+    fn title(&mut self, record: AiTitle) {
+        let Some(title) = record.title.filter(|title| !title.trim().is_empty()) else {
+            return;
+        };
+        if self.title.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        self.title = Some(title.clone());
+        self.out.push(Event::Titled { title });
+    }
+
     fn mode(&mut self, record: PermissionMode) {
         let Some(spelt) = record.permission_mode else {
             return;
@@ -571,9 +610,11 @@ enum Line {
     /// How the session was gating tool calls.
     #[serde(rename = "permission-mode")]
     PermissionMode(PermissionMode),
+    /// The CLI's own title for the session.
+    #[serde(rename = "ai-title")]
+    AiTitle(AiTitle),
     /// Records that say nothing about what the session did, changed or cost:
-    /// the CLI's own title for the session (`ai-title`) and the name it gives
-    /// a sub-agent's session (`agent-name`), the prompt it offers to repeat
+    /// the name the CLI gives a sub-agent's session (`agent-name`), the prompt it offers to repeat
     /// (`last-prompt`), the context it attached to a turn (`attachment`), the
     /// file snapshots a rewind would restore (`file-history-snapshot`,
     /// `file-history-delta`), its queue (`queue-operation`), its editing mode
@@ -584,15 +625,14 @@ enum Line {
     ///
     /// Read off every record type present across the transcripts on the
     /// machine this was written on — sixteen in all — rather than off the
-    /// types one session happened to produce. Four of them are read
-    /// (`assistant`, `user`, `cost-state`, `permission-mode`) and the other
-    /// twelve are here. A type left out is a warning entry per record in front
+    /// types one session happened to produce. Five of them are read
+    /// (`assistant`, `user`, `cost-state`, `permission-mode`, `ai-title`) and
+    /// the other eleven are here. A type left out is a warning entry per record in front
     /// of the operator, for a record that says nothing: `bridge-session` alone
     /// stood in fifteen thousand of them.
     #[serde(
         rename = "system",
         alias = "agent-name",
-        alias = "ai-title",
         alias = "atis-latch",
         alias = "attachment",
         alias = "bridge-session",
@@ -661,6 +701,21 @@ struct CostState {
     /// total it recorded a floor.
     #[serde(rename = "hasUnknownModelCost", default)]
     has_unknown_model_cost: bool,
+}
+
+/// The CLI's title for the session, in its own words.
+///
+/// The interactive CLI writes one once the session has a subject, and again
+/// whenever it re-titles it — the same record over and over, mostly. Read off
+/// the transcripts on the machine this was written on, 25 September 2026: 261
+/// of 534 carried one, all but nine of them interactive sessions; no headless
+/// session from 2.1.277 on carried one, so a session driven over the stream
+/// is captioned from its first prompt instead. One title in the whole set
+/// changed after it was first written.
+#[derive(Debug, Deserialize)]
+struct AiTitle {
+    #[serde(rename = "aiTitle")]
+    title: Option<String>,
 }
 
 /// How the session was gating tool calls, in the CLI's own spelling.
@@ -850,7 +905,6 @@ mod tests {
     #[test]
     fn the_records_the_cli_keeps_for_its_own_screen_are_passed_over_in_silence() {
         let events = folded(&[
-            r#"{"type":"ai-title","aiTitle":"Etag support"}"#,
             r#"{"type":"attachment","attachment":{"type":"model"}}"#,
             r#"{"type":"file-history-snapshot","messageId":"m"}"#,
             r#"{"type":"queue-operation","operation":"add"}"#,
@@ -861,6 +915,68 @@ mod tests {
         ]);
 
         assert_eq!(events, []);
+    }
+
+    #[test]
+    fn the_clis_title_is_reported_when_it_changes_and_not_on_every_record() {
+        let events = folded(&[
+            r#"{"type":"ai-title","aiTitle":"Interstellar objects in catalog","sessionId":"s-1"}"#,
+            r#"{"type":"ai-title","aiTitle":"Interstellar objects in catalog","sessionId":"s-1"}"#,
+            r#"{"type":"ai-title","aiTitle":"  ","sessionId":"s-1"}"#,
+            r#"{"type":"ai-title","aiTitle":"interstellar-objects-search-issue","sessionId":"s-1"}"#,
+        ]);
+
+        assert_eq!(
+            events,
+            [
+                Event::Titled {
+                    title: "Interstellar objects in catalog".to_owned()
+                },
+                Event::Titled {
+                    title: "interstellar-objects-search-issue".to_owned()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_transcript_the_cli_never_titled_is_titled_by_the_first_prompt_the_operator_typed() {
+        let events = imported(&[
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Caveat: the messages below were generated by the user"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"Add etag support to the fetcher"}}"#,
+        ]);
+
+        assert_eq!(
+            events.first(),
+            Some(&Event::Titled {
+                title: "Add etag support to the fetcher".to_owned()
+            })
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Titled { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_transcript_the_cli_titled_is_titled_by_the_cli_alone() {
+        let events = imported(&[
+            r#"{"type":"user","message":{"role":"user","content":"Add etag support to the fetcher"}}"#,
+            r#"{"type":"ai-title","aiTitle":"Etag support","sessionId":"s-1"}"#,
+        ]);
+
+        let titles: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Titled { title } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["Etag support"]);
     }
 
     /// Folds the transcript `lines` through the whole of [`events`], which is

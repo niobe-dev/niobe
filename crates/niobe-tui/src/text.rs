@@ -126,6 +126,31 @@ pub fn truncate(text: &str, columns: usize) -> String {
     out
 }
 
+/// Shortens `text` to `columns` cells at a word boundary, ending in `…` when
+/// anything was cut.
+///
+/// For a phrase, where half a word reads as a different word. A first word
+/// that is itself wider than the room is cut inside it, as [`truncate`] would:
+/// a caption of nothing but the ellipsis says less than part of a word.
+pub fn truncate_words(text: &str, columns: usize) -> String {
+    if width(text) <= columns {
+        return text.to_owned();
+    }
+    let room = columns.saturating_sub(1);
+    let mut kept = "";
+    for (at, _) in text.match_indices(char::is_whitespace) {
+        let before = text[..at].trim_end();
+        if width(before) > room {
+            break;
+        }
+        kept = before;
+    }
+    match kept.is_empty() {
+        true => truncate(text, columns),
+        false => format!("{kept}…"),
+    }
+}
+
 /// Shortens `text` to `columns` cells by cutting the **front**, starting in
 /// `…` when anything was cut.
 ///
@@ -209,6 +234,32 @@ mod tests {
         assert_eq!(truncate("catalog/fetch.ts", 8), "catalog…");
         assert_eq!(width(&truncate("catalog/fetch.ts", 8)), 8);
         assert_eq!(truncate("catalog/fetch.ts", 1), "…");
+    }
+
+    #[test]
+    fn a_phrase_too_long_for_its_room_is_cut_between_words() {
+        let caption = "Cost floors and replay pricing";
+        assert_eq!(truncate_words(caption, 40), caption);
+        assert_eq!(truncate_words(caption, 30), caption);
+        assert_eq!(truncate_words(caption, 29), "Cost floors and replay…");
+        assert_eq!(truncate_words(caption, 16), "Cost floors and…");
+        assert_eq!(truncate_words(caption, 15), "Cost floors…");
+        assert_eq!(truncate_words("Cost  floors", 11), "Cost…");
+    }
+
+    #[test]
+    fn a_first_word_wider_than_the_room_is_cut_inside_it() {
+        assert_eq!(truncate_words("interstellar-objects search", 8), "interst…");
+        assert_eq!(truncate_words("anything at all", 1), "…");
+        assert_eq!(truncate_words("anything at all", 0), "");
+    }
+
+    #[test]
+    fn a_phrase_of_wide_characters_is_cut_by_cells() {
+        let cut = truncate_words("日本語 テスト です", 14);
+        assert_eq!(cut, "日本語 テスト…");
+        assert_eq!(width(&cut), 14);
+        assert_eq!(truncate_words("日本語 テスト です", 13), "日本語…");
     }
 
     #[test]

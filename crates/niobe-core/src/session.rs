@@ -358,6 +358,11 @@ pub struct SessionState {
     /// Whether a window has been reported since the last turn began or ended.
     window_reported: bool,
     user_messages: u64,
+    /// The last title the backend gave the session.
+    title: Option<String>,
+    /// The first thing the operator said, which captions a session the
+    /// backend gave no title.
+    first_prompt: Option<String>,
     assistant_messages: u64,
     pending_assistant: String,
     last_assistant: Option<String>,
@@ -421,8 +426,13 @@ impl SessionState {
 
             // A prompt sent while a turn runs joins it: the turn began with
             // the first one.
-            Event::UserMessage { .. } => {
+            Event::Titled { title } => self.title = Some(title.clone()),
+
+            Event::UserMessage { text } => {
                 self.user_messages += 1;
+                if self.first_prompt.is_none() {
+                    self.first_prompt = Some(text.clone());
+                }
                 if !self.turn_running {
                     self.turn_began = Some(self.mark());
                     self.window_reported = false;
@@ -754,6 +764,25 @@ impl SessionState {
     /// Requests still waiting on the operator.
     pub fn pending_permissions(&self) -> &BTreeSet<ToolCallId> {
         &self.pending_permissions
+    }
+
+    /// What the session is about, on one line: the last title the backend
+    /// gave it, or else the first line of the operator's first message.
+    ///
+    /// A title follows the backend, which may re-title a session; a caption
+    /// taken from the first message is written once and stays, because what
+    /// a session was started to do does not change when the talk moves on.
+    /// `None` where there is neither — a session nobody has spoken in — or
+    /// where what there is holds no words.
+    pub fn caption(&self) -> Option<String> {
+        let words = |text: &str| {
+            let line = text.lines().find(|line| !line.trim().is_empty())?;
+            Some(line.split_whitespace().collect::<Vec<_>>().join(" "))
+        };
+        self.title
+            .as_deref()
+            .and_then(words)
+            .or_else(|| self.first_prompt.as_deref().and_then(words))
     }
 
     /// The decisions log, in order.
@@ -1493,6 +1522,59 @@ mod tests {
             context(20_000),
         ]);
         assert_eq!(state.context().map(|c| c.tokens), Some(20_000));
+    }
+
+    fn said(text: &str) -> Event {
+        Event::UserMessage {
+            text: text.to_owned(),
+        }
+    }
+
+    fn titled(title: &str) -> Event {
+        Event::Titled {
+            title: title.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_session_nobody_has_spoken_in_has_no_caption() {
+        assert_eq!(SessionState::new().caption(), None);
+    }
+
+    #[test]
+    fn an_untitled_session_is_captioned_by_the_first_line_of_its_first_prompt() {
+        let state = SessionState::replay(&[
+            said("\n  Fix the   retry\tloop\nin catalog/fetch.ts"),
+            Event::TurnEnded,
+            said("now the tests"),
+        ]);
+
+        assert_eq!(state.caption().as_deref(), Some("Fix the retry loop"));
+    }
+
+    #[test]
+    fn the_backends_latest_title_captions_the_session_over_the_first_prompt() {
+        let state = SessionState::replay(&[
+            said("fix it"),
+            titled("Interstellar objects in catalog"),
+            titled("Interstellar objects search"),
+        ]);
+
+        assert_eq!(
+            state.caption().as_deref(),
+            Some("Interstellar objects search")
+        );
+    }
+
+    #[test]
+    fn a_title_or_prompt_of_nothing_but_whitespace_is_no_caption() {
+        assert_eq!(SessionState::replay(&[said(" \n\t")]).caption(), None);
+        assert_eq!(
+            SessionState::replay(&[titled("  "), said("Etag support")])
+                .caption()
+                .as_deref(),
+            Some("Etag support")
+        );
     }
 
     #[test]

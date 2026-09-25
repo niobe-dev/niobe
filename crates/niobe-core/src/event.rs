@@ -421,6 +421,18 @@ pub enum Event {
         text: String,
     },
 
+    /// What the session is about, in a few words the backend had for it.
+    ///
+    /// The last one stands, so a backend that re-titles a session moves the
+    /// caption with it. A session that never produces one is captioned from
+    /// the operator's first message instead; see [`SessionState::caption`].
+    ///
+    /// [`SessionState::caption`]: crate::session::SessionState::caption
+    Titled {
+        /// The title, as the backend gave it.
+        title: String,
+    },
+
     /// A fragment of the assistant's reply, as it streams.
     AssistantDelta {
         /// The fragment. Consumers append; they do not replace.

@@ -1191,8 +1191,9 @@ impl App {
             // Everything else is a number or a list a pane reads off the
             // session fold, not a line in the transcript. The mode and the
             // model are in the menu row, which is where a session says what
-            // it is running as.
+            // it is running as, and the title is the session pane's caption.
             Event::SessionMeta(_)
+            | Event::Titled { .. }
             | Event::Usage(_)
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
