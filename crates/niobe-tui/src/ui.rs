@@ -41,7 +41,7 @@ use crate::fx;
 use crate::meter::meter;
 use crate::prices::Prices;
 use crate::text;
-use crate::theme::Theme;
+use crate::theme::{Motion, Theme};
 use crate::tree;
 use crate::usage;
 
@@ -462,12 +462,6 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         .areas(area);
 
     draw_session(frame, left, true, app, theme);
-    draw_desktop(
-        frame,
-        Rect::new(left.right(), area.y, 1, area.height),
-        app,
-        theme,
-    );
 
     // Usage takes the rows its figures need and no more; what is left goes to
     // the two panes that grow with the session, 1.3 : 1 in favour of the files
@@ -482,23 +476,42 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_usage(frame, usage, app, theme);
     draw_changes(frame, changes, app, theme);
     draw_activity(frame, activity, app, theme);
+    draw_desktop(frame, area, &[left, usage, changes, activity], app, theme);
 }
 
-/// The strip of desktop between the panes, animated while a turn is running.
+/// The desktop the panes leave uncovered in `body`, animated while a turn is
+/// running.
 ///
-/// It is the one part of the screen that says the session is alive without
-/// the operator reading anything, and it is drawn from the same clock as the
-/// spinner under the transcript, so the two cannot disagree about whether a
-/// turn is going. A theme that does not animate, and a session with no turn
-/// running, leave the strip as it was: empty desktop.
-fn draw_desktop(frame: &mut Frame, strip: Rect, app: &App, theme: &Theme) {
+/// The motion is a picture of the whole screen and the panes are opaque, so
+/// it is worked out only for the cells no pane owns: a pane's cell is never
+/// written here, whatever the motion is. It is the one part of the screen
+/// that says the session is alive without the operator reading anything, and
+/// it is drawn from the same clock as the spinner under the transcript, so
+/// the two cannot disagree about whether a turn is going. A theme that does
+/// not animate, effects turned off, and a session with no turn running leave
+/// the desktop empty and work nothing out.
+fn draw_desktop(frame: &mut Frame, body: Rect, panes: &[Rect], app: &App, theme: &Theme) {
+    if !app.effects() || theme.motion == Motion::Still {
+        return;
+    }
     let Some(activity) = app.activity() else {
         return;
     };
-    for mote in fx::column(theme, strip.height, fx::frame_at(activity.elapsed)) {
-        let at = (strip.x, strip.y.saturating_add(mote.row));
-        if let Some(cell) = frame.buffer_mut().cell_mut(at) {
-            cell.set_char(mote.symbol).set_fg(mote.colour);
+    let screen = frame.area();
+    let field = fx::Field::new(
+        theme,
+        screen.width,
+        screen.height,
+        fx::frame_at(theme.motion, activity.elapsed),
+    );
+    let buffer = frame.buffer_mut();
+    for at in body.positions() {
+        if panes.iter().any(|pane| pane.contains(at)) {
+            continue;
+        }
+        let glyph = field.at(at.x.saturating_sub(screen.x), at.y.saturating_sub(screen.y));
+        if let (Some(glyph), Some(cell)) = (glyph, buffer.cell_mut(at)) {
+            cell.set_char(glyph.symbol).set_fg(glyph.colour);
         }
     }
 }

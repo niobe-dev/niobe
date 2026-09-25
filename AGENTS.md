@@ -81,9 +81,11 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   run of calls to one tool as one group that Ctrl+O folds, `turns.rs` draws the rule under a
   finished turn with what that turn spent — its tokens, how far it moved the five-hour window and
   how long it took — giving up whole figures where the pane is narrow,
-  and `fx.rs` is what the desktop between the panes does while a turn is running: a pure
-  function of the theme, the strip's height and how long the turn has run, so a frame of it can
-  be asserted rather than merely observed to move. Snapshot pictures of the screen live in
+  and `fx.rs` is what the desktop behind the panes does while a turn is running — rain, drifting
+  words or a radar, by theme, and nothing where `effects = false` — a picture of the whole screen
+  that is a pure function of the theme, the screen's size and how long the turn has run, so a
+  frame of it can be asserted rather than merely observed to move. The panes cover it: it is
+  worked out only for the cells they leave uncovered, and a test proves no pane cell changes. Snapshot pictures of the screen live in
   `tests/snapshots/`.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.

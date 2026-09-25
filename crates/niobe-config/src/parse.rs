@@ -58,6 +58,7 @@ impl File<'_> {
                         line: self.line(&value.span()),
                     });
                 }
+                "effects" => config.effects = Some(self.boolean(value, &at)?),
                 "permissions" => config.allowed = self.permissions(value, &at)?,
                 "profiles" => {
                     for (name, profile) in in_file_order(self.table(value, &at)?) {
@@ -77,8 +78,8 @@ impl File<'_> {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        "unknown key; expected `default_profile`, `theme`, `profiles` \
-                         or `permissions`",
+                        "unknown key; expected `default_profile`, `theme`, `effects`, \
+                         `profiles` or `permissions`",
                     ));
                 }
             }
@@ -298,6 +299,13 @@ impl File<'_> {
         match value.get_ref() {
             DeValue::String(text) => Ok(text),
             _ => Err(self.wrong_type(value, at, "a string")),
+        }
+    }
+
+    fn boolean(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<bool, ConfigError> {
+        match value.get_ref() {
+            DeValue::Boolean(on) => Ok(*on),
+            _ => Err(self.wrong_type(value, at, "a boolean")),
         }
     }
 

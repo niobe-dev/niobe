@@ -18,9 +18,10 @@ mod common;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use common::{MARKDOWN_REPLY, hunk, running_session, screen};
+use common::{MARKDOWN_REPLY, at_work, hunk, running_session, screen};
 use niobe_core::event::Event;
 use niobe_tui::app::{App, WorkingFile};
+use niobe_tui::theme::{Depth, THEMES};
 
 /// A frame is drawn inside a 60 Hz budget at the largest supported snapshot
 /// size, so a resize redraws without a visible stutter. The test binary is a
@@ -165,6 +166,42 @@ fn edit_hunk(start: u64) -> niobe_core::diff::Hunk {
             " ",
         ],
     )
+}
+
+/// The redraw every tick makes while a turn is running, in every theme: the
+/// long session of markdown replies with the desktop moving behind it. The
+/// motion is worked out for the cells the panes leave uncovered and no more,
+/// so it costs the frame next to nothing; if it ever costs more, it is the
+/// motion that gives way, not this budget.
+#[test]
+fn a_running_turn_redraws_inside_a_frame_budget_in_every_theme() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for theme in THEMES {
+        for depth in [Depth::Sixteen, Depth::TrueColour] {
+            let mut app = running_session().with_depth(depth).with_theme(theme);
+            for _ in 0..LONG_SESSION_REPLIES {
+                app.apply(&Event::UserMessage {
+                    text: "What changed?".to_owned(),
+                });
+                app.apply(&Event::AssistantMessage {
+                    text: MARKDOWN_REPLY.to_owned(),
+                });
+            }
+            let mut app = at_work(app, Duration::from_secs(3));
+            let _ = screen(&mut app, 200, 60);
+
+            let median = median_frame(&mut app, &[(200, 60)]);
+
+            assert!(
+                median <= FRAME_BUDGET,
+                "{} at {depth:?}: the median frame of a running turn at 200x60 took \
+                 {median:?}, over the {FRAME_BUDGET:?} budget",
+                theme.name
+            );
+        }
+    }
 }
 
 /// The median time to draw one frame, cycling through `sizes`. A frame the scheduler took the core away

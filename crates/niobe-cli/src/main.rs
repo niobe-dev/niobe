@@ -190,7 +190,8 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
             App::new(repo::describe(&cwd))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
-                .with_theme(chosen_theme(asked, &loaded)?),
+                .with_theme(chosen_theme(asked, &loaded)?)
+                .with_effects(loaded.config.effects()),
         ),
         &loaded,
     );
@@ -268,7 +269,8 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
             App::new(repo::describe(&cwd))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
-                .with_theme(chosen_theme(asked, &loaded)?),
+                .with_theme(chosen_theme(asked, &loaded)?)
+                .with_effects(loaded.config.effects()),
         ),
         &loaded,
     );
@@ -377,7 +379,8 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
             App::new(repo::describe(&cwd))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
-                .with_theme(theme),
+                .with_theme(theme)
+                .with_effects(loaded.config.effects()),
         ),
         &loaded,
     );
@@ -887,6 +890,11 @@ THEME:
     own 24-bit colours where COLORTERM is truecolor or 24bit, and in the
     sixteen everywhere else, so a session stays legible over SSH and in
     screen.
+
+    While a turn runs, the desktop behind the panes moves: rain in neo,
+    drifting words in cyber, a radar in modern; classic stays still. You see
+    it between the panes. effects = false at the top of a config keeps it
+    still in every theme.
 
 BUDGET:
     --budget <amount> caps what a session may spend, in dollars, and niobe says

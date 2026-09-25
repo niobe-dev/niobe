@@ -847,3 +847,20 @@ fn render(buffer: &Buffer) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// `app` with a prompt sent from the shell and its turn still running,
+/// `elapsed` into it by the clock the event loop hands in.
+pub fn at_work(app: App, elapsed: Duration) -> App {
+    let mut app = app.attached();
+    for c in "fix the etag test".chars() {
+        app.type_into_composer(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char(c),
+            ..Default::default()
+        });
+    }
+    app.submit();
+    let started = Instant::now();
+    app.tick(started, None);
+    app.tick(started + elapsed, None);
+    app
+}
