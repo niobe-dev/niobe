@@ -771,6 +771,8 @@ pub struct App {
     transcript_lines: usize,
     viewport_lines: usize,
     hint: Option<String>,
+    /// The search through the transcript, while it is open.
+    find: Option<Find>,
     /// Prompts waiting on the operator, oldest first. The transcript shows
     /// the front one; the rest wait behind it, because a backend can gate two
     /// calls of the same turn and answering them out of order would put the
@@ -837,6 +839,43 @@ pub struct App {
     should_quit: bool,
 }
 
+/// A search through the transcript, from `/` on an empty composer to Esc.
+#[derive(Debug)]
+struct Find {
+    /// What is being looked for, edited like the composer.
+    query: TextArea<'static>,
+    /// Where the view was when the search opened — the first line drawn and
+    /// whether it followed the tail — which is where Esc puts it back.
+    from: (usize, bool),
+    /// Every place the query was found by the last draw, top to bottom.
+    found: Vec<crate::find::Found>,
+    /// Which of them is the one stepped to. `None` until a draw has found
+    /// the query at all, and after every edit of it, when the draw picks the
+    /// match nearest where the view was.
+    current: Option<usize>,
+    /// Whether the view has been moved to the current match since it last
+    /// changed. Kept so the view is moved once per step rather than every
+    /// frame, which would undo the operator scrolling away from it.
+    revealed: bool,
+}
+
+impl Find {
+    /// Steps to the next match down the transcript, or up it, going round at
+    /// either end.
+    fn step(&mut self, down: bool) {
+        let count = self.found.len();
+        let Some(at) = self.current.filter(|_| count > 0) else {
+            return;
+        };
+        self.current = Some(if down {
+            (at + 1) % count
+        } else {
+            (at + count - 1) % count
+        });
+        self.revealed = false;
+    }
+}
+
 /// How a scroll key or a wheel notch moves the pane it goes to.
 #[derive(Debug, Clone, Copy)]
 enum Scroll {
@@ -862,7 +901,7 @@ impl App {
         // A prompt is prose, so it wraps rather than scrolling sideways, and a
         // path or a URL longer than the pane falls back to breaking mid-word.
         composer.set_wrap_mode(WrapMode::WordOrGlyph);
-        composer.set_placeholder_text("Ask for a change");
+        composer.set_placeholder_text(placeholder(usize::MAX));
         paint_composer(&mut composer, &theme);
 
         Self {
@@ -893,6 +932,7 @@ impl App {
             transcript_lines: 0,
             viewport_lines: 0,
             hint: None,
+            find: None,
             asks: VecDeque::new(),
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
@@ -1835,6 +1875,9 @@ impl App {
         let theme = theme.at(self.depth);
         self.theme = theme;
         paint_composer(&mut self.composer, &theme);
+        if let Some(find) = self.find.as_mut() {
+            paint_composer(&mut find.query, &theme);
+        }
     }
 
     /// The same shell, opening on a line from the shell itself.
@@ -2205,6 +2248,142 @@ impl App {
         self.hint.as_deref()
     }
 
+    /// Fits the empty composer's placeholder into `columns`, dropping what it
+    /// advertises before what the bar says beside it: the mode a session is in
+    /// matters more than a reminder of a key.
+    pub(crate) fn fit_placeholder(&mut self, columns: usize) {
+        let said = placeholder(columns);
+        if self.composer.placeholder_text() != said {
+            self.composer.set_placeholder_text(said);
+        }
+    }
+
+    /// What is being looked for in the transcript, while a search is open.
+    pub fn finding(&self) -> Option<&TextArea<'static>> {
+        self.find.as_ref().map(|find| &find.query)
+    }
+
+    /// The query as typed, while a search is open.
+    pub(crate) fn find_query(&self) -> Option<String> {
+        self.find.as_ref().map(|find| find.query.lines().concat())
+    }
+
+    /// Every place the last draw found the query, and which of them the view
+    /// was moved to, while a search is open.
+    pub(crate) fn find_marks(&self) -> Option<(&[crate::find::Found], Option<usize>)> {
+        self.find
+            .as_ref()
+            .map(|find| (find.found.as_slice(), find.current))
+    }
+
+    /// Told by the draw where the query is in the transcript as it is drawn
+    /// now.
+    ///
+    /// A query just typed starts on the match nearest the bottom of where the
+    /// view was when the search opened, and on the first one where none is
+    /// above it: the transcript is read upwards from where the operator was.
+    pub(crate) fn found(&mut self, found: Vec<crate::find::Found>) {
+        let viewport = self.viewport_lines;
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let bottom = find.from.0.saturating_add(viewport);
+        find.current = match find.current {
+            _ if found.is_empty() => None,
+            Some(at) => Some(at.min(found.len() - 1)),
+            None => {
+                find.revealed = false;
+                Some(found.iter().rposition(|at| at.line < bottom).unwrap_or(0))
+            }
+        };
+        find.found = found;
+    }
+
+    /// Moves the view to the current match, once for each time it changes:
+    /// called by the draw once it has measured the transcript.
+    pub(crate) fn reveal_found(&mut self) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let line = match (find.revealed, find.current) {
+            (false, Some(at)) => find.found.get(at).map(|found| found.line),
+            _ => None,
+        };
+        find.revealed = true;
+        if let Some(line) = line {
+            self.reveal_line(line);
+        }
+    }
+
+    /// Scrolls the transcript so `line` is on screen, in the middle of it
+    /// where the view has to move at all.
+    fn reveal_line(&mut self, line: usize) {
+        let top = self.scroll();
+        let rows = self.viewport_lines.max(1);
+        if (top..top.saturating_add(rows)).contains(&line) {
+            return;
+        }
+        self.scroll = line.saturating_sub(rows / 2).min(self.max_scroll());
+        self.follow = self.scroll >= self.max_scroll();
+    }
+
+    /// Opens a search through the transcript, remembering where the view is.
+    fn open_find(&mut self) {
+        let mut query = TextArea::default();
+        query.set_placeholder_text("Find in the transcript");
+        paint_composer(&mut query, &self.theme);
+        self.find = Some(Find {
+            query,
+            from: (self.scroll(), self.follow),
+            found: Vec::new(),
+            current: None,
+            revealed: true,
+        });
+    }
+
+    /// Closes the search and puts the view back where it was when it opened.
+    fn close_find(&mut self) {
+        if let Some(find) = self.find.take() {
+            (self.scroll, self.follow) = find.from;
+        }
+    }
+
+    /// One key, while a search is open. Returns whether the search took it.
+    ///
+    /// The F-keys, Shift+Tab and Ctrl+O still do what they do everywhere;
+    /// every other key is the search's, so nothing typed at it lands in the
+    /// composer behind it. The key that opened it, pressed again on an empty
+    /// query, closes it and types itself: that is how a prompt starts with a
+    /// literal `/`.
+    fn on_find_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let Some(find) = self.find.as_mut() else {
+            return false;
+        };
+        let empty = find.query.is_empty();
+        match (key.code, key.modifiers) {
+            (KeyCode::F(_) | KeyCode::BackTab, _) | (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+                return false;
+            }
+            (KeyCode::Esc, _) => self.close_find(),
+            (KeyCode::Backspace, _) if empty => self.close_find(),
+            (KeyCode::Char('/'), KeyModifiers::NONE | KeyModifiers::SHIFT) if empty => {
+                self.close_find();
+                self.composer.insert_char('/');
+            }
+            (KeyCode::Enter | KeyCode::Up, _) => find.step(false),
+            (KeyCode::Down, _) => find.step(true),
+            (KeyCode::Tab, _) => {}
+            _ => {
+                if find.query.input(Input::from(key)) {
+                    find.current = None;
+                }
+            }
+        }
+        true
+    }
+
     /// Whether the transcript is pinned to its newest line.
     pub fn follows_tail(&self) -> bool {
         self.follow
@@ -2370,6 +2549,9 @@ impl App {
         if self.scroll_key(key) {
             return;
         }
+        if self.on_find_key(key) {
+            return;
+        }
         if let Focus::Pane(pane) = self.focus
             && self.on_pane_key(pane, key)
         {
@@ -2405,6 +2587,14 @@ impl App {
             (KeyCode::F(9), _) => self.cycle_theme(),
             (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
 
+            // `/` searches the transcript where it would start a prompt: in
+            // a composer with anything in it, it is a slash.
+            (KeyCode::Char('/'), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                if self.composer.is_empty() =>
+            {
+                self.focus = Focus::Session;
+                self.open_find();
+            }
             // What was typed goes where typing always goes, and the keyboard
             // follows it back: the Enter after it has to send it.
             _ => {
@@ -2707,6 +2897,24 @@ fn left(seconds: u64) -> String {
 /// than the whole window is reporting something the operator has to see.
 pub fn percent(utilization: f64) -> u64 {
     (utilization * 100.0).round() as u64
+}
+
+/// What an empty composer says it is for, and after it what else it does,
+/// each only once it works.
+const PLACEHOLDER: [&str; 2] = ["Ask for a change", "/ search transcript"];
+
+/// The placeholder in at most `columns` columns: as many of the things the
+/// composer does as fit whole, and what it is for however narrow it is.
+fn placeholder(columns: usize) -> String {
+    let mut said = PLACEHOLDER[0].to_owned();
+    for more in &PLACEHOLDER[1..] {
+        let longer = format!("{said} · {more}");
+        if crate::text::width(&longer) > columns {
+            break;
+        }
+        said = longer;
+    }
+    said
 }
 
 /// Gives the composer the theme's colours.

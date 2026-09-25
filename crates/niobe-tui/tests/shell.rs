@@ -2050,7 +2050,8 @@ fn the_placeholder_names_only_what_the_composer_does_today() {
     let mut app = running_session();
     let row = bar_row(&screen(&mut app, 120, 30));
     assert!(row.contains("Ask for a change"), "{row}");
-    for promise in ["/ search", "@ file", "! shell"] {
+    assert!(row.contains("/ search transcript"), "{row}");
+    for promise in ["@ file", "! shell"] {
         assert!(
             !row.contains(promise),
             "the bar promises `{promise}`, which the composer does not do:\n{row}"
@@ -2409,4 +2410,153 @@ fn a_transcript_too_short_to_scroll_never_offers_the_way_back_down() {
         !frame.contains('█'),
         "no scrollbar where nothing scrolls:\n{frame}"
     );
+}
+
+/// A session long enough to scroll, with a word in two of its replies: one
+/// far above the newest line and one a screen or so above it.
+fn session_with_a_needle() -> App {
+    let mut app = empty_session();
+    for n in 0..40 {
+        let text = match n {
+            3 => "the needle in reply three".to_owned(),
+            30 => "the needle in reply thirty".to_owned(),
+            n => format!("reply {n}, with nothing in it worth finding"),
+        };
+        app.apply(&Event::UserMessage {
+            text: format!("prompt {n}"),
+        });
+        app.apply(&Event::AssistantMessage { text });
+        app.apply(&Event::TurnEnded);
+    }
+    app
+}
+
+/// The row the bar is drawn on while it searches.
+fn find_row(frame: &str) -> String {
+    frame
+        .lines()
+        .find(|row| row.contains(" find ") && row.contains(" / "))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("no search in the bar:\n{frame}"))
+}
+
+fn type_keys(app: &mut App, typed: &str) {
+    for c in typed.chars() {
+        press(app, ratatui::crossterm::event::KeyCode::Char(c));
+    }
+}
+
+#[test]
+fn slash_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_back() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_a_needle();
+    let tail = screen(&mut app, 120, 30);
+    assert!(
+        !tail.contains("reply three"),
+        "the test needs it off screen"
+    );
+
+    press(&mut app, KeyCode::Char('/'));
+    let row = find_row(&screen(&mut app, 120, 30));
+    assert!(row.contains("Find in the transcript"), "{row}");
+    assert!(app.composed().is_empty(), "the slash went into the prompt");
+
+    type_keys(&mut app, "needle");
+    let frame = screen(&mut app, 120, 30);
+    let row = find_row(&frame);
+    assert!(
+        row.contains("2 of 2"),
+        "the search starts on the match nearest where the view was:\n{frame}"
+    );
+    assert!(frame.contains("needle in reply thirty"), "{frame}");
+    let theme = app.theme().to_owned();
+    let mark = style_at(&mut app, 120, 30, "needle").expect("the match is on screen");
+    assert_eq!(
+        (mark.fg, mark.bg),
+        (Some(theme.pane_bg), Some(theme.hot)),
+        "the match stepped to is marked as a chip"
+    );
+
+    press(&mut app, KeyCode::Up);
+    let frame = screen(&mut app, 120, 30);
+    assert!(find_row(&frame).contains("1 of 2"), "{frame}");
+    assert!(
+        frame.contains("needle in reply three"),
+        "stepping up did not bring the older match into view:\n{frame}"
+    );
+
+    press(&mut app, KeyCode::Up);
+    assert!(
+        find_row(&screen(&mut app, 120, 30)).contains("2 of 2"),
+        "stepping past the first match goes round to the last"
+    );
+
+    press(&mut app, KeyCode::Esc);
+    assert!(app.finding().is_none());
+    assert!(app.follows_tail(), "Esc left the view where the match was");
+    assert_eq!(screen(&mut app, 120, 30), tail);
+}
+
+#[test]
+fn every_match_on_screen_is_marked_and_only_the_current_one_as_a_chip() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_a_needle();
+    press(&mut app, KeyCode::Char('/'));
+    type_keys(&mut app, "worth");
+    let frame = screen(&mut app, 120, 30);
+    let theme = app.theme().to_owned();
+    let marked: Vec<Style> = styles(&mut app, 120, 30)
+        .into_iter()
+        .filter(|style| style.bg == Some(theme.hot) && style.fg == Some(theme.pane_bg))
+        .collect();
+    assert!(!marked.is_empty(), "{frame}");
+    let underlined = styles(&mut app, 120, 30).into_iter().any(|style| {
+        style
+            .add_modifier
+            .contains(ratatui::style::Modifier::UNDERLINED)
+    });
+    assert!(
+        underlined,
+        "the matches other than the current one are not marked:\n{frame}"
+    );
+}
+
+#[test]
+fn a_query_found_nowhere_says_so() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_a_needle();
+    let tail = screen(&mut app, 120, 30);
+    press(&mut app, KeyCode::Char('/'));
+    type_keys(&mut app, "haystack");
+    let frame = screen(&mut app, 120, 30);
+    assert!(find_row(&frame).contains("no match"), "{frame}");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(screen(&mut app, 120, 30), tail);
+}
+
+#[test]
+fn a_slash_anywhere_but_the_start_of_a_prompt_is_a_slash() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_a_needle();
+    type_keys(&mut app, "a/b");
+    assert!(app.finding().is_none());
+    assert_eq!(app.composed(), "a/b");
+
+    let mut app = session_with_a_needle();
+    type_keys(&mut app, "//etc");
+    assert!(app.finding().is_none(), "a second slash leaves the search");
+    assert_eq!(app.composed(), "/etc", "and starts the prompt with one");
+
+    let mut app = session_with_a_needle();
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Backspace);
+    assert!(
+        app.finding().is_none(),
+        "backspace on an empty search leaves it"
+    );
+    assert!(app.composed().is_empty());
 }

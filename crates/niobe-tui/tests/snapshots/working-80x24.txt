@@ -19,6 +19,6 @@
 ┃                                                                              ┃
 ┃ ⠋ running Bash  npm test -- fetch · 1m 15s                                   ┃
 ┃ ──────────────────────────────────────────────────────────────────────────── ┃
-┃  ask  >  Ask for a change                 Shift+Tab mode · Alt+Enter newline ┃
+┃  ask  >  Ask for a change · / search transcript               Shift+Tab mode ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit

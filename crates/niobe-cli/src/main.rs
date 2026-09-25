@@ -849,6 +849,10 @@ IN THE SHELL:
     Enter                  Send what is in the composer
     Alt+Enter              Open a new line in the composer
     PgUp / PgDn            Scroll the transcript
+    /                      On an empty composer, search the transcript: Up and
+                           Enter step to the match above, Down to the one
+                           below, Esc puts the view back where it was, and a
+                           second / types a prompt that starts with one
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
     F8                     Pick a model from the ones the profile names
     F9                     Cycle the palette the shell draws in

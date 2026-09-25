@@ -603,6 +603,9 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
         return;
     }
 
+    find_in_transcript(app, inner.width, theme);
+    fit_placeholder(app, panes, inner.width, theme);
+
     // The composer grows with what is typed into it, up to a third of the pane,
     // so a long prompt is editable without hiding the transcript behind it.
     // The shell's own reply wraps in the bar rather than being cut, and takes
@@ -639,6 +642,35 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     draw_ask_bar(frame, composer, said, app, theme);
 }
 
+/// Gives the placeholder the room the bar leaves once its first hint — the
+/// mode, where one is reported — has what it needs.
+fn fit_placeholder(app: &mut App, panes: bool, width: u16, theme: &Theme) {
+    let first = key_hints(app.session().mode(), app.focus(), panes, theme)
+        .first()
+        .map_or(0, |hint| text::width(&hint.text));
+    // The cursor, and the column between the editor and the hints.
+    let columns = usize::from(width)
+        .saturating_sub(lead_width(app))
+        .saturating_sub(first + 2);
+    app.fit_placeholder(columns);
+}
+
+/// Looks for what a search is looking for in the transcript as it will be
+/// drawn `width` wide, before anything is drawn: the bar says how many places
+/// it was found, and the bar is drawn before the transcript.
+fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
+    let Some(query) = app.find_query() else {
+        return;
+    };
+    let folded = app.calls_folded();
+    let (entries, drawn) = app.entries_to_draw();
+    drawn.update(entries, usize::from(width), folded, theme);
+    let found = crate::find::Query::new(&query)
+        .map(|query| drawn.find(&query))
+        .unwrap_or_default();
+    app.found(found);
+}
+
 /// The border cells a pane's title leaves on its top edge: a corner and a
 /// cell of the edge either side, so the pane still reads as framed, and the
 /// space either side of the title itself.
@@ -662,11 +694,32 @@ fn session_caption(session: &SessionState, repo: &str, width: u16) -> String {
 /// The badge in front of the composer: what the bar is for, as a chip.
 const ASK_BADGE: &str = " ask ";
 
+/// The badge the bar wears while it is searching the transcript.
+const FIND_BADGE: &str = " find ";
+
 /// What the bar puts between its hints.
 const HINT_SEPARATOR: &str = " · ";
 
-/// The columns of the badge and the marker in front of the composer.
-const BAR_LEAD: u16 = 8;
+/// The badge and the marker in front of what the bar is editing: the prompt,
+/// or a search through the transcript.
+fn bar_lead(app: &App) -> (&'static str, &'static str) {
+    match app.finding() {
+        Some(_) => (FIND_BADGE, " / "),
+        None => (ASK_BADGE, " > "),
+    }
+}
+
+/// The columns of the badge and the marker.
+fn lead_width(app: &App) -> usize {
+    let (badge, marker) = bar_lead(app);
+    text::width(badge) + text::width(marker)
+}
+
+/// What the bar is editing: the search while one is open, which the composer
+/// behind it waits under, and the composer otherwise.
+fn editing(app: &App) -> &ratatui_textarea::TextArea<'static> {
+    app.finding().unwrap_or_else(|| app.composer())
+}
 
 /// The composer, with its badge in front and, at its right-hand end, what the
 /// shell has to say: its own reply to the last key when it has one, otherwise
@@ -678,23 +731,24 @@ fn draw_ask_bar(
     app: &mut App,
     theme: &Theme,
 ) {
-    let badge_width = u16::try_from(text::width(ASK_BADGE)).unwrap_or(u16::MAX);
+    let (badge_text, marker_text) = bar_lead(app);
     let [badge, marker, rest] = Layout::horizontal([
-        Constraint::Length(badge_width),
-        Constraint::Length(BAR_LEAD.saturating_sub(badge_width)),
+        Constraint::Length(u16::try_from(text::width(badge_text)).unwrap_or(u16::MAX)),
+        Constraint::Length(u16::try_from(text::width(marker_text)).unwrap_or(u16::MAX)),
         Constraint::Min(1),
     ])
     .areas(area);
     let pane = Style::new().bg(theme.pane_bg);
     frame.render_widget(
         Paragraph::new(
-            Line::from(ASK_BADGE).style(Style::new().fg(theme.pane_bg).bg(theme.hot).bold()),
+            Line::from(badge_text).style(Style::new().fg(theme.pane_bg).bg(theme.hot).bold()),
         )
         .style(pane),
         Rect { height: 1, ..badge },
     );
     frame.render_widget(
-        Paragraph::new(Line::from(" > ").style(Style::new().fg(theme.hot).bold())).style(pane),
+        Paragraph::new(Line::from(marker_text).style(Style::new().fg(theme.hot).bold()))
+            .style(pane),
         marker,
     );
 
@@ -711,7 +765,7 @@ fn draw_ask_bar(
         Constraint::Length(said_width),
     ])
     .areas(rest);
-    app.composer().render(editor, frame.buffer_mut());
+    editing(app).render(editor, frame.buffer_mut());
     frame.render_widget(Paragraph::new(said).style(pane), right);
 }
 
@@ -720,7 +774,9 @@ fn draw_ask_bar(
 /// What was typed keeps the room it needs, and the right-hand end gets what is
 /// left: a hint drawn over a prompt would hide the prompt.
 fn bar_room(app: &App, width: u16) -> usize {
-    usize::from(width.saturating_sub(BAR_LEAD)).saturating_sub(editor_needs(app) + 1)
+    usize::from(width)
+        .saturating_sub(lead_width(app))
+        .saturating_sub(editor_needs(app) + 1)
 }
 
 /// The columns the composer needs to show what is in it, cursor included.
@@ -729,10 +785,11 @@ fn bar_room(app: &App, width: u16) -> usize {
 /// say: the placeholder teaches what the bar is for, and a reply to the key
 /// just pressed is the more pressing of the two.
 fn editor_needs(app: &App) -> usize {
-    let typed = app.composed();
+    let editor = editing(app);
+    let typed = editor.lines().join("\n");
     let widest = match (typed.is_empty(), app.hint()) {
         (true, Some(_)) => 0,
-        (true, None) => text::width(app.composer().placeholder_text()),
+        (true, None) => text::width(editor.placeholder_text()),
         (false, _) => typed.lines().map(text::width).max().unwrap_or(0),
     };
     widest + 1
@@ -753,18 +810,22 @@ fn bar_says(app: &App, panes: bool, theme: &Theme, room: usize) -> Vec<Line<'sta
             .map(|line| Line::from(line).style(Style::new().fg(theme.hot)))
             .collect();
     }
-    // A question holding the keyboard takes Tab for writing its answer, so
-    // while it does, Tab is not offered as the way between the panes.
-    let question_holds = app.asking().is_some() && app.ask_focus() != AskFocus::Deferred;
-    let hints = fitted_hints(
-        key_hints(
-            app.session().mode(),
-            app.focus(),
-            panes && !question_holds,
-            theme,
-        ),
-        room,
-    );
+    let hints = match app.find_marks() {
+        Some((found, current)) => find_hints(app, found.len(), current, theme),
+        None => {
+            // A question holding the keyboard takes Tab for writing its
+            // answer, so while it does, Tab is not offered as the way between
+            // the panes.
+            let question_holds = app.asking().is_some() && app.ask_focus() != AskFocus::Deferred;
+            key_hints(
+                app.session().mode(),
+                app.focus(),
+                panes && !question_holds,
+                theme,
+            )
+        }
+    };
+    let hints = fitted_hints(hints, room);
     let mut spans = Vec::with_capacity(hints.len() * 2);
     for (i, hint) in hints.into_iter().enumerate() {
         if i > 0 {
@@ -773,6 +834,33 @@ fn bar_says(app: &App, panes: bool, theme: &Theme, room: usize) -> Vec<Line<'sta
         spans.push(Span::styled(hint.text, hint.style));
     }
     vec![Line::from(spans)]
+}
+
+/// What the bar says while it searches: where in the matches the view is,
+/// then the keys that step between them and leave.
+fn find_hints(app: &App, count: usize, current: Option<usize>, theme: &Theme) -> Vec<Segment> {
+    let key = |text: &str| Segment {
+        text: text.to_owned(),
+        style: Style::new().fg(theme.dim),
+    };
+    let typed = app.finding().is_some_and(|query| !query.is_empty());
+    let mut hints = Vec::new();
+    match current {
+        Some(at) => hints.push(Segment {
+            text: format!("{} of {count}", at + 1),
+            style: Style::new().fg(theme.hot).bold(),
+        }),
+        None if typed => hints.push(Segment {
+            text: "no match".to_owned(),
+            style: Style::new().fg(theme.hot).bold(),
+        }),
+        None => {}
+    }
+    if count > 1 {
+        hints.push(key("↑↓ step"));
+    }
+    hints.push(key("Esc back"));
+    hints
 }
 
 /// The mode the session gates tool calls in, and the keys the bar answers
@@ -878,9 +966,13 @@ fn draw_transcript(
     let total = above + question.len();
 
     app.measured(total, height);
+    app.reveal_found();
     let start = app.scroll().min(total);
     let (_, drawn) = app.entries_to_draw();
     let mut visible = drawn.lines(start, height);
+    if let Some((found, current)) = app.find_marks() {
+        mark_found(&mut visible, start, found, current, theme);
+    }
     let room = height.saturating_sub(visible.len());
     visible.extend(
         question
@@ -933,6 +1025,37 @@ fn draw_jump(frame: &mut Frame, area: Rect, waiting: bool, theme: &Theme) -> Opt
     Some(at)
 }
 
+/// Marks every match of a search on the transcript lines drawn from line
+/// `start`: the one the view was stepped to as a solid chip, the rest
+/// underlined, so the current one can be told from them without its colour.
+fn mark_found(
+    lines: &mut [Line<'static>],
+    start: usize,
+    found: &[crate::find::Found],
+    current: Option<usize>,
+    theme: &Theme,
+) {
+    let here = Style::new().fg(theme.pane_bg).bg(theme.hot).bold();
+    let other = Style::new().fg(theme.hot).underlined();
+    for (row, line) in lines.iter_mut().enumerate() {
+        let at = start + row;
+        let first = found.partition_point(|found| found.line < at);
+        let marks: Vec<(usize, usize, Style)> = found
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take_while(|(_, found)| found.line == at)
+            .map(|(index, found)| {
+                let style = if Some(index) == current { here } else { other };
+                (found.start, found.len, style)
+            })
+            .collect();
+        if !marks.is_empty() {
+            *line = crate::find::highlight(std::mem::take(line), &marks);
+        }
+    }
+}
+
 /// Every transcript entry's lines as they were last drawn, with what they were
 /// drawn from, so that a redraw renders again only the entries that changed.
 ///
@@ -960,6 +1083,16 @@ impl DrawnEntries {
                     .push((key, entry_lines(entry, width, folded, theme))),
             }
         }
+    }
+
+    /// Every place `query` is in the transcript as drawn, top to bottom.
+    fn find(&self, query: &crate::find::Query) -> Vec<crate::find::Found> {
+        self.drawn
+            .iter()
+            .flat_map(|(_, lines)| lines)
+            .enumerate()
+            .flat_map(|(at, line)| query.in_line(line, at))
+            .collect()
     }
 
     fn line_count(&self) -> usize {

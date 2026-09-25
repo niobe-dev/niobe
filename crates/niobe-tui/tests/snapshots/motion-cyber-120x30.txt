@@ -25,6 +25,6 @@
 ┃                                                                            █ │ ▾ Sub-agents                          █
 ┃ ⠋ thinking · 5s                                                            ┃S│ ◆ test-writer → tes… sonnet-5 running │
 ┃ ────────────────────────────────────────────────────────────────────────── ┃H│   └ Reading tests/stream.rs           │
-┃  ask  >  Ask for a change                   ▸▸ ask mode · Shift+Tab cycles ┃E│ ◇ reviewer → catalog/c… done 4100 ctx │
+┃  ask  >  Ask for a change · / search transcript                ▸▸ ask mode ┃E│ ◇ reviewer → catalog/c… done 4100 ctx │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛L└───────────────────────────────────────┘
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit
