@@ -880,12 +880,16 @@ IN THE SHELL:
                            session's directory instead of sending a prompt:
                            Enter runs it, Esc goes back, and a second ! types
                            a prompt that starts with one
+    Ctrl+G                 Stop the newest ! command still running, with
+                           everything it started; again, the one before it
 
     A command run with ! is yours: no rule is consulted and no mode applies,
     as in any other terminal. It has no terminal of its own and nothing to
-    read, runs until it ends or niobe quits, and is kept in the session as a
-    call, with the end of what it printed shown under it. The agent is not
-    told it ran and does not see what it printed.
+    read, runs until it ends, Ctrl+G stops it or niobe quits, and is kept in
+    the session as a call, with the end of what it printed shown under it. A
+    stopped command is asked to end, killed if it has not two seconds later,
+    and its call ends as stopped by the operator. Ctrl+C quits, as always.
+    The agent is not told it ran and does not see what it printed.
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
     F8                     Pick a model from the ones the profile names
     F9                     Cycle the palette the shell draws in

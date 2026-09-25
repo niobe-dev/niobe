@@ -14,7 +14,7 @@
 //! again. The transcript's notices are the shell talking, not the session, and
 //! are neither queued nor shown again after a restart.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::diff::Hunk;
@@ -861,8 +861,15 @@ pub struct App {
     /// Commands the operator ran that have not been handed out to be run.
     commands: Vec<(ToolCallId, String)>,
     /// Each command handed out to be run and not yet ended, by the call it is
-    /// recorded as, so its end can repeat what it ran.
-    running_commands: BTreeMap<ToolCallId, String>,
+    /// recorded as, so its end can repeat what it ran; oldest first, which is
+    /// what decides the one [`crate::shell::STOP_KEY`] stops.
+    running_commands: Vec<(ToolCallId, String)>,
+    /// Commands the operator stopped that have not been handed out to be
+    /// stopped.
+    stops: Vec<ToolCallId>,
+    /// Every running command the operator has asked to stop, so a second
+    /// press moves on to the next one and its end can say who stopped it.
+    stopping: BTreeSet<ToolCallId>,
     /// How many commands this shell has started, which keeps each one's call
     /// id apart from the others started in the same second.
     commands_started: u64,
@@ -1042,7 +1049,9 @@ impl App {
             reports_shift_enter: false,
             shell_mode: false,
             commands: Vec::new(),
-            running_commands: BTreeMap::new(),
+            running_commands: Vec::new(),
+            stops: Vec::new(),
+            stopping: BTreeSet::new(),
             commands_started: 0,
             asks: VecDeque::new(),
             ask_selected: 0,
@@ -2583,8 +2592,9 @@ impl App {
             input: command.clone(),
             summary: None,
         });
-        self.running_commands.insert(id.clone(), command.clone());
+        self.running_commands.push((id.clone(), command.clone()));
         self.commands.push((id, command));
+        self.hint = Some(format!("{} stops it", crate::shell::STOP_KEY));
         self.scroll_to_tail();
     }
 
@@ -2594,12 +2604,54 @@ impl App {
         std::mem::take(&mut self.commands)
     }
 
+    /// Stops the newest command still running that the operator has not
+    /// already stopped, by queueing it for [`App::take_stops`]; says so where
+    /// there is none.
+    fn stop_command(&mut self) {
+        let newest = self
+            .running_commands
+            .iter()
+            .rev()
+            .map(|(id, _)| id)
+            .find(|id| !self.stopping.contains(*id))
+            .cloned();
+        let Some(id) = newest else {
+            self.hint = Some("No ! command is running".to_owned());
+            return;
+        };
+        self.stopping.insert(id.clone());
+        self.stops.push(id);
+    }
+
+    /// The commands the operator stopped since the last call, for the event
+    /// loop to hand to a [`crate::shell::Shell`] to stop.
+    pub fn take_stops(&mut self) -> Vec<ToolCallId> {
+        std::mem::take(&mut self.stops)
+    }
+
     /// Records how a command the operator ran ended, as the end of its call
     /// and, where it ran `cargo test`, the run it reported.
-    pub fn ran(&mut self, ran: crate::shell::Ran) {
-        let command = self.running_commands.remove(&ran.id).unwrap_or_default();
+    ///
+    /// A command the operator stopped ends as [`crate::shell::STOPPED`] and
+    /// as a call that did not succeed, rather than with the signal that
+    /// stopped it — the signal is how, the operator is why — and keeps any
+    /// status it was reported with: `sh` can outlive the signal that ends
+    /// what it runs and exit 0, which is not the command succeeding.
+    pub fn ran(&mut self, mut ran: crate::shell::Ran) {
+        let command = match self
+            .running_commands
+            .iter()
+            .position(|(id, _)| *id == ran.id)
+        {
+            Some(at) => self.running_commands.remove(at).1,
+            None => String::new(),
+        };
+        let stopped = self.stopping.remove(&ran.id);
+        if stopped {
+            ran.error = Some(crate::shell::STOPPED.to_owned());
+        }
         let outcome = match ran.exit_code {
-            Some(0) => ToolOutcome::Ok,
+            Some(0) if !stopped => ToolOutcome::Ok,
             _ => ToolOutcome::Failed,
         };
         let tested = niobe_core::test_run::is_test_run(&command).then(|| {
@@ -2640,7 +2692,11 @@ impl App {
     /// Ends the call of every command still running, as stopped by the
     /// session ending, which is what stops it.
     pub fn abandon_commands(&mut self) {
-        let running: Vec<ToolCallId> = self.running_commands.keys().cloned().collect();
+        let running: Vec<ToolCallId> = self
+            .running_commands
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
         for id in running {
             self.ran(crate::shell::Ran {
                 id,
@@ -2916,6 +2972,15 @@ impl App {
             (key.code, key.modifiers)
         {
             self.quit();
+            return;
+        }
+        // Stopping a command is always available for the same reason: `! yes`
+        // runs on under a question, and the operator should not have to answer
+        // it, or quit, to stop it.
+        if (key.code, key.modifiers) == (KeyCode::Char('g'), KeyModifiers::CONTROL)
+            && self.runs_commands
+        {
+            self.stop_command();
             return;
         }
         // A prompt takes the keyboard whole until it is put off. Typing into

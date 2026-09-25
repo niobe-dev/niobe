@@ -367,7 +367,8 @@ fn send_produced(
 
 /// Hands the commands the operator ran to `shell`, and records a command it
 /// would not start as a call that failed, so that nothing typed after `!` is
-/// left looking as though it were running.
+/// left looking as though it were running; then hands it the commands the
+/// operator stopped.
 ///
 /// Before [`send_produced`], so a command that would not start is kept as a
 /// start and a failed end in the one pass, in that order.
@@ -376,6 +377,11 @@ fn run_commands(app: &mut App, shell: &mut dyn Shell) {
         if let Err(error) = shell.run(&id, &command) {
             app.not_run(&id, &error.to_string());
         }
+    }
+    // After the starts, so a command run and stopped between two ticks has
+    // been started by the time it is stopped.
+    for id in app.take_stops() {
+        shell.stop(&id);
     }
 }
 
@@ -550,6 +556,7 @@ mod tests {
     struct Running {
         started: Vec<(ToolCallId, String)>,
         ends: Vec<crate::shell::Ran>,
+        stopped: Vec<ToolCallId>,
         refuse: bool,
     }
 
@@ -560,6 +567,10 @@ mod tests {
             }
             self.started.push((id.clone(), command.to_owned()));
             Ok(())
+        }
+
+        fn stop(&mut self, id: &ToolCallId) {
+            self.stopped.push(id.clone());
         }
 
         fn drain(&mut self) -> Vec<crate::shell::Ran> {
@@ -638,6 +649,23 @@ mod tests {
                 Some("not run: cannot start sh".to_owned())
             )]
         );
+    }
+
+    #[test]
+    fn the_command_the_operator_stops_is_handed_to_the_shell_to_stop() {
+        let mut app = app_that_ran("yes");
+        let mut shell = Running::default();
+        run_commands(&mut app, &mut shell);
+        let [(id, _)] = shell.started.as_slice() else {
+            panic!("the command did not reach the shell: {:?}", shell.started);
+        };
+        let id = id.clone();
+
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        run_commands(&mut app, &mut shell);
+
+        assert_eq!(shell.stopped, [id]);
+        assert!(!app.should_quit());
     }
 
     #[test]

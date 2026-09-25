@@ -22,8 +22,19 @@
 //! * it runs in the directory the session runs in, with the environment niobe
 //!   was started with, standard input closed and no terminal — the shell has
 //!   the terminal — so a command that waits for input reads the end of it
-//!   and a pager prints straight through. It runs until it ends or niobe
-//!   quits, which stops it.
+//!   and a pager prints straight through. It runs until it ends, the
+//!   operator stops it with [`STOP_KEY`], or niobe quits, which stops it.
+//!
+//! # Stopping one
+//!
+//! [`STOP_KEY`] stops the newest command still running that has not already
+//! been asked to stop, and a second press the one before it, so several
+//! commands running at once can each be stopped without quitting. It is not
+//! Ctrl+C, which quits, as it has always done: a key that quit in one moment
+//! and stopped a command in the next would end a session the operator only
+//! meant to interrupt. The command is stopped with everything it started —
+//! asked first, and killed if it has not ended a moment later — and its call
+//! ends as stopped by the operator, with what it printed up to then.
 //!
 //! # What it leaves behind
 //!
@@ -50,6 +61,13 @@ use niobe_core::event::ToolCallId;
 /// No backend names a tool this way, so the operator's commands are never
 /// counted as one of the agent's tools, nor grouped with its calls.
 pub const OPERATOR_SHELL: &str = "! shell";
+
+/// The key that stops a command the operator ran, as the help and the hints
+/// name it.
+pub const STOP_KEY: &str = "Ctrl+G";
+
+/// Why a command the operator stopped did not run to its end.
+pub const STOPPED: &str = "stopped by the operator";
 
 /// Why a command could not be started. Shown to the operator as it reads.
 pub type ShellError = Box<dyn std::error::Error + Send + Sync>;
@@ -85,6 +103,12 @@ pub trait Shell: std::fmt::Debug {
     /// [`Shell::drain`].
     fn run(&mut self, id: &ToolCallId, command: &str) -> Result<(), ShellError>;
 
+    /// Stops the command recorded as the call `id`, with whatever it started.
+    /// Returns once it has been told, not once it has ended: its end arrives
+    /// through [`Shell::drain`] like any other. A command that has already
+    /// ended, or was never started, is left alone.
+    fn stop(&mut self, id: &ToolCallId);
+
     /// Every command that has ended since the last call, in the order they
     /// ended. Never blocks.
     fn drain(&mut self) -> Vec<Ran>;
@@ -99,6 +123,8 @@ impl Shell for NoShell {
     fn run(&mut self, _id: &ToolCallId, _command: &str) -> Result<(), ShellError> {
         Err("this session runs no commands".into())
     }
+
+    fn stop(&mut self, _id: &ToolCallId) {}
 
     fn drain(&mut self) -> Vec<Ran> {
         Vec::new()

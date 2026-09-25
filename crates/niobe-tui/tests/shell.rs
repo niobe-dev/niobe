@@ -3153,3 +3153,110 @@ fn a_bang_anywhere_but_the_start_of_a_prompt_is_a_bang() {
     assert!(!app.shell_mode());
     assert_eq!(app.composed(), "!x");
 }
+
+fn stop_key(app: &mut App) {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+}
+
+#[test]
+fn ctrl_g_stops_the_newest_command_still_running_and_leaves_the_session_open() {
+    let mut app = session_that_runs_commands();
+    let older = run_command(&mut app, "npm run dev");
+    let newer = run_command(&mut app, "yes");
+    assert_eq!(
+        app.hint(),
+        Some("Ctrl+G stops it"),
+        "the key is named as it runs"
+    );
+
+    stop_key(&mut app);
+    assert_eq!(app.take_stops(), [newer], "the newest one is stopped");
+    assert!(!app.should_quit(), "stopping a command is not quitting");
+
+    // Asked again before the first has ended, it moves on to the next one
+    // rather than asking the same command twice.
+    stop_key(&mut app);
+    assert_eq!(app.take_stops(), [older]);
+
+    stop_key(&mut app);
+    assert!(
+        app.take_stops().is_empty(),
+        "both are already being stopped"
+    );
+    assert!(!app.should_quit());
+}
+
+#[test]
+fn a_command_the_operator_stopped_ends_as_stopped_with_what_it_printed_up_to_then() {
+    use niobe_core::event::ToolOutcome;
+
+    let mut app = session_that_runs_commands();
+    let id = run_command(&mut app, "yes");
+    app.take_produced();
+    stop_key(&mut app);
+    app.take_stops();
+
+    app.ran(niobe_tui::Ran {
+        id: id.clone(),
+        output: "y\ny\ny\n".to_owned(),
+        bytes: 6,
+        whole: true,
+        exit_code: None,
+        error: Some("ended by signal 15".to_owned()),
+    });
+
+    let produced = app.take_produced();
+    assert!(
+        matches!(
+            produced.as_slice(),
+            [Event::ToolCallEnd { id: ended, outcome: ToolOutcome::Failed, exit_code: None, error: Some(error), output, .. }]
+                if *ended == id && error == "stopped by the operator" && output == "y\ny\ny\n"
+        ),
+        "the end does not say the operator stopped it: {produced:?}"
+    );
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("stopped by the operator"), "{frame}");
+}
+
+#[test]
+fn a_stopped_command_whose_sh_exited_0_is_still_stopped_and_keeps_the_status() {
+    use niobe_core::event::ToolOutcome;
+
+    let mut app = session_that_runs_commands();
+    let id = run_command(&mut app, "sleep 30 & wait");
+    app.take_produced();
+    stop_key(&mut app);
+    app.take_stops();
+
+    app.ran(niobe_tui::Ran {
+        id,
+        output: "sh: line 1: 43400 Terminated: 15 sleep 30\n".to_owned(),
+        bytes: 42,
+        whole: true,
+        exit_code: Some(0),
+        error: None,
+    });
+
+    let produced = app.take_produced();
+    assert!(
+        matches!(
+            produced.as_slice(),
+            [Event::ToolCallEnd { outcome: ToolOutcome::Failed, exit_code: Some(0), error: Some(error), .. }]
+                if error == "stopped by the operator"
+        ),
+        "a stopped command read as one that succeeded: {produced:?}"
+    );
+}
+
+#[test]
+fn ctrl_g_with_no_command_running_says_so() {
+    let mut app = session_that_runs_commands();
+
+    stop_key(&mut app);
+
+    assert!(app.take_stops().is_empty());
+    assert_eq!(app.hint(), Some("No ! command is running"));
+    assert!(!app.should_quit());
+}

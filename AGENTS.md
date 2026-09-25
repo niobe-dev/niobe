@@ -124,7 +124,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the shell under the selected profile, with the session store as its journal and the
   repository's config as the place a standing answer is kept, and where `niobe trust` records
   that a repository's config may start a backend with what it names. `commands.rs` runs the
-  operator's `!` commands, off the draw path, and stops them when the session ends. `backend.rs` is the only module
+  operator's `!` commands, off the draw path, and stops one when the operator asks — killing it if it will not end — and every one when the session ends. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
   `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal; `tests/permission.rs` walks a recorded permission
