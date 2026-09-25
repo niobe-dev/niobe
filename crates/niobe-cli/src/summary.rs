@@ -207,6 +207,31 @@ mod tests {
         );
     }
 
+    /// Prices `opus-5` at a tenth of a cent per thousand tokens and nothing
+    /// else, so the figure below is worked out by hand.
+    #[derive(Debug)]
+    struct OnlyOpus;
+
+    impl niobe_tui::Prices for OnlyOpus {
+        fn estimate(&self, usage: &Usage) -> Option<f64> {
+            (usage.model == "opus-5").then(|| usage.tokens() as f64 / 1_000.0 * 0.001)
+        }
+    }
+
+    #[test]
+    fn a_floor_part_of_which_is_estimated_carries_the_panes_label() {
+        let mut haiku = usage(None);
+        if let Event::Usage(usage) = &mut haiku {
+            usage.model = "haiku-4-5".to_owned();
+        }
+        // $0.25 reported, 1,500 opus tokens owed ($0.0015), haiku unpriced.
+        let app = folded(&[usage(Some(0.25)), usage(None), haiku]).with_prices(Box::new(OnlyOpus));
+        assert_eq!(
+            lines(&app)[1],
+            "cost        ≥~$0.25 — 2 of 3 usage records no reported cost covers"
+        );
+    }
+
     fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> Event {
         Event::FileChange {
             path: path.to_owned(),

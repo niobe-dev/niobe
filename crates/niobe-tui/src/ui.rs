@@ -3398,13 +3398,18 @@ fn identity(
 
 /// The session's cost, labelled for what it is.
 ///
-/// Four labels, and each says exactly how much is known:
+/// Each label says exactly how much is known:
 ///
 /// * `$1.15` — every record is covered by a cost the backend reported.
 /// * `~$1.15` — some are not, and `prices` valued all of them, so the figure
 ///   is what was reported plus an estimate at published rates.
-/// * `≥$1.15` — some are not and could not be valued, so the figure is a
-///   floor under the session's cost.
+/// * `≥~$1.15` — some are not, `prices` valued the models it lists and not
+///   the rest, so the figure is what was reported plus the estimate for the
+///   priced models: a floor that is itself partly an estimate. Counting the
+///   priced models' estimate keeps the session from reading less than one of
+///   its own models' `~$` rows.
+/// * `≥$1.15` — some are not and none of them could be valued, so the figure
+///   is a floor of reported money only.
 /// * `unpriced` — nothing was reported and nothing could be valued.
 /// * `—` — there is no usage at all. Never a zero.
 ///
@@ -3418,7 +3423,7 @@ pub fn session_cost(session: &SessionState, prices: Option<&dyn Prices>) -> Stri
     labelled(
         totals.reported_cost_usd,
         totals.cost_fully_reported(),
-        estimate_unsettled(totals, prices),
+        value_unsettled(totals, prices),
     )
     .unwrap_or_else(|| "unpriced".to_owned())
 }
@@ -3450,7 +3455,7 @@ fn spend_rate(app: &App) -> Option<String> {
     let (label, usd) = known_cost(
         totals.reported_cost_usd,
         totals.cost_fully_reported(),
-        estimate_unsettled(totals, app.prices()),
+        value_unsettled(totals, app.prices()),
     )?;
     Some(label.format(usd / worked.as_secs_f64() * 3_600.0))
 }
@@ -3467,20 +3472,21 @@ fn model_cost(totals: &Totals, model: &str, prices: Option<&dyn Prices>) -> Stri
     if reported.is_none() && owed.is_none() {
         return "—".to_owned();
     }
-    labelled(
-        reported.unwrap_or_default(),
-        owed.is_none(),
-        owed.and_then(|owed| prices?.estimate(owed)),
-    )
-    .unwrap_or_else(|| "—".to_owned())
+    let valued = match owed.and_then(|owed| prices?.estimate(owed)) {
+        Some(usd) => Valued::All(usd),
+        None => Valued::Nothing,
+    };
+    labelled(reported.unwrap_or_default(), owed.is_none(), valued).unwrap_or_else(|| "—".to_owned())
 }
 
 /// A cost, labelled for how much of it is known: `$` where a reported cost
-/// covers all of it, `~$` where the rest was valued at published rates, `≥$`
-/// where it could not be and the figure is a floor. `None` where nothing was
-/// reported and nothing could be valued, which each caller words its own way.
-fn labelled(reported: f64, settled: bool, estimated: Option<f64>) -> Option<String> {
-    known_cost(reported, settled, estimated).map(|(label, usd)| label.format(usd))
+/// covers all of it, `~$` where the rest was valued at published rates, `≥~$`
+/// where only part of the rest was and the figure is a partly estimated floor,
+/// `≥$` where none of it could be and the figure is a floor. `None` where
+/// nothing was reported and nothing could be valued, which each caller words
+/// its own way.
+fn labelled(reported: f64, settled: bool, valued: Valued) -> Option<String> {
+    known_cost(reported, settled, valued).map(|(label, usd)| label.format(usd))
 }
 
 /// How much of a cost is known, which is what its figure is prefixed with.
@@ -3490,6 +3496,8 @@ enum CostLabel {
     Reported,
     /// Reported, and the rest valued at published rates.
     Estimate,
+    /// Reported in part, and of the rest only some could be valued.
+    EstimatedFloor,
     /// Reported in part, and the rest could not be valued.
     Floor,
 }
@@ -3499,6 +3507,7 @@ impl CostLabel {
         let prefix = match self {
             Self::Reported => "",
             Self::Estimate => "~",
+            Self::EstimatedFloor => "≥~",
             Self::Floor => "≥",
         };
         format!("{prefix}${usd:.2}")
@@ -3507,31 +3516,55 @@ impl CostLabel {
 
 /// The figure [`labelled`] draws and how it is labelled, kept apart so that a
 /// figure derived from the cost — a rate — carries the same label.
-fn known_cost(reported: f64, settled: bool, estimated: Option<f64>) -> Option<(CostLabel, f64)> {
+fn known_cost(reported: f64, settled: bool, valued: Valued) -> Option<(CostLabel, f64)> {
     if settled {
         return Some((CostLabel::Reported, reported));
     }
-    if let Some(estimated) = estimated {
-        return Some((CostLabel::Estimate, reported + estimated));
+    match valued {
+        Valued::All(estimated) => Some((CostLabel::Estimate, reported + estimated)),
+        Valued::Part(estimated) => Some((CostLabel::EstimatedFloor, reported + estimated)),
+        Valued::Nothing if reported == 0.0 => None,
+        Valued::Nothing => Some((CostLabel::Floor, reported)),
     }
-    if reported == 0.0 {
-        return None;
-    }
-    Some((CostLabel::Floor, reported))
+}
+
+/// How much of the tokens no reported cost covers published rates could
+/// value, and what that much comes to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Valued {
+    /// Every model owed for is priced.
+    All(f64),
+    /// Some models owed for are priced and some are not; the figure is the
+    /// priced ones' share alone, so it understates what is owed.
+    Part(f64),
+    /// No model owed for is priced, or there is no price sheet.
+    Nothing,
 }
 
 /// What the tokens no reported cost covers come to at published rates.
 ///
-/// `None` where there is no price sheet, or where any one model among them is
-/// not in it: a total missing one model's share understates the session, and
-/// an understated total shown as an estimate is worse than an honest floor.
-fn estimate_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Option<f64> {
-    let prices = prices?;
-    let mut sum = 0.0;
+/// A model the sheet does not list leaves the sum short of what is owed, so it
+/// is [`Valued::Part`] and read as a floor: an understated total shown as an
+/// estimate is worse than an honest floor.
+fn value_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Valued {
+    let Some(prices) = prices else {
+        return Valued::Nothing;
+    };
+    let (mut sum, mut priced, mut unpriced) = (0.0, false, false);
     for owed in totals.unsettled.values() {
-        sum += prices.estimate(owed)?;
+        match prices.estimate(owed) {
+            Some(usd) => {
+                sum += usd;
+                priced = true;
+            }
+            None => unpriced = true,
+        }
     }
-    Some(sum)
+    match (priced, unpriced) {
+        (_, false) => Valued::All(sum),
+        (true, true) => Valued::Part(sum),
+        (false, true) => Valued::Nothing,
+    }
 }
 
 /// Token counts, short enough for a column of them: thousands above ten
@@ -3673,6 +3706,53 @@ mod tests {
         // estimate, so what was reported is still shown as a floor.
         let partly = SessionState::replay(&[priced(Some(0.25)), priced(None)]);
         assert_eq!(session_cost(&partly, Some(&NothingIsPriced)), "≥$0.25");
+    }
+
+    /// The table as it stands for a session on two models, one it lists and
+    /// one it does not: a tenth of a cent per thousand for `opus-5`, nothing
+    /// for anything else.
+    #[derive(Debug)]
+    struct OnlyOpusIsPriced;
+
+    impl Prices for OnlyOpusIsPriced {
+        fn estimate(&self, usage: &Usage) -> Option<f64> {
+            (usage.model == "opus-5").then(|| ATenthOfACentPerThousand.estimate(usage))?
+        }
+    }
+
+    fn on(model: &str, cost: Option<f64>) -> niobe_core::event::Event {
+        let mut event = priced(cost);
+        if let niobe_core::event::Event::Usage(usage) = &mut event {
+            usage.model = model.to_owned();
+        }
+        event
+    }
+
+    #[test]
+    fn a_floor_counts_the_estimate_for_every_model_the_table_prices() {
+        // $0.04 reported; 110,000 opus tokens owed, which is $0.11 at a tenth
+        // of a cent per thousand; haiku owed and unpriced. The session is at
+        // least roughly $0.15, never less than opus's own ~$0.11.
+        let mut opus = on("opus-5", None);
+        if let niobe_core::event::Event::Usage(usage) = &mut opus {
+            usage.input = 100_000;
+            usage.output = 10_000;
+        }
+        let session =
+            SessionState::replay(&[on("opus-5", Some(0.04)), opus, on("haiku-4-5", None)]);
+        assert_eq!(session_cost(&session, Some(&OnlyOpusIsPriced)), "≥~$0.15");
+        assert_eq!(
+            model_cost(session.totals(), "opus-5", Some(&OnlyOpusIsPriced)),
+            "~$0.15"
+        );
+
+        // Nothing reported and only part of it priced is still a figure: at
+        // least what the priced part comes to, rather than "unpriced".
+        let unreported = SessionState::replay(&[on("opus-5", None), on("haiku-4-5", None)]);
+        assert_eq!(
+            session_cost(&unreported, Some(&OnlyOpusIsPriced)),
+            "≥~$0.00"
+        );
     }
 
     #[test]

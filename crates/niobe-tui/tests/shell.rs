@@ -802,10 +802,15 @@ fn a_metered_profile_leads_the_usage_pane_with_money_and_prices_each_model() {
     let model = frame.find("opus-5    ").expect("the model rows are drawn");
     assert!(session < model, "{frame}");
     // Haiku is priced by nothing, so the session's figure is a floor under
-    // what it cost, whatever the table made of the rest.
+    // what it cost; opus is, so the floor counts the table's estimate for it
+    // and never reads less than opus's own row.
     let totals = app.session().totals().clone();
+    let owed = totals.unsettled["opus-5"].tokens() as f64 / 1_000.0 * 0.001;
     assert!(
-        frame.contains(&format!("session ≥${:.2}", totals.reported_cost_usd)),
+        frame.contains(&format!(
+            "session ≥~${:.2}",
+            totals.reported_cost_usd + owed
+        )),
         "{frame}"
     );
     let haiku = frame
@@ -817,7 +822,6 @@ fn a_metered_profile_leads_the_usage_pane_with_money_and_prices_each_model() {
         "{haiku}"
     );
     // Opus's own reported figure plus what the table makes of what is owed.
-    let owed = totals.unsettled["opus-5"].tokens() as f64 / 1_000.0 * 0.001;
     let opus = format!("~${:.2}", totals.reported_cost_by_model["opus-5"] + owed);
     assert!(
         frame

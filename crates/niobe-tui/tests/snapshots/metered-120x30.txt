@@ -1,7 +1,7 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
 ┏━━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌──────────────── Usage ────────────────┐
 ┃                                                                            ┃ │                                       │
-┃    47 +   if (res.status === 304 && cached) return cached.body;            ┃ │ session ≥$0.04 · ≥$1.41/h worked      │
+┃    47 +   if (res.status === 304 && cached) return cached.body;            ┃ │ session ≥~$0.07 · ≥~$2.37/h worked    │
 ┃    48     return res;                                                      ┃ │ ───────────────────────────────────── │
 ┃       …                                                                    ┃ │ opus-5     94%  ▓▓▓▓▓▓▓   49k  ~$0.07 │
 ┃   115     cache.set(url, {                                                 ┃ │ haiku-4-5   6%  ▓░░░░░░  3200       — │
