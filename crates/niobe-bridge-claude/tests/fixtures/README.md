@@ -631,12 +631,72 @@ sub-agent:
   reviewer's own file stops on a `Grep` call, after a line saying what it was
   about to do; it shows its model and no answer, because words said before a
   call are what an agent meant to do, not what it found.
-- **No token figure is read back.** The notice carries
+- **The agent's own work is in the timeline, where the CLI stamped it.**
+  Every record in an agent's file carries a `timestamp`, and those interleave
+  with the session's: the three agents' calls run between the launch results
+  and the session's `Three agents are working…`, and the fetch reviewer's
+  last three records after it. Each record goes in before the first of the
+  session's stamped later, agents stamped the same instant in the order they
+  were spawned, and never before the call that spawned the agent. The
+  session's own file is kept in the order the CLI wrote it, which is not
+  always the order of its stamps: its `attachment` at `11:14:52.029` follows
+  a queue record at `11:14:55.038`.
+- **An agent's edit is a change to the repository.** The fetch reviewer
+  edits `catalog/fetch.py`, and its file carries the CLI's own
+  `structuredPatch` for it. `git diff --numstat` on the same edit, applied to
+  the file as `originalFile` holds it, says `2  1  catalog/fetch.py`, which is
+  what the change set reads.
+- **An agent's tokens are the session's, under the agent's model.** The
+  session was not closed, so it has no `cost-state` and is counted from its
+  messages, and its agents' messages are among them. Each response is counted
+  once, from the **last** record the CLI wrote of it: an agent's file writes
+  one response over several records with the output count as it stood at
+  each — `msg_sum1` says 7 and then 291, `msg_cac2` 30 and then 88 — and only
+  the last is the response's own.
+- **No token figure is read back per agent.** The notice carries
   `<usage><subagent_tokens>`, which is not the size the live stream reports:
   on the recording this session is modelled on, the summariser's notice said
   6609 where its last message came to 8 + 5701 + 520 + 262 = 6491 tokens. A
   figure that cannot be checked against what it claims to be is left out, so a
   read-back agent's row has none.
+
+What the session and its agents spent, per model, by the last record of
+each response:
+
+| Model | responses | in | out | cache read | cache write | of which for an hour |
+| ----- | --------- | -- | --- | ---------- | ----------- | -------------------- |
+| `claude-haiku-4-5-20251001` | 2  | 18 | 553   | 5701   | 6221  | 6221  |
+| `claude-opus-5`             | 10 | 18 | 2480  | 178278 | 16268 | 16268 |
+| **session**                 | **12** | **36** | **3033** | **183979** | **22489** | **22489** |
+
+The session's own four responses are 6 in, 475 out, 86000 cache read and
+4900 cache write of that; the rest is its agents'. Had the CLI closed the
+session, its `cost-state` would already hold the agents' share, and the
+session is counted from that record alone: the agents' messages add nothing
+to it. To re-derive the table:
+
+```sh
+jq -s -c 'map(select(.type=="assistant").message) | group_by(.id) | map(.[-1])
+          | group_by(.model)
+          | map({model: .[0].model, n: length, in: (map(.usage.input_tokens)|add),
+                 out: (map(.usage.output_tokens)|add),
+                 cache_read: (map(.usage.cache_read_input_tokens)|add),
+                 cache_write: (map(.usage.cache_creation_input_tokens)|add),
+                 cache_write_1h: (map(.usage.cache_creation.ephemeral_1h_input_tokens)|add)})' \
+  transcripts/7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73.jsonl \
+  transcripts/7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73/subagents/*.jsonl
+```
+
+and the order the calls reach the timeline in, which is the stamps' order —
+among equals, the session's own file first and then the agents in the order
+they were spawned, which here is also the order their files sort in:
+
+```sh
+jq -r 'select(.type=="assistant") | .timestamp as $at
+       | .message.content[] | select(.type=="tool_use") | "\($at) \(.id)"' \
+  transcripts/7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73.jsonl \
+  transcripts/7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73/subagents/*.jsonl | sort -s -k1,1
+```
 
 To re-derive what each agent's file says — its call, its last model, and
 whether its last message called a tool:

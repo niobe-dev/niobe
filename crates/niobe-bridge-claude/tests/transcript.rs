@@ -410,6 +410,270 @@ fn a_read_back_sub_agent_reports_no_token_figure() {
     }
 }
 
+/// Where in `events` each tool call started, by its id, in order.
+fn call_starts(events: &[Event]) -> Vec<(usize, &str)> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, event)| match event {
+            Event::ToolCallStart { id, .. } => Some((at, id.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An agent's own calls are in its side file, and read back they fall where
+/// the CLI's timestamps put them: after the spawn, interleaved with the other
+/// agents' calls and the session's own messages, and before the agent's end.
+/// The order is the one the README's `jq` program derives from the fixture.
+#[test]
+fn a_read_back_sub_agents_own_calls_are_in_the_timeline_in_the_order_the_cli_stamped_them() {
+    let events = folded_session(WITH_AGENTS);
+    let starts = call_starts(&events);
+
+    let order: Vec<&str> = starts.iter().map(|(_, id)| *id).collect();
+    assert_eq!(
+        order,
+        [
+            "toolu_sum",
+            "toolu_fetch",
+            "toolu_cache",
+            "toolu_f1",
+            "toolu_c1",
+            "toolu_s1",
+            "toolu_f2",
+            "toolu_c2",
+            "toolu_f3",
+        ],
+        "{events:?}"
+    );
+
+    for (agent, own) in [
+        ("toolu_sum", &["toolu_s1"][..]),
+        ("toolu_fetch", &["toolu_f1", "toolu_f2", "toolu_f3"][..]),
+        ("toolu_cache", &["toolu_c1", "toolu_c2"][..]),
+    ] {
+        let (spawn, _, exit) = positions(&events, agent);
+        let spawn = spawn.expect("the agent was spawned");
+        for call in own {
+            let (at, _) = starts
+                .iter()
+                .find(|(_, id)| id == call)
+                .expect("the agent's call is in the timeline");
+            assert!(*at > spawn, "{call} started before {agent} was spawned");
+            assert!(
+                exit.is_none_or(|exit| *at < exit),
+                "{call} started after {agent} ended"
+            );
+        }
+    }
+
+    // The session's own message, stamped between the agents' calls, stays
+    // between them.
+    let said = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::AssistantMessage { text } if text.starts_with("Three agents"))
+        })
+        .expect("the session's message is in the timeline");
+    let at = |call: &str| {
+        starts
+            .iter()
+            .find(|(_, id)| *id == call)
+            .map(|(at, _)| *at)
+            .expect("the call started")
+    };
+    assert!(at("toolu_c2") < said && said < at("toolu_f3"));
+    assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+}
+
+/// The agent's prompt is the session speaking to the agent, not the operator
+/// speaking to the session.
+#[test]
+fn a_read_back_sub_agents_prompt_is_not_the_operators_turn() {
+    let events = folded_session(WITH_AGENTS);
+
+    let turns: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::UserMessage { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        turns,
+        [
+            "summarize catalog/cache.py, and review cache.py and fetch.py for bugs, in the background"
+        ]
+    );
+}
+
+/// A session the CLI never closed is counted from its messages, and an
+/// agent's messages were billed as much as the session's: each is counted
+/// once, from the last record the CLI wrote of it, under the model it ran on.
+/// The figures are the README's, derived from the fixture with `jq`.
+#[test]
+fn an_unpriced_read_back_session_counts_its_agents_messages_under_their_own_models() {
+    let events = folded_session(WITH_AGENTS);
+
+    let mut by_model: std::collections::BTreeMap<&str, [u64; 4]> =
+        std::collections::BTreeMap::new();
+    for usage in usage_records(&events) {
+        assert_eq!(usage.cost_usd, None, "{usage:?}");
+        let counts = by_model.entry(usage.model.as_str()).or_default();
+        counts[0] += usage.input;
+        counts[1] += usage.output;
+        counts[2] += usage.cache_read;
+        counts[3] += usage.cache_write;
+    }
+    assert_eq!(
+        by_model,
+        std::collections::BTreeMap::from([
+            ("claude-haiku-4-5-20251001", [18, 553, 5_701, 6_221]),
+            ("claude-opus-5", [18, 2_480, 178_278, 16_268]),
+        ])
+    );
+
+    let totals = SessionState::replay(&events).totals().clone();
+    assert_eq!(
+        (
+            totals.input,
+            totals.output,
+            totals.cache_read,
+            totals.cache_write
+        ),
+        (36, 3_033, 183_979, 22_489)
+    );
+    assert_eq!(totals.cache_write_1h, 22_489);
+}
+
+/// The context meter is the session's own conversation; an agent's is a
+/// different conversation, and moving the meter to it would show a size the
+/// session never had.
+#[test]
+fn a_read_back_sub_agents_messages_do_not_move_the_sessions_context() {
+    let events = folded_session(WITH_AGENTS);
+    let without_agents = {
+        let dir = copied_without_agents();
+        transcript::events(
+            &dir.path().join(format!("{WITH_AGENTS}.jsonl")),
+            "max",
+            Path::new("/repo"),
+        )
+        .expect("the transcript reads")
+    };
+
+    let contexts = |events: &[Event]| -> Vec<Event> {
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Context(_)))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(contexts(&events), contexts(&without_agents));
+}
+
+/// The session's file alone, in a directory of its own, with no side files
+/// beside it.
+fn copied_without_agents() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::copy(
+        transcripts().join(format!("{WITH_AGENTS}.jsonl")),
+        dir.path().join(format!("{WITH_AGENTS}.jsonl")),
+    )
+    .expect("the session's file is copied");
+    dir
+}
+
+/// The fixture's session and its side files, copied into a directory of its
+/// own with `extra` appended to the session's file.
+fn copied_with(extra: &str) -> tempfile::TempDir {
+    let dir = copied_without_agents();
+    let session = dir.path().join(format!("{WITH_AGENTS}.jsonl"));
+    let mut text = std::fs::read_to_string(&session).expect("the copy reads");
+    text.push_str(extra);
+    text.push('\n');
+    std::fs::write(&session, text).expect("the copy is written");
+
+    let from = transcripts().join(WITH_AGENTS).join("subagents");
+    let to = dir.path().join(WITH_AGENTS).join("subagents");
+    std::fs::create_dir_all(&to).expect("the side files' directory is made");
+    for entry in std::fs::read_dir(&from).expect("the side files are listed") {
+        let entry = entry.expect("a side file is listed");
+        std::fs::copy(entry.path(), to.join(entry.file_name())).expect("a side file is copied");
+    }
+    dir
+}
+
+/// A session the CLI closed is counted from its `cost-state` alone, which
+/// already holds what its agents spent: reading their side files adds
+/// nothing to it.
+#[test]
+fn a_priced_read_back_sessions_totals_are_unchanged_by_its_agents_side_files() {
+    let cost_state = r#"{"type":"cost-state","sessionId":"7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73","totalCostUSD":0.5,"modelUsage":{"claude-opus-5[1m]":{"inputTokens":18,"outputTokens":2480,"cacheReadInputTokens":178278,"cacheCreationInputTokens":16268,"webSearchRequests":0,"costUSD":0.49,"contextWindow":1000000},"claude-haiku-4-5-20251001":{"inputTokens":18,"outputTokens":553,"cacheReadInputTokens":5701,"cacheCreationInputTokens":6221,"webSearchRequests":0,"costUSD":0.01,"contextWindow":200000}},"hasUnknownModelCost":false}"#;
+    let dir = copied_with(cost_state);
+    let events = transcript::events(
+        &dir.path().join(format!("{WITH_AGENTS}.jsonl")),
+        "max",
+        Path::new("/repo"),
+    )
+    .expect("the transcript reads");
+
+    let named: Vec<&str> = usage_records(&events)
+        .iter()
+        .map(|usage| usage.model.as_str())
+        .collect();
+    assert_eq!(
+        named,
+        ["claude-haiku-4-5-20251001", "claude-opus-5[1m]"],
+        "one record per model the CLI billed, and none per message"
+    );
+    let totals = SessionState::replay(&events).totals().clone();
+    assert_eq!(
+        (
+            totals.input,
+            totals.output,
+            totals.cache_read,
+            totals.cache_write
+        ),
+        (36, 3_033, 183_979, 22_489)
+    );
+    assert!((totals.reported_cost_usd - 0.5).abs() < 1e-9);
+    assert_eq!(totals.records_unsettled, 0);
+}
+
+/// An agent that edits a file changes the repository as much as the session
+/// does. The counts are `git diff --numstat` on the same edit, as the README
+/// records it.
+#[test]
+fn a_read_back_sub_agents_edit_is_in_the_change_set() {
+    let events = folded_session(WITH_AGENTS);
+    let state = SessionState::replay(&events);
+
+    let files: Vec<(&str, u64, u64, u64)> = state
+        .files()
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.added,
+                file.removed,
+                file.added_unstated + file.removed_unstated,
+            )
+        })
+        .collect();
+    assert_eq!(files, [("catalog/fetch.py", 2, 1, 0)]);
+
+    let hunks: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::FileChange { hunks, .. } => Some(hunks.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hunks, [1], "the CLI's own hunk rides with the change");
+}
+
 /// A `cargo test --workspace` whose output the CLI saved to a file, as its own
 /// transcript records the call and the result: Claude Code 2.1.282, with the
 /// records cut down to what the bridge reads, the preview shortened to its

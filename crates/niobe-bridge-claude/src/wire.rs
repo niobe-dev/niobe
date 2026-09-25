@@ -128,15 +128,6 @@ pub(crate) struct Envelope {
 }
 
 impl Envelope {
-    /// A message with nothing beside its content.
-    pub(crate) fn of(message: ApiMessage) -> Self {
-        Self {
-            message,
-            parent_tool_use_id: None,
-            tool_use_result: None,
-        }
-    }
-
     /// Whether the tool this line answers started work that carries on after
     /// the call returned: a sub-agent the CLI ran in the background, whose
     /// end the CLI reports later as a `system`/`task_notification`.
@@ -321,8 +312,22 @@ pub(crate) struct Usage {
     /// the split of the cache writes by lifetime, which Claude Code 2.1.278
     /// puts here and not beside the total on a `message_delta`, and for the
     /// prompt of the last request, which the total sums with the others.
-    #[serde(default)]
+    ///
+    /// Written as `null` on a message the CLI wrote itself, which took no
+    /// request: 80 such records, from 2.1.241 to 2.1.278, stood in the
+    /// transcripts on the machine this was written on, and reading the `null`
+    /// as an error lost the message the operator had been shown.
+    #[serde(default, deserialize_with = "none_as_empty")]
     pub(crate) iterations: Vec<Iteration>,
+}
+
+/// A list the CLI writes as `null` where it has nothing in it.
+fn none_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Usage {
@@ -600,6 +605,19 @@ mod tests {
         .expect("a message_delta's usage");
 
         assert_eq!(usage.cache_write_1h(), 10_059);
+    }
+
+    #[test]
+    fn a_message_the_cli_wrote_itself_lists_no_iterations_and_is_still_read() {
+        // The usage the CLI stamps on a message of its own, written by no
+        // model, as its transcripts hold it from 2.1.241 to 2.1.278.
+        let usage: Usage = serde_json::from_str(
+            r#"{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null}"#,
+        )
+        .expect("a message the CLI wrote itself");
+
+        assert!(usage.iterations.is_empty());
+        assert_eq!(usage.last_prompt(), 0);
     }
 
     #[test]

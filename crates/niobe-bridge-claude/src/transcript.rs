@@ -45,14 +45,16 @@
 //! * **A sub-agent's messages are not in it.** The CLI writes each agent's
 //!   conversation to a transcript of its own, in a directory named after the
 //!   session, and the session's file says only that the agent was launched
-//!   and, later, that it stopped. The model an agent ran on and the answer it
-//!   gave are read from its own file; see [`recorded_agents`].
+//!   and, later, that it stopped. Each agent's own messages — its calls, its
+//!   edits, the model it ran on — are read from its file and folded in where
+//!   the CLI's timestamps put them among the session's, which is where the
+//!   live stream would have shown them; see [`side_files`] and [`Threads`].
 //!
 //! [`Event::Titled`]: niobe_core::event::Event::Titled
 //!
 //! [`Event::UserMessage`]: niobe_core::event::Event::UserMessage
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -281,26 +283,29 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
 
     // Read once, then folded: whether the session was priced decides where its
     // tokens are counted from, and the record that says so is at the end.
-    let read: Vec<(&str, Result<Line, serde_json::Error>)> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| (line, serde_json::from_str::<Line>(line)))
-        .collect();
+    let read = records(&text);
     let priced = read
         .iter()
-        .any(|(_, record)| matches!(record, Ok(Line::CostState(_))));
+        .any(|record| matches!(record.record, Ok(Line::CostState(_))));
+    let sides = side_files(path);
+    let mut threads = Threads::read(&sides);
+    let last_usage = last_usage(read.iter().chain(threads.records()));
+    let agents = sides
+        .iter()
+        .map(|side| (side.call.clone(), recorded_agent(&side.text)))
+        .collect();
 
-    let mut fold = Fold::new(profile, cwd, id, priced, recorded_agents(path));
+    let mut fold = Fold::new(profile, cwd, id, priced, agents).counting(last_usage);
     // A session the CLI never titled is captioned by what the operator first
     // asked. Said here rather than left to the first message, because the
     // first message in a transcript may be one the CLI wrote itself.
     let titled = read
         .iter()
-        .any(|(_, record)| matches!(record, Ok(Line::AiTitle(_))));
+        .any(|record| matches!(record.record, Ok(Line::AiTitle(_))));
     if !titled
         && let Some(title) = read
             .iter()
-            .find_map(|(_, record)| record.as_ref().ok().and_then(prompt))
+            .find_map(|record| record.record.as_ref().ok().and_then(prompt))
     {
         fold.out.push(Event::Titled { title });
     }
@@ -313,14 +318,163 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         fold.out
             .push(translate::warn(conformance::unrecorded(&version)));
     }
-    for (line, record) in read {
-        fold.record(line, record);
+    for record in read {
+        // The session's own file is kept in the order the CLI wrote it, which
+        // is not always the order of its stamps: an agent's records go in
+        // before the first of the session's that was stamped after them.
+        if let Some(at) = &record.at {
+            threads.fold_before(Some(at), &mut fold);
+        }
+        threads.spawned_in(&record.record);
+        fold.record(record.line, record.record, None);
     }
+    threads.fold_before(None, &mut fold);
     Ok(fold.out)
 }
 
-/// What each sub-agent's own transcript says about it, by the id of the call
-/// that spawned it, for the session whose transcript is at `path`.
+/// One record of a transcript, as read, with the time the CLI stamped on it.
+struct Record<'a> {
+    line: &'a str,
+    /// When the CLI wrote it: `2026-09-19T11:14:47.000Z`, always to the
+    /// millisecond and always in UTC, so that two stamps compare as text.
+    /// Measured on the machine this was written on, 26 September 2026: all
+    /// 143,141 stamps in the sessions that ran sub-agents, and in their
+    /// agents' files, were written that way.
+    at: Option<String>,
+    record: Result<Line, serde_json::Error>,
+}
+
+/// Every record of the transcript `text`, in the order it holds them.
+fn records(text: &str) -> Vec<Record<'_>> {
+    #[derive(Deserialize)]
+    struct Stamp {
+        timestamp: Option<String>,
+    }
+
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| Record {
+            line,
+            at: serde_json::from_str::<Stamp>(line)
+                .ok()
+                .and_then(|stamp| stamp.timestamp),
+            record: serde_json::from_str::<Line>(line),
+        })
+        .collect()
+}
+
+/// The usage of the last record the CLI wrote of each API response, by its
+/// `message.id`.
+///
+/// The CLI writes one response out as several records, and on each the
+/// output count as it stood when that record was written: only the last is
+/// the response's own. Measured on the machine this was written on, 26
+/// September 2026: of 58,546 responses written over more than one record,
+/// the counts moved within 8,200, always in `output_tokens` alone, and the
+/// last record held the largest count every time. Almost all of those were in
+/// sub-agents' files; four were in sessions' own.
+fn last_usage<'a>(records: impl Iterator<Item = &'a Record<'a>>) -> BTreeMap<String, wire::Usage> {
+    let mut last = BTreeMap::new();
+    for record in records {
+        if let Ok(Line::Assistant(Assistant { message })) = &record.record
+            && let (Some(id), Some(usage)) = (&message.id, &message.usage)
+        {
+            last.insert(id.clone(), usage.clone());
+        }
+    }
+    last
+}
+
+/// Every sub-agent's own records, each waiting for its place among the
+/// session's.
+///
+/// An agent's records are folded in the order its file holds them, and each
+/// goes in once the session has reached the time the CLI stamped on it. Two
+/// agents' records stamped the same instant go in the order the agents were
+/// spawned. No record goes in before the call that spawned its agent has been
+/// folded, whatever its stamp says: the call is what the agent's work is
+/// shown under. An agent whose spawn the session never records is left out.
+struct Threads<'a> {
+    /// Each agent's records not yet folded, by the id of the call that spawned
+    /// it.
+    waiting: BTreeMap<String, VecDeque<Record<'a>>>,
+    /// The agents whose spawn has been folded, in the order it was.
+    spawned: Vec<String>,
+}
+
+impl<'a> Threads<'a> {
+    fn read(sides: &'a [SideFile]) -> Self {
+        Self {
+            waiting: sides
+                .iter()
+                .map(|side| (side.call.clone(), records(&side.text).into()))
+                .collect(),
+            spawned: Vec::new(),
+        }
+    }
+
+    /// Every record still waiting, in no particular order.
+    fn records(&self) -> impl Iterator<Item = &Record<'a>> {
+        self.waiting.values().flatten()
+    }
+
+    /// Notes each agent whose spawning call `record` makes.
+    fn spawned_in(&mut self, record: &Result<Line, serde_json::Error>) {
+        let Ok(Line::Assistant(Assistant { message })) = record else {
+            return;
+        };
+        let Some(wire::Content::Blocks(blocks)) = &message.content else {
+            return;
+        };
+        for block in blocks {
+            if let wire::Block::ToolUse { id, .. } = block
+                && self.waiting.contains_key(id)
+                && !self.spawned.contains(id)
+            {
+                self.spawned.push(id.clone());
+            }
+        }
+    }
+
+    /// Folds every agent record stamped before `bound`, or every one left
+    /// where there is no bound, earliest first.
+    fn fold_before(&mut self, bound: Option<&str>, fold: &mut Fold) {
+        while let Some((call, record)) = self.next_before(bound) {
+            self.spawned_in(&record.record);
+            fold.record(record.line, record.record, Some(&call));
+        }
+    }
+
+    /// The earliest waiting record of a spawned agent stamped before `bound`,
+    /// and the call that spawned its agent. A record with no stamp goes in as
+    /// soon as the one before it has.
+    fn next_before(&mut self, bound: Option<&str>) -> Option<(String, Record<'a>)> {
+        let call = self
+            .spawned
+            .iter()
+            .filter_map(|call| {
+                let at = self.waiting.get(call)?.front()?.at.as_deref();
+                bound
+                    .is_none_or(|bound| at.is_none_or(|at| at < bound))
+                    .then_some((at, call))
+            })
+            // `min_by_key` keeps the first of equals, which is the agent
+            // spawned first.
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, call)| call.clone())?;
+        let record = self.waiting.get_mut(&call)?.pop_front()?;
+        Some((call, record))
+    }
+}
+
+/// A sub-agent's own transcript, and the call that spawned the agent.
+struct SideFile {
+    call: String,
+    text: String,
+}
+
+/// Every sub-agent's own transcript, for the session whose transcript is at
+/// `path`, each with the id of the call that spawned it.
 ///
 /// The CLI keeps each agent in `<session>/subagents/agent-<id>.jsonl`, beside
 /// a `.meta.json` that names the call that spawned it in `toolUseId`. Read off
@@ -330,7 +484,7 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
 /// An agent whose files are missing or cannot be read is left out, and shows
 /// what the session's own file says about it and no more: the session's
 /// history does not depend on them.
-fn recorded_agents(path: &Path) -> BTreeMap<String, RecordedAgent> {
+fn side_files(path: &Path) -> Vec<SideFile> {
     #[derive(Deserialize)]
     struct Meta {
         #[serde(rename = "toolUseId")]
@@ -339,9 +493,9 @@ fn recorded_agents(path: &Path) -> BTreeMap<String, RecordedAgent> {
 
     let dir = path.with_extension("").join(SUB_AGENTS);
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        return BTreeMap::new();
+        return Vec::new();
     };
-    let mut recorded = BTreeMap::new();
+    let mut sides = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(META)) else {
@@ -357,13 +511,16 @@ fn recorded_agents(path: &Path) -> BTreeMap<String, RecordedAgent> {
         let Ok(text) = std::fs::read_to_string(dir.join(format!("{stem}.{EXTENSION}"))) else {
             continue;
         };
-        recorded.insert(call, recorded_agent(&text));
+        sides.push(SideFile { call, text });
     }
-    recorded
+    // The directory's own order is the file system's; the call's id is at
+    // least the same on every machine.
+    sides.sort_by(|a, b| a.call.cmp(&b.call));
+    sides
 }
 
-/// What one sub-agent's transcript says about it: the model its latest
-/// message names, and the text of its last message where no call followed it.
+/// What one sub-agent's transcript says about it beyond its messages: the
+/// text of its last message, where no call followed it.
 ///
 /// An agent's last message is its answer only once it has stopped; while it
 /// works, its text is what it says before its next call, and the call is
@@ -375,9 +532,6 @@ fn recorded_agent(text: &str) -> RecordedAgent {
         let Ok(Line::Assistant(Assistant { message })) = serde_json::from_str::<Line>(line) else {
             continue;
         };
-        if let Some(model) = message.model.filter(|model| model != NO_MODEL) {
-            agent.model = Some(model);
-        }
         let Some(wire::Content::Blocks(blocks)) = message.content else {
             continue;
         };
@@ -448,6 +602,9 @@ struct Fold {
     /// The `message.id` of every API response whose tokens have been counted,
     /// so that the records that repeat one are not billed again.
     counted: BTreeMap<String, ()>,
+    /// The usage the last record of each API response carries, which is the
+    /// response's own; see [`last_usage`].
+    last_usage: BTreeMap<String, wire::Usage>,
     /// The mode the session was last recorded in, as the CLI spells it. The
     /// CLI writes the mode out again whenever it writes anything, so only a
     /// change is worth an event.
@@ -473,15 +630,25 @@ impl Fold {
             out: Vec::new(),
             priced,
             counted: BTreeMap::new(),
+            last_usage: BTreeMap::new(),
             mode: None,
             title: None,
         }
     }
 
-    fn record(&mut self, line: &str, record: Result<Line, serde_json::Error>) {
+    /// The same fold, counting each API response by the usage its last
+    /// record carries rather than by the first it meets.
+    fn counting(mut self, last_usage: BTreeMap<String, wire::Usage>) -> Self {
+        self.last_usage = last_usage;
+        self
+    }
+
+    /// Folds one record of the session's own file, where `agent` is `None`,
+    /// or of the file of the sub-agent spawned by call `agent`.
+    fn record(&mut self, line: &str, record: Result<Line, serde_json::Error>, agent: Option<&str>) {
         match record {
-            Ok(Line::Assistant(record)) => self.assistant(record),
-            Ok(Line::User(record)) => self.user(record),
+            Ok(Line::Assistant(record)) => self.assistant(record, agent),
+            Ok(Line::User(record)) => self.user(record, agent),
             Ok(Line::CostState(record)) => self.cost(record),
             Ok(Line::PermissionMode(record)) => self.mode(record),
             Ok(Line::AiTitle(record)) => self.title(record),
@@ -500,8 +667,14 @@ impl Fold {
         }
     }
 
-    fn assistant(&mut self, record: Assistant) {
+    /// A message from the model: the session's own, or where `agent` names a
+    /// call, the sub-agent's that call spawned, folded as the live stream
+    /// folds one that names its `parent_tool_use_id` — its model reported as
+    /// the agent's rather than the session's, its tokens under that model,
+    /// and the session's context meter left where it was.
+    fn assistant(&mut self, record: Assistant, agent: Option<&str>) {
         let Assistant { message } = record;
+        let parent = agent.map(str::to_owned);
 
         // The model is named on the message itself, which is where the live
         // stream reads it from too — off the head of the message rather than
@@ -516,7 +689,7 @@ impl Fold {
                 event: wire::StreamBody::MessageStart {
                     message: wire::StartMessage { model: Some(model) },
                 },
-                parent_tool_use_id: None,
+                parent_tool_use_id: parent.clone(),
             }));
         }
 
@@ -529,14 +702,15 @@ impl Fold {
             None => true,
         };
 
-        self.fold(wire::Message::Assistant(wire::Envelope::of(
-            wire::ApiMessage {
+        self.fold(wire::Message::Assistant(wire::Envelope {
+            message: wire::ApiMessage {
                 content: message.content,
-                // Which agent a transcript's message belongs to is not read,
-                // so the model it names says nothing about a sub-agent here.
+                // Reported above, off the message's head, as the stream does.
                 model: None,
             },
-        )));
+            parent_tool_use_id: parent.clone(),
+            tool_use_result: None,
+        }));
 
         // Counted here only where the session was never priced. A message
         // names the model it ran on as the family — `claude-opus-5` — and the
@@ -551,18 +725,36 @@ impl Fold {
         // from the CLI's own accounting and this from the messages, and a
         // session the CLI has not closed yet — which has no accounting — is
         // counted from the messages, which is measured and reads as a floor.
-        if let Some(usage) = message.usage
+        //
+        // A sub-agent's messages are counted the same way. They are billed
+        // like the session's own, and the CLI's accounting for a session
+        // includes them: measured on the machine this was written on, 26
+        // September 2026, across the 56 closed sessions that ran agents, the
+        // sessions' own messages came to 33.6% of the cache writes their
+        // `cost-state` recorded and 92.4% with their agents' messages added,
+        // and the agents' took no session over its own record in 55 of them.
+        // A session with that record is counted from it, so an agent's
+        // messages add nothing to one; an unclosed session's floor without
+        // them would leave out most of what it spent.
+        let usage = message
+            .id
+            .as_ref()
+            .and_then(|id| self.last_usage.get(id).cloned())
+            .or(message.usage);
+        if let Some(usage) = usage
             && first_time
             && !self.priced
         {
             self.fold(wire::Message::StreamEvent(wire::StreamEvent {
                 event: wire::StreamBody::MessageDelta { usage: Some(usage) },
-                parent_tool_use_id: None,
+                parent_tool_use_id: parent,
             }));
         }
     }
 
-    fn user(&mut self, record: User) {
+    /// A turn of the session's, or where `agent` names a call, of the
+    /// conversation the sub-agent that call spawned had with the session.
+    fn user(&mut self, record: User, agent: Option<&str>) {
         // The CLI writes notes of its own into the transcript as user turns —
         // the caveat that precedes a local command's output, and the like —
         // and marks them. They are not what the operator said.
@@ -583,7 +775,11 @@ impl Fold {
             }
             return;
         }
-        if let Some(text) = record.message.content.as_ref().and_then(said) {
+        // What an agent is told is the session speaking to it, and the
+        // operator said none of it.
+        if agent.is_none()
+            && let Some(text) = record.message.content.as_ref().and_then(said)
+        {
             self.out.push(Event::UserMessage { text });
         }
         // The same record carries the results of the calls the turn before it
@@ -593,7 +789,7 @@ impl Fold {
                 content: record.message.content,
                 model: None,
             },
-            parent_tool_use_id: None,
+            parent_tool_use_id: agent.map(str::to_owned),
             tool_use_result: record.tool_use_result,
         }));
     }
@@ -1020,7 +1216,7 @@ mod tests {
             .any(|line| line.contains(r#""type":"cost-state""#));
         let mut fold = Fold::new("max", Path::new("/repo"), "s-1".to_owned(), priced, agents);
         for line in lines {
-            fold.record(line, serde_json::from_str::<Line>(line));
+            fold.record(line, serde_json::from_str::<Line>(line), None);
         }
         fold.out
     }
@@ -1028,12 +1224,11 @@ mod tests {
     /// A call to the sub-agent tool, as the transcript writes it.
     const AGENT_CALL: &str = r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"quick-lookup","description":"Summarize catalog/cache.py","prompt":"Summarize it."}}]}}"#;
 
-    /// What a sub-agent's own transcript said: it ran on Haiku and answered.
+    /// What a sub-agent's own transcript said: it answered.
     fn answered() -> BTreeMap<String, RecordedAgent> {
         BTreeMap::from([(
             "toolu_a".to_owned(),
             RecordedAgent {
-                model: Some("claude-haiku-4-5".to_owned()),
                 answer: Some("## The cache is an LRU map.\nIt evicts the oldest entry.".to_owned()),
             },
         )])
@@ -1072,7 +1267,6 @@ mod tests {
             agent_story(&events),
             [
                 "spawn",
-                r#"Some("claude-haiku-4-5") None None"#,
                 r#"None None Some("The cache is an LRU map.")"#,
                 "exit Completed",
             ]
@@ -1089,14 +1283,7 @@ mod tests {
             answered(),
         );
 
-        assert_eq!(
-            agent_story(&events),
-            [
-                "spawn",
-                r#"Some("claude-haiku-4-5") None None"#,
-                "exit Failed",
-            ]
-        );
+        assert_eq!(agent_story(&events), ["spawn", "exit Failed"]);
     }
 
     #[test]
@@ -1162,10 +1349,9 @@ mod tests {
         assert_eq!(
             recorded_agent(&finished),
             RecordedAgent {
-                model: Some("claude-opus-5".to_owned()),
                 answer: Some("An error the CLI wrote.".to_owned()),
             },
-            "a message no model wrote names no model, and is still the last thing said"
+            "a message no model wrote is still the last thing said"
         );
 
         let cut_off = [
@@ -1201,19 +1387,13 @@ mod tests {
         )
         .expect("written");
 
-        assert_eq!(
-            recorded_agents(&session),
-            BTreeMap::from([(
-                "toolu_a".to_owned(),
-                RecordedAgent {
-                    model: Some("claude-haiku-4-5".to_owned()),
-                    answer: Some("Done.".to_owned()),
-                }
-            )])
-        );
-        assert_eq!(
-            recorded_agents(&dir.path().join("none.jsonl")),
-            BTreeMap::new(),
+        let found: Vec<(String, String)> = side_files(&session)
+            .into_iter()
+            .map(|side| (side.call, side.text))
+            .collect();
+        assert_eq!(found, [("toolu_a".to_owned(), answer.to_owned())]);
+        assert!(
+            side_files(&dir.path().join("none.jsonl")).is_empty(),
             "a session with no sub-agents"
         );
     }
@@ -1611,5 +1791,93 @@ mod tests {
             })
             .collect();
         assert_eq!(hunks, [1], "{events:?}");
+    }
+
+    /// Writes a session's file and one sub-agent's file beside it, spawned by
+    /// call `toolu_a`, and folds the session.
+    fn with_agent(session: &[&str], agent: &[&str]) -> Vec<Event> {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = dir.path().join(format!("s.{EXTENSION}"));
+        std::fs::write(&path, session.join("\n")).expect("the session is written");
+        let sides = dir.path().join("s").join(SUB_AGENTS);
+        std::fs::create_dir_all(&sides).expect("the sub-agents' directory is made");
+        std::fs::write(
+            sides.join(format!("agent-a1{META}")),
+            r#"{"toolUseId":"toolu_a"}"#,
+        )
+        .expect("written");
+        std::fs::write(
+            sides.join(format!("agent-a1.{EXTENSION}")),
+            agent.join("\n"),
+        )
+        .expect("written");
+        events(&path, "max", Path::new("/repo")).expect("the transcript reads")
+    }
+
+    fn output_counts(events: &[Event]) -> Vec<(String, u64)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.model.clone(), usage.output)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_response_written_over_several_records_is_counted_once_by_its_last() {
+        let record = |at: &str, output: u64, block: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{at}","message":{{"id":"msg_1","model":"claude-opus-5","content":[{block}],"usage":{{"input_tokens":2,"output_tokens":{output}}}}}}}"#
+            )
+        };
+        let thinking = r#"{"type":"thinking","thinking":"…","signature":"s"}"#;
+        let text = r#"{"type":"text","text":"Done."}"#;
+
+        let events = with_agent(
+            &[
+                &record("2026-09-19T11:14:40.000Z", 3, thinking),
+                &record("2026-09-19T11:14:41.000Z", 40, text),
+            ],
+            &[],
+        );
+        assert_eq!(output_counts(&events), [("claude-opus-5".to_owned(), 40)]);
+    }
+
+    #[test]
+    fn an_agents_record_stamped_before_its_spawn_waits_for_the_spawn() {
+        let spawn = r#"{"type":"assistant","timestamp":"2026-09-19T11:14:44.000Z","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"quick-lookup","description":"Look","prompt":"Look."}}]}}"#;
+        let early = r#"{"type":"assistant","timestamp":"2026-09-19T11:14:43.000Z","message":{"id":"msg_a","model":"claude-haiku-4-5","content":[{"type":"tool_use","id":"toolu_r","name":"Read","input":{"file_path":"/repo/a.py"}}],"usage":{"input_tokens":1,"output_tokens":5}}}"#;
+
+        let events = with_agent(&[spawn], &[early]);
+        let order: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentSpawn { .. } => Some("spawn"),
+                Event::AgentProgress { .. } => Some("model"),
+                Event::ToolCallStart { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["spawn", "toolu_a", "model", "toolu_r"]);
+        assert_eq!(
+            output_counts(&events),
+            [("claude-haiku-4-5".to_owned(), 5)],
+            "the agent's tokens are under its own model, and the spawn's record had none"
+        );
+    }
+
+    #[test]
+    fn an_agent_whose_spawn_the_session_never_records_is_left_out() {
+        let early = r#"{"type":"assistant","timestamp":"2026-09-19T11:14:43.000Z","message":{"id":"msg_a","model":"claude-haiku-4-5","content":[{"type":"tool_use","id":"toolu_r","name":"Read","input":{}}],"usage":{"input_tokens":1,"output_tokens":5}}}"#;
+        let said = r#"{"type":"user","timestamp":"2026-09-19T11:14:40.000Z","message":{"content":"hello"}}"#;
+
+        let events = with_agent(&[said], &[early]);
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, Event::ToolCallStart { .. } | Event::Usage(_))),
+            "{events:?}"
+        );
     }
 }

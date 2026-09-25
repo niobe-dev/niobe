@@ -106,7 +106,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `transcript.rs` reads the session files the CLI keeps for
   itself, so a session started in plain Claude Code can be listed and carried on — it writes
   nothing back, and folds through the same `translate.rs` as the live stream; a sub-agent's
-  model and answer are read from the file the CLI keeps for that agent beside the session's; `conformance.rs`
+  own messages — its calls, its edits, its model and its tokens — are read from the file the CLI
+  keeps for that agent beside the session's and folded in where the CLI's timestamps put them,
+  and its answer from the same file; `conformance.rs`
   names the CLI releases every shape in the crate was recorded from, which is what a session says
   once when it is driving a release nobody recorded. `tests/stream.rs` and `tests/transcript.rs`
   fold the recordings in `tests/fixtures/`, whose README carries the arithmetic the tests assert —

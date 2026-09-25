@@ -271,11 +271,10 @@ pub struct Translator {
     read_spilled: Option<ReadSpilled>,
 }
 
-/// What a sub-agent's own transcript says about it.
+/// What a sub-agent's own transcript says about it that its messages, folded
+/// in where they happened, do not.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RecordedAgent {
-    /// The model its latest message names.
-    pub(crate) model: Option<String>,
     /// The text of its last message, where that message called no tool after
     /// it: what it answered, and nothing where it stopped mid-step.
     pub(crate) answer: Option<String>,
@@ -352,12 +351,11 @@ impl Translator {
     /// The same translator, told what each sub-agent's own transcript says
     /// about it, by the id of the call that spawned it.
     ///
-    /// A session read back from the CLI's transcripts has none of the live
-    /// stream's reports on a sub-agent: the agent's messages are kept in a
-    /// file of their own, and the session's file says only that it was
-    /// launched and that it stopped. What that file says is reported where
-    /// the stream would have said it — the model with the spawn, the answer
-    /// just before the end.
+    /// A session read back from the CLI's transcripts has no notification
+    /// carrying an agent's answer: the session's file says only that the
+    /// agent was launched and that it stopped. The agent's own file says
+    /// what it answered, which is reported where the stream would have said
+    /// it — just before the end.
     #[must_use]
     pub(crate) fn knowing_agents(mut self, recorded: BTreeMap<String, RecordedAgent>) -> Self {
         self.recorded_agents = recorded;
@@ -816,13 +814,6 @@ impl Translator {
                             parent: None,
                             label: label_of(&input).unwrap_or_else(|| rendered.clone()),
                         });
-                        if let Some(model) = self
-                            .recorded_agents
-                            .get(&id)
-                            .and_then(|recorded| recorded.model.clone())
-                        {
-                            self.agent_model(&id, model, &mut calls);
-                        }
                     }
                     calls.push(Event::ToolCallStart {
                         id: ToolCallId::new(id),
