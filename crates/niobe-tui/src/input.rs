@@ -86,7 +86,7 @@ fn crossterm_input(timeout: Duration) -> io::Result<Input> {
 
 /// Waits on `tty` for up to `timeout`.
 #[cfg(unix)]
-fn poll_input(tty: BorrowedFd<'_>, timeout: Duration) -> io::Result<Input> {
+pub(crate) fn poll_input(tty: BorrowedFd<'_>, timeout: Duration) -> io::Result<Input> {
     let mut fds = [PollFd::from_borrowed_fd(tty, PollFlags::IN)];
     match rustix::event::poll(&mut fds, Some(&timespec(timeout))) {
         Ok(0) => Ok(Input::Idle),

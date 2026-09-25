@@ -864,7 +864,9 @@ SESSIONS:
 
 IN THE SHELL:
     Enter                  Send what is in the composer
-    Alt+Enter              Open a new line in the composer
+    Shift+Enter            Open a new line in the composer, on a terminal that
+                           can tell it from Enter (the bar names it only there)
+    Alt+Enter              Open a new line in the composer, on any terminal
     PgUp / PgDn            Scroll the transcript
     /                      On an empty composer, search the transcript: Up and
                            Enter step to the match above, Down to the one

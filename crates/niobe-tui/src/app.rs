@@ -835,6 +835,9 @@ pub struct App {
     /// Whether a [`crate::shell::Shell`] is there to run the operator's
     /// commands. Without one, `!` is a character like any other.
     runs_commands: bool,
+    /// Whether the terminal tells Shift+Enter from Enter, which decides the
+    /// key the bar names for a new line.
+    reports_shift_enter: bool,
     /// Whether what is in the composer is a command for the operator's own
     /// shell rather than a prompt: set by `!` on an empty composer.
     shell_mode: bool,
@@ -1009,6 +1012,7 @@ impl App {
             mention_closed: None,
             mention_selected: 0,
             runs_commands: false,
+            reports_shift_enter: false,
             shell_mode: false,
             commands: Vec::new(),
             running_commands: BTreeMap::new(),
@@ -1977,6 +1981,29 @@ impl App {
         self
     }
 
+    /// The same shell, on a terminal that tells Shift+Enter from Enter, so the
+    /// bar can name it as the key that opens a line.
+    ///
+    /// Shift+Enter opens a line whether or not this is set — where the
+    /// terminal cannot tell it apart it arrives as Enter and sends, which is
+    /// why only a terminal that said it can is told to press it.
+    #[must_use]
+    pub fn reports_shift_enter(mut self) -> Self {
+        self.reports_shift_enter = true;
+        self
+    }
+
+    /// The key that opens a new line in the composer on this terminal:
+    /// Shift+Enter where the terminal can report it, and Alt+Enter, which
+    /// every terminal can, where it cannot.
+    pub fn newline_key(&self) -> &'static str {
+        if self.reports_shift_enter {
+            "Shift+Enter"
+        } else {
+            "Alt+Enter"
+        }
+    }
+
     /// The same shell, opening on a line from the shell itself.
     ///
     /// For what the operator has to know before the first prompt and would
@@ -2451,7 +2478,7 @@ impl App {
         }
         let empty = self.composer.is_empty();
         match (key.code, key.modifiers) {
-            (KeyCode::Enter, KeyModifiers::ALT) => return false,
+            (KeyCode::Enter, modifiers) if opens_a_line(modifiers) => return false,
             (KeyCode::Enter, _) => self.run_command(),
             (KeyCode::Esc, _) => self.shell_mode = false,
             (KeyCode::Backspace, _) if empty => self.shell_mode = false,
@@ -2834,7 +2861,7 @@ impl App {
                 // hold a prompt sent now until after it — so the operator
                 // would have written the next turn believing it the answer.
                 AskFocus::Deferred
-                    if key.code == KeyCode::Enter && key.modifiers != KeyModifiers::ALT =>
+                    if key.code == KeyCode::Enter && !opens_a_line(key.modifiers) =>
                 {
                     self.hint = Some(
                         "The turn is still waiting on the question above; Esc to answer it first"
@@ -2875,9 +2902,9 @@ impl App {
             // Tab has nothing to do in a prompt, and Shift+Tab already cycles
             // the mode, so the plain key is the one that moves the focus.
             (KeyCode::Tab, KeyModifiers::NONE) => self.focus_next(),
-            // Alt+Enter opens a line; Enter sends. The other way round would
-            // make the common action the awkward one.
-            (KeyCode::Enter, KeyModifiers::ALT) => {
+            // Shift+Enter or Alt+Enter opens a line; Enter sends. The other
+            // way round would make the common action the awkward one.
+            (KeyCode::Enter, modifiers) if opens_a_line(modifiers) => {
                 self.focus = Focus::Session;
                 self.composer.insert_newline();
             }
@@ -3245,6 +3272,15 @@ const MENTION_ROWS: usize = 8;
 /// a repository, or one whose repository has not been read yet — since it
 /// would be advertising a list that cannot open; `! shell` where nothing runs
 /// commands, as in a recorded log being looked at.
+/// Whether Enter with `modifiers` opens a line in the composer rather than
+/// sending it: Shift, on a terminal that can report it, and Alt, which every
+/// terminal can.
+fn opens_a_line(modifiers: ratatui::crossterm::event::KeyModifiers) -> bool {
+    use ratatui::crossterm::event::KeyModifiers;
+
+    modifiers == KeyModifiers::SHIFT || modifiers == KeyModifiers::ALT
+}
+
 fn placeholder(columns: usize, files: bool, commands: bool) -> String {
     let mut said = PLACEHOLDER[0].to_owned();
     for more in PLACEHOLDER[1..].iter().filter(|more| match **more {
@@ -3785,6 +3821,63 @@ mod tests {
         assert_eq!(app.session().user_messages(), 1);
         assert_eq!(app.entries()[0].kind, EntryKind::User);
         assert_eq!(app.entries()[1].kind, EntryKind::Notice);
+    }
+
+    /// `app` with `text` typed into its composer, then `enter` with `modifiers`.
+    fn typed_then_enter(
+        app: &mut App,
+        text: &str,
+        modifiers: ratatui::crossterm::event::KeyModifiers,
+    ) {
+        for c in text.chars() {
+            app.type_into_composer(Input {
+                key: Key::Char(c),
+                ..Default::default()
+            });
+        }
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            modifiers,
+        ));
+    }
+
+    #[test]
+    fn shift_enter_opens_a_line_and_enter_still_sends() {
+        use ratatui::crossterm::event::KeyModifiers;
+
+        let mut app = app().reports_shift_enter();
+        typed_then_enter(&mut app, "one", KeyModifiers::SHIFT);
+        typed_then_enter(&mut app, "two", KeyModifiers::NONE);
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "one\ntwo".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn alt_enter_opens_a_line_on_any_terminal() {
+        use ratatui::crossterm::event::KeyModifiers;
+
+        for mut app in [app(), app().reports_shift_enter()] {
+            typed_then_enter(&mut app, "one", KeyModifiers::ALT);
+            typed_then_enter(&mut app, "two", KeyModifiers::NONE);
+
+            assert_eq!(
+                app.take_produced(),
+                [Event::UserMessage {
+                    text: "one\ntwo".to_owned()
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_named_for_a_new_line_is_the_one_the_terminal_can_report() {
+        assert_eq!(app().newline_key(), "Alt+Enter");
+        assert_eq!(app().reports_shift_enter().newline_key(), "Shift+Enter");
     }
 
     #[test]

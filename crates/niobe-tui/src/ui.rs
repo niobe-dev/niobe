@@ -700,9 +700,15 @@ fn draw_mention(frame: &mut Frame, transcript: Rect, bar: Rect, app: &App, theme
 /// Gives the placeholder the room the bar leaves once its first hint — the
 /// mode, where one is reported — has what it needs.
 fn fit_placeholder(app: &mut App, panes: bool, width: u16, theme: &Theme) {
-    let first = key_hints(app.session().mode(), app.focus(), panes, theme)
-        .first()
-        .map_or(0, |hint| text::width(&hint.text));
+    let first = key_hints(
+        app.session().mode(),
+        app.focus(),
+        panes,
+        app.newline_key(),
+        theme,
+    )
+    .first()
+    .map_or(0, |hint| text::width(&hint.text));
     // The cursor, and the column between the editor and the hints.
     let columns = usize::from(width)
         .saturating_sub(lead_width(app))
@@ -887,6 +893,7 @@ fn bar_says(app: &App, panes: bool, theme: &Theme, room: usize) -> Vec<Line<'sta
                 app.session().mode(),
                 app.focus(),
                 panes && !question_holds,
+                app.newline_key(),
                 theme,
             )
         }
@@ -934,8 +941,15 @@ fn find_hints(app: &App, count: usize, current: Option<usize>, theme: &Theme) ->
 ///
 /// With a right-hand pane focused, the keys that differ are that pane's: the
 /// arrows and Enter are not the composer's while it has them. `panes` is
-/// whether there is a pane beside the session for Tab to move to.
-fn key_hints(mode: Option<Mode>, focus: Focus, panes: bool, theme: &Theme) -> Vec<Segment> {
+/// whether there is a pane beside the session for Tab to move to, and
+/// `newline` the key that opens a line on this terminal.
+fn key_hints(
+    mode: Option<Mode>,
+    focus: Focus,
+    panes: bool,
+    newline: &str,
+    theme: &Theme,
+) -> Vec<Segment> {
     let key = |text: &str| Segment {
         text: text.to_owned(),
         style: Style::new().fg(theme.dim),
@@ -954,7 +968,7 @@ fn key_hints(mode: Option<Mode>, focus: Focus, panes: bool, theme: &Theme) -> Ve
     };
     match focus {
         Focus::Session => {
-            hints.push(key("Alt+Enter newline"));
+            hints.push(key(&format!("{newline} newline")));
             if panes {
                 hints.push(key("Tab panes"));
             }

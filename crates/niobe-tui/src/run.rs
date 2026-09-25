@@ -114,9 +114,17 @@ pub fn run(
     // The same clock the loop stamps events with, so that a moment an event
     // names — when a window comes back — is read in the timezone the rest of
     // the shell is drawn in.
-    let mut app = app.with_clock(clock.clone());
+    let app = app.with_clock(clock.clone());
 
     let mut guard = TerminalGuard::enter(io::stdout())?;
+    // The bar names the key that opens a line, and on a terminal that cannot
+    // tell Shift+Enter from Enter, naming it would be naming the key that
+    // sends.
+    let mut app = if guard.reports_shift_enter() {
+        app.reports_shift_enter()
+    } else {
+        app
+    };
     // No `Terminal::clear` here: the alternate screen starts blank and the
     // first draw covers it. `clear` also asks the terminal where its cursor is
     // and waits for the reply, which never comes when stdin is a pipe.

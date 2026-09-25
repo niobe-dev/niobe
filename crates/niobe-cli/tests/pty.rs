@@ -89,12 +89,48 @@ const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h";
 /// twice fails as well as one never handed back at all.
 const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 
-/// The terminal handed back: the mouse no longer reported, off the alternate
-/// screen and the cursor visible, in that order. The shell writes them from
-/// one place, so they arrive as one run of bytes, and a restoration that
-/// stopped in the middle — a prompt that prints escape sequences at every
-/// click, or has no cursor on it — is not this.
-const RESTORED: &str = "\x1b[?1006l\x1b[?1000l\x1b[?1049l\x1b[?25h";
+/// The terminal handed back: the mouse no longer reported, the keyboard
+/// enhancement popped, off the alternate screen and the cursor visible, in
+/// that order. The shell writes them from one place, so they arrive as one run
+/// of bytes, and a restoration that stopped in the middle — a prompt that
+/// prints escape sequences at every click, reads Enter as `CSI 13 u`, or has
+/// no cursor on it — is not this.
+///
+/// The terminals these tests open answer as one that reports keys does, so
+/// this is what every way out has to leave behind.
+const RESTORED: &str = "\x1b[?1006l\x1b[?1000l\x1b[<1u\x1b[?1049l\x1b[?25h";
+
+/// The same, on a terminal that cannot report keys: it was never asked to, so
+/// it is never asked to stop.
+const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1000l\x1b[?1049l\x1b[?25h";
+
+/// What the shell asks a terminal on the way in: which keyboard enhancements
+/// it has on, then its primary device attributes.
+const KEYBOARD_QUERY: &str = "\x1b[?u\x1b[c";
+
+/// The shell asking the terminal to tell Shift+Enter from Enter, and taking
+/// that back.
+const KEYBOARD_ON: &str = "\x1b[>1u";
+const KEYBOARD_OFF: &str = "\x1b[<1u";
+
+/// How the terminal a test opens answers [`KEYBOARD_QUERY`].
+#[derive(Clone, Copy)]
+enum Keys {
+    /// As one that knows the kitty keyboard protocol: its flags, none on yet,
+    /// then its attributes.
+    Reported,
+    /// As one that does not: its attributes alone.
+    Legacy,
+}
+
+impl Keys {
+    fn answer(self) -> &'static [u8] {
+        match self {
+            Self::Reported => b"\x1b[?0u\x1b[?62;22c",
+            Self::Legacy => b"\x1b[?62;22c",
+        }
+    }
+}
 
 /// Ctrl+Q, one of the two keys that quit the shell.
 const CTRL_Q: &[u8] = b"\x11";
@@ -125,6 +161,15 @@ const SIZE: Winsize = Winsize {
     ws_ypixel: 0,
 };
 
+/// A size with room on the bar for the key that opens a line: at [`SIZE`] the
+/// bar keeps only its first hint.
+const WIDE: Winsize = Winsize {
+    ws_row: 60,
+    ws_col: 200,
+    ws_xpixel: 0,
+    ws_ypixel: 0,
+};
+
 /// The end of the pty a terminal emulator holds: everything the shell draws is
 /// read off it as it arrives, and typing into it is typing into the shell.
 struct Terminal {
@@ -135,8 +180,15 @@ struct Terminal {
 }
 
 impl Terminal {
-    /// Opens a pty, and gives back the end the shell is to be run on.
+    /// Opens a pty on a terminal that reports keys, and gives back the end
+    /// the shell is to be run on.
     fn open() -> (Self, File) {
+        Self::answering(Keys::Reported)
+    }
+
+    /// Opens a pty on a terminal that answers the keyboard query as `keys`
+    /// says, and gives back the end the shell is to be run on.
+    fn answering(keys: Keys) -> (Self, File) {
         let master = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)
             .expect("a pty can be opened");
         rustix::pty::grantpt(&master).expect("the slave can be granted");
@@ -164,7 +216,7 @@ impl Terminal {
             let master = Arc::clone(&master);
             let drawn = Arc::clone(&drawn);
             let stop = Arc::clone(&stop);
-            move || read_until_stopped(&master, &drawn, &stop)
+            move || read_until_stopped(&master, &drawn, &stop, keys)
         });
 
         (
@@ -231,9 +283,11 @@ impl Terminal {
 }
 
 /// Reads everything the shell draws until the test stops, or until the shell
-/// closes its end.
-fn read_until_stopped(master: &OwnedFd, drawn: &Mutex<String>, stop: &AtomicBool) {
+/// closes its end, answering the keyboard query the first time it is asked, as
+/// a terminal emulator would.
+fn read_until_stopped(master: &OwnedFd, drawn: &Mutex<String>, stop: &AtomicBool, keys: Keys) {
     let mut buffer = [0u8; 4096];
+    let mut answered = false;
     while !stop.load(Ordering::SeqCst) {
         let mut fds = [PollFd::new(master, PollFlags::IN)];
         let ready = rustix::event::poll(&mut fds, Some(&POLL)).unwrap_or(0);
@@ -242,10 +296,18 @@ fn read_until_stopped(master: &OwnedFd, drawn: &Mutex<String>, stop: &AtomicBool
         }
         match rustix::io::read(master, &mut buffer) {
             Ok(0) | Err(_) => return,
-            Ok(read) => drawn
-                .lock()
-                .expect("the test thread did not panic holding the lock")
-                .push_str(&String::from_utf8_lossy(&buffer[..read])),
+            Ok(read) => {
+                let mut drawn = drawn
+                    .lock()
+                    .expect("the test thread did not panic holding the lock");
+                drawn.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                if !answered && drawn.contains(KEYBOARD_QUERY) {
+                    answered = true;
+                    // A terminal that has gone takes no answer, and a test
+                    // that closes it is not failed by that.
+                    let _ = rustix::io::write(master, keys.answer());
+                }
+            }
         }
     }
 }
@@ -328,7 +390,13 @@ fn assert_handed_back(drawn: &str, path: &str) {
     );
     assert!(
         drawn.contains(RESTORED),
-        "on {path} the shell left the alternate screen without showing the cursor: {drawn:?}"
+        "on {path} the shell left the alternate screen without popping the keyboard or showing \
+         the cursor: {drawn:?}"
+    );
+    assert_eq!(
+        drawn.matches(KEYBOARD_OFF).count(),
+        1,
+        "on {path} the keyboard enhancement was not popped exactly once: {drawn:?}"
     );
 }
 
@@ -645,6 +713,65 @@ fn a_sigterm_hands_the_terminal_back() {
     // screen in raw mode; catching the signal is what turns it into a quit.
     assert!(status.success(), "a SIGTERM ended the shell with {status}");
     assert_handed_back(&drawn, "a SIGTERM");
+}
+
+#[test]
+fn a_terminal_that_reports_keys_is_asked_to_tell_shift_enter_and_the_bar_names_it() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows("Shift+Enter newline");
+
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert!(status.success(), "a clean quit ended with {status}");
+    let entered = drawn
+        .find(ENTER_ALTERNATE_SCREEN)
+        .expect("the shell entered the alternate screen");
+    let pushed = drawn
+        .find(KEYBOARD_ON)
+        .expect("a terminal that reports keys was never asked to");
+    assert!(
+        entered < pushed,
+        "the keyboard was pushed onto the main screen's stack, which leaving the alternate \
+         screen does not pop: {drawn:?}"
+    );
+    assert!(!drawn.contains("Alt+Enter newline"), "{drawn:?}");
+}
+
+#[test]
+fn a_terminal_that_cannot_report_keys_is_never_asked_and_the_bar_names_alt_enter() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::answering(Keys::Legacy);
+    rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows("Alt+Enter newline");
+
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert!(status.success(), "a clean quit ended with {status}");
+    assert!(
+        drawn.contains(RESTORED_LEGACY),
+        "the terminal was not handed back: {drawn:?}"
+    );
+    assert!(!drawn.contains(KEYBOARD_ON), "{drawn:?}");
+    assert!(
+        !drawn.contains(KEYBOARD_OFF),
+        "a terminal that was never asked to report keys was sent the sequence that takes it \
+         back: {drawn:?}"
+    );
+    // On this terminal Shift+Enter sends the same carriage return as Enter,
+    // so naming it would be naming the key that sends the prompt.
+    assert!(!drawn.contains("Shift+Enter"), "{drawn:?}");
 }
 
 /// Only with debug assertions on: the panic the binary is asked for is

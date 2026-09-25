@@ -2087,6 +2087,20 @@ fn the_bar_names_the_mode_once_a_backend_has_said_it() {
 }
 
 #[test]
+fn the_bar_names_shift_enter_only_on_a_terminal_that_can_report_it() {
+    let row = bar_row(&screen(&mut empty_session(), 200, 60));
+    assert!(
+        !row.contains("Shift+Enter"),
+        "on a terminal that sends Enter for Shift+Enter, the bar names the key that sends:\n{row}"
+    );
+
+    let mut app = empty_session().reports_shift_enter();
+    let row = bar_row(&screen(&mut app, 200, 60));
+    assert!(row.contains("Shift+Enter newline"), "{row}");
+    assert!(!row.contains("Alt+Enter"), "{row}");
+}
+
+#[test]
 fn a_narrowing_bar_drops_whole_hints_and_never_cuts_one() {
     let mut app = running_session();
     app.apply(&Event::ModeSelected { mode: Mode::Auto });

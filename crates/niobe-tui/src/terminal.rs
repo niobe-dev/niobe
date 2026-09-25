@@ -14,6 +14,10 @@
 //!   process to stop, SIGHUP says the terminal it ran on has gone, and the
 //!   session ended for different reasons.
 //!
+//! Where the terminal can report keys the legacy encoding cannot tell apart —
+//! Shift+Enter from Enter, above all — the guard asks it to, and every one of
+//! those paths takes that back with the rest.
+//!
 //! All three are idempotent, so overlapping paths — a panic while a SIGTERM is
 //! pending — restore once and do not fight each other.
 //!
@@ -34,6 +38,7 @@
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::execute;
@@ -47,6 +52,14 @@ use ratatui::crossterm::terminal::{
 /// test must not spray escape sequences at a terminal the shell never touched.
 static TERMINAL_ENTERED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the terminal was asked to report keys the legacy encoding cannot
+/// tell apart, and still owes being asked to stop.
+///
+/// Read by the panic hook for the same reason as [`TERMINAL_ENTERED`]; kept
+/// apart from it because a terminal that cannot report those keys is never
+/// asked, and must not be sent the sequence that takes the request back.
+static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+
 /// Asks the terminal to report mouse buttons and the wheel, in SGR encoding.
 ///
 /// Written by hand rather than with crossterm's `EnableMouseCapture`, which
@@ -59,6 +72,137 @@ const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
 /// is what lets the panic hook write it without knowing how far entry got.
 const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
 
+/// Asks which keyboard enhancements the terminal has on, then for its primary
+/// device attributes.
+///
+/// A terminal that knows the kitty keyboard protocol answers the first; every
+/// terminal answers the second. So an answer to the second with none to the
+/// first before it is a terminal that cannot report Shift+Enter, and nothing
+/// has to be waited out to learn so.
+const KEYBOARD_QUERY: &[u8] = b"\x1b[?u\x1b[c";
+
+/// Pushes the one enhancement the shell needs onto the terminal's stack:
+/// disambiguating escape codes, which is what makes Shift+Enter arrive as
+/// itself rather than as the carriage return Enter sends. Nothing else is
+/// asked for — reporting key releases, say, would send every key twice.
+const KEYBOARD_ON: &[u8] = b"\x1b[>1u";
+
+/// Pops what [`KEYBOARD_ON`] pushed. Written only to a terminal that was sent
+/// it: a terminal that does not know the protocol has no reason to read this
+/// as nothing.
+const KEYBOARD_OFF: &[u8] = b"\x1b[<1u";
+
+/// How long the terminal has to answer [`KEYBOARD_QUERY`] before it is taken
+/// not to report the keys. Every terminal answers the attributes, so this is
+/// only ever waited out on one that answers nothing at all, and the shell
+/// opens on it a second late rather than not at all.
+const KEYBOARD_PATIENCE: Duration = Duration::from_secs(1);
+
+/// What a terminal has said so far in answer to [`KEYBOARD_QUERY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// The attributes have not arrived yet.
+    Waiting,
+    /// It reported its keyboard flags before its attributes.
+    Reports,
+    /// Its attributes came with no keyboard flags before them.
+    DoesNot,
+}
+
+/// Reads the replies in `heard`: `ESC [ ? <flags> u` for the keyboard, then
+/// `ESC [ ? <attributes> c` for the device. Anything else between them is
+/// passed over.
+fn answer(heard: &[u8]) -> Answer {
+    const INTRODUCER: &[u8] = b"\x1b[?";
+    let mut reports = false;
+    let mut rest = heard;
+    while let Some(start) = rest
+        .windows(INTRODUCER.len())
+        .position(|window| window == INTRODUCER)
+    {
+        let body = &rest[start + INTRODUCER.len()..];
+        let Some(end) = body
+            .iter()
+            .position(|byte| !(byte.is_ascii_digit() || *byte == b';'))
+        else {
+            return Answer::Waiting;
+        };
+        match body[end] {
+            b'u' => reports = true,
+            b'c' if reports => return Answer::Reports,
+            b'c' => return Answer::DoesNot,
+            _ => {}
+        }
+        rest = &body[end..];
+    }
+    Answer::Waiting
+}
+
+/// Asks the terminal whether it can report Shift+Enter, and waits for the
+/// answer on standard input.
+///
+/// Asked here rather than with crossterm's own query, which writes to
+/// `/dev/tty` whenever it can open it: that is the controlling terminal, and a
+/// process can be drawing on a terminal that is not its controlling one. The
+/// question goes where the screen is drawn and the answer is read where the
+/// keys are, which is the terminal the shell is actually on.
+///
+/// The answer is read before crossterm reads anything, so whatever the
+/// operator types in the moment it takes is not a key the shell sees. Only
+/// standard input is asked: when it is not a terminal the keys come from
+/// `/dev/tty`, which `poll(2)` cannot wait on everywhere, and the legacy keys
+/// are what the shell falls back on.
+#[cfg(unix)]
+fn reports_keys(out: &mut impl Write) -> bool {
+    use std::io::IsTerminal;
+    use std::os::fd::AsFd;
+
+    let stdin = io::stdin();
+    if !stdin.is_terminal() {
+        return false;
+    }
+    if out
+        .write_all(KEYBOARD_QUERY)
+        .and_then(|()| out.flush())
+        .is_err()
+    {
+        return false;
+    }
+
+    let deadline = std::time::Instant::now() + KEYBOARD_PATIENCE;
+    let mut heard = Vec::new();
+    let mut buffer = [0u8; 256];
+    loop {
+        match answer(&heard) {
+            Answer::Waiting => {}
+            Answer::Reports => return true,
+            Answer::DoesNot => return false,
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        // Idle is a wait a signal cut short as well as one that ran out, so
+        // the deadline rather than the wait decides when to stop.
+        match crate::input::poll_input(stdin.as_fd(), left) {
+            Ok(crate::input::Input::Ready) => {}
+            Ok(crate::input::Input::Idle) => continue,
+            Ok(crate::input::Input::HungUp) | Err(_) => return false,
+        }
+        match rustix::io::read(stdin.as_fd(), &mut buffer) {
+            Ok(0) | Err(_) => return false,
+            Ok(read) => heard.extend_from_slice(&buffer[..read]),
+        }
+    }
+}
+
+/// Asks the terminal whether it can report Shift+Enter. Only the POSIX side
+/// asks; elsewhere the legacy keys are what the shell uses.
+#[cfg(not(unix))]
+fn reports_keys(_out: &mut impl Write) -> bool {
+    false
+}
+
 /// Writes the sequences that put a terminal into the drawing mode.
 fn enter_screen(out: &mut impl Write) -> io::Result<()> {
     execute!(out, EnterAlternateScreen, Hide)?;
@@ -66,14 +210,20 @@ fn enter_screen(out: &mut impl Write) -> io::Result<()> {
     out.flush()
 }
 
-/// Writes the sequences that take a terminal out of the drawing mode.
+/// Writes the sequences that take a terminal out of the drawing mode, and
+/// pops the keyboard enhancement when `keyboard` says it was pushed.
 ///
 /// Separated from [`TerminalGuard`] so that the panic hook, which cannot reach
 /// the guard, emits exactly the same bytes. The mouse goes back first: a
 /// terminal left reporting it would print escape sequences into the shell the
-/// operator returns to at every click.
-fn leave(out: &mut impl Write) -> io::Result<()> {
+/// operator returns to at every click. The keyboard is popped before the
+/// alternate screen is left, because the protocol keeps one stack per screen
+/// and the push was made on this one.
+fn leave(out: &mut impl Write, keyboard: bool) -> io::Result<()> {
     out.write_all(MOUSE_OFF)?;
+    if keyboard {
+        out.write_all(KEYBOARD_OFF)?;
+    }
     execute!(out, LeaveAlternateScreen, Show)
 }
 
@@ -87,12 +237,16 @@ pub struct TerminalGuard<W: Write> {
     out: W,
     /// Whether this guard turned raw mode on, and so owes turning it off.
     raw_mode: bool,
+    /// Whether this guard pushed the keyboard enhancement, and so owes
+    /// popping it.
+    keyboard: bool,
     restored: bool,
 }
 
 impl<W: Write> TerminalGuard<W> {
-    /// Enters raw mode and the alternate screen, hides the cursor and asks for
-    /// the mouse wheel and clicks.
+    /// Enters raw mode and the alternate screen, hides the cursor, asks for
+    /// the mouse wheel and clicks and, where the terminal says it can, for
+    /// Shift+Enter to be told from Enter.
     pub fn enter(out: W) -> io::Result<Self> {
         enable_raw_mode()?;
 
@@ -102,6 +256,7 @@ impl<W: Write> TerminalGuard<W> {
         let mut guard = Self {
             out,
             raw_mode: true,
+            keyboard: false,
             restored: false,
         };
         // Set before the screen is entered, not after: it is what
@@ -109,8 +264,32 @@ impl<W: Write> TerminalGuard<W> {
         // mode rather than decide there was nothing to undo.
         TERMINAL_ENTERED.store(true, Ordering::SeqCst);
         enter_screen(&mut guard.out)?;
+        // On the alternate screen, where the push is made: the protocol keeps
+        // a stack per screen.
+        if reports_keys(&mut guard.out) {
+            guard.push_keyboard()?;
+        }
 
         Ok(guard)
+    }
+
+    /// Asks the terminal to tell Shift+Enter from Enter. Marked as owed
+    /// before it is written, for the same reason as the screen: a write that
+    /// fails halfway still leaves a terminal that may have taken the push.
+    fn push_keyboard(&mut self) -> io::Result<()> {
+        self.keyboard = true;
+        if self.raw_mode {
+            KEYBOARD_PUSHED.store(true, Ordering::SeqCst);
+        }
+        self.out.write_all(KEYBOARD_ON)?;
+        self.out.flush()
+    }
+
+    /// Whether the terminal said it can tell Shift+Enter from Enter, and was
+    /// asked to. Only then is Shift+Enter a key the shell can name: on any
+    /// other terminal it sends the same byte as Enter.
+    pub fn reports_shift_enter(&self) -> bool {
+        self.keyboard
     }
 
     /// Enters the alternate screen without touching raw mode.
@@ -124,6 +303,7 @@ impl<W: Write> TerminalGuard<W> {
         Ok(Self {
             out,
             raw_mode: false,
+            keyboard: false,
             restored: false,
         })
     }
@@ -136,7 +316,7 @@ impl<W: Write> TerminalGuard<W> {
         self.restored = true;
 
         if !self.raw_mode {
-            return leave(&mut self.out);
+            return leave(&mut self.out, self.keyboard);
         }
 
         // A panic unwinds through this guard after the hook has already
@@ -148,8 +328,9 @@ impl<W: Write> TerminalGuard<W> {
 
         // Both run even if the first fails: half a restoration is a terminal
         // the operator has to fix by hand.
+        KEYBOARD_PUSHED.store(false, Ordering::SeqCst);
         let raw = disable_raw_mode();
-        let screen = leave(&mut self.out);
+        let screen = leave(&mut self.out, self.keyboard);
         raw.and(screen)
     }
 }
@@ -170,8 +351,9 @@ pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if TERMINAL_ENTERED.swap(false, Ordering::SeqCst) {
+            let keyboard = KEYBOARD_PUSHED.swap(false, Ordering::SeqCst);
             let _ = disable_raw_mode();
-            let _ = leave(&mut io::stdout());
+            let _ = leave(&mut io::stdout(), keyboard);
         }
         previous(info);
     }));
@@ -327,6 +509,68 @@ mod tests {
         );
         assert!(out.contains(SHOW_CURSOR), "a panic left the cursor hidden");
         assert!(out.contains(MOUSE_OFF), "a panic left the mouse captured");
+    }
+
+    #[test]
+    fn a_guard_that_pushed_the_keyboard_pops_it_before_leaving_the_screen() {
+        let mut sink = Vec::new();
+        {
+            let mut guard =
+                TerminalGuard::enter_screen_only(&mut sink).expect("a Vec sink cannot fail");
+            guard.push_keyboard().expect("a Vec sink cannot fail");
+            assert!(guard.reports_shift_enter());
+        }
+
+        let out = written(&sink);
+        let pushed = out.find("\x1b[>1u").expect("the keyboard was pushed");
+        let popped = out.find("\x1b[<1u").expect("the keyboard was never popped");
+        assert!(
+            out.find(ENTER_ALTERNATE_SCREEN) < Some(pushed),
+            "pushed onto the main screen's stack: {out:?}"
+        );
+        assert!(
+            Some(popped) < out.find(LEAVE_ALTERNATE_SCREEN),
+            "popped after leaving the screen it was pushed on: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_guard_that_never_pushed_the_keyboard_never_pops_it() {
+        let mut sink = Vec::new();
+        {
+            let guard =
+                TerminalGuard::enter_screen_only(&mut sink).expect("a Vec sink cannot fail");
+            assert!(!guard.reports_shift_enter());
+        }
+
+        let out = written(&sink);
+        assert!(
+            !out.contains("\x1b[<1u"),
+            "popped what it never pushed: {out:?}"
+        );
+    }
+
+    #[test]
+    fn keyboard_flags_before_the_attributes_are_a_terminal_that_reports_keys() {
+        assert_eq!(answer(b"\x1b[?0u\x1b[?62;22c"), Answer::Reports);
+    }
+
+    #[test]
+    fn the_attributes_alone_are_a_terminal_that_does_not() {
+        assert_eq!(answer(b"\x1b[?62;22c"), Answer::DoesNot);
+    }
+
+    #[test]
+    fn an_answer_cut_off_mid_reply_is_still_awaited() {
+        assert_eq!(answer(b""), Answer::Waiting);
+        assert_eq!(answer(b"\x1b[?0u"), Answer::Waiting);
+        assert_eq!(answer(b"\x1b[?0u\x1b[?6"), Answer::Waiting);
+    }
+
+    #[test]
+    fn keys_typed_around_the_replies_do_not_change_the_answer() {
+        assert_eq!(answer(b"ab\x1b[?1u\x1bx\x1b[?1;2c"), Answer::Reports);
+        assert_eq!(answer(b"ab\x1b[A\x1b[?1;2c"), Answer::DoesNot);
     }
 
     /// A signal is delivered to the process, not to the `Shutdown` that asked
