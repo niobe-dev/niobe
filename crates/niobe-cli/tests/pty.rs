@@ -10,8 +10,9 @@
 //! full one — and typing into it.
 //!
 //! Three of these drive the shell down each way out and read the bytes that
-//! came back: a clean quit, restored by the guard; a SIGTERM, restored by the
-//! guard after the flag the handler sets ends the loop; and a panic, restored
+//! came back: a clean quit, restored by the guard; a SIGTERM, SIGINT or
+//! SIGQUIT, restored by the guard after the flag the handler sets ends the loop,
+//! which also ends the `!` commands still running; and a panic, restored
 //! by the panic hook while the stack unwinds. Nothing short of a real terminal
 //! proves the last two — the hook writes to the process's own standard output,
 //! and the signal disposition belongs to the process.
@@ -1382,4 +1383,78 @@ fn a_hangup_does_not_wait_on_what_the_cli_started_and_takes_it_along() {
     quits_without_waiting_on_what_the_cli_started("a hangup", |_, shell| {
         signal(shell, Signal::HUP);
     });
+}
+
+/// Ends the shell with `signal` while a `!` command is running, and asserts
+/// the shell took the same way out as a quit: the terminal handed back with
+/// its line discipline cooked again, and the command's group gone with it.
+///
+/// The default disposition of SIGINT and SIGQUIT kills the process outright,
+/// which leaves the terminal raw on the alternate screen and the command
+/// running with no one left to end it. Neither comes from the keyboard while
+/// the shell is up — raw mode reads Ctrl+C as a key — but `kill`, `timeout`
+/// and the task runners of editors send them.
+fn a_signal_hands_back_the_terminal_and_ends_the_bang_command(path: &str, sent: Signal) {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(b"echo $$ > bang.tmp && mv bang.tmp bang.pid; sleep 77104\r");
+    let marker = repo.path().join("bang.pid");
+    let deadline = Instant::now() + PATIENCE;
+    while !marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let written = std::fs::read_to_string(&marker).expect("the command wrote down its process");
+    let raw: i32 = written.trim().parse().expect("a pid is a number");
+    let group = Pid::from_raw(raw).expect("a pid is positive");
+
+    signal(&shell, sent);
+
+    let (took, status) = ended(&mut shell);
+    let modes = rustix::termios::tcgetattr(&slave).expect("the pty's modes can be read");
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(
+        took < DEADLINE,
+        "the shell took {took:?} to act on {path}, over the {DEADLINE:?} it has"
+    );
+    assert!(status.success(), "{path} ended the shell with {status}");
+    assert_handed_back(&drawn, path);
+    let cooked = rustix::termios::LocalModes::ICANON
+        | rustix::termios::LocalModes::ECHO
+        | rustix::termios::LocalModes::ISIG;
+    assert!(
+        modes.local_modes.contains(cooked),
+        "on {path} the terminal was left without its line discipline: {:?}",
+        modes.local_modes
+    );
+
+    // What was killed is reaped by whoever inherited it, a moment later.
+    let deadline = Instant::now() + DEADLINE;
+    let left = || rustix::process::test_kill_process_group(group).is_ok();
+    while left() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !left(),
+        "on {path} the `!` command was still running after the shell ended"
+    );
+}
+
+#[test]
+fn a_sigint_hands_back_the_terminal_and_ends_a_running_bang_command() {
+    a_signal_hands_back_the_terminal_and_ends_the_bang_command("a SIGINT", Signal::INT);
+}
+
+#[test]
+fn a_sigquit_hands_back_the_terminal_and_ends_a_running_bang_command() {
+    a_signal_hands_back_the_terminal_and_ends_the_bang_command("a SIGQUIT", Signal::QUIT);
+}
+
+#[test]
+fn a_sigterm_hands_back_the_terminal_and_ends_a_running_bang_command() {
+    a_signal_hands_back_the_terminal_and_ends_the_bang_command("a SIGTERM", Signal::TERM);
 }

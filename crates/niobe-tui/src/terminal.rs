@@ -433,9 +433,12 @@ pub enum Stop {
 ///
 /// The default disposition for SIGTERM kills the process outright, which leaves
 /// the terminal in raw mode on the alternate screen. Catching it costs two
-/// atomic reads per tick and turns the signal into an ordinary quit. SIGHUP is
-/// caught for the same reason and kept apart from it, because it carries more:
-/// the terminal is gone.
+/// atomic reads per tick and turns the signal into an ordinary quit. SIGINT and
+/// SIGQUIT are caught as the same request: raw mode reads Ctrl+C and Ctrl+\ as
+/// keys, so neither arrives from the keyboard, but `kill`, `timeout` and the
+/// task runners of editors send them, and their default disposition kills the
+/// process just as outright. SIGHUP is caught for the same reason and kept
+/// apart from them, because it carries more: the terminal is gone.
 #[derive(Debug, Clone)]
 pub struct Shutdown {
     #[cfg(unix)]
@@ -451,10 +454,13 @@ impl Shutdown {
     pub fn install() -> io::Result<Self> {
         let requested = std::sync::Arc::new(AtomicBool::new(false));
         let hung_up = std::sync::Arc::new(AtomicBool::new(false));
-        signal_hook::flag::register(
+        for asked in [
             signal_hook::consts::SIGTERM,
-            std::sync::Arc::clone(&requested),
-        )?;
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGQUIT,
+        ] {
+            signal_hook::flag::register(asked, std::sync::Arc::clone(&requested))?;
+        }
         signal_hook::flag::register(signal_hook::consts::SIGHUP, std::sync::Arc::clone(&hung_up))?;
         Ok(Self { requested, hung_up })
     }

@@ -311,10 +311,10 @@ Where tests live:
     tests take turns on a lock, so that nothing shares their cores, and each asserts the median
     of 31 frames so that a frame the scheduler interrupted cannot fail it.
   - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached
-    the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM and
-    a panic; a unit test cannot, because the panic hook writes to the process's own standard
-    output and the signal disposition belongs to the process. Watch it after touching
-    `terminal.rs` or `run.rs`.
+    the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM,
+    SIGINT or SIGQUIT and a panic; a unit test cannot, because the panic hook writes to the
+    process's own standard output and the signal disposition belongs to the process. Watch it
+    after touching `terminal.rs` or `run.rs`.
 
 ### 6.1 The gate
 

@@ -30,7 +30,7 @@ use crate::watch::Watch;
 /// How long the loop waits for a key before looking at the shutdown flag.
 ///
 /// A signal is noticed within one tick, so this is also the worst case between
-/// a SIGTERM and the terminal being handed back, and between the terminal going
+/// a signal asking it to stop and the terminal being handed back, and between the terminal going
 /// away and the session ending.
 const TICK: Duration = Duration::from_millis(100);
 
