@@ -17,7 +17,7 @@ use ratatui::prelude::CrosstermBackend;
 
 use niobe_core::event::Event as SessionEvent;
 
-use crate::app::App;
+use crate::app::{App, Arrival};
 use crate::bridge::Bridge;
 use crate::input::{Input, Wait};
 use crate::journal::Journal;
@@ -279,11 +279,10 @@ fn event_loop<B: Backend<Error = io::Error>>(
 fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
     let mut events = Vec::new();
     wait.read(&mut events)?;
+    let arrival = arrival(&events, std::time::Instant::now());
     for event in events {
         match event {
-            // Windows reports a press and a release; acting on both would
-            // send every prompt twice.
-            Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+            Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key_read(key, arrival),
             Event::Mouse(mouse) => app.on_mouse(mouse),
             // The next draw reads the new size; nothing to do here.
             Event::Resize(_, _) => {}
@@ -291,6 +290,25 @@ fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// How the keys among `events`, one read of the terminal made at `at`,
+/// arrived.
+///
+/// A read that held several keys is a paste, or keys typed faster than a
+/// person types, and a prompt must not take either as an answer. A mouse
+/// event beside a key leaves the key alone: it is not something typed.
+fn arrival(events: &[Event], at: std::time::Instant) -> Arrival {
+    Arrival {
+        at,
+        alone: events.iter().filter(|event| is_press(event)).count() <= 1,
+    }
+}
+
+/// Whether `event` is a key being pressed. Windows reports a press and a
+/// release; acting on both would send every prompt twice.
+fn is_press(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press)
 }
 
 /// Hands what the operator produced to the backend and to the journal, and
@@ -1131,5 +1149,24 @@ mod tests {
             BUSY_TICK.as_millis() >= 16,
             "looking more often than the frame budget would spend the time drawing"
         );
+    }
+
+    #[test]
+    fn a_read_holding_several_keys_did_not_bring_any_of_them_alone() {
+        let at = std::time::Instant::now();
+        let press = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let wheel = Event::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        let mut released = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE);
+        released.kind = KeyEventKind::Release;
+
+        assert!(!arrival(&[press('2'), press('x')], at).alone);
+        assert!(arrival(&[press('2')], at).alone);
+        assert!(arrival(&[press('2'), wheel], at).alone);
+        assert!(arrival(&[press('2'), Event::Key(released)], at).alone);
     }
 }

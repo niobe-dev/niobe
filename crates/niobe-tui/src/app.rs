@@ -916,6 +916,12 @@ pub struct App {
     ask_focus: AskFocus,
     /// The answer being written in place of the numbered ones.
     ask_draft: String,
+    /// Since when the front prompt has waited on a quiet keyboard: when it
+    /// came to the front, or when a key last reached it that was not taken
+    /// as an answer. `None` where no clock was handed in.
+    ask_quiet_since: Option<Instant>,
+    /// When the key being handled was read, where the event loop said.
+    arrival: Option<Arrival>,
     /// The standing answers this session starts with, plus the ones made in
     /// it.
     allowed: Allowlist,
@@ -1035,6 +1041,27 @@ enum Scroll {
 /// from the end that a turn can still be started on purpose.
 const BUDGET_WARNING: f64 = 0.8;
 
+/// How long a prompt waits on a quiet keyboard before a key answers it.
+///
+/// Long enough to hold back the keys of someone typing when the prompt came
+/// up — at thirty words a minute a key lands every 400 ms, and every key held
+/// back starts the wait again — and short against the time it takes to read
+/// the question before answering it.
+pub const ASK_QUIET: Duration = Duration::from_millis(500);
+
+/// What the bar says when keys reached a prompt too soon to answer it.
+const TOO_SOON_HINT: &str =
+    "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
+
+/// When a key reached the shell, as the event loop read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arrival {
+    /// When the read that held it came back.
+    pub at: Instant,
+    /// Whether it was the only key in that read.
+    pub alone: bool,
+}
+
 impl App {
     /// An empty session in the given repo.
     pub fn new(repo: Repo) -> Self {
@@ -1095,6 +1122,8 @@ impl App {
             stops: Vec::new(),
             stopping: BTreeSet::new(),
             commands_started: 0,
+            ask_quiet_since: None,
+            arrival: None,
             asks: VecDeque::new(),
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
@@ -1409,14 +1438,19 @@ impl App {
                 input,
                 target,
                 agent,
-            } => self.asks.push_back(Ask {
-                id: id.clone(),
-                tool: tool.clone(),
-                input: input.clone(),
-                target: target.clone(),
-                turn: self.session.user_messages(),
-                agent: agent.clone(),
-            }),
+            } => {
+                if self.asks.is_empty() {
+                    self.ask_quiet_since = self.latest_instant();
+                }
+                self.asks.push_back(Ask {
+                    id: id.clone(),
+                    tool: tool.clone(),
+                    input: input.clone(),
+                    target: target.clone(),
+                    turn: self.session.user_messages(),
+                    agent: agent.clone(),
+                });
+            }
 
             // A refusal is shown as its own entry rather than left to the tool
             // result that carries it back: a backend that reports nothing
@@ -1770,6 +1804,7 @@ impl App {
             self.ask_selected = 0;
             self.ask_focus = AskFocus::Choosing;
             self.ask_draft.clear();
+            self.ask_quiet_since = self.latest_instant();
         }
         self.asks.remove(at)
     }
@@ -3259,6 +3294,52 @@ impl App {
         }
     }
 
+    /// Handles one key the event loop read from the terminal, saying when
+    /// and with what else it came.
+    ///
+    /// Where a prompt waits, that is what tells a key the operator pressed to
+    /// answer it from one they were already typing, or one of a paste: see
+    /// [`ASK_QUIET`]. [`App::on_key`] is the same key with nothing known of
+    /// its arrival, which no prompt holds back.
+    pub fn on_key_read(&mut self, key: ratatui::crossterm::event::KeyEvent, arrival: Arrival) {
+        self.arrival = Some(arrival);
+        self.on_key(key);
+        self.arrival = None;
+    }
+
+    /// The latest moment the shell has been told of: the tick's, or the
+    /// arrival of the key being handled, which a prompt that key brought to
+    /// the front came up at.
+    fn latest_instant(&self) -> Option<Instant> {
+        match (self.now, self.arrival.map(|arrival| arrival.at)) {
+            (Some(now), Some(at)) => Some(now.max(at)),
+            (now, at) => now.or(at),
+        }
+    }
+
+    /// Whether the key being handled reached the front prompt before the
+    /// operator could have meant it as an answer, and if so, starts the quiet
+    /// the prompt waits for over again from it.
+    ///
+    /// A key comes too soon when it arrived with other keys in one read, as a
+    /// paste does, or within [`ASK_QUIET`] of the prompt coming up or of the
+    /// last key held back. Restarting the wait on each key held back is what
+    /// stops a word being typed through a prompt one key at a time.
+    fn too_soon_to_answer(&mut self) -> bool {
+        let Some(arrival) = self.arrival else {
+            return false;
+        };
+        let early = self
+            .ask_quiet_since
+            .is_some_and(|since| arrival.at < since + ASK_QUIET);
+        if arrival.alone && !early {
+            return false;
+        }
+        self.ask_quiet_since = Some(arrival.at);
+        self.hint = Some(TOO_SOON_HINT.to_owned());
+        true
+    }
+
     /// Handles one key.
     ///
     /// The shell's own bindings are taken first and everything left over goes
@@ -3438,6 +3519,10 @@ impl App {
         // it into view and does nothing else.
         if !self.follow {
             self.scroll_to_tail();
+            self.ask_quiet_since = self.latest_instant();
+            return;
+        }
+        if self.too_soon_to_answer() {
             return;
         }
         match self.ask_focus {
@@ -6726,5 +6811,131 @@ mod tests {
         assert!(app.diffs_open());
         assert!(app.asking().is_some(), "the key answered the question");
         assert!(app.take_produced().is_empty(), "{:?}", app.take_produced());
+    }
+
+    /// Hands `bytes` to the shell the way the event loop does: decoded as one
+    /// read of the terminal, every key in it arriving at `at`.
+    fn read(app: &mut App, bytes: &[u8], at: Instant) {
+        let mut events = Vec::new();
+        crate::keys::Decoder::default().feed(bytes, false, &mut events);
+        let keys: Vec<KeyEvent> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ratatui::crossterm::event::Event::Key(key) => Some(key),
+                _ => None,
+            })
+            .collect();
+        let alone = keys.len() == 1;
+        for key in keys {
+            app.on_key_read(key, Arrival { at, alone });
+        }
+    }
+
+    /// A prompt for `rm -rf build`, put on screen by the tick at `shown`.
+    fn shown_at(shown: Instant) -> App {
+        let mut app = app();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(
+            app.ask_options(),
+            [
+                Answer::Once,
+                Answer::AlwaysTool,
+                Answer::AlwaysTarget,
+                Answer::No
+            ]
+        );
+        app
+    }
+
+    #[test]
+    fn a_paste_answers_no_prompt_and_stores_no_rule() {
+        let shown = Instant::now();
+        let mut app = shown_at(shown);
+
+        read(
+            &mut app,
+            b"step 2 failed\rsee log",
+            shown + Duration::from_secs(5),
+        );
+
+        assert!(app.asking().is_some(), "the paste answered the question");
+        assert!(app.take_produced().is_empty());
+        assert!(app.take_rules().is_empty());
+        assert_eq!(
+            app.ask_selected(),
+            Answer::Once,
+            "the paste chose an answer"
+        );
+    }
+
+    #[test]
+    fn keys_typed_as_a_prompt_appears_do_not_answer_it() {
+        let shown = Instant::now();
+        let mut app = shown_at(shown);
+
+        // "retry 2⏎", a key every 200 ms, the prompt up after "retry ".
+        read(&mut app, b"2", shown + Duration::from_millis(150));
+        read(&mut app, b"\r", shown + Duration::from_millis(350));
+        read(&mut app, b"\r", shown + Duration::from_millis(550));
+
+        assert!(app.asking().is_some(), "typing ahead answered the question");
+        assert!(app.take_produced().is_empty());
+        assert!(app.take_rules().is_empty());
+        assert_eq!(app.ask_selected(), Answer::Once);
+        assert!(app.hint().is_some(), "nothing said the keys were not taken");
+    }
+
+    #[test]
+    fn a_deliberate_key_after_the_pause_still_answers() {
+        let shown = Instant::now();
+        let mut app = shown_at(shown);
+
+        read(&mut app, b"2", shown + Duration::from_secs(2));
+        read(&mut app, b"\r", shown + Duration::from_secs(3));
+
+        assert!(app.asking().is_none());
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::AllowAlways,
+                message: None,
+            }]
+        );
+        assert_eq!(app.take_rules(), [Rule::tool("Bash")]);
+    }
+
+    #[test]
+    fn typing_on_after_a_prompt_appears_holds_it_until_the_keyboard_is_quiet() {
+        let shown = Instant::now();
+        let mut app = shown_at(shown);
+
+        read(&mut app, b"2", shown + Duration::from_millis(400));
+        read(&mut app, b"\r", shown + Duration::from_millis(800));
+        assert!(app.asking().is_some(), "typing on answered the question");
+
+        read(&mut app, b"\r", shown + Duration::from_millis(1800));
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_second_enter_does_not_answer_the_prompt_the_first_one_brought_up() {
+        let mut app = asked(Some("ls"));
+        let first = Instant::now();
+        app.tick(first, None);
+
+        read(&mut app, b"\r", first + Duration::from_secs(2));
+        read(&mut app, b"\r", first + Duration::from_millis(2100));
+
+        assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
+        assert_eq!(app.take_produced().len(), 1);
     }
 }
