@@ -217,7 +217,7 @@ pub fn trust_path() -> Option<PathBuf> {
 
 /// The text of `path`, or `None` where there is no such file.
 fn read(path: &Path) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(path) {
+    match niobe_config::read::text(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("cannot read {}: {error}", path.display())),

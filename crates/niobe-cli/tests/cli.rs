@@ -595,6 +595,33 @@ fn an_invalid_config_errors_with_the_key_and_the_line() {
     }
 }
 
+/// A repository could commit its config as a link to an endless device, and
+/// every command that reads the config would hang on it, filling memory.
+#[cfg(unix)]
+#[test]
+fn a_repository_config_linked_to_dev_zero_fails_fast_and_names_the_file() {
+    let setup = Configured::new(USER_CONFIG, "");
+    let repo = std::fs::canonicalize(setup.repo.path()).expect("the repository exists");
+    std::fs::create_dir(repo.join(".niobe")).expect("a .niobe directory");
+    std::os::unix::fs::symlink("/dev/zero", repo_config(&repo)).expect("the link is made");
+    let expected = format!(
+        "niobe: cannot read {}: not a regular file\n",
+        repo_config(&repo).display()
+    );
+
+    for args in [&["profiles"][..], &[], &["trust"]] {
+        let started = std::time::Instant::now();
+        let output = setup.run(args);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{args:?} took {:?}",
+            started.elapsed()
+        );
+        assert!(!output.status.success(), "{args:?}");
+        assert_eq!(stderr(&output), expected, "{args:?}");
+    }
+}
+
 #[test]
 fn a_config_that_is_not_toml_names_the_line() {
     let setup = Configured::new(

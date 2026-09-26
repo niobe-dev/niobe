@@ -85,7 +85,7 @@ impl Trusted {
     /// which is not an error: it is every machine before the first `niobe
     /// trust`.
     pub fn read(path: &Path) -> Result<Self, ConfigError> {
-        match std::fs::read_to_string(path) {
+        match crate::read::text(path) {
             Ok(text) => Self::parse(&text, path),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(ConfigError::Read {

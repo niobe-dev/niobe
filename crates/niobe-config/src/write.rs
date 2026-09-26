@@ -61,7 +61,7 @@ fn remember_with(
     std::fs::create_dir_all(dir).map_err(failed)?;
     let _lock = replace::Lock::directory(dir).map_err(failed)?;
 
-    let text = match std::fs::read_to_string(&target) {
+    let text = match crate::read::text(&target) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => {

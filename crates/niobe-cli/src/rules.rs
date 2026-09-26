@@ -40,7 +40,7 @@ impl ConfigRules {
         let Some(record) = &self.trust else {
             return false;
         };
-        let (Ok(trusted), Ok(text)) = (Trusted::read(record), std::fs::read_to_string(&self.path))
+        let (Ok(trusted), Ok(text)) = (Trusted::read(record), niobe_config::read::text(&self.path))
         else {
             return false;
         };
@@ -52,7 +52,7 @@ impl ConfigRules {
         let Some(record) = &self.trust else {
             return Ok(());
         };
-        let text = std::fs::read_to_string(&self.path)
+        let text = niobe_config::read::text(&self.path)
             .map_err(|e| format!("cannot read {}: {e}", self.path.display()))?;
         let mut trusted = Trusted::read(record).map_err(|e| e.to_string())?;
         trusted

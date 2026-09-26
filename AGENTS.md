@@ -63,7 +63,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   array at the byte range the parser gives it, so the operator's comments and ordering survive,
   under a lock on the file's directory so two sessions adding rules at once both keep theirs;
   `replace.rs` writes a file Niobe did not create by renaming a flushed copy over it, so a failed
-  write or a crash leaves the old file rather than half of the new one;
+  write or a crash leaves the old file rather than half of the new one; `read.rs` is how every
+  config file is read — without waiting on a FIFO, only if it is a regular file and only up to a
+  mebibyte — because a repository can commit its config as a link to `/dev/zero`;
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
   `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
   profile, or replace one of the user's — as each file's SHA-256 under the user's own config

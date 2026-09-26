@@ -629,7 +629,7 @@ fn untrust() -> Result<(), String> {
 /// file rather than on what it parses to.
 fn repo_config() -> Result<(PathBuf, String), String> {
     let path = repo::config_path(&repo::root(&cwd()?));
-    match std::fs::read_to_string(&path) {
+    match niobe_config::read::text(&path) {
         Ok(text) => Ok((path, text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
             "no config to trust: {} does not exist",

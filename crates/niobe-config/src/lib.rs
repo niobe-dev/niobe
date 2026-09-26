@@ -91,6 +91,7 @@
 
 mod error;
 mod parse;
+pub mod read;
 mod replace;
 pub mod trust;
 mod write;
@@ -374,7 +375,7 @@ impl Config {
     /// Reads and parses the config file at `path`. A file that does not exist
     /// is no config at all, which is not an error: most repositories have none.
     pub fn read(path: &Path) -> Result<Option<Self>, ConfigError> {
-        match std::fs::read_to_string(path) {
+        match read::text(path) {
             Ok(text) => Self::parse(&text, path).map(Some),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(ConfigError::Read {
@@ -1303,6 +1304,23 @@ backend = "codex"
         assert!(
             error.starts_with(&format!("cannot read {}", dir.path().display())),
             "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_linked_to_an_endless_device_is_refused_and_named() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let link = dir.path().join(FILE_NAME);
+        std::os::unix::fs::symlink("/dev/zero", &link).expect("the link is made");
+
+        let error = Config::read(&link)
+            .expect_err("a device is not a config")
+            .to_string();
+
+        assert_eq!(
+            error,
+            format!("cannot read {}: not a regular file", link.display())
         );
     }
 
