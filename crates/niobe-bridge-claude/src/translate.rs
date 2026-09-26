@@ -4396,6 +4396,33 @@ error: could not compile `demo` (lib test) due to 1 previous error";
     }
 
     #[test]
+    fn a_commit_whose_message_mentions_cargo_test_leaves_the_failing_run_shown() {
+        let mut translator = translator();
+        let mut state = niobe_core::session::SessionState::new();
+        shell_call(&mut translator);
+        let commit = serde_json::json!({
+            "command": "git commit -m \"fix: parser; cargo test now covers it\"",
+        });
+        for line in [
+            result("t1", &format!("Exit code 101\n{TEST_RUN}"), true),
+            call("t2", "Bash", &commit.to_string()),
+            result(
+                "t2",
+                "[main 1a2b3c4] fix: parser; cargo test now covers it",
+                false,
+            ),
+        ] {
+            for event in translator.line(&line) {
+                state.apply(&event);
+            }
+        }
+
+        let run = state.test_run().expect("the failing run is reported");
+        assert!(run.failed, "{run:?}");
+        assert_eq!(run.exit_code, Some(101));
+    }
+
+    #[test]
     fn a_counted_run_is_failed_exactly_where_its_counts_say_so() {
         let mut failing = translator();
         shell_call(&mut failing);

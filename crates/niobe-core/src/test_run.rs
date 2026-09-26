@@ -108,9 +108,10 @@ where
 /// change nothing about what is printed. A `cargo test` that builds the tests
 /// and runs none — `--no-run`, `--help`, `-- --list` — is not a test run.
 ///
-/// It does not look inside a quoted string, so `echo "cargo test"` is not one;
-/// nor through any other wrapper, whose output may not be what `cargo test`
-/// printed.
+/// It does not look inside a quoted string, so neither `echo "cargo test"` nor
+/// `git commit -m "fix; cargo test passes"` is one; nor inside a `$(…)` or
+/// backticks, whose output is captured; nor through any other wrapper, whose
+/// output may not be what `cargo test` printed.
 pub fn is_test_run(command: &str) -> bool {
     simple_commands(command)
         .into_iter()
@@ -119,18 +120,70 @@ pub fn is_test_run(command: &str) -> bool {
 
 /// The simple commands in `command`, in order, split where a shell would run
 /// the next one, and empty where two separators meet (`&&`, `||`).
+///
+/// A separator inside quotes, a `$(…)` or backticks, or escaped with `\`, is
+/// part of a word: `git commit -m "fix; cargo test passes"` is one command,
+/// `git`'s. What a command substitution runs is not split out either, since
+/// what it prints is captured and its status is not the command's.
 fn simple_commands(command: &str) -> Vec<&str> {
     let bytes = command.as_bytes();
     let mut commands = Vec::new();
     let mut start = 0;
-    for at in 0..bytes.len() {
-        if separates(bytes, at) {
-            commands.extend(command.get(start..at));
-            start = at + 1;
+    let mut open: Vec<Quoted> = Vec::new();
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        let inner = open.last().copied();
+        let substitution = byte == b'$' && bytes.get(at + 1) == Some(&b'(');
+        match (inner, byte) {
+            (Some(Quoted::Single), b'\'') => {
+                open.pop();
+            }
+            (Some(Quoted::Single), _) => {}
+            (_, b'\\') => at += 1,
+            (_, b'$') if substitution => {
+                open.push(Quoted::Substitution);
+                at += 1;
+            }
+            (Some(Quoted::Double), b'"') | (Some(Quoted::Backticks), b'`') => {
+                open.pop();
+            }
+            (_, b'`') => open.push(Quoted::Backticks),
+            (Some(Quoted::Double), _) => {}
+            (_, b'\'') => open.push(Quoted::Single),
+            (_, b'"') => open.push(Quoted::Double),
+            (Some(Quoted::Substitution | Quoted::Parenthesis), b'(') => {
+                open.push(Quoted::Parenthesis);
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis), b')') => {
+                open.pop();
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis | Quoted::Backticks), _) => {}
+            (None, _) => {
+                if separates(bytes, at) {
+                    commands.extend(command.get(start..at));
+                    start = at + 1;
+                }
+            }
         }
+        at += 1;
     }
     commands.extend(command.get(start..));
     commands
+}
+
+/// What a byte of a command is inside of, where a separator is not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Quoted {
+    /// `'…'`, where nothing is special but the closing quote.
+    Single,
+    /// `"…"`, which a `\`, a `$(…)` or backticks can still appear in.
+    Double,
+    /// `$(…)`.
+    Substitution,
+    /// `(…)` inside a `$(…)`, so that its `)` does not close the substitution.
+    Parenthesis,
+    /// `` `…` ``.
+    Backticks,
 }
 
 /// Whether the byte at `at` ends a simple command. An `&` that follows `>` or
@@ -755,6 +808,10 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "cargo test -- --nocapture",
             "cargo test &> log.txt",
             "cargo test >| log.txt",
+            "echo \"done\"; cargo test",
+            "echo 'a;b' && cargo test",
+            "git commit -m \"$(cat msg)\" && cargo test",
+            "echo \\\"; cargo test",
         ] {
             assert!(is_test_run(command), "{command:?} runs the tests");
         }
@@ -773,6 +830,15 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "echo \"cargo test\"",
             "echo cargo test",
             "grep -rn 'cargo test' AGENTS.md",
+            "git commit -m \"wip; cargo test later\"",
+            "git commit -m \"fix: cargo test; cargo test passes\"",
+            "echo 'done; cargo test --all'",
+            "echo \"it's done; cargo test\"",
+            "echo 'say \"hi\"; cargo test'",
+            "echo \\; cargo test",
+            "git commit -m \"$(printf 'x'); cargo test\"",
+            "echo $(date; cargo test)",
+            "echo `date; cargo test`",
             "cargo xtask ci",
             "cargo nextest run",
             "pytest",
