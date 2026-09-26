@@ -892,9 +892,20 @@ IN THE SHELL:
     and its call ends as stopped by the operator. Ctrl+C quits, as always.
     The agent is not told it ran and does not see what it printed.
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
-    F8                     Pick a model from the ones the profile names
-    F9                     Cycle the palette the shell draws in
-    F10, Ctrl+Q            Quit
+    F1, Esc 1              Say which keys move around the shell
+    F5, Esc 5              On a plan, say when its usage windows come back
+    F6, Esc 6              Fold or open the working tree section
+    F7, Esc 7              Fold or open the tools section
+    F8, Esc 8              Pick a model from the ones the profile names
+    F9, Esc 9              Cycle the palette the shell draws in
+    F10, Esc 0, Ctrl+Q     Quit
+
+    F2, F3 and F4 name views that are not implemented yet, and say so.
+
+    Every F-key is also Esc and then its digit, 0 for F10, which is how the
+    bar at the foot of the shell names them: on a Mac the top row is media
+    keys unless Fn is held, and Esc and a digit reach every terminal. Alt and
+    the digit does the same where the terminal sends Option as Meta.
 
     When a backend stops for permission, the question is asked at the foot of
     the transcript and the turn waits on it:

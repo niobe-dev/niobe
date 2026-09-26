@@ -93,7 +93,18 @@ const PICK_CURRENT: &str = "· ";
 /// the money.
 const BUDGET_SHOWN_HOT: f64 = 0.8;
 
-/// The F-key bar, which is also the list of what the shell can be asked to do.
+/// What the F-key bar starts with: the key that makes each digit after it the
+/// F-key of that number.
+///
+/// The bar names Esc and a digit rather than F1 to F10 because on a Mac the
+/// top row is media keys unless Fn is held or the system is set to send
+/// function keys, so an F-key the bar named would not reach the shell on a
+/// default setup. Esc and a digit reach every terminal as two plain bytes, and
+/// the F-keys still work where they arrive.
+const FKEYS_LEAD: &str = "Esc ";
+
+/// The F-key bar, which is also the list of what the shell can be asked to do:
+/// the digit that follows Esc for each, `0` being F10.
 const FKEYS: [(&str, &str); 10] = [
     ("1", "Help"),
     ("2", "Plan"),
@@ -104,7 +115,7 @@ const FKEYS: [(&str, &str); 10] = [
     ("7", "Tools"),
     ("8", "Model"),
     ("9", "Theme"),
-    ("10", "Quit"),
+    ("0", "Quit"),
 ];
 
 /// The menu bar's items. The first letter is the hot key.
@@ -3439,8 +3450,11 @@ fn window_style(window: &UsageWindow, theme: &Theme) -> Style {
 }
 
 fn draw_fkeys(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let slot = usize::from(area.width) / FKEYS.len();
-    let mut spans = Vec::new();
+    let slot = usize::from(area.width).saturating_sub(FKEYS_LEAD.len()) / FKEYS.len();
+    let mut spans = vec![Span::styled(
+        FKEYS_LEAD,
+        Style::new().fg(theme.hot).bg(theme.menu_bg).bold(),
+    )];
 
     for (number, label) in FKEYS {
         let room = slot.saturating_sub(number.len() + 1);
@@ -4101,6 +4115,26 @@ mod tests {
             !MENUS.contains(&"Cost") && !FKEYS.iter().any(|(_, label)| *label == "Cost"),
             "nothing the operator reads still calls this pane Cost"
         );
+    }
+
+    #[test]
+    fn the_bar_names_the_digit_after_esc_and_every_label_fits_at_the_narrowest() {
+        // A Mac's top row is media keys unless Fn is held, so the bar names
+        // the key that reaches every terminal: Esc, then one digit.
+        assert!(
+            FKEYS.iter().all(|(key, _)| key.len() == 1),
+            "one digit per action, 0 for the tenth: {FKEYS:?}"
+        );
+        assert_eq!(FKEYS[9], ("0", "Quit"));
+
+        let slot = (usize::from(MIN_SIZE.0) - FKEYS_LEAD.len()) / FKEYS.len();
+        for (key, label) in FKEYS {
+            assert!(
+                key.len() + label.len() < slot,
+                "{key}{label} is cut at {} columns",
+                MIN_SIZE.0
+            );
+        }
     }
 
     fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> niobe_core::Event {

@@ -633,6 +633,9 @@ fn the_help_says_how_the_mode_the_model_the_budget_and_the_theme_are_changed() {
         "F9",
         "theme = \"neo\"",
         "Ctrl+G",
+        "Esc 8",
+        "Esc 9",
+        "Esc 0",
     ] {
         assert!(
             out.contains(said),

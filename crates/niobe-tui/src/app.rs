@@ -841,6 +841,9 @@ pub struct App {
     transcript_lines: usize,
     viewport_lines: usize,
     hint: Option<String>,
+    /// Whether the last key was an Esc that did nothing else, which makes a
+    /// digit pressed next the F-key of that number.
+    escaped: bool,
     /// The search through the transcript, while it is open.
     find: Option<Find>,
     /// The `@` word the operator closed the list of files for, by its line
@@ -1042,6 +1045,7 @@ impl App {
             transcript_lines: 0,
             viewport_lines: 0,
             hint: None,
+            escaped: false,
             find: None,
             mention_closed: None,
             mention_selected: 0,
@@ -2821,6 +2825,35 @@ impl App {
         }
     }
 
+    /// The key as the shell acts on it: a digit after an Esc that did nothing
+    /// else, or with Alt held, is the F-key of that number.
+    ///
+    /// Alt and a digit is the same two bytes as Esc and the digit arriving
+    /// together, which is what a terminal that sends Option as Meta writes
+    /// and what a quick Esc then digit can read as. Anything else after Esc
+    /// is itself, and ends it: the digit is only the one key after.
+    fn as_function_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> ratatui::crossterm::event::KeyEvent {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let escaped = std::mem::take(&mut self.escaped);
+        let KeyCode::Char(digit) = key.code else {
+            return key;
+        };
+        let stands_for =
+            escaped && key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::ALT;
+        match function_key_of(digit) {
+            Some(n) if stands_for => KeyEvent {
+                code: KeyCode::F(n),
+                modifiers: KeyModifiers::NONE,
+                ..key
+            },
+            Some(_) | None => key,
+        }
+    }
+
     /// One key, while a search is open. Returns whether the search took it.
     ///
     /// The F-keys, Shift+Tab, Ctrl+O and Ctrl+T still do what they do everywhere;
@@ -2973,6 +3006,7 @@ impl App {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         self.hint = None;
+        let key = self.as_function_key(key);
 
         // Quitting is always available: a session with a prompt up is still a
         // session the operator may need to leave, and the backend is told the
@@ -3074,6 +3108,14 @@ impl App {
             (KeyCode::F(8), _) => self.pick_model(),
             (KeyCode::F(9), _) => self.cycle_theme(),
             (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
+            // An Esc nothing else wanted leaves the composer as it is and
+            // makes the next digit an F-key, which is how the bar's actions
+            // are reached where the F-keys never arrive.
+            (KeyCode::Esc, _) => {
+                self.focus = Focus::Session;
+                self.escaped = true;
+                self.hint = Some(ESCAPED_HINT.to_owned());
+            }
 
             // `/` searches the transcript where it would start a prompt: in
             // a composer with anything in it, it is a slash.
@@ -3494,6 +3536,22 @@ fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
     composer.set_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
     composer.set_cursor_line_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
     composer.set_cursor_style(Style::new().fg(theme.pane_bg).bg(theme.hot));
+}
+
+/// What the shell says once Esc has made the next digit an F-key.
+const ESCAPED_HINT: &str = "Esc — a digit now presses its F-key: 1 Help · 5 Usage · 6 Files · \
+                            7 Tools · 8 Model · 9 Theme · 0 Quit";
+
+/// The F-key a digit stands for after Esc: `1` to `9` are F1 to F9 and `0`
+/// is F10, in the order the bar draws them.
+fn function_key_of(digit: char) -> Option<u8> {
+    match digit {
+        '0' => Some(10),
+        _ => digit
+            .to_digit(10)
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| *n > 0),
+    }
 }
 
 /// What an F-key does, for the ones that do nothing yet.
@@ -4186,6 +4244,75 @@ mod tests {
         for _ in 1..THEMES.len() {
             app.on_key(key(KeyCode::F(9)));
         }
+        assert_eq!(*app.theme(), CYBER);
+    }
+
+    #[test]
+    fn esc_then_a_digit_presses_the_function_key_of_that_number() {
+        use crate::theme::CLASSIC;
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = app();
+        app.on_key(key(KeyCode::Esc));
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("0 Quit")),
+            "Esc says what the digit after it does: {:?}",
+            app.hint()
+        );
+        app.on_key(key(KeyCode::Char('9')));
+        assert_eq!(*app.theme(), CLASSIC);
+        assert_eq!(app.composer().lines(), [""]);
+
+        // It is one key after Esc, not every key after it.
+        app.on_key(key(KeyCode::Char('9')));
+        assert_eq!(*app.theme(), CLASSIC);
+        assert_eq!(app.composer().lines(), ["9"]);
+
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('0')));
+        assert!(app.should_quit(), "Esc then 0 is F10");
+    }
+
+    #[test]
+    fn alt_and_a_digit_is_the_same_function_key() {
+        use crate::theme::CLASSIC;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // Esc and a digit that reach the terminal together, or Option sent
+        // as Meta, arrive as the digit with Alt held.
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::ALT));
+        assert_eq!(*app.theme(), CLASSIC);
+        assert_eq!(app.composer().lines(), [""]);
+        app.on_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::ALT));
+        assert!(app.should_quit(), "Alt+0 is F10");
+    }
+
+    #[test]
+    fn a_key_after_esc_that_is_not_a_digit_is_typed_as_itself() {
+        use crate::theme::CYBER;
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = app();
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('x')));
+        app.on_key(key(KeyCode::Char('9')));
+        assert_eq!(app.composer().lines(), ["x9"]);
+        assert_eq!(*app.theme(), CYBER);
+    }
+
+    #[test]
+    fn a_digit_after_the_esc_that_closed_a_search_is_typed() {
+        use crate::theme::CYBER;
+        use ratatui::crossterm::event::KeyCode;
+
+        // That Esc already did something; the digit after it is the start of
+        // what the operator types next.
+        let mut app = app();
+        app.on_key(key(KeyCode::Char('/')));
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('9')));
+        assert_eq!(app.composer().lines(), ["9"]);
         assert_eq!(*app.theme(), CYBER);
     }
 

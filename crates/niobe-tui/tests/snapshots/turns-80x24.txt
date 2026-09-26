@@ -21,4 +21,4 @@
 ┃ ──────────────────────────────────────────────────────────────────────────── ┃
 ┃  —  >  Ask for a change                      Shift+Tab mode · Ctrl+J newline ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-1Help   2Plan   3Diff   4Undo   5Usage  6Files  7Tools  8Model  9Theme  10Quit
+Esc 1Help  2Plan  3Diff  4Undo  5Usage 6Files 7Tools 8Model 9Theme 0Quit
