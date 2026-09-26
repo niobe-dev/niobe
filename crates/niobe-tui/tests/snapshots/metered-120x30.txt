@@ -3,9 +3,9 @@
  ┃                                                                          ┃ │                                       │
  ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ session ≥~$0.07 · ≥~$2.37/h worked    │
  ┃    48     return res;                                                    ┃ │ ───────────────────────────────────── │
- ┃       …                                                                  ┃ │ opus-5     94%  ▓▓▓▓▓▓▓   49k  ~$0.07 │
- ┃   115     cache.set(url, {                                               ┃ │ haiku-4-5   6%  ▓░░░░░░  3200       — │
- ┃   116 +     etag: res.headers.get("ETag"),                               ┃ │ cache hit  81%  ▓▓▓▓▓▓░   40k         │
+ ┃       …                                                                  ┃ │ opus-5     94%  ▓▓▓▓▓▓   49k   ~$0.07 │
+ ┃   115     cache.set(url, {                                               ┃ │ haiku-4-5   6%  ▓░░░░░  3200        — │
+ ┃   116 +     etag: res.headers.get("ETag"),                               ┃ │ cache hit  81%  ▓▓▓▓▓░   40k          │
  ┃   117       body,                                                        ┃ │ ───────────────────────────────────── │
  ┃   └ allowed by you                                                       ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
  ┃                                                                          ┃ └───────────────────────────────────────┘

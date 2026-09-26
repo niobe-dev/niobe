@@ -181,11 +181,12 @@ impl Totals {
         // both settling the model and carrying tokens of its own — which the
         // Claude bridge emits for tokens no message reported — leaves nothing
         // owed rather than owing for itself.
-        if usage.settles_model && usage.cost_usd.is_some() {
+        let cost = reported_cost(usage);
+        if usage.settles_model && cost.is_some() {
             self.clear_unsettled(&usage.model);
         }
 
-        match usage.cost_usd {
+        match cost {
             Some(cost) => {
                 self.reported_cost_usd += cost;
                 *self
@@ -213,6 +214,18 @@ impl Totals {
             self.records_unsettled = self.records_unsettled.saturating_sub(covered);
         }
     }
+}
+
+/// The money a record reports, where it is a sum of money at all.
+///
+/// A cost that is not finite, or is below nothing, is not a figure anything
+/// on screen can stand behind: added in, a `NaN` poisons every total after it
+/// and a negative one quietly takes spend away. Such a record is folded as one
+/// that reported no money, so its tokens are owed for like any other's.
+fn reported_cost(usage: &Usage) -> Option<f64> {
+    usage
+        .cost_usd
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
 }
 
 /// Tool call counters, for the tools pane and for waste accounting.
@@ -1051,6 +1064,33 @@ mod tests {
         };
         usage.settles_model = true;
         Event::Usage(usage)
+    }
+
+    #[test]
+    fn a_cost_that_is_not_a_sum_of_money_is_taken_as_not_reported() {
+        for nonsense in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            let state = SessionState::replay(&[
+                usage(100, 10, Some(0.25)),
+                usage(200, 20, Some(nonsense)),
+                settlement("opus-5", nonsense),
+            ]);
+
+            let totals = state.totals();
+            assert!(
+                (totals.reported_cost_usd - 0.25).abs() < f64::EPSILON,
+                "{nonsense}: {}",
+                totals.reported_cost_usd
+            );
+            assert_eq!(totals.records_unsettled, 2, "{nonsense}");
+            assert!(!totals.cost_fully_reported(), "{nonsense}");
+            assert!(
+                totals
+                    .reported_cost_by_model
+                    .values()
+                    .all(|cost| (cost - 0.25).abs() < f64::EPSILON),
+                "{nonsense}"
+            );
+        }
     }
 
     #[test]

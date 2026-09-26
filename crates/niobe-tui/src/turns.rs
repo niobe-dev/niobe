@@ -16,7 +16,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::app::TurnRule;
-use crate::clock::spent;
+use crate::clock;
 use crate::text;
 use crate::theme::Theme;
 use crate::ui::compact;
@@ -110,7 +110,7 @@ fn figures(rule: &TurnRule) -> Vec<Figure> {
     if let Some(took) = rule.took {
         figures.push(Figure {
             kind: Kind::Took,
-            text: spent(took),
+            text: clock::took(took),
         });
     }
     figures

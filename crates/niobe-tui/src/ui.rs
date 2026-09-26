@@ -2016,8 +2016,9 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
-/// What a model's tokens get: the widest figure [`compact`] produces
-/// (`1000k`) and a column of gap before it.
+/// What a model's tokens get: the widest figure [`compact`] produces for a
+/// session under a hundred million tokens (`999k`, `12.3M`) and a column of
+/// gap before it, which is drawn whatever the figure's width.
 const MODEL_TOKENS: usize = 6;
 
 /// What a model's share is drawn in: three columns and the sign, with a space
@@ -2025,8 +2026,10 @@ const MODEL_TOKENS: usize = 6;
 const MODEL_SHARE: usize = 6;
 
 /// What a model's cost is drawn in on a metered account: the widest figure
-/// the pane prints for one (`≥$12.34`) and a column of gap before it.
-const MODEL_COST: usize = 8;
+/// the pane prints for one (`≥~$12.34`) and a column of gap before it. A wider
+/// one pushes the row out rather than into the count beside it: the gap is
+/// drawn whatever the figure's width.
+const MODEL_COST: usize = 9;
 
 /// The label the cache row carries. It names what its figure means, because a
 /// hit rate and a share of the session are two different questions and the
@@ -2123,11 +2126,11 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             Span::styled("  ", dim),
             Span::styled(filled, style),
             Span::styled(track, dim),
-            Span::styled(format!("{count:>MODEL_TOKENS$}"), dim),
+            Span::styled(format!(" {count:>width$}", width = MODEL_TOKENS - 1), dim),
         ];
         if let Some(cost) = cost {
             spans.push(Span::styled(
-                format!("{cost:>MODEL_COST$}"),
+                format!(" {cost:>width$}", width = MODEL_COST - 1),
                 Style::new().fg(theme.fg),
             ));
         }
@@ -2350,7 +2353,7 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     if let Some(budget) = app.budget() {
         let spent = app.session().totals().reported_cost_usd;
         lines.push(
-            Line::from(format!("budget ${spent:.2}/${budget:.2}")).style(
+            Line::from(format!("budget {}/{}", dollars(spent), dollars(budget))).style(
                 match spent >= budget * BUDGET_SHOWN_HOT {
                     true => Style::new().fg(theme.hot).bold(),
                     false => Style::new().fg(theme.fg),
@@ -3808,7 +3811,25 @@ impl CostLabel {
             Self::EstimatedFloor => "≥~",
             Self::Floor => "≥",
         };
-        format!("{prefix}${usd:.2}")
+        match self {
+            Self::Reported | Self::Estimate if usd > 0.0 && usd < HALF_A_CENT => {
+                format!("<{prefix}$0.01")
+            }
+            Self::EstimatedFloor | Self::Floor if usd < HALF_A_CENT => ">$0.00".to_owned(),
+            _ => format!("{prefix}{}", dollars(usd)),
+        }
+    }
+}
+
+/// The least a figure can be and still be drawn in cents as something.
+const HALF_A_CENT: f64 = 0.005;
+
+/// `$0.75`, or `<$0.01` for money that was spent and rounds to no cents: a
+/// real spend drawn as `$0.00` reads as a session that has cost nothing.
+pub(crate) fn dollars(usd: f64) -> String {
+    match usd > 0.0 && usd < HALF_A_CENT {
+        true => "<$0.01".to_owned(),
+        false => format!("${usd:.2}"),
     }
 }
 
@@ -3866,11 +3887,12 @@ fn value_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Valued {
 }
 
 /// Token counts, short enough for a column of them: thousands above ten
-/// thousand, millions above a million.
+/// thousand, millions from the count that would round to a thousand
+/// thousands — `1000k` is a million drawn in the wrong unit.
 pub(crate) fn compact(n: u64) -> String {
     match n {
         0..=9_999 => n.to_string(),
-        10_000..=999_999 => format!("{:.0}k", n as f64 / 1_000.0),
+        10_000..=999_499 => format!("{:.0}k", n as f64 / 1_000.0),
         _ => format!("{:.1}M", n as f64 / 1_000_000.0),
     }
 }
@@ -4003,11 +4025,11 @@ mod tests {
     #[test]
     fn a_turn_the_backend_has_not_priced_is_estimated_rather_than_left_unpriced() {
         // Two records of 1,100 tokens each: 2,200 tokens at a tenth of a cent
-        // per thousand is $0.0022, which rounds to a cent.
+        // per thousand is $0.0022, which is under a cent.
         let running = SessionState::replay(&[priced(None), priced(None)]);
         assert_eq!(
             session_cost(&running, Some(&ATenthOfACentPerThousand)),
-            "~$0.00"
+            "<~$0.01"
         );
 
         // The estimate is added to what was already reported, not shown
@@ -4071,10 +4093,7 @@ mod tests {
         // Nothing reported and only part of it priced is still a figure: at
         // least what the priced part comes to, rather than "unpriced".
         let unreported = SessionState::replay(&[on("opus-5", None), on("haiku-4-5", None)]);
-        assert_eq!(
-            session_cost(&unreported, Some(&OnlyOpusIsPriced)),
-            "≥~$0.00"
-        );
+        assert_eq!(session_cost(&unreported, Some(&OnlyOpusIsPriced)), ">$0.00");
     }
 
     #[test]
@@ -4469,7 +4488,9 @@ mod tests {
         // The two boundaries: where a figure starts being thousands, and where
         // thousands become millions.
         assert_eq!(compact(10_000), "10k");
-        assert_eq!(compact(999_999), "1000k");
+        assert_eq!(compact(999_499), "999k");
+        assert_eq!(compact(999_500), "1.0M");
+        assert_eq!(compact(999_999), "1.0M");
         assert_eq!(compact(1_000_000), "1.0M");
     }
 
@@ -5253,5 +5274,65 @@ mod tests {
             .map(line_text)
             .collect();
         assert_eq!(narrow[0], "session $0.50");
+    }
+
+    #[test]
+    fn a_spend_under_a_cent_reads_as_under_a_cent_not_as_nothing() {
+        assert_eq!(
+            session_cost(&SessionState::replay(&[priced(Some(0.004))]), None),
+            "<$0.01"
+        );
+        assert_eq!(
+            session_cost(&SessionState::replay(&[priced(Some(0.0))]), None),
+            "$0.00"
+        );
+        // 1,100 tokens at a tenth of a cent per thousand is $0.0011.
+        let owed = SessionState::replay(&[priced(None)]);
+        assert_eq!(
+            session_cost(&owed, Some(&ATenthOfACentPerThousand)),
+            "<~$0.01"
+        );
+        let floor = SessionState::replay(&[priced(Some(0.004)), priced(None)]);
+        assert_eq!(session_cost(&floor, Some(&NothingIsPriced)), ">$0.00");
+        assert_eq!(model_cost(floor.totals(), "opus-5", None), ">$0.00");
+
+        // $0.002 over half an hour is $0.004 an hour: both under a cent.
+        let app = metered_for(1_800, 0.002);
+        let said: Vec<String> = money_lines(&app, 40, &crate::theme::CLASSIC)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(said[0], "session <$0.01 · <$0.01/h worked");
+    }
+
+    #[test]
+    fn a_models_cost_is_set_off_from_its_count_however_wide_it_is() {
+        for cost in [150.0, 1_000.0, 1e12] {
+            let mut app = spending(&[]);
+            app.apply(&niobe_core::event::Event::Billing {
+                billing: Billing::Metered,
+            });
+            app.apply(&niobe_core::event::Event::Usage(Usage {
+                input: 1_000_000,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: Some(cost),
+                cost_basis: None,
+                settles_model: false,
+            }));
+            let rows = spend_of(&app, 66);
+            let (count, cost_drawn) = rows[0]
+                .split_once('$')
+                .expect("a metered model's row carries its cost");
+            assert!(
+                count.ends_with(' ') && count.trim_end().ends_with("1.0M"),
+                "{cost}: {rows:?}"
+            );
+            assert_eq!(cost_drawn, format!("{cost:.2}"), "{cost}: {rows:?}");
+        }
     }
 }

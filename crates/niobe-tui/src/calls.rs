@@ -31,6 +31,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::{Call, Entry, human_bytes};
+use crate::clock;
 use crate::text;
 use crate::theme::Theme;
 use crate::ui::count;
@@ -508,7 +509,7 @@ fn result(call: &Call, theme: &Theme) -> Vec<Span<'static>> {
         }
     };
     if let Some(took) = call.took {
-        spans.push(Span::styled(format!(" · {}", human_duration(took)), dim));
+        spans.push(Span::styled(format!(" · {}", clock::took(took)), dim));
     }
     spans
 }
@@ -581,8 +582,8 @@ fn summed_time(calls: &[Call]) -> Option<String> {
     }
     let total = timed.iter().sum();
     Some(match timed.len() == calls.len() {
-        true => human_duration(total),
-        false => format!("≥{}", human_duration(total)),
+        true => clock::took(total),
+        false => format!("≥{}", clock::took(total)),
     })
 }
 
@@ -598,16 +599,6 @@ fn diffstat(added: (u64, bool), removed: (u64, bool), theme: &Theme) -> Vec<Span
 
 fn theme_del(theme: &Theme) -> Style {
     Style::new().fg(theme.del)
-}
-
-/// A duration, short enough for the cost column: tenths of a second under
-/// ten seconds, whole seconds under a minute, minutes and seconds after.
-fn human_duration(took: Duration) -> String {
-    match took.as_secs() {
-        0..10 => format!("{:.1}s", took.as_secs_f64()),
-        10..60 => format!("{}s", took.as_secs()),
-        secs => format!("{}m{:02}s", secs / 60, secs % 60),
-    }
 }
 
 #[cfg(test)]
@@ -1054,13 +1045,5 @@ mod tests {
             .find(|span| span.content.starts_with("tests::wrong"))
             .expect("the name is a span of its own");
         assert_eq!(name.style.fg, Some(theme.del));
-    }
-
-    #[test]
-    fn a_duration_reads_in_the_unit_that_says_anything() {
-        assert_eq!(human_duration(Duration::from_millis(300)), "0.3s");
-        assert_eq!(human_duration(Duration::from_millis(9_940)), "9.9s");
-        assert_eq!(human_duration(Duration::from_millis(12_600)), "12s");
-        assert_eq!(human_duration(Duration::from_secs(125)), "2m05s");
     }
 }

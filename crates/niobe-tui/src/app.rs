@@ -2137,7 +2137,11 @@ impl App {
         self.push(Entry {
             kind: EntryKind::Notice,
             head: "budget".to_owned(),
-            meta: format!("${spent:.2} of ${budget:.2}"),
+            meta: format!(
+                "{} of {}",
+                crate::ui::dollars(spent),
+                crate::ui::dollars(budget)
+            ),
             body: "Most of this session's budget is spent. The backend stops the session \
                    when the budget is reached, and it checks between turns rather than \
                    inside one, so the session can finish above the figure by what the turn \

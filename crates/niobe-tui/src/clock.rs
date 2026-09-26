@@ -282,6 +282,24 @@ pub fn spent(duration: Duration) -> String {
     }
 }
 
+/// `0.3s`, `12s`, `2m 05s`, `25h 00m`: how long something that has finished
+/// took.
+///
+/// A call and the turn it ran in are both drawn with this, so the same span
+/// cannot read two ways and a part cannot read longer than its whole: every
+/// figure is cut down, never rounded up — 999 ms is `0.9s`, not `1.0s`. Under
+/// ten seconds it keeps its tenths, which is where most calls end, and under
+/// a tenth it says so rather than drawing a span that happened as none.
+/// From ten seconds on it reads as [`spent`] does.
+pub fn took(duration: Duration) -> String {
+    let tenths = duration.as_millis() / 100;
+    match tenths {
+        0 => "<0.1s".to_owned(),
+        1..=99 => format!("{}.{}s", tenths / 10, tenths % 10),
+        _ => spent(duration),
+    }
+}
+
 /// `4.2s`, `38s`, `12m`, `1h`, `2d`: how long ago something happened.
 ///
 /// One unit, and coarser the older it gets: an age sits in a narrow column
@@ -395,6 +413,59 @@ mod tests {
         let first = clock.at(SystemTime::UNIX_EPOCH + Duration::from_secs(100));
         let later = clock.at(SystemTime::UNIX_EPOCH + Duration::from_secs(142));
         assert_eq!(first.since(later), None);
+    }
+
+    #[test]
+    fn a_finished_span_keeps_its_tenths_and_never_rounds_up() {
+        assert_eq!(took(Duration::from_millis(0)), "<0.1s");
+        assert_eq!(took(Duration::from_millis(40)), "<0.1s");
+        assert_eq!(took(Duration::from_millis(300)), "0.3s");
+        assert_eq!(took(Duration::from_millis(999)), "0.9s");
+        assert_eq!(took(Duration::from_millis(9_999)), "9.9s");
+        assert_eq!(took(Duration::from_millis(12_600)), "12s");
+        assert_eq!(took(Duration::from_secs(125)), "2m 05s");
+        assert_eq!(took(Duration::from_secs(25 * 3_600)), "25h 00m");
+    }
+
+    /// A call is part of its turn, so the one formatter both are drawn with
+    /// must never draw the part longer than the whole.
+    #[test]
+    fn a_longer_span_never_reads_shorter() {
+        let mut last = Duration::ZERO;
+        for ms in (0..200_000)
+            .step_by(7)
+            .chain([999, 9_999, 59_999, 3_599_999])
+        {
+            let now = Duration::from_millis(ms);
+            if now < last {
+                continue;
+            }
+            let (shorter, longer) = (took(last), took(now));
+            assert!(
+                seconds_of(&shorter) <= seconds_of(&longer),
+                "{last:?} reads {shorter} and {now:?} reads {longer}"
+            );
+            last = now;
+        }
+    }
+
+    fn seconds_of(said: &str) -> f64 {
+        let said = said.trim_start_matches('<');
+        if let Some((h, m)) = said.split_once("h ") {
+            let (h, m): (f64, f64) = (
+                h.parse().expect("hours"),
+                m.trim_end_matches('m').parse().expect("minutes"),
+            );
+            return h * 3_600.0 + m * 60.0;
+        }
+        if let Some((m, s)) = said.split_once("m ") {
+            let (m, s): (f64, f64) = (
+                m.parse().expect("minutes"),
+                s.trim_end_matches('s').parse().expect("seconds"),
+            );
+            return m * 60.0 + s;
+        }
+        said.trim_end_matches('s').parse().expect("seconds")
     }
 
     #[test]
