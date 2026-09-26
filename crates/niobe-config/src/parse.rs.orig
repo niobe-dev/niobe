@@ -92,15 +92,15 @@ impl File<'_> {
         &self,
         value: &Spanned<DeValue<'_>>,
         at: &Key,
-    ) -> Result<Vec<(String, Profile)>, ConfigError> {
-        let mut profiles = Vec::new();
+    ) -> Result<BTreeMap<String, Profile>, ConfigError> {
+        let mut profiles = BTreeMap::new();
         for (name, profile) in in_file_order(self.table(value, at)?) {
             let at = at.child(name.get_ref());
             if name.get_ref().is_empty() {
                 return Err(self.invalid(&name.span(), &at, "a profile name cannot be empty"));
             }
             let profile = self.profile(name, profile, &at)?;
-            profiles.push((name.get_ref().to_string(), profile));
+            profiles.insert(name.get_ref().to_string(), profile);
         }
         Ok(profiles)
     }
