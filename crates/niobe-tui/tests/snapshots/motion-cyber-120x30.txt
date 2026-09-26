@@ -25,6 +25,6 @@ G┃                                                                          �
  ┃                                                                          █ │ ▾ Sub-agents  1 running · 1 failed    █U
 L┃ ⠋ thinking · 5s                                                          ┃ │ ◆ test-writer → tes… sonnet-5 running │
 R┃ ──────────────────────────────────────────────────────────────────────── ┃ │   └ Reading tests/stream.rs           │
-U┃  ask  >  Ask for a change                   ▸▸ ask mode · Ctrl+J newline ┃ │ ◇ reviewer → catalog/c… done 4100 ctx │
+U┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │ ◇ reviewer → catalog/c… done 4100 ctx │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘T
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

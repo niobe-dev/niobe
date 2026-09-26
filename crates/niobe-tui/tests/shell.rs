@@ -2223,11 +2223,12 @@ fn a_decision_from_a_log_with_no_times_is_drawn_without_one() {
     );
 }
 
-/// The row the ask bar is drawn on: the one its badge starts.
+/// The row the ask bar is drawn on: the one where a badge meets the prompt's
+/// marker, whichever mode the badge names.
 fn bar_row(frame: &str) -> String {
     frame
         .lines()
-        .find(|row| row.contains(" ask ") && row.contains(" > "))
+        .find(|row| row.contains("  > "))
         .map(str::to_owned)
         .unwrap_or_else(|| panic!("no ask bar on the frame:\n{frame}"))
 }
@@ -2285,17 +2286,73 @@ fn the_bar_names_the_mode_once_a_backend_has_said_it() {
     let mut app = empty_session();
     let row = bar_row(&screen(&mut app, 200, 60));
     assert!(
-        !row.contains("▸▸"),
-        "nothing has said how this session gates tool calls, and the bar claims to know:\n{row}"
+        row.contains(" —  > "),
+        "nothing has said how this session gates tool calls, so the badge claims no mode:\n{row}"
     );
+    for mode in [Mode::Plan, Mode::Ask, Mode::Auto] {
+        assert!(!row.contains(&format!(" {mode}  > ")), "{row}");
+    }
     assert!(row.contains("Shift+Tab mode"), "{row}");
     assert!(row.contains("Ctrl+J newline"), "{row}");
 
-    app.apply(&Event::ModeSelected { mode: Mode::Plan });
-    let row = bar_row(&screen(&mut app, 200, 60));
-    assert!(row.contains("▸▸ plan mode"), "{row}");
-    assert!(row.contains("Shift+Tab cycles"), "{row}");
-    assert!(row.contains("Ctrl+J newline"), "{row}");
+    for mode in [Mode::Plan, Mode::Ask, Mode::Auto] {
+        app.apply(&Event::ModeSelected { mode });
+        let row = bar_row(&screen(&mut app, 200, 60));
+        assert!(
+            row.contains(&format!(" {mode}  > ")),
+            "the badge names the mode:\n{row}"
+        );
+        assert!(
+            !row.contains(&format!("{mode} mode")),
+            "the mode is said twice, in the badge and at the right end:\n{row}"
+        );
+        assert!(row.contains("Shift+Tab cycles"), "{row}");
+        assert!(row.contains("Ctrl+J newline"), "{row}");
+    }
+}
+
+#[test]
+fn the_badge_keeps_the_mode_while_the_right_end_is_taken() {
+    let mut app = running_session();
+    app.apply(&Event::ModeSelected { mode: Mode::Auto });
+
+    press(&mut app, ratatui::crossterm::event::KeyCode::F(3));
+    let row = bar_row(&screen(&mut app, 80, 24));
+    assert!(row.contains("F3 Diff"), "{row}");
+    assert!(
+        row.contains(" auto  > "),
+        "the shell's reply hid the mode:\n{row}"
+    );
+
+    press(&mut app, ratatui::crossterm::event::KeyCode::Char('x'));
+    for c in "a prompt long enough to reach where the hints are drawn on the bar".chars() {
+        app.type_into_composer(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char(c),
+            ..Default::default()
+        });
+    }
+    let row = bar_row(&screen(&mut app, 80, 24));
+    assert!(
+        row.contains(" auto  > "),
+        "a long prompt hid the mode:\n{row}"
+    );
+}
+
+#[test]
+fn a_command_and_a_search_keep_their_own_badges() {
+    let mut app = running_session().runs_commands();
+    app.apply(&Event::ModeSelected { mode: Mode::Auto });
+
+    press(&mut app, ratatui::crossterm::event::KeyCode::Char('!'));
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(" shell  $ "), "{frame}");
+    assert!(!frame.contains(" auto  > "), "{frame}");
+
+    press(&mut app, ratatui::crossterm::event::KeyCode::Esc);
+    press(&mut app, ratatui::crossterm::event::KeyCode::Char('/'));
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(" find  / "), "{frame}");
+    assert!(!frame.contains(" auto  > "), "{frame}");
 }
 
 #[test]
@@ -2316,7 +2373,7 @@ fn the_bar_names_shift_enter_only_on_a_terminal_that_can_report_it() {
 fn a_narrowing_bar_drops_whole_hints_and_never_cuts_one() {
     let mut app = running_session();
     app.apply(&Event::ModeSelected { mode: Mode::Auto });
-    let whole = ["▸▸ auto mode", "Shift+Tab cycles", "Ctrl+J newline"];
+    let whole = ["Shift+Tab cycles", "Ctrl+J newline"];
     let mut seen = std::collections::BTreeSet::new();
     for width in 80..=200 {
         let row = bar_row(&screen(&mut app, width, 30));
@@ -2325,16 +2382,16 @@ fn a_narrowing_bar_drops_whole_hints_and_never_cuts_one() {
             .copied()
             .filter(|hint| row.contains(hint))
             .collect();
-        // The key that opens a line is held with the mode: on a terminal that
-        // sends Enter for Shift+Enter, it is the hint whose absence sends a
-        // prompt the operator meant to go on writing. The reminder of the key
-        // that cycles the mode is what gives way between them.
-        let held = ["▸▸ auto mode", "Ctrl+J newline"];
+        // The key that opens a line is held: on a terminal that sends Enter
+        // for Shift+Enter, it is the hint whose absence sends a prompt the
+        // operator meant to go on writing. The reminder of the key that
+        // cycles the mode gives way before it.
+        let held = ["Ctrl+J newline"];
         assert!(
             shown == whole || shown == held,
             "at {width} columns the hints are not the held ones or all of them:\n{row}"
         );
-        for piece in ["Ctrl+", "Shift+T", "▸▸ auto"] {
+        for piece in ["Ctrl+", "Shift+T"] {
             assert!(
                 shown.iter().any(|hint| hint.starts_with(piece)) || !row.contains(piece),
                 "at {width} columns a hint is cut short:\n{row}"
@@ -2353,8 +2410,9 @@ fn a_narrowing_bar_drops_whole_hints_and_never_cuts_one() {
 /// remind the operator of what the composer can do, while the key that opens
 /// a line — on a terminal that sends Enter for Shift+Enter — is what stops
 /// Enter sending a prompt half-written. After them the hints that are only
-/// reminders give way (`Shift+Tab cycles`, `Tab panes`); the mode and the
-/// newline key keep their wording whole.
+/// reminders give way (`Shift+Tab cycles`, `Tab panes`); the newline key, and
+/// `Shift+Tab mode` before any mode is reported, keep their wording whole. The
+/// mode itself is the badge's, which gives way to nothing.
 #[test]
 fn the_bar_keeps_the_key_that_opens_a_line_at_eighty_columns() {
     let mut unannounced = empty_session();
@@ -2367,21 +2425,25 @@ fn the_bar_keeps_the_key_that_opens_a_line_at_eighty_columns() {
         let mut app = running_session();
         app.apply(&Event::ModeSelected { mode });
         let row = bar_row(&screen(&mut app, 80, 24));
-        assert!(row.contains(&format!("▸▸ {mode} mode")), "{row}");
+        assert!(row.contains(&format!(" {mode}  > ")), "{row}");
         assert!(row.contains("Ctrl+J newline"), "{row}");
-        assert!(row.contains("Ask for a change"), "{row}");
+        assert!(
+            row.contains("Ask for a change · / search transcript · @ file"),
+            "with the mode in the badge, the placeholder has its room back:\n{row}"
+        );
     }
 }
 
 #[test]
-fn a_terminal_that_reports_shift_enter_keeps_its_eighty_column_bar() {
+fn a_terminal_that_reports_shift_enter_holds_no_newline_key_at_eighty_columns() {
     let mut app = running_session().reports_shift_enter();
     let row = bar_row(&screen(&mut app, 80, 24));
     assert!(
         row.contains("Ask for a change · / search transcript · @ file"),
         "Shift+Enter cannot be mistaken for Enter here, so the placeholder keeps its room:\n{row}"
     );
-    assert!(row.contains("▸▸ ask mode"), "{row}");
+    assert!(row.contains(" ask  > "), "{row}");
+    assert!(row.contains("Shift+Tab cycles"), "{row}");
     assert!(!row.contains("newline"), "{row}");
 }
 

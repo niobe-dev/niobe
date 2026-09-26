@@ -2460,9 +2460,10 @@ impl App {
     }
 
     /// Fits the empty composer's placeholder into `columns`, dropping what it
-    /// advertises before what the bar holds beside it: the mode a session is
-    /// in, and the key that opens a line where Enter would be sent for it,
-    /// matter more than a reminder of what the composer can do.
+    /// advertises before what the bar holds beside it: the key that sets a
+    /// mode where none is reported, and the key that opens a line where Enter
+    /// would be sent for it, matter more than a reminder of what the composer
+    /// can do.
     pub(crate) fn fit_placeholder(&mut self, columns: usize) {
         let said = match self.shell_mode {
             true => SHELL_PLACEHOLDER.to_owned(),

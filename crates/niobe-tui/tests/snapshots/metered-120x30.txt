@@ -25,6 +25,6 @@
  ┃ ── turn 1 13:41 · 52k tok · 1m 42s ───────────────────────────────────── █ │ ◆ test-writer → tests… running 1m 42s │
  ┃                                                                          █ │   └ Reading tests/stream.rs           │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ◇ reviewer → catalog/c… done 4100 ctx │
- ┃  ask  >  Ask for a change                   ▸▸ ask mode · Ctrl+J newline ┃ │ ✗ doc-writer → docs/etags.md   failed │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │ ✗ doc-writer → docs/etags.md   failed │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

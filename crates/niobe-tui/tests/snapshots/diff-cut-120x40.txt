@@ -35,6 +35,6 @@
  ┃   … 10 more rows · Ctrl+T shows them                                     █ │   └ Notion 404, gave up after 2 retr… │
  ┃                                                                          █ │ ▾ Decisions  2                        │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   13:39 Key the cache on the request  │
- ┃  ask  >  Ask for a change                   ▸▸ ask mode · Ctrl+J newline ┃ │         URL, not the manifest id —    │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │         URL, not the manifest id —    │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

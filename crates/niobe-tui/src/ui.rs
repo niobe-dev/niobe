@@ -30,7 +30,7 @@ use ratatui::widgets::{
     Widget,
 };
 
-use niobe_core::event::{AgentOutcome, Billing, Context, Mode, UsageWindow};
+use niobe_core::event::{AgentOutcome, Billing, Context, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, TestRunRecord, ToolTotals, Totals};
 use niobe_core::test_run::FailedTests;
 
@@ -718,8 +718,8 @@ fn draw_mention(frame: &mut Frame, transcript: Rect, bar: Rect, app: &App, theme
 }
 
 /// Gives the placeholder the room the bar leaves once its held hints — the
-/// mode, where one is reported, and the key that opens a line where Enter
-/// would be mistaken for it — have what they need.
+/// key that sets a mode, where none is reported, and the key that opens a
+/// line where Enter would be mistaken for it — have what they need.
 fn fit_placeholder(app: &mut App, panes: bool, width: u16, theme: &Theme) {
     let held: Vec<Segment> = bar_key_hints(app, panes, theme)
         .into_iter()
@@ -769,8 +769,10 @@ fn session_caption(session: &SessionState, repo: &str, width: u16) -> String {
     text::truncate_words(&title, usize::from(width.saturating_sub(TITLE_MARGIN)))
 }
 
-/// The badge in front of the composer: what the bar is for, as a chip.
-const ASK_BADGE: &str = " ask ";
+/// The badge in front of the composer before anything has said which mode
+/// the session gates tool calls in: it claims none, as a figure nobody
+/// reported is a dash.
+const UNREPORTED_MODE_BADGE: &str = " — ";
 
 /// The badge the bar wears while it is searching the transcript.
 const FIND_BADGE: &str = " find ";
@@ -781,20 +783,32 @@ const SHELL_BADGE: &str = " shell ";
 /// What the bar puts between its hints.
 const HINT_SEPARATOR: &str = " · ";
 
-/// The badge and the marker in front of what the bar is editing: the prompt,
-/// or a search through the transcript.
-fn bar_lead(app: &App) -> (&'static str, &'static str) {
+/// The badge and the marker in front of what the bar is editing: a search
+/// through the transcript, a command for the operator's shell, or the prompt.
+///
+/// The prompt's badge is the mode the session is in. It sits where the eye
+/// goes to type, next to the key that changes it, and nothing else on the bar
+/// takes its place: the mode decides what a prompt may do, so it is not a
+/// hint to give way to a reply or a long prompt. A command and a search are
+/// not gated by it, so their badges say what they are instead.
+fn bar_lead(app: &App) -> (String, &'static str) {
     match (app.finding(), app.shell_mode()) {
-        (Some(_), _) => (FIND_BADGE, " / "),
-        (None, true) => (SHELL_BADGE, " $ "),
-        (None, false) => (ASK_BADGE, " > "),
+        (Some(_), _) => (FIND_BADGE.to_owned(), " / "),
+        (None, true) => (SHELL_BADGE.to_owned(), " $ "),
+        (None, false) => {
+            let badge = app.session().mode().map_or_else(
+                || UNREPORTED_MODE_BADGE.to_owned(),
+                |mode| format!(" {mode} "),
+            );
+            (badge, " > ")
+        }
     }
 }
 
 /// The columns of the badge and the marker.
 fn lead_width(app: &App) -> usize {
     let (badge, marker) = bar_lead(app);
-    text::width(badge) + text::width(marker)
+    text::width(&badge) + text::width(marker)
 }
 
 /// What the bar is editing: the search while one is open, which the composer
@@ -805,7 +819,7 @@ fn editing(app: &App) -> &ratatui_textarea::TextArea<'static> {
 
 /// The composer, with its badge in front and, at its right-hand end, what the
 /// shell has to say: its own reply to the last key when it has one, otherwise
-/// the mode the session is in and the keys that change what the bar does.
+/// the keys that change what the bar does.
 fn draw_ask_bar(
     frame: &mut Frame,
     area: Rect,
@@ -815,7 +829,7 @@ fn draw_ask_bar(
 ) {
     let (badge_text, marker_text) = bar_lead(app);
     let [badge, marker, rest] = Layout::horizontal([
-        Constraint::Length(u16::try_from(text::width(badge_text)).unwrap_or(u16::MAX)),
+        Constraint::Length(u16::try_from(text::width(&badge_text)).unwrap_or(u16::MAX)),
         Constraint::Length(u16::try_from(text::width(marker_text)).unwrap_or(u16::MAX)),
         Constraint::Min(1),
     ])
@@ -968,7 +982,7 @@ fn loose(segments: Vec<Segment>) -> Vec<Hint> {
 fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
     let question_holds = app.asking().is_some() && app.ask_focus() != AskFocus::Deferred;
     key_hints(
-        app.session().mode(),
+        app.session().mode().is_some(),
         app.focus(),
         panes && !question_holds,
         (app.newline_key(), app.sends_enter_for_shift_enter()),
@@ -976,21 +990,22 @@ fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
     )
 }
 
-/// The mode the session gates tool calls in, and the keys the bar answers
-/// to, in the order the bar shows them.
+/// The keys the bar answers to, in the order the bar shows them.
 ///
 /// With a right-hand pane focused, the keys that differ are that pane's: the
 /// arrows and Enter are not the composer's while it has them. `panes` is
-/// whether there is a pane beside the session for Tab to move to, and
-/// `newline` the key that opens a line on this terminal and whether Enter is
-/// sent for Shift+Enter on it.
+/// whether there is a pane beside the session for Tab to move to, `reported`
+/// whether a mode has been reported for the badge to name, and `newline` the
+/// key that opens a line on this terminal and whether Enter is sent for
+/// Shift+Enter on it.
 ///
-/// The mode is held, since it changes what a prompt is allowed to do. So is
-/// the newline key where Shift+Enter arrives as Enter: an operator not told
+/// Before a mode is reported, the key that sets one is held: the badge names
+/// none, and this is where the bar says there are modes at all. So is the
+/// newline key where Shift+Enter arrives as Enter: an operator not told
 /// otherwise reaches for Shift+Enter and sends a prompt half-written. The
 /// other keys are reminders, and give way first.
 fn key_hints(
-    mode: Option<Mode>,
+    reported: bool,
     focus: Focus,
     panes: bool,
     newline: (&str, bool),
@@ -1003,20 +1018,9 @@ fn key_hints(
         },
         held,
     };
-    let mut hints = match mode {
-        Some(mode) => vec![
-            Hint {
-                segment: Segment {
-                    text: format!("\u{25b8}\u{25b8} {mode} mode"),
-                    style: Style::new().fg(theme.hot).bold(),
-                },
-                held: true,
-            },
-            key("Shift+Tab cycles", false),
-        ],
-        // Nothing has said how this session gates tool calls, so nothing
-        // claims to know: the key that sets it is what is left to say.
-        None => vec![key("Shift+Tab mode", true)],
+    let mut hints = match reported {
+        true => vec![key("Shift+Tab cycles", false)],
+        false => vec![key("Shift+Tab mode", true)],
     };
     match focus {
         Focus::Session => {
