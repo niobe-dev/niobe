@@ -2698,6 +2698,16 @@ impl App {
         self.composer.lines().join("\n")
     }
 
+    /// Whether the composer holds nothing a prompt could be made of. Spaces
+    /// the operator cannot see must not turn the `/` and `!` that start a
+    /// search or a command into text, or the next command goes to the agent.
+    fn composer_is_blank(&self) -> bool {
+        self.composer
+            .lines()
+            .iter()
+            .all(|line| line.trim().is_empty())
+    }
+
     /// The transient message under the transcript, if there is one.
     pub fn hint(&self) -> Option<&str> {
         self.hint.as_deref()
@@ -2913,13 +2923,15 @@ impl App {
     }
 
     /// Runs what is in the composer as a command: records it as a call that
-    /// has started, and queues it for [`App::take_commands`].
+    /// has started, and queues it for [`App::take_commands`]. Blank, it runs
+    /// nothing and is cleared, so no invisible spaces stay behind to make
+    /// the next `!` text.
     fn run_command(&mut self) {
         let command = self.composed();
+        self.composer.clear();
         if command.trim().is_empty() {
             return;
         }
-        self.composer.clear();
         self.shell_mode = false;
         self.commands_started = self.commands_started.saturating_add(1);
         let id = ToolCallId::new(format!(
@@ -3579,19 +3591,21 @@ impl App {
             }
 
             // `/` searches the transcript where it would start a prompt: in
-            // a composer with anything in it, it is a slash.
+            // a composer with anything but spaces in it, it is a slash.
             (KeyCode::Char('/'), KeyModifiers::NONE | KeyModifiers::SHIFT)
-                if self.composer.is_empty() =>
+                if self.composer_is_blank() =>
             {
                 self.focus = Focus::Session;
+                self.composer.clear();
                 self.open_find();
             }
             // `!` runs a command where it would start a prompt, for the same
             // reason `/` searches only there.
             (KeyCode::Char('!'), KeyModifiers::NONE | KeyModifiers::SHIFT)
-                if self.composer.is_empty() && self.runs_commands =>
+                if self.composer_is_blank() && self.runs_commands =>
             {
                 self.focus = Focus::Session;
+                self.composer.clear();
                 self.shell_mode = true;
             }
             // What was typed goes where typing always goes, and the keyboard

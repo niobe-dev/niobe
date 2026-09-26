@@ -3592,6 +3592,49 @@ fn bang_runs_a_command_that_is_recorded_as_a_call_and_shows_what_it_printed() {
 }
 
 #[test]
+fn a_command_after_a_blank_one_still_runs_here_rather_than_reaching_the_agent() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_that_runs_commands();
+    press(&mut app, KeyCode::Char('!'));
+    type_keys(&mut app, "   ");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.take_commands().is_empty(), "a blank command ran");
+    assert!(
+        app.composed().is_empty(),
+        "the blank command was left behind"
+    );
+    press(&mut app, KeyCode::Esc);
+
+    run_command(&mut app, "echo after-blank");
+    let produced = app.take_produced();
+    assert!(
+        !produced
+            .iter()
+            .any(|event| matches!(event, Event::UserMessage { .. })),
+        "the command was sent to the agent as a prompt: {produced:?}"
+    );
+}
+
+#[test]
+fn bang_and_slash_on_a_composer_of_spaces_open_what_they_open_on_nothing() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_that_runs_commands();
+    type_keys(&mut app, "  ");
+    run_command(&mut app, "echo spaced");
+
+    type_keys(&mut app, "  ");
+    press(&mut app, KeyCode::Char('/'));
+    assert!(
+        app.finding().is_some(),
+        "`/` was typed rather than opening search: {:?}",
+        app.composed()
+    );
+    assert!(app.composed().is_empty(), "the spaces were left behind");
+}
+
+#[test]
 fn a_command_that_failed_shows_its_status_and_what_it_printed_rather_than_a_made_up_reason() {
     let mut app = session_that_runs_commands();
     let id = run_command(&mut app, "ls nowhere");
