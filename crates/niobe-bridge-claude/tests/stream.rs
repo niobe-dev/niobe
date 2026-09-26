@@ -318,6 +318,84 @@ fn a_session_that_opens_with_the_clis_command_list_opens_with_nothing_to_report(
     assert!(warnings(&events).is_empty(), "{events:?}");
 }
 
+fn translate(recording: &str) -> Vec<Event> {
+    let mut translator = Translator::new("max");
+    recording
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect()
+}
+
+fn command_names(state: &SessionState) -> Vec<&str> {
+    state
+        .commands()
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect()
+}
+
+const SLASH_COMMAND: &str = include_str!("fixtures/slash-command.jsonl");
+
+#[test]
+fn the_command_list_comes_from_the_answer_to_initialize_and_from_every_change() {
+    let events = translate(SLASH_COMMAND);
+    let lists: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Commands { commands } => Some(commands.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lists, [4, 4], "the pushed change, then the answer");
+
+    let state = SessionState::replay(&events);
+    assert_eq!(
+        command_names(&state),
+        [
+            "compact",
+            "context",
+            "fast",
+            "code-review-graph:review_changes (MCP)"
+        ]
+    );
+    let fast = &state.commands()[2];
+    assert_eq!(fast.description, "Toggle fast mode (Opus 5.5)");
+    assert_eq!(fast.argument_hint.as_deref(), Some("[on|off]"));
+    assert_eq!(
+        state.commands()[1].argument_hint,
+        None,
+        "an empty hint is a command that takes nothing"
+    );
+    assert!(warnings(&events).is_empty(), "{events:?}");
+    assert!(notices(&events).is_empty(), "{events:?}");
+}
+
+#[test]
+fn a_command_the_cli_runs_itself_answers_as_a_reply_that_cost_nothing() {
+    let state = SessionState::replay(&translate(SLASH_COMMAND));
+    let reply = state
+        .last_assistant()
+        .expect("the command's output is a reply");
+    assert!(reply.starts_with("## Context Usage"), "{reply}");
+    assert_eq!(state.turns().len(), 1);
+    assert_eq!(state.totals().tokens(), 0);
+}
+
+#[test]
+fn a_change_pushed_mid_session_replaces_the_list_the_cli_answered_with() {
+    let events = translate(&format!(
+        "{SLASH_COMMAND}\n{}",
+        include_str!("fixtures/commands-changed.jsonl")
+    ));
+    let state = SessionState::replay(&events);
+    assert_eq!(
+        command_names(&state),
+        ["deep-research", "design", "design-sync"],
+        "the recorded change is the whole list, not an addition to it"
+    );
+}
+
 #[test]
 fn what_the_session_ran_comes_from_the_cli_not_from_the_profile() {
     let events = translated();

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Event, Mode, PermissionDecision, ToolCallId, ToolOutcome,
-    UsageWindow,
+    AgentId, AgentOutcome, Backend, Event, Mode, PermissionDecision, SlashCommand, ToolCallId,
+    ToolOutcome, UsageWindow,
 };
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
@@ -866,12 +866,14 @@ pub struct App {
     escaped: bool,
     /// The search through the transcript, while it is open.
     find: Option<Find>,
-    /// The `@` word the operator closed the list of files for, by its line
-    /// and the column of its `@`, so the list stays closed while the cursor
-    /// is still in that word.
-    mention_closed: Option<(usize, usize)>,
-    /// Which of the files offered for the `@` word Enter would take.
-    mention_selected: usize,
+    /// The word the operator closed the list under — of files for an `@`
+    /// word, of commands for the `/` that opens the prompt — by its line and
+    /// the column it starts at, so the list stays closed while the cursor is
+    /// still in that word. The two cannot share a word: one starts with `@`
+    /// and the other with `/`.
+    offer_closed: Option<(usize, usize)>,
+    /// Which of the entries the open list offers Enter would take.
+    offer_selected: usize,
     /// Whether a [`crate::shell::Shell`] is there to run the operator's
     /// commands. Without one, `!` is a character like any other.
     runs_commands: bool,
@@ -1036,7 +1038,14 @@ impl App {
         // A prompt is prose, so it wraps rather than scrolling sideways, and a
         // path or a URL longer than the pane falls back to breaking mid-word.
         composer.set_wrap_mode(WrapMode::WordOrGlyph);
-        composer.set_placeholder_text(placeholder(usize::MAX, false, false));
+        composer.set_placeholder_text(placeholder(
+            usize::MAX,
+            Offers {
+                files: false,
+                shell: false,
+                commands: false,
+            },
+        ));
         paint_composer(&mut composer, &theme);
 
         Self {
@@ -1071,8 +1080,8 @@ impl App {
             hint: None,
             escaped: false,
             find: None,
-            mention_closed: None,
-            mention_selected: 0,
+            offer_closed: None,
+            offer_selected: 0,
             runs_commands: false,
             reports_shift_enter: false,
             shell_mode: false,
@@ -1441,6 +1450,7 @@ impl App {
             | Event::UsageWindows(_)
             | Event::Billing { .. }
             | Event::Context(_)
+            | Event::Commands { .. }
             | Event::Checkpoint { .. } => {}
 
             // The decision itself is in the session fold, which carries no
@@ -2607,30 +2617,115 @@ impl App {
     pub(crate) fn fit_placeholder(&mut self, columns: usize) {
         let said = match self.shell_mode {
             true => SHELL_PLACEHOLDER.to_owned(),
-            false => placeholder(columns, !self.repo.files.is_empty(), self.runs_commands),
+            false => placeholder(
+                columns,
+                Offers {
+                    files: !self.repo.files.is_empty(),
+                    shell: self.runs_commands,
+                    commands: !self.session.commands().is_empty(),
+                },
+            ),
         };
         if self.composer.placeholder_text() != said {
             self.composer.set_placeholder_text(said);
         }
     }
 
-    /// The `@` word at the end of which the cursor sits, while the list of
-    /// files for it is open: only while the operator is typing into the
-    /// composer, and not for a word the list was closed for.
-    fn mention(&self) -> Option<crate::mention::Mention> {
-        let typing = self.focus() == Focus::Session
+    /// Whether the operator is typing a prompt into the composer, which is
+    /// the only time a list is offered under what they type.
+    fn typing_a_prompt(&self) -> bool {
+        self.focus() == Focus::Session
             && !self.shell_mode
             && self.find.is_none()
             && self.picking.is_none()
             && !self
                 .asking()
-                .is_some_and(|_| self.ask_focus != AskFocus::Deferred);
-        if !typing {
+                .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
+    }
+
+    /// The `@` word at the end of which the cursor sits, while the list of
+    /// files for it is open: only while the operator is typing into the
+    /// composer, and not for a word the list was closed for.
+    fn mention(&self) -> Option<crate::mention::Mention> {
+        if !self.typing_a_prompt() {
             return None;
         }
         let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
         crate::mention::at_cursor(self.composer.lines(), (row, column))
-            .filter(|mention| self.mention_closed != Some((mention.row, mention.at)))
+            .filter(|mention| self.offer_closed != Some((mention.row, mention.at)))
+    }
+
+    /// Forgets the word a list was closed under once the cursor is no longer
+    /// in it, so that a word typed later in the same place is offered a list
+    /// of its own.
+    fn reopen_offers(&mut self) {
+        let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
+        let lines = self.composer.lines();
+        let word = crate::mention::at_cursor(lines, (row, column))
+            .map(|mention| (mention.row, mention.at))
+            .or_else(|| crate::slash::at_cursor(lines, (row, column)).map(|_| (0, 0)));
+        if word != self.offer_closed {
+            self.offer_closed = None;
+        }
+    }
+
+    /// What has been typed after the `/` that opens the prompt, while the
+    /// list of the backend's commands for it is open.
+    fn slash(&self) -> Option<String> {
+        if !self.typing_a_prompt() || self.offer_closed == Some((0, 0)) {
+            return None;
+        }
+        let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
+        crate::slash::at_cursor(self.composer.lines(), (row, column))
+    }
+
+    /// The backend's commands the `/` that opens the prompt could name, and
+    /// which of them Enter would take. Empty where no list is open, which is
+    /// also where the backend has listed none.
+    pub fn offered_commands(&self) -> (Vec<&SlashCommand>, usize) {
+        let Some(typed) = self.slash() else {
+            return (Vec::new(), 0);
+        };
+        let commands = crate::slash::candidates(self.session.commands(), &typed, MENTION_ROWS);
+        let selected = self.offer_selected.min(commands.len().saturating_sub(1));
+        (commands, selected)
+    }
+
+    /// One key, while the list of the backend's commands is open. Returns
+    /// whether the list took it: the same keys as the list of files.
+    fn on_command_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let (commands, selected) = self.offered_commands();
+        let count = commands.len();
+        let Some(chosen) = commands.get(selected).map(|command| command.name.clone()) else {
+            return false;
+        };
+        match (key.code, key.modifiers) {
+            (KeyCode::Up, KeyModifiers::NONE) => {
+                self.offer_selected = (selected + count - 1) % count;
+            }
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                self.offer_selected = (selected + 1) % count;
+            }
+            (KeyCode::Tab | KeyCode::Enter, KeyModifiers::NONE) => self.name_command(&chosen),
+            (KeyCode::Esc, _) => self.offer_closed = Some((0, 0)),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Replaces what was typed after the opening `/` with `name`, and a space
+    /// after it for what the command takes.
+    fn name_command(&mut self, name: &str) {
+        let Some(typed) = self.slash() else {
+            return;
+        };
+        for _ in typed.chars() {
+            self.composer.delete_char();
+        }
+        self.composer.insert_str(format!("{name} "));
+        self.offer_selected = 0;
     }
 
     /// The files the list under the `@` word offers, likeliest first, and
@@ -2640,7 +2735,7 @@ impl App {
             return (Vec::new(), 0);
         };
         let files = crate::mention::candidates(&self.repo.files, &mention.typed, MENTION_ROWS);
-        let selected = self.mention_selected.min(files.len().saturating_sub(1));
+        let selected = self.offer_selected.min(files.len().saturating_sub(1));
         (files, selected)
     }
 
@@ -2661,14 +2756,14 @@ impl App {
         };
         match (key.code, key.modifiers) {
             (KeyCode::Up, KeyModifiers::NONE) => {
-                self.mention_selected = (selected + count - 1) % count;
+                self.offer_selected = (selected + count - 1) % count;
             }
             (KeyCode::Down, KeyModifiers::NONE) => {
-                self.mention_selected = (selected + 1) % count;
+                self.offer_selected = (selected + 1) % count;
             }
             (KeyCode::Tab | KeyCode::Enter, KeyModifiers::NONE) => self.name_file(&chosen),
             (KeyCode::Esc, _) => {
-                self.mention_closed = self.mention().map(|mention| (mention.row, mention.at));
+                self.offer_closed = self.mention().map(|mention| (mention.row, mention.at));
             }
             _ => return false,
         }
@@ -2685,7 +2780,7 @@ impl App {
             self.composer.delete_char();
         }
         self.composer.insert_str(format!("{file} "));
-        self.mention_selected = 0;
+        self.offer_selected = 0;
     }
 
     /// Whether the composer holds a command for the operator's own shell
@@ -3205,7 +3300,7 @@ impl App {
         if self.on_shell_key(key) {
             return;
         }
-        if self.on_mention_key(key) {
+        if self.on_mention_key(key) || self.on_command_key(key) {
             return;
         }
         if let Focus::Pane(pane) = self.focus
@@ -3273,7 +3368,8 @@ impl App {
             _ => {
                 self.focus = Focus::Session;
                 if self.composer.input(Input::from(key)) {
-                    self.mention_selected = 0;
+                    self.offer_selected = 0;
+                    self.reopen_offers();
                 }
             }
         }
@@ -3479,6 +3575,7 @@ impl App {
         }
 
         self.composer.clear();
+        self.offer_closed = None;
         self.produce(Event::UserMessage { text });
         self.sent_here = self.attached;
         if !self.attached {
@@ -3607,11 +3704,12 @@ pub fn percent(utilization: f64) -> u64 {
 
 /// What an empty composer says it is for, and after it what else it does,
 /// each only once it works.
-const PLACEHOLDER: [&str; 4] = [
+const PLACEHOLDER: [&str; 5] = [
     "Ask for a change",
     "/ search transcript",
     "@ file",
     "! shell",
+    "// command",
 ];
 
 /// What an empty composer says while it holds a command: where it runs, and
@@ -3646,12 +3744,14 @@ fn opens_a_line(key: ratatui::crossterm::event::KeyEvent) -> bool {
 /// `@ file` is left out where there are no files to name — a session outside
 /// a repository, or one whose repository has not been read yet — since it
 /// would be advertising a list that cannot open; `! shell` where nothing runs
-/// commands, as in a recorded log being looked at.
-fn placeholder(columns: usize, files: bool, commands: bool) -> String {
+/// commands, as in a recorded log being looked at; `// command` where the
+/// backend has listed no commands of its own.
+fn placeholder(columns: usize, can: Offers) -> String {
     let mut said = PLACEHOLDER[0].to_owned();
     for more in PLACEHOLDER[1..].iter().filter(|more| match **more {
-        "@ file" => files,
-        "! shell" => commands,
+        "@ file" => can.files,
+        "! shell" => can.shell,
+        "// command" => can.commands,
         _ => true,
     }) {
         let longer = format!("{said} · {more}");
@@ -3661,6 +3761,18 @@ fn placeholder(columns: usize, files: bool, commands: bool) -> String {
         said = longer;
     }
     said
+}
+
+/// What the composer can do beyond taking a prompt, which is what its
+/// placeholder may advertise.
+#[derive(Debug, Clone, Copy)]
+struct Offers {
+    /// There are files to name with `@`.
+    files: bool,
+    /// Something runs the operator's `!` commands.
+    shell: bool,
+    /// The backend has listed commands to pick with `//`.
+    commands: bool,
 }
 
 /// Gives the composer the theme's colours.

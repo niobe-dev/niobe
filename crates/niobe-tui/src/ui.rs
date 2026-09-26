@@ -675,57 +675,142 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     draw_mention(frame, transcript, composer, app, theme);
 }
 
-/// The files an `@` word could name, as a list standing on the divider above
-/// the bar, over the foot of the transcript, lined up with what is typed.
+/// The files an `@` word could name, or the backend's commands the `/` that
+/// opens the prompt could, as a list standing on the divider above the bar,
+/// over the foot of the transcript, lined up with what is typed.
 fn draw_mention(frame: &mut Frame, transcript: Rect, bar: Rect, app: &App, theme: &Theme) {
     let (files, selected) = app.mention_files();
-    if files.is_empty() {
+    if !files.is_empty() {
+        let rows = files
+            .iter()
+            .map(|file| ((*file).to_owned(), None))
+            .collect();
+        draw_offer(
+            frame,
+            (transcript, bar),
+            app,
+            theme,
+            (" @ file ", rows, selected),
+        );
         return;
     }
+    let (commands, selected) = app.offered_commands();
+    if !commands.is_empty() {
+        let rows = commands
+            .iter()
+            .map(|command| {
+                let named = match &command.argument_hint {
+                    Some(hint) => format!("/{} {hint}", command.name),
+                    None => format!("/{}", command.name),
+                };
+                (named, Some(command.description.as_str()))
+            })
+            .collect();
+        draw_offer(
+            frame,
+            (transcript, bar),
+            app,
+            theme,
+            (" / command ", rows, selected),
+        );
+    }
+}
+
+/// The widest a command's description is drawn beside its name, so that one
+/// long description does not stretch the list across the whole transcript.
+const OFFER_DETAIL: usize = 56;
+
+/// One list of what the word being typed could become: its title, each row as
+/// what goes into the prompt and what it is, and the row Enter would take.
+type Offer<'a> = (&'static str, Vec<(String, Option<&'a str>)>, usize);
+
+/// Draws `offer` over the foot of `transcript`, starting where the bar's
+/// prompt starts.
+fn draw_offer(
+    frame: &mut Frame,
+    (transcript, bar): (Rect, Rect),
+    app: &App,
+    theme: &Theme,
+    (title, rows, selected): Offer<'_>,
+) {
     let lead = u16::try_from(lead_width(app)).unwrap_or(u16::MAX);
     let x = bar.x.saturating_add(lead).min(transcript.right());
     let room = transcript.right().saturating_sub(x);
-    // A border either side, and a column of padding inside each.
-    let widest = files
+    let named = rows
         .iter()
-        .map(|file| text::width(file))
+        .map(|(row, _)| text::width(row))
         .max()
         .unwrap_or(0);
-    let width = u16::try_from(widest + 4).unwrap_or(u16::MAX).min(room);
-    let rows = files
+    let detail = rows
+        .iter()
+        .filter_map(|(_, detail)| detail.map(|detail| text::width(first_line(detail))))
+        .max()
+        .map_or(0, |widest| widest.min(OFFER_DETAIL) + 2);
+    // A border either side, and a column of padding inside each.
+    let width = u16::try_from(named + detail + 4)
+        .unwrap_or(u16::MAX)
+        .min(room);
+    let shown = rows
         .len()
         .min(usize::from(transcript.height.saturating_sub(2)));
-    if rows == 0 || width < 5 {
+    if shown == 0 || width < 5 {
         return;
     }
-    let height = u16::try_from(rows + 2).unwrap_or(u16::MAX);
+    let height = u16::try_from(shown + 2).unwrap_or(u16::MAX);
     let area = Rect::new(x, transcript.bottom().saturating_sub(height), width, height);
 
     let inside = usize::from(width.saturating_sub(4));
-    let lines: Vec<Line<'static>> = files
+    let lines: Vec<Line<'static>> = rows
         .iter()
-        .take(rows)
+        .take(shown)
         .enumerate()
-        .map(|(at, file)| {
-            // The name is the end of the path, so a path too long for the list
-            // keeps that and gives up its leading directories.
-            let shown = format!(" {:<inside$} ", text::truncate_start(file, inside));
-            if at == selected {
-                Line::from(shown).style(Style::new().fg(theme.pane_bg).bg(theme.hot).bold())
-            } else {
-                Line::from(shown).style(Style::new().fg(theme.fg))
-            }
+        .map(|(at, (row, detail))| {
+            let chosen = at == selected;
+            let style = match chosen {
+                true => Style::new().fg(theme.pane_bg).bg(theme.hot).bold(),
+                false => Style::new().fg(theme.fg),
+            };
+            let Some(detail) = detail else {
+                // A file's name is the end of its path, so a path too long
+                // for the list keeps that and gives up its leading
+                // directories.
+                let shown = format!(" {:<inside$} ", text::truncate_start(row, inside));
+                return Line::from(shown).style(style);
+            };
+            // The names are a column, so the descriptions start together.
+            let row = text::truncate(row, inside);
+            let row = format!("{row:<column$}", column = named.min(inside));
+            let left = inside.saturating_sub(text::width(&row));
+            let said = match left > 2 {
+                true => format!("  {}", text::truncate(first_line(detail), left - 2)),
+                false => String::new(),
+            };
+            let pad = inside.saturating_sub(text::width(&row) + text::width(&said));
+            let detail_style = match chosen {
+                true => style,
+                false => Style::new().fg(theme.dim),
+            };
+            Line::from(vec![
+                Span::styled(format!(" {row}"), style),
+                Span::styled(format!("{said}{} ", " ".repeat(pad)), detail_style),
+            ])
         })
         .collect();
     let block = Block::bordered()
         .border_type(theme.border)
         .border_style(Style::new().fg(theme.frame).bg(theme.pane_bg))
         .style(Style::new().bg(theme.pane_bg))
-        .title_top(Line::from(" @ file ").style(Style::new().fg(theme.title).bold()));
+        .title_top(Line::from(title).style(Style::new().fg(theme.title).bold()));
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The first line of `text`, which is all of a description a list row has
+/// room for.
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
 }
 
 /// Gives the placeholder the room the bar leaves once its held hints — the

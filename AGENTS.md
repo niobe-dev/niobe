@@ -80,7 +80,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
   and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps and truncates, `find.rs` finds a query in the transcript as it is drawn and marks
-  where, `mention.rs` completes an `@` word from the files the CLI listed, `shell.rs` is the trait the loop
+  where, `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
+  backend's own commands where a prompt opens with `/` — typed `//`, since one `/` on an empty
+  composer searches — from the list the backend sent, `shell.rs` is the trait the loop
   hands the operator's `!` commands to, and where who allows them and what they reach is written
   down, `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
@@ -102,8 +104,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
   `translate.rs` turns one message of it into events and owns no process, `driver.rs` spawns the
-  binary, keeps its standard input open for the life of the session and answers the permission
-  prompts the CLI stops turns on; `spilled.rs` reads the file the CLI saves a shell output
+  binary, asks it with `initialize` what it offers — the answer is where the slash commands a
+  session starts with are listed, `commands_changed` only reports a change to them — keeps its
+  standard input open for the life of the session and answers the permission prompts the CLI
+  stops turns on; `spilled.rs` reads the file the CLI saves a shell output
   too large to hand over to, so a whole test run is counted from it rather than from the
   preview, and both the driver and the transcript reader hand it to the translator;
   `transcript.rs` reads the session files the CLI keeps for

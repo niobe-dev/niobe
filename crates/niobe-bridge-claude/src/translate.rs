@@ -77,7 +77,7 @@ use std::path::{Path, PathBuf};
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, Context, CostBasis, Event, Mode, PermissionDecision,
-    SessionMeta, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    SessionMeta, SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
@@ -456,17 +456,21 @@ impl Translator {
         out
     }
 
-    /// Reports a request of Niobe's own that the CLI refused.
+    /// Reads the CLI's answer to a request of Niobe's own: the slash commands
+    /// the answer to `initialize` lists, or the refusal of a change.
     ///
     /// Only this side asks the CLI anything, so every `control_response` is an
-    /// answer to a request made here — a mode or a model the session was asked
-    /// to move to. A refusal left unreported would leave the shell showing a
-    /// change that never happened.
+    /// answer to a request made here — what the CLI offers, or a mode or a
+    /// model the session was asked to move to. A refusal left unreported would
+    /// leave the shell showing a change that never happened.
     fn answered(&mut self, response: wire::ControlResponse, out: &mut Vec<Event>) {
         let Some(outcome) = response.response else {
             return;
         };
         if outcome.subtype.as_deref() == Some("success") {
+            if let Some(commands) = outcome.response.and_then(|answer| answer.commands) {
+                out.push(listed(commands));
+            }
             return;
         }
         out.push(warn(format!(
@@ -550,11 +554,15 @@ impl Translator {
             Some("task_started" | "task_updated" | "background_tasks_changed") => {}
             // The CLI's whole slash-command list, pushed when it changes after
             // the process started — an MCP server's prompts arriving late, a
-            // skill found mid-session — which can be before `init`. Passed
-            // over: the session state has no place for it, and it is not a
-            // list of what the CLI offers, only of what changed — a session
-            // whose commands never change is never sent one.
-            Some("commands_changed") => {}
+            // skill found mid-session — which can be before `init`, and before
+            // the answer to `initialize` that carries the list as it started.
+            // Both are the whole list as it stood when sent, so whichever
+            // arrives last is the list.
+            Some("commands_changed") => {
+                if let Some(commands) = system.commands {
+                    out.push(listed(commands));
+                }
+            }
             other => out.push(unread(format!(
                 "the CLI sent a system message of subtype `{}`, which this version of Niobe \
                  does not know how to read.",
@@ -1901,6 +1909,20 @@ fn label_of(input: &serde_json::Value) -> Option<String> {
         (Some(kind), None) => Some(kind.to_owned()),
         (None, Some(description)) => Some(description.to_owned()),
         (None, None) => None,
+    }
+}
+
+/// The CLI's slash commands, as the event that replaces the list before them.
+fn listed(commands: Vec<wire::Command>) -> Event {
+    Event::Commands {
+        commands: commands
+            .into_iter()
+            .map(|command| SlashCommand {
+                name: command.name,
+                description: command.description,
+                argument_hint: command.argument_hint.filter(|hint| !hint.trim().is_empty()),
+            })
+            .collect(),
     }
 }
 

@@ -25,8 +25,8 @@ use crate::test_run::{self, FailedTests, TestCounts};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, Billing, CheckpointId, Context, Event, Mode, SessionMeta, ToolCallId,
-    ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Billing, CheckpointId, Context, Event, Mode, SessionMeta, SlashCommand,
+    ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -450,6 +450,8 @@ pub struct SessionState {
     peak_running_agents: u64,
     errors: u64,
     fatal_error: Option<String>,
+    /// The commands the backend last said it runs from a prompt.
+    commands: Vec<SlashCommand>,
 }
 
 impl SessionState {
@@ -655,6 +657,7 @@ impl SessionState {
             // A notice changes nothing that is counted: it explains the
             // numbers around it, and the transcript is where it is read.
             Event::Notice { .. } => {}
+            Event::Commands { commands } => self.commands = commands.clone(),
         }
     }
 
@@ -924,6 +927,12 @@ impl SessionState {
         self.errors
     }
 
+    /// The commands the backend last said it runs from a prompt, in its
+    /// order. Empty until it has said, which is not a backend with none.
+    pub fn commands(&self) -> &[SlashCommand] {
+        &self.commands
+    }
+
     /// The error that ended the session, if one did.
     pub fn fatal_error(&self) -> Option<&str> {
         self.fatal_error.as_deref()
@@ -955,7 +964,7 @@ fn first_line(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{AgentId, Backend, Mode, PermissionDecision, UsageWindow};
+    use crate::event::{AgentId, Backend, Mode, PermissionDecision, SlashCommand, UsageWindow};
 
     fn usage(input: u64, output: u64, cost: Option<f64>) -> Event {
         on_model("opus-5", input, output, cost)
@@ -2073,5 +2082,29 @@ mod tests {
         ]);
         let tokens: Vec<u64> = state.turns().iter().map(|turn| turn.tokens).collect();
         assert_eq!(tokens, [100, 30]);
+    }
+
+    fn command(name: &str) -> SlashCommand {
+        SlashCommand {
+            name: name.to_owned(),
+            description: format!("what /{name} does"),
+            argument_hint: None,
+        }
+    }
+
+    #[test]
+    fn the_last_command_list_the_backend_sent_replaces_the_one_before() {
+        let state = SessionState::replay(&[
+            Event::Commands {
+                commands: vec![command("compact"), command("context")],
+            },
+            prompt(),
+            Event::Commands {
+                commands: vec![command("review_changes (MCP)")],
+            },
+        ]);
+        let names: Vec<&str> = state.commands().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["review_changes (MCP)"]);
+        assert!(SessionState::new().commands().is_empty());
     }
 }

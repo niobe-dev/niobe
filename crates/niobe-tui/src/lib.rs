@@ -40,6 +40,7 @@ pub mod prices;
 pub mod rules;
 pub mod run;
 pub mod shell;
+mod slash;
 pub mod terminal;
 mod text;
 pub mod theme;

@@ -308,16 +308,56 @@ CLI's own. The only edits: `commands` cut from 59 entries to its first three,
 and `system`/`init` cut down to the keys that say what ran, its `cwd`
 rewritten to `/repo`.
 
-What it settles is when `system`/`commands_changed` arrives, and why the
-bridge passes over it:
+What it settles is when `system`/`commands_changed` arrives, and what it
+holds:
 
 - **It is sent when the command list changes after the process starts**, which
   is here the MCP server's prompts arriving, and it can arrive before `init`.
   The same turn recorded in an empty directory, with no MCP server, has none:
   it is not the CLI's announcement of its commands, only of a change to them.
+  The list a session starts with is in the answer to `initialize`; see
+  `slash-command.jsonl`.
 - **It is the whole list, each entry `{name, description, argumentHint}` with
   `builtin: true` on the CLI's own** — 54 of the 59 here; the other five were
-  the MCP server's prompts, named `<server>:<prompt> (MCP)`.
+  the MCP server's prompts, named `<server>:<prompt> (MCP)`. `tests/stream.rs`
+  folds it after `slash-command.jsonl` and expects exactly its three names:
+  each list replaces the one before it.
+
+## `slash-command.jsonl`
+
+One turn that is a slash command, recorded from Claude Code 2.1.282 on
+26 September 2026 with the flags above and `--setting-sources project,local`,
+in a repository whose local settings enable an MCP server. Before the turn the
+session sent `{"type":"control_request","request_id":"niobe-1","request":{"subtype":"initialize"}}`,
+as the driver does, and the turn was the prompt `/context`. The lines are the
+CLI's own, in the order it printed them. The only edits: both command lists
+cut from 59 entries to the same four (three of the CLI's own and one MCP
+prompt); the answer to `initialize` cut to its `commands` and the three keys
+that say what state the session is in — it also names the signed-in account,
+the models and the process id; `system`/`init` cut down to the keys that say
+what ran, its `cwd` rewritten to `/repo`; and the command's output cut to its
+first table, in the message, its `local_command_source` and the `result`,
+with the rest of `context_usage` dropped, because the rest lists the
+recording machine's files.
+
+What it settles:
+
+- **The command list a session starts with is in the answer to
+  `initialize`**, under `response.response.commands`, in the same shape as
+  `commands_changed`. The CLI answers with the list as it stands when it
+  answers — here 59, the MCP prompts included — and in this recording it sent
+  `commands_changed` *before* that answer. Both are whole lists, so whichever
+  arrives last is the list, which is what the translator does.
+- **The list is what runs headless.** 2.1.282 lists 54 commands of its own
+  over stream-json, and none of the ones that only mean something in its own
+  terminal — `/help`, `/login`, `/resume`, `/theme`, `/exit` are not in it.
+- **A command runs from a plain user turn** whose text starts with `/` and its
+  name. An MCP prompt is typed with its listed name whole, ` (MCP)` included:
+  that suffix is how the CLI's parser tells one from a command of its own.
+  `/context` ran without a request: its output came back as an `assistant`
+  message from `model: "<synthetic>"` with all-zero usage, then a `result`
+  with `num_turns: 0` and `total_cost_usd: 0`. `tests/stream.rs` expects one
+  turn of zero tokens whose reply is that output.
 
 ## `tool-results/cargo-test-workspace.txt`
 

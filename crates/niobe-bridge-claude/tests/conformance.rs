@@ -76,8 +76,10 @@ const SHAPES: &[&str] = &[
     "system/background_tasks_changed",
     "system/task_started",
     "system/task_updated",
-    // The CLI's slash-command list after it changed, recorded from Claude Code
-    // 2.1.282. Passed over on purpose; `translate.rs` says why.
+    // The CLI's slash-command list: as it stood when the CLI answered the
+    // `initialize` a session opens with, and whole again whenever it changes,
+    // recorded from Claude Code 2.1.282. Each replaces the list before it.
+    "control_response/success",
     "system/commands_changed",
     "user",
     // Content blocks and deltas, which ride on both the stream and the

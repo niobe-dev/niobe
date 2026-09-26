@@ -347,7 +347,7 @@ impl Session {
             }
         });
 
-        Ok(Self {
+        let mut session = Self {
             child,
             stdin: Some(stdin),
             events,
@@ -357,7 +357,27 @@ impl Session {
             readers: vec![reader, errors],
             control_requests: 0,
             reported: false,
-        })
+        };
+        // A CLI that cannot be written to has already left, and the next
+        // drain reports that in the CLI's own words; failing the spawn here
+        // would report it without them.
+        let _ = session.initialize();
+        Ok(session)
+    }
+
+    /// Asks the CLI what it offers, which it answers with its slash commands
+    /// among other things.
+    ///
+    /// The answer is the only place the CLI lists its commands as the session
+    /// starts: `commands_changed` is sent only when the list changes after
+    /// that, and a session whose list never changes is never sent one. The
+    /// CLI takes the request once, before anything else, so it goes out here.
+    fn initialize(&mut self) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "initialize" }),
+        ))
     }
 
     /// Sends one turn.

@@ -87,6 +87,25 @@ pub(crate) struct System {
     pub(crate) summary: Option<String>,
     /// On `task_progress` and `task_notification`: what the task has used.
     pub(crate) usage: Option<TaskUsage>,
+    /// On `commands_changed`: every slash command the CLI now runs.
+    pub(crate) commands: Option<Vec<Command>>,
+}
+
+/// One slash command, as the CLI lists it in its answer to `initialize` and in
+/// `commands_changed`.
+///
+/// The CLI also says whether it is one of its own (`builtin`) and what else
+/// it answers to (`aliases`). Neither is read: a command runs by its name
+/// whoever supplied it, and an alias runs what the name already offers.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Command {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) description: String,
+    /// What the command takes after its name. The CLI writes `""` for a
+    /// command that takes nothing.
+    #[serde(rename = "argumentHint")]
+    pub(crate) argument_hint: Option<String>,
 }
 
 /// What a background task has used, as the CLI counts it for the task alone.
@@ -469,6 +488,20 @@ pub(crate) struct ControlResponse {
 pub(crate) struct ControlOutcome {
     pub(crate) subtype: Option<String>,
     pub(crate) error: Option<String>,
+    /// What a request that succeeded answered with. Only the answer to
+    /// `initialize` carries anything Niobe reads.
+    pub(crate) response: Option<ControlAnswer>,
+}
+
+/// The body of a successful answer.
+///
+/// The answer to `initialize` also says who is signed in, which models and
+/// output styles there are and the process's id. None of it is read: the
+/// account is the CLI's business, and the rest arrives again on `init`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControlAnswer {
+    /// Every slash command the CLI runs, as it stood when it answered.
+    pub(crate) commands: Option<Vec<Command>>,
 }
 
 /// The `result` line that closes a turn.

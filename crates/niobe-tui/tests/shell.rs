@@ -3246,6 +3246,189 @@ fn a_session_with_no_files_to_name_does_not_offer_to_name_one() {
     assert!(file_list(&screen(&mut app, 120, 30)).is_empty());
 }
 
+/// The backend's commands as it lists them, each with what it does and, where
+/// it takes something, what.
+fn listed_commands(names: &[(&str, &str, Option<&str>)]) -> Event {
+    Event::Commands {
+        commands: names
+            .iter()
+            .map(
+                |(name, description, hint)| niobe_core::event::SlashCommand {
+                    name: (*name).to_owned(),
+                    description: (*description).to_owned(),
+                    argument_hint: hint.map(str::to_owned),
+                },
+            )
+            .collect(),
+    }
+}
+
+/// A session whose backend has listed its commands.
+fn session_with_commands() -> App {
+    let mut app = empty_session();
+    app.apply(&listed_commands(&[
+        (
+            "compact",
+            "Free up context by summarizing the conversation so far",
+            None,
+        ),
+        ("context", "Show current context usage", None),
+        ("fast", "Toggle fast mode", Some("[on|off]")),
+        (
+            "autocompact",
+            "Configure the auto-compact window size",
+            None,
+        ),
+    ]));
+    app
+}
+
+/// The rows of the list of commands standing over the transcript, each
+/// trimmed to what is inside its border.
+fn command_list(frame: &str) -> Vec<String> {
+    let rows: Vec<&str> = frame.lines().collect();
+    let Some(top) = rows.iter().position(|row| row.contains(" / command ")) else {
+        return Vec::new();
+    };
+    rows[top + 1..]
+        .iter()
+        .take_while(|row| !row.contains('└'))
+        .map(|row| {
+            let inside = row.split('│').nth(1).unwrap_or_default();
+            inside.trim().to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn two_slashes_offer_the_backends_commands_and_enter_picks_one_to_send() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_commands();
+    type_keys(&mut app, "//");
+    assert!(app.finding().is_none());
+    let frame = screen(&mut app, 120, 30);
+    let offered = command_list(&frame);
+    assert_eq!(offered.len(), 4, "{frame}");
+    assert!(
+        offered[2].starts_with("/fast [on|off]") && offered[2].contains("Toggle fast mode"),
+        "a command is offered with what it takes and what it does: {offered:?}"
+    );
+
+    type_keys(&mut app, "comp");
+    let frame = screen(&mut app, 120, 30);
+    let offered = command_list(&frame);
+    assert_eq!(offered.len(), 2, "{frame}");
+    assert!(offered[0].starts_with("/compact "), "{offered:?}");
+    assert!(offered[1].starts_with("/autocompact "), "{offered:?}");
+    let theme = app.theme().to_owned();
+    let chosen = style_at(&mut app, 120, 30, " /compact").expect("the list is drawn");
+    assert_eq!(
+        (chosen.fg, chosen.bg),
+        (Some(theme.pane_bg), Some(theme.hot)),
+        "the command Enter would take is marked as a chip"
+    );
+
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.composed(), "/compact ");
+    assert!(
+        app.take_produced().is_empty(),
+        "the Enter that picked a command sent the prompt"
+    );
+    assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
+
+    type_keys(&mut app, "keep the plan");
+    press(&mut app, KeyCode::Enter);
+    let sent = app.take_produced();
+    assert!(
+        sent.iter().any(|event| matches!(
+            event,
+            Event::UserMessage { text } if text == "/compact keep the plan"
+        )),
+        "the command goes to the backend as the prompt it reads it from: {sent:?}"
+    );
+}
+
+#[test]
+fn a_list_the_backend_sends_again_replaces_what_is_offered() {
+    let mut app = session_with_commands();
+    app.apply(&listed_commands(&[(
+        "code-review-graph:review_changes (MCP)",
+        "Pre-commit review workflow",
+        None,
+    )]));
+    type_keys(&mut app, "//");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert_eq!(offered.len(), 1, "{offered:?}");
+    assert!(
+        offered[0].starts_with("/code-review-graph:review_changes (MCP)"),
+        "{offered:?}"
+    );
+}
+
+#[test]
+fn a_command_is_offered_only_where_it_opens_the_prompt_and_esc_leaves_it_as_typed() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_commands();
+    type_keys(&mut app, "see //comp");
+    assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
+
+    let mut app = session_with_commands();
+    type_keys(&mut app, "//co");
+    assert!(!command_list(&screen(&mut app, 120, 30)).is_empty());
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "n");
+    assert!(
+        command_list(&screen(&mut app, 120, 30)).is_empty(),
+        "the list came back for the word it was closed on"
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        !app.take_produced().is_empty(),
+        "with the list closed, Enter sends"
+    );
+
+    type_keys(&mut app, "//co");
+    assert!(
+        !command_list(&screen(&mut app, 120, 30)).is_empty(),
+        "a list closed on one prompt stayed closed for the next"
+    );
+}
+
+#[test]
+fn a_list_of_files_closed_on_a_word_opens_again_for_the_next_word_in_its_place() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_files();
+    type_keys(&mut app, "@cat");
+    press(&mut app, KeyCode::Esc);
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Backspace);
+    }
+    type_keys(&mut app, "@cat");
+    assert!(
+        !file_list(&screen(&mut app, 120, 30)).is_empty(),
+        "the list stayed closed for a word typed again where the closed one was"
+    );
+}
+
+#[test]
+fn a_session_whose_backend_listed_no_commands_does_not_offer_one() {
+    let mut app = empty_session();
+    assert!(!bar_row(&screen(&mut app, 200, 60)).contains("// command"));
+    type_keys(&mut app, "//");
+    assert_eq!(app.composed(), "/");
+    assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
+
+    let mut app = session_with_commands();
+    let row = bar_row(&screen(&mut app, 200, 60));
+    assert!(
+        row.contains("// command"),
+        "a session with commands to run says how to reach them: {row}"
+    );
+}
+
 /// A session that runs the operator's commands, in a repository with files.
 fn session_that_runs_commands() -> App {
     session_with_files().runs_commands()

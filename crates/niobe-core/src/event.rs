@@ -306,6 +306,26 @@ pub struct Context {
     pub window: Option<u64>,
 }
 
+/// A command the backend runs itself when a prompt starts with `/` and its
+/// name: compacting the context, reporting what the context holds, a prompt a
+/// server of the backend's supplies.
+///
+/// Only what the operator needs to choose one: the backend is what runs it,
+/// and it runs it from the prompt as typed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// The name, without its `/`, exactly as the backend reads it after one —
+    /// which can hold a space, as a server's prompt named `server:prompt (MCP)`
+    /// does.
+    pub name: String,
+    /// What it does, in the backend's words.
+    pub description: String,
+    /// What it takes after its name, as the backend writes it, such as
+    /// `[on|off]`. `None` for a command that takes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+}
+
 /// How a tool call ended. Drives waste accounting: a failed call is spend with
 /// nothing to show for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -745,6 +765,15 @@ pub enum Event {
         id: AgentId,
         /// How it finished.
         outcome: AgentOutcome,
+    },
+
+    /// Every command the backend offers to run from a prompt, as it now
+    /// stands. Replaces the list before it whole: a backend sends it again
+    /// when the list changes, and a command it no longer lists is one it will
+    /// no longer run.
+    Commands {
+        /// The commands, in the backend's order.
+        commands: Vec<SlashCommand>,
     },
 
     /// Something happened in the session that is neither a message nor a

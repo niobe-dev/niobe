@@ -45,7 +45,8 @@ fn recording() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stdio-answers.jsonl")
 }
 
-/// A `claude` that reads a turn, replays the recording, stops at every prompt
+/// A `claude` that reads the request it is sent first and keeps it as
+/// `first.json`, reads a turn, replays the recording, stops at every prompt
 /// until it is answered, and writes the answers to `answers.jsonl` in the
 /// directory `ANSWERS_DIR` names. It also writes down in `progress` there how
 /// far it got, which is what tells a stand-in that never ran from a session
@@ -62,6 +63,8 @@ fn stand_in() -> &'static Path {
         let body = format!(
             "#!/bin/sh\n\
              echo started >> \"$ANSWERS_DIR/progress\"\n\
+             read -r first\n\
+             printf '%s\\n' \"$first\" > \"$ANSWERS_DIR/first.json\"\n\
              read -r turn\n\
              echo read the turn >> \"$ANSWERS_DIR/progress\"\n\
              while IFS= read -r line; do\n\
@@ -124,7 +127,7 @@ fn stalled_at(dir: &Path) -> String {
 /// Runs the recorded turn, answering each prompt with what `decide` says
 /// about the tool it names, and returns every event and every answer the
 /// stand-in received.
-fn exchange(decide: impl Fn(&str) -> PermissionDecision) -> (Vec<Event>, Vec<serde_json::Value>) {
+fn exchange(decide: impl Fn(&str) -> PermissionDecision) -> Exchanged {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let mut options = Options::new(dir.path(), "max");
     options.binary = stand_in().to_path_buf();
@@ -176,8 +179,15 @@ fn exchange(decide: impl Fn(&str) -> PermissionDecision) -> (Vec<Event>, Vec<ser
         .lines()
         .map(|line| serde_json::from_str(line).expect("each answer is one JSON line"))
         .collect();
-    (events, answers)
+    let first = std::fs::read_to_string(dir.path().join("first.json"))
+        .expect("the stand-in kept the first line it read");
+    let first = serde_json::from_str(&first).expect("the first line is one JSON line");
+    (events, answers, first)
 }
+
+/// Every event of an exchange, every answer the stand-in received, and the
+/// line it read before the turn.
+type Exchanged = (Vec<Event>, Vec<serde_json::Value>, serde_json::Value);
 
 /// The prompts in `events` that are waiting on an answer.
 ///
@@ -229,7 +239,7 @@ fn by_tool(tool: &str) -> PermissionDecision {
 
 #[test]
 fn each_prompt_is_answered_by_the_request_id_the_cli_asked_under() {
-    let (_, answers) = exchange(by_tool);
+    let (_, answers, _) = exchange(by_tool);
 
     let addressed: Vec<&str> = answers
         .iter()
@@ -250,7 +260,7 @@ fn each_prompt_is_answered_by_the_request_id_the_cli_asked_under() {
 
 #[test]
 fn an_approval_hands_back_the_arguments_the_cli_asked_about() {
-    let (events, answers) = exchange(by_tool);
+    let (events, answers, _) = exchange(by_tool);
 
     let approval = &answers[0]["response"]["response"];
     assert_eq!(approval["behavior"], "allow");
@@ -268,7 +278,7 @@ fn an_approval_hands_back_the_arguments_the_cli_asked_about() {
 
 #[test]
 fn a_refusal_made_here_reads_as_denied_though_the_cli_never_announces_it() {
-    let (events, answers) = exchange(by_tool);
+    let (events, answers, _) = exchange(by_tool);
 
     // What the model is told is what the CLI put in the tool result, word for
     // word, so it has to say the call was refused rather than that it broke.
@@ -298,5 +308,19 @@ fn a_refusal_made_here_reads_as_denied_though_the_cli_never_announces_it() {
     assert_eq!(
         refusals, 0,
         "the closing result's permission_denials was reported as a refusal of its own"
+    );
+}
+
+#[test]
+fn a_session_asks_the_cli_what_it_offers_before_it_sends_a_turn() {
+    let (_, _, first) = exchange(by_tool);
+
+    assert_eq!(first["type"], "control_request");
+    assert_eq!(first["request"]["subtype"], "initialize");
+    assert!(
+        first["request_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("niobe-")),
+        "{first}"
     );
 }
