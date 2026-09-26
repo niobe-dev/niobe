@@ -642,8 +642,7 @@ impl Printed {
 /// carriage return, tabs as spaces, and no control characters.
 fn terminal_line(line: &str) -> String {
     let shown = line.rsplit('\r').next().unwrap_or(line);
-    shown
-        .replace('\t', "    ")
+    crate::text::expand_tabs(shown)
         .chars()
         .filter(|c| !c.is_control())
         .collect()

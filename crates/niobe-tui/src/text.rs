@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! Wrapping and truncation, done here rather than by the widgets.
+//! Wrapping, truncation and tab expansion, done here rather than by the
+//! widgets.
 //!
 //! The transcript scrolls, so the shell has to know how many lines a message
 //! occupies before it draws it. A [`ratatui::widgets::Paragraph`] wraps
@@ -13,6 +14,39 @@ use unicode_width::UnicodeWidthChar;
 /// Display width of a string in terminal cells.
 pub fn width(text: &str) -> usize {
     text.chars().map(|c| c.width().unwrap_or(0)).sum()
+}
+
+/// Columns between tab stops where the shell expands a tab itself.
+const TAB_STOP: usize = 4;
+
+/// `line` with each tab replaced by the spaces that reach the next tab stop.
+///
+/// A terminal cell cannot hold a tab: ratatui drops it as a control
+/// character, so tab-indented code would draw every level of its nesting in
+/// one column. Stops rather than a fixed run of spaces, so a tab that lines up
+/// a column mid-line still lines it up. Every four columns rather than the
+/// terminal's eight, because a pane is narrower than the terminal and a code
+/// line is cut, not rewrapped.
+pub fn expand_tabs(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_owned();
+    }
+    let mut out = String::with_capacity(line.len() + TAB_STOP);
+    let mut column = 0;
+    for c in line.chars() {
+        match c {
+            '\t' => {
+                let fill = TAB_STOP - column % TAB_STOP;
+                out.extend(std::iter::repeat_n(' ', fill));
+                column += fill;
+            }
+            _ => {
+                out.push(c);
+                column += c.width().unwrap_or(0);
+            }
+        }
+    }
+    out
 }
 
 /// Wraps `text` to `columns` cells, breaking on whitespace where it can and
@@ -183,6 +217,23 @@ pub fn truncate_start(text: &str, columns: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leading_tab_is_one_level_of_indentation_per_tab() {
+        assert_eq!(expand_tabs("\t\treturn"), "        return");
+    }
+
+    #[test]
+    fn a_tab_mid_line_reaches_the_next_stop_so_columns_still_line_up() {
+        assert_eq!(expand_tabs("ID\tstring"), "ID  string");
+        assert_eq!(expand_tabs("Body\t[]byte"), "Body    []byte");
+        assert_eq!(expand_tabs("名\tx"), "名  x");
+    }
+
+    #[test]
+    fn a_line_without_tabs_is_unchanged() {
+        assert_eq!(expand_tabs("if ok {"), "if ok {");
+    }
 
     #[test]
     fn words_break_on_whitespace() {

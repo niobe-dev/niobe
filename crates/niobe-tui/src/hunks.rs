@@ -179,7 +179,7 @@ fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> L
         DiffLine::Added(_) => ("+", theme.add, theme.add, theme.add_bg),
     };
     let room = width.saturating_sub(number_width + 3);
-    let shown = text::truncate(&expand_tabs(line.text()), room);
+    let shown = text::truncate(&text::expand_tabs(line.text()), room);
     Line::from(vec![
         Span::styled(
             format!("{number:>number_width$} "),
@@ -236,12 +236,6 @@ fn footer(gate: Gate, width: usize, theme: &Theme) -> Line<'static> {
             Style::new().fg(theme.dim),
         ),
     ])
-}
-
-/// Tabs as four spaces: a tab's width is the terminal's to decide, and a row
-/// whose width the shell cannot count is a row it cannot cut or pad.
-fn expand_tabs(line: &str) -> String {
-    line.replace('\t', "    ")
 }
 
 /// `text` padded with spaces to `width` cells.

@@ -373,7 +373,8 @@ impl<'t> Renderer<'t> {
 
     /// A code block's lines behind the gutter, as written: code is not
     /// rewrapped, because where its lines break is part of what it says. A line
-    /// wider than the pane is cut into pieces that each keep the gutter.
+    /// wider than the pane is cut into pieces that each keep the gutter. Tabs
+    /// are expanded, since a cell cannot draw one.
     fn code_lines(&mut self, code: &str) {
         let room = self.room().saturating_sub(text::width(CODE_GUTTER)).max(1);
         let gutter = Style::new().fg(self.theme.dim);
@@ -381,7 +382,7 @@ impl<'t> Renderer<'t> {
         for line in code.trim_end_matches('\n').split('\n') {
             let pieces = match line.is_empty() {
                 true => vec![String::new()],
-                false => text::split_to_width(line, room),
+                false => text::split_to_width(&text::expand_tabs(line), room),
             };
             for piece in pieces {
                 self.emit(vec![

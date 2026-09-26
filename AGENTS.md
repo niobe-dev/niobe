@@ -85,7 +85,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   a bracketed paste as one paste whose line breaks are not Enter, `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
-  and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps and truncates, `find.rs` finds a query in the transcript as it is drawn and marks
+  and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps, truncates and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
   where, `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
   backend's own commands where a prompt opens with `/` — typed `//`, since one `/` on an empty
   composer searches — from the list the backend sent, `shell.rs` is the trait the loop

@@ -29,8 +29,9 @@ use std::path::PathBuf;
 
 use common::{
     at_work, metered_session, paint, running_session, screen, session_with_a_long_write,
-    session_with_a_markdown_reply, session_with_finished_turns, session_with_test_records,
-    session_with_test_runs, session_with_two_agents_at_work, style_at, styles, unmetered_session,
+    session_with_a_markdown_reply, session_with_a_tab_indented_reply, session_with_finished_turns,
+    session_with_test_records, session_with_test_runs, session_with_two_agents_at_work, style_at,
+    styles, unmetered_session,
 };
 use niobe_core::event::{
     AgentId, Backend, Event, Mode, PermissionDecision, Usage, UsageWindow, UsageWindows,
@@ -485,6 +486,25 @@ fn a_reply_in_markdown_is_drawn_styled_in_both_themes() {
             40,
         ),
     );
+}
+
+/// A terminal draws no tab, so code indented with tabs, as Go and Makefiles
+/// are, would lose every level of its nesting: each tab is taken to the next
+/// stop four columns on, the way the diff under a call draws one.
+#[test]
+fn tab_indented_code_in_a_reply_keeps_its_nesting() {
+    let frame = screen(&mut session_with_a_tab_indented_reply(), 80, 24);
+    for line in [
+        "│ func handle(ok bool) {",
+        "│     if ok {",
+        "│         return",
+        "│     }",
+        "│     ID  string",
+        "│     Body    []byte",
+    ] {
+        assert!(frame.contains(line), "{line:?} is not drawn:\n{frame}");
+    }
+    assert_snapshot("markdown-tabs-80x24", &frame);
 }
 
 /// A theme is a palette and the line its focused pane is drawn in, and

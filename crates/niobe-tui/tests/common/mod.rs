@@ -667,8 +667,6 @@ if (res.status === 304) return cached.body;
 ```
 ";
 
-/// The running session after one more prompt, answered in [`MARKDOWN_REPLY`],
-/// scrolled to the reply.
 /// The running session with a file of thirty lines written at its end: a
 /// diff longer than the transcript draws unopened.
 pub fn session_with_a_long_write() -> App {
@@ -704,6 +702,39 @@ pub fn session_with_a_long_write() -> App {
     app
 }
 
+/// A reply with Go in it, indented with tabs the way `gofmt` writes it, and a
+/// struct whose field types a tab lines up.
+pub const TAB_INDENTED_REPLY: &str = "The handler returns early:
+
+```go
+func handle(ok bool) {
+\tif ok {
+\t\treturn
+\t}
+}
+
+type Entry struct {
+\tID\tstring
+\tBody\t[]byte
+}
+```
+";
+
+/// The running session after one more prompt, answered in
+/// [`TAB_INDENTED_REPLY`].
+pub fn session_with_a_tab_indented_reply() -> App {
+    let mut app = running_session();
+    app.apply(&Event::UserMessage {
+        text: "How does it return?".to_owned(),
+    });
+    app.apply(&Event::AssistantMessage {
+        text: TAB_INDENTED_REPLY.to_owned(),
+        agent: None,
+    });
+    app
+}
+
+/// The running session after one more prompt, answered in [`MARKDOWN_REPLY`].
 pub fn session_with_a_markdown_reply() -> App {
     let mut app = running_session();
     app.apply(&Event::UserMessage {
