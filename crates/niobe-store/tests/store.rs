@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use niobe_core::event::{Event, Usage};
+use niobe_core::event::{AgentId, Event, ToolCallId, Usage};
 use niobe_core::session::SessionState;
 use niobe_store::{Recorder, SessionId, Store, StoreError, read_log};
 
@@ -200,6 +200,7 @@ fn sessions_are_listed_newest_first_with_their_first_prompt_and_size() {
             newer,
             &Event::AssistantMessage {
                 text: "hello".to_owned(),
+                agent: None,
             },
         )
         .expect("append");
@@ -275,6 +276,62 @@ fn an_unreadable_row_names_the_session_and_the_sequence_number() {
         "{error}"
     );
     assert!(error.to_string().contains("event 2"), "{error}");
+}
+
+/// A call and a message written before either said which agent made it load
+/// as the session's own, and one that does say comes back naming it.
+#[test]
+fn calls_and_messages_stored_before_they_named_an_agent_load_as_the_sessions() {
+    let (_dir, path) = scratch();
+    let session = {
+        let store = Store::open(&path).expect("a store opens");
+        let session = store.create_session().expect("a session is created");
+        store.append(session, &user("review it")).expect("append");
+        session
+    };
+    let id = session.to_string().parse::<i64>().expect("ids are numbers");
+    let conn = raw(&path);
+    for (seq, row) in [
+        (
+            2,
+            r#"{"type":"tool_call_start","id":"t","name":"Read","input":"{}"}"#,
+        ),
+        (3, r#"{"type":"assistant_message","text":"Done."}"#),
+    ] {
+        conn.execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (?1, ?2, 0, ?3)",
+            rusqlite::params![id, seq, row],
+        )
+        .expect("a row in the older shape can be appended directly");
+    }
+    drop(conn);
+
+    let store = Store::open(&path).expect("the store opens");
+    let owned = Event::ToolCallStart {
+        id: ToolCallId::new("a1"),
+        name: "Grep".to_owned(),
+        input: "{}".to_owned(),
+        summary: None,
+        agent: Some(AgentId::new("toolu_a")),
+    };
+    store.append(session, &owned).expect("append");
+
+    let events: Vec<Event> = store
+        .events(session)
+        .expect("the older rows load")
+        .into_iter()
+        .map(|stored| stored.event)
+        .collect();
+    let owners: Vec<Option<&str>> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolCallStart { agent, .. } | Event::AssistantMessage { agent, .. } => {
+                Some(agent.as_ref().map(AgentId::as_str))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(owners, [None, None, Some("toolu_a")]);
 }
 
 #[test]

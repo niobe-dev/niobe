@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use common::{
     at_work, metered_session, paint, running_session, screen, session_with_a_long_write,
     session_with_a_markdown_reply, session_with_finished_turns, session_with_test_records,
-    session_with_test_runs, style_at, styles, unmetered_session,
+    session_with_test_runs, session_with_two_agents_at_work, style_at, styles, unmetered_session,
 };
 use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
 use niobe_core::{FailedTests, TestCounts, TestRunRecord};
@@ -269,6 +269,23 @@ fn a_finished_turn_is_ruled_off_with_what_it_spent() {
     assert_snapshot("turns-80x24", &frame);
 }
 
+/// Two sub-agents at work at once: each of their calls is named for the
+/// agent that made it, two agents' calls to one tool stay two rows, and what
+/// an agent says is drawn under its own name rather than as the session's.
+#[test]
+fn whose_each_row_is_shows_where_two_agents_calls_interleave() {
+    let frame = screen(&mut session_with_two_agents_at_work(), 120, 30);
+    for row in [
+        "…fetch.py › catalog/fetch.py",
+        "…cache.py › catalog/cache.py",
+        "…fetch.py › catalog/etag.py",
+        "↳ deep-reasoner: Review cache.py  sub-agent",
+    ] {
+        assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
+    }
+    assert_snapshot("agents-120x30", &frame);
+}
+
 #[test]
 fn a_diff_cut_at_twenty_rows_opens_in_place_and_cuts_again() {
     let mut app = session_with_a_long_write();
@@ -311,7 +328,10 @@ const TRANSCRIPT_TOP: usize = 3;
 fn long_write_under_a_long_reply() -> App {
     let mut app = session_with_a_long_write();
     let reply: String = (1..=60).map(|n| format!("- reply line {n:02}\n")).collect();
-    app.apply(&Event::AssistantMessage { text: reply });
+    app.apply(&Event::AssistantMessage {
+        text: reply,
+        agent: None,
+    });
     app
 }
 
@@ -727,6 +747,7 @@ fn session_at_work() -> App {
         name: "Bash".to_owned(),
         input: r#"{"command":"npm test -- fetch"}"#.to_owned(),
         summary: Some("npm test -- fetch".to_owned()),
+        agent: None,
     });
     app.tick(t0 + Duration::from_secs(75), None);
     app
@@ -2970,7 +2991,7 @@ fn session_with_a_needle() -> App {
         app.apply(&Event::UserMessage {
             text: format!("prompt {n}"),
         });
-        app.apply(&Event::AssistantMessage { text });
+        app.apply(&Event::AssistantMessage { text, agent: None });
         app.apply(&Event::TurnEnded);
     }
     app

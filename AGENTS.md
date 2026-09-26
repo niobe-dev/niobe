@@ -83,8 +83,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   cut at twenty rows until Ctrl+T opens every cut diff in place,
-  `calls.rs` draws a tool call as a row of a table — its name in a fixed column, what it does,
-  and on the right what it cost, by what the backend reported and the shell's own clock — with
+  `calls.rs` draws a tool call as a row of a table — its name in a fixed column, what it does
+  behind the name of the sub-agent that made it where one did, and on the right what it cost, by what the backend reported and the shell's own clock — with
   what a test run reported under the call that ran it, and a run of calls to one tool as one
   group that Ctrl+O folds, `turns.rs` draws the rule under a
   finished turn with what that turn spent — its tokens, how far it moved the five-hour window and

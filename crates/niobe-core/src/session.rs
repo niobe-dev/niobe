@@ -420,6 +420,15 @@ pub struct SessionState {
     assistant_messages: u64,
     pending_assistant: String,
     last_assistant: Option<String>,
+    /// What each sub-agent last said, by agent: the why of a file that agent
+    /// changes, which the session's own words are not.
+    agents_said: BTreeMap<AgentId, String>,
+    /// The sub-agent that made each call still running, where one did.
+    agent_calls: BTreeMap<ToolCallId, AgentId>,
+    /// The sub-agent that made the call that ended last, or `None` for the
+    /// session's own. A file change arrives directly after the end of the call
+    /// that made it, so this is whose change it is.
+    ended_by: Option<AgentId>,
     permission_requests: u64,
     permissions_denied: u64,
     pending_permissions: BTreeSet<ToolCallId>,
@@ -498,15 +507,26 @@ impl SessionState {
 
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
 
-            Event::AssistantMessage { text } => {
+            Event::AssistantMessage { text, agent: None } => {
                 self.assistant_messages += 1;
                 self.pending_assistant.clear();
                 self.last_assistant = Some(text.clone());
             }
+            Event::AssistantMessage {
+                text,
+                agent: Some(agent),
+            } => {
+                self.agents_said.insert(agent.clone(), text.clone());
+            }
 
-            Event::ToolCallStart { id, name, .. } => {
+            Event::ToolCallStart {
+                id, name, agent, ..
+            } => {
                 self.tools.started += 1;
                 self.in_flight_tools.insert(id.clone(), name.clone());
+                if let Some(agent) = agent {
+                    self.agent_calls.insert(id.clone(), agent.clone());
+                }
             }
 
             Event::ToolCallEnd {
@@ -530,6 +550,7 @@ impl SessionState {
                 if self.in_flight_tools.remove(id).is_none() {
                     self.tools.unmatched_ends += 1;
                 }
+                self.ended_by = self.agent_calls.remove(id);
             }
 
             Event::Usage(usage) => self.totals.add(usage),
@@ -669,12 +690,17 @@ impl SessionState {
     /// The "why" is taken here rather than carried on the event: the fold is
     /// what knows the order the stream arrived in, and every backend gets the
     /// same rule for free — the last thing the model said before this call is
-    /// the last [`Event::AssistantMessage`] the fold saw, because nothing else
-    /// speaks between a call and its result.
+    /// the last [`Event::AssistantMessage`] the fold saw from the agent that
+    /// made the call, because nothing else that agent says comes between a
+    /// call and its result. Another agent's words can, while agents run at
+    /// once, which is why each agent's are kept apart.
     fn change_file(&mut self, path: &str, added: Option<u64>, removed: Option<u64>) {
-        let why = self
-            .last_assistant
-            .as_deref()
+        let said = match &self.ended_by {
+            Some(agent) => self.agents_said.get(agent),
+            None => self.last_assistant.as_ref(),
+        };
+        let why = said
+            .map(String::as_str)
             .and_then(first_line)
             .map(str::to_owned);
 
@@ -795,7 +821,9 @@ impl SessionState {
         self.user_messages
     }
 
-    /// How many replies the assistant completed.
+    /// How many replies the assistant completed. A sub-agent's messages are
+    /// its own conversation with the session, not replies, and are not
+    /// counted.
     pub fn assistant_messages(&self) -> u64 {
         self.assistant_messages
     }
@@ -806,7 +834,7 @@ impl SessionState {
         &self.pending_assistant
     }
 
-    /// The last completed reply.
+    /// The last completed reply: the session's own, never a sub-agent's.
     pub fn last_assistant(&self) -> Option<&str> {
         self.last_assistant.as_deref()
     }
@@ -927,7 +955,7 @@ fn first_line(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Backend, Mode, PermissionDecision, UsageWindow};
+    use crate::event::{AgentId, Backend, Mode, PermissionDecision, UsageWindow};
 
     fn usage(input: u64, output: u64, cost: Option<f64>) -> Event {
         on_model("opus-5", input, output, cost)
@@ -1166,6 +1194,7 @@ mod tests {
 
         state.apply(&Event::AssistantMessage {
             text: "Reading fetch.ts and its callers.".to_owned(),
+            agent: None,
         });
         assert_eq!(state.pending_assistant(), "");
         assert_eq!(
@@ -1186,6 +1215,7 @@ mod tests {
         assert!(state.turn_running());
         state.apply(&Event::AssistantMessage {
             text: "Reading it first.".to_owned(),
+            agent: None,
         });
         assert!(state.turn_running(), "a reply mid-turn is not its end");
 
@@ -1219,6 +1249,7 @@ mod tests {
             name: "Read".to_owned(),
             input: "fetch.ts".to_owned(),
             summary: None,
+            agent: None,
         });
         assert_eq!(state.in_flight_tools().len(), 1);
 
@@ -1557,10 +1588,12 @@ mod tests {
         let state = SessionState::replay(&[
             Event::AssistantMessage {
                 text: "Adding the etag header.\nThen the cache lookup.".to_owned(),
+                agent: None,
             },
             changed("src/fetch.rs", Some(9), Some(0)),
             Event::AssistantMessage {
                 text: "  Short-circuiting the 304 path.  ".to_owned(),
+                agent: None,
             },
             changed("src/cache.rs", Some(2), Some(0)),
         ]);
@@ -1584,10 +1617,12 @@ mod tests {
         let state = SessionState::replay(&[
             Event::AssistantMessage {
                 text: "Adding the etag header.".to_owned(),
+                agent: None,
             },
             changed("src/fetch.rs", Some(9), Some(0)),
             Event::AssistantMessage {
                 text: "Short-circuiting the 304 path.".to_owned(),
+                agent: None,
             },
             changed("src/fetch.rs", Some(4), Some(1)),
         ]);
@@ -1596,6 +1631,76 @@ mod tests {
             state.files()[0].why.as_deref(),
             Some("Short-circuiting the 304 path.")
         );
+    }
+
+    /// A call and its end, made by `agent`, that changed `path`.
+    fn edited_by(agent: Option<&str>, id: &str, path: &str) -> [Event; 3] {
+        [
+            Event::ToolCallStart {
+                id: ToolCallId::new(id),
+                name: "Edit".to_owned(),
+                input: String::new(),
+                summary: None,
+                agent: agent.map(AgentId::new),
+            },
+            Event::ToolCallEnd {
+                id: ToolCallId::new(id),
+                name: "Edit".to_owned(),
+                input: String::new(),
+                output: String::new(),
+                bytes: 0,
+                outcome: ToolOutcome::Ok,
+                summary: None,
+                exit_code: None,
+                error: None,
+            },
+            changed(path, Some(1), Some(1)),
+        ]
+    }
+
+    /// Two agents at work at once: each file's why is what the agent that
+    /// changed it said last, never the other's words that happened to land
+    /// in between.
+    #[test]
+    fn the_why_beside_a_file_is_what_the_agent_that_changed_it_said() {
+        let said = |text: &str, agent: Option<&str>| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: agent.map(AgentId::new),
+        };
+        let mut events = vec![
+            said("Fixing the session's header.", None),
+            said("Let me check how eviction is triggered.", Some("toolu_a")),
+        ];
+        events.extend(edited_by(None, "t1", "src/fetch.rs"));
+        events.push(said("Evicting on write, not on read.", Some("toolu_a")));
+        events.extend(edited_by(Some("toolu_a"), "t2", "src/cache.rs"));
+        let state = SessionState::replay(&events);
+
+        let why = |at: usize| state.files()[at].why.as_deref();
+        assert_eq!(why(0), Some("Fixing the session's header."));
+        assert_eq!(why(1), Some("Evicting on write, not on read."));
+        assert_eq!(
+            state.last_assistant(),
+            Some("Fixing the session's header."),
+            "a sub-agent's words were taken for the session's reply"
+        );
+        assert_eq!(state.assistant_messages(), 1);
+    }
+
+    /// A sub-agent's message never streams, so it does not finish the reply
+    /// the session is streaming.
+    #[test]
+    fn a_sub_agents_message_leaves_the_sessions_streaming_reply_alone() {
+        let state = SessionState::replay(&[
+            Event::AssistantDelta {
+                text: "Reading fetch".to_owned(),
+            },
+            Event::AssistantMessage {
+                text: "Found it.".to_owned(),
+                agent: Some(AgentId::new("toolu_a")),
+            },
+        ]);
+        assert_eq!(state.pending_assistant(), "Reading fetch");
     }
 
     #[test]

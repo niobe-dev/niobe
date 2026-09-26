@@ -64,9 +64,11 @@
 //!   the size of the agent's conversation rather than summing what it was
 //!   billed, so it is carried as a size and never priced.
 //! * A sub-agent's `parent_tool_use_id` says which sub-agent call a message
-//!   belongs to. Its tool calls and its tokens are folded in — they are work
-//!   done and money spent — but attributing each line of the transcript to the
-//!   agent that wrote it needs a pane that can show two agents at once.
+//!   belongs to. Its tool calls and its finished messages carry that agent,
+//!   and its tokens are folded in under the model that produced them. Its
+//!   text is not streamed: two agents' fragments arriving interleaved would
+//!   have to be reassembled per agent, and the finished message is the same
+//!   words.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -779,10 +781,13 @@ impl Translator {
         ) {
             self.agent_model(agent, model, out);
         }
+        // A message that names the sub-agent call it belongs to is that
+        // agent's: its words and its calls are the agent's, not the session's.
+        let agent = envelope.parent_tool_use_id.map(AgentId::new);
         let blocks = match envelope.message.content {
             Some(wire::Content::Blocks(blocks)) => blocks,
             Some(wire::Content::Text(text)) => {
-                out.push(Event::AssistantMessage { text });
+                out.push(Event::AssistantMessage { text, agent });
                 return;
             }
             None => return,
@@ -815,10 +820,7 @@ impl Translator {
                         self.agents.insert(id.clone(), Running::Yes);
                         calls.push(Event::AgentSpawn {
                             id: AgentId::new(id.clone()),
-                            // Which agent spawned this one is the sub-agent
-                            // pane's question; the stream says only that the
-                            // session did.
-                            parent: None,
+                            parent: agent.clone(),
                             label: label_of(&input).unwrap_or_else(|| rendered.clone()),
                         });
                     }
@@ -827,6 +829,7 @@ impl Translator {
                         name,
                         input: rendered,
                         summary,
+                        agent: agent.clone(),
                     });
                 }
                 // A tool result never rides on an assistant message, and
@@ -839,7 +842,7 @@ impl Translator {
         // The text first: it is what the model said before it acted, and the
         // transcript reads in that order.
         if !text.is_empty() {
-            out.push(Event::AssistantMessage { text });
+            out.push(Event::AssistantMessage { text, agent });
         }
         out.append(&mut calls);
     }
@@ -1138,9 +1141,9 @@ impl Translator {
             }
 
             // A sub-agent's text is folded in when the message is complete
-            // rather than as it streams: two agents streaming into one
-            // transcript would write through each other's paragraphs, and
-            // telling them apart on screen needs a pane that shows both.
+            // rather than as it streams: two agents streaming at once would
+            // write through each other's paragraphs, and the finished message,
+            // which names its agent, carries the same words.
             wire::StreamBody::ContentBlockDelta {
                 delta: wire::Delta::TextDelta { text },
             } if stream.is_none() => out.push(Event::AssistantDelta { text }),

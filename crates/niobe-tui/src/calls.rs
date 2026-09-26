@@ -76,8 +76,8 @@ pub(crate) fn lines(
 ) -> Vec<Line<'static>> {
     let colour = entry.kind.colour(theme);
     let mut lines = match entry.calls.as_slice() {
-        [call] => single(&entry.head, call, width, detail, colour, theme),
-        calls => group(&entry.head, calls, width, detail, colour, theme),
+        [call] => single(entry, call, width, detail, colour, theme),
+        calls => group(entry, calls, width, detail, colour, theme),
     };
     lines.push(Line::from(""));
     lines
@@ -86,7 +86,7 @@ pub(crate) fn lines(
 /// A call on its own: its row, then the reason it failed or the lines it
 /// changed.
 fn single(
-    head: &str,
+    entry: &Entry,
     call: &Call,
     width: usize,
     detail: Detail,
@@ -99,8 +99,11 @@ fn single(
     };
     let mut lines = vec![row(
         glyph,
-        head.to_owned(),
-        &call.what,
+        entry.head.clone(),
+        Doing {
+            agent: entry.agent.as_deref(),
+            what: &call.what,
+        },
         result(call, theme),
         width,
         colour,
@@ -113,7 +116,7 @@ fn single(
 /// A run of calls: the group's row, then the calls under it unless the runs
 /// are folded.
 fn group(
-    head: &str,
+    entry: &Entry,
     calls: &[Call],
     width: usize,
     detail: Detail,
@@ -129,11 +132,14 @@ fn group(
         .map(|call| call.what.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let name = format!("{head} ×{}", calls.len());
+    let name = format!("{} ×{}", entry.head, calls.len());
     let mut lines = vec![row(
         glyph,
         name,
-        &what,
+        Doing {
+            agent: entry.agent.as_deref(),
+            what: &what,
+        },
         group_result(calls, theme),
         width,
         colour,
@@ -403,7 +409,7 @@ fn first_line(text: &str) -> Option<&str> {
 fn row(
     glyph: &str,
     name: String,
-    what: &str,
+    doing: Doing<'_>,
     result: Vec<Span<'static>>,
     width: usize,
     colour: Color,
@@ -414,9 +420,17 @@ fn row(
     let name_column = NAME_COLUMN.min(room);
     let name = text::truncate(&name, name_column);
     let what_room = room.saturating_sub(name_column + 1);
-    let what = text::truncate(what, what_room);
-    let gap = room
-        .saturating_sub(name_column + 1 + text::width(&what))
+    let (agent, what_room) = match doing.agent {
+        Some(agent) => {
+            let tag = agent_tag(agent, doing.what, what_room);
+            let left = what_room.saturating_sub(text::width(&tag));
+            (Some(tag), left)
+        }
+        None => (None, what_room),
+    };
+    let what = text::truncate(doing.what, what_room);
+    let gap = what_room
+        .saturating_sub(text::width(&what))
         .saturating_add(GAP);
 
     let mut spans = vec![
@@ -426,11 +440,45 @@ fn row(
             Style::new().fg(colour).bold(),
         ),
         Span::raw(" "),
-        Span::styled(what, Style::new().fg(theme.dim)),
-        Span::raw(" ".repeat(gap)),
     ];
+    if let Some(tag) = agent {
+        spans.push(Span::styled(tag, Style::new().fg(theme.agent)));
+    }
+    spans.push(Span::styled(what, Style::new().fg(theme.dim)));
+    spans.push(Span::raw(" ".repeat(gap)));
     spans.extend(result);
     Line::from(spans)
+}
+
+/// What a row says the call does, and which sub-agent made it, where one did.
+#[derive(Clone, Copy)]
+struct Doing<'a> {
+    /// The sub-agent's name, or `None` for the session's own call.
+    agent: Option<&'a str>,
+    /// What the call does, in one line.
+    what: &'a str,
+}
+
+/// What stands between an agent's name and what its call does.
+const AGENT_MARK: &str = " › ";
+
+/// A sub-agent's name and the mark after it, fitted into the `room` it shares
+/// with what the call does.
+///
+/// The name is what tells two agents' interleaved rows apart, so it keeps
+/// half the room however long what the call does is, and all of the room
+/// what the call does leaves. Where there is no room for a letter of it and
+/// the mark, it is dropped whole rather than left as a mark after an
+/// ellipsis.
+fn agent_tag(agent: &str, what: &str, room: usize) -> String {
+    let mark = text::width(AGENT_MARK);
+    let half = room.saturating_sub(mark) / 2;
+    let left = room.saturating_sub(mark + text::width(what));
+    let name = text::truncate(agent, half.max(left));
+    match name.as_str() {
+        "" | "…" => String::new(),
+        _ => format!("{name}{AGENT_MARK}"),
+    }
 }
 
 fn spans_width(spans: &[Span<'_>]) -> usize {
@@ -580,6 +628,7 @@ mod tests {
             name: name.to_owned(),
             input: String::new(),
             summary: Some(id.to_owned()),
+            agent: None,
         }
     }
 
@@ -687,6 +736,84 @@ mod tests {
         assert!(rows[0].ends_with("+8 −≥3"), "{rows:?}");
         assert!(rows[1].ends_with("+4 —"), "{rows:?}");
         assert!(rows[2].ends_with("+4 −3"), "{rows:?}");
+    }
+
+    fn spawn(app: &mut App, id: &str, label: &str) {
+        app.apply(&Event::AgentSpawn {
+            id: niobe_core::event::AgentId::new(id),
+            parent: None,
+            label: label.to_owned(),
+        });
+    }
+
+    fn start_by(id: &str, name: &str, agent: &str) -> Event {
+        Event::ToolCallStart {
+            id: id.into(),
+            name: name.to_owned(),
+            input: String::new(),
+            summary: Some(format!("catalog/{id}.py")),
+            agent: Some(niobe_core::event::AgentId::new(agent)),
+        }
+    }
+
+    #[test]
+    fn a_sub_agents_call_names_the_agent_before_what_it_does() {
+        let mut app = app();
+        spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
+        app.apply(&start_by("t1", "Read", "toolu_a"));
+
+        let rows = drawn(&app, false);
+        assert!(
+            rows[0].contains("Read ")
+                && rows[0].contains("quick-lookup: Summarize › catalog/t1.py"),
+            "{rows:?}"
+        );
+        assert!(rows[0].ends_with("running"), "{rows:?}");
+        assert_eq!(rows[0].chars().count(), 80, "{rows:?}");
+    }
+
+    #[test]
+    fn two_agents_calls_to_one_tool_are_not_one_group() {
+        let mut app = app();
+        spawn(&mut app, "toolu_a", "Review fetch");
+        spawn(&mut app, "toolu_b", "Review cache");
+        app.apply(&start_by("t1", "Read", "toolu_a"));
+        app.apply(&start_by("t2", "Read", "toolu_b"));
+        app.apply(&start_by("t3", "Read", "toolu_b"));
+
+        let heads: Vec<(&str, Option<&str>, usize)> = app
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.head.as_str(),
+                    entry.agent.as_deref(),
+                    entry.calls.len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            [("Read", Some("…fetch"), 1), ("Read", Some("…cache"), 2),]
+        );
+    }
+
+    #[test]
+    fn an_agents_name_keeps_half_the_room_and_gives_way_whole_where_none_is_left() {
+        let long = "x".repeat(60);
+        assert_eq!(agent_tag("Review fetch", &long, 40), "Review fetch › ");
+        assert_eq!(
+            text::width(&agent_tag(&"n".repeat(50), &long, 40)),
+            18 + text::width(AGENT_MARK),
+            "a long name took more than half the room from what the call does"
+        );
+        assert_eq!(
+            agent_tag(&"n".repeat(50), "short", 40),
+            format!("{}…{AGENT_MARK}", "n".repeat(31)),
+            "the room a short call leaves went unused"
+        );
+        assert_eq!(agent_tag("Review fetch", &long, 3), "");
+        assert_eq!(agent_tag("Review fetch", &long, 5), "");
     }
 
     #[test]

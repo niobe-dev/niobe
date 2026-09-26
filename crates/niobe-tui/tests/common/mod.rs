@@ -21,7 +21,7 @@
 
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
-    AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
+    AgentId, AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
     ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::{TestCounts, TestRunRecord};
@@ -58,6 +58,7 @@ fn read_started(id: &str, path: &str) -> Event {
         name: "Read".to_owned(),
         input: path.to_owned(),
         summary: Some(path.to_owned()),
+        agent: None,
     }
 }
 
@@ -99,6 +100,7 @@ fn session_events() -> Vec<Event> {
             text: "Reading catalog/fetch.ts and its callers first. Two call sites, one \
                    test file."
                 .to_owned(),
+            agent: None,
         },
         // Three reads started together, as a model asks for them in one
         // message: the run the transcript folds into one group.
@@ -231,12 +233,14 @@ fn session_events() -> Vec<Event> {
         Event::AssistantMessage {
             text: "Caching the etag beside the body so a 304 can be answered from the LRU."
                 .to_owned(),
+            agent: None,
         },
         Event::ToolCallStart {
             id: "t2".into(),
             name: "Edit".to_owned(),
             input: "catalog/fetch.ts".to_owned(),
             summary: None,
+            agent: None,
         },
         Event::PermissionRequest {
             id: "t2".into(),
@@ -301,6 +305,7 @@ fn session_events() -> Vec<Event> {
         // no size for at all.
         Event::AssistantMessage {
             text: "Rewriting the 304 test around the cached body.".to_owned(),
+            agent: None,
         },
         Event::FileChange {
             path: "catalog/etag.test.ts".to_owned(),
@@ -310,6 +315,7 @@ fn session_events() -> Vec<Event> {
         },
         Event::AssistantMessage {
             text: "The notebook that demonstrates the fetcher needs the new call shape.".to_owned(),
+            agent: None,
         },
         Event::FileChange {
             path: "docs/notebooks/catalog.ipynb".to_owned(),
@@ -322,6 +328,7 @@ fn session_events() -> Vec<Event> {
             name: "Bash".to_owned(),
             input: "npm test -- fetch".to_owned(),
             summary: None,
+            agent: None,
         },
         Event::ToolCallEnd {
             id: "t3".into(),
@@ -357,6 +364,7 @@ fn session_events() -> Vec<Event> {
             text: "Etags cached in the LRU; 304s short-circuit. One test still red — the \
                    304 path asserts a body that is no longer sent."
                 .to_owned(),
+            agent: None,
         },
     ]
 }
@@ -528,6 +536,7 @@ pub fn session_with_test_records(runs: &[TestRunRecord]) -> App {
                 name: "Bash".to_owned(),
                 input: "cargo test".to_owned(),
                 summary: Some("cargo test".to_owned()),
+                agent: None,
             },
             Event::ToolCallEnd {
                 id: id.as_str().into(),
@@ -669,6 +678,7 @@ pub fn session_with_a_long_write() -> App {
         name: "Write".to_owned(),
         input: path.clone(),
         summary: Some(path.clone()),
+        agent: None,
     });
     app.apply(&Event::ToolCallEnd {
         id: "w1".into(),
@@ -700,7 +710,69 @@ pub fn session_with_a_markdown_reply() -> App {
     });
     app.apply(&Event::AssistantMessage {
         text: MARKDOWN_REPLY.to_owned(),
+        agent: None,
     });
+    app
+}
+
+/// The running session after it spawned two reviewers that work at once:
+/// their calls interleave with each other and with what one of them says,
+/// and the session speaks again while both are still running.
+pub fn session_with_two_agents_at_work() -> App {
+    let mut app = running_session();
+    let agent = |id: &str| Some(AgentId::new(id));
+    let call = |id: &str, name: &str, what: &str, by: Option<AgentId>| Event::ToolCallStart {
+        id: id.into(),
+        name: name.to_owned(),
+        input: what.to_owned(),
+        summary: Some(what.to_owned()),
+        agent: by,
+    };
+    let done = |id: &str, name: &str, what: &str, bytes| Event::ToolCallEnd {
+        id: id.into(),
+        name: name.to_owned(),
+        input: what.to_owned(),
+        output: String::new(),
+        bytes,
+        outcome: ToolOutcome::Ok,
+        summary: Some(what.to_owned()),
+        exit_code: None,
+        error: None,
+    };
+    let mut events = vec![Event::UserMessage {
+        text: "Review fetch.py and cache.py in parallel.".to_owned(),
+    }];
+    for (id, label) in [
+        ("toolu_fetch", "deep-reasoner: Review fetch.py"),
+        ("toolu_cache", "deep-reasoner: Review cache.py"),
+    ] {
+        events.push(Event::AgentSpawn {
+            id: AgentId::new(id),
+            parent: None,
+            label: label.to_owned(),
+        });
+        events.push(call(id, "Agent", label, None));
+        events.push(done(id, "Agent", label, 120));
+    }
+    events.extend([
+        call("f1", "Read", "catalog/fetch.py", agent("toolu_fetch")),
+        Event::AssistantMessage {
+            text: "Let me check how eviction is triggered.".to_owned(),
+            agent: agent("toolu_cache"),
+        },
+        call("c1", "Read", "catalog/cache.py", agent("toolu_cache")),
+        done("f1", "Read", "catalog/fetch.py", 4_100),
+        call("f2", "Read", "catalog/etag.py", agent("toolu_fetch")),
+        done("c1", "Read", "catalog/cache.py", 2_900),
+        done("f2", "Read", "catalog/etag.py", 1_300),
+        Event::AssistantMessage {
+            text: "Both reviewers are working.".to_owned(),
+            agent: None,
+        },
+    ]);
+    for event in &events {
+        app.apply(event);
+    }
     app
 }
 
@@ -764,6 +836,7 @@ pub fn session_with_finished_turns() -> App {
             20,
             Event::AssistantMessage {
                 text: "It treats it as an error and downloads the manifest again.".to_owned(),
+                agent: None,
             },
         ),
         (20, spent(1_200, 300, 4_900, 0)),
@@ -779,6 +852,7 @@ pub fn session_with_finished_turns() -> App {
             96,
             Event::AssistantMessage {
                 text: "Done: a 304 now returns the cached manifest.".to_owned(),
+                agent: None,
             },
         ),
         (96, spent(2_100, 180, 18_400, 900)),

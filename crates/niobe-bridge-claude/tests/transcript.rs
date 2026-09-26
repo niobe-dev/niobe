@@ -160,7 +160,8 @@ fn a_transcript_folds_into_what_the_session_said_and_did() {
     assert_eq!(
         *reply,
         &Event::AssistantMessage {
-            text: "I will add the header.".to_owned()
+            text: "I will add the header.".to_owned(),
+            agent: None,
         }
     );
     let Event::ToolCallEnd { name, outcome, .. } = call else {
@@ -473,7 +474,7 @@ fn a_read_back_sub_agents_own_calls_are_in_the_timeline_in_the_order_the_cli_sta
     let said = events
         .iter()
         .position(|event| {
-            matches!(event, Event::AssistantMessage { text } if text.starts_with("Three agents"))
+            matches!(event, Event::AssistantMessage { text, agent: None } if text.starts_with("Three agents"))
         })
         .expect("the session's message is in the timeline");
     let at = |call: &str| {
@@ -485,6 +486,51 @@ fn a_read_back_sub_agents_own_calls_are_in_the_timeline_in_the_order_the_cli_sta
     };
     assert!(at("toolu_c2") < said && said < at("toolu_f3"));
     assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+}
+
+/// How many calls and messages each owner made in `events`, the session's
+/// own under `None`, in the order each owner first appeared.
+fn owners(events: &[Event]) -> Vec<(Option<&str>, usize, usize)> {
+    let mut owners: Vec<(Option<&str>, usize, usize)> = Vec::new();
+    for event in events {
+        let (agent, call) = match event {
+            Event::ToolCallStart { agent, .. } => (agent, true),
+            Event::AssistantMessage { agent, .. } => (agent, false),
+            _ => continue,
+        };
+        let agent = agent.as_ref().map(|agent| agent.as_str());
+        let at = match owners.iter().position(|(owner, ..)| *owner == agent) {
+            Some(at) => at,
+            None => {
+                owners.push((agent, 0, 0));
+                owners.len() - 1
+            }
+        };
+        let (_, calls, messages) = &mut owners[at];
+        match call {
+            true => *calls += 1,
+            false => *messages += 1,
+        }
+    }
+    owners
+}
+
+/// A call or message read back from an agent's side file is that agent's:
+/// the one whose spawning call the side file's description names. The counts
+/// are each file's `tool_use` and `text` blocks, as `jq` counts them.
+#[test]
+fn a_read_back_sub_agents_calls_and_words_carry_the_agent_that_made_them() {
+    let events = folded_session(WITH_AGENTS);
+    assert_eq!(
+        owners(&events),
+        [
+            (None, 3, 3),
+            (Some("toolu_fetch"), 3, 2),
+            (Some("toolu_cache"), 2, 1),
+            (Some("toolu_sum"), 1, 1),
+        ],
+        "{events:?}"
+    );
 }
 
 /// The agent's prompt is the session speaking to the agent, not the operator

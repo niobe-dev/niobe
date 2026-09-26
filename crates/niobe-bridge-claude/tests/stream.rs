@@ -808,6 +808,48 @@ fn a_recorded_agent_call_is_a_sub_agent_named_for_its_kind_and_its_task() {
     );
 }
 
+/// A message that names the call that spawned its agent is that agent's, and
+/// so is every call in it. The counts are the recording's `tool_use` blocks
+/// and its messages with text, grouped by `parent_tool_use_id` with `jq`.
+#[test]
+fn a_recorded_sub_agents_calls_and_words_carry_the_agent_that_made_them() {
+    let events = translated_sub_agents();
+    let mut owners: Vec<(Option<&str>, usize, usize)> = Vec::new();
+    for event in &events {
+        let (agent, call) = match event {
+            Event::ToolCallStart { agent, .. } => (agent, true),
+            Event::AssistantMessage { agent, .. } => (agent, false),
+            _ => continue,
+        };
+        let agent = agent.as_ref().map(|agent| agent.as_str());
+        match owners.iter_mut().find(|(owner, ..)| *owner == agent) {
+            Some((_, calls, messages)) => match call {
+                true => *calls += 1,
+                false => *messages += 1,
+            },
+            None => owners.push((agent, usize::from(call), usize::from(!call))),
+        }
+    }
+    owners.sort();
+    assert_eq!(
+        owners,
+        [
+            (None, 3, 4),
+            (Some("toolu_018CBLWZbbx5bZCa7U5VkDVi"), 9, 4),
+            (Some("toolu_018oEYQ3e89jvpp8SycSyQ75"), 6, 2),
+            (Some("toolu_01Bjmsju8Kjg8jieHzs66KmX"), 1, 1),
+        ]
+    );
+    // The session spawned all three; none was spawned by another agent.
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentSpawn {
+            parent: Some(_),
+            ..
+        }
+    )));
+}
+
 #[test]
 fn recorded_background_sub_agents_end_when_the_cli_says_they_stopped() {
     let events = translated_sub_agents();

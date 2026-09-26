@@ -444,6 +444,12 @@ pub enum Event {
     AssistantMessage {
         /// The finished message.
         text: String,
+        /// The sub-agent that wrote it, or `None` for the session's own
+        /// reply. A sub-agent's message never streams as
+        /// [`Event::AssistantDelta`]s, so a message that names an agent is
+        /// never the end of the reply the deltas were building.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentId>,
     },
 
     /// A tool call started.
@@ -461,6 +467,11 @@ pub enum Event {
         /// nothing better than `input` to say, and `input` is shown instead.
         #[serde(default)]
         summary: Option<String>,
+        /// The sub-agent that made the call, or `None` for the session's own.
+        /// Carried on the start alone: the end names the call, and the call
+        /// names its agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentId>,
     },
 
     /// A tool call finished.
@@ -870,6 +881,38 @@ mod tests {
             let read: Event = serde_json::from_str(&line).expect("what was written reads back");
             assert_eq!(read, run(failures.clone()));
             assert_eq!(line.contains("failures"), !failures.is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_call_or_message_stored_before_the_agent_field_is_the_sessions() {
+        let call = r#"{"type":"tool_call_start","id":"t","name":"Read","input":"{}"}"#;
+        let message = r#"{"type":"assistant_message","text":"Done."}"#;
+        for json in [call, message] {
+            let read: Event = serde_json::from_str(json).expect("a record from before the field");
+            match read {
+                Event::ToolCallStart { agent, .. } | Event::AssistantMessage { agent, .. } => {
+                    assert_eq!(agent, None, "{json}");
+                }
+                other => panic!("the record reads as what it was written as: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn whose_a_call_is_survives_the_round_trip_and_the_sessions_own_writes_nothing() {
+        let call = |agent| Event::ToolCallStart {
+            id: ToolCallId::new("t"),
+            name: "Read".to_owned(),
+            input: "{}".to_owned(),
+            summary: None,
+            agent,
+        };
+        for agent in [Some(AgentId::new("toolu_a")), None] {
+            let line = serde_json::to_string(&call(agent.clone())).expect("a call record");
+            let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+            assert_eq!(read, call(agent.clone()));
+            assert_eq!(line.contains("agent"), agent.is_some(), "{line}");
         }
     }
 

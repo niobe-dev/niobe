@@ -1,0 +1,30 @@
+ Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
+ ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃                                                                          ┃ │                                       │
+ ┃ ◆ claude                                                                 ┃ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  ┃ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
+ ┃   304 path asserts a body that is no longer sent.                        ┃ │ ───────────────────────────────────── │
+ ┃                                                                          ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃ > you                                                                    ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃   Review fetch.py and cache.py in parallel.                              ┃ │ API-equivalent ≥$0.04                 │
+ ┃                                                                          ┃ │ ───────────────────────────────────── │
+ ┃ ▾ Agent ×2                   deep-reasoner: Review fetch.py, dee…  240 B ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
+ ┃   ├ deep-reasoner: Review fetch.py                                 120 B ┃ └───────────────────────────────────────┘
+ ┃   └ deep-reasoner: Review cache.py                                 120 B ┃ ┌─────────────── Changes ───────────────┐
+ ┃                                                                          ┃ │                                       │
+ ┃ ⚙ Read                       …fetch.py › catalog/fetch.py         4.0 kB ┃ │ ⎇ main ↑3                             █
+ ┃                                                                          ┃ │ ▾ Working tree  23 files  +977 −259   │
+ ┃ ↳ deep-reasoner: Review cache.py  sub-agent                              ┃ │   .                                   │
+ ┃   Let me check how eviction is triggered.                                ┃ │     CHANGELOG.md                +0 −0 │
+ ┃                                                                          ┃ │   catalog/                            │
+ ┃ ⚙ Read                       …cache.py › catalog/cache.py         2.8 kB █ │     fetch.ts                 +149 −12 │
+ ┃                                                                          █ │     etag.ts                   +88 −41 │
+ ┃ ⚙ Read                       …fetch.py › catalog/etag.py          1.3 kB █ └───────────────────────────────────────┘
+ ┃                                                                          █ ┌────────────── Activity ───────────────┐
+ ┃ ◆ claude                                                                 █ │                                       │
+ ┃   Both reviewers are working.                                            █ │ ▾ Sub-agents  3 running · 1 failed    █
+ ┃                                                                          █ │ ◆ test-writer → tests… running 1m 42s │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   └ Reading tests/stream.rs           │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │ ◇ reviewer → catalog/c… done 4100 ctx │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit

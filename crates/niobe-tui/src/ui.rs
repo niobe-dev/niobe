@@ -1754,7 +1754,9 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
 /// line, so its empty body is no lines at all rather than a blank one.
 fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     match entry.kind {
-        EntryKind::Agent => crate::markdown::render(entry.body.trim_end(), width, theme),
+        EntryKind::Agent | EntryKind::SubAgent => {
+            crate::markdown::render(entry.body.trim_end(), width, theme)
+        }
         // The rule carries its figures on its one line and has no body.
         EntryKind::Turn(_) => Vec::new(),
         EntryKind::User | EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
@@ -5029,6 +5031,7 @@ mod tests {
             name: "Write".to_owned(),
             input: path.clone(),
             summary: Some(path.clone()),
+            agent: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: id.into(),
@@ -5050,6 +5053,7 @@ mod tests {
         });
         app.apply(&Event::AssistantMessage {
             text: format!("wrote {id}"),
+            agent: None,
         });
     }
 

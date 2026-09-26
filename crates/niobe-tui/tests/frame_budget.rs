@@ -80,6 +80,7 @@ fn a_long_session_of_markdown_redraws_inside_a_frame_budget() {
         });
         app.apply(&Event::AssistantMessage {
             text: MARKDOWN_REPLY.to_owned(),
+            agent: None,
         });
     }
     let _ = screen(&mut app, 200, 60);
@@ -151,6 +152,7 @@ fn session_of_diffs() -> App {
             name: "Edit".to_owned(),
             input: path.clone(),
             summary: Some(path.clone()),
+            agent: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: id.as_str().into(),
@@ -215,6 +217,7 @@ fn a_running_turn_redraws_inside_a_frame_budget_in_every_theme() {
                 });
                 app.apply(&Event::AssistantMessage {
                     text: MARKDOWN_REPLY.to_owned(),
+                    agent: None,
                 });
             }
             let mut app = at_work(app, Duration::from_secs(3));

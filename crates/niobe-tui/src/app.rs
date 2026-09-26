@@ -406,6 +406,9 @@ pub enum EntryKind {
     User,
     /// The assistant.
     Agent,
+    /// A sub-agent the session spawned, speaking: its words are its own
+    /// conversation with the session, not the session's reply.
+    SubAgent,
     /// A tool call.
     Tool,
     /// An error the backend reported.
@@ -443,6 +446,7 @@ impl EntryKind {
         match self {
             Self::User => ">",
             Self::Agent => "◆",
+            Self::SubAgent => "↳",
             Self::Tool => "⚙",
             Self::Failure => "!",
             Self::Notice => "·",
@@ -454,7 +458,7 @@ impl EntryKind {
     pub fn colour(self, theme: &Theme) -> ratatui::style::Color {
         match self {
             Self::User => theme.user,
-            Self::Agent => theme.agent,
+            Self::Agent | Self::SubAgent => theme.agent,
             Self::Tool => theme.tool,
             Self::Failure => theme.del,
             Self::Notice | Self::Turn(_) => theme.dim,
@@ -489,8 +493,20 @@ pub struct Entry {
     /// transcript. Anything else the transcript shows breaks it — a call to
     /// another tool, the assistant saying something, a refusal, a notice —
     /// and so does the end of a turn, so two turns' calls are never one
-    /// group even where no words came between them.
+    /// group even where no words came between them. So does a call another
+    /// agent made: a group is one agent's.
     pub calls: Vec<Call>,
+    /// The sub-agent whose words or calls this entry is, or `None` for the
+    /// session's own and for everything that is not the agents'.
+    ///
+    /// Named by the shortest part of the name the Activity pane lists it by
+    /// that tells it apart from every other agent the session spawned: two
+    /// reviewers spawned as `deep-reasoner: Review catalog/fetch.py` and
+    /// `deep-reasoner: Review catalog/cache.py` are `…fetch.py` and
+    /// `…cache.py`, which a row cut short still tells apart. It is worked out
+    /// again whenever an agent is spawned, because a new one can make an
+    /// older one's name ambiguous.
+    pub agent: Option<String>,
 }
 
 /// One tool call as the transcript shows it: what it does, how it ended and
@@ -801,6 +817,10 @@ pub struct App {
     /// Where each running call is drawn: its entry, and its place among the
     /// entry's calls.
     tool_entries: BTreeMap<ToolCallId, (usize, usize)>,
+    /// Which sub-agent each entry of a sub-agent's is, by the entry's place:
+    /// what renames the entry when another agent's name makes its own
+    /// ambiguous, and what keeps two agents' calls out of one run.
+    agent_entries: BTreeMap<usize, AgentId>,
     /// The entry a call to the same tool would join, while nothing has come
     /// between it and the next call: see [`Entry::calls`] for what breaks a
     /// run.
@@ -1034,6 +1054,7 @@ impl App {
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
+            agent_entries: BTreeMap::new(),
             run: None,
             calls_folded: false,
             diffs_open: false,
@@ -1134,6 +1155,7 @@ impl App {
             streaming: false,
             at: self.at,
             calls: Vec::new(),
+            agent: None,
         });
     }
 
@@ -1150,6 +1172,7 @@ impl App {
                 streaming: false,
                 at: self.at,
                 calls: Vec::new(),
+                agent: None,
             }),
 
             Event::AssistantDelta { text } => match self.streaming_agent_entry() {
@@ -1164,11 +1187,29 @@ impl App {
                         streaming: true,
                         at: self.at,
                         calls: Vec::new(),
+                        agent: None,
                     });
                 }
             },
 
-            Event::AssistantMessage { text } => match self.streaming_agent_entry() {
+            Event::AssistantMessage {
+                text,
+                agent: Some(agent),
+            } => {
+                self.agent_entries.insert(self.entries.len(), agent.clone());
+                self.push(Entry {
+                    kind: EntryKind::SubAgent,
+                    head: self.sub_agent_label(agent),
+                    meta: "sub-agent".to_owned(),
+                    body: text.clone(),
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: Some(self.sub_agent_tag(agent)),
+                });
+            }
+
+            Event::AssistantMessage { text, agent: None } => match self.streaming_agent_entry() {
                 Some(entry) => {
                     entry.body = text.clone();
                     entry.streaming = false;
@@ -1183,6 +1224,7 @@ impl App {
                         streaming: false,
                         at: self.at,
                         calls: Vec::new(),
+                        agent: None,
                     });
                 }
             },
@@ -1192,10 +1234,11 @@ impl App {
                 name,
                 input,
                 summary,
+                agent,
             } => {
                 let head = tool_label(name);
                 let call = Call::started(what_it_does(summary.as_deref(), input), self.at);
-                match self.open_run(&head) {
+                match self.open_run(&head, agent.as_ref()) {
                     Some(at) => {
                         if let Some(entry) = self.entries.get_mut(at) {
                             self.tool_entries
@@ -1207,6 +1250,10 @@ impl App {
                     None => {
                         let at = self.entries.len();
                         self.tool_entries.insert(id.clone(), (at, 0));
+                        if let Some(agent) = agent {
+                            self.agent_entries.insert(at, agent.clone());
+                        }
+                        let agent = agent.as_ref().map(|agent| self.sub_agent_tag(agent));
                         self.push(Entry {
                             kind: EntryKind::Tool,
                             head,
@@ -1215,6 +1262,7 @@ impl App {
                             streaming: true,
                             at: self.at,
                             calls: vec![call],
+                            agent,
                         });
                         self.run = Some(at);
                     }
@@ -1259,6 +1307,7 @@ impl App {
                             streaming: false,
                             at: self.at,
                             calls: vec![call],
+                            agent: None,
                         });
                         Some((self.entries.len().saturating_sub(1), 0))
                     }
@@ -1312,6 +1361,7 @@ impl App {
                 streaming: false,
                 at: self.at,
                 calls: Vec::new(),
+                agent: None,
             }),
 
             Event::Notice { message } => self.push(Entry {
@@ -1322,6 +1372,7 @@ impl App {
                 streaming: false,
                 at: self.at,
                 calls: Vec::new(),
+                agent: None,
             }),
 
             Event::PermissionRequest {
@@ -1373,6 +1424,7 @@ impl App {
                         streaming: false,
                         at: self.at,
                         calls: Vec::new(),
+                        agent: None,
                     });
                 }
             }
@@ -1437,6 +1489,7 @@ impl App {
                     Some(existing) => *existing = spawned,
                     None => self.agents.push(spawned),
                 }
+                self.rename_agents_entries();
             }
             Event::AgentProgress {
                 id,
@@ -1497,16 +1550,56 @@ impl App {
         self.entries.push(entry);
     }
 
-    /// The entry a call to `head` joins, where the transcript's last entry is
-    /// a run of calls to it that nothing has broken.
-    fn open_run(&self, head: &str) -> Option<usize> {
+    /// The entry a call to `head` by `agent` joins, where the transcript's
+    /// last entry is a run of that agent's calls to it that nothing has
+    /// broken.
+    fn open_run(&self, head: &str, agent: Option<&AgentId>) -> Option<usize> {
         self.run.filter(|&at| {
             at + 1 == self.entries.len()
+                && self.agent_entries.get(&at) == agent
                 && self
                     .entries
                     .get(at)
                     .is_some_and(|entry| entry.head == head && !entry.calls.is_empty())
         })
+    }
+
+    /// What sub-agent `id` is called where its words are drawn: the name the
+    /// Activity pane lists it by, or its id where its spawn was never seen.
+    fn sub_agent_label(&self, id: &AgentId) -> String {
+        self.agents
+            .iter()
+            .find(|agent| &agent.id == id)
+            .map_or_else(|| id.to_string(), |agent| agent.label.clone())
+    }
+
+    /// What sub-agent `id` is called on a row it shares with what it did:
+    /// see [`Entry::agent`].
+    fn sub_agent_tag(&self, id: &AgentId) -> String {
+        let labels: Vec<&str> = self
+            .agents
+            .iter()
+            .map(|agent| agent.label.as_str())
+            .collect();
+        match self.agents.iter().position(|agent| &agent.id == id) {
+            Some(at) => distinct_tail(&labels, at),
+            None => id.to_string(),
+        }
+    }
+
+    /// Names every sub-agent's entry again, now that the agents are not the
+    /// ones its name was worked out among.
+    fn rename_agents_entries(&mut self) {
+        let named: Vec<(usize, String)> = self
+            .agent_entries
+            .iter()
+            .map(|(&at, id)| (at, self.sub_agent_tag(id)))
+            .collect();
+        for (at, tag) in named {
+            if let Some(entry) = self.entries.get_mut(at) {
+                entry.agent = Some(tag);
+            }
+        }
     }
 
     /// Records the end of the `index`th call of entry `at`, and hands back
@@ -1810,6 +1903,7 @@ impl App {
             streaming: false,
             at: self.at,
             calls: Vec::new(),
+            agent: None,
         });
     }
 
@@ -1827,6 +1921,7 @@ impl App {
             streaming: false,
             at: self.at,
             calls: Vec::new(),
+            agent: None,
         });
         self.scroll_to_tail();
     }
@@ -1845,6 +1940,7 @@ impl App {
             streaming: false,
             at: self.at,
             calls: Vec::new(),
+            agent: None,
         });
     }
 
@@ -1863,6 +1959,7 @@ impl App {
             streaming: false,
             at: self.at,
             calls: Vec::new(),
+            agent: None,
         });
         self.scroll_to_tail();
     }
@@ -1949,6 +2046,7 @@ impl App {
             streaming: false,
             at: self.at,
             calls: Vec::new(),
+            agent: None,
         });
         self.scroll_to_tail();
     }
@@ -2020,7 +2118,15 @@ impl App {
     }
 
     fn streaming_agent_entry(&mut self) -> Option<&mut Entry> {
-        match self.entries.last_mut() {
+        // A sub-agent's rows land while the session is still writing, and do
+        // not end its reply: the reply keeps its place above them rather than
+        // being started again below.
+        match self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.agent.is_none())
+        {
             Some(entry) if entry.kind == EntryKind::Agent && entry.streaming => Some(entry),
             _ => None,
         }
@@ -2140,6 +2246,7 @@ impl App {
             streaming: false,
             at: self.at,
             calls: Vec::new(),
+            agent: None,
         });
         self
     }
@@ -2632,6 +2739,7 @@ impl App {
             name: crate::shell::OPERATOR_SHELL.to_owned(),
             input: command.clone(),
             summary: None,
+            agent: None,
         });
         self.running_commands.push((id.clone(), command.clone()));
         self.commands.push((id, command));
@@ -3378,6 +3486,7 @@ impl App {
                 streaming: false,
                 at: self.at,
                 calls: Vec::new(),
+                agent: None,
             });
         }
         self.scroll_to_tail();
@@ -3398,6 +3507,7 @@ impl App {
             streaming: false,
             at: self.at,
             calls: Vec::new(),
+            agent: None,
         });
         self.scroll_to_tail();
     }
@@ -3619,6 +3729,45 @@ pub fn tool_label(name: &str) -> String {
         false => tool,
     };
     format!("{server}·{tool}")
+}
+
+/// The part of `labels[at]` that tells it apart from every other label:
+/// whatever follows the longest start it shares with another, from the word
+/// that start ends in, behind an ellipsis that says something was left off.
+///
+/// A label that shares no start with another is whole, and so is one that
+/// nothing is left of — another label is it with more on the end — because
+/// an ellipsis alone names nothing. A label the same as another's is told
+/// apart from the rest as that one is: nothing tells the two apart.
+pub(crate) fn distinct_tail(labels: &[&str], at: usize) -> String {
+    let Some(label) = labels.get(at) else {
+        return String::new();
+    };
+    let shared = labels
+        .iter()
+        .enumerate()
+        .filter(|&(other, text)| other != at && text != label)
+        .map(|(_, other)| shared_start(label, other))
+        .max()
+        .unwrap_or(0);
+    // Back to the start of the word the shared part ends in, so the name
+    // begins at a word rather than inside one.
+    let from = label
+        .get(..shared)
+        .and_then(|start| start.rfind([' ', '/']))
+        .map_or(0, |space| space + 1);
+    match label.get(from..) {
+        Some(tail) if from > 0 && !tail.is_empty() => format!("…{tail}"),
+        _ => (*label).to_owned(),
+    }
+}
+
+/// How many bytes `a` and `b` start with in common, on a character boundary.
+fn shared_start(a: &str, b: &str) -> usize {
+    a.char_indices()
+        .zip(b.chars())
+        .find(|((_, x), y)| x != y)
+        .map_or(a.len().min(b.len()), |((at, _), _)| at)
 }
 
 /// The backend's one-line reading of a call, or its arguments where it had
@@ -3964,10 +4113,127 @@ mod tests {
 
         app.apply(&Event::AssistantMessage {
             text: "Reading fetch.ts and its callers.".to_owned(),
+            agent: None,
         });
         assert_eq!(app.entries().len(), 1);
         assert_eq!(app.entries()[0].body, "Reading fetch.ts and its callers.");
         assert!(!app.entries()[0].streaming);
+    }
+
+    /// A sub-agent's words are its own: drawn under its name, and never
+    /// the end of the reply the session is streaming, which keeps its place
+    /// and its deltas.
+    #[test]
+    fn a_sub_agents_words_are_its_own_and_leave_the_sessions_reply_streaming() {
+        let mut app = app();
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "default".to_owned(),
+            model: "opus-5".to_owned(),
+            backend_session: None,
+        }));
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("toolu_a"),
+            parent: None,
+            label: "deep-reasoner: Review cache".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "While they ".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "Let me check how eviction is triggered.".to_owned(),
+            agent: Some(AgentId::new("toolu_a")),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "work".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "While they work, I will wait.".to_owned(),
+            agent: None,
+        });
+
+        let entries: Vec<(EntryKind, &str, &str, bool)> = app
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind,
+                    entry.head.as_str(),
+                    entry.body.as_str(),
+                    entry.streaming,
+                )
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                (
+                    EntryKind::Agent,
+                    "claude",
+                    "While they work, I will wait.",
+                    false
+                ),
+                (
+                    EntryKind::SubAgent,
+                    "deep-reasoner: Review cache",
+                    "Let me check how eviction is triggered.",
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_agent_is_named_by_what_tells_it_apart_from_the_others() {
+        let labels = [
+            "quick-lookup: Summarize catalog/cache.py",
+            "deep-reasoner: Review catalog/fetch.py for bugs",
+            "deep-reasoner: Review catalog/cache.py for bugs",
+            "deep-reasoner: Review",
+            "deep-reasoner: Review catalog/fetch.py for bugs",
+        ];
+        let named: Vec<String> = (0..labels.len())
+            .map(|at| distinct_tail(&labels, at))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                "quick-lookup: Summarize catalog/cache.py",
+                "…fetch.py for bugs",
+                "…cache.py for bugs",
+                "…Review",
+                // Two agents spawned alike are named alike: nothing in what
+                // the backend said tells them apart.
+                "…fetch.py for bugs",
+            ]
+        );
+    }
+
+    /// An agent named whole while it was the only one is renamed on the rows
+    /// it has already made once a second agent shares the start of its name.
+    #[test]
+    fn a_second_agent_renames_the_first_agents_rows() {
+        let mut app = app();
+        let spawn = |id: &str, label: &str| Event::AgentSpawn {
+            id: AgentId::new(id),
+            parent: None,
+            label: label.to_owned(),
+        };
+        app.apply(&spawn("toolu_a", "Review catalog/fetch.py"));
+        app.apply(&Event::ToolCallStart {
+            id: ToolCallId::new("r1"),
+            name: "Read".to_owned(),
+            input: String::new(),
+            summary: None,
+            agent: Some(AgentId::new("toolu_a")),
+        });
+        assert_eq!(
+            app.entries()[0].agent.as_deref(),
+            Some("Review catalog/fetch.py")
+        );
+
+        app.apply(&spawn("toolu_b", "Review catalog/cache.py"));
+        assert_eq!(app.entries()[0].agent.as_deref(), Some("…fetch.py"));
     }
 
     #[test]
@@ -3978,6 +4244,7 @@ mod tests {
             name: "Read".to_owned(),
             input: "catalog/fetch.ts".to_owned(),
             summary: None,
+            agent: None,
         });
         assert!(app.entries()[0].streaming);
 
@@ -4013,6 +4280,7 @@ mod tests {
             name: "Bash".to_owned(),
             input: "npm test".to_owned(),
             summary: None,
+            agent: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: "t1".into(),
@@ -5006,6 +5274,7 @@ mod tests {
             name: name.to_owned(),
             input: input.to_owned(),
             summary: summary.map(str::to_owned),
+            agent: None,
         }
     }
 
@@ -5383,6 +5652,7 @@ mod tests {
             },
             Event::AssistantMessage {
                 text: "done".to_owned(),
+                agent: None,
             },
         ]);
 
@@ -5647,6 +5917,7 @@ mod tests {
         });
         app.apply(&Event::AssistantMessage {
             text: "and then".to_owned(),
+            agent: None,
         });
         app.apply(&Event::FileChange {
             path: "a.rs".to_owned(),
@@ -5799,6 +6070,7 @@ mod tests {
         called(&mut app, "t3", "Read");
         app.apply(&Event::AssistantMessage {
             text: "and then".to_owned(),
+            agent: None,
         });
         called(&mut app, "t4", "Read");
         app.apply(&Event::TurnEnded);
@@ -6014,6 +6286,7 @@ mod tests {
         });
         app.apply(&Event::AssistantMessage {
             text: "then".to_owned(),
+            agent: None,
         });
         app.apply(&start("t2", "Write", "{}", None));
         app.apply(&ended("t2", "Write", ToolOutcome::Ok, 20));

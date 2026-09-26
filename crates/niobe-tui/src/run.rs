@@ -846,6 +846,7 @@ mod tests {
                 },
                 SessionEvent::AssistantMessage {
                     text: "reading".to_owned(),
+                    agent: None,
                 },
             ],
             ..Attached::default()
@@ -1072,6 +1073,7 @@ mod tests {
                 },
                 SessionEvent::AssistantMessage {
                     text: "done".to_owned(),
+                    agent: None,
                 },
             ],
             ..Attached::default()
@@ -1092,6 +1094,7 @@ mod tests {
         let mut backend = Attached {
             produces: vec![SessionEvent::AssistantMessage {
                 text: "nothing to change".to_owned(),
+                agent: None,
             }],
             ..Attached::default()
         };
