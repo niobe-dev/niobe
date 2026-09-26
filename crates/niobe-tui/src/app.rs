@@ -434,8 +434,10 @@ pub struct TurnRule {
     pub number: u64,
     /// When it ended, by the clock the shell stamped its end with.
     pub ended: Option<LocalTime>,
-    /// Every token it spent, cache traffic included.
-    pub tokens: u64,
+    /// Every token it spent, cache traffic included. `None` where no usage
+    /// was reported across it, which a turn interrupted or failed before its
+    /// first message is.
+    pub tokens: Option<u64>,
     /// How far the five-hour window moved across it, in whole points of the
     /// window as the Usage pane rounds them. `Some(0)` is a move under one
     /// point, which is not the same as no move at all and is drawn as such.
@@ -6159,7 +6161,7 @@ mod tests {
             TurnRule {
                 number: 1,
                 ended: LocalTime::new(14, 5),
-                tokens: 4_100,
+                tokens: Some(4_100),
                 five_hour_points: None,
                 took: Some(Duration::from_secs(38)),
             }
@@ -6193,7 +6195,7 @@ mod tests {
         );
         assert_eq!(
             (rule.tokens, rule.took),
-            (900, Some(Duration::from_secs(12)))
+            (Some(900), Some(Duration::from_secs(12)))
         );
     }
 
@@ -6212,7 +6214,31 @@ mod tests {
         let [(_, rule)] = rules(&app)[..] else {
             panic!("the turn was not ruled off");
         };
-        assert_eq!((rule.ended, rule.took, rule.tokens), (None, None, 300));
+        assert_eq!(
+            (rule.ended, rule.took, rule.tokens),
+            (None, None, Some(300))
+        );
+    }
+
+    /// A turn cut short before the backend reported any usage spent what
+    /// nobody measured, so its rule carries no token figure rather than a
+    /// zero.
+    #[test]
+    fn a_turn_ended_before_any_usage_was_reported_is_ruled_off_with_no_tokens() {
+        let mut app = app();
+        app.extend(&[
+            Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+        ]);
+        let [(_, rule)] = rules(&app)[..] else {
+            panic!("the turn was not ruled off");
+        };
+        assert_eq!(rule.tokens, None);
     }
 
     #[test]

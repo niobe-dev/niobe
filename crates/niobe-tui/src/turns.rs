@@ -95,10 +95,12 @@ fn figures(rule: &TurnRule) -> Vec<Figure> {
             text: ended.to_string(),
         });
     }
-    figures.push(Figure {
-        kind: Kind::Tokens,
-        text: format!("{} tok", compact(rule.tokens)),
-    });
+    if let Some(tokens) = rule.tokens {
+        figures.push(Figure {
+            kind: Kind::Tokens,
+            text: format!("{} tok", compact(tokens)),
+        });
+    }
     if let Some(points) = rule.five_hour_points {
         figures.push(Figure {
             kind: Kind::Share,
@@ -155,7 +157,7 @@ mod tests {
         TurnRule {
             number: 46,
             ended: LocalTime::new(14, 5),
-            tokens: 6_400,
+            tokens: Some(6_400),
             five_hour_points: Some(1),
             took: Some(Duration::from_secs(38)),
         }
@@ -205,6 +207,36 @@ mod tests {
         assert!(said.starts_with("── turn 46 6400 tok ─"), "{said}");
         assert!(!said.contains("of 5h"), "{said}");
         assert!(!said.contains("0s"), "{said}");
+    }
+
+    /// A turn no usage was reported for — interrupted, or failed before its
+    /// first message — draws no token figure, never `0 tok`.
+    #[test]
+    fn a_turn_with_no_usage_reported_draws_no_token_figure() {
+        let said = drawn(
+            &TurnRule {
+                tokens: None,
+                ..rule()
+            },
+            80,
+        );
+        assert!(
+            said.starts_with("── turn 46 14:05 · 1% of 5h · 38s ─"),
+            "{said}"
+        );
+        assert!(!said.contains("tok"), "{said}");
+    }
+
+    #[test]
+    fn a_turn_that_reported_spending_nothing_reads_zero() {
+        let said = drawn(
+            &TurnRule {
+                tokens: Some(0),
+                ..rule()
+            },
+            80,
+        );
+        assert!(said.contains(" · 0 tok · "), "{said}");
     }
 
     /// At every width from the narrowest that holds the turn's number to the

@@ -375,7 +375,12 @@ pub struct TurnRecord {
     /// Every token the turn spent, cache traffic included, on the definition
     /// [`Totals::tokens`] uses: the session's total when the turn ended less
     /// its total when the turn began.
-    pub tokens: u64,
+    ///
+    /// `None` where no usage record landed in that span — a turn interrupted
+    /// or failed before its first message was reported nothing, and a zero
+    /// would read as a measurement. `Some(0)` is a turn whose records said it
+    /// spent none.
+    pub tokens: Option<u64>,
     /// How far the five-hour window moved across the turn, as a share of the
     /// window: `0.01` is one percent of it.
     ///
@@ -444,6 +449,9 @@ pub struct SessionState {
     turn_last_ended: TurnMark,
     /// Whether a window has been reported since the last turn began or ended.
     window_reported: bool,
+    /// Whether a usage record has landed since the last turn began or ended,
+    /// which is the span a turn's tokens are counted over.
+    usage_reported: bool,
     user_messages: u64,
     /// The last title the backend gave the session.
     title: Option<String>,
@@ -534,6 +542,7 @@ impl SessionState {
                 if !self.turn_running {
                     self.turn_began = Some(self.mark());
                     self.window_reported = false;
+                    self.usage_reported = false;
                 }
                 self.turn_running = true;
             }
@@ -588,7 +597,10 @@ impl SessionState {
                 self.ended_by = self.agent_calls.remove(id);
             }
 
-            Event::Usage(usage) => self.totals.add(usage),
+            Event::Usage(usage) => {
+                self.totals.add(usage);
+                self.usage_reported = true;
+            }
 
             // The last report replaces the one before it: a window is a level,
             // not a quantity, so summing two reports of it would be nonsense.
@@ -722,11 +734,14 @@ impl SessionState {
         };
         self.turns.push(TurnRecord {
             number: self.turns.len() as u64 + 1,
-            tokens: ended.tokens.saturating_sub(began.tokens),
+            tokens: self
+                .usage_reported
+                .then(|| ended.tokens.saturating_sub(began.tokens)),
             five_hour_share,
         });
         self.turn_last_ended = ended;
         self.window_reported = false;
+        self.usage_reported = false;
         self.turn_running = false;
     }
 
@@ -2008,9 +2023,46 @@ mod tests {
 
         let turns = state.turns();
         assert_eq!(turns.len(), 2);
-        assert_eq!((turns[0].number, turns[0].tokens), (1, 10_025));
-        assert_eq!((turns[1].number, turns[1].tokens), (2, 9_047));
+        assert_eq!((turns[0].number, turns[0].tokens), (1, Some(10_025)));
+        assert_eq!((turns[1].number, turns[1].tokens), (2, Some(9_047)));
         assert_eq!(state.totals().tokens(), 19_072);
+    }
+
+    /// A turn no usage record landed in — interrupted, or failed before the
+    /// first message — has no token figure, which is not the same as one
+    /// that reported spending none.
+    #[test]
+    fn a_turn_nothing_reported_usage_for_has_no_token_figure() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(100, 10, 0, 0),
+            Event::TurnEnded,
+            prompt(),
+            Event::TurnEnded,
+            prompt(),
+            cached(0, 0, 0, 0),
+            Event::TurnEnded,
+        ]);
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [Some(110), None, Some(0)]);
+    }
+
+    /// Whether a turn's tokens were measured is decided over the same span
+    /// its tokens are counted over: from the prompt that opened it where the
+    /// fold saw one, and from the end of the turn before where it did not.
+    #[test]
+    fn a_turns_tokens_are_measured_over_the_span_they_are_counted_over() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::TurnEnded,
+            cached(30, 0, 0, 0),
+            Event::TurnEnded,
+            cached(20, 0, 0, 0),
+            prompt(),
+            Event::TurnEnded,
+        ]);
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [None, Some(30), None]);
     }
 
     #[test]
@@ -2030,7 +2082,7 @@ mod tests {
             },
         ]);
         assert_eq!(state.turns().len(), 1);
-        assert_eq!(state.turns()[0].tokens, 110);
+        assert_eq!(state.turns()[0].tokens, Some(110));
     }
 
     #[test]
@@ -2183,8 +2235,8 @@ mod tests {
             cached(30, 0, 0, 0),
             Event::TurnEnded,
         ]);
-        let tokens: Vec<u64> = state.turns().iter().map(|turn| turn.tokens).collect();
-        assert_eq!(tokens, [100, 30]);
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [Some(100), Some(30)]);
     }
 
     fn command(name: &str) -> SlashCommand {
