@@ -546,6 +546,13 @@ impl Translator {
             // * `background_tasks_changed` lists what is running now, which is
             //   what the spawns and exits already fold to.
             Some("task_started" | "task_updated" | "background_tasks_changed") => {}
+            // The CLI's whole slash-command list, pushed when it changes after
+            // the process started — an MCP server's prompts arriving late, a
+            // skill found mid-session — which can be before `init`. Passed
+            // over: the session state has no place for it, and it is not a
+            // list of what the CLI offers, only of what changed — a session
+            // whose commands never change is never sent one.
+            Some("commands_changed") => {}
             other => out.push(unread(format!(
                 "the CLI sent a system message of subtype `{}`, which this version of Niobe \
                  does not know how to read.",

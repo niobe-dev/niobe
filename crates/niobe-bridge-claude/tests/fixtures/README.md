@@ -298,6 +298,27 @@ no status. Across 18,756 shell results in 336 of the CLI's own transcripts of
 2.1.27x–2.1.281, every failed command that ran opened with `Exit code <n>` and
 no successful one did.
 
+## `commands-changed.jsonl`
+
+One turn that opens with the CLI's slash-command list, recorded from Claude
+Code 2.1.282 on 26 September 2026 with the flags above and
+`--setting-sources project,local`, in a repository whose local settings enable
+an MCP server. The model was asked to reply with one word. The lines are the
+CLI's own. The only edits: `commands` cut from 59 entries to its first three,
+and `system`/`init` cut down to the keys that say what ran, its `cwd`
+rewritten to `/repo`.
+
+What it settles is when `system`/`commands_changed` arrives, and why the
+bridge passes over it:
+
+- **It is sent when the command list changes after the process starts**, which
+  is here the MCP server's prompts arriving, and it can arrive before `init`.
+  The same turn recorded in an empty directory, with no MCP server, has none:
+  it is not the CLI's announcement of its commands, only of a change to them.
+- **It is the whole list, each entry `{name, description, argumentHint}` with
+  `builtin: true` on the CLI's own** — 54 of the 59 here; the other five were
+  the MCP server's prompts, named `<server>:<prompt> (MCP)`.
+
 ## `tool-results/cargo-test-workspace.txt`
 
 The whole output of a `cargo test --workspace` on this repository, as Claude

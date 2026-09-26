@@ -305,6 +305,20 @@ fn a_message_type_the_bridge_does_not_know_is_a_notice_and_not_a_crash() {
 }
 
 #[test]
+fn a_session_that_opens_with_the_clis_command_list_opens_with_nothing_to_report() {
+    const COMMANDS_CHANGED: &str = include_str!("fixtures/commands-changed.jsonl");
+    let mut translator = Translator::new("max");
+    let events: Vec<Event> = COMMANDS_CHANGED
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect();
+
+    assert!(notices(&events).is_empty(), "{events:?}");
+    assert!(warnings(&events).is_empty(), "{events:?}");
+}
+
+#[test]
 fn what_the_session_ran_comes_from_the_cli_not_from_the_profile() {
     let events = translated();
     let Some(Event::SessionMeta(meta)) = events.first() else {

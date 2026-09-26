@@ -76,6 +76,9 @@ const SHAPES: &[&str] = &[
     "system/background_tasks_changed",
     "system/task_started",
     "system/task_updated",
+    // The CLI's slash-command list after it changed, recorded from Claude Code
+    // 2.1.282. Passed over on purpose; `translate.rs` says why.
+    "system/commands_changed",
     "user",
     // Content blocks and deltas, which ride on both the stream and the
     // transcript.
