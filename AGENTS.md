@@ -60,7 +60,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   account behind it is billed, and the `[permissions]` rules a session answers
   prompts with before asking. `parse.rs` walks the spanned TOML document by hand so that an
   invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`
-  array at the byte range the parser gives it, so the operator's comments and ordering survive;
+  array at the byte range the parser gives it, so the operator's comments and ordering survive,
+  under a lock on the file's directory so two sessions adding rules at once both keep theirs;
+  `replace.rs` writes a file Niobe did not create by renaming a flushed copy over it, so a failed
+  write or a crash leaves the old file rather than half of the new one;
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
   `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
   profile, or replace one of the user's — as each file's SHA-256 under the user's own config

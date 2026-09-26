@@ -816,6 +816,7 @@ name = "niobe-config"
 version = "0.12.0"
 dependencies = [
  "niobe-core",
+ "rustix",
  "sha2",
  "tempfile",
  "toml",

@@ -16,6 +16,11 @@ niobe-core.workspace = true
 toml.workspace = true
 sha2.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# `flock(2)` on the directory a rule is written into, so two sessions adding
+# rules at once do not lose one.
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 

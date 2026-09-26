@@ -169,15 +169,17 @@ impl Trusted {
 
     /// Writes the record to `path`, creating its directory if this is the
     /// first file trusted on this machine.
+    ///
+    /// The record is replaced whole, so a write that fails partway leaves the
+    /// previous record rather than one with every entry after the break gone.
     pub fn write(&self, path: &Path) -> Result<(), ConfigError> {
-        let failed = |error: std::io::Error| ConfigError::Read {
+        let failed = |error: std::io::Error| ConfigError::Write {
             path: path.to_path_buf(),
             error,
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(failed)?;
-        }
-        std::fs::write(path, self.render()).map_err(failed)
+        let target = crate::replace::resolved(path).map_err(failed)?;
+        std::fs::create_dir_all(crate::replace::parent(&target)).map_err(failed)?;
+        crate::replace::replace(&target, self.render().as_bytes()).map_err(failed)
     }
 }
 

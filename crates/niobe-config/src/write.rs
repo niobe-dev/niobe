@@ -20,12 +20,13 @@
 //!   belongs in a file this code does not understand is how an operator's
 //!   config gets broken by a program they asked to remember one thing.
 
+use std::io::Write as _;
 use std::path::Path;
 
 use niobe_core::permission::Rule;
 use toml::de::{DeTable, DeValue};
 
-use crate::{Config, ConfigError};
+use crate::{Config, ConfigError, replace};
 
 /// Indentation of one rule in the array Niobe writes.
 const INDENT: &str = "    ";
@@ -36,7 +37,31 @@ const INDENT: &str = "    ";
 /// A rule the file's own allowlist already covers is not written again: the
 /// operator answering "always" twice must not grow the file twice.
 pub fn remember(path: &Path, rule: &Rule) -> Result<(), ConfigError> {
-    let text = match std::fs::read_to_string(path) {
+    remember_with(path, rule, |file, bytes| file.write_all(bytes))
+}
+
+/// [`remember`], with the write of the new text handed in so that a test can
+/// make it fail partway through.
+///
+/// The file is read, checked and written under a lock on its directory, so
+/// two sessions answering "always" at once each add their rule to what the
+/// other wrote rather than to what both read; and it is replaced whole, so a
+/// write that fails or a process that dies inside it leaves the file as it was.
+fn remember_with(
+    path: &Path,
+    rule: &Rule,
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), ConfigError> {
+    let failed = |error| ConfigError::Write {
+        path: path.to_path_buf(),
+        error,
+    };
+    let target = replace::resolved(path).map_err(failed)?;
+    let dir = replace::parent(&target);
+    std::fs::create_dir_all(dir).map_err(failed)?;
+    let _lock = replace::Lock::directory(dir).map_err(failed)?;
+
+    let text = match std::fs::read_to_string(&target) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => {
@@ -63,16 +88,7 @@ pub fn remember(path: &Path, rule: &Rule) -> Result<(), ConfigError> {
     rules.push(rule.to_string());
 
     let written = splice(&text, path, &rules)?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|error| ConfigError::Read {
-            path: path.to_path_buf(),
-            error,
-        })?;
-    }
-    std::fs::write(path, written).map_err(|error| ConfigError::Read {
-        path: path.to_path_buf(),
-        error,
-    })
+    replace::replace_with(&target, written.as_bytes(), write).map_err(failed)
 }
 
 /// The file's text with `rules` as its `permissions.allow` array.
@@ -331,5 +347,61 @@ backend = \"claude\"
             "[profiles.max]\nbackend = \"nothing\"\n",
             "a rule was added to a config that will not load"
         );
+    }
+
+    #[test]
+    fn a_write_that_fails_halfway_leaves_the_file_as_it_was() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("config.toml");
+        let before = "# mine\n[profiles.max]\nbackend = \"claude\"\n";
+        std::fs::write(&file, before).expect("the file is written");
+
+        let failed = remember_with(&file, &Rule::tool("Read"), |out, bytes| {
+            out.write_all(&bytes[..bytes.len() / 2])?;
+            Err(std::io::Error::other("the disk is full"))
+        })
+        .expect_err("the write failed");
+
+        assert!(failed.to_string().contains("the disk is full"), "{failed}");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file is still there"),
+            before,
+            "a failed write changed the operator's config"
+        );
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("the directory lists")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(left, ["config.toml"], "a failed write left a file behind");
+    }
+
+    #[test]
+    fn two_sessions_answering_always_at_once_both_keep_their_rule() {
+        for round in 0..100 {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let file = dir.path().join("config.toml");
+            std::fs::write(&file, "[profiles.max]\nbackend = \"claude\"\n").expect("written");
+            let start = std::sync::Barrier::new(2);
+
+            std::thread::scope(|scope| {
+                for rule in [Rule::targeted("Bash", "cargo test"), Rule::tool("Read")] {
+                    let (file, start) = (&file, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        remember(file, &rule).expect("the rule is written");
+                    });
+                }
+            });
+
+            let config = Config::read(&file)
+                .expect("what was written reads back")
+                .expect("the file is there");
+            let rules = config.allowed().rules();
+            assert!(
+                rules.contains(&Rule::targeted("Bash", "cargo test"))
+                    && rules.contains(&Rule::tool("Read")),
+                "round {round} lost a rule: {rules:?}"
+            );
+        }
     }
 }

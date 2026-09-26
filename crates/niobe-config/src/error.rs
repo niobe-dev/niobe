@@ -6,7 +6,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-/// A config file that could not be read, a value in one that is not valid, or a
+/// A config file that could not be read or written, a value in one that is not valid, or a
 /// profile asked for that no config defines.
 ///
 /// Every message names the file, and every invalid value names its line and,
@@ -17,6 +17,13 @@ use std::path::PathBuf;
 pub enum ConfigError {
     /// The file exists but could not be read.
     Read {
+        /// The file.
+        path: PathBuf,
+        /// What the operating system said.
+        error: std::io::Error,
+    },
+    /// The file could not be written, and is as it was before the attempt.
+    Write {
         /// The file.
         path: PathBuf,
         /// What the operating system said.
@@ -56,6 +63,7 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Read { path, error } => write!(f, "cannot read {}: {error}", path.display()),
+            Self::Write { path, error } => write!(f, "cannot write {}: {error}", path.display()),
             Self::Invalid {
                 path,
                 line,
@@ -90,7 +98,7 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Read { error, .. } => Some(error),
+            Self::Read { error, .. } | Self::Write { error, .. } => Some(error),
             Self::Invalid { .. } | Self::Untrustable { .. } | Self::UnknownProfile { .. } => None,
         }
     }

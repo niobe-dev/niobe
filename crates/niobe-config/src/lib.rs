@@ -91,6 +91,7 @@
 
 mod error;
 mod parse;
+mod replace;
 pub mod trust;
 mod write;
 
