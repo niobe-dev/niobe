@@ -45,20 +45,19 @@ const RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"r
 /// Writes a `claude` into `dir` that runs `body` after reading the request a
 /// session starts with and the turn it is sent.
 fn stand_in(dir: &Path, body: &str) -> PathBuf {
+    let script = dir.join("claude");
     let script_tmp = dir.join("claude.tmp");
     std::fs::write(
-        &script_tmp,
+        &script,
         format!("#!/bin/sh\nread -r first\nread -r turn\n{body}"),
     )
     .expect("the stand-in is written");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script_tmp, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("the stand-in is made executable");
     }
-    let script = dir.join("claude");
-    std::fs::rename(&script_tmp, &script).expect("the stand-in is renamed");
     script
 }
 
