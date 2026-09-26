@@ -12,16 +12,16 @@
 //!
 //! [profiles.personal]
 //! backend = "claude"
-//! settings = "~/.config/niobe/claude-personal.json"
+//! settings = "~/.config/niobe/settings.json"
 //!
 //! [profiles.work]
 //! backend = "claude"
-//! env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "example-sso", AWS_REGION = "eu-west-1" }
-//! auth_refresh = "aws sso login --profile example-sso"
+//! env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "corp-sso", AWS_REGION = "eu-west-1" }
+//! auth_refresh = "aws sso login --profile corp-sso"
 //!
 //! [profiles.codex]
 //! backend = "codex"
-//! args = ["--model", "gpt-5-codex"]
+//! args = ["--model", "gpt-4"]
 //! ```
 //!
 //! A profile may also name the models it offers, which is what the shell lists
@@ -577,12 +577,12 @@ backend = "claude"
 
 [profiles.work]
 backend = "claude"
-env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "example-sso", AWS_REGION = "eu-west-1" }
-auth_refresh = "aws sso login --profile example-sso"
+env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "corp-sso", AWS_REGION = "eu-west-1" }
+auth_refresh = "aws sso login --profile corp-sso"
 
 [profiles.codex]
 backend = "codex"
-args = ["--model", "gpt-5-codex"]
+args = ["--model", "gpt-4"]
 "#;
 
     #[test]
@@ -599,21 +599,21 @@ args = ["--model", "gpt-5-codex"]
         assert_eq!(
             work.env().iter().collect::<Vec<_>>(),
             [
-                (&"AWS_PROFILE".to_owned(), &"example-sso".to_owned()),
+                (&"AWS_PROFILE".to_owned(), &"corp-sso".to_owned()),
                 (&"AWS_REGION".to_owned(), &"eu-west-1".to_owned()),
                 (&"CLAUDE_CODE_USE_BEDROCK".to_owned(), &"1".to_owned()),
             ]
         );
         assert_eq!(
             work.auth_refresh(),
-            Some("aws sso login --profile example-sso")
+            Some("aws sso login --profile corp-sso")
         );
         assert!(work.args().is_empty());
         assert_eq!(work.source(), path("user"));
 
         let codex = &config.profiles()["codex"];
         assert_eq!(codex.backend(), Backend::Codex);
-        assert_eq!(codex.args(), ["--model", "gpt-5-codex"]);
+        assert_eq!(codex.args(), ["--model", "gpt-4"]);
         assert!(codex.env().is_empty());
         assert_eq!(codex.auth_refresh(), None);
     }
@@ -695,13 +695,13 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     #[test]
     fn a_profile_can_name_the_settings_file_its_backend_runs_under() {
         let config = parsed(
-            "[profiles.max]\nbackend = \"claude\"\n\nsettings = \"~/.config/niobe/claude-personal.json\"\n",
+            "[profiles.max]\nbackend = \"claude\"\n\nsettings = \"~/.config/niobe/settings.json\"\n",
         );
 
         let settings = config.profiles()["max"]
             .settings()
             .expect("the profile names a settings file");
-        assert_eq!(settings.path(), "~/.config/niobe/claude-personal.json");
+        assert_eq!(settings.path(), "~/.config/niobe/settings.json");
         // The line, because a path that is not there is reported at it.
         assert_eq!(settings.line(), 4);
         assert_eq!(parsed(EXAMPLE).profiles()["personal"].settings(), None);
