@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use niobe_core::event::ToolCallId;
 use niobe_tui::shell::{Ran, Shell, ShellError};
@@ -28,6 +28,13 @@ const KEPT: usize = 1024 * 1024;
 /// enough that a command which ignores the signal, or a `sh` that outlives
 /// it and goes on with the rest of the line, is not left running.
 const GRACE: Duration = Duration::from_secs(2);
+
+/// How long the commands still running when the session ends are given to
+/// end on SIGTERM before they are killed. Shorter than [`GRACE`]: the
+/// terminal has been handed back by then, but niobe has not exited, and the
+/// operator who quit is waiting on it. A command that listens ends within a
+/// few milliseconds, so only one that does not is waited for this long.
+const QUIT_GRACE: Duration = Duration::from_millis(500);
 
 /// The operator's commands, run in the directory the session runs in.
 #[derive(Debug)]
@@ -109,15 +116,33 @@ impl Shell for Commands {
 impl Drop for Commands {
     /// Stops every command still running, and whatever it started: the
     /// session is over, and nothing it ran on the operator's behalf is left
-    /// running with no one to see it end.
+    /// running with no one to see it end. Each is asked first and killed if it
+    /// is still running after [`QUIT_GRACE`]; a quit with nothing still
+    /// running, or only what ends when asked, is not held up.
     fn drop(&mut self) {
-        let Ok(running) = self.running.lock() else {
-            return;
-        };
-        for (_, pid) in running.iter() {
-            stop(*pid);
+        if let Ok(running) = self.running.lock() {
+            for (_, pid) in running.iter() {
+                stop(*pid);
+            }
+        }
+        let until = Instant::now() + QUIT_GRACE;
+        while Instant::now() < until && !none_running(&self.running) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Under the lock, as in `stop`: the thread waiting on a command takes
+        // it off the list after reaping it, so a group killed here is still
+        // the command's own.
+        if let Ok(running) = self.running.lock() {
+            for (_, pid) in running.iter() {
+                kill(*pid);
+            }
         }
     }
+}
+
+/// Whether every command has ended and been reaped.
+fn none_running(running: &Mutex<Vec<(ToolCallId, u32)>>) -> bool {
+    running.lock().map_or(true, |running| running.is_empty())
 }
 
 /// The process the command recorded as `id` runs as, while it runs.
@@ -245,8 +270,6 @@ fn kill(_pid: u32) {}
 mod tests {
     use super::*;
 
-    use std::time::{Duration, Instant};
-
     /// Runs `command` in `cwd` and waits for it to end.
     fn ran(cwd: &Path, command: &str) -> Ran {
         let mut commands = Commands::at(cwd);
@@ -325,6 +348,58 @@ mod tests {
         drop(commands);
 
         gone(child, "what the command started outlived the session");
+    }
+
+    #[test]
+    fn a_command_that_will_not_end_when_the_session_does_is_killed_without_holding_up_the_quit() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("ignoring");
+        let mut commands = Commands::at(dir.path());
+        // An ignored signal stays ignored across exec, so `sleep` ignores it
+        // too, and so does `sh`.
+        commands
+            .run(
+                &ToolCallId::new("t"),
+                &format!(
+                    "trap '' TERM; sleep 30 & echo $! > {}; wait",
+                    marker.display()
+                ),
+            )
+            .expect("sh starts");
+        let child = pid_in(&marker);
+        let quit = Instant::now();
+
+        drop(commands);
+
+        let held = quit.elapsed();
+        assert!(
+            held < QUIT_GRACE + Duration::from_millis(500),
+            "the quit was held up for {held:?}"
+        );
+        gone(child, "a command that ignores SIGTERM outlived the session");
+    }
+
+    #[test]
+    fn a_command_that_ends_when_asked_does_not_hold_up_the_quit_for_the_grace() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("running");
+        let mut commands = Commands::at(dir.path());
+        commands
+            .run(
+                &ToolCallId::new("t"),
+                &format!("echo $$ > {}; exec sleep 30", marker.display()),
+            )
+            .expect("sh starts");
+        pid_in(&marker);
+        let quit = Instant::now();
+
+        drop(commands);
+
+        let held = quit.elapsed();
+        assert!(
+            held < QUIT_GRACE / 2,
+            "a command that ended on SIGTERM held up the quit for {held:?}"
+        );
     }
 
     /// Waits for `marker` to hold the pid a command wrote into it.
