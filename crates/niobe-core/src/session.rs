@@ -683,6 +683,10 @@ impl SessionState {
                 self.errors += 1;
                 if *fatal {
                     self.fatal_error = Some(message.clone());
+                    // Nothing is left to take an answer: a prompt the session
+                    // ended on was asked and never answered, and waits on no
+                    // one now.
+                    self.pending_permissions.clear();
                     // The turn it cut short spent what it spent, and is
                     // recorded with it; with no turn running there is none
                     // to end.
@@ -1381,6 +1385,34 @@ mod tests {
         assert!(state.pending_permissions().is_empty());
         assert_eq!(state.permission_requests(), 1);
         assert_eq!(state.permissions_denied(), 1);
+    }
+
+    #[test]
+    fn a_fatal_error_leaves_no_prompt_waiting_and_a_recoverable_one_does() {
+        let mut state = SessionState::new();
+        state.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"ls"}"#.to_owned(),
+            target: Some("ls".to_owned()),
+            agent: None,
+        });
+        state.apply(&Event::Error {
+            message: "retrying".to_owned(),
+            fatal: false,
+        });
+        assert_eq!(state.pending_permissions().len(), 1);
+
+        state.apply(&Event::Error {
+            message: "the CLI exited".to_owned(),
+            fatal: true,
+        });
+
+        assert!(state.pending_permissions().is_empty());
+        // The prompt was asked, and never answered: neither a request nor a
+        // refusal is taken back.
+        assert_eq!(state.permission_requests(), 1);
+        assert_eq!(state.permissions_denied(), 0);
     }
 
     #[test]

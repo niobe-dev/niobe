@@ -1396,16 +1396,23 @@ impl App {
             // grouped with the next turn's.
             Event::TurnEnded => self.run = None,
 
-            Event::Error { message, fatal } => self.push(Entry {
-                kind: EntryKind::Failure,
-                head: if *fatal { "fatal" } else { "error" }.to_owned(),
-                meta: String::new(),
-                body: message.clone(),
-                streaming: false,
-                at: self.at,
-                calls: Vec::new(),
-                agent: None,
-            }),
+            Event::Error { message, fatal } => {
+                // A session that ended cannot take an answer, so a prompt it
+                // ended on is not left on screen asking for one.
+                if *fatal {
+                    self.forget_asks();
+                }
+                self.push(Entry {
+                    kind: EntryKind::Failure,
+                    head: if *fatal { "fatal" } else { "error" }.to_owned(),
+                    meta: String::new(),
+                    body: message.clone(),
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: None,
+                });
+            }
 
             Event::Notice { message } => self.push(Entry {
                 kind: EntryKind::Notice,
@@ -1807,6 +1814,18 @@ impl App {
             self.ask_quiet_since = self.latest_instant();
         }
         self.asks.remove(at)
+    }
+
+    /// Drops every prompt waiting, and whatever the operator had begun
+    /// answering the one on screen with.
+    fn forget_asks(&mut self) {
+        if self.asks.is_empty() {
+            return;
+        }
+        self.asks.clear();
+        self.ask_selected = 0;
+        self.ask_focus = AskFocus::Choosing;
+        self.ask_draft.clear();
     }
 
     /// The answers the prompt on screen offers, in the order they are
@@ -4979,6 +4998,39 @@ mod tests {
             app.composer().placeholder_style(),
             Some(Style::new().fg(NEO.dim).bg(NEO.pane_bg))
         );
+    }
+
+    #[test]
+    fn a_session_that_ended_leaves_no_prompt_to_answer() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "clean up".to_owned(),
+        });
+        app.apply(&prompt(Some("rm -rf build")));
+        app.apply(&Event::PermissionRequest {
+            id: "t2".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"ls"}"#.to_owned(),
+            target: Some("ls".to_owned()),
+            agent: None,
+        });
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+
+        app.apply(&Event::Error {
+            message: "the `claude` session ended with exit status: 3: crashed".to_owned(),
+            fatal: true,
+        });
+
+        assert!(app.asking().is_none(), "{:?}", app.asking());
+        assert_eq!(app.asks_waiting(), 0);
+        assert_eq!(app.ask_focus(), AskFocus::Choosing);
+        assert!(app.session().pending_permissions().is_empty());
+        // Nothing is left for a key to answer, so nothing goes to a backend
+        // that could not take it.
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.take_produced().is_empty());
     }
 
     #[test]

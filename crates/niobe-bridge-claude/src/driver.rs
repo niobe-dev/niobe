@@ -587,6 +587,7 @@ impl Session {
             Ok(None) if closed.elapsed() < GOODBYE => return None,
             Ok(None) => {
                 self.reported = true;
+                self.unanswered();
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 return Some(Event::Error {
@@ -596,6 +597,7 @@ impl Session {
             }
             Err(error) => {
                 self.reported = true;
+                self.unanswered();
                 return Some(Event::Error {
                     message: format!("the `claude` session ended and could not be reaped: {error}"),
                     fatal: true,
@@ -604,16 +606,37 @@ impl Session {
         };
         self.reported = true;
         let said = self.said();
+        let unanswered = self.unanswered();
 
-        if status.success() && said.is_empty() {
-            return Some(Event::Notice {
-                message: "the `claude` session ended.".to_owned(),
+        if !status.success() || !said.is_empty() {
+            return Some(Event::Error {
+                message: ended_because(status, &said),
+                fatal: true,
             });
         }
-        Some(Event::Error {
-            message: ended_because(status, &said),
-            fatal: true,
-        })
+        // A clean exit is a clean end only when nothing was left asking: the
+        // turn a prompt stopped did not finish, and reading the end as a clean
+        // one would leave the prompt on screen asking for an answer nothing
+        // can take.
+        match unanswered.is_empty() {
+            true => Some(Event::Notice {
+                message: "the `claude` session ended.".to_owned(),
+            }),
+            false => Some(Event::Error {
+                message: ended_asking(&unanswered),
+                fatal: true,
+            }),
+        }
+    }
+
+    /// The tool calls the CLI was still waiting on an answer about, which are
+    /// forgotten here: a session that has ended takes no answer, and one kept
+    /// would be refused only when written to a closed pipe.
+    fn unanswered(&mut self) -> Vec<String> {
+        self.waiting
+            .lock()
+            .map(|mut waiting| std::mem::take(&mut *waiting).into_keys().collect())
+            .unwrap_or_default()
     }
 
     /// Everything the CLI has written to standard error so far.
@@ -738,6 +761,19 @@ fn ended_because(status: std::process::ExitStatus, said: &str) -> String {
         );
     }
     message
+}
+
+/// Why a session that left with success is reported as a failure: it left
+/// with a permission prompt about each of `calls` still open.
+fn ended_asking(calls: &[String]) -> String {
+    let calls = calls
+        .iter()
+        .map(|id| format!("`{id}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "the `claude` session ended while it was still waiting on a decision about tool call {calls}."
+    )
 }
 
 /// Whether what the CLI said reads like it is not signed in.
@@ -997,6 +1033,98 @@ mod tests {
         let said = error.to_string();
         assert!(said.contains("not waiting on a decision"), "{said}");
         assert!(said.contains("toolu_1"), "{said}");
+    }
+
+    /// Spawns a `claude` that reads the request a session starts with and a
+    /// turn, asks about a call, and then leaves with `status`, and drains it
+    /// until it has said it ended. The session is returned with what it said.
+    #[cfg(unix)]
+    fn asks_then_leaves(status: u8) -> (Session, Vec<Event>) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let script = dir.path().join("claude");
+        let request = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#;
+        let crash = match status {
+            0 => String::new(),
+            _ => "echo crashed >&2\n".to_owned(),
+        };
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nread -r first\nread -r turn\nprintf '%s\\n' '{request}'\n{crash}exit {status}\n"
+            ),
+        )
+        .expect("the stand-in is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+
+        let mut options = options();
+        options.binary = script;
+        options.cwd = dir.path().to_path_buf();
+        let mut session = Session::spawn(&options).expect("the stand-in starts");
+        session.send("list the files").expect("the turn is sent");
+
+        // Generous for the reason `tests/answers.rs` gives: a freshly written
+        // script can be held at its first instruction for seconds.
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !session.reported {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (session, events)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_dies_with_a_prompt_open_leaves_nothing_waiting_on_an_answer() {
+        let (mut session, events) = asks_then_leaves(3);
+
+        assert!(
+            matches!(events.first(), Some(Event::PermissionRequest { .. })),
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message }) if message.contains("crashed")),
+            "{events:#?}"
+        );
+        let waiting = session.waiting.lock().expect("nothing panicked holding it");
+        assert!(waiting.is_empty(), "{waiting:?}");
+        drop(waiting);
+        let said = session
+            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow, None)
+            .expect_err("there is no one left to answer")
+            .to_string();
+        assert!(said.contains("not waiting on a decision"), "{said}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_leaves_cleanly_with_a_prompt_open_is_not_reported_as_a_clean_end() {
+        let (session, events) = asks_then_leaves(0);
+
+        let said = events
+            .iter()
+            .find_map(|event| match event {
+                Event::Error {
+                    message,
+                    fatal: true,
+                } => Some(message.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the end was not a failure: {events:#?}"));
+        assert!(said.contains("toolu_1"), "{said}");
+        assert!(
+            session
+                .waiting
+                .lock()
+                .expect("nothing panicked holding it")
+                .is_empty()
+        );
     }
 
     #[test]
