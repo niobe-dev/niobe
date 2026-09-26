@@ -149,7 +149,11 @@ fn a_turn_in_flight_says_which_tokens_no_cost_covers() {
     let totals = mid_turn.totals();
 
     assert!(totals.records_unsettled > 0, "no cost has landed yet");
-    let owed: u64 = totals.unsettled.values().map(|usage| usage.tokens()).sum();
+    let owed: u64 = totals
+        .unsettled
+        .values()
+        .map(|owed| owed.total().tokens())
+        .sum();
     assert_eq!(
         owed,
         totals.tokens(),
@@ -159,8 +163,18 @@ fn a_turn_in_flight_says_which_tokens_no_cost_covers() {
         totals
             .unsettled
             .values()
+            .flat_map(|owed| owed.records())
             .all(|usage| usage.cost_usd.is_none()),
         "what is owed for carries no cost of its own"
+    );
+    let records: usize = totals
+        .unsettled
+        .values()
+        .map(|owed| owed.records().len())
+        .sum();
+    assert_eq!(
+        records as u64, totals.records_unsettled,
+        "each record owed for is kept, so each can be priced as its request"
     );
 }
 

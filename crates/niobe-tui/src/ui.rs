@@ -3770,7 +3770,7 @@ fn model_cost(totals: &Totals, model: &str, prices: Option<&dyn Prices>) -> Stri
     if reported.is_none() && owed.is_none() {
         return "—".to_owned();
     }
-    let valued = match owed.and_then(|owed| prices?.estimate(owed)) {
+    let valued = match owed.and_then(|owed| prices?.estimate_owed(owed)) {
         Some(usd) => Valued::All(usd),
         None => Valued::Nothing,
     };
@@ -3850,7 +3850,7 @@ fn value_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Valued {
     };
     let (mut sum, mut priced, mut unpriced) = (0.0, false, false);
     for owed in totals.unsettled.values() {
-        match prices.estimate(owed) {
+        match prices.estimate_owed(owed) {
             Some(usd) => {
                 sum += usd;
                 priced = true;
@@ -3974,6 +3974,30 @@ mod tests {
 
         let none = SessionState::replay(&[priced(None)]);
         assert_eq!(session_cost(&none, None), "unpriced");
+    }
+
+    /// A dollar per record, and ten for a record whose input is past 1,500
+    /// tokens: a long-context tier with round numbers.
+    #[derive(Debug)]
+    struct DearerPastFifteenHundred;
+
+    impl Prices for DearerPastFifteenHundred {
+        fn estimate(&self, usage: &Usage) -> Option<f64> {
+            Some(if usage.input > 1_500 { 10.0 } else { 1.0 })
+        }
+    }
+
+    #[test]
+    fn records_owed_for_are_each_priced_as_the_request_they_were() {
+        // Two records of 1,000 input tokens: each is under the threshold, so
+        // $1 each, although their sum of 2,000 is past it.
+        let running = SessionState::replay(&[priced(None), priced(None)]);
+        let prices: &dyn Prices = &DearerPastFifteenHundred;
+        assert_eq!(session_cost(&running, Some(prices)), "~$2.00");
+        assert_eq!(
+            model_cost(running.totals(), "opus-5", Some(prices)),
+            "~$2.00"
+        );
     }
 
     #[test]

@@ -20,8 +20,8 @@ pub use event::{
 };
 pub use permission::{Allowlist, Rule, RuleError};
 pub use session::{
-    CheckpointRecord, DecisionRecord, FileChanges, SessionState, TestRunRecord, ToolTotals, Totals,
-    TurnRecord,
+    CheckpointRecord, DecisionRecord, FileChanges, Owed, SessionState, TestRunRecord, ToolTotals,
+    Totals, TurnRecord,
 };
 pub use test_run::{FailedTests, TestCounts};
 

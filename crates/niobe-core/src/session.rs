@@ -56,7 +56,7 @@ pub struct Totals {
     /// by one that did. While this is non-zero,
     /// [`Totals::reported_cost_usd`] is a floor, not the session's cost.
     pub records_unsettled: u64,
-    /// The tokens those records carried, summed per model.
+    /// Those records, per model.
     ///
     /// A backend that reports money once per turn leaves the turn priced by
     /// nothing while it runs. These are the tokens no reported figure covers,
@@ -65,9 +65,8 @@ pub struct Totals {
     /// prices nothing: an invented number here would be indistinguishable
     /// from a measured one.
     ///
-    /// A model is in the map only while it is owed for, and the record's
-    /// `cost_usd` is always `None` — it is what is *not* accounted for.
-    pub unsettled: BTreeMap<String, Usage>,
+    /// A model is in the map only while it is owed for.
+    pub unsettled: BTreeMap<String, Owed>,
     /// Every token the session spent, summed per model, on the same definition
     /// [`Totals::tokens`] uses — so the map adds up to that total exactly.
     ///
@@ -86,11 +85,66 @@ pub struct Totals {
     /// spent tokens and was billed nothing is absent rather than at zero: what
     /// it cost is unknown, and a consumer prices it or says so.
     pub reported_cost_by_model: BTreeMap<String, f64>,
-    /// How many records each model in [`Totals::unsettled`] is owed for, so
-    /// that a settlement takes exactly its own model's share back out of
-    /// [`Totals::records_unsettled`]. Private because it is the bookkeeping
-    /// behind that count rather than a figure of its own.
-    unsettled_records: BTreeMap<String, u64>,
+}
+
+/// The records of one model that no reported cost covers.
+///
+/// Each record is kept as the backend reported it, not only summed, because
+/// what a request costs can turn on the request itself: a provider bills a
+/// prompt past a long-context threshold at dearer rates, and a sum of short
+/// prompts read as one request would cross that threshold where none of them
+/// did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Owed {
+    total: Usage,
+    records: Vec<Usage>,
+}
+
+impl Owed {
+    fn new(model: &str) -> Self {
+        Self {
+            total: Usage {
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: model.to_owned(),
+                cost_usd: None,
+                cost_basis: None,
+                settles_model: false,
+            },
+            records: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, usage: &Usage) {
+        let total = &mut self.total;
+        total.input = total.input.saturating_add(usage.input);
+        total.output = total.output.saturating_add(usage.output);
+        total.cache_read = total.cache_read.saturating_add(usage.cache_read);
+        total.cache_write = total.cache_write.saturating_add(usage.cache_write);
+        total.cache_write_1h = total.cache_write_1h.saturating_add(usage.cache_write_1h);
+        total.reasoning = total.reasoning.saturating_add(usage.reasoning);
+        self.records.push(usage.clone());
+    }
+
+    /// Every token owed for, summed. Its `cost_usd` is always `None` — it is
+    /// what is *not* accounted for.
+    ///
+    /// For counting tokens, not for pricing: a sum of several requests priced
+    /// as one can land in a rate none of them was billed at. Price
+    /// [`Owed::records`] one at a time.
+    pub fn total(&self) -> &Usage {
+        &self.total
+    }
+
+    /// The records owed for, in the order they were folded, each as its
+    /// backend reported it. Never empty.
+    pub fn records(&self) -> &[Usage] {
+        &self.records
+    }
 }
 
 impl Totals {
@@ -146,37 +200,16 @@ impl Totals {
     /// Records tokens that no reported cost covers.
     fn owe(&mut self, usage: &Usage) {
         self.records_unsettled += 1;
-        let owed = self
-            .unsettled
+        self.unsettled
             .entry(usage.model.clone())
-            .or_insert_with(|| Usage {
-                input: 0,
-                output: 0,
-                cache_read: 0,
-                cache_write: 0,
-                cache_write_1h: 0,
-                reasoning: 0,
-                model: usage.model.clone(),
-                cost_usd: None,
-                cost_basis: None,
-                settles_model: false,
-            });
-        owed.input = owed.input.saturating_add(usage.input);
-        owed.output = owed.output.saturating_add(usage.output);
-        owed.cache_read = owed.cache_read.saturating_add(usage.cache_read);
-        owed.cache_write = owed.cache_write.saturating_add(usage.cache_write);
-        owed.cache_write_1h = owed.cache_write_1h.saturating_add(usage.cache_write_1h);
-        owed.reasoning = owed.reasoning.saturating_add(usage.reasoning);
-        self.unsettled_records
-            .entry(usage.model.clone())
-            .and_modify(|n| *n = n.saturating_add(1))
-            .or_insert(1);
+            .or_insert_with(|| Owed::new(&usage.model))
+            .push(usage);
     }
 
     /// Forgets what `model` was owed for, because a cost has now covered it.
     fn clear_unsettled(&mut self, model: &str) {
-        self.unsettled.remove(model);
-        if let Some(covered) = self.unsettled_records.remove(model) {
+        if let Some(covered) = self.unsettled.remove(model) {
+            let covered = u64::try_from(covered.records.len()).unwrap_or(u64::MAX);
             self.records_unsettled = self.records_unsettled.saturating_sub(covered);
         }
     }
@@ -1032,7 +1065,8 @@ mod tests {
         let owed = totals
             .unsettled
             .get("haiku-4-5")
-            .expect("haiku is owed for");
+            .expect("haiku is owed for")
+            .total();
         assert_eq!((owed.input, owed.output), (300, 30));
         assert!(!totals.unsettled.contains_key("opus-5"));
     }
@@ -1051,8 +1085,30 @@ mod tests {
         let owed = totals
             .unsettled
             .get("opus-5")
-            .expect("the new turn is owed for");
+            .expect("the new turn is owed for")
+            .total();
         assert_eq!((owed.input, owed.output), (200, 20));
+    }
+
+    #[test]
+    fn each_record_owed_for_is_kept_as_it_was_reported_and_summed() {
+        // A long-context rate is decided per request, so a consumer pricing
+        // what is owed needs each request's own prompt, not only their sum.
+        let state = SessionState::replay(&[
+            usage(100, 10, None),
+            usage(200, 20, None),
+            on_model("haiku-4-5", 300, 30, None),
+        ]);
+
+        let owed = &state.totals().unsettled["opus-5"];
+        let each: Vec<_> = owed
+            .records()
+            .iter()
+            .map(|record| (record.input, record.output))
+            .collect();
+        assert_eq!(each, [(100, 10), (200, 20)]);
+        assert_eq!((owed.total().input, owed.total().output), (300, 30));
+        assert_eq!(owed.total().model, "opus-5");
     }
 
     /// What each model was billed is kept apart, so that a pane can price a

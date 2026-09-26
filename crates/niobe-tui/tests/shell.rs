@@ -227,7 +227,11 @@ fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
 
     let mut priced = running_session().with_prices(Box::new(ATenthOfACentPerThousand));
     let totals = priced.session().totals().clone();
-    let owed: u64 = totals.unsettled.values().map(|usage| usage.tokens()).sum();
+    let owed: u64 = totals
+        .unsettled
+        .values()
+        .map(|owed| owed.total().tokens())
+        .sum();
     let expected = totals.reported_cost_usd + owed as f64 / 1_000.0 * 0.001;
 
     let frame = screen(&mut priced, 120, 40);
@@ -977,7 +981,7 @@ fn a_metered_profile_leads_the_usage_pane_with_money_and_prices_each_model() {
     // what it cost; opus is, so the floor counts the table's estimate for it
     // and never reads less than opus's own row.
     let totals = app.session().totals().clone();
-    let owed = totals.unsettled["opus-5"].tokens() as f64 / 1_000.0 * 0.001;
+    let owed = totals.unsettled["opus-5"].total().tokens() as f64 / 1_000.0 * 0.001;
     assert!(
         frame.contains(&format!(
             "session ≥~${:.2}",
