@@ -291,6 +291,119 @@ fn a_diff_cut_at_twenty_rows_opens_in_place_and_cuts_again() {
     assert_eq!(screen(&mut app, 120, 40), cut);
 }
 
+/// The first transcript line that reads `marker`, and which row of the screen
+/// it is on. Only the session pane's text is kept, so the scrollbar's thumb
+/// moving down its track does not count as the line moving.
+fn first_row_with(frame: &str, marker: &str) -> Option<(usize, String)> {
+    frame
+        .lines()
+        .enumerate()
+        .filter_map(|(at, row)| row.split('┃').nth(1).map(|text| (at, text)))
+        .find(|(_, text)| text.contains(marker))
+        .map(|(at, text)| (at, text.trim_end_matches('█').to_owned()))
+}
+
+/// The screen row the transcript's first line is drawn on at 120×40.
+const TRANSCRIPT_TOP: usize = 3;
+
+/// The long write, opened, with a reply under it long enough to scroll back
+/// through without the diff coming into view.
+fn long_write_under_a_long_reply() -> App {
+    let mut app = session_with_a_long_write();
+    let reply: String = (1..=60).map(|n| format!("- reply line {n:02}\n")).collect();
+    app.apply(&Event::AssistantMessage { text: reply });
+    app
+}
+
+#[test]
+fn opening_or_cutting_the_diffs_while_scrolled_back_keeps_the_lines_being_read() {
+    let mut app = long_write_under_a_long_reply();
+    app.open_diffs();
+    screen(&mut app, 120, 40);
+    app.scroll_up(20);
+    let before = screen(&mut app, 120, 40);
+    assert!(
+        !before.contains("export const"),
+        "the diff is above the view:\n{before}"
+    );
+    let top = first_row_with(&before, "reply line").expect("the reply is in view");
+
+    app.open_diffs();
+    let cut = screen(&mut app, 120, 40);
+    assert_eq!(
+        first_row_with(&cut, "reply line"),
+        Some(top.clone()),
+        "{cut}"
+    );
+
+    app.open_diffs();
+    let open = screen(&mut app, 120, 40);
+    assert_eq!(first_row_with(&open, "reply line"), Some(top), "{open}");
+    assert!(!app.follows_tail());
+}
+
+#[test]
+fn folding_the_calls_while_scrolled_back_keeps_the_lines_being_read() {
+    let mut app = long_write_under_a_long_reply();
+    screen(&mut app, 120, 40);
+    app.scroll_up(20);
+    let before = screen(&mut app, 120, 40);
+    let top = first_row_with(&before, "reply line").expect("the reply is in view");
+
+    app.fold_calls();
+    let folded = screen(&mut app, 120, 40);
+    assert_eq!(first_row_with(&folded, "reply line"), Some(top), "{folded}");
+}
+
+#[test]
+fn a_line_cut_away_leaves_the_view_on_the_nearest_line_above_it_still_drawn() {
+    let mut app = long_write_under_a_long_reply();
+    app.open_diffs();
+    screen(&mut app, 120, 40);
+    app.scroll_to_head();
+    // Put a line only the opened diff draws at the top of the view.
+    let mut before = screen(&mut app, 120, 40);
+    for _ in 0..100 {
+        if first_row_with(&before, "etag28").is_some_and(|(at, _)| at == TRANSCRIPT_TOP) {
+            break;
+        }
+        app.scroll_down(1);
+        before = screen(&mut app, 120, 40);
+    }
+    assert_eq!(
+        first_row_with(&before, "etag28").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{before}"
+    );
+
+    app.open_diffs();
+    let cut = screen(&mut app, 120, 40);
+    // The line is gone with the rows the cut hides; the nearest one above it
+    // still drawn is the last row kept, with the way to the rest under it.
+    assert!(!cut.contains("etag28"), "{cut}");
+    assert_eq!(
+        first_row_with(&cut, "etag20").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{cut}"
+    );
+    assert_eq!(
+        first_row_with(&cut, "more rows").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP + 1),
+        "{cut}"
+    );
+}
+
+#[test]
+fn toggling_at_the_tail_still_follows_the_tail() {
+    let mut app = long_write_under_a_long_reply();
+    screen(&mut app, 120, 40);
+    app.open_diffs();
+    app.fold_calls();
+    let frame = screen(&mut app, 120, 40);
+    assert!(app.follows_tail());
+    assert!(frame.contains("reply line 60"), "{frame}");
+}
+
 #[test]
 fn a_reply_in_markdown_is_drawn_styled_in_both_themes() {
     let frame = screen(&mut session_with_a_markdown_reply(), 120, 40);

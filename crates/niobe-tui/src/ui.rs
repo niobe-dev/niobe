@@ -1120,6 +1120,7 @@ fn draw_transcript(
     let (entries, drawn) = app.entries_to_draw();
     drawn.update(entries, width, detail, theme);
     let above = drawn.line_count();
+    app.keep_view();
     let total = above + question.len();
 
     app.measured(total, height);
@@ -1257,6 +1258,55 @@ impl DrawnEntries {
         self.drawn.iter().map(|(_, lines)| lines.len()).sum()
     }
 
+    /// Line `line` of the whole transcript as last drawn, named by what it
+    /// was drawn from rather than by how far down it is. `None` where nothing
+    /// is drawn there.
+    pub(crate) fn anchor(&self, line: usize) -> Option<Anchor> {
+        let mut first = 0usize;
+        for (entry, (_, lines)) in self.drawn.iter().enumerate() {
+            let offset = line.checked_sub(first)?;
+            if offset < lines.len() {
+                return Some(Anchor {
+                    entry,
+                    offset,
+                    lines: lines.clone(),
+                });
+            }
+            first = first.saturating_add(lines.len());
+        }
+        None
+    }
+
+    /// Where `anchor` is in the transcript as drawn now: the same line of the
+    /// same entry, and where that line is gone — a diff cut again, a run of
+    /// calls folded — the nearest line above it that is still drawn, so the
+    /// view stops on what led up to the line rather than past it.
+    pub(crate) fn line_of(&self, anchor: &Anchor) -> Option<usize> {
+        let (_, lines) = self.drawn.get(anchor.entry)?;
+        let last = lines.len().checked_sub(1)?;
+        let first: usize = self
+            .drawn
+            .iter()
+            .take(anchor.entry)
+            .map(|(_, lines)| lines.len())
+            .sum();
+        let above = (0..=anchor.offset).rev();
+        let below = anchor.offset.saturating_add(1)..anchor.lines.len();
+        let offset = above
+            .chain(below)
+            .find_map(|at| {
+                let held = anchor.lines.get(at)?;
+                lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| *line == held)
+                    .map(|(now, _)| now)
+                    .min_by_key(|now| now.abs_diff(at))
+            })
+            .unwrap_or(anchor.offset.min(last));
+        Some(first.saturating_add(offset))
+    }
+
     /// `count` lines from line `start` of the whole transcript.
     fn lines(&self, start: usize, count: usize) -> Vec<Line<'static>> {
         self.drawn
@@ -1267,6 +1317,21 @@ impl DrawnEntries {
             .cloned()
             .collect()
     }
+}
+
+/// A transcript line as the entry it belongs to and its place among that
+/// entry's lines, with every line the entry was drawn as, so it can be found
+/// again after a switch lays the entries out again.
+///
+/// The lines are kept as well as the place because a switch moves lines
+/// within their own entry — opening a cut diff puts rows above the ones kept
+/// at its end — and takes some away, and what is still drawn of the entry is
+/// found by what it reads.
+#[derive(Debug)]
+pub(crate) struct Anchor {
+    entry: usize,
+    offset: usize,
+    lines: Vec<Line<'static>>,
 }
 
 /// What an entry's lines are drawn from, as one number.

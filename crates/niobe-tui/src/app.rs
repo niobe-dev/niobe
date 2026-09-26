@@ -948,6 +948,9 @@ pub struct App {
     idle_since: Option<Instant>,
     /// Each entry as last drawn, so a redraw re-renders only what changed.
     drawn: crate::ui::DrawnEntries,
+    /// The line at the top of the view when a switch was pressed while the
+    /// transcript was scrolled back, until the next draw puts it back there.
+    held: Option<crate::ui::Anchor>,
     should_quit: bool,
 }
 
@@ -1079,6 +1082,7 @@ impl App {
             working_since: None,
             idle_since: None,
             drawn: crate::ui::DrawnEntries::default(),
+            held: None,
             should_quit: false,
         }
     }
@@ -1545,6 +1549,7 @@ impl App {
     /// a key that folded whichever group happened to be on screen would fold
     /// one the operator was not looking at.
     pub fn fold_calls(&mut self) {
+        self.hold_view();
         self.calls_folded = !self.calls_folded;
     }
 
@@ -1559,7 +1564,30 @@ impl App {
     /// One switch for the whole transcript, as [`App::fold_calls`] is and
     /// for its reason: nothing says which diff a key would be meant for.
     pub fn open_diffs(&mut self) {
+        self.hold_view();
         self.diffs_open = !self.diffs_open;
+    }
+
+    /// Remembers the line at the top of the view, before a switch changes how
+    /// many lines the entries above it take.
+    ///
+    /// The scroll offset counts lines from the top, so without this the same
+    /// offset would put other lines under the view. At the tail there is
+    /// nothing to hold: the view follows the tail wherever it goes. A second
+    /// switch before the next draw keeps the first one's line, since the lines
+    /// last drawn no longer say where the view is.
+    fn hold_view(&mut self) {
+        if !self.follow && self.held.is_none() {
+            self.held = self.drawn.anchor(self.scroll);
+        }
+    }
+
+    /// Puts the line [`App::hold_view`] remembered back at the top of the
+    /// view, called by the draw once it has laid the entries out again.
+    pub(crate) fn keep_view(&mut self) {
+        if let Some(line) = self.held.take().and_then(|held| self.drawn.line_of(&held)) {
+            self.scroll = line;
+        }
     }
 
     /// Folds in an event the operator produced here and queues it to be kept.
