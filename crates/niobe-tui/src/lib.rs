@@ -32,6 +32,7 @@ mod fx;
 mod hunks;
 mod input;
 pub mod journal;
+mod keys;
 mod markdown;
 mod mention;
 mod meter;

@@ -2204,7 +2204,8 @@ impl App {
     ///
     /// Shift+Enter opens a line whether or not this is set — where the
     /// terminal cannot tell it apart it arrives as Enter and sends, which is
-    /// why only a terminal that said it can is told to press it.
+    /// why only a terminal that said it can, or has sent one, is told to press
+    /// it.
     #[must_use]
     pub fn reports_shift_enter(mut self) -> Self {
         self.reports_shift_enter = true;
@@ -3135,6 +3136,12 @@ impl App {
 
         self.hint = None;
         let key = self.as_function_key(key);
+        // A terminal that did not say it could send Shift+Enter has now sent
+        // one — tmux asked for modifyOtherKeys, under a terminal that reports
+        // it — so it is the key the bar can name.
+        if (key.code, key.modifiers) == (KeyCode::Enter, KeyModifiers::SHIFT) {
+            self.reports_shift_enter = true;
+        }
 
         // Quitting is always available: a session with a prompt up is still a
         // session the operator may need to leave, and the backend is told the
@@ -4435,6 +4442,20 @@ mod tests {
     fn the_key_named_for_a_new_line_is_the_one_the_terminal_can_report() {
         assert_eq!(app().newline_key(), "Ctrl+J");
         assert_eq!(app().reports_shift_enter().newline_key(), "Shift+Enter");
+    }
+
+    #[test]
+    fn a_shift_enter_that_arrives_is_the_key_named_from_then_on() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(app.newline_key(), "Ctrl+J");
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        assert_eq!(app.newline_key(), "Shift+Enter");
+        assert!(!app.sends_enter_for_shift_enter());
     }
 
     #[test]

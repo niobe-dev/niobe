@@ -15,8 +15,10 @@
 //!   session ended for different reasons.
 //!
 //! Where the terminal can report keys the legacy encoding cannot tell apart —
-//! Shift+Enter from Enter, above all — the guard asks it to, and every one of
-//! those paths takes that back with the rest.
+//! Shift+Enter from Enter, above all — the guard asks it to: with the kitty
+//! protocol where the terminal answers its query, and with xterm's
+//! modifyOtherKeys where it answers only its attributes, which is how tmux
+//! answers. Every one of those paths takes back whichever was asked for.
 //!
 //! All three are idempotent, so overlapping paths — a panic while a SIGTERM is
 //! pending — restore once and do not fight each other.
@@ -37,7 +39,7 @@
 //! unit tests below reach the guard and the flag but not the way out.
 
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use ratatui::crossterm::cursor::{Hide, Show};
@@ -52,13 +54,37 @@ use ratatui::crossterm::terminal::{
 /// test must not spray escape sequences at a terminal the shell never touched.
 static TERMINAL_ENTERED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the terminal was asked to report keys the legacy encoding cannot
-/// tell apart, and still owes being asked to stop.
+/// What the terminal was asked to report keys with and still owes being asked
+/// to stop, as an [`Asked`].
 ///
 /// Read by the panic hook for the same reason as [`TERMINAL_ENTERED`]; kept
-/// apart from it because a terminal that cannot report those keys is never
-/// asked, and must not be sent the sequence that takes the request back.
-static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+/// apart from it because a terminal is sent only the sequence that takes back
+/// what it was asked for, and nothing where it was asked for nothing.
+static KEYBOARD_ASKED: AtomicU8 = AtomicU8::new(Asked::Nothing as u8);
+
+/// What the terminal was asked to report the keys the legacy encoding cannot
+/// tell apart with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Asked {
+    /// Nothing: it answered neither way, or its keys are not read here.
+    Nothing,
+    /// The kitty protocol's disambiguation, pushed onto its stack.
+    Enhancement,
+    /// xterm's modifyOtherKeys.
+    OtherKeys,
+}
+
+impl Asked {
+    /// The value [`KEYBOARD_ASKED`] held, read back.
+    fn from_stored(stored: u8) -> Self {
+        match stored {
+            stored if stored == Self::Enhancement as u8 => Self::Enhancement,
+            stored if stored == Self::OtherKeys as u8 => Self::OtherKeys,
+            _ => Self::Nothing,
+        }
+    }
+}
 
 /// Asks the terminal to report mouse buttons and the wheel, in SGR encoding.
 ///
@@ -91,6 +117,20 @@ const KEYBOARD_ON: &[u8] = b"\x1b[>1u";
 /// it: a terminal that does not know the protocol has no reason to read this
 /// as nothing.
 const KEYBOARD_OFF: &[u8] = b"\x1b[<1u";
+
+/// Asks a terminal that did not answer the kitty query for xterm's
+/// modifyOtherKeys, which is what tmux reports Shift+Enter in under
+/// `extended-keys on`: as `CSI 27 ; 2 ; 13 ~`, which [`crate::keys`] reads.
+///
+/// Level 1, not 2. Measured with tmux 3.7c, level 1 changes Shift+Enter and
+/// leaves Ctrl+J the line feed and Alt+Enter an Esc and a carriage return;
+/// level 2 sends those as sequences too. A terminal that knows neither
+/// protocol reads this as nothing, and tmux under `extended-keys off` ignores
+/// it, which leaves the keys as they were.
+const OTHER_KEYS_ON: &[u8] = b"\x1b[>4;1m";
+
+/// Takes [`OTHER_KEYS_ON`] back to whatever the terminal had before.
+const OTHER_KEYS_OFF: &[u8] = b"\x1b[>4m";
 
 /// How long the terminal has to answer [`KEYBOARD_QUERY`] before it is taken
 /// not to report the keys. Every terminal answers the attributes, so this is
@@ -139,7 +179,7 @@ fn answer(heard: &[u8]) -> Answer {
 }
 
 /// Asks the terminal whether it can report Shift+Enter, and waits for the
-/// answer on standard input.
+/// answer on standard input. [`Answer::Waiting`] is none having come.
 ///
 /// Asked here rather than with crossterm's own query, which writes to
 /// `/dev/tty` whenever it can open it: that is the controlling terminal, and a
@@ -153,20 +193,20 @@ fn answer(heard: &[u8]) -> Answer {
 /// `/dev/tty`, which `poll(2)` cannot wait on everywhere, and the legacy keys
 /// are what the shell falls back on.
 #[cfg(unix)]
-fn reports_keys(out: &mut impl Write) -> bool {
+fn reports_keys(out: &mut impl Write) -> Answer {
     use std::io::IsTerminal;
     use std::os::fd::AsFd;
 
     let stdin = io::stdin();
     if !stdin.is_terminal() {
-        return false;
+        return Answer::Waiting;
     }
     if out
         .write_all(KEYBOARD_QUERY)
         .and_then(|()| out.flush())
         .is_err()
     {
-        return false;
+        return Answer::Waiting;
     }
 
     let deadline = std::time::Instant::now() + KEYBOARD_PATIENCE;
@@ -175,22 +215,21 @@ fn reports_keys(out: &mut impl Write) -> bool {
     loop {
         match answer(&heard) {
             Answer::Waiting => {}
-            Answer::Reports => return true,
-            Answer::DoesNot => return false,
+            known => return known,
         }
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            return false;
+            return Answer::Waiting;
         }
         // Idle is a wait a signal cut short as well as one that ran out, so
         // the deadline rather than the wait decides when to stop.
         match crate::input::poll_input(stdin.as_fd(), left) {
             Ok(crate::input::Input::Ready) => {}
             Ok(crate::input::Input::Idle) => continue,
-            Ok(crate::input::Input::HungUp) | Err(_) => return false,
+            Ok(crate::input::Input::HungUp) | Err(_) => return Answer::Waiting,
         }
         match rustix::io::read(stdin.as_fd(), &mut buffer) {
-            Ok(0) | Err(_) => return false,
+            Ok(0) | Err(_) => return Answer::Waiting,
             Ok(read) => heard.extend_from_slice(&buffer[..read]),
         }
     }
@@ -199,8 +238,8 @@ fn reports_keys(out: &mut impl Write) -> bool {
 /// Asks the terminal whether it can report Shift+Enter. Only the POSIX side
 /// asks; elsewhere the legacy keys are what the shell uses.
 #[cfg(not(unix))]
-fn reports_keys(_out: &mut impl Write) -> bool {
-    false
+fn reports_keys(_out: &mut impl Write) -> Answer {
+    Answer::Waiting
 }
 
 /// Writes the sequences that put a terminal into the drawing mode.
@@ -211,7 +250,7 @@ fn enter_screen(out: &mut impl Write) -> io::Result<()> {
 }
 
 /// Writes the sequences that take a terminal out of the drawing mode, and
-/// pops the keyboard enhancement when `keyboard` says it was pushed.
+/// takes back what `keyboard` says the terminal was asked to report keys with.
 ///
 /// Separated from [`TerminalGuard`] so that the panic hook, which cannot reach
 /// the guard, emits exactly the same bytes. The mouse goes back first: a
@@ -219,10 +258,12 @@ fn enter_screen(out: &mut impl Write) -> io::Result<()> {
 /// operator returns to at every click. The keyboard is popped before the
 /// alternate screen is left, because the protocol keeps one stack per screen
 /// and the push was made on this one.
-fn leave(out: &mut impl Write, keyboard: bool) -> io::Result<()> {
+fn leave(out: &mut impl Write, keyboard: Asked) -> io::Result<()> {
     out.write_all(MOUSE_OFF)?;
-    if keyboard {
-        out.write_all(KEYBOARD_OFF)?;
+    match keyboard {
+        Asked::Nothing => {}
+        Asked::Enhancement => out.write_all(KEYBOARD_OFF)?,
+        Asked::OtherKeys => out.write_all(OTHER_KEYS_OFF)?,
     }
     execute!(out, LeaveAlternateScreen, Show)
 }
@@ -237,16 +278,17 @@ pub struct TerminalGuard<W: Write> {
     out: W,
     /// Whether this guard turned raw mode on, and so owes turning it off.
     raw_mode: bool,
-    /// Whether this guard pushed the keyboard enhancement, and so owes
-    /// popping it.
-    keyboard: bool,
+    /// What this guard asked the terminal to report keys with, and so owes
+    /// taking back.
+    keyboard: Asked,
     restored: bool,
 }
 
 impl<W: Write> TerminalGuard<W> {
     /// Enters raw mode and the alternate screen, hides the cursor, asks for
-    /// the mouse wheel and clicks and, where the terminal says it can, for
-    /// Shift+Enter to be told from Enter.
+    /// the mouse wheel and clicks and for Shift+Enter to be told from Enter:
+    /// with the kitty protocol where the terminal says it knows it, and with
+    /// modifyOtherKeys where it answered without saying so.
     pub fn enter(out: W) -> io::Result<Self> {
         enable_raw_mode()?;
 
@@ -256,7 +298,7 @@ impl<W: Write> TerminalGuard<W> {
         let mut guard = Self {
             out,
             raw_mode: true,
-            keyboard: false,
+            keyboard: Asked::Nothing,
             restored: false,
         };
         // Set before the screen is entered, not after: it is what
@@ -265,31 +307,44 @@ impl<W: Write> TerminalGuard<W> {
         TERMINAL_ENTERED.store(true, Ordering::SeqCst);
         enter_screen(&mut guard.out)?;
         // On the alternate screen, where the push is made: the protocol keeps
-        // a stack per screen.
-        if reports_keys(&mut guard.out) {
-            guard.push_keyboard()?;
+        // a stack per screen. modifyOtherKeys is asked for only where an
+        // answer came, which is where standard input is a terminal `poll(2)`
+        // sees — the one whose keys the shell reads itself, and so the one
+        // where the form it arrives in is read rather than dropped.
+        match reports_keys(&mut guard.out) {
+            Answer::Reports => guard.ask_keyboard(Asked::Enhancement)?,
+            Answer::DoesNot => guard.ask_keyboard(Asked::OtherKeys)?,
+            Answer::Waiting => {}
         }
 
         Ok(guard)
     }
 
-    /// Asks the terminal to tell Shift+Enter from Enter. Marked as owed
-    /// before it is written, for the same reason as the screen: a write that
-    /// fails halfway still leaves a terminal that may have taken the push.
-    fn push_keyboard(&mut self) -> io::Result<()> {
-        self.keyboard = true;
+    /// Asks the terminal to tell Shift+Enter from Enter as `asked` says.
+    /// Marked as owed before it is written, for the same reason as the screen:
+    /// a write that fails halfway still leaves a terminal that may have taken
+    /// the request.
+    fn ask_keyboard(&mut self, asked: Asked) -> io::Result<()> {
+        self.keyboard = asked;
         if self.raw_mode {
-            KEYBOARD_PUSHED.store(true, Ordering::SeqCst);
+            KEYBOARD_ASKED.store(asked as u8, Ordering::SeqCst);
         }
-        self.out.write_all(KEYBOARD_ON)?;
+        let request = match asked {
+            Asked::Nothing => return Ok(()),
+            Asked::Enhancement => KEYBOARD_ON,
+            Asked::OtherKeys => OTHER_KEYS_ON,
+        };
+        self.out.write_all(request)?;
         self.out.flush()
     }
 
     /// Whether the terminal said it can tell Shift+Enter from Enter, and was
-    /// asked to. Only then is Shift+Enter a key the shell can name: on any
-    /// other terminal it sends the same byte as Enter.
+    /// asked to. Only then is Shift+Enter a key the shell can name before it
+    /// has arrived: modifyOtherKeys is asked for on a terminal that did not
+    /// say, and tmux asked for it still sends the carriage return Enter sends
+    /// when the terminal it runs in cannot tell the two apart.
     pub fn reports_shift_enter(&self) -> bool {
-        self.keyboard
+        self.keyboard == Asked::Enhancement
     }
 
     /// Enters the alternate screen without touching raw mode.
@@ -303,7 +358,7 @@ impl<W: Write> TerminalGuard<W> {
         Ok(Self {
             out,
             raw_mode: false,
-            keyboard: false,
+            keyboard: Asked::Nothing,
             restored: false,
         })
     }
@@ -328,7 +383,7 @@ impl<W: Write> TerminalGuard<W> {
 
         // Both run even if the first fails: half a restoration is a terminal
         // the operator has to fix by hand.
-        KEYBOARD_PUSHED.store(false, Ordering::SeqCst);
+        KEYBOARD_ASKED.store(Asked::Nothing as u8, Ordering::SeqCst);
         let raw = disable_raw_mode();
         let screen = leave(&mut self.out, self.keyboard);
         raw.and(screen)
@@ -351,7 +406,8 @@ pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if TERMINAL_ENTERED.swap(false, Ordering::SeqCst) {
-            let keyboard = KEYBOARD_PUSHED.swap(false, Ordering::SeqCst);
+            let keyboard =
+                Asked::from_stored(KEYBOARD_ASKED.swap(Asked::Nothing as u8, Ordering::SeqCst));
             let _ = disable_raw_mode();
             let _ = leave(&mut io::stdout(), keyboard);
         }
@@ -517,7 +573,9 @@ mod tests {
         {
             let mut guard =
                 TerminalGuard::enter_screen_only(&mut sink).expect("a Vec sink cannot fail");
-            guard.push_keyboard().expect("a Vec sink cannot fail");
+            guard
+                .ask_keyboard(Asked::Enhancement)
+                .expect("a Vec sink cannot fail");
             assert!(guard.reports_shift_enter());
         }
 
@@ -535,6 +593,43 @@ mod tests {
     }
 
     #[test]
+    fn a_guard_that_asked_for_modify_other_keys_takes_it_back_and_pops_nothing() {
+        let mut sink = Vec::new();
+        {
+            let mut guard =
+                TerminalGuard::enter_screen_only(&mut sink).expect("a Vec sink cannot fail");
+            guard
+                .ask_keyboard(Asked::OtherKeys)
+                .expect("a Vec sink cannot fail");
+            // Not until a Shift+Enter has come: the terminal did not say it
+            // can send one.
+            assert!(!guard.reports_shift_enter());
+        }
+
+        let out = written(&sink);
+        let asked = out
+            .find("\x1b[>4;1m")
+            .expect("modifyOtherKeys was asked for");
+        let taken_back = out
+            .find("\x1b[>4m")
+            .expect("modifyOtherKeys was never taken back");
+        assert!(asked < taken_back, "{out:?}");
+        assert!(
+            Some(taken_back) < out.find(LEAVE_ALTERNATE_SCREEN),
+            "{out:?}"
+        );
+        assert!(!out.contains("\x1b[>1u"), "{out:?}");
+        assert!(!out.contains("\x1b[<1u"), "{out:?}");
+    }
+
+    #[test]
+    fn what_was_asked_of_the_keyboard_is_read_back_as_it_was_stored() {
+        for asked in [Asked::Nothing, Asked::Enhancement, Asked::OtherKeys] {
+            assert_eq!(Asked::from_stored(asked as u8), asked);
+        }
+    }
+
+    #[test]
     fn a_guard_that_never_pushed_the_keyboard_never_pops_it() {
         let mut sink = Vec::new();
         {
@@ -547,6 +642,10 @@ mod tests {
         assert!(
             !out.contains("\x1b[<1u"),
             "popped what it never pushed: {out:?}"
+        );
+        assert!(
+            !out.contains("\x1b[>4m"),
+            "took back modifyOtherKeys it never asked for: {out:?}"
         );
     }
 

@@ -100,9 +100,10 @@ const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 /// this is what every way out has to leave behind.
 const RESTORED: &str = "\x1b[?1006l\x1b[?1000l\x1b[<1u\x1b[?1049l\x1b[?25h";
 
-/// The same, on a terminal that cannot report keys: it was never asked to, so
-/// it is never asked to stop.
-const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1000l\x1b[?1049l\x1b[?25h";
+/// The same, on a terminal that cannot report keys: it was never pushed the
+/// enhancement, so it is never asked to pop it, and the modifyOtherKeys it was
+/// asked for instead goes back to what the terminal had.
+const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1000l\x1b[>4m\x1b[?1049l\x1b[?25h";
 
 /// What the shell asks a terminal on the way in: which keyboard enhancements
 /// it has on, then its primary device attributes.
@@ -112,6 +113,16 @@ const KEYBOARD_QUERY: &str = "\x1b[?u\x1b[c";
 /// that back.
 const KEYBOARD_ON: &str = "\x1b[>1u";
 const KEYBOARD_OFF: &str = "\x1b[<1u";
+
+/// The shell asking a terminal that did not answer the flags for xterm's
+/// modifyOtherKeys, which is what tmux reports Shift+Enter under, and taking
+/// that back.
+const OTHER_KEYS_ON: &str = "\x1b[>4;1m";
+const OTHER_KEYS_OFF: &str = "\x1b[>4m";
+
+/// Shift+Enter as xterm's modifyOtherKeys sends it, and tmux with
+/// `extended-keys` on once asked, or set to `always`.
+const SHIFT_ENTER_OTHER_KEYS: &[u8] = b"\x1b[27;2;13~";
 
 /// How the terminal a test opens answers [`KEYBOARD_QUERY`].
 #[derive(Clone, Copy)]
@@ -128,6 +139,22 @@ impl Keys {
         match self {
             Self::Reported => b"\x1b[?0u\x1b[?62;22c",
             Self::Legacy => b"\x1b[?62;22c",
+        }
+    }
+
+    /// What every way out of the shell has to leave behind on this terminal.
+    fn restored(self) -> &'static str {
+        match self {
+            Self::Reported => RESTORED,
+            Self::Legacy => RESTORED_LEGACY,
+        }
+    }
+
+    /// The sequence that takes back what the shell asked this terminal for.
+    fn taken_back(self) -> &'static str {
+        match self {
+            Self::Reported => KEYBOARD_OFF,
+            Self::Legacy => OTHER_KEYS_OFF,
         }
     }
 }
@@ -379,6 +406,12 @@ fn signal(shell: &Child, signal: Signal) {
 /// Asserts that the shell handed the terminal back exactly once on `path`, the
 /// way out of the shell it was driven down.
 fn assert_handed_back(drawn: &str, path: &str) {
+    assert_handed_back_as(drawn, path, Keys::Reported);
+}
+
+/// Asserts that the shell handed back exactly once, on `path`, a terminal that
+/// answered the keyboard query as `keys` says.
+fn assert_handed_back_as(drawn: &str, path: &str, keys: Keys) {
     assert!(
         drawn.contains(ENTER_ALTERNATE_SCREEN),
         "on {path} the shell never entered the alternate screen, so leaving it would prove nothing"
@@ -389,14 +422,14 @@ fn assert_handed_back(drawn: &str, path: &str) {
         "on {path} the shell left the alternate screen {left} time(s), not once"
     );
     assert!(
-        drawn.contains(RESTORED),
-        "on {path} the shell left the alternate screen without popping the keyboard or showing \
-         the cursor: {drawn:?}"
+        drawn.contains(keys.restored()),
+        "on {path} the shell left the alternate screen without taking the keyboard back or \
+         showing the cursor: {drawn:?}"
     );
     assert_eq!(
-        drawn.matches(KEYBOARD_OFF).count(),
+        drawn.matches(keys.taken_back()).count(),
         1,
-        "on {path} the keyboard enhancement was not popped exactly once: {drawn:?}"
+        "on {path} what the keyboard was asked for was not taken back exactly once: {drawn:?}"
     );
 }
 
@@ -716,6 +749,23 @@ fn a_sigterm_hands_the_terminal_back() {
 }
 
 #[test]
+fn a_sigterm_takes_back_the_modify_other_keys_a_legacy_terminal_was_asked_for() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::answering(Keys::Legacy);
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    signal(&shell, Signal::TERM);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert!(status.success(), "a SIGTERM ended the shell with {status}");
+    assert_handed_back_as(&drawn, "a SIGTERM", Keys::Legacy);
+}
+
+#[test]
 fn a_terminal_that_reports_keys_is_asked_to_tell_shift_enter_and_the_bar_names_it() {
     let repo = repo();
     let (terminal, slave) = Terminal::open();
@@ -745,7 +795,7 @@ fn a_terminal_that_reports_keys_is_asked_to_tell_shift_enter_and_the_bar_names_i
 }
 
 #[test]
-fn a_terminal_that_cannot_report_keys_is_never_asked_and_the_bar_names_ctrl_j() {
+fn a_terminal_that_cannot_report_keys_is_asked_for_modify_other_keys_and_the_bar_names_ctrl_j() {
     let repo = repo();
     let (terminal, slave) = Terminal::answering(Keys::Legacy);
     rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
@@ -763,15 +813,54 @@ fn a_terminal_that_cannot_report_keys_is_never_asked_and_the_bar_names_ctrl_j() 
         drawn.contains(RESTORED_LEGACY),
         "the terminal was not handed back: {drawn:?}"
     );
+    let answered = drawn
+        .find(KEYBOARD_QUERY)
+        .expect("the terminal was asked what it reports");
+    let asked = drawn
+        .find(OTHER_KEYS_ON)
+        .expect("a terminal that did not answer the flags was never asked for modifyOtherKeys");
+    assert!(answered < asked, "{drawn:?}");
     assert!(!drawn.contains(KEYBOARD_ON), "{drawn:?}");
     assert!(
         !drawn.contains(KEYBOARD_OFF),
         "a terminal that was never asked to report keys was sent the sequence that takes it \
          back: {drawn:?}"
     );
-    // On this terminal Shift+Enter sends the same carriage return as Enter,
-    // so naming it would be naming the key that sends the prompt.
+    // Nothing has shown Shift+Enter arriving as itself here: tmux asked for
+    // modifyOtherKeys still sends the carriage return Enter sends when the
+    // terminal it runs in cannot tell the two apart, so naming it would be
+    // naming the key that sends the prompt.
     assert!(!drawn.contains("Shift+Enter"), "{drawn:?}");
+}
+
+#[test]
+fn shift_enter_in_modify_other_keys_opens_a_line_and_the_bar_names_it_from_then_on() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::answering(Keys::Legacy);
+    rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows("Ctrl+J newline");
+
+    // As in the Ctrl+J test: were Shift+Enter dropped or read as Enter, the
+    // command would not be the two lines that print this.
+    terminal.typed(b"!");
+    terminal.shows("the agent does not see");
+    terminal.typed(b"printf %s \"joined-$((6*7))");
+    terminal.typed(SHIFT_ENTER_OTHER_KEYS);
+    terminal.typed(b"y\"\r");
+    terminal.shows("joined-42");
+    // Out of the `!` mode, whose bar does not name the newline key, and then
+    // the key alone: the hint is right-aligned, so the word after it keeps its
+    // cells and is never sent again.
+    terminal.typed(b"\x7f");
+    terminal.shows("Shift+Enter");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "the shell ended with {status}");
+    assert_handed_back_as(&drawn, "a clean quit", Keys::Legacy);
 }
 
 /// Only with debug assertions on: the panic the binary is asked for is
@@ -780,8 +869,23 @@ fn a_terminal_that_cannot_report_keys_is_never_asked_and_the_bar_names_ctrl_j() 
 #[cfg(debug_assertions)]
 #[test]
 fn a_panic_hands_the_terminal_back() {
+    panics_and_hands_back(Keys::Reported);
+}
+
+/// The panic hook has no guard to ask what the keyboard was asked for, so what
+/// it takes back is proven on both answers.
+#[cfg(debug_assertions)]
+#[test]
+fn a_panic_takes_back_the_modify_other_keys_a_legacy_terminal_was_asked_for() {
+    panics_and_hands_back(Keys::Legacy);
+}
+
+/// Panics the shell on a terminal that answers the keyboard query as `keys`
+/// says, and asserts that the terminal was handed back before the message.
+#[cfg(debug_assertions)]
+fn panics_and_hands_back(keys: Keys) {
     let repo = repo();
-    let (terminal, slave) = Terminal::open();
+    let (terminal, slave) = Terminal::answering(keys);
     let mut shell = shell_command(&slave, repo.path())
         .env(PANIC_ON_RECORD, "1")
         .spawn()
@@ -802,7 +906,7 @@ fn a_panic_hands_the_terminal_back() {
         Some(PANICKED),
         "the shell was asked to panic and ended with {status}"
     );
-    assert_handed_back(&drawn, "a panic");
+    assert_handed_back_as(&drawn, "a panic", keys);
 
     // The guard would restore on its own as the stack unwinds, so restoring is
     // not what the hook is for: it restores *first*, so that the message is
@@ -810,7 +914,7 @@ fn a_panic_hands_the_terminal_back() {
     // goes onto the alternate screen, which is then torn down, and the operator
     // is left with a working prompt and no reason why their session ended.
     let restored = drawn
-        .find(RESTORED)
+        .find(keys.restored())
         .expect("the shell handed the terminal back");
     let message = drawn
         .find(PANIC_ON_RECORD)

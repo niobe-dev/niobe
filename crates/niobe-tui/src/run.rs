@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{Event, KeyEventKind};
 use ratatui::prelude::CrosstermBackend;
 
 use niobe_core::event::Event as SessionEvent;
@@ -51,7 +51,7 @@ const BUSY_TICK: Duration = Duration::from_millis(33);
 /// same way — once, at the top, before it looks at anything else.
 struct Machine<'a> {
     shutdown: &'a Shutdown,
-    wait: &'a Wait,
+    wait: &'a mut Wait,
     clock: &'a crate::clock::Clock,
 }
 
@@ -106,7 +106,7 @@ pub fn run(
 ) -> io::Result<Ended> {
     install_panic_hook();
     let shutdown = Shutdown::install()?;
-    let wait = Wait::on_the_terminal();
+    let mut wait = Wait::on_the_terminal();
 
     // Read once: the timezone is a file on disk and the loop asks for the time
     // ten times a second.
@@ -140,9 +140,9 @@ pub fn run(
             watch,
             shell,
         },
-        &Machine {
+        &mut Machine {
             shutdown: &shutdown,
-            wait: &wait,
+            wait: &mut wait,
             clock: &clock,
         },
     );
@@ -199,7 +199,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     around: Around<'_>,
-    machine: &Machine<'_>,
+    machine: &mut Machine<'_>,
 ) -> io::Result<Ended> {
     let Around {
         journal,
@@ -237,7 +237,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         let tick = if producing { BUSY_TICK } else { TICK };
         match machine.wait.input(tick)? {
             Input::Ready => {
-                read_input(app)?;
+                read_input(app, machine.wait)?;
                 run_commands(app, shell);
                 send_produced(app, journal, backend, rules);
             }
@@ -276,18 +276,11 @@ fn event_loop<B: Backend<Error = io::Error>>(
 }
 
 /// Hands the app everything the terminal has for it.
-///
-/// crossterm parses a read into a queue and gives out one event at a time — a
-/// paste is one read and many keys — so the queue is emptied here. Were it not,
-/// the rest of a paste would sit there until the next keystroke woke the wait,
-/// which only looks at the terminal.
-///
-/// The zero-timeout check is the one place a hangup can still catch the loop,
-/// in the instant between the wait and this call; crossterm offers no way to
-/// ask what it has already parsed without also reading the terminal.
-fn read_input(app: &mut App) -> io::Result<()> {
-    loop {
-        match event::read()? {
+fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
+    let mut events = Vec::new();
+    wait.read(&mut events)?;
+    for event in events {
+        match event {
             // Windows reports a press and a release; acting on both would
             // send every prompt twice.
             Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
@@ -296,11 +289,8 @@ fn read_input(app: &mut App) -> io::Result<()> {
             Event::Resize(_, _) => {}
             _ => {}
         }
-
-        if !event::poll(Duration::ZERO)? {
-            return Ok(());
-        }
     }
+    Ok(())
 }
 
 /// Hands what the operator produced to the backend and to the journal, and

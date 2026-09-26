@@ -12,13 +12,18 @@
 //! end it either.
 //!
 //! `poll(2)` reports that hangup as POLLHUP, which is the one thing a read
-//! cannot say. So the wait happens here, and crossterm is called only once
-//! there is something for it to read.
+//! cannot say. So the wait happens here. Where it does, the read does too, and
+//! [`crate::keys`] makes events of what it read: crossterm drops the form tmux
+//! sends Shift+Enter in. Where `poll(2)` cannot see the terminal, crossterm
+//! both waits and reads.
 
 use std::io::{self, IsTerminal};
 use std::time::Duration;
 
-use ratatui::crossterm::event;
+use ratatui::crossterm::event::{self, Event};
+
+#[cfg(unix)]
+use crate::keys::Decoder;
 
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd};
@@ -41,12 +46,22 @@ pub(crate) enum Input {
 /// How this session waits for input.
 ///
 /// Carries the one decision made when the shell opens: whether `poll(2)` can
-/// see the descriptor crossterm reads.
+/// see the descriptor crossterm reads, and so whether the shell reads the
+/// terminal itself.
 #[derive(Debug)]
 pub(crate) struct Wait {
     #[cfg(unix)]
     polls_the_terminal: bool,
+    /// What the shell's own reads have made of the terminal so far, including
+    /// a sequence one read cut short.
+    #[cfg(unix)]
+    decoder: Decoder,
 }
+
+/// How much one read of the terminal takes. A paste longer than this is read
+/// in turns within the same tick.
+#[cfg(unix)]
+const READ_SIZE: usize = 1024;
 
 impl Wait {
     /// Decides how this session waits.
@@ -61,6 +76,8 @@ impl Wait {
         Self {
             #[cfg(unix)]
             polls_the_terminal: io::stdin().is_terminal() && poll_sees_stdin(),
+            #[cfg(unix)]
+            decoder: Decoder::default(),
         }
     }
 
@@ -71,6 +88,58 @@ impl Wait {
             return poll_input(io::stdin().as_fd(), timeout);
         }
         crossterm_input(timeout)
+    }
+
+    /// Reads everything the terminal has for the shell into `events`.
+    ///
+    /// Called once a wait has found something to read, and reads until
+    /// nothing is left — a paste is many keys in one read, and the rest of it
+    /// would otherwise sit there until the next keystroke woke the wait.
+    pub(crate) fn read(&mut self, events: &mut Vec<Event>) -> io::Result<()> {
+        #[cfg(unix)]
+        if self.polls_the_terminal {
+            return self.read_the_terminal(events);
+        }
+        crossterm_read(events)
+    }
+
+    /// The shell's own read of standard input.
+    ///
+    /// A read that ends the terminal — end-of-file, a hangup — reads as
+    /// nothing here: the next wait sees the hangup and says so.
+    #[cfg(unix)]
+    fn read_the_terminal(&mut self, events: &mut Vec<Event>) -> io::Result<()> {
+        let stdin = io::stdin();
+        let mut buffer = [0u8; READ_SIZE];
+        loop {
+            let read = match rustix::io::read(stdin.as_fd(), &mut buffer) {
+                Ok(read) => read,
+                Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => return Ok(()),
+                Err(errno) => return Err(errno.into()),
+            };
+            if read == 0 {
+                return Ok(());
+            }
+            self.decoder
+                .feed(&buffer[..read], read == buffer.len(), events);
+            if poll_input(stdin.as_fd(), Duration::ZERO)? != Input::Ready {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// crossterm's own read, which empties the queue it parses a read into.
+///
+/// The zero-timeout check is the one place a hangup can still catch the loop,
+/// in the instant between the wait and this call; crossterm offers no way to
+/// ask what it has already parsed without also reading the terminal.
+fn crossterm_read(events: &mut Vec<Event>) -> io::Result<()> {
+    loop {
+        events.push(event::read()?);
+        if !event::poll(Duration::ZERO)? {
+            return Ok(());
+        }
     }
 }
 
