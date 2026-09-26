@@ -186,6 +186,9 @@ struct Call {
     /// The arguments as the CLI sent them. The rendered `input` is for a
     /// human; counting what an edit changed needs the fields themselves.
     arguments: serde_json::Value,
+    /// The sub-agent that made the call, or `None` for the session's own: a
+    /// prompt about the call is that agent's.
+    agent: Option<AgentId>,
 }
 
 /// A permission prompt the CLI is waiting on an answer to.
@@ -239,6 +242,11 @@ pub struct Translator {
     /// What each outstanding `tool_use` id was called and called with, so that
     /// the `tool_result` can repeat both without the consumer holding state.
     tool_calls: BTreeMap<String, Call>,
+    /// The sub-agent behind each call that has ended since the last `result`,
+    /// by call id: the closing line can list a refusal of one of them after
+    /// its `tool_result` took the call out of `tool_calls`, and the refusal is
+    /// that agent's.
+    ended_agents: BTreeMap<String, AgentId>,
     /// The permission prompts read since the last drain, for whatever owns the
     /// CLI's standard input to answer.
     asked: Vec<Asked>,
@@ -316,6 +324,7 @@ impl Translator {
             unavailable: Vec::new(),
             in_flight: BTreeMap::new(),
             tool_calls: BTreeMap::new(),
+            ended_agents: BTreeMap::new(),
             asked: Vec::new(),
             agents: BTreeMap::new(),
             agent_models: BTreeMap::new(),
@@ -772,6 +781,7 @@ impl Translator {
             .unwrap_or_default();
         let input = call.map(|call| call.input.clone()).unwrap_or_default();
         let target = call.and_then(|call| call.target.clone());
+        let agent = call.and_then(|call| call.agent.clone());
 
         self.denied.insert(id.clone(), ());
         let id = ToolCallId::new(id);
@@ -780,6 +790,7 @@ impl Translator {
             tool,
             input,
             target,
+            agent,
         });
         out.push(Event::PermissionResponse {
             id,
@@ -874,6 +885,7 @@ impl Translator {
                             target: target_of(&input),
                             summary: summary.clone(),
                             arguments: input.clone(),
+                            agent: agent.clone(),
                         },
                     );
                     if AGENT_TOOLS.contains(&name.as_str()) {
@@ -930,7 +942,12 @@ impl Translator {
             let output = content.map(render_content).unwrap_or_default();
             let bytes = output.len() as u64;
             let (name, input, summary, arguments) = match self.tool_calls.remove(&tool_use_id) {
-                Some(call) => (call.name, call.input, call.summary, call.arguments),
+                Some(call) => {
+                    if let Some(agent) = call.agent {
+                        self.ended_agents.insert(tool_use_id.clone(), agent);
+                    }
+                    (call.name, call.input, call.summary, call.arguments)
+                }
                 None => {
                     out.push(warn(format!(
                         "the CLI returned a result for tool call `{tool_use_id}`, which it never \
@@ -1225,7 +1242,15 @@ impl Translator {
         if body.subtype.as_deref() != Some("can_use_tool") {
             return;
         }
-        let id = ToolCallId::new(body.tool_use_id.unwrap_or_default());
+        let call_id = body.tool_use_id.unwrap_or_default();
+        // The request names the agent too, but by the CLI's own id for it,
+        // which nothing else on the stream uses; the call it gates names the
+        // agent the way its calls and messages do.
+        let agent = self
+            .tool_calls
+            .get(&call_id)
+            .and_then(|call| call.agent.clone());
+        let id = ToolCallId::new(call_id);
         if let Some(request_id) = request.request_id {
             self.asked.push(Asked {
                 id: id.clone(),
@@ -1238,6 +1263,7 @@ impl Translator {
             tool: body.tool_name.unwrap_or_default(),
             input: body.input.as_ref().map(render).unwrap_or_default(),
             target: body.input.as_ref().and_then(target_of),
+            agent,
         });
     }
 
@@ -1255,12 +1281,18 @@ impl Translator {
             if self.denied.insert(id.clone(), ()).is_some() {
                 continue;
             }
+            let agent = self
+                .tool_calls
+                .get(&id)
+                .and_then(|call| call.agent.clone())
+                .or_else(|| self.ended_agents.get(&id).cloned());
             let id = ToolCallId::new(id);
             out.push(Event::PermissionRequest {
                 id: id.clone(),
                 tool: denial.tool_name.unwrap_or_default(),
                 input: denial.tool_input.as_ref().map(render).unwrap_or_default(),
                 target: denial.tool_input.as_ref().and_then(target_of),
+                agent,
             });
             out.push(Event::PermissionResponse {
                 id,
@@ -1268,6 +1300,7 @@ impl Translator {
                 message: None,
             });
         }
+        self.ended_agents.clear();
 
         if outcome.is_error || outcome.subtype.as_deref() != Some("success") {
             // `result` carries the reason for most failures and `errors` for
@@ -2743,6 +2776,7 @@ mod tests {
                 tool,
                 input,
                 target,
+                agent,
             },
             Event::PermissionResponse { decision, .. },
         ] = announced.as_slice()
@@ -2760,6 +2794,7 @@ mod tests {
             Some("rm -rf build"),
             "a refusal the operator may want a standing answer about lost its target"
         );
+        assert_eq!(*agent, None, "the session's own call");
         assert_eq!(*decision, PermissionDecision::Deny);
         assert!(
             result.is_empty(),
@@ -2863,6 +2898,35 @@ mod tests {
         };
         assert_eq!(tool, "Write");
         assert_eq!(input, r#"{"file_path":"/etc/hosts"}"#);
+    }
+
+    /// The closing line lists a refusal after the call's result has come
+    /// back, and the result is where the call is let go of; whose call it was
+    /// outlives it until then.
+    #[test]
+    fn a_sub_agents_refusal_listed_only_at_the_end_is_still_that_agents() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_task","message":{"content":[{"type":"tool_use","id":"toolu_9","name":"Write","input":{"file_path":"/etc/hosts"}}]}}"#,
+        );
+        translator.line(
+            r#"{"type":"user","parent_tool_use_id":"toolu_task","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_9","content":"refused","is_error":true}]}}"#,
+        );
+
+        let events = before_the_end(translator.line(
+            r#"{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_9","tool_input":{"file_path":"/etc/hosts"}}]}"#,
+        ));
+
+        let asked: Vec<Option<&str>> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::PermissionRequest { agent, .. } => {
+                    Some(agent.as_ref().map(|agent| agent.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, [Some("toolu_task")], "{events:?}");
     }
 
     #[test]

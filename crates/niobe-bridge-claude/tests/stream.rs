@@ -504,6 +504,7 @@ fn a_prompt_the_cli_is_waiting_on_is_asked_and_kept_to_be_answered() {
         tool,
         input,
         target,
+        agent,
     }) = asked.first().copied()
     else {
         panic!("the CLI asked before it read the file: {asked:?}");
@@ -517,6 +518,7 @@ fn a_prompt_the_cli_is_waiting_on_is_asked_and_kept_to_be_answered() {
         Some("/repo/notes.txt"),
         "a standing answer could not be written about this call"
     );
+    assert_eq!(*agent, None, "the session's own call");
 
     // The event says what to show; this says what to address the answer to.
     let waiting = translator.take_asked();
@@ -926,6 +928,40 @@ fn a_recorded_sub_agents_calls_and_words_carry_the_agent_that_made_them() {
             ..
         }
     )));
+}
+
+/// Every prompt in the recording is a reviewer's: the owners are the
+/// `parent_tool_use_id` of the message that made each gated call, found with
+/// the `jq` program in the fixtures' README.
+#[test]
+fn a_recorded_sub_agents_permission_prompts_name_the_agent_that_asked() {
+    let events = translated_sub_agents();
+    let asked: Vec<(&str, Option<&str>)> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::PermissionRequest { id, agent, .. } => {
+                Some((id.as_str(), agent.as_ref().map(|agent| agent.as_str())))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            (
+                "toolu_017GvV2rk8uZrSyvepx1U3MN",
+                Some("toolu_018oEYQ3e89jvpp8SycSyQ75")
+            ),
+            (
+                "toolu_01TPuJK1d1jLwHKPPUDzmqSm",
+                Some("toolu_018CBLWZbbx5bZCa7U5VkDVi")
+            ),
+            (
+                "toolu_01EFpgkrESAVWSm71mNubREi",
+                Some("toolu_018CBLWZbbx5bZCa7U5VkDVi")
+            ),
+        ]
+    );
 }
 
 #[test]

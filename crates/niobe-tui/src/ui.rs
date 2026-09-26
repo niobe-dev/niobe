@@ -1624,10 +1624,11 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<
 }
 
 /// `┌ ? claude asks ──── blocks turn 3 ┐`: who is asking at the left, in the
-/// title colour, and what is waiting on the answer at the right, dimmed.
+/// title colour — a sub-agent by the name its calls' rows give it — and what
+/// is waiting on the answer at the right, dimmed.
 fn question_top(app: &App, ask: &Ask, outer: usize, theme: &Theme) -> Line<'static> {
     let border = Style::new().fg(theme.hot);
-    let asks = format!(" ? {} asks ", app.agent_name());
+    let asks = format!(" ? {} asks ", app.asker(ask));
     let blocks = match ask.turn {
         0 => "blocks this turn".to_owned(),
         turn => format!("blocks turn {turn}"),
@@ -1808,9 +1809,27 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
         ),
         Span::styled(entry.head.clone(), Style::new().fg(colour).bold()),
     ];
-    if !entry.meta.is_empty() {
-        let room = body_width.saturating_sub(text::width(&entry.head) + 2);
+    let room = body_width.saturating_sub(text::width(&entry.head) + 2);
+    // A sub-agent's own words are headed with its whole name already; on
+    // anything else of an agent's — a refusal of its call — the name is said
+    // the way its calls' rows say it.
+    let agent = match (&entry.kind, &entry.agent) {
+        (EntryKind::SubAgent, _) | (_, None) => None,
+        (_, Some(agent)) => Some(crate::calls::agent_tag(agent, &entry.meta, room)),
+    }
+    .filter(|tag| !tag.is_empty());
+    if agent.is_some() || !entry.meta.is_empty() {
         head.push(Span::raw("  "));
+    }
+    let room = match agent {
+        Some(tag) => {
+            let left = room.saturating_sub(text::width(&tag));
+            head.push(Span::styled(tag, Style::new().fg(theme.agent)));
+            left
+        }
+        None => room,
+    };
+    if !entry.meta.is_empty() {
         head.push(Span::styled(
             text::truncate(&entry.meta, room),
             Style::new().fg(theme.dim),

@@ -1313,6 +1313,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: Some("rm -rf build".to_owned()),
+            agent: None,
         });
         assert_eq!(state.pending_permissions().len(), 1);
 

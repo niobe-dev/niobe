@@ -278,10 +278,11 @@ fn an_unreadable_row_names_the_session_and_the_sequence_number() {
     assert!(error.to_string().contains("event 2"), "{error}");
 }
 
-/// A call and a message written before either said which agent made it load
-/// as the session's own, and one that does say comes back naming it.
+/// A call, a message and a permission prompt written before any of them said
+/// which agent made it load as the session's own, and one that does say comes
+/// back naming it.
 #[test]
-fn calls_and_messages_stored_before_they_named_an_agent_load_as_the_sessions() {
+fn calls_messages_and_prompts_stored_before_they_named_an_agent_load_as_the_sessions() {
     let (_dir, path) = scratch();
     let session = {
         let store = Store::open(&path).expect("a store opens");
@@ -297,6 +298,10 @@ fn calls_and_messages_stored_before_they_named_an_agent_load_as_the_sessions() {
             r#"{"type":"tool_call_start","id":"t","name":"Read","input":"{}"}"#,
         ),
         (3, r#"{"type":"assistant_message","text":"Done."}"#),
+        (
+            4,
+            r#"{"type":"permission_request","id":"p","tool":"Bash","input":"{}","target":"ls"}"#,
+        ),
     ] {
         conn.execute(
             "INSERT INTO events (session_id, seq, at, event) VALUES (?1, ?2, 0, ?3)",
@@ -325,13 +330,13 @@ fn calls_and_messages_stored_before_they_named_an_agent_load_as_the_sessions() {
     let owners: Vec<Option<&str>> = events
         .iter()
         .filter_map(|event| match event {
-            Event::ToolCallStart { agent, .. } | Event::AssistantMessage { agent, .. } => {
-                Some(agent.as_ref().map(AgentId::as_str))
-            }
+            Event::ToolCallStart { agent, .. }
+            | Event::AssistantMessage { agent, .. }
+            | Event::PermissionRequest { agent, .. } => Some(agent.as_ref().map(AgentId::as_str)),
             _ => None,
         })
         .collect();
-    assert_eq!(owners, [None, None, Some("toolu_a")]);
+    assert_eq!(owners, [None, None, None, Some("toolu_a")]);
 }
 
 #[test]

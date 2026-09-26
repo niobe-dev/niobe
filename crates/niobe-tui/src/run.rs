@@ -685,6 +685,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"cargo test"}"#.to_owned(),
             target: target.map(str::to_owned),
+            agent: None,
         });
         app
     }
@@ -956,6 +957,7 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: r#"{"command":"cargo test"}"#.to_owned(),
                 target: Some("cargo test".to_owned()),
+                agent: None,
             }],
             ..Attached::default()
         };
@@ -988,6 +990,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"cargo test"}"#.to_owned(),
             target: Some("cargo test".to_owned()),
+            agent: None,
         });
 
         assert!(app.take_produced().is_empty());

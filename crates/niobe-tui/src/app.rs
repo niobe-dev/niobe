@@ -319,6 +319,10 @@ pub struct Ask {
     /// which is what the question says it is blocking. Zero where the session
     /// has no prompt on record, as one attached to a turn already running.
     pub turn: u64,
+    /// The sub-agent whose call this is, or `None` for the session's own.
+    /// Who asked is said on the question and nowhere in the answer: a
+    /// standing answer is about the tool and its target, whoever asked.
+    pub agent: Option<AgentId>,
 }
 
 impl Ask {
@@ -496,8 +500,9 @@ pub struct Entry {
     /// group even where no words came between them. So does a call another
     /// agent made: a group is one agent's.
     pub calls: Vec<Call>,
-    /// The sub-agent whose words or calls this entry is, or `None` for the
-    /// session's own and for everything that is not the agents'.
+    /// The sub-agent whose words, calls or refused call this entry is, or
+    /// `None` for the session's own and for everything that is not the
+    /// agents'.
     ///
     /// Named by the shortest part of the name the Activity pane lists it by
     /// that tells it apart from every other agent the session spawned: two
@@ -1403,12 +1408,14 @@ impl App {
                 tool,
                 input,
                 target,
+                agent,
             } => self.asks.push_back(Ask {
                 id: id.clone(),
                 tool: tool.clone(),
                 input: input.clone(),
                 target: target.clone(),
                 turn: self.session.user_messages(),
+                agent: agent.clone(),
             }),
 
             // A refusal is shown as its own entry rather than left to the tool
@@ -1426,6 +1433,7 @@ impl App {
                     self.restart_clock(id);
                 }
                 if *decision == PermissionDecision::Deny {
+                    let agent = asked.as_ref().and_then(|ask| ask.agent.clone());
                     let (tool, what) = match &asked {
                         Some(ask) => (
                             tool_label(&ask.tool),
@@ -1433,6 +1441,10 @@ impl App {
                         ),
                         None => (id.to_string(), String::new()),
                     };
+                    let tag = agent.as_ref().map(|agent| self.sub_agent_tag(agent));
+                    if let Some(agent) = agent {
+                        self.agent_entries.insert(self.entries.len(), agent);
+                    }
                     self.push(Entry {
                         kind: EntryKind::Failure,
                         head: "denied".to_owned(),
@@ -1447,7 +1459,7 @@ impl App {
                         streaming: false,
                         at: self.at,
                         calls: Vec::new(),
-                        agent: None,
+                        agent: tag,
                     });
                 }
             }
@@ -1595,6 +1607,15 @@ impl App {
             .iter()
             .find(|agent| &agent.id == id)
             .map_or_else(|| id.to_string(), |agent| agent.label.clone())
+    }
+
+    /// Who is asking `ask`: the sub-agent whose call it is, by the name its
+    /// calls' rows give it, or the session's own agent.
+    pub fn asker(&self, ask: &Ask) -> String {
+        match &ask.agent {
+            Some(agent) => self.sub_agent_tag(agent),
+            None => self.agent_name(),
+        }
     }
 
     /// What sub-agent `id` is called on a row it shares with what it did:
@@ -4721,6 +4742,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: target.map(str::to_owned),
+            agent: None,
         }
     }
 
@@ -5020,6 +5042,7 @@ mod tests {
             tool: "Write".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            agent: None,
         });
 
         assert_eq!(app.asks_waiting(), 1);
@@ -5156,6 +5179,89 @@ mod tests {
         assert!(app.asking().is_none());
     }
 
+    /// `prompt`'s call as call `id`, made by `agent`.
+    fn asked_by(id: &str, agent: Option<&str>) -> Event {
+        Event::PermissionRequest {
+            id: id.into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"rm -rf build"}"#.to_owned(),
+            target: Some("rm -rf build".to_owned()),
+            agent: agent.map(AgentId::new),
+        }
+    }
+
+    /// A rule is about the tool and what it acts on: the one kept from a
+    /// sub-agent's question is the one the session's would have kept, and it
+    /// answers the session's next question too.
+    #[test]
+    fn a_standing_answer_to_a_sub_agents_question_is_the_rule_the_sessions_would_be() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let from_an_agent = |answer: char| {
+            let mut app = app();
+            app.apply(&Event::AgentSpawn {
+                id: AgentId::new("toolu_a"),
+                parent: None,
+                label: "deep-reasoner: Review fetch.py".to_owned(),
+            });
+            app.apply(&asked_by("t1", Some("toolu_a")));
+            assert_eq!(
+                app.asking().map(|ask| app.asker(ask)),
+                Some("deep-reasoner: Review fetch.py".to_owned())
+            );
+            app.on_key(key(KeyCode::Char(answer)));
+            app.on_key(key(KeyCode::Enter));
+            app
+        };
+
+        let mut by_target = from_an_agent('3');
+        assert_eq!(
+            by_target.take_rules(),
+            [Rule::targeted("Bash", "rm -rf build")]
+        );
+        by_target.apply(&asked_by("t2", None));
+        by_target.settle_rules();
+        assert!(by_target.asking().is_none(), "the session's own question");
+
+        assert_eq!(from_an_agent('2').take_rules(), [Rule::tool("Bash")]);
+    }
+
+    #[test]
+    fn a_sub_agents_refusal_names_the_agent_and_one_it_never_asked_does_not() {
+        let mut app = app();
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("toolu_a"),
+            parent: None,
+            label: "deep-reasoner: Review fetch.py".to_owned(),
+        });
+        app.apply(&asked_by("t1", Some("toolu_a")));
+        let deny = |id: &str| Event::PermissionResponse {
+            id: id.into(),
+            decision: PermissionDecision::Deny,
+            message: None,
+        };
+        app.apply(&deny("t1"));
+        app.apply(&asked_by("t2", None));
+        app.apply(&deny("t2"));
+
+        let refused: Vec<(&str, Option<&str>)> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "denied")
+            .map(|entry| (entry.meta.as_str(), entry.agent.as_deref()))
+            .collect();
+        assert_eq!(
+            refused,
+            [
+                (
+                    "Bash · rm -rf build",
+                    Some("deep-reasoner: Review fetch.py")
+                ),
+                ("Bash · rm -rf build", None),
+            ]
+        );
+    }
+
     #[test]
     fn a_standing_rule_answers_a_prompt_without_showing_it() {
         let mut app = app().with_rules([Rule::tool("Read")].into_iter().collect());
@@ -5164,6 +5270,7 @@ mod tests {
             tool: "Read".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            agent: None,
         });
 
         app.settle_rules();
@@ -5580,6 +5687,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: "{}".to_owned(),
             target: None,
+            agent: None,
         });
         assert_eq!(
             app.activity().map(|a| a.doing).as_deref(),
@@ -5612,6 +5720,7 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: r#"{"command":"ls"}"#.to_owned(),
                 target: target.map(str::to_owned),
+                agent: None,
             });
         }
         app
@@ -6163,6 +6272,7 @@ mod tests {
             tool: "Edit".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            agent: None,
         });
         app.apply(&Event::PermissionResponse {
             id: "t1".into(),
@@ -6455,6 +6565,7 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: "{}".to_owned(),
                 target: None,
+                agent: None,
             },
             millis(1_100),
         );

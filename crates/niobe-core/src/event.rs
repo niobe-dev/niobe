@@ -598,6 +598,11 @@ pub enum Event {
         /// the call acts on nothing.
         #[serde(default)]
         target: Option<String>,
+        /// The sub-agent whose call is waiting, or `None` for the session's
+        /// own. It says who is asking and nothing more: a standing answer is
+        /// about the tool and its target, whichever agent asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentId>,
     },
 
     /// The operator answered a permission request.
@@ -935,6 +940,34 @@ mod tests {
                 }
                 other => panic!("the record reads as what it was written as: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_permission_request_stored_before_the_agent_field_is_the_sessions() {
+        let json =
+            r#"{"type":"permission_request","id":"t","tool":"Bash","input":"{}","target":"ls"}"#;
+        let read: Event = serde_json::from_str(json).expect("a record from before the field");
+        let Event::PermissionRequest { agent, .. } = read else {
+            panic!("the record reads as what it was written as: {read:?}");
+        };
+        assert_eq!(agent, None);
+    }
+
+    #[test]
+    fn whose_a_prompt_is_survives_the_round_trip_and_the_sessions_own_writes_nothing() {
+        let asked = |agent| Event::PermissionRequest {
+            id: ToolCallId::new("t"),
+            tool: "Bash".to_owned(),
+            input: "{}".to_owned(),
+            target: Some("ls".to_owned()),
+            agent,
+        };
+        for agent in [Some(AgentId::new("toolu_a")), None] {
+            let line = serde_json::to_string(&asked(agent.clone())).expect("a prompt record");
+            let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+            assert_eq!(read, asked(agent.clone()));
+            assert_eq!(line.contains("agent"), agent.is_some(), "{line}");
         }
     }
 

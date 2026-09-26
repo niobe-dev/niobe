@@ -32,7 +32,9 @@ use common::{
     session_with_a_markdown_reply, session_with_finished_turns, session_with_test_records,
     session_with_test_runs, session_with_two_agents_at_work, style_at, styles, unmetered_session,
 };
-use niobe_core::event::{Backend, Event, Mode, Usage, UsageWindow, UsageWindows};
+use niobe_core::event::{
+    AgentId, Backend, Event, Mode, PermissionDecision, Usage, UsageWindow, UsageWindows,
+};
 use niobe_core::{FailedTests, TestCounts, TestRunRecord};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
@@ -53,6 +55,7 @@ pub fn session_waiting_on_a_prompt() -> App {
         tool: "Read".to_owned(),
         input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
         target: Some("/repo/notes.txt".to_owned()),
+        agent: None,
     });
     app
 }
@@ -284,6 +287,38 @@ fn whose_each_row_is_shows_where_two_agents_calls_interleave() {
         assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
     }
     assert_snapshot("agents-120x30", &frame);
+}
+
+/// A reviewer's call refused and the other reviewer's waiting: the refusal
+/// and the question each say which agent asked, by the name its calls' rows
+/// give it, rather than reading as the session's own.
+#[test]
+fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
+    let mut app = session_with_two_agents_at_work();
+    let asked = |id: &str, command: &str, agent: &str| Event::PermissionRequest {
+        id: id.into(),
+        tool: "Bash".to_owned(),
+        input: format!(r#"{{"command":"{command}"}}"#),
+        target: Some(command.to_owned()),
+        agent: Some(AgentId::new(agent)),
+    };
+    app.apply(&asked("f3", "curl -sI localhost:8080", "toolu_fetch"));
+    app.apply(&Event::PermissionResponse {
+        id: "f3".into(),
+        decision: PermissionDecision::Deny,
+        message: None,
+    });
+    app.apply(&asked("c2", "python3 probe.py", "toolu_cache"));
+
+    let frame = screen(&mut app, 120, 30);
+    for row in [
+        "! denied  …fetch.py › Bash · curl -sI localhost:8080",
+        "? …cache.py asks",
+    ] {
+        assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
+    }
+    assert!(!frame.contains("? claude asks"), "{frame}");
+    assert_snapshot("agents-asking-120x30", &frame);
 }
 
 #[test]
@@ -605,6 +640,7 @@ fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
         tool: "mcp__claude_ai_Notion__notion-search".to_owned(),
         input: format!(r#"{{"command":"{command}"}}"#),
         target: Some(command.to_owned()),
+        agent: None,
     });
     let frame = screen(&mut app, 120, 30);
     let rows = question_rows(&frame);
@@ -637,6 +673,7 @@ fn a_long_request_wraps_inside_the_question() {
         tool: "Bash".to_owned(),
         input: format!(r#"{{"command":"{}"}}"#, command.trim()),
         target: Some(command.trim().to_owned()),
+        agent: None,
     });
     let frame = screen(&mut app, 200, 60);
 
@@ -715,6 +752,7 @@ fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
         tool: "Read".to_owned(),
         input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
         target: Some("/repo/notes.txt".to_owned()),
+        agent: None,
     });
     let after = screen(&mut app, 120, 30);
 

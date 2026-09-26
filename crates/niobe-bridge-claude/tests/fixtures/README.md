@@ -576,7 +576,24 @@ It exists because of what a sub-agent call is on this release:
   What the agents spent arrives only in the closing `modelUsage`, under
   `claude-opus-5[1m]` for the two reviewers. The three permission prompts
   here are all a reviewer's, and each `control_request` names the agent in
-  `agent_id`.
+  `agent_id` — the CLI's own id for it, which nothing else on the stream
+  carries. The call a prompt gates arrives first, on a message whose
+  `parent_tool_use_id` names the agent the way the rest of the stream does, so
+  that is whose the prompt is: `toolu_018oEYQ3e89jvpp8SycSyQ75` (the
+  review of `catalog/cache.py`) for the first and
+  `toolu_018CBLWZbbx5bZCa7U5VkDVi` (the review of `catalog/fetch.py`) for the
+  other two. The two kinds of id agree: `task_started` pairs
+  `a82c24093d563b64e` with the first call and `a8857370967f63821` with the
+  second.
+
+  ```sh
+  jq -r 'select(.type=="control_request") | .request.tool_use_id' sub-agents.jsonl |
+    while read -r call; do
+      jq -r --arg call "$call" 'select(.type=="assistant")
+        | select(any(.message.content[]?; .type=="tool_use" and .id==$call))
+        | .parent_tool_use_id' sub-agents.jsonl
+    done
+  ```
 - **Every cache write was bought for the hour**, and the `message_delta`s say
   so only inside `usage.iterations` — see above.
 

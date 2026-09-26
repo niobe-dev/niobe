@@ -470,7 +470,7 @@ const AGENT_MARK: &str = " › ";
 /// what the call does leaves. Where there is no room for a letter of it and
 /// the mark, it is dropped whole rather than left as a mark after an
 /// ellipsis.
-fn agent_tag(agent: &str, what: &str, room: usize) -> String {
+pub(crate) fn agent_tag(agent: &str, what: &str, room: usize) -> String {
     let mark = text::width(AGENT_MARK);
     let half = room.saturating_sub(mark) / 2;
     let left = room.saturating_sub(mark + text::width(what));
