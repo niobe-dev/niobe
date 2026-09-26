@@ -3752,6 +3752,52 @@ fn ctrl_g_stops_the_newest_command_still_running_and_leaves_the_session_open() {
 }
 
 #[test]
+fn the_stop_key_is_named_until_the_last_running_command_ends() {
+    let mut app = session_that_runs_commands();
+    let first = run_command(&mut app, "sleep 1");
+    let second = run_command(&mut app, "sleep 2");
+    let ended = |id| niobe_tui::Ran {
+        id,
+        output: String::new(),
+        bytes: 0,
+        whole: true,
+        exit_code: Some(0),
+        error: None,
+    };
+
+    app.ran(ended(first));
+    assert_eq!(
+        app.hint(),
+        Some("Ctrl+G stops it"),
+        "one is still running, so the key still stops something"
+    );
+
+    app.ran(ended(second));
+    assert_eq!(app.hint(), None, "nothing is left for the key to stop");
+    let row = bar_row(&screen(&mut app, 200, 60));
+    assert!(!row.contains("Ctrl+G"), "{row}");
+}
+
+#[test]
+fn a_command_ending_leaves_a_hint_that_is_not_about_stopping_it() {
+    let mut app = session_that_runs_commands();
+    let id = run_command(&mut app, "sleep 1");
+    stop_key(&mut app);
+    stop_key(&mut app);
+    assert_eq!(app.hint(), Some("No ! command is running"));
+
+    app.ran(niobe_tui::Ran {
+        id,
+        output: String::new(),
+        bytes: 0,
+        whole: true,
+        exit_code: None,
+        error: Some("ended by signal 15".to_owned()),
+    });
+    assert_eq!(app.hint(), Some("No ! command is running"));
+}
+
+#[test]
 fn a_command_the_operator_stopped_ends_as_stopped_with_what_it_printed_up_to_then() {
     use niobe_core::event::ToolOutcome;
 

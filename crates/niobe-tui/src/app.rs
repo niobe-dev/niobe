@@ -2874,7 +2874,7 @@ impl App {
         });
         self.running_commands.push((id.clone(), command.clone()));
         self.commands.push((id, command));
-        self.hint = Some(format!("{} stops it", crate::shell::STOP_KEY));
+        self.hint = Some(stop_hint());
         self.scroll_to_tail();
     }
 
@@ -2926,6 +2926,9 @@ impl App {
             Some(at) => self.running_commands.remove(at).1,
             None => String::new(),
         };
+        if self.running_commands.is_empty() && self.hint.as_deref() == Some(&stop_hint()) {
+            self.hint = None;
+        }
         let stopped = self.stopping.remove(&ran.id);
         if stopped {
             ran.error = Some(crate::shell::STOPPED.to_owned());
@@ -3841,6 +3844,13 @@ fn function_key_of(digit: char) -> Option<u8> {
             .and_then(|n| u8::try_from(n).ok())
             .filter(|n| *n > 0),
     }
+}
+
+/// The hint a running `!` command leaves, which only holds while one does:
+/// the last one ending takes it down rather than leave the bar naming a key
+/// with nothing to stop.
+fn stop_hint() -> String {
+    format!("{} stops it", crate::shell::STOP_KEY)
 }
 
 /// What an F-key does, for the ones that do nothing yet.
