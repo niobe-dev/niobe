@@ -1167,16 +1167,29 @@ impl Translator {
         match event.event {
             wire::StreamBody::MessageStart { message } => {
                 let Some(model) = message.model else { return };
-                let same_model = self
+                let windowed = self
                     .model
-                    .as_deref()
-                    .is_some_and(|session| is_window_of(session, &model));
-                match stream.as_deref() {
-                    None if !same_model => self.set_model(model.clone(), out),
-                    None => {}
-                    Some(agent) => self.agent_model(agent, model.clone(), out),
-                }
-                self.in_flight.insert(stream, model);
+                    .clone()
+                    .filter(|session| is_window_of(session, &model));
+                // A main-agent message naming the family of the session's
+                // model is billed under the session's id, which carries the
+                // window, so its tokens are filed there. Filed under the
+                // family, they would be owed for until a cost under that id
+                // settled them, and none ever does: the turn's cost is
+                // reported under the billed id, and the shell would price the
+                // same tokens a second time on top of it.
+                let billed = match (stream.as_deref(), windowed) {
+                    (None, Some(session)) => session,
+                    (None, None) => {
+                        self.set_model(model.clone(), out);
+                        model
+                    }
+                    (Some(agent), _) => {
+                        self.agent_model(agent, model.clone(), out);
+                        model
+                    }
+                };
+                self.in_flight.insert(stream, billed);
             }
 
             wire::StreamBody::MessageDelta { usage } => {
@@ -1490,6 +1503,11 @@ impl Translator {
     /// as `claude-opus-5[1m]`, naming the family in `canonicalModel`. Recorded
     /// live on Claude Code 2.1.278. Reconciled by id, the two have nothing in
     /// common, and every token the messages carried is reported again.
+    ///
+    /// The main agent's messages are filed under the session's id as they
+    /// arrive, where `init` named it. What is left for this is a message the
+    /// session's id does not account for: a sub-agent's, which the window of
+    /// the session says nothing about until the bill does.
     ///
     /// Only where the family is not billed in its own right in the same
     /// `result`: then there is no telling which of the two a message belongs
@@ -2335,6 +2353,59 @@ mod tests {
             })
             .collect();
         assert_eq!(billed, [("opus-5", 0, 0), ("opus-5[1m]", 2, 3)]);
+    }
+
+    /// The session is on the id with the window and its messages name the
+    /// family; each message's tokens are filed under the id the turn's cost
+    /// will be reported under, so that cost settles them.
+    #[test]
+    fn a_message_naming_the_family_of_the_sessions_window_is_filed_under_the_session() {
+        let mut translator = Translator::new("max");
+        translator
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5[1m]"}"#);
+        translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"opus-5"}}}"#,
+        );
+
+        let events = translator.line(&delta(5, 7));
+
+        let [Event::Usage(usage), Event::Context(_)] = events.as_slice() else {
+            panic!("a usage record and the context: {events:?}");
+        };
+        assert_eq!(usage.model, "opus-5[1m]");
+        assert_eq!((usage.input, usage.output), (5, 7));
+    }
+
+    /// A sub-agent's message is the agent's, on whatever the agent runs on;
+    /// the session's window says nothing about which id bills it. Where the
+    /// CLI bills it under the windowed id alone, its tokens are counted once.
+    #[test]
+    fn a_sub_agents_message_naming_the_family_keeps_its_name_and_is_counted_once() {
+        let mut translator = Translator::new("max");
+        translator
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5[1m]"}"#);
+        translator.line(
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_task","event":{"type":"message_start","message":{"model":"opus-5"}}}"#,
+        );
+        let delta = translator.line(
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_task","event":{"type":"message_delta","usage":{"input_tokens":5,"output_tokens":7}}}"#,
+        );
+        let [Event::Usage(usage)] = delta.as_slice() else {
+            panic!("one usage record: {delta:?}");
+        };
+        assert_eq!(usage.model, "opus-5");
+
+        let events = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":7},"modelUsage":{"opus-5[1m]":{"inputTokens":5,"outputTokens":7,"costUSD":0.1,"canonicalModel":"opus-5"}},"total_cost_usd":0.1}"#,
+        );
+        let billed: Vec<(&str, u64, u64)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.model.as_str(), usage.input, usage.output)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(billed, [("opus-5[1m]", 0, 0)]);
     }
 
     fn contexts(events: &[Event]) -> Vec<niobe_core::event::Context> {

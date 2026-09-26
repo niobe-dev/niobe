@@ -520,6 +520,13 @@ nothing in common, and every token is counted twice. `canonicalModel` is what
 says they are the same model. The same session without `--model`, on the
 default Opus, names `claude-opus-5` in all four places.
 
+Filed under the family, the messages' records would also stay owed for: the
+turn's cost is reported under `claude-opus-5[1m]`, and a cost settles only the
+records of its own id. The shell would then price the family's tokens again
+on top of the $0.269486 and show about twice the bill. So the main agent's
+messages are filed under the id `init` named, and the session folds to one
+model, `claude-opus-5[1m]`, with nothing owed and exactly $0.269486.
+
 ### The arithmetic the tests assert
 
 | Turn | in | out | cache read | cache write | `modelUsage` cost, running |

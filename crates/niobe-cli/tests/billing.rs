@@ -21,6 +21,8 @@ use std::path::PathBuf;
 
 use niobe_bridge_claude::Translator;
 use niobe_core::Billing;
+use niobe_core::event::Usage;
+use niobe_ledger::{Date, PriceTable};
 use niobe_tui::app::{App, Repo};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -45,6 +47,19 @@ fn shell_on(recording: &str, translator: Translator) -> App {
     });
     app.extend(&events);
     app
+}
+
+/// The bundled price table, read on the day the recordings were made, as the
+/// binary hands it to the shell: what the shell prices a token no reported
+/// cost covers with.
+#[derive(Debug)]
+struct Bundled(PriceTable);
+
+impl niobe_tui::Prices for Bundled {
+    fn estimate(&self, usage: &Usage) -> Option<f64> {
+        let day = Date::new(2026, 9, 19).expect("19 September 2026 is a date");
+        self.0.cost(usage, day).usd()
+    }
 }
 
 /// The Usage pane, as text: the rows of its box, cut out of a 120×30 frame.
@@ -138,6 +153,33 @@ fn a_recorded_max_session_shows_windows_and_tokens_and_no_dollar_total() {
     assert!(pane.contains("API-equivalent $"), "{pane}");
     assert!(!pane.contains("session "), "{pane}");
     assert_snapshot("usage-max-120x30", &pane);
+}
+
+/// Two turns on `claude-opus-5[1m]`, whose messages name the family and whose
+/// `result`s bill the id with the window, $0.269486 in all.
+const LONG_CONTEXT: &str =
+    include_str!("../../niobe-bridge-claude/tests/fixtures/long-context.jsonl");
+
+/// The CLI's cost covers every token of the session, so the pane shows that
+/// figure, as a measurement of what the CLI reported rather than a floor with
+/// an estimate for the same tokens added on top, against one model row.
+#[test]
+fn a_session_on_the_1m_window_costs_what_the_cli_reported() {
+    let table = PriceTable::bundled().expect("the bundled price table reads");
+    let mut app = shell_on(
+        LONG_CONTEXT,
+        Translator::new("company").billed_as(Billing::Metered),
+    )
+    .with_prices(Box::new(Bundled(table)));
+
+    let pane = usage_pane(&mut app);
+    assert!(pane.contains("session $0.27 "), "{pane}");
+    assert!(
+        !pane.contains('~'),
+        "no part of the bill is estimated: {pane}"
+    );
+    assert_eq!(pane.matches("opus-5").count(), 1, "one model row: {pane}");
+    assert_snapshot("usage-long-context-120x30", &pane);
 }
 
 /// The profile knows the contract; the stream only shows how the requests

@@ -787,6 +787,30 @@ mod long_context {
         );
     }
 
+    /// The cost the CLI reported covers every token the messages carried, so
+    /// nothing is left owed for and priced again on top of it, and the tokens
+    /// are counted against the one id the session is billed under — one row,
+    /// not the family's tokens beside the billed id's money.
+    #[test]
+    fn the_reported_cost_settles_every_message_of_the_session() {
+        let events = translated();
+        let totals = SessionState::replay(&events).totals().clone();
+
+        assert_eq!(
+            totals.records_unsettled, 0,
+            "left owed for: {:?}",
+            totals.unsettled
+        );
+        assert!(totals.cost_fully_reported());
+        assert_eq!(
+            totals.tokens_by_model.keys().collect::<Vec<_>>(),
+            ["claude-opus-5[1m]"],
+            "{:?}",
+            totals.tokens_by_model
+        );
+        assert_eq!(totals.tokens_by_model["claude-opus-5[1m]"], totals.tokens());
+    }
+
     /// The bill is filed under the id the CLI billed, with the money on it
     /// and no tokens: the messages already carried every one of them.
     #[test]
