@@ -2288,13 +2288,13 @@ fn the_bar_names_the_mode_once_a_backend_has_said_it() {
         "nothing has said how this session gates tool calls, and the bar claims to know:\n{row}"
     );
     assert!(row.contains("Shift+Tab mode"), "{row}");
-    assert!(row.contains("Alt+Enter newline"), "{row}");
+    assert!(row.contains("Ctrl+J newline"), "{row}");
 
     app.apply(&Event::ModeSelected { mode: Mode::Plan });
     let row = bar_row(&screen(&mut app, 200, 60));
     assert!(row.contains("▸▸ plan mode"), "{row}");
     assert!(row.contains("Shift+Tab cycles"), "{row}");
-    assert!(row.contains("Alt+Enter newline"), "{row}");
+    assert!(row.contains("Ctrl+J newline"), "{row}");
 }
 
 #[test]
@@ -2308,14 +2308,14 @@ fn the_bar_names_shift_enter_only_on_a_terminal_that_can_report_it() {
     let mut app = empty_session().reports_shift_enter();
     let row = bar_row(&screen(&mut app, 200, 60));
     assert!(row.contains("Shift+Enter newline"), "{row}");
-    assert!(!row.contains("Alt+Enter"), "{row}");
+    assert!(!row.contains("Ctrl+J"), "{row}");
 }
 
 #[test]
 fn a_narrowing_bar_drops_whole_hints_and_never_cuts_one() {
     let mut app = running_session();
     app.apply(&Event::ModeSelected { mode: Mode::Auto });
-    let whole = ["▸▸ auto mode", "Shift+Tab cycles", "Alt+Enter newline"];
+    let whole = ["▸▸ auto mode", "Shift+Tab cycles", "Ctrl+J newline"];
     let mut seen = std::collections::BTreeSet::new();
     for width in 80..=200 {
         let row = bar_row(&screen(&mut app, width, 30));
@@ -2409,6 +2409,36 @@ fn the_composer_still_grows_to_a_third_of_the_pane() {
     // The pane's inner rows, less the one border and padding row above.
     let inner = bottom - 2;
     assert_eq!(bottom - bar, inner / 3, "{frame}");
+}
+
+#[test]
+fn a_line_opened_after_the_last_one_grows_the_composer_rather_than_hiding_it() {
+    let mut app = running_session();
+    app.type_into_composer(ratatui_textarea::Input {
+        key: ratatui_textarea::Key::Char('a'),
+        ..Default::default()
+    });
+    let before = screen(&mut app, 120, 30);
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char('j'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let after = screen(&mut app, 120, 30);
+
+    let bar = |frame: &str| {
+        frame
+            .lines()
+            .position(|row| row.contains(" ask "))
+            .expect("the bar is drawn")
+    };
+    assert!(
+        after
+            .lines()
+            .nth(bar(&after))
+            .is_some_and(|row| row.contains("> a")),
+        "the line typed before the new one scrolled out of the composer:\n{after}"
+    );
+    assert_eq!(bar(&after) + 1, bar(&before), "{after}");
 }
 
 #[test]

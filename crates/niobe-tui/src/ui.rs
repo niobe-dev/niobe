@@ -629,7 +629,10 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     // The shell's own reply wraps in the bar rather than being cut, and takes
     // a row of its own only while it is too long for one.
     let said = bar_says(app, panes, theme, bar_room(app, inner.width));
-    let typed = app.composed().lines().count().max(said.len()).max(1);
+    // Split rather than `lines`, which does not count the empty line a
+    // just-opened one is: that line would take the only row, and scroll the
+    // one above it out of sight.
+    let typed = app.composed().split('\n').count().max(said.len()).max(1);
     let cap = usize::from(inner.height / 3).max(1);
     let composer_rows = u16::try_from(typed.min(cap)).unwrap_or(1);
 

@@ -741,16 +741,16 @@ fn a_terminal_that_reports_keys_is_asked_to_tell_shift_enter_and_the_bar_names_i
         "the keyboard was pushed onto the main screen's stack, which leaving the alternate \
          screen does not pop: {drawn:?}"
     );
-    assert!(!drawn.contains("Alt+Enter newline"), "{drawn:?}");
+    assert!(!drawn.contains("Ctrl+J newline"), "{drawn:?}");
 }
 
 #[test]
-fn a_terminal_that_cannot_report_keys_is_never_asked_and_the_bar_names_alt_enter() {
+fn a_terminal_that_cannot_report_keys_is_never_asked_and_the_bar_names_ctrl_j() {
     let repo = repo();
     let (terminal, slave) = Terminal::answering(Keys::Legacy);
     rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
     let mut shell = shell_on(&slave, repo.path());
-    terminal.shows("Alt+Enter newline");
+    terminal.shows("Ctrl+J newline");
 
     terminal.typed(CTRL_Q);
 
@@ -1048,6 +1048,27 @@ fn a_hangup_ends_the_session_as_a_terminal_that_went_away_rather_than_as_a_quit(
         "a hangup printed the line a quit prints, onto the terminal the hangup says has gone: \
          {drawn:?}"
     );
+}
+
+#[test]
+fn ctrl_j_opens_a_line_on_a_terminal_that_cannot_report_keys() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::answering(Keys::Legacy);
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    // The line feed Ctrl+J sends is a byte of its own. Were it read as Enter,
+    // the first line would run alone, an unterminated quote, and print nothing.
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(b"printf %s \"joined-$((6*7))\ny\"\r");
+    terminal.shows("joined-42");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    terminal.drained();
+    assert!(status.success(), "the shell ended with {status}");
 }
 
 /// A command typed after `!` runs in the directory the session was opened

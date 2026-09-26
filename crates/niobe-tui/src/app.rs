@@ -2074,13 +2074,14 @@ impl App {
     }
 
     /// The key that opens a new line in the composer on this terminal:
-    /// Shift+Enter where the terminal can report it, and Alt+Enter, which
-    /// every terminal can, where it cannot.
+    /// Shift+Enter where the terminal can report it, and Ctrl+J, which every
+    /// terminal sends as a byte of its own, where it cannot. Alt+Enter is not
+    /// named: whether it arrives at all is a setting of the terminal's.
     pub fn newline_key(&self) -> &'static str {
         if self.reports_shift_enter {
             "Shift+Enter"
         } else {
-            "Alt+Enter"
+            "Ctrl+J"
         }
     }
 
@@ -2558,7 +2559,7 @@ impl App {
         }
         let empty = self.composer.is_empty();
         match (key.code, key.modifiers) {
-            (KeyCode::Enter, modifiers) if opens_a_line(modifiers) => return false,
+            _ if opens_a_line(key) => return false,
             (KeyCode::Enter, _) => self.run_command(),
             (KeyCode::Esc, _) => self.shell_mode = false,
             (KeyCode::Backspace, _) if empty => self.shell_mode = false,
@@ -3000,9 +3001,7 @@ impl App {
                 // The turn is waiting on the answer, and the backend would
                 // hold a prompt sent now until after it — so the operator
                 // would have written the next turn believing it the answer.
-                AskFocus::Deferred
-                    if key.code == KeyCode::Enter && !opens_a_line(key.modifiers) =>
-                {
+                AskFocus::Deferred if key.code == KeyCode::Enter && !opens_a_line(key) => {
                     self.hint = Some(
                         "The turn is still waiting on the question above; Esc to answer it first"
                             .to_owned(),
@@ -3042,9 +3041,9 @@ impl App {
             // Tab has nothing to do in a prompt, and Shift+Tab already cycles
             // the mode, so the plain key is the one that moves the focus.
             (KeyCode::Tab, KeyModifiers::NONE) => self.focus_next(),
-            // Shift+Enter or Alt+Enter opens a line; Enter sends. The other
-            // way round would make the common action the awkward one.
-            (KeyCode::Enter, modifiers) if opens_a_line(modifiers) => {
+            // Shift+Enter, Ctrl+J or Alt+Enter opens a line; Enter sends. The
+            // other way round would make the common action the awkward one.
+            _ if opens_a_line(key) => {
                 self.focus = Focus::Session;
                 self.composer.insert_newline();
             }
@@ -3435,6 +3434,25 @@ const SHELL_PLACEHOLDER: &str = "A command to run here; the agent does not see w
 /// How many files the list under an `@` word offers at once.
 const MENTION_ROWS: usize = 8;
 
+/// Whether `key` opens a line in the composer rather than sending it.
+///
+/// Shift+Enter, on a terminal that can report it. Ctrl+J on every terminal:
+/// it is the line feed, a byte of its own rather than a modifier the terminal
+/// may not pass on. Alt+Enter as well, which reaches the shell only where the
+/// terminal is set to send Option as Meta: out of the box, Terminal.app sends
+/// Option+Enter as Enter.
+fn opens_a_line(key: ratatui::crossterm::event::KeyEvent) -> bool {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    match key.code {
+        KeyCode::Enter => {
+            key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::ALT
+        }
+        KeyCode::Char('j') => key.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    }
+}
+
 /// The placeholder in at most `columns` columns: as many of the things the
 /// composer does as fit whole, and what it is for however narrow it is.
 ///
@@ -3442,15 +3460,6 @@ const MENTION_ROWS: usize = 8;
 /// a repository, or one whose repository has not been read yet — since it
 /// would be advertising a list that cannot open; `! shell` where nothing runs
 /// commands, as in a recorded log being looked at.
-/// Whether Enter with `modifiers` opens a line in the composer rather than
-/// sending it: Shift, on a terminal that can report it, and Alt, which every
-/// terminal can.
-fn opens_a_line(modifiers: ratatui::crossterm::event::KeyModifiers) -> bool {
-    use ratatui::crossterm::event::KeyModifiers;
-
-    modifiers == KeyModifiers::SHIFT || modifiers == KeyModifiers::ALT
-}
-
 fn placeholder(columns: usize, files: bool, commands: bool) -> String {
     let mut said = PLACEHOLDER[0].to_owned();
     for more in PLACEHOLDER[1..].iter().filter(|more| match **more {
@@ -4046,8 +4055,31 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_j_opens_a_line_on_any_terminal() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for mut app in [app(), app().reports_shift_enter()] {
+            for c in "one".chars() {
+                app.type_into_composer(Input {
+                    key: Key::Char(c),
+                    ..Default::default()
+                });
+            }
+            app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+            typed_then_enter(&mut app, "two", KeyModifiers::NONE);
+
+            assert_eq!(
+                app.take_produced(),
+                [Event::UserMessage {
+                    text: "one\ntwo".to_owned()
+                }]
+            );
+        }
+    }
+
+    #[test]
     fn the_key_named_for_a_new_line_is_the_one_the_terminal_can_report() {
-        assert_eq!(app().newline_key(), "Alt+Enter");
+        assert_eq!(app().newline_key(), "Ctrl+J");
         assert_eq!(app().reports_shift_enter().newline_key(), "Shift+Enter");
     }
 
