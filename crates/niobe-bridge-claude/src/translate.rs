@@ -144,6 +144,16 @@ impl Counts {
         }
     }
 
+    /// The smaller of the two, field by field.
+    fn least(self, other: Self) -> Self {
+        Self {
+            input: self.input.min(other.input),
+            output: self.output.min(other.output),
+            cache_read: self.cache_read.min(other.cache_read),
+            cache_write: self.cache_write.min(other.cache_write),
+        }
+    }
+
     fn is_empty(self) -> bool {
         self == Self::default()
     }
@@ -1459,9 +1469,10 @@ impl Translator {
             self.report_session_cost(outcome, out);
             return;
         }
-        self.file_messages_under_their_bill(&outcome.model_usage);
+        let moved = self.file_messages_under_their_bill(&outcome.model_usage);
 
         let mut costs = 0.0;
+        let mut settled = Vec::new();
         for (model, usage) in &outcome.model_usage {
             if let Some(basis) = &usage.cost_basis
                 && basis != "list"
@@ -1482,7 +1493,13 @@ impl Translator {
             }
             seen.tokens.add(tokens);
             seen.cost_usd = cost_now;
+            if spent > 0.0 {
+                settled.push(model.clone());
+            }
             out.push(self.cost_record(model.clone(), tokens, spent));
+        }
+        for model in moved.into_iter().filter(|model| !settled.contains(model)) {
+            out.push(covered_elsewhere(model));
         }
 
         if let Some(total) = outcome.total_cost_usd
@@ -1496,7 +1513,8 @@ impl Translator {
     }
 
     /// Moves what the messages reported under one id to the id the CLI billed
-    /// them under, where `modelUsage` says the two are the same model.
+    /// them under, where `modelUsage` says the two are the same model, and
+    /// returns the ids that gave anything up.
     ///
     /// A session on a model with its 1M-token window selected names the model
     /// as the family in every `message_start` — `claude-opus-5` — and bills it
@@ -1506,27 +1524,74 @@ impl Translator {
     ///
     /// The main agent's messages are filed under the session's id as they
     /// arrive, where `init` named it. What is left for this is a message the
-    /// session's id does not account for: a sub-agent's, which the window of
-    /// the session says nothing about until the bill does.
+    /// session's id does not account for: a sub-agent's, or one of a turn
+    /// after `/model` moved the session onto the window before any `init` said
+    /// so.
     ///
-    /// Only where the family is not billed in its own right in the same
-    /// `result`: then there is no telling which of the two a message belongs
-    /// to, and each is reconciled against what was reported under its own id.
-    fn file_messages_under_their_bill(&mut self, model_usage: &BTreeMap<String, wire::ModelUsage>) {
-        for (billed, usage) in model_usage {
-            let Some(named) = usage.canonical_model.as_ref() else {
-                continue;
-            };
-            if named == billed || model_usage.contains_key(named) {
-                continue;
+    /// Where the family is billed beside its window in the same `result`, a
+    /// message's name cannot say which of the two it belongs to, so the bill
+    /// does: an id that was filed more than it grew gives the difference to
+    /// an id of the same model that grew more than was filed under it. Moving
+    /// everything filed under the family instead would report the family's
+    /// own growth again, and moving nothing would report the window's.
+    fn file_messages_under_their_bill(
+        &mut self,
+        model_usage: &BTreeMap<String, wire::ModelUsage>,
+    ) -> Vec<String> {
+        let family_of = |(id, usage): (&String, &wire::ModelUsage)| {
+            usage.canonical_model.clone().unwrap_or_else(|| id.clone())
+        };
+        let families: Vec<String> = model_usage.iter().map(family_of).collect();
+        let mut moved = Vec::new();
+        for family in families {
+            let bills: BTreeMap<String, Counts> = model_usage
+                .iter()
+                .filter(|entry| family_of(*entry) == family)
+                .map(|(id, usage)| (id.clone(), Counts::from(usage)))
+                .collect();
+            let mut spare: BTreeMap<String, Counts> = bills
+                .iter()
+                .map(|(id, bill)| (id.clone(), bill.beyond(self.filed(id))))
+                .collect();
+            spare
+                .entry(family.clone())
+                .or_insert_with(|| self.filed(&family));
+            for (target, bill) in &bills {
+                let mut short = self.filed(target).beyond(*bill);
+                for (source, left) in &mut spare {
+                    let take = left.least(short);
+                    if source == target || take.is_empty() {
+                        continue;
+                    }
+                    *left = take.beyond(*left);
+                    short = take.beyond(short);
+                    self.shift(source, target, take);
+                    if !moved.contains(source) {
+                        moved.push(source.clone());
+                    }
+                }
             }
-            let Some(messages) = self.reported.remove(named) else {
-                continue;
-            };
-            let bill = self.reported.entry(billed.clone()).or_default();
-            bill.tokens.add(messages.tokens);
-            bill.cost_usd += messages.cost_usd;
         }
+        moved
+    }
+
+    /// The tokens reported under `model` so far this session.
+    fn filed(&self, model: &str) -> Counts {
+        self.reported
+            .get(model)
+            .map(|seen| seen.tokens)
+            .unwrap_or_default()
+    }
+
+    /// Moves `tokens` from what was reported under one id to another's.
+    fn shift(&mut self, from: &str, to: &str, tokens: Counts) {
+        let source = self.reported.entry(from.to_owned()).or_default();
+        source.tokens = tokens.beyond(source.tokens);
+        self.reported
+            .entry(to.to_owned())
+            .or_default()
+            .tokens
+            .add(tokens);
     }
 
     /// The fallback for a `result` that priced the session without saying how
@@ -1573,6 +1638,27 @@ impl Translator {
             settles_model: true,
         })
     }
+}
+
+/// A record settling what went out under `model` that the CLI billed under
+/// another id of the same model, whose cost covers it.
+///
+/// The cost is the CLI's own: nothing more was billed under `model`, and the
+/// money for these tokens is in the other id's record. Left unsettled, they
+/// would be priced by the shell on top of that money.
+fn covered_elsewhere(model: String) -> Event {
+    Event::Usage(Usage {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: 0,
+        reasoning: 0,
+        model,
+        cost_usd: Some(0.0),
+        cost_basis: Some(CostBasis::ApiEquivalent),
+        settles_model: true,
+    })
 }
 
 /// How a session is billed, from where its credential came from and the
@@ -2405,7 +2491,124 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(billed, [("opus-5[1m]", 0, 0)]);
+        // The second record carries no tokens: it settles what went out under
+        // the family, which the windowed id's cost covers.
+        assert_eq!(billed, [("opus-5[1m]", 0, 0), ("opus-5", 0, 0)]);
+    }
+
+    /// Folds `lines` through a fresh translator into the session state, the
+    /// way the shell does, so that a test reads what the operator would see.
+    fn folded(lines: &[&str]) -> niobe_core::session::Totals {
+        let mut translator = Translator::new("max");
+        let mut state = niobe_core::session::SessionState::new();
+        for line in lines {
+            for event in translator.line(line) {
+                state.apply(&event);
+            }
+        }
+        state.totals().clone()
+    }
+
+    const INIT_FAMILY: &str =
+        r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#;
+    const INIT_WINDOW: &str =
+        r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5[1m]"}"#;
+    const MAIN_START: &str =
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"opus-5"}}}"#;
+    const AGENT_START: &str = r#"{"type":"stream_event","parent_tool_use_id":"toolu_task","event":{"type":"message_start","message":{"model":"opus-5"}}}"#;
+    const AGENT_DELTA: &str = r#"{"type":"stream_event","parent_tool_use_id":"toolu_task","event":{"type":"message_delta","usage":{"input_tokens":50,"output_tokens":5}}}"#;
+    const FIRST_TURN_ON_THE_FAMILY: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":10},"modelUsage":{"opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5,"canonicalModel":"opus-5"}},"total_cost_usd":0.5}"#;
+    const SECOND_TURN_ON_THE_WINDOW: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5,"canonicalModel":"opus-5"},"opus-5[1m]":{"inputTokens":40,"outputTokens":4,"costUSD":0.3,"canonicalModel":"opus-5"}},"total_cost_usd":0.8}"#;
+    const MAIN_ON_THE_WINDOW_AGENT_ON_THE_FAMILY: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":150,"output_tokens":15},"modelUsage":{"opus-5[1m]":{"inputTokens":100,"outputTokens":10,"costUSD":0.6,"canonicalModel":"opus-5"},"opus-5":{"inputTokens":50,"outputTokens":5,"costUSD":0.3,"canonicalModel":"opus-5"}},"total_cost_usd":0.9}"#;
+
+    fn assert_counted_once(totals: &niobe_core::session::Totals, input: u64, output: u64) {
+        assert_eq!((totals.input, totals.output), (input, output));
+        assert_eq!(totals.records_unsettled, 0, "owed: {:?}", totals.unsettled);
+    }
+
+    /// `/model` moves the session onto the window between two turns, and the
+    /// second turn's message still names the family: the bill says the family
+    /// did not grow and the windowed id did, so the message is the window's.
+    #[test]
+    fn moving_onto_the_window_mid_session_counts_the_turn_once() {
+        let totals = folded(&[
+            INIT_FAMILY,
+            MAIN_START,
+            &delta(100, 10),
+            FIRST_TURN_ON_THE_FAMILY,
+            MAIN_START,
+            &delta(40, 4),
+            SECOND_TURN_ON_THE_WINDOW,
+        ]);
+
+        assert_counted_once(&totals, 140, 14);
+        assert!((totals.reported_cost_usd - 0.8).abs() < 1e-9);
+    }
+
+    /// The same move, where the CLI's `init` for the second turn names the
+    /// windowed id.
+    #[test]
+    fn moving_onto_the_window_announced_by_init_counts_the_turn_once() {
+        let totals = folded(&[
+            INIT_FAMILY,
+            MAIN_START,
+            &delta(100, 10),
+            FIRST_TURN_ON_THE_FAMILY,
+            INIT_WINDOW,
+            MAIN_START,
+            &delta(40, 4),
+            SECOND_TURN_ON_THE_WINDOW,
+        ]);
+
+        assert_counted_once(&totals, 140, 14);
+    }
+
+    /// The main agent on the window and a sub-agent billed under the family,
+    /// both of whose messages name the family: each id's bill takes the
+    /// messages that made it grow, and neither is counted twice or lost.
+    #[test]
+    fn a_sub_agent_billed_under_the_family_beside_a_session_on_the_window_counts_once() {
+        let totals = folded(&[
+            INIT_WINDOW,
+            MAIN_START,
+            &delta(100, 10),
+            AGENT_START,
+            AGENT_DELTA,
+            MAIN_ON_THE_WINDOW_AGENT_ON_THE_FAMILY,
+        ]);
+
+        assert_counted_once(&totals, 150, 15);
+    }
+
+    /// The same session read back with no `init` to say which id the main
+    /// agent runs on: every message names the family, and the bill alone says
+    /// how they split.
+    #[test]
+    fn messages_all_naming_the_family_split_by_what_each_billed_id_grew() {
+        let totals = folded(&[
+            MAIN_START,
+            &delta(100, 10),
+            AGENT_START,
+            AGENT_DELTA,
+            MAIN_ON_THE_WINDOW_AGENT_ON_THE_FAMILY,
+        ]);
+
+        assert_counted_once(&totals, 150, 15);
+    }
+
+    /// A sub-agent's messages name the family and the CLI bills them under the
+    /// windowed id alone: the cost under that id covers them, so nothing is
+    /// left owed under the name they went out with.
+    #[test]
+    fn a_family_the_bill_does_not_name_is_settled_by_the_id_that_billed_it() {
+        let totals = folded(&[
+            INIT_WINDOW,
+            AGENT_START,
+            AGENT_DELTA,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":50,"output_tokens":5},"modelUsage":{"opus-5[1m]":{"inputTokens":50,"outputTokens":5,"costUSD":0.3,"canonicalModel":"opus-5"}},"total_cost_usd":0.3}"#,
+        ]);
+
+        assert_counted_once(&totals, 50, 5);
     }
 
     fn contexts(events: &[Event]) -> Vec<niobe_core::event::Context> {
