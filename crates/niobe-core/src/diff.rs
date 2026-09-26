@@ -4,15 +4,16 @@
 //! The line arithmetic every backend's file changes are counted with.
 //!
 //! A bridge knows what its CLI replaced with what; it does not get to decide
-//! what a changed line is. Both bridges count through [`lines_changed`], so a
+//! what a changed line is. Both bridges count through this module, so a
 //! session cannot report one figure on one backend and another figure on the
 //! other for the same edit.
 //!
 //! The counts are the ones `git diff --numstat` prints for the same
 //! replacement: the minimal number of lines that have to be removed and added
-//! to turn one text into the other. That is the longest common subsequence of
-//! the two line sequences, which is what a diff's own minimality means — so
-//! the pane's `+2 −1` is a figure the operator can check against `git`.
+//! to turn one text into the other, a line being its text and its terminator
+//! both. That is the longest common subsequence of the two line sequences,
+//! which is what a diff's own minimality means — so the pane's `+2 −1` is a
+//! figure the operator can check against `git`.
 //!
 //! A [`Hunk`] is the other half: not how many lines changed but which, as the
 //! backend reported them. It is kept here rather than in a bridge so that the
@@ -21,23 +22,29 @@
 use serde::{Deserialize, Serialize};
 
 /// Lines added and removed by replacing `before` with `after`, as
-/// `(added, removed)`.
+/// `(added, removed)`, where the two are the whole of a file before and after.
 ///
-/// A trailing newline is a terminator, not a line: `"a\nb\n"` and `"a\nb"` are
-/// both two lines, which is how `git` counts them too.
+/// A line is compared with its terminator, as `git` compares it: a line whose
+/// `\r\n` became `\n` is a line removed and a line added, and so is a last
+/// line that gained or lost its newline. A trailing newline still ends the
+/// last line rather than starting another, so `"a\nb\n"` and `"a\nb"` are
+/// both two lines.
 ///
-/// `None` where the two texts are too large to compare exactly. The comparison
-/// is quadratic in the number of lines that differ, so a replacement of
-/// thousands of lines by thousands of others is refused rather than allowed to
-/// stall a redraw. A caller reports that as a change of an unstated size — an
-/// estimate here would be a number nobody could check.
+/// `None` where either text is binary by git's reading — a nul in its first
+/// 8000 bytes — since git states no line counts for one either, and where the
+/// two differ too much to compare within a redraw. A caller reports either as
+/// a change of an unstated size — an estimate here would be a number nobody
+/// could check.
 pub fn lines_changed(before: &str, after: &str) -> Option<(u64, u64)> {
-    let before: Vec<&str> = before.lines().collect();
-    let after: Vec<&str> = after.lines().collect();
+    if is_binary(before) || is_binary(after) {
+        return None;
+    }
+    let before: Vec<&str> = before.split_inclusive('\n').collect();
+    let after: Vec<&str> = after.split_inclusive('\n').collect();
 
     // The lines that match at either end are common to both texts whatever the
-    // middle does, so trimming them is free and leaves the quadratic step with
-    // only the part that actually differs.
+    // middle does, so trimming them is free and leaves the diff with only the
+    // part that actually differs.
     let head = common_prefix(&before, &after);
     let tail = common_suffix(&before[head..], &after[head..]);
     let before = &before[head..before.len() - tail];
@@ -50,43 +57,87 @@ pub fn lines_changed(before: &str, after: &str) -> Option<(u64, u64)> {
     ))
 }
 
-/// The most cells the longest-common-subsequence table may be walked.
+/// Lines added and removed by replacing `old` with `new` somewhere inside a
+/// file, as `(added, removed)`: what an edit that names the text it replaced
+/// changes.
 ///
-/// Four million is a few milliseconds, which a replacement made between two
-/// frames can afford. Above it the change is reported as one whose size the
-/// backend did not state, because a redraw that waits on a diff is a redraw
-/// the operator watches stall.
-const MAX_CELLS: usize = 4_000_000;
+/// Whatever follows the replaced text in the file follows both sides alike, so
+/// the last line of each is continued by the same text rather than ended where
+/// the argument ends. It is counted as a line the file ends with a newline,
+/// which is exact wherever the replacement stops at the end of a line — the
+/// usual case, since an edit is usually of whole lines.
+pub fn replacement_changed(old: &str, new: &str) -> Option<(u64, u64)> {
+    lines_changed(&format!("{old}\n"), &format!("{new}\n"))
+}
 
-/// How many lines the two sequences have in common, in order.
+/// How far into a text `git` looks for a nul before calling it binary.
+const BINARY_PROBE: usize = 8_000;
+
+fn is_binary(text: &str) -> bool {
+    text.as_bytes()
+        .iter()
+        .take(BINARY_PROBE)
+        .any(|&byte| byte == 0)
+}
+
+/// The most steps the diff may take before the change is refused.
+///
+/// A step is one diagonal tried or one matching line followed, so the budget
+/// grows with how much the texts differ times how long they are, not with the
+/// size of the file alone: a two-line change in a fifty-thousand-line file is
+/// a few hundred thousand steps, and seven hundred lines replaced by seven
+/// hundred others are just inside the million. A million is under ten
+/// milliseconds in a release build, which a replacement made between two
+/// frames can afford. Above it the change is reported as one whose size the backend did not
+/// state, because a redraw that waits on a diff is a redraw the operator
+/// watches stall.
+const MAX_STEPS: usize = 1_000_000;
+
+/// How many lines the two sequences have in common, in order, or `None`
+/// where finding out would take more than [`MAX_STEPS`].
+///
+/// Myers' greedy diff: it finds the fewest lines that must be removed and
+/// added, `d`, by trying every edit script of length 0, 1, 2 … in turn, so
+/// its work grows with `d` rather than with the product of the lengths. The
+/// longest common subsequence is what the two lengths share once those `d`
+/// lines are set aside.
 fn common_lines(before: &[&str], after: &[&str]) -> Option<usize> {
-    if before.is_empty() || after.is_empty() {
+    let (n, m) = (before.len(), after.len());
+    if n == 0 || m == 0 {
         return Some(0);
     }
-    if before.len().checked_mul(after.len())? > MAX_CELLS {
-        return None;
-    }
 
-    // Only the length of the longest common subsequence is wanted, not the
-    // subsequence itself, so two rows of the table are enough and the shorter
-    // side is the one held in memory.
-    let (outer, inner) = match before.len() >= after.len() {
-        true => (before, after),
-        false => (after, before),
-    };
-
-    let mut previous = vec![0usize; inner.len() + 1];
-    let mut current = vec![0usize; inner.len() + 1];
-    for outer_line in outer {
-        for (j, inner_line) in inner.iter().enumerate() {
-            current[j + 1] = match outer_line == inner_line {
-                true => previous[j] + 1,
-                false => current[j].max(previous[j + 1]),
+    // Diagonal `k` holds the points where the line of `before` minus the line
+    // of `after` is `k - offset`; the shift keeps it an index. `furthest[k]`
+    // is how far along `before` the best script of the current length
+    // reaches on that diagonal.
+    let offset = n + m;
+    let mut furthest = vec![0usize; 2 * offset + 2];
+    let mut steps = 0usize;
+    for d in 0..=offset {
+        for k in (offset - d..=offset + d).step_by(2) {
+            let down = k == offset - d || (k != offset + d && furthest[k - 1] < furthest[k + 1]);
+            let mut x = match down {
+                true => furthest[k + 1],
+                false => furthest[k - 1] + 1,
             };
+            let mut y = (x + offset).checked_sub(k)?;
+            while x < n && y < m && before[x] == after[y] {
+                x += 1;
+                y += 1;
+                steps += 1;
+            }
+            furthest[k] = x;
+            if x >= n && y >= m {
+                return Some((n + m - d) / 2);
+            }
+            steps += 1;
+            if steps > MAX_STEPS {
+                return None;
+            }
         }
-        std::mem::swap(&mut previous, &mut current);
     }
-    previous.last().copied()
+    None
 }
 
 fn common_prefix(before: &[&str], after: &[&str]) -> usize {
@@ -197,45 +248,28 @@ impl Hunk {
                 Line::Added(_) => (old, new.saturating_add(1)),
             })
     }
-
-    /// The hunk's two sides as texts, for [`lines_changed`].
-    fn sides(&self) -> (String, String) {
-        let mut before = String::new();
-        let mut after = String::new();
-        for line in &self.lines {
-            let (to_before, to_after) = match line {
-                Line::Context(_) => (true, true),
-                Line::Removed(_) => (true, false),
-                Line::Added(_) => (false, true),
-            };
-            for (wanted, side) in [(to_before, &mut before), (to_after, &mut after)] {
-                if wanted {
-                    side.push_str(line.text());
-                    side.push('\n');
-                }
-            }
-        }
-        (before, after)
-    }
 }
 
-/// Lines added and removed across `hunks`, as `(added, removed)`, counted
-/// through [`lines_changed`] one hunk at a time so that a change reported as
-/// hunks is counted by the same arithmetic as one reported as two texts.
+/// Lines added and removed across `hunks`, as `(added, removed)`.
 ///
-/// `None` where there are no hunks, or where one of them is too large to
-/// compare exactly.
+/// A hunk is already a diff, so its own markers are the count: a line the
+/// backend removed and added again differs in something the hunk's text does
+/// not carry — its terminator, or the newline a last line gained or lost —
+/// and that is a change `git` counts too.
+///
+/// `None` where there are no hunks.
 pub fn hunks_changed(hunks: &[Hunk]) -> Option<(u64, u64)> {
     if hunks.is_empty() {
         return None;
     }
-    hunks
-        .iter()
-        .try_fold((0u64, 0u64), |(added, removed), hunk| {
-            let (before, after) = hunk.sides();
-            let (a, r) = lines_changed(&before, &after)?;
-            Some((added.saturating_add(a), removed.saturating_add(r)))
-        })
+    Some(hunks.iter().flat_map(Hunk::lines).fold(
+        (0u64, 0u64),
+        |(added, removed), line| match line {
+            Line::Context(_) => (added, removed),
+            Line::Removed(_) => (added, removed.saturating_add(1)),
+            Line::Added(_) => (added.saturating_add(1), removed),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -335,9 +369,72 @@ mod tests {
 
     #[test]
     fn a_trailing_newline_terminates_the_last_line_rather_than_starting_one() {
-        assert_eq!(lines_changed("a\nb\n", "a\nb"), Some((0, 0)));
         assert_eq!(lines_changed("", "one line\n"), Some((1, 0)));
         assert_eq!(lines_changed("one line", ""), Some((0, 1)));
+        assert_eq!(lines_changed("a\nb\n", "a\nb\nc\n"), Some((1, 0)));
+    }
+
+    /// Each row was measured with `git diff --no-index --numstat` on two files
+    /// holding exactly these bytes; `None` is the `-  -` git prints for a
+    /// binary file.
+    #[test]
+    fn line_ending_final_newline_and_binary_changes_count_as_git_counts_them() {
+        let cases = [
+            ("crlf to lf", "a\r\nb\r\nc\r\n", "a\nb\nc\n", Some((3, 3))),
+            ("lf to crlf", "a\nb\n", "a\r\nb\r\n", Some((2, 2))),
+            ("final newline dropped", "a\nb\n", "a\nb", Some((1, 1))),
+            ("final newline added", "a\nb", "a\nb\n", Some((1, 1))),
+            ("content with a nul", "a\nb\n", "a\n\0b\n", None),
+        ];
+        for (case, before, after, git) in cases {
+            assert_eq!(lines_changed(before, after), git, "{case}");
+        }
+    }
+
+    /// A nul past the first 8000 bytes is not where git looks, so the file is
+    /// still text to it.
+    #[test]
+    fn a_nul_past_where_git_looks_leaves_the_file_text() {
+        let before = format!("{}\n", "x".repeat(8_000));
+        let after = format!("{before}\0\n");
+        assert_eq!(lines_changed(&before, &after), Some((1, 0)));
+    }
+
+    /// Two changes far apart leave the whole file between them to compare, and
+    /// that is still cheap when the files are mostly the same.
+    #[test]
+    fn two_changes_far_apart_in_a_large_file_are_counted() {
+        let before: String = (0..50_000).map(|i| format!("line {i}\n")).collect();
+        let after = before.replacen("line 0\n", "line zero\n", 1).replacen(
+            "line 49999\n",
+            "line last\n",
+            1,
+        );
+        assert_eq!(lines_changed(&before, &after), Some((2, 2)));
+    }
+
+    /// An edit's two texts sit in a file whose text after them is the same on
+    /// both sides, so their last lines are not told apart by a terminator the
+    /// file supplies.
+    #[test]
+    fn a_replacement_inside_a_file_reads_its_last_lines_as_continued_by_the_file() {
+        assert_eq!(replacement_changed("a\nb", "a\nb\nc"), Some((1, 0)));
+        assert_eq!(
+            replacement_changed("gamma", "gamma one\ngamma two"),
+            Some((2, 1))
+        );
+        assert_eq!(replacement_changed("drop me\n", ""), Some((0, 1)));
+        assert_eq!(replacement_changed("a\r\nb", "a\nb"), Some((1, 1)));
+        assert_eq!(replacement_changed("a\n\0", "a\n"), None);
+    }
+
+    /// The patch's own markers are the diff: a line removed and added again
+    /// with only its terminator changed is a change git counts.
+    #[test]
+    fn a_hunk_that_rewrites_a_line_unchanged_but_for_its_end_counts_it() {
+        let hunk = Hunk::checked(1, 2, 1, 2, vec![context("a"), removed("b"), added("b")])
+            .expect("consistent");
+        assert_eq!(hunks_changed(&[hunk]), Some((1, 1)));
     }
 
     #[test]
@@ -360,9 +457,53 @@ mod tests {
         );
     }
 
+    /// The longest common subsequence by the whole table, which is too slow
+    /// to ship and too plain to be wrong.
+    fn common_by_table(before: &[&str], after: &[&str]) -> usize {
+        let mut table = vec![vec![0usize; after.len() + 1]; before.len() + 1];
+        for (i, b) in before.iter().enumerate() {
+            for (j, a) in after.iter().enumerate() {
+                table[i + 1][j + 1] = match b == a {
+                    true => table[i][j] + 1,
+                    false => table[i][j + 1].max(table[i + 1][j]),
+                };
+            }
+        }
+        table[before.len()][after.len()]
+    }
+
+    /// Every pair of short sequences over three lines, which covers each way
+    /// a script can run into the edge of the grid.
+    #[test]
+    fn the_diff_finds_the_same_common_lines_as_the_whole_table() {
+        let alphabet = ["a", "b", "c"];
+        let sequences: Vec<Vec<&str>> = (0..=4u32)
+            .flat_map(|len| {
+                (0..3usize.pow(len)).map(move |mut code| {
+                    (0..len)
+                        .map(|_| {
+                            let line = alphabet[code % 3];
+                            code /= 3;
+                            line
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        for before in &sequences {
+            for after in &sequences {
+                assert_eq!(
+                    common_lines(before, after),
+                    Some(common_by_table(before, after)),
+                    "{before:?} against {after:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_moved_line_is_one_removal_and_one_addition() {
-        assert_eq!(lines_changed("a\nb\nc", "b\nc\na"), Some((1, 1)));
+        assert_eq!(lines_changed("a\nb\nc\n", "b\nc\na\n"), Some((1, 1)));
     }
 
     #[test]

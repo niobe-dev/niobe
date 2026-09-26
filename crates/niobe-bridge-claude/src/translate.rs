@@ -1076,7 +1076,7 @@ impl Translator {
                     .and_then(serde_json::Value::as_bool)
                 {
                     Some(true) => diff::hunks_changed(&hunks),
-                    Some(false) | None => diff::lines_changed(
+                    Some(false) | None => diff::replacement_changed(
                         string_at(arguments, "old_string").unwrap_or_default(),
                         string_at(arguments, "new_string").unwrap_or_default(),
                     ),

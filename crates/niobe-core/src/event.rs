@@ -650,9 +650,8 @@ pub enum Event {
     /// which is the difference between a count and a guess. Whatever shows
     /// these reads the session's figure as a floor while any are `None`.
     ///
-    /// Counted with [`crate::diff::lines_changed`] by whichever backend
-    /// produced it, so that two backends cannot disagree about what a changed
-    /// line is.
+    /// Counted with [`crate::diff`] by whichever backend produced it, so that
+    /// two backends cannot disagree about what a changed line is.
     ///
     /// Arrives directly after the [`Event::ToolCallEnd`] of the call that
     /// made the change, which is how a transcript puts the change under the
