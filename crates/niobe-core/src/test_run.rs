@@ -100,7 +100,9 @@ where
 /// Whether a shell command runs `cargo test`.
 ///
 /// The command is read as the agent wrote it, split into the simple commands
-/// that `&&`, `||`, `;`, `|`, a newline or a subshell's parentheses separate.
+/// that `&&`, `||`, `&`, `;`, `|`, a newline or a subshell's parentheses
+/// separate. A redirection — `2>&1`, `&> log`, `>| log` — is part of the
+/// command it redirects, not a separator.
 /// One of them has to be `cargo test` or `cargo +<toolchain> test`, after any
 /// `NAME=value` assignments and the wrappers `env`, `time` and `nice` that
 /// change nothing about what is printed. A `cargo test` that builds the tests
@@ -110,9 +112,39 @@ where
 /// nor through any other wrapper, whose output may not be what `cargo test`
 /// printed.
 pub fn is_test_run(command: &str) -> bool {
-    command
-        .split(['&', '|', ';', '\n', '(', ')'])
+    simple_commands(command)
+        .into_iter()
         .any(|simple| runs_cargo_test(simple.split_whitespace()))
+}
+
+/// The simple commands in `command`, in order, split where a shell would run
+/// the next one, and empty where two separators meet (`&&`, `||`).
+fn simple_commands(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let mut commands = Vec::new();
+    let mut start = 0;
+    for at in 0..bytes.len() {
+        if separates(bytes, at) {
+            commands.extend(command.get(start..at));
+            start = at + 1;
+        }
+    }
+    commands.extend(command.get(start..));
+    commands
+}
+
+/// Whether the byte at `at` ends a simple command. An `&` that follows `>` or
+/// `<` or precedes `>`, and a `|` that follows `>`, belong to a redirection:
+/// `cargo test 2>&1` is one command, whose status is `cargo test`'s.
+fn separates(bytes: &[u8], at: usize) -> bool {
+    let before = at.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+    let after = bytes.get(at + 1).copied();
+    match bytes.get(at) {
+        Some(b'&') => !matches!(before, Some(b'>' | b'<')) && after != Some(b'>'),
+        Some(b'|') => before != Some(b'>'),
+        Some(b';' | b'\n' | b'(' | b')') => true,
+        _ => false,
+    }
 }
 
 fn runs_cargo_test<'a>(mut words: impl Iterator<Item = &'a str>) -> bool {
@@ -261,8 +293,8 @@ const FAILED_STATUS: i32 = 101;
 /// Whether the last simple command in `command` is `cargo test`, so that the
 /// status the whole command exited with is the run's.
 fn ends_in_cargo_test(command: &str) -> bool {
-    command
-        .split(['&', '|', ';', '\n', '(', ')'])
+    simple_commands(command)
+        .into_iter()
         .rfind(|simple| !simple.trim().is_empty())
         .is_some_and(|simple| runs_cargo_test(simple.split_whitespace()))
 }
@@ -721,6 +753,8 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "(cd x && cargo test)",
             "cargo fmt --all\ncargo test",
             "cargo test -- --nocapture",
+            "cargo test &> log.txt",
+            "cargo test >| log.txt",
         ] {
             assert!(is_test_run(command), "{command:?} runs the tests");
         }
@@ -767,6 +801,24 @@ error: could not compile `demo` (lib test) due to 1 previous error
     }
 
     #[test]
+    fn a_cut_failing_run_whose_output_is_redirected_failed() {
+        let kept = cut(FAILED);
+        for command in [
+            "cargo test",
+            "cargo test 2>&1",
+            "cargo test --workspace 2>&1",
+            "cargo test &> log.txt",
+            "cargo test &>> log.txt",
+            "cargo test >& log.txt",
+            "cargo test > log.txt 2>&1",
+            "cargo test 2<&1",
+            "cargo test >| log.txt",
+        ] {
+            assert!(failed(command, &kept, Some(101)), "{command:?}");
+        }
+    }
+
+    #[test]
     fn a_whole_failing_run_failed_too() {
         assert!(failed("cargo test", FAILED, Some(101)));
         assert!(failed("cargo test", FAILED_EVERY_BINARY, Some(101)));
@@ -800,6 +852,8 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "cargo test && cargo clippy --all-targets -- -D warnings",
             "cargo test; cargo build",
             "cargo test 2>&1 | tail -20",
+            "cargo test |& tail -20",
+            "cargo test & cargo build",
             "cargo build",
         ] {
             assert!(!failed(command, &kept, Some(101)), "{command:?}");
