@@ -38,6 +38,8 @@ pub(crate) enum Message {
     ControlResponse(ControlResponse),
     /// How much of the plan's usage windows is gone.
     RateLimitEvent(RateLimit),
+    /// The conversation started over, as `/clear` starts it.
+    ConversationReset(Reset),
     /// The end of a turn, with the turn's totals.
     Result(Outcome),
     /// A `type` this bridge does not know.
@@ -502,7 +504,22 @@ pub(crate) struct ControlOutcome {
 pub(crate) struct ControlAnswer {
     /// Every slash command the CLI runs, as it stood when it answered.
     pub(crate) commands: Option<Vec<Command>>,
+    /// Why `/fast` will not switch fast mode on in this process, where it
+    /// will not. Claude Code 2.1.282 says `sdk_opt_in_required` over
+    /// stream-json and answers the command with a refusal.
+    pub(crate) fast_mode_disabled_reason: Option<String>,
 }
+
+/// `conversation_reset`: the CLI dropped the conversation and started a new
+/// one in the same process.
+///
+/// Recorded from Claude Code 2.1.282 after `/clear`, with `trigger: "clear"`,
+/// the `session_id` of the conversation it dropped and a
+/// `new_conversation_id`. That id is not the one the CLI goes on to call the
+/// new conversation by — the next `init` names another — so nothing is read
+/// off it: the `init` is what names the session.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Reset {}
 
 /// The `result` line that closes a turn.
 ///

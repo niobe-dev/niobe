@@ -11,7 +11,7 @@
 //!
 //! # What the recording taught, and what the protocol costs
 //!
-//! Five properties of the stream are not obvious and are the reason this file
+//! Six properties of the stream are not obvious and are the reason this file
 //! is not a `match` over message types:
 //!
 //! * **`assistant` messages repeat their `usage`.** The CLI splits one API
@@ -28,6 +28,11 @@
 //!   `modelUsage` and `total_cost_usd` grow across turns, so they are read as
 //!   running totals and reported as the difference from the last turn's.
 //!   `result.usage`, alone among them, is the turn's own.
+//! * **`/clear` restarts those running totals.** The CLI announces it with a
+//!   `conversation_reset`, and the first `result` after it reports the new
+//!   conversation from zero, under a `session_id` the next `init` gives. The
+//!   difference is taken from there again, or the new conversation is billed
+//!   only for what it spent beyond the old one.
 //! * **A refusal is reported twice.** `system`/`permission_denied` announces
 //!   it between the call and the result it comes back as, and the closing
 //!   `result` lists it again. Counting both doubles every denial; reading the
@@ -219,6 +224,13 @@ pub struct Translator {
     cwd: Option<PathBuf>,
     model: Option<String>,
     backend_session: Option<String>,
+    /// The session id the last [`Event::SessionMeta`] named, so that a new one
+    /// goes out when the CLI moves to another conversation on the same model,
+    /// as it does after `/clear`.
+    announced_session: Option<String>,
+    /// The commands the CLI lists and has said it will not run in this
+    /// process, which are left out of every list it sends.
+    unavailable: Vec<String>,
     /// The model of the message in flight, per stream: the main session is
     /// `None` and each sub-agent is the id of the call that spawned it. `message_delta`
     /// carries the turn's authoritative usage and no model, so the model is
@@ -256,8 +268,9 @@ pub struct Translator {
     /// arrives after it can be reported with it.
     context: Option<Context>,
     /// Whether the CLI's release has been read off the first `init`. The CLI
-    /// writes `init` again whenever the session moves model, and the release
-    /// it reports there has not changed.
+    /// writes `init` again at the start of every turn — Claude Code 2.1.282
+    /// was recorded doing so for each prompt on its standard input — and the
+    /// release it reports there has not changed.
     checked_release: bool,
     /// How the profile says the session is billed, which stands over anything
     /// the stream suggests. `None` where the profile left it to the stream.
@@ -299,6 +312,8 @@ impl Translator {
             cwd: None,
             model: None,
             backend_session: None,
+            announced_session: None,
+            unavailable: Vec::new(),
             in_flight: BTreeMap::new(),
             tool_calls: BTreeMap::new(),
             asked: Vec::new(),
@@ -449,6 +464,7 @@ impl Translator {
             wire::Message::Result(outcome) => self.result(outcome, &mut out),
             wire::Message::ControlResponse(response) => self.answered(response, &mut out),
             wire::Message::RateLimitEvent(event) => rate_limit(event, &mut out),
+            wire::Message::ConversationReset(_) => self.reset(&mut out),
             // Only the line a message arrived on says what type it was, so
             // whoever read that line is the one that can report it.
             wire::Message::Unknown => {}
@@ -468,8 +484,14 @@ impl Translator {
             return;
         };
         if outcome.subtype.as_deref() == Some("success") {
-            if let Some(commands) = outcome.response.and_then(|answer| answer.commands) {
-                out.push(listed(commands));
+            let Some(answer) = outcome.response else {
+                return;
+            };
+            if answer.fast_mode_disabled_reason.is_some() {
+                self.unavailable.push("fast".to_owned());
+            }
+            if let Some(commands) = answer.commands {
+                out.push(self.listed(commands));
             }
             return;
         }
@@ -560,7 +582,7 @@ impl Translator {
             // arrives last is the list.
             Some("commands_changed") => {
                 if let Some(commands) = system.commands {
-                    out.push(listed(commands));
+                    out.push(self.listed(commands));
                 }
             }
             other => out.push(unread(format!(
@@ -769,11 +791,41 @@ impl Translator {
     /// Records the model the session is on, producing a fresh [`SessionMeta`]
     /// whenever it changes — which is how a routing decision reaches the
     /// menu row.
+    /// The list the CLI sent, less what it has said it will not run here.
+    ///
+    /// A command the CLI lists and then refuses in every session this bridge
+    /// drives is one the operator would pick only to be told no.
+    fn listed(&self, commands: Vec<wire::Command>) -> Event {
+        listed_as_offered(commands, &self.unavailable)
+    }
+
+    /// The conversation started over: the CLI's running totals restart at
+    /// zero with it, and its context is gone.
+    ///
+    /// Recorded from Claude Code 2.1.282: the first `result` after `/clear`
+    /// reported that turn's cost alone. Measured against the totals from
+    /// before, the new conversation would be billed only for what it spent
+    /// beyond the old one — $0.0165 for a turn that cost $0.0424 — so what has
+    /// been reported per model is forgotten here, and nothing already counted
+    /// is counted again: the CLI's totals from here on hold nothing from
+    /// before.
+    fn reset(&mut self, out: &mut Vec<Event>) {
+        self.reported.clear();
+        self.turn = Counts::default();
+        self.context = None;
+        out.push(Event::Cleared);
+    }
+
+    /// Says what is running, where the model or the conversation has changed
+    /// since it was last said.
     fn set_model(&mut self, model: String, out: &mut Vec<Event>) {
-        if self.model.as_deref() == Some(model.as_str()) {
+        if self.model.as_deref() == Some(model.as_str())
+            && self.announced_session == self.backend_session
+        {
             return;
         }
         self.model = Some(model.clone());
+        self.announced_session = self.backend_session.clone();
         out.push(Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: self.profile.clone(),
@@ -1913,10 +1965,11 @@ fn label_of(input: &serde_json::Value) -> Option<String> {
 }
 
 /// The CLI's slash commands, as the event that replaces the list before them.
-fn listed(commands: Vec<wire::Command>) -> Event {
+fn listed_as_offered(commands: Vec<wire::Command>, unavailable: &[String]) -> Event {
     Event::Commands {
         commands: commands
             .into_iter()
+            .filter(|command| !unavailable.contains(&command.name))
             .map(|command| SlashCommand {
                 name: command.name,
                 description: command.description,
@@ -2774,6 +2827,23 @@ mod tests {
             panic!("the call ending: {events:?}");
         };
         assert_eq!(*outcome, ToolOutcome::Denied);
+    }
+
+    #[test]
+    fn a_command_the_cli_said_it_will_not_run_stays_out_of_a_later_list() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"commands":[{"name":"fast"}],"fast_mode_disabled_reason":"sdk_opt_in_required"}}}"#,
+        );
+
+        let events = translator.line(
+            r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"clear"},{"name":"fast"}]}"#,
+        );
+        let [Event::Commands { commands }] = events.as_slice() else {
+            panic!("one list: {events:?}");
+        };
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["clear"]);
     }
 
     #[test]

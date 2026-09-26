@@ -1210,3 +1210,125 @@ mod shell {
         );
     }
 }
+
+const CLEAR_COMMAND: &str = include_str!("fixtures/clear-command.jsonl");
+
+/// `/clear` restarts the CLI's running totals: the `result` of the first turn
+/// after it reports that turn's cost alone. Read as a running total from
+/// before the clear, the new conversation would be billed only for what it
+/// spent beyond the old one.
+#[test]
+fn a_cleared_conversation_is_billed_from_zero_again() {
+    let events = translate(CLEAR_COMMAND);
+    let state = SessionState::replay(&events);
+
+    let costs: Vec<f64> = usage_records(&events)
+        .iter()
+        .filter_map(|usage| usage.cost_usd)
+        .collect();
+    assert_eq!(
+        costs.len(),
+        2,
+        "one per turn that reached the model: {costs:?}"
+    );
+    assert!((costs[0] - 0.025_885).abs() < 1e-9, "{costs:?}");
+    assert!((costs[1] - 0.042_380_4).abs() < 1e-9, "{costs:?}");
+    assert!((state.totals().reported_cost_usd - 0.068_265_4).abs() < 1e-9);
+    assert_eq!(state.totals().tokens(), 17_567 + 23_333);
+    assert!(warnings(&events).is_empty(), "{events:?}");
+    assert!(notices(&events).is_empty(), "{events:?}");
+}
+
+#[test]
+fn a_cleared_conversation_is_the_one_a_resume_carries_on() {
+    let events = translate(CLEAR_COMMAND);
+    let cleared = events
+        .iter()
+        .position(|event| matches!(event, Event::Cleared))
+        .expect("the reset is reported");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Cleared))
+            .count(),
+        1
+    );
+
+    let state = SessionState::replay(&events[..=cleared]);
+    assert_eq!(
+        state.context(),
+        None,
+        "the old conversation's prompt is gone"
+    );
+
+    let state = SessionState::replay(&events);
+    assert_eq!(
+        state
+            .meta()
+            .and_then(|meta| meta.backend_session.as_deref()),
+        Some("696b8194-b78d-4f8d-9b3d-36b234a5cc51"),
+        "the id the CLI's `init` gave after the clear"
+    );
+    assert_eq!(
+        state.meta().map(|meta| meta.model.as_str()),
+        Some("claude-sonnet-5")
+    );
+    assert_eq!(
+        state.context().map(|context| context.tokens),
+        Some(2 + 13_412 + 9_916),
+        "the new conversation's own request"
+    );
+}
+
+/// `/fast` is listed and then refused headless: the answer to `initialize`
+/// says why, and the command is not offered.
+#[test]
+fn a_command_the_cli_says_is_disabled_is_not_offered() {
+    let state = SessionState::replay(&translate(CLEAR_COMMAND));
+    assert_eq!(command_names(&state), ["clear", "compact", "model"]);
+}
+
+#[test]
+fn a_model_moved_by_command_is_named_from_the_next_turn_and_billed_apart() {
+    const MODEL_COMMAND: &str = include_str!("fixtures/model-command.jsonl");
+    let events = translate(MODEL_COMMAND);
+    let state = SessionState::replay(&events);
+
+    assert_eq!(state.model(), Some("claude-haiku-4-5-20251001"));
+    let by_model = &state.totals().reported_cost_by_model;
+    assert!(
+        (by_model["claude-sonnet-5"] - 0.021_822_4).abs() < 1e-9,
+        "{by_model:?}"
+    );
+    assert!(
+        (by_model["claude-haiku-4-5-20251001"] - 0.036_321).abs() < 1e-9,
+        "{by_model:?}"
+    );
+    assert!(warnings(&events).is_empty(), "{events:?}");
+    assert!(notices(&events).is_empty(), "{events:?}");
+}
+
+/// A compaction the operator asked for is a request of its own: it is billed,
+/// with no message of its own to count, in a `result` of no turns.
+#[test]
+fn a_compaction_asked_for_by_command_is_billed_and_explained() {
+    const COMPACT_COMMAND: &str = include_str!("fixtures/compact-command.jsonl");
+    let events = translate(COMPACT_COMMAND);
+    let state = SessionState::replay(&events);
+
+    assert!((state.totals().reported_cost_usd - 0.115_232_2).abs() < 1e-9);
+    assert_eq!(
+        notices(&events)
+            .iter()
+            .filter(|notice| notice.contains("compacted (manual)") && notice.contains("23193"))
+            .count(),
+        1,
+        "{events:?}"
+    );
+    assert!(warnings(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        state.user_messages(),
+        0,
+        "the summary it hands the model is not a prompt"
+    );
+}

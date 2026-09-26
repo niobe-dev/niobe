@@ -359,6 +359,58 @@ What it settles:
   with `num_turns: 0` and `total_cost_usd: 0`. `tests/stream.rs` expects one
   turn of zero tokens whose reply is that output.
 
+## `clear-command.jsonl`, `model-command.jsonl`, `compact-command.jsonl`
+
+Three sessions that each run one of the CLI's commands that change the session
+between two ordinary turns, recorded from Claude Code 2.1.282 on 26 September
+2026 with the flags above, `--permission-prompt-tool stdio`,
+`--setting-sources project` and `--model sonnet`, in an empty directory. Each
+opened with the `initialize` request the driver sends, then: a one-word turn,
+the command, and a second turn. The lines are the CLI's own, in the order it
+printed them. The only edits: the answer to `initialize` cut to its `commands`
+— the four whose behaviour is recorded here — and the keys that say what state
+the session is in; `system`/`init` cut down to the keys that say what ran, its
+`cwd` rewritten to `/repo`; and, in the compaction's summary, the path of the
+recording machine's transcript and the names of its MCP servers.
+
+What they settle, and what `tests/stream.rs` expects of each:
+
+- **`/clear` starts the conversation over, and the CLI's running totals with
+  it.** It sends `conversation_reset` (`trigger: "clear"`), a `result` with
+  `num_turns: 0` and empty `modelUsage`, and from the next turn a new
+  `session_id` on every line — `696b8194-…`, which is not the
+  `new_conversation_id` the reset named. The second turn's `result` reports
+  $0.0423804 and 23,333 tokens: that turn alone, not added to the first
+  turn's $0.025885 and 17,567. Read as a running total from before the clear,
+  it would bill $0.0164954. The test expects both turns' costs whole, the new
+  id as the session a resume carries on, and no context between the reset and
+  the second turn's first request.
+- **`/model haiku` moves the model and says so a turn late.** The command's
+  reply is an `assistant` message from `<synthetic>`, "Set model to `Haiku 4.5`
+  for this session only", with a zero-cost `result`; the `init` that opens the
+  next turn is the first line to name `claude-haiku-4-5-20251001`. Each model
+  is priced apart in `modelUsage` from then on ($0.0218224 and $0.036321). The
+  shell sends `/model <name>` as the change its model picker makes instead,
+  which the CLI applies the same way and the menu row shows at once.
+- **`/compact` is a request of its own.** `system`/`status` `compacting`, then
+  `compact_boundary` (`trigger: "manual"`, `pre_tokens: 23193`,
+  `post_tokens: 4282`), the summary handed back as a plain-text `user`
+  message, and a `result` of no turns whose running total rose by $0.0376034
+  with no message to count it against. The test expects the session's
+  $0.1152322 whole, the compaction's notice, and no prompt of the operator's
+  made out of the summary.
+- **`/fast` is listed and refused.** The answer to `initialize` carries
+  `fast_mode_disabled_reason: "sdk_opt_in_required"`, and `/fast on` in a
+  fourth session was answered "Fast mode unavailable: Fast mode is not
+  available in the Agent SDK". The translator leaves a command out of every
+  list once the CLI has said it is disabled, so the test expects the list
+  without it.
+
+The rest of the commands that touch the session were run the same way and
+change nothing the fold reads: `/color` and `/rename` answer with a line of
+their own, `/effort` sets the effort with a line of its own, `/focus` answers
+that it is not available here, and a bare `/model` lists the models.
+
 ## `tool-results/cargo-test-workspace.txt`
 
 The whole output of a `cargo test --workspace` on this repository, as Claude

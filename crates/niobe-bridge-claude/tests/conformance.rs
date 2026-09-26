@@ -81,6 +81,10 @@ const SHAPES: &[&str] = &[
     // recorded from Claude Code 2.1.282. Each replaces the list before it.
     "control_response/success",
     "system/commands_changed",
+    // `/clear`, recorded from Claude Code 2.1.282: the conversation starts
+    // over and the CLI's running totals with it, which the translator reads as
+    // the point the totals are measured from again.
+    "conversation_reset",
     "user",
     // Content blocks and deltas, which ride on both the stream and the
     // transcript.

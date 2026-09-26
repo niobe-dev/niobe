@@ -573,6 +573,16 @@ pub enum Event {
     /// context of their own.
     Context(Context),
 
+    /// The backend started the conversation over, at the operator's word:
+    /// nothing said before this point is in front of the model any more.
+    ///
+    /// The session goes on — what it spent stays spent, and the transcript
+    /// keeps what was said — but the context the last request measured is
+    /// gone with the conversation, and nothing measures the new one until its
+    /// first request. A backend that names its conversations says what the new
+    /// one is called with a fresh [`Event::SessionMeta`].
+    Cleared,
+
     /// A tool call is waiting on the operator.
     PermissionRequest {
         /// The call being gated.

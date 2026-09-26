@@ -1384,6 +1384,20 @@ impl App {
                 agent: None,
             }),
 
+            Event::Cleared => self.push(Entry {
+                kind: EntryKind::Notice,
+                head: "cleared".to_owned(),
+                meta: String::new(),
+                body: "The conversation starts over here: nothing above this line is in \
+                       front of the model any more. What it cost stays in the session's \
+                       totals."
+                    .to_owned(),
+                streaming: false,
+                at: self.at,
+                calls: Vec::new(),
+                agent: None,
+            }),
+
             Event::PermissionRequest {
                 id,
                 tool,
@@ -3576,6 +3590,11 @@ impl App {
 
         self.composer.clear();
         self.offer_closed = None;
+        if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
+            self.produce(Event::ModelSelected { model });
+            self.scroll_to_tail();
+            return;
+        }
         self.produce(Event::UserMessage { text });
         self.sent_here = self.attached;
         if !self.attached {
@@ -4492,6 +4511,77 @@ mod tests {
             ratatui::crossterm::event::KeyCode::Enter,
             modifiers,
         ));
+    }
+
+    /// `app`, told the backend offers `/model`.
+    fn offering_model(mut app: App) -> App {
+        app.apply(&Event::Commands {
+            commands: vec![SlashCommand {
+                name: "model".to_owned(),
+                description: String::new(),
+                argument_hint: None,
+            }],
+        });
+        app
+    }
+
+    fn submitted(app: &mut App, text: &str) -> Vec<Event> {
+        for c in text.chars() {
+            app.type_into_composer(Input {
+                key: Key::Char(c),
+                ..Default::default()
+            });
+        }
+        app.submit();
+        app.take_produced()
+    }
+
+    /// Typed as a prompt, the backend would move the model only when the next
+    /// turn starts and say nothing of it until then; asked for the way the
+    /// picker asks, the menu row names it at once.
+    #[test]
+    fn a_model_command_with_a_name_moves_the_model_as_the_picker_does() {
+        let mut app = offering_model(app());
+        assert_eq!(
+            submitted(&mut app, "/model  haiku "),
+            [Event::ModelSelected {
+                model: "haiku".to_owned()
+            }]
+        );
+        assert_eq!(app.session().model(), Some("haiku"));
+        assert_eq!(app.composed(), "");
+        assert_eq!(app.session().user_messages(), 0);
+    }
+
+    #[test]
+    fn a_model_command_the_picker_cannot_stand_for_goes_to_the_backend_as_typed() {
+        for text in ["/model", "/model haiku please", "/models haiku"] {
+            let mut app = offering_model(app());
+            assert_eq!(
+                submitted(&mut app, text),
+                [Event::UserMessage {
+                    text: text.to_owned()
+                }]
+            );
+        }
+
+        let mut app = app();
+        assert_eq!(
+            submitted(&mut app, "/model haiku"),
+            [Event::UserMessage {
+                text: "/model haiku".to_owned()
+            }],
+            "a backend that lists no `/model` is sent what was typed"
+        );
+    }
+
+    #[test]
+    fn a_cleared_conversation_is_a_line_in_the_transcript() {
+        let mut app = app();
+        app.apply(&Event::Cleared);
+        let last = app.entries().last().expect("an entry");
+        assert_eq!(last.kind, EntryKind::Notice);
+        assert_eq!(last.head, "cleared");
     }
 
     #[test]

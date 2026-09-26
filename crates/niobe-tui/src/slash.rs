@@ -31,6 +31,28 @@ pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Stri
     }
 }
 
+/// The model a prompt asks the session to move to, where the prompt is the
+/// backend's `/model` command with one name after it and nothing else.
+///
+/// Such a prompt is sent as the change the model picker makes, not as a turn.
+/// Typed as a turn, the `claude` CLI moves the model and says so only when the
+/// next turn starts — recorded from Claude Code 2.1.282, the reply was a line
+/// of its own and the next `init` the first to name the new model — so the
+/// menu row would name the old model until then. Anything else `/model` is
+/// given, a bare `/model` included, goes to the backend as typed: it answers
+/// those itself, and a name the picker would have to guess at is not one it
+/// should send.
+pub(crate) fn model_named(prompt: &str, commands: &[SlashCommand]) -> Option<String> {
+    let mut words = prompt.split_whitespace();
+    let (Some("/model"), Some(model), None) = (words.next(), words.next(), words.next()) else {
+        return None;
+    };
+    commands
+        .iter()
+        .any(|command| command.name == "model")
+        .then(|| model.to_owned())
+}
+
 /// Up to `limit` of `commands` that `typed` could name.
 ///
 /// A command matches when its name holds what was typed, ignoring case. One

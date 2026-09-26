@@ -571,6 +571,11 @@ impl SessionState {
             // a context the model no longer has.
             Event::Context(context) => self.context = Some(context.clone()),
 
+            // Nothing has measured the conversation that starts here, and the
+            // last figure is of one the model no longer has: no figure is
+            // what is true until the next request reports one.
+            Event::Cleared => self.context = None,
+
             Event::PermissionRequest { id, .. } => {
                 self.permission_requests += 1;
                 self.pending_permissions.insert(id.clone());
@@ -1781,6 +1786,15 @@ mod tests {
             context(20_000),
         ]);
         assert_eq!(state.context().map(|c| c.tokens), Some(20_000));
+    }
+
+    #[test]
+    fn a_cleared_conversation_has_no_context_until_its_first_request() {
+        let state = SessionState::replay(&[context(150_000), Event::Cleared]);
+        assert_eq!(state.context(), None);
+
+        let state = SessionState::replay(&[context(150_000), Event::Cleared, context(9_000)]);
+        assert_eq!(state.context().map(|c| c.tokens), Some(9_000));
     }
 
     fn said(text: &str) -> Event {
