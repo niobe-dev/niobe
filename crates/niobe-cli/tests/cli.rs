@@ -266,13 +266,12 @@ fn claude_config_with_the_transcript(cwd: &Path) -> tempfile::TempDir {
     // is the resolved one: a temporary directory on macOS is reached through a
     // symlink, and both binaries run in the directory behind it.
     let cwd = std::fs::canonicalize(cwd).expect("the working directory resolves");
+    // The CLI keeps ASCII letters and digits and makes a `-` of the rest; a
+    // temporary directory's name is ASCII, so one character is one dash.
     let flattened: String = cwd
         .to_string_lossy()
         .chars()
-        .map(|c| match c {
-            '/' | '.' => '-',
-            other => other,
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     let dir = config.path().join("projects").join(flattened);
     std::fs::create_dir_all(&dir).expect("the project directory can be made");

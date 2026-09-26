@@ -145,21 +145,94 @@ pub fn config_dir(configured: Option<&OsStr>, home: Option<&OsStr>) -> Option<Pa
 /// The directory the CLI writes `cwd`'s transcripts into, under `config` —
 /// its own configuration directory.
 ///
-/// The CLI names the directory after the working directory with every `/` and
-/// every `.` replaced by `-`. Read off a machine running Claude Code 2.1.277
-/// on 18 September 2026: all thirty directories present matched their own
-/// transcripts' recorded `cwd` under that rule, including paths with dots in
-/// them and paths that already contained a `-`.
+/// The CLI names the directory after the working directory with every
+/// character but an ASCII letter or digit replaced by `-`, and where that name
+/// is longer than [`NAME_LIMIT`] it keeps the first [`NAME_LIMIT`] characters
+/// and appends a hash of the whole path. Read off the `claude` 2.1.282 binary
+/// on 26 September 2026, where the rule is
+/// `e.replace(/[^a-zA-Z0-9]/g,"-")`. On the machine this was written on, all
+/// forty directories whose transcripts record a `cwd` matched it under that
+/// rule, and the ten others record none.
+///
+/// The hash is not reproduced. It is the runtime's own string hash, which
+/// Niobe has no copy of, and a guessed one would read as "no sessions" the
+/// day the runtime changed it. A long path is found instead by the `cwd` the
+/// transcripts under each candidate recorded; see [`hashed`].
 pub fn directory(config: &Path, cwd: &Path) -> PathBuf {
-    let flattened: String = cwd
-        .to_string_lossy()
+    let projects = config.join(PROJECTS);
+    let flattened = flatten(cwd);
+    match flattened.get(..NAME_LIMIT) {
+        // Every character of the flattened name is ASCII, so the cut is on a
+        // character boundary and `get` only fails where the name is short.
+        Some(kept) if flattened.len() > NAME_LIMIT => {
+            hashed(&projects, kept, cwd).unwrap_or_else(|| projects.join(kept))
+        }
+        _ => projects.join(flattened),
+    }
+}
+
+/// How long a directory name the CLI makes of a working directory may be
+/// before it is cut and a hash appended.
+const NAME_LIMIT: usize = 200;
+
+/// `cwd` flattened into a directory name as the CLI flattens it.
+///
+/// The CLI's pattern has no `u` flag, so it replaces UTF-16 code units rather
+/// than characters: a character outside the basic plane is two dashes.
+fn flatten(cwd: &Path) -> String {
+    cwd.to_string_lossy()
         .chars()
-        .map(|c| match c {
-            '/' | '.' => '-',
-            other => other,
+        .flat_map(|c| {
+            let (kept, dashes) = if c.is_ascii_alphanumeric() {
+                (Some(c), 0)
+            } else {
+                (None, c.len_utf16())
+            };
+            kept.into_iter().chain(std::iter::repeat_n('-', dashes))
         })
-        .collect();
-    config.join(PROJECTS).join(flattened)
+        .collect()
+}
+
+/// Among the directories under `projects` named `kept` followed by a hash,
+/// the one whose transcripts recorded `cwd` as where they ran.
+///
+/// Two working directories that share their first [`NAME_LIMIT`] flattened
+/// characters differ only in the hash, so the prefix alone cannot choose.
+fn hashed(projects: &Path, kept: &str, cwd: &Path) -> Option<PathBuf> {
+    let named = format!("{kept}-");
+    std::fs::read_dir(projects)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&named))
+        .map(|entry| entry.path())
+        .find(|dir| ran_in(dir, cwd))
+}
+
+/// Whether a transcript in `dir` recorded `cwd` as the directory it ran in.
+fn ran_in(dir: &Path, cwd: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(OsStr::to_str) == Some(EXTENSION))
+        .any(|path| recorded_cwd(&path).is_some_and(|recorded| recorded == cwd))
+}
+
+/// The working directory the transcript at `path` says it ran in: the first
+/// `cwd` any of its records carries. The CLI's own bookkeeping records that
+/// open a file carry none, so the first line is not enough.
+fn recorded_cwd(path: &Path) -> Option<PathBuf> {
+    #[derive(Deserialize)]
+    struct Placed {
+        cwd: Option<PathBuf>,
+    }
+    BufReader::new(File::open(path).ok()?)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Placed>(&line).ok())
+        .find_map(|placed| placed.cwd)
 }
 
 /// One session the CLI has recorded for a working directory.
@@ -1102,12 +1175,81 @@ mod tests {
             directory(Path::new("/home/me/.claude"), Path::new("/w/my.app")),
             Path::new("/home/me/.claude/projects/-w-my-app")
         );
-        // A path that already holds a `-` keeps it, so two directories cannot
-        // collide by one of them being flattened onto the other.
         assert_eq!(
             directory(Path::new("/c"), Path::new("/w/a-b")),
             Path::new("/c/projects/-w-a-b")
         );
+    }
+
+    #[test]
+    fn every_character_but_an_ascii_letter_or_digit_is_flattened_as_the_cli_does() {
+        let named = |cwd: &str| directory(Path::new("/c"), Path::new(cwd));
+
+        assert_eq!(
+            named("/home/u/my_project"),
+            Path::new("/c/projects/-home-u-my-project")
+        );
+        assert_eq!(
+            named("/home/u/My Project"),
+            Path::new("/c/projects/-home-u-My-Project")
+        );
+        assert_eq!(named("/home/u/café"), Path::new("/c/projects/-home-u-caf-"));
+        assert_eq!(
+            named("/home/u/a+b@c"),
+            Path::new("/c/projects/-home-u-a-b-c")
+        );
+        // The CLI's pattern has no `u` flag, so it replaces UTF-16 code units:
+        // a character outside the basic plane is two of them, and two dashes.
+        assert_eq!(named("/w/🦀"), Path::new("/c/projects/-w---"));
+    }
+
+    /// A working directory whose flattened name is 250 characters long.
+    fn long_cwd(last: &str) -> PathBuf {
+        PathBuf::from(format!("/{}/{last}", "d".repeat(244)))
+    }
+
+    #[test]
+    fn a_working_directory_past_200_characters_is_found_by_the_cwd_its_transcripts_recorded() {
+        let config = tempfile::tempdir().expect("a temporary directory can be created");
+        let cwd = long_cwd("mine");
+        let prefix = &flatten(&cwd)[..200];
+        // Two directories the CLI could have written: the same first 200
+        // characters, told apart only by a hash of the whole path.
+        let other = config.path().join(PROJECTS).join(format!("{prefix}-1a2b"));
+        let ours = config.path().join(PROJECTS).join(format!("{prefix}-3c4d"));
+        for dir in [&other, &ours] {
+            std::fs::create_dir_all(dir).expect("the directory is created");
+        }
+        let recorded = |cwd: &Path| {
+            format!(
+                "{{\"type\":\"queue-operation\"}}\n{{\"type\":\"user\",\"cwd\":{:?},\
+                 \"message\":{{\"role\":\"user\",\"content\":\"hello\"}}}}\n",
+                cwd.to_string_lossy()
+            )
+        };
+        transcript(
+            &other,
+            "theirs",
+            Duration::ZERO,
+            &recorded(&long_cwd("other")),
+        );
+        transcript(&ours, "mine", Duration::ZERO, &recorded(&cwd));
+
+        let found = directory(config.path(), &cwd);
+
+        assert_eq!(found, ours);
+        let listed = list(&found).expect("the directory lists");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "mine");
+    }
+
+    #[test]
+    fn a_long_working_directory_the_cli_never_ran_in_holds_no_sessions() {
+        let config = tempfile::tempdir().expect("a temporary directory can be created");
+
+        let found = directory(config.path(), &long_cwd("never"));
+
+        assert_eq!(list(&found).expect("absence is not a failure"), []);
     }
 
     /// Writes `text` as the transcript of session `id` in `dir`, last written
