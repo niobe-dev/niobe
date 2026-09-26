@@ -2085,6 +2085,12 @@ impl App {
         }
     }
 
+    /// Whether this terminal sends Shift+Enter as Enter, so that the operator
+    /// who reaches for it to open a line sends the prompt instead.
+    pub fn sends_enter_for_shift_enter(&self) -> bool {
+        !self.reports_shift_enter
+    }
+
     /// The same shell, opening on a line from the shell itself.
     ///
     /// For what the operator has to know before the first prompt and would
@@ -2454,8 +2460,9 @@ impl App {
     }
 
     /// Fits the empty composer's placeholder into `columns`, dropping what it
-    /// advertises before what the bar says beside it: the mode a session is in
-    /// matters more than a reminder of a key.
+    /// advertises before what the bar holds beside it: the mode a session is
+    /// in, and the key that opens a line where Enter would be sent for it,
+    /// matter more than a reminder of what the composer can do.
     pub(crate) fn fit_placeholder(&mut self, columns: usize) {
         let said = match self.shell_mode {
             true => SHELL_PLACEHOLDER.to_owned(),

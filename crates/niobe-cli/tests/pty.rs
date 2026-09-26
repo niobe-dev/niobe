@@ -1059,8 +1059,11 @@ fn ctrl_j_opens_a_line_on_a_terminal_that_cannot_report_keys() {
 
     // The line feed Ctrl+J sends is a byte of its own. Were it read as Enter,
     // the first line would run alone, an unterminated quote, and print nothing.
+    // The shell's placeholder is waited for by words the frame before it did
+    // not have in the same cells: the terminal is sent only the cells that
+    // changed, so a word that coincides with the hint under it arrives cut.
     terminal.typed(b"!");
-    terminal.shows("what it prints");
+    terminal.shows("the agent does not see");
     terminal.typed(b"printf %s \"joined-$((6*7))\ny\"\r");
     terminal.shows("joined-42");
     terminal.typed(CTRL_Q);

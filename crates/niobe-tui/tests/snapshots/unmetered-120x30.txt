@@ -25,6 +25,6 @@
  ┃   304 path asserts a body that is no longer sent.                        █ │   └ Reading tests/stream.rs           │
  ┃                                                                          █ │ ◇ reviewer → catalog/c… done 4100 ctx │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ✗ doc-writer → docs/etags.md   failed │
- ┃  ask  >  Ask for a change · / search transcript · @ file     ▸▸ ask mode ┃ │   └ Notion 404, gave up after 2 retr… │
+ ┃  ask  >  Ask for a change                   ▸▸ ask mode · Ctrl+J newline ┃ │   └ Notion 404, gave up after 2 retr… │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 1Help       2Plan       3Diff       4Undo       5Usage      6Files      7Tools      8Model      9Theme      10Quit

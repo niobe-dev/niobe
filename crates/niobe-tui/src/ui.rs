@@ -717,22 +717,19 @@ fn draw_mention(frame: &mut Frame, transcript: Rect, bar: Rect, app: &App, theme
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Gives the placeholder the room the bar leaves once its first hint — the
-/// mode, where one is reported — has what it needs.
+/// Gives the placeholder the room the bar leaves once its held hints — the
+/// mode, where one is reported, and the key that opens a line where Enter
+/// would be mistaken for it — have what they need.
 fn fit_placeholder(app: &mut App, panes: bool, width: u16, theme: &Theme) {
-    let first = key_hints(
-        app.session().mode(),
-        app.focus(),
-        panes,
-        app.newline_key(),
-        theme,
-    )
-    .first()
-    .map_or(0, |hint| text::width(&hint.text));
+    let held: Vec<Segment> = bar_key_hints(app, panes, theme)
+        .into_iter()
+        .filter(|hint| hint.held)
+        .map(|hint| hint.segment)
+        .collect();
     // The cursor, and the column between the editor and the hints.
     let columns = usize::from(width)
         .saturating_sub(lead_width(app))
-        .saturating_sub(first + 2);
+        .saturating_sub(hints_width(held.iter()) + 2);
     app.fit_placeholder(columns);
 }
 
@@ -896,27 +893,17 @@ fn bar_says(app: &App, panes: bool, theme: &Theme, room: usize) -> Vec<Line<'sta
             .collect();
     }
     let hints = match app.find_marks() {
-        Some((found, current)) => find_hints(app, found.len(), current, theme),
-        None if app.shell_mode() => ["Enter runs", "Esc back"]
-            .into_iter()
-            .map(|key| Segment {
-                text: key.to_owned(),
-                style: Style::new().fg(theme.dim),
-            })
-            .collect(),
-        None => {
-            // A question holding the keyboard takes Tab for writing its
-            // answer, so while it does, Tab is not offered as the way between
-            // the panes.
-            let question_holds = app.asking().is_some() && app.ask_focus() != AskFocus::Deferred;
-            key_hints(
-                app.session().mode(),
-                app.focus(),
-                panes && !question_holds,
-                app.newline_key(),
-                theme,
-            )
-        }
+        Some((found, current)) => loose(find_hints(app, found.len(), current, theme)),
+        None if app.shell_mode() => loose(
+            ["Enter runs", "Esc back"]
+                .into_iter()
+                .map(|key| Segment {
+                    text: key.to_owned(),
+                    style: Style::new().fg(theme.dim),
+                })
+                .collect(),
+        ),
+        None => bar_key_hints(app, panes, theme),
     };
     let hints = fitted_hints(hints, room);
     let mut spans = Vec::with_capacity(hints.len() * 2);
@@ -956,61 +943,116 @@ fn find_hints(app: &App, count: usize, current: Option<usize>, theme: &Theme) ->
     hints
 }
 
+/// A hint on the bar, and whether it is held: kept while the placeholder and
+/// the hints that are not give way.
+struct Hint {
+    segment: Segment,
+    held: bool,
+}
+
+/// Hints none of which is held, so the bar gives them up last first.
+fn loose(segments: Vec<Segment>) -> Vec<Hint> {
+    segments
+        .into_iter()
+        .map(|segment| Hint {
+            segment,
+            held: false,
+        })
+        .collect()
+}
+
+/// The key hints the bar shows with nothing else to say.
+///
+/// A question holding the keyboard takes Tab for writing its answer, so while
+/// it does, Tab is not offered as the way between the panes.
+fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
+    let question_holds = app.asking().is_some() && app.ask_focus() != AskFocus::Deferred;
+    key_hints(
+        app.session().mode(),
+        app.focus(),
+        panes && !question_holds,
+        (app.newline_key(), app.sends_enter_for_shift_enter()),
+        theme,
+    )
+}
+
 /// The mode the session gates tool calls in, and the keys the bar answers
-/// to, most important first.
+/// to, in the order the bar shows them.
 ///
 /// With a right-hand pane focused, the keys that differ are that pane's: the
 /// arrows and Enter are not the composer's while it has them. `panes` is
 /// whether there is a pane beside the session for Tab to move to, and
-/// `newline` the key that opens a line on this terminal.
+/// `newline` the key that opens a line on this terminal and whether Enter is
+/// sent for Shift+Enter on it.
+///
+/// The mode is held, since it changes what a prompt is allowed to do. So is
+/// the newline key where Shift+Enter arrives as Enter: an operator not told
+/// otherwise reaches for Shift+Enter and sends a prompt half-written. The
+/// other keys are reminders, and give way first.
 fn key_hints(
     mode: Option<Mode>,
     focus: Focus,
     panes: bool,
-    newline: &str,
+    newline: (&str, bool),
     theme: &Theme,
-) -> Vec<Segment> {
-    let key = |text: &str| Segment {
-        text: text.to_owned(),
-        style: Style::new().fg(theme.dim),
+) -> Vec<Hint> {
+    let key = |text: &str, held: bool| Hint {
+        segment: Segment {
+            text: text.to_owned(),
+            style: Style::new().fg(theme.dim),
+        },
+        held,
     };
     let mut hints = match mode {
         Some(mode) => vec![
-            Segment {
-                text: format!("\u{25b8}\u{25b8} {mode} mode"),
-                style: Style::new().fg(theme.hot).bold(),
+            Hint {
+                segment: Segment {
+                    text: format!("\u{25b8}\u{25b8} {mode} mode"),
+                    style: Style::new().fg(theme.hot).bold(),
+                },
+                held: true,
             },
-            key("Shift+Tab cycles"),
+            key("Shift+Tab cycles", false),
         ],
         // Nothing has said how this session gates tool calls, so nothing
         // claims to know: the key that sets it is what is left to say.
-        None => vec![key("Shift+Tab mode")],
+        None => vec![key("Shift+Tab mode", true)],
     };
     match focus {
         Focus::Session => {
-            hints.push(key(&format!("{newline} newline")));
+            let (newline, mistaken) = newline;
+            hints.push(key(&format!("{newline} newline"), mistaken));
             if panes {
-                hints.push(key("Tab panes"));
+                hints.push(key("Tab panes", false));
             }
         }
         Focus::Pane(_) => {
-            hints.push(key("↑↓ Enter folds"));
-            hints.push(key("Esc back"));
+            hints.push(key("↑↓ Enter folds", false));
+            hints.push(key("Esc back", false));
         }
     }
     hints
 }
 
-/// The hints that fit in `room` columns, separators included, whole ones only.
-fn fitted_hints(mut hints: Vec<Segment>, room: usize) -> Vec<Segment> {
-    let width = |hints: &[Segment]| {
-        let text: usize = hints.iter().map(|h| text::width(&h.text)).sum();
-        text + hints.len().saturating_sub(1) * text::width(HINT_SEPARATOR)
-    };
-    while !hints.is_empty() && width(&hints) > room {
-        hints.pop();
+/// The columns `hints` take on the bar, separators included.
+fn hints_width<'a>(hints: impl ExactSizeIterator<Item = &'a Segment>) -> usize {
+    let count = hints.len();
+    let text: usize = hints.map(|hint| text::width(&hint.text)).sum();
+    text + count.saturating_sub(1) * text::width(HINT_SEPARATOR)
+}
+
+/// The hints that fit in `room` columns, whole ones only: the last hint that
+/// is not held gives way first, and the held ones, last first, only once
+/// every other has.
+fn fitted_hints(mut hints: Vec<Hint>, room: usize) -> Vec<Segment> {
+    while !hints.is_empty() && hints_width(hints.iter().map(|hint| &hint.segment)) > room {
+        let gives_way = hints
+            .iter()
+            .rposition(|hint| !hint.held)
+            .unwrap_or(hints.len() - 1);
+        hints.remove(gives_way);
     }
-    hints
+    hints.into_iter().map(|hint| hint.segment).collect()
 }
 
 /// The transcript, in `area`, with its scrollbar drawn over the pane border at

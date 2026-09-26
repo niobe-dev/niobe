@@ -2258,8 +2258,9 @@ fn the_ask_bar_wears_its_badge_in_every_theme() {
 
 #[test]
 fn the_placeholder_names_only_what_the_composer_does_today() {
+    // Wide enough for the whole placeholder beside the hints the bar holds.
     let mut app = running_session();
-    let row = bar_row(&screen(&mut app, 120, 30));
+    let row = bar_row(&screen(&mut app, 200, 60));
     assert!(row.contains("Ask for a change"), "{row}");
     assert!(row.contains("/ search transcript"), "{row}");
     assert!(row.contains("@ file"), "{row}");
@@ -2324,12 +2325,16 @@ fn a_narrowing_bar_drops_whole_hints_and_never_cuts_one() {
             .copied()
             .filter(|hint| row.contains(hint))
             .collect();
-        assert_eq!(
-            shown,
-            whole[..shown.len()],
-            "at {width} columns the hints are not the first ones whole:\n{row}"
+        // The key that opens a line is held with the mode: on a terminal that
+        // sends Enter for Shift+Enter, it is the hint whose absence sends a
+        // prompt the operator meant to go on writing. The reminder of the key
+        // that cycles the mode is what gives way between them.
+        let held = ["▸▸ auto mode", "Ctrl+J newline"];
+        assert!(
+            shown == whole || shown == held,
+            "at {width} columns the hints are not the held ones or all of them:\n{row}"
         );
-        for piece in ["Alt+En", "Shift+T", "▸▸ auto"] {
+        for piece in ["Ctrl+", "Shift+T", "▸▸ auto"] {
             assert!(
                 shown.iter().any(|hint| hint.starts_with(piece)) || !row.contains(piece),
                 "at {width} columns a hint is cut short:\n{row}"
@@ -2341,6 +2346,43 @@ fn a_narrowing_bar_drops_whole_hints_and_never_cuts_one() {
         seen.len() > 1,
         "no width in the range dropped a hint, so the test proves nothing: {seen:?}"
     );
+}
+
+/// Where the bar at 80 columns has not room for the placeholder whole and the
+/// key hints, the placeholder's trailing affordances give way first: they
+/// remind the operator of what the composer can do, while the key that opens
+/// a line — on a terminal that sends Enter for Shift+Enter — is what stops
+/// Enter sending a prompt half-written. After them the hints that are only
+/// reminders give way (`Shift+Tab cycles`, `Tab panes`); the mode and the
+/// newline key keep their wording whole.
+#[test]
+fn the_bar_keeps_the_key_that_opens_a_line_at_eighty_columns() {
+    let mut unannounced = empty_session();
+    let row = bar_row(&screen(&mut unannounced, 80, 24));
+    assert!(row.contains("Shift+Tab mode"), "{row}");
+    assert!(row.contains("Ctrl+J newline"), "{row}");
+    assert!(row.contains("Ask for a change"), "{row}");
+
+    for mode in [Mode::Ask, Mode::Auto, Mode::Plan] {
+        let mut app = running_session();
+        app.apply(&Event::ModeSelected { mode });
+        let row = bar_row(&screen(&mut app, 80, 24));
+        assert!(row.contains(&format!("▸▸ {mode} mode")), "{row}");
+        assert!(row.contains("Ctrl+J newline"), "{row}");
+        assert!(row.contains("Ask for a change"), "{row}");
+    }
+}
+
+#[test]
+fn a_terminal_that_reports_shift_enter_keeps_its_eighty_column_bar() {
+    let mut app = running_session().reports_shift_enter();
+    let row = bar_row(&screen(&mut app, 80, 24));
+    assert!(
+        row.contains("Ask for a change · / search transcript · @ file"),
+        "Shift+Enter cannot be mistaken for Enter here, so the placeholder keeps its room:\n{row}"
+    );
+    assert!(row.contains("▸▸ ask mode"), "{row}");
+    assert!(!row.contains("newline"), "{row}");
 }
 
 #[test]
@@ -2859,7 +2901,7 @@ fn at_the_start_of_a_word_offers_the_files_the_repository_listed_and_enter_names
 
     let mut app = session_with_files();
     assert!(
-        bar_row(&screen(&mut app, 120, 30)).contains("@ file"),
+        bar_row(&screen(&mut app, 200, 60)).contains("@ file"),
         "a session with files to name says it can name them"
     );
 
