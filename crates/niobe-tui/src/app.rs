@@ -5297,6 +5297,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_prefix_rule_does_not_answer_a_command_chained_after_the_one_it_allows() {
+        let rule = Rule::parse("Bash(cargo *)").expect("the rule is valid");
+        let mut app = app().with_rules([rule].into_iter().collect());
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"cargo test && rm -rf ~"}"#.to_owned(),
+            target: Some("cargo test && rm -rf ~".to_owned()),
+            agent: None,
+        });
+
+        app.settle_rules();
+
+        assert_eq!(
+            app.asking().map(|ask| ask.target.as_deref()),
+            Some(Some("cargo test && rm -rf ~")),
+            "the chained command was let through by a rule about cargo"
+        );
+        assert!(app.take_produced().is_empty());
+    }
+
     fn under_a_profile(models: &[&str]) -> App {
         app().with_profile(SelectedProfile {
             name: "max".to_owned(),

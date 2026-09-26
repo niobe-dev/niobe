@@ -969,8 +969,10 @@ PERMISSIONS:
     A bare tool name allows every call to it; a name and a target allow that
     target alone. A target ending in * matches by prefix — Bash(cargo *) — and
     only you write one: Niobe stores the target as it stood, never a guess at
-    what else you meant. The user's config and the repository's both apply; a
-    rule in either allows the call.
+    what else you meant. The * never covers a second command chained after
+    the first (;, &&, |, a redirection or a substitution) or a path that climbs
+    above the prefix with ..; such a call is asked about. The user's config and
+    the repository's both apply; a rule in either allows the call.
 
 BACKENDS:
     A claude profile drives the official `claude` CLI as a subprocess, with the
