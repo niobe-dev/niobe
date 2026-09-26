@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! How long the shell takes to redraw.
+//! How long the shell takes to redraw, and to take a long line into the
+//! composer.
 //!
 //! This is a test binary of its own. Cargo runs test binaries one after
 //! another, so no other test draws while these frames are timed; inside one
@@ -20,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use common::{MARKDOWN_REPLY, at_work, hunk, running_session, screen};
 use niobe_core::event::Event;
-use niobe_tui::app::{App, WorkingFile};
+use niobe_tui::app::{App, Arrival, WorkingFile};
 use niobe_tui::theme::{Depth, THEMES};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// A frame is drawn inside a 60 Hz budget at the largest supported snapshot
 /// size, so a resize redraws without a visible stutter. The test binary is a
@@ -343,4 +345,107 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
         "the median frame with {BUSY_AGENTS} agents, {BUSY_DECISIONS} decisions and \
          {BUSY_TOOLS} tools at 200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
     );
+}
+
+/// The length of the shorter line [`keys_read_together_type_a_long_line_in_time_linear_in_its_length`]
+/// types; the longer is four times it.
+const TYPED_LINE: usize = 5_000;
+
+/// Keys the terminal hands over in one read — a paste it did not bracket —
+/// go into the composer as one insert. The composer's editor lays its whole
+/// text out again after every edit, so the same line put in a key at a time
+/// costs its length once per key: 10 000 characters took 1.4 s that way.
+/// Four times the line has to take about four times as long, not sixteen.
+#[test]
+fn keys_read_together_type_a_long_line_in_time_linear_in_its_length() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let short = median_typing(TYPED_LINE);
+    let long = median_typing(4 * TYPED_LINE);
+
+    let ratio = long.as_secs_f64() / short.as_secs_f64().max(f64::EPSILON);
+    assert!(
+        ratio < 8.0,
+        "{TYPED_LINE} characters read together took {short:?} and four times as many \
+         {long:?}: {ratio:.1} times as long, where linear is 4 and quadratic 16"
+    );
+}
+
+/// How long a paste may take to reach the composer. Longer than a frame: the
+/// composer's editor lays out the whole of what it holds after an edit, and
+/// in this debug build that is about 25 ms for 100 KB of one line, where the
+/// release binary takes about 4.
+const PASTE_BUDGET: Duration = Duration::from_millis(50);
+
+/// A line pasted whole reaches the composer without a pause the operator
+/// would notice, however long.
+#[test]
+fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let text = typed_line(100_000);
+
+    let mut times: Vec<Duration> = (0..FRAMES)
+        .map(|_| {
+            let mut app = running_session();
+            let _ = screen(&mut app, 200, 60);
+            let started = Instant::now();
+            app.on_paste(&text);
+            started.elapsed()
+        })
+        .collect();
+    times.sort_unstable();
+    let median = times[FRAMES / 2];
+
+    assert!(
+        median <= PASTE_BUDGET,
+        "a 100 KB one-line paste took {median:?} to land, over the {PASTE_BUDGET:?} budget"
+    );
+}
+
+/// The median time a line of `length` characters takes to type into the
+/// composer, read from the terminal all at once.
+fn median_typing(length: usize) -> Duration {
+    let keys: Vec<KeyEvent> = typed_line(length)
+        .chars()
+        .map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+        .collect();
+    let mut times: Vec<Duration> = (0..5)
+        .map(|_| {
+            let mut app = running_session();
+            // Drawn once, so the composer knows its width and wraps what is
+            // typed into it, as it does in a session.
+            let _ = screen(&mut app, 200, 60);
+            let started = Instant::now();
+            app.on_keys_read(
+                &keys,
+                Arrival {
+                    at: started,
+                    alone: false,
+                },
+            );
+            let took = started.elapsed();
+            assert_eq!(
+                app.composer()
+                    .lines()
+                    .first()
+                    .map(|line| line.chars().count()),
+                Some(length),
+                "the line did not reach the composer whole"
+            );
+            took
+        })
+        .collect();
+    times.sort_unstable();
+    times[2]
+}
+
+/// Prose of `length` characters on one line: words of six letters.
+fn typed_line(length: usize) -> String {
+    (0..length)
+        .map(|n| if n % 7 == 6 { ' ' } else { 'a' })
+        .collect()
 }

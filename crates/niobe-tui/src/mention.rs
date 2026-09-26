@@ -27,20 +27,28 @@ pub(crate) struct Mention {
 /// is at the end of, if it is at the end of one.
 pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Mention> {
     let (row, column) = cursor;
-    let line: Vec<char> = lines.get(row)?.chars().collect();
-    let before = line.get(..column)?;
-    let at = before
-        .iter()
-        .rposition(|c| c.is_whitespace())
-        .map_or(0, |space| space + 1);
-    match before.get(at..)? {
-        ['@', typed @ ..] => Some(Mention {
-            row,
-            at,
-            typed: typed.iter().collect(),
-        }),
-        _ => None,
-    }
+    let line = lines.get(row)?;
+    let before = line.get(..byte_of_column(line, column)?)?;
+    let word = before.rsplit(char::is_whitespace).next()?;
+    let typed = word.strip_prefix('@')?;
+    Some(Mention {
+        row,
+        at: column - word.chars().count(),
+        typed: typed.to_owned(),
+    })
+}
+
+/// Where in `line` the character at `column` starts, or its end where
+/// `column` is just past its last character; `None` further out.
+///
+/// The one walk over the line is the one the prompt's editor makes on every
+/// key as well; nothing here copies the line, which would cost its length in
+/// allocations for every key typed into it.
+fn byte_of_column(line: &str, column: usize) -> Option<usize> {
+    line.char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(line.len()))
+        .nth(column)
 }
 
 /// Up to `limit` of `files` that `typed` could name, the likeliest first.
@@ -115,6 +123,23 @@ mod tests {
         assert_eq!(at_cursor(&lines("ops@example.com"), (0, 15)), None);
         assert_eq!(at_cursor(&lines("@src done"), (0, 9)), None);
         assert_eq!(at_cursor(&lines("no at here"), (0, 10)), None);
+    }
+
+    #[test]
+    fn columns_count_characters_not_bytes() {
+        assert_eq!(
+            at_cursor(&lines("café\u{3000}@ünï then"), (0, 9)),
+            Some(Mention {
+                row: 0,
+                at: 5,
+                typed: "ünï".to_owned(),
+            })
+        );
+        assert_eq!(
+            at_cursor(&lines("@über more"), (0, 3)).map(|m| m.typed),
+            Some("üb".to_owned())
+        );
+        assert_eq!(at_cursor(&lines("@é"), (0, 3)), None, "past the line");
     }
 
     #[test]

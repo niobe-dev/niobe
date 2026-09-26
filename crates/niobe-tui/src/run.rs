@@ -280,16 +280,28 @@ fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
     let mut events = Vec::new();
     wait.read(&mut events)?;
     let arrival = arrival(&events, std::time::Instant::now());
+    // The keys between two other events are handed over together, so that a
+    // paste the terminal did not bracket is typed as one insert.
+    let mut keys = Vec::new();
     for event in events {
         match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key_read(key, arrival),
-            Event::Mouse(mouse) => app.on_mouse(mouse),
-            Event::Paste(text) => app.on_paste(&text),
+            Event::Key(key) if key.kind == KeyEventKind::Press => keys.push(key),
+            // A release or a repeat is not typing, and ends no run of it.
+            Event::Key(_) => {}
+            Event::Mouse(mouse) => {
+                app.on_keys_read(&std::mem::take(&mut keys), arrival);
+                app.on_mouse(mouse);
+            }
+            Event::Paste(text) => {
+                app.on_keys_read(&std::mem::take(&mut keys), arrival);
+                app.on_paste(&text);
+            }
             // The next draw reads the new size; nothing to do here.
             Event::Resize(_, _) => {}
             _ => {}
         }
     }
+    app.on_keys_read(&keys, arrival);
     Ok(())
 }
 

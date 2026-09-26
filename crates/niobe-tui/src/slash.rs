@@ -22,13 +22,16 @@ pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Stri
     if row != 0 {
         return None;
     }
-    let line: Vec<char> = lines.first()?.chars().collect();
-    match line.get(..column)? {
-        ['/', typed @ ..] if !typed.iter().any(|c| c.is_whitespace()) => {
-            Some(typed.iter().collect())
-        }
-        _ => None,
-    }
+    let length = column.checked_sub(1)?;
+    let after = lines.first()?.strip_prefix('/')?;
+    // Only the first word is read, so a key typed into a long prompt does
+    // not walk the whole of it.
+    let typed: String = after
+        .chars()
+        .take(length)
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    (typed.chars().count() == length).then_some(typed)
 }
 
 /// The model a prompt asks the session to move to, where the prompt is the
@@ -119,6 +122,13 @@ mod tests {
         assert_eq!(at_cursor(&lines("/compact now"), (0, 12)), None);
         assert_eq!(at_cursor(&lines("first\n/second"), (1, 7)), None);
         assert_eq!(at_cursor(&lines("no slash"), (0, 8)), None);
+    }
+
+    #[test]
+    fn a_command_is_read_up_to_the_cursor_in_characters() {
+        assert_eq!(at_cursor(&lines("/rév now"), (0, 3)), Some("ré".to_owned()));
+        assert_eq!(at_cursor(&lines("/rév"), (0, 0)), None);
+        assert_eq!(at_cursor(&lines("/ré"), (0, 4)), None, "past the line");
     }
 
     #[test]

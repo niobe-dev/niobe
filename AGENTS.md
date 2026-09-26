@@ -312,7 +312,8 @@ Where tests live:
     `UPDATE_SNAPSHOTS=1 cargo test -p niobe-tui --test shell` and **read the diff** of the
     snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
   - `niobe-tui/tests/frame_budget.rs` times a 200×60 resize, and the steady redraw of a long
-    session of markdown replies, against a 16 ms budget. It is a test binary of its own and its
+    session of markdown replies, against a 16 ms budget, and a long line typed or pasted into
+    the composer: a 100 KB paste against 50 ms, and keys read together against a linear ratio. It is a test binary of its own and its
     tests take turns on a lock, so that nothing shares their cores, and each asserts the median
     of 31 frames so that a frame the scheduler interrupted cannot fail it.
   - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached

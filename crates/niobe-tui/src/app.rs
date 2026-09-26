@@ -2748,6 +2748,9 @@ impl App {
     /// in it, so that a word typed later in the same place is offered a list
     /// of its own.
     fn reopen_offers(&mut self) {
+        if self.offer_closed.is_none() {
+            return;
+        }
         let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
         let lines = self.composer.lines();
         let word = crate::mention::at_cursor(lines, (row, column))
@@ -3324,6 +3327,51 @@ impl App {
         self.arrival = Some(arrival);
         self.on_key(key);
         self.arrival = None;
+    }
+
+    /// Handles the keys one read of the terminal held, in order, as
+    /// [`App::on_key_read`] would one at a time.
+    ///
+    /// Where a character has just been typed into the prompt, the characters
+    /// that follow it in the same read go in with one insert, as a paste
+    /// does. The composer's editor lays out its whole text again after every
+    /// edit, so a paste the terminal did not bracket, taken a key at a time,
+    /// would cost the length of the line once for every character in it.
+    pub fn on_keys_read(&mut self, keys: &[ratatui::crossterm::event::KeyEvent], arrival: Arrival) {
+        let mut rest = keys;
+        while let Some((&key, after)) = rest.split_first() {
+            self.on_key_read(key, arrival);
+            rest = after;
+            if typed_char(key).is_none() || !self.types_into_the_prompt() {
+                continue;
+            }
+            let run = rest
+                .iter()
+                .take_while(|key| typed_char(**key).is_some())
+                .count();
+            let (typed, after) = rest.split_at(run);
+            let text: String = typed.iter().copied().filter_map(typed_char).collect();
+            if self.composer.insert_str(text) {
+                self.offer_selected = 0;
+                self.reopen_offers();
+            }
+            rest = after;
+        }
+    }
+
+    /// Whether a character typed now would go into the prompt as itself: the
+    /// prompt has the keyboard and something in it already, so no `/` or `!`
+    /// could open the search or a command, and no `Esc` has made the next
+    /// digit an F-key.
+    fn types_into_the_prompt(&self) -> bool {
+        self.focus() == Focus::Session
+            && !self.escaped
+            && self.find.is_none()
+            && self.picking.is_none()
+            && !self
+                .asking()
+                .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
+            && !self.composer.is_empty()
     }
 
     /// Handles a paste the terminal bracketed: text, not keys.
@@ -3918,6 +3966,18 @@ const SHELL_PLACEHOLDER: &str = "A command to run here; the agent does not see w
 
 /// How many files the list under an `@` word offers at once.
 const MENTION_ROWS: usize = 8;
+
+/// The character `key` types, where it is one typed as itself: no Ctrl or
+/// Alt, which make it a binding, and not a control character, which the
+/// composer's editor would take for a line break.
+fn typed_char(key: ratatui::crossterm::event::KeyEvent) -> Option<char> {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) if !c.is_control() => Some(c),
+        _ => None,
+    }
+}
 
 /// Whether `key` opens a line in the composer rather than sending it.
 ///
@@ -6931,9 +6991,54 @@ mod tests {
             })
             .collect();
         let alone = keys.len() == 1;
-        for key in keys {
-            app.on_key_read(key, Arrival { at, alone });
+        app.on_keys_read(&keys, Arrival { at, alone });
+    }
+
+    /// What typing `text` a key at a time leaves in the composer.
+    fn typed_alone(text: &str) -> Vec<String> {
+        let mut app = app();
+        let at = Instant::now();
+        for byte in text.bytes() {
+            read(&mut app, &[byte], at);
         }
+        app.composer().lines().to_vec()
+    }
+
+    #[test]
+    fn keys_read_together_type_what_they_type_one_at_a_time() {
+        let text = "look at @src/ma, /tmp and ops@example.com! 2 then @x";
+        let mut app = app();
+
+        read(&mut app, text.as_bytes(), Instant::now());
+
+        assert_eq!(app.composer().lines(), typed_alone(text));
+        assert_eq!(app.composer().lines(), [text]);
+        assert!(app.finding().is_none(), "a slash inside the text searched");
+    }
+
+    #[test]
+    fn a_slash_that_opens_a_read_searches_for_the_rest_of_it() {
+        let mut app = app();
+
+        read(&mut app, b"/build", Instant::now());
+
+        let query = app.finding().expect("the slash opened the search");
+        assert_eq!(query.lines(), ["build"]);
+        assert!(app.composer().is_empty(), "the query went into the prompt");
+    }
+
+    #[test]
+    fn an_enter_read_with_the_keys_before_it_sends_them() {
+        let mut app = app();
+
+        read(&mut app, b"run it\r", Instant::now());
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "run it".to_owned()
+            }]
+        );
     }
 
     /// A prompt for `rm -rf build`, put on screen by the tick at `shown`.
