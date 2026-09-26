@@ -16,6 +16,12 @@
 //! a line that is not UTF-8 is read with the bytes replaced, because a reader
 //! that stopped on one would lose the rest of the session and could leave the
 //! CLI blocked on a pipe nobody drains.
+//!
+//! The CLI leads a process group of its own, and everything it starts — the
+//! shell a tool call runs in, an MCP server — is in it unless it leaves. That
+//! is what a closing session ends, rather than the CLI alone: something it
+//! started holds the pipes it inherited, so the readers would never see them
+//! close, and nobody would be left to see it end.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -41,6 +47,21 @@ pub const BINARY: &str = "claude";
 /// The CLI has a session of its own to write out. Long enough for that on a
 /// loaded machine, short enough that quitting the shell stays instant.
 const GOODBYE: Duration = Duration::from_millis(500);
+
+/// How long what the CLI started is given to end on SIGTERM once the CLI has
+/// gone, before its group is killed.
+///
+/// A process that listens ends within a few milliseconds, so only one that
+/// does not is waited for this long; the operator who quit is waiting too.
+const LEFTOVERS: Duration = Duration::from_millis(250);
+
+/// How long a closing session waits for its reader threads once the CLI's
+/// group has gone, before it leaves them.
+///
+/// Only something that left the group — a daemon that started a session of
+/// its own — can still hold a pipe by then. A thread left reading it ends
+/// with the process, and a quit is not held up for as long as that runs.
+const LET_GO: Duration = Duration::from_millis(100);
 
 /// What the CLI is told when the operator refuses a call.
 ///
@@ -236,8 +257,8 @@ impl std::error::Error for SpawnError {
 /// A running `claude` session.
 ///
 /// Dropping it closes the session: standard input is closed so the CLI can
-/// write its own transcript out, and the process is killed if it has not left
-/// by then.
+/// write its own transcript out, the process is killed if it has not left
+/// by then, and then so is everything it started that has not left either.
 #[derive(Debug)]
 pub struct Session {
     child: Child,
@@ -272,6 +293,8 @@ impl Session {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
         for (name, value) in &options.env {
             command.env(name, value);
         }
@@ -749,13 +772,53 @@ impl Drop for Session {
             }
         }
 
-        // The threads end when their pipes close, which the child leaving
-        // does. Joined so that no thread outlives the session it reads.
+        end_group(self.child.id());
+
+        // The threads end when their pipes close, which the group leaving
+        // does. Joined so that no thread outlives the session it reads, but
+        // never waited on without a bound: a pipe still held by something
+        // outside the group would hold the quit up for as long as that runs.
+        let until = Instant::now() + LET_GO;
         for reader in self.readers.drain(..) {
-            let _ = reader.join();
+            while !reader.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
         }
     }
 }
+
+/// Ends what is left of the process group the CLI led: asked with SIGTERM,
+/// then killed if anything is still in it after [`LEFTOVERS`].
+///
+/// Called once the CLI has been reaped. A process group's id is not given to
+/// a new process while any member of the group is alive, so the group
+/// signalled is still the CLI's, or is gone and the signal finds nothing.
+#[cfg(unix)]
+fn end_group(leader: u32) {
+    use rustix::process::{Pid, Signal};
+
+    let Some(group) = i32::try_from(leader).ok().and_then(Pid::from_raw) else {
+        return;
+    };
+    // A group with nobody left in it is what was wanted.
+    if rustix::process::kill_process_group(group, Signal::TERM).is_err() {
+        return;
+    }
+    let until = Instant::now() + LEFTOVERS;
+    while rustix::process::test_kill_process_group(group).is_ok() {
+        if Instant::now() >= until {
+            let _ = rustix::process::kill_process_group(group, Signal::KILL);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(not(unix))]
+fn end_group(_leader: u32) {}
 
 #[cfg(test)]
 mod tests {

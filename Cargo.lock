@@ -780,6 +780,7 @@ name = "niobe-bridge-claude"
 version = "0.12.0"
 dependencies = [
  "niobe-core",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

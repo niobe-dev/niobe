@@ -1243,20 +1243,9 @@ const UNDECODABLE_CLAUDE: &str = "#!/bin/sh\n\
 #[test]
 fn a_line_from_the_cli_that_is_not_utf8_costs_neither_the_reply_nor_the_shell() {
     let repo = repo();
-    let bin = repo.path().join("bin");
-    std::fs::create_dir(&bin).expect("a directory for the stand-in");
-    let claude = bin.join("claude");
-    std::fs::write(&claude, UNDECODABLE_CLAUDE).expect("the stand-in is written");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755))
-            .expect("the stand-in is made executable");
-    }
-    let home = user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n");
+    let home = stand_in(repo.path(), UNDECODABLE_CLAUDE);
     let (terminal, slave) = Terminal::open();
-    let mut shell = shell_command(&slave, repo.path())
-        .env("XDG_CONFIG_HOME", home.path())
-        .env("PATH", format!("{}:/bin:/usr/bin", bin.display()))
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
         .spawn()
         .expect("the niobe binary runs");
     terminal.shows(OPENING_FRAME);
@@ -1275,4 +1264,122 @@ fn a_line_from_the_cli_that_is_not_utf8_costs_neither_the_reply_nor_the_shell() 
         "the session closed the CLI's input under it: {drawn}"
     );
     assert_handed_back(&drawn, "a quit after a line that was not UTF-8");
+}
+
+/// Puts `script` in `cwd` as the `claude` a session runs, and gives back a
+/// user config whose default profile runs it.
+fn stand_in(cwd: &Path, script: &str) -> tempfile::TempDir {
+    let bin = cwd.join("bin");
+    std::fs::create_dir(&bin).expect("a directory for the stand-in");
+    let claude = bin.join("claude");
+    std::fs::write(&claude, script).expect("the stand-in is written");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+    }
+    user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n")
+}
+
+/// The shell on `slave`, recording into `cwd` under the config in `home`,
+/// with the stand-in [`stand_in`] put in `cwd` first on its `PATH`.
+fn shell_driving_the_stand_in(slave: &File, cwd: &Path, home: &Path) -> Command {
+    let mut command = shell_command(slave, cwd);
+    command.env("XDG_CONFIG_HOME", home).env(
+        "PATH",
+        format!("{}:/bin:/usr/bin", cwd.join("bin").display()),
+    );
+    command
+}
+
+/// A `claude` that starts something of its own on its standard output and
+/// error — as a command a tool call left in the background, or an MCP server,
+/// is — writes down its own process and that one, answers one turn, and
+/// leaves as soon as its standard input closes. What it started stays, and
+/// holds the pipes the session reads the CLI from.
+const LEAVES_SOMETHING_RUNNING_CLAUDE: &str = "#!/bin/sh\n\
+    echo $$ > claude.pid\n\
+    sleep 77101 &\n\
+    echo $! > started.pid\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"replied-with-something-running\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    while read -r line; do :; done\n";
+
+/// Ends the shell down `path` while the CLI has something running that holds
+/// its pipes, and asserts the shell is gone within [`DEADLINE`] and took
+/// with it everything the CLI started.
+///
+/// The CLI leaving does not close the pipes the session reads it from while
+/// anything it started still holds them, so a session that waits for them to
+/// close waits for as long as that runs: the operator is handed back a
+/// terminal with a finished-looking session on it and no prompt.
+fn quits_without_waiting_on_what_the_cli_started(path: &str, end: impl FnOnce(&Terminal, &Child)) {
+    let repo = repo();
+    let home = stand_in(repo.path(), LEAVES_SOMETHING_RUNNING_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"say something\r");
+    terminal.shows("replied-with-something-running");
+    let pid = |file: &str| {
+        let written = std::fs::read_to_string(repo.path().join(file))
+            .expect("the stand-in wrote down its processes before it answered");
+        let raw: i32 = written.trim().parse().expect("a pid is a number");
+        Pid::from_raw(raw).expect("a pid is positive")
+    };
+    let (cli, started) = (pid("claude.pid"), pid("started.pid"));
+
+    end(&terminal, &shell);
+
+    let (took, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(
+        took < DEADLINE,
+        "on {path} the shell took {took:?} to end, over the {DEADLINE:?} it has"
+    );
+    assert!(
+        status.success(),
+        "on {path} the shell ended with {status}: {drawn}"
+    );
+    assert_handed_back(&drawn, path);
+
+    // What was killed is reaped by whoever inherited it, a moment later.
+    let deadline = Instant::now() + DEADLINE;
+    let left = || {
+        rustix::process::test_kill_process(started).is_ok()
+            || rustix::process::test_kill_process_group(cli).is_ok()
+    };
+    while left() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !left(),
+        "on {path} what the CLI started was still running after the shell ended"
+    );
+}
+
+#[test]
+fn a_quit_does_not_wait_on_what_the_cli_started_and_takes_it_along() {
+    quits_without_waiting_on_what_the_cli_started("a clean quit", |terminal, _| {
+        terminal.typed(CTRL_Q);
+    });
+}
+
+#[test]
+fn a_sigterm_does_not_wait_on_what_the_cli_started_and_takes_it_along() {
+    quits_without_waiting_on_what_the_cli_started("a SIGTERM", |_, shell| {
+        signal(shell, Signal::TERM);
+    });
+}
+
+#[test]
+fn a_hangup_does_not_wait_on_what_the_cli_started_and_takes_it_along() {
+    quits_without_waiting_on_what_the_cli_started("a hangup", |_, shell| {
+        signal(shell, Signal::HUP);
+    });
 }

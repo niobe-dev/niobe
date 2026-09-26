@@ -107,8 +107,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `translate.rs` turns one message of it into events and owns no process, `driver.rs` spawns the
   binary, asks it with `initialize` what it offers — the answer is where the slash commands a
   session starts with are listed, `commands_changed` only reports a change to them — keeps its
-  standard input open for the life of the session and answers the permission prompts the CLI
-  stops turns on; `spilled.rs` reads the file the CLI saves a shell output
+  standard input open for the life of the session, answers the permission prompts the CLI
+  stops turns on, and starts it as the leader of a process group of its own, which a closing
+  session ends whole, so nothing the CLI started outlives it or holds the quit up on its pipes; `spilled.rs` reads the file the CLI saves a shell output
   too large to hand over to, so a whole test run is counted from it rather than from the
   preview, and both the driver and the transcript reader hand it to the translator;
   `transcript.rs` reads the session files the CLI keeps for
@@ -137,7 +138,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   operator's `!` commands, off the draw path, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
   `tests/cli.rs` runs the binary;
-  `tests/pty.rs` runs it on a real terminal; `tests/permission.rs` walks a recorded permission
+  `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
   `tests/billing.rs` folds the bridge's recordings into the shell and compares the Usage pane
