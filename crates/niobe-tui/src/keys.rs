@@ -18,11 +18,19 @@
 //! that the shell's keys mean the same on either path: the same modifiers from
 //! the same masks, a lone Esc at the end of a read being the Esc key, and a
 //! sequence nobody recognises passed over whole rather than typed out.
+//!
+//! A bracketed paste, `CSI 200 ~ … CSI 201 ~`, is read as one
+//! [`Event::Paste`] of everything between the two markers, byte for byte: the
+//! carriage returns in it are line breaks the operator pasted, not Enter.
 
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
+
+/// What a terminal sends after a paste, once the shell has asked for pastes
+/// to be bracketed. The marker before one, `CSI 200 ~`, is read as a sequence.
+const PASTE_END: &[u8] = b"\x1b[201~";
 
 /// The longest sequence waited out before the bytes are taken to be none the
 /// shell reads. Every sequence a terminal sends for a key or a click is far
@@ -34,9 +42,12 @@ const LONGEST_SEQUENCE: usize = 64;
 enum Step {
     /// A key or a click.
     Event(Event),
-    /// A whole sequence that is no key: a reply to a query, focus, a paste
-    /// marker, or one this reader does not know.
+    /// A whole sequence that is no key: a reply to a query, focus, the end
+    /// of a paste nothing opened, or one this reader does not know.
     Skip,
+    /// The marker that opens a paste: what follows is text up to the marker
+    /// that closes it.
+    Paste,
     /// The start of a sequence whose end has not been read yet.
     Wait,
 }
@@ -46,6 +57,10 @@ enum Step {
 #[derive(Debug, Default)]
 pub(crate) struct Decoder {
     pending: Vec<u8>,
+    /// The text of a paste whose closing marker has not been read yet. It is
+    /// not bounded by [`LONGEST_SEQUENCE`]: a paste is as long as what the
+    /// operator copied, and cutting it would type the rest as keys.
+    pasting: Option<Vec<u8>>,
 }
 
 impl Decoder {
@@ -56,6 +71,16 @@ impl Decoder {
     /// on its way.
     pub(crate) fn feed(&mut self, bytes: &[u8], more: bool, events: &mut Vec<Event>) {
         for (index, byte) in bytes.iter().enumerate() {
+            if let Some(pasted) = self.pasting.as_mut() {
+                pasted.push(*byte);
+                if pasted.ends_with(PASTE_END) {
+                    pasted.truncate(pasted.len() - PASTE_END.len());
+                    let text = String::from_utf8_lossy(pasted).into_owned();
+                    events.push(Event::Paste(text));
+                    self.pasting = None;
+                }
+                continue;
+            }
             self.pending.push(*byte);
             let more = more || index + 1 < bytes.len();
             match step(&self.pending, more) {
@@ -64,6 +89,10 @@ impl Decoder {
                     self.pending.clear();
                 }
                 Step::Skip => self.pending.clear(),
+                Step::Paste => {
+                    self.pending.clear();
+                    self.pasting = Some(Vec::new());
+                }
                 Step::Wait if self.pending.len() > LONGEST_SEQUENCE => self.pending.clear(),
                 Step::Wait => {}
             }
@@ -179,6 +208,9 @@ fn sequence(parameters: &[u8], last: u8) -> Step {
     // is no key; so is focus, which the shell never asks for.
     if parameters.starts_with('?') {
         return Step::Skip;
+    }
+    if (parameters, last) == ("200", b'~') {
+        return Step::Paste;
     }
     match last {
         b'u' => csi_u(parameters),
@@ -582,7 +614,7 @@ mod tests {
     #[test]
     fn replies_and_unknown_sequences_are_passed_over_whole() {
         assert_eq!(
-            read(b"\x1b[?0u\x1b[?62;22cx\x1b[Ix\x1b[99~x\x1b[200~x"),
+            read(b"\x1b[?0u\x1b[?62;22cx\x1b[Ix\x1b[99~x\x1b[201~x"),
             [
                 pressed(KeyCode::Char('x'), KeyModifiers::NONE),
                 pressed(KeyCode::Char('x'), KeyModifiers::NONE),
@@ -590,6 +622,40 @@ mod tests {
                 pressed(KeyCode::Char('x'), KeyModifiers::NONE),
             ]
         );
+    }
+
+    #[test]
+    fn a_bracketed_paste_is_one_paste_with_its_line_breaks_and_escapes_kept() {
+        assert_eq!(
+            read(b"\x1b[200~one\rtwo\x1b[A\tthree\x1b[201~x"),
+            [
+                Event::Paste("one\rtwo\x1b[A\tthree".to_owned()),
+                pressed(KeyCode::Char('x'), KeyModifiers::NONE),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_paste_cut_between_reads_anywhere_is_read_whole() {
+        let bytes = "\x1b[200~é one\rtwo\x1b[201~".as_bytes();
+        for cut in 1..bytes.len() {
+            let mut decoder = Decoder::default();
+            let mut events = Vec::new();
+            decoder.feed(&bytes[..cut], true, &mut events);
+            decoder.feed(&bytes[cut..], false, &mut events);
+            assert_eq!(
+                events,
+                [Event::Paste("é one\rtwo".to_owned())],
+                "cut after byte {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_paste_longer_than_any_sequence_is_not_cut_short() {
+        let text = "line\r".repeat(LONGEST_SEQUENCE * 4);
+        let bytes = format!("\x1b[200~{text}\x1b[201~");
+        assert_eq!(read(bytes.as_bytes()), [Event::Paste(text)]);
     }
 
     #[test]

@@ -3326,6 +3326,46 @@ impl App {
         self.arrival = None;
     }
 
+    /// Handles a paste the terminal bracketed: text, not keys.
+    ///
+    /// Its line breaks stay line breaks, so a pasted log is one prompt to
+    /// read over and send rather than a turn per line. It goes where typing
+    /// would go, but it presses nothing: no Enter, no `/` or `!` opening the
+    /// search or a command, and no answer to a question — a paste is exactly
+    /// what a prompt must not take as one (see [`ASK_QUIET`]).
+    pub fn on_paste(&mut self, text: &str) {
+        self.hint = None;
+        self.escaped = false;
+        let text = pasted_lines(text);
+        if self.asking().is_some() {
+            match self.ask_focus {
+                AskFocus::Writing => {
+                    self.ask_draft.push_str(&joined_lines(&text));
+                    return;
+                }
+                AskFocus::Choosing => {
+                    self.hint = Some(TOO_SOON_HINT.to_owned());
+                    return;
+                }
+                AskFocus::Deferred => {}
+            }
+        }
+        if self.picking().is_some() {
+            return;
+        }
+        if let Some(find) = self.find.as_mut() {
+            if find.query.insert_str(joined_lines(&text)) {
+                find.current = None;
+            }
+            return;
+        }
+        self.focus = Focus::Session;
+        if self.composer.insert_str(text) {
+            self.offer_selected = 0;
+            self.reopen_offers();
+        }
+    }
+
     /// The latest moment the shell has been told of: the tick's, or the
     /// arrival of the key being handled, which a prompt that key brought to
     /// the front came up at.
@@ -3803,6 +3843,19 @@ impl App {
     pub fn type_into_composer(&mut self, input: impl Into<Input>) {
         self.composer.input(input);
     }
+}
+
+/// A paste with every line break in it written as `\n`, which is what the
+/// composer splits lines at. A terminal sends the lines of a paste apart with
+/// a carriage return, as the Enter key is sent; a file copied from elsewhere
+/// may hold `\r\n` or `\n`.
+fn pasted_lines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// A paste for somewhere that holds one line: its lines joined by spaces.
+fn joined_lines(text: &str) -> String {
+    text.replace('\n', " ")
 }
 
 /// Now, in seconds since the Unix epoch. Zero on a clock set before it, which
@@ -6919,6 +6972,93 @@ mod tests {
             Answer::Once,
             "the paste chose an answer"
         );
+    }
+
+    #[test]
+    fn a_three_line_paste_is_one_three_line_prompt_and_sends_nothing() {
+        let mut app = app();
+
+        app.on_paste("here is the log:\rerror: boom\rat foo.rs:3");
+
+        assert_eq!(
+            app.composer().lines(),
+            ["here is the log:", "error: boom", "at foo.rs:3"]
+        );
+        assert!(app.take_produced().is_empty(), "the paste sent a turn");
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "here is the log:\nerror: boom\nat foo.rs:3".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_pasted_line_break_is_one_line_break_whatever_it_was_written_as() {
+        let mut app = app();
+
+        app.on_paste("crlf\r\nlf\ncr\rend");
+
+        assert_eq!(app.composer().lines(), ["crlf", "lf", "cr", "end"]);
+    }
+
+    #[test]
+    fn a_paste_goes_in_at_the_cursor_without_opening_search_or_a_command() {
+        let mut app = app();
+
+        app.on_paste("/tmp holds it");
+        app.on_paste("!");
+
+        assert!(app.finding().is_none(), "a pasted slash opened the search");
+        assert_eq!(app.composer().lines(), ["/tmp holds it!"]);
+    }
+
+    #[test]
+    fn a_paste_into_the_search_is_one_line_of_query() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+
+        app.on_paste("two\rwords");
+
+        let query = app.finding().expect("the slash opened the search");
+        assert_eq!(query.lines(), ["two words"]);
+        assert!(
+            app.composer().is_empty(),
+            "the paste landed behind the search"
+        );
+    }
+
+    #[test]
+    fn a_bracketed_paste_answers_no_prompt_and_types_nothing_under_it() {
+        let shown = Instant::now();
+        let mut app = shown_at(shown);
+
+        app.on_paste("2\r");
+
+        assert!(app.asking().is_some(), "the paste answered the question");
+        assert!(app.take_rules().is_empty());
+        assert_eq!(
+            app.ask_selected(),
+            Answer::Once,
+            "the paste chose an answer"
+        );
+        assert!(
+            app.composer().is_empty(),
+            "the paste went under the question"
+        );
+    }
+
+    #[test]
+    fn a_paste_into_a_written_answer_is_written_and_sends_nothing() {
+        let mut app = shown_at(Instant::now());
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        app.on_paste("keep\rbuild");
+
+        assert_eq!(app.ask_draft(), "keep build");
+        assert!(app.asking().is_some(), "the paste sent the answer");
     }
 
     #[test]

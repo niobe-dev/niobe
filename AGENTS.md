@@ -76,11 +76,13 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
-  enters and restores the terminal, the mouse it takes for the wheel and clicks, and the keyboard
+  enters and restores the terminal, the mouse it takes for the wheel and clicks, the bracketing it
+  asks pastes to arrive in, and the keyboard
   enhancement it pushes where the terminal says it can tell Shift+Enter from Enter — or the
   modifyOtherKeys it asks for where the terminal answers only its attributes, as tmux does —
   `input.rs` waits on the terminal and, where `poll(2)` sees it, reads it too, `keys.rs` makes
-  events of those bytes as crossterm would, plus the modifyOtherKeys form crossterm drops, `theme.rs` is the
+  events of those bytes as crossterm would, plus the modifyOtherKeys form crossterm drops, and
+  a bracketed paste as one paste whose line breaks are not Enter, `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
   and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps and truncates, `find.rs` finds a query in the transcript as it is drawn and marks

@@ -284,6 +284,7 @@ fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key_read(key, arrival),
             Event::Mouse(mouse) => app.on_mouse(mouse),
+            Event::Paste(text) => app.on_paste(&text),
             // The next draw reads the new size; nothing to do here.
             Event::Resize(_, _) => {}
             _ => {}

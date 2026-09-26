@@ -95,21 +95,22 @@ const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h";
 /// twice fails as well as one never handed back at all.
 const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 
-/// The terminal handed back: the mouse no longer reported, the keyboard
-/// enhancement popped, off the alternate screen and the cursor visible, in
-/// that order. The shell writes them from one place, so they arrive as one run
-/// of bytes, and a restoration that stopped in the middle — a prompt that
-/// prints escape sequences at every click, reads Enter as `CSI 13 u`, or has
-/// no cursor on it — is not this.
+/// The terminal handed back: the mouse no longer reported, a paste no longer
+/// bracketed, the keyboard enhancement popped, off the alternate screen and
+/// the cursor visible, in that order. The shell writes them from one place, so
+/// they arrive as one run of bytes, and a restoration that stopped in the
+/// middle — a prompt that prints escape sequences at every click or around
+/// every paste, reads Enter as `CSI 13 u`, or has no cursor on it — is not
+/// this.
 ///
 /// The terminals these tests open answer as one that reports keys does, so
 /// this is what every way out has to leave behind.
-const RESTORED: &str = "\x1b[?1006l\x1b[?1000l\x1b[<1u\x1b[?1049l\x1b[?25h";
+const RESTORED: &str = "\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[<1u\x1b[?1049l\x1b[?25h";
 
 /// The same, on a terminal that cannot report keys: it was never pushed the
 /// enhancement, so it is never asked to pop it, and the modifyOtherKeys it was
 /// asked for instead goes back to what the terminal had.
-const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1000l\x1b[>4m\x1b[?1049l\x1b[?25h";
+const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[>4m\x1b[?1049l\x1b[?25h";
 
 /// What the shell asks a terminal on the way in: which keyboard enhancements
 /// it has on, then its primary device attributes.
@@ -1269,6 +1270,49 @@ fn a_line_from_the_cli_that_is_not_utf8_costs_neither_the_reply_nor_the_shell() 
         "the session closed the CLI's input under it: {drawn}"
     );
     assert_handed_back(&drawn, "a quit after a line that was not UTF-8");
+}
+
+/// A `claude` that writes down every turn it is sent, one line each, and
+/// answers each with the same reply.
+const WRITES_DOWN_TURNS_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    while read -r turn; do\n\
+    printf '%s\\n' \"$turn\" >> turns.jsonl\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    done\n";
+
+/// A paste the terminal bracketed is one prompt with its lines in it, sent
+/// by the Enter after it: the carriage returns a terminal separates the
+/// lines of a paste with are not Enter.
+#[test]
+fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[200~here is the log:\rerror: boom\rat foo.rs:3\x1b[201~");
+    terminal.typed(b"\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let turns = std::fs::read_to_string(repo.path().join("turns.jsonl"))
+        .expect("the stand-in wrote down the turn it was sent");
+    let turns: Vec<&str> = turns.lines().collect();
+    assert_eq!(turns.len(), 1, "the paste was sent as {turns:?}");
+    assert!(
+        turns[0].contains(r"here is the log:\nerror: boom\nat foo.rs:3"),
+        "the turn sent was not the paste with its lines: {turns:?}"
+    );
+    assert_handed_back(&drawn, "a quit after a paste");
 }
 
 /// Puts `script` in `cwd` as the `claude` a session runs, and gives back a

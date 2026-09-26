@@ -98,6 +98,15 @@ const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
 /// is what lets the panic hook write it without knowing how far entry got.
 const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
 
+/// Asks the terminal to mark the start and end of a paste, so that the lines
+/// of one are read as text rather than as a key press each, Enter included.
+const PASTE_ON: &[u8] = b"\x1b[?2004h";
+
+/// Takes [`PASTE_ON`] back. Harmless on a terminal that was never asked, for
+/// the same reason as [`MOUSE_OFF`]; one left asked would wrap every paste
+/// into the shell the operator returns to in escape sequences.
+const PASTE_OFF: &[u8] = b"\x1b[?2004l";
+
 /// Asks which keyboard enhancements the terminal has on, then for its primary
 /// device attributes.
 ///
@@ -246,6 +255,7 @@ fn reports_keys(_out: &mut impl Write) -> Answer {
 fn enter_screen(out: &mut impl Write) -> io::Result<()> {
     execute!(out, EnterAlternateScreen, Hide)?;
     out.write_all(MOUSE_ON)?;
+    out.write_all(PASTE_ON)?;
     out.flush()
 }
 
@@ -253,13 +263,14 @@ fn enter_screen(out: &mut impl Write) -> io::Result<()> {
 /// takes back what `keyboard` says the terminal was asked to report keys with.
 ///
 /// Separated from [`TerminalGuard`] so that the panic hook, which cannot reach
-/// the guard, emits exactly the same bytes. The mouse goes back first: a
-/// terminal left reporting it would print escape sequences into the shell the
-/// operator returns to at every click. The keyboard is popped before the
+/// the guard, emits exactly the same bytes. The mouse and the paste markers go
+/// back first: a terminal left reporting them would print escape sequences
+/// into the shell the operator returns to at every click and every paste. The keyboard is popped before the
 /// alternate screen is left, because the protocol keeps one stack per screen
 /// and the push was made on this one.
 fn leave(out: &mut impl Write, keyboard: Asked) -> io::Result<()> {
     out.write_all(MOUSE_OFF)?;
+    out.write_all(PASTE_OFF)?;
     match keyboard {
         Asked::Nothing => {}
         Asked::Enhancement => out.write_all(KEYBOARD_OFF)?,
@@ -286,9 +297,10 @@ pub struct TerminalGuard<W: Write> {
 
 impl<W: Write> TerminalGuard<W> {
     /// Enters raw mode and the alternate screen, hides the cursor, asks for
-    /// the mouse wheel and clicks and for Shift+Enter to be told from Enter:
-    /// with the kitty protocol where the terminal says it knows it, and with
-    /// modifyOtherKeys where it answered without saying so.
+    /// the mouse wheel and clicks, for pastes to be bracketed, and for
+    /// Shift+Enter to be told from Enter: with the kitty protocol where the
+    /// terminal says it knows it, and with modifyOtherKeys where it answered
+    /// without saying so.
     pub fn enter(out: W) -> io::Result<Self> {
         enable_raw_mode()?;
 
@@ -503,6 +515,8 @@ mod tests {
     const SHOW_CURSOR: &str = "\x1b[?25h";
     const MOUSE_ON: &str = "\x1b[?1000h";
     const MOUSE_OFF: &str = "\x1b[?1000l";
+    const PASTE_ON: &str = "\x1b[?2004h";
+    const PASTE_OFF: &str = "\x1b[?2004l";
 
     fn written(bytes: &[u8]) -> String {
         String::from_utf8(bytes.to_owned()).expect("crossterm writes UTF-8")
@@ -533,6 +547,10 @@ mod tests {
         assert!(
             out.find(MOUSE_ON) < out.find(MOUSE_OFF),
             "the mouse was not handed back after it was taken: {out:?}"
+        );
+        assert!(
+            out.contains(PASTE_ON) && out.find(PASTE_ON) < out.find(PASTE_OFF),
+            "a paste was not asked to be marked, or was left marked: {out:?}"
         );
     }
 
