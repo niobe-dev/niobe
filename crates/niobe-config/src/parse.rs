@@ -43,7 +43,9 @@ impl File<'_> {
         for (key, value) in in_file_order(root) {
             let at = Key::root(key.get_ref());
             match key.get_ref().as_ref() {
-                "default_profile" => config.default_profile = Some(self.default_profile(value, &at)?),
+                "default_profile" => {
+                    config.default_profile = Some(self.default_profile(value, &at)?)
+                }
                 "theme" => config.theme = Some(self.theme(value, &at)?),
                 "effects" => config.effects = Some(self.boolean(value, &at)?),
                 "permissions" => config.allowed = self.permissions(value, &at)?,
