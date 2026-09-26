@@ -1223,3 +1223,56 @@ fn a_command_typed_after_a_bang_runs_here_and_is_kept_as_a_call() {
         "{events:?}"
     );
 }
+
+/// A `claude` that reads the request a session opens with and one turn,
+/// replies around a line that is not UTF-8, ends the turn, and then reads
+/// whatever it is sent until its standard input closes — so a session that
+/// closed it early would find it gone.
+const UNDECODABLE_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"written-before-the-bytes\"}]}}'\n\
+    printf 'BAD\\377\\376LINE\\n'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"written-after-the-bytes\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    while read -r line; do :; done\n";
+
+/// One line from the CLI that is not UTF-8 is passed over: the reply after it
+/// is drawn, the session stays open for the next prompt, and the shell still
+/// answers the keyboard and quits.
+#[test]
+fn a_line_from_the_cli_that_is_not_utf8_costs_neither_the_reply_nor_the_shell() {
+    let repo = repo();
+    let bin = repo.path().join("bin");
+    std::fs::create_dir(&bin).expect("a directory for the stand-in");
+    let claude = bin.join("claude");
+    std::fs::write(&claude, UNDECODABLE_CLAUDE).expect("the stand-in is written");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+    }
+    let home = user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("PATH", format!("{}:/bin:/usr/bin", bin.display()))
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"say something\r");
+    terminal.shows("written-after-the-bytes");
+    terminal.typed(b"and again\r");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert!(
+        !drawn.contains("standard input is closed"),
+        "the session closed the CLI's input under it: {drawn}"
+    );
+    assert_handed_back(&drawn, "a quit after a line that was not UTF-8");
+}

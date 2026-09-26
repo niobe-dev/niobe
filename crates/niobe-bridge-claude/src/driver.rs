@@ -12,7 +12,10 @@
 //! Two threads read the child, because a pipe that nobody drains fills up and
 //! stops the writer: one turns standard output into events, one keeps whatever
 //! the CLI writes to standard error so that a failure can be reported with the
-//! CLI's own words rather than with an exit status.
+//! CLI's own words rather than with an exit status. Both read bytes, not text:
+//! a line that is not UTF-8 is read with the bytes replaced, because a reader
+//! that stopped on one would lose the rest of the session and could leave the
+//! CLI blocked on a pipe nobody drains.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -252,6 +255,11 @@ pub struct Session {
     /// Whether the child's exit has already been turned into an event, so that
     /// a session that has ended says so once rather than on every drain.
     reported: bool,
+    /// When the CLI's standard output was first found closed. The process
+    /// leaving closes it a moment before it can be reaped, so the end is not
+    /// reported until one or the other — the process gone, or [`GOODBYE`]
+    /// passed with it still there — and never by waiting on it.
+    output_closed: Option<Instant>,
 }
 
 impl Session {
@@ -307,9 +315,13 @@ impl Session {
         let refusals: Refusals = Arc::new(Mutex::new(Vec::new()));
         let refused = Arc::clone(&refusals);
         let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let mut stdout = BufReader::new(stdout);
+            while let Some((line, decoded)) = next_line(&mut stdout) {
                 if line.trim().is_empty() {
                     continue;
+                }
+                if !decoded && sender.send(undecodable()).is_err() {
+                    return;
                 }
                 if let Ok(mut refused) = refused.lock() {
                     for id in refused.drain(..) {
@@ -339,7 +351,8 @@ impl Session {
         let kept = Arc::new(Mutex::new(String::new()));
         let writing = Arc::clone(&kept);
         let errors = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let mut stderr = BufReader::new(stderr);
+            while let Some((line, _)) = next_line(&mut stderr) {
                 if let Ok(mut kept) = writing.lock() {
                     kept.push_str(&line);
                     kept.push('\n');
@@ -357,6 +370,7 @@ impl Session {
             readers: vec![reader, errors],
             control_requests: 0,
             reported: false,
+            output_closed: None,
         };
         // A CLI that cannot be written to has already left, and the next
         // drain reports that in the CLI's own words; failing the spawn here
@@ -506,8 +520,10 @@ impl Session {
 
     /// Everything the CLI has produced since the last call.
     ///
-    /// Never blocks. A session whose subprocess has gone reports that once,
-    /// with whatever the CLI wrote to standard error, and then nothing.
+    /// Never blocks: it runs on the thread that draws the screen. A session
+    /// whose subprocess has gone reports that once, with whatever the CLI
+    /// wrote to standard error, and then nothing. One whose subprocess closed
+    /// its standard output and stayed is stopped, and reported as a failure.
     pub fn drain(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         loop {
@@ -524,31 +540,40 @@ impl Session {
         }
     }
 
-    /// The event a session's subprocess leaving produces, the once.
+    /// The event a session's subprocess leaving produces, the once, or
+    /// nothing yet while it may still be on its way out.
     fn ended(&mut self) -> Option<Event> {
         if self.reported {
             return None;
         }
-        self.reported = true;
-        // Standard input is closed here rather than on drop: the CLI has
-        // already gone, and holding the pipe would keep a descriptor for a
-        // process that will never read it.
+        // Standard input is closed here rather than on drop: nothing the CLI
+        // says can be read any more, and closing it is how the CLI is asked to
+        // leave.
         self.stdin = None;
+        let closed = *self.output_closed.get_or_insert_with(Instant::now);
 
-        let status = match self.child.wait() {
-            Ok(status) => status,
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => status,
+            Ok(None) if closed.elapsed() < GOODBYE => return None,
+            Ok(None) => {
+                self.reported = true;
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Some(Event::Error {
+                    message: kept_running(&self.said()),
+                    fatal: true,
+                });
+            }
             Err(error) => {
+                self.reported = true;
                 return Some(Event::Error {
                     message: format!("the `claude` session ended and could not be reaped: {error}"),
                     fatal: true,
                 });
             }
         };
-        let said = self
-            .stderr
-            .lock()
-            .map(|kept| kept.trim().to_owned())
-            .unwrap_or_default();
+        self.reported = true;
+        let said = self.said();
 
         if status.success() && said.is_empty() {
             return Some(Event::Notice {
@@ -560,6 +585,66 @@ impl Session {
             fatal: true,
         })
     }
+
+    /// Everything the CLI has written to standard error so far.
+    fn said(&self) -> String {
+        self.stderr
+            .lock()
+            .map(|kept| kept.trim().to_owned())
+            .unwrap_or_default()
+    }
+}
+
+/// The next line of one of the CLI's pipes, without its line ending, and
+/// whether it was UTF-8 as sent. `None` once the pipe is closed or cannot be
+/// read.
+///
+/// A line that is not UTF-8 is read with each byte that is not replaced by
+/// U+FFFD rather than ending the pipe: the bytes come from whatever a tool
+/// printed or a file held, and one of them must not cost the rest of the
+/// session — nor leave the CLI blocked writing to a pipe nobody reads.
+fn next_line(reader: &mut impl BufRead) -> Option<(String, bool)> {
+    let mut bytes = Vec::new();
+    match reader.read_until(b'\n', &mut bytes) {
+        Ok(0) | Err(_) => return None,
+        Ok(_) => {}
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    Some(match String::from_utf8(bytes) {
+        Ok(line) => (line, true),
+        Err(error) => (
+            String::from_utf8_lossy(error.as_bytes()).into_owned(),
+            false,
+        ),
+    })
+}
+
+/// The warning for a line of the CLI's output that was not UTF-8.
+fn undecodable() -> Event {
+    Event::Error {
+        message: "the CLI sent a line that was not UTF-8; the bytes that were not are shown \
+                  as \u{fffd}."
+            .to_owned(),
+        fatal: false,
+    }
+}
+
+/// What to say about a CLI that closed its standard output and did not leave
+/// when asked, so it was stopped: nothing it did after that could be shown.
+fn kept_running(said: &str) -> String {
+    let mut message = "the `claude` CLI closed its output while still running, so nothing more \
+                       it did could be shown; it was stopped."
+        .to_owned();
+    if !said.is_empty() {
+        message.push_str(" It said: ");
+        message.push_str(said);
+    }
+    message
 }
 
 /// The line that asks the CLI to change something about the running session.
