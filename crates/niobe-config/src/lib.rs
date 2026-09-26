@@ -80,8 +80,10 @@
 //! crate reads the paths it is given and never looks at the environment.
 //!
 //! A repository's file arrives with the clone, so what it may put in front of a
-//! backend — a profile's `env`, `args`, `settings` and `auth_refresh` — takes
-//! effect only once the operator has read it and said so. [`trust`] is where
+//! backend — a profile's `env`, `args`, `settings` and `auth_refresh` — and
+//! what decides which account a session runs on and how its bill reads — a
+//! profile's `billing`, the `default_profile`, and a profile named like one of
+//! the user's — take effect only once the operator has read it and said so. [`trust`] is where
 //! that decision is kept and [`Config::untrusted`] is the config as it applies
 //! until it has been made.
 //!
@@ -122,6 +124,8 @@ pub struct Withheld {
     pub auth_refresh: bool,
     /// Whether the file named a settings file for the backend to run under.
     pub settings: bool,
+    /// Whether the file said how the account behind the profile is billed.
+    pub billing: bool,
 }
 
 /// A settings file a profile starts its backend under, and where it was
@@ -162,6 +166,7 @@ pub struct Profile {
     auth_refresh: Option<String>,
     source: PathBuf,
     withheld: Option<Withheld>,
+    shadowed_by: Option<PathBuf>,
 }
 
 impl Profile {
@@ -198,9 +203,11 @@ impl Profile {
     ///
     /// `None` leaves it to the backend, which can tell an API key or a cloud
     /// provider from a plan's login but not a seat billed by use from a
-    /// flat-rate one: they sign in alike. Kept from an untrusted file too,
-    /// because it changes what the shell shows and nothing the backend runs
-    /// with.
+    /// flat-rate one: they sign in alike.
+    ///
+    /// `None` for a profile from a file that has not been trusted: it is a
+    /// statement about the operator's account, and it decides whether the
+    /// shell leads with money, so a clone does not get to make it.
     pub fn billing(&self) -> Option<Billing> {
         self.billing
     }
@@ -235,6 +242,13 @@ impl Profile {
         self.withheld.as_ref()
     }
 
+    /// The untrusted file that defines a profile of this name too, where one
+    /// does. This profile is the one in force: a file that has not been
+    /// trusted adds profiles and replaces none.
+    pub fn shadowed_by(&self) -> Option<&Path> {
+        self.shadowed_by.as_deref()
+    }
+
     /// Whether anything this profile carries takes effect only once the file
     /// it came from has been trusted — before the withholding and after it
     /// alike, so a file can still be named as one worth trusting once its
@@ -245,17 +259,13 @@ impl Profile {
             || !self.args.is_empty()
             || self.settings.is_some()
             || self.auth_refresh.is_some()
+            || self.billing.is_some()
     }
 
     /// Drops what an untrusted file may not put in front of a backend, keeping
     /// the names of it.
     fn withhold(&mut self) {
-        if self.withheld.is_some()
-            || (self.env.is_empty()
-                && self.args.is_empty()
-                && self.settings.is_none()
-                && self.auth_refresh.is_none())
-        {
+        if !self.needs_trust() || self.withheld.is_some() {
             return;
         }
         self.withheld = Some(Withheld {
@@ -263,6 +273,7 @@ impl Profile {
             args: !std::mem::take(&mut self.args).is_empty(),
             auth_refresh: self.auth_refresh.take().is_some(),
             settings: self.settings.take().is_some(),
+            billing: self.billing.take().is_some(),
         });
     }
 }
@@ -315,6 +326,12 @@ pub struct Config {
     theme: Option<ThemeName>,
     effects: Option<bool>,
     allowed: Allowlist,
+    /// The `default_profile` of a file that has not been trusted, which is not
+    /// in force.
+    withheld_default: Option<DefaultProfile>,
+    /// Whether this is a file that has not been trusted, as
+    /// [`Config::untrusted`] leaves it.
+    untrusted: bool,
 }
 
 /// The profile a session runs under, with the name it was selected by.
@@ -384,11 +401,28 @@ impl Config {
     /// rather than key by key: what a file says a profile is, is all of that
     /// profile, and a repository cannot quietly inherit the environment of a
     /// user's profile by reusing its name. A `default_profile` in `over` wins.
+    ///
+    /// Unless `over` has not been trusted ([`Config::untrusted`]): then it
+    /// adds profiles and replaces none. Replaced, a profile would lose what
+    /// the operator's own file set — the settings file that keeps it on their
+    /// account — and run on whatever the backend finds by itself, under a
+    /// name the operator trusts. The profile kept says which file wanted it
+    /// ([`Profile::shadowed_by`]).
     #[must_use]
     pub fn overlay(mut self, over: Self) -> Self {
-        self.profiles.extend(over.profiles);
+        for (name, profile) in over.profiles {
+            match self.profiles.get_mut(&name) {
+                Some(kept) if over.untrusted => kept.shadowed_by = Some(profile.source),
+                _ => {
+                    self.profiles.insert(name, profile);
+                }
+            }
+        }
         if over.default_profile.is_some() {
             self.default_profile = over.default_profile;
+        }
+        if over.withheld_default.is_some() {
+            self.withheld_default = over.withheld_default;
         }
         if over.theme.is_some() {
             self.theme = over.theme;
@@ -405,25 +439,53 @@ impl Config {
 
     /// This config as it applies while the file it came from has not been
     /// trusted: every profile keeps its backend and the models it offers, and
-    /// loses its `env`, its `args`, its `settings` and its `auth_refresh`
-    /// (see [`trust`]).
+    /// loses its `env`, its `args`, its `settings`, its `auth_refresh` and
+    /// what it says about billing; the `default_profile` is not in force; and
+    /// laid over another config it adds profiles without replacing any (see
+    /// [`trust`] and [`Config::overlay`]).
     ///
     /// Applied to the layer, before it is laid over anything, so that a
-    /// profile the repository replaces cannot end up holding half of the
+    /// profile the repository defines cannot end up holding half of the
     /// user's.
     #[must_use]
     pub fn untrusted(mut self) -> Self {
         for profile in self.profiles.values_mut() {
             profile.withhold();
         }
+        if let Some(default) = self.default_profile.take() {
+            self.withheld_default = Some(default);
+        }
+        self.untrusted = true;
         self
     }
 
     /// Whether anything in this config takes effect only once the file it came
     /// from has been trusted, which is what makes trusting worth asking about.
     /// True after [`Config::untrusted`] as well as before it.
+    ///
+    /// Said of the file alone: whether it also defines a profile another file
+    /// defines is [`Config::replaces`].
     pub fn needs_trust(&self) -> bool {
         self.profiles.values().any(Profile::needs_trust)
+            || self.default_profile.is_some()
+            || self.withheld_default.is_some()
+    }
+
+    /// Whether `over` defines a profile this config defines too, which it
+    /// replaces only once it has been trusted.
+    pub fn replaces(&self, over: &Self) -> bool {
+        over.profiles
+            .keys()
+            .any(|name| self.profiles.contains_key(name))
+    }
+
+    /// The `default_profile` a file that has not been trusted names, and that
+    /// file, where one does. It is not the default: which of the operator's
+    /// profiles a session runs under is not a clone's to choose.
+    pub fn withheld_default(&self) -> Option<(&str, &Path)> {
+        self.withheld_default
+            .as_ref()
+            .map(|default| (default.name.as_str(), default.path.as_path()))
     }
 
     /// The standing answers to permission prompts, from every file laid over
@@ -743,6 +805,7 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
                 args: true,
                 auth_refresh: false,
                 settings: false,
+                billing: false,
             }
         );
     }
@@ -766,6 +829,7 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
                 args: false,
                 auth_refresh: false,
                 settings: true,
+                billing: false,
             }
         );
         assert!(config.needs_trust());
@@ -794,18 +858,96 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     }
 
     #[test]
-    fn permissions_and_the_default_profile_are_not_what_trust_gates() {
-        let config = parsed(
-            "default_profile = \"p\"\n[profiles.p]\nbackend = \"claude\"\n\
-             \n[permissions]\nallow = [\"Read\"]\n",
+    fn permissions_are_not_what_trust_gates() {
+        let config =
+            parsed("[profiles.p]\nbackend = \"claude\"\n\n[permissions]\nallow = [\"Read\"]\n")
+                .untrusted();
+
+        assert!(config.allowed().allows("Read", None));
+        assert!(!config.needs_trust());
+    }
+
+    #[test]
+    fn an_untrusted_file_does_not_say_how_the_account_is_billed() {
+        // How the account behind a profile is billed is a statement about the
+        // operator's account, and it decides whether the shell leads with
+        // money or with a plan's windows: a clone saying "plan" over a key
+        // that is metered would take the bill off the screen.
+        let user = parsed("[profiles.mine]\nbackend = \"claude\"\n");
+        let repo = Config::parse(
+            "[profiles.api]\nbackend = \"claude\"\nbilling = \"plan\"\n",
+            &path("repo"),
         )
-        .untrusted();
+        .expect("valid");
+        assert!(repo.needs_trust());
+
+        let config = user.overlay(repo.untrusted());
+        let api = &config.profiles()["api"];
+
+        assert_eq!(api.billing(), None);
+        assert_eq!(
+            api.withheld().expect("the profile said how it is billed"),
+            &Withheld {
+                billing: true,
+                ..Withheld::default()
+            }
+        );
+    }
+
+    #[test]
+    fn an_untrusted_file_cannot_replace_a_profile_the_users_file_defines() {
+        // Replaced whole, the user's `max` would lose the settings file that
+        // keeps it on the operator's own account, and run on whatever the CLI
+        // finds by itself under the name the operator trusts.
+        let user = parsed("[profiles.max]\nbackend = \"claude\"\nsettings = \"~/max.json\"\n");
+        let repo =
+            Config::parse("[profiles.max]\nbackend = \"codex\"\n", &path("repo")).expect("valid");
+
+        let config = user.clone().overlay(repo.clone().untrusted());
+        let max = &config.profiles()["max"];
+
+        assert_eq!(max.backend(), Backend::Claude);
+        assert_eq!(max.source(), path("user"));
+        assert_eq!(max.settings().map(Settings::path), Some("~/max.json"));
+        assert_eq!(max.shadowed_by(), Some(path("repo").as_path()));
+
+        // Trusted, the repository's file says what the profile is, whole.
+        let trusted = user.overlay(repo);
+        assert_eq!(trusted.profiles()["max"].backend(), Backend::Codex);
+        assert_eq!(trusted.profiles()["max"].shadowed_by(), None);
+    }
+
+    #[test]
+    fn an_untrusted_file_does_not_choose_the_profile_a_session_runs_under() {
+        // A default the operator did not choose would start a session on one
+        // of their own profiles — a metered one, say — with nothing on screen
+        // saying the repository picked it.
+        let user = parsed(
+            "default_profile = \"max\"\n[profiles.max]\nbackend = \"claude\"\n\
+             [profiles.api]\nbackend = \"claude\"\n",
+        );
+        let repo = Config::parse("\ndefault_profile = \"api\"\n", &path("repo")).expect("valid");
+        assert!(repo.needs_trust());
+
+        let untrusted = repo.clone().untrusted();
+        assert!(untrusted.needs_trust());
+        let config = user.clone().overlay(untrusted);
 
         assert_eq!(
             config.select(None).expect("valid").map(|s| s.name),
-            Some("p")
+            Some("max")
         );
-        assert!(config.allowed().allows("Read", None));
+        assert_eq!(
+            config.withheld_default(),
+            Some(("api", path("repo").as_path()))
+        );
+
+        let trusted = user.overlay(repo);
+        assert_eq!(
+            trusted.select(None).expect("valid").map(|s| s.name),
+            Some("api")
+        );
+        assert_eq!(trusted.withheld_default(), None);
     }
 
     #[test]

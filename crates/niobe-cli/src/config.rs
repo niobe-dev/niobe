@@ -138,8 +138,13 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
     };
     let mut untrusted = None;
     if let Some(layer) = repository(&repo)? {
+        // A file that defines a profile the user's does is worth trusting
+        // even where it sets nothing else: until it is trusted, its profile of
+        // that name is not the one in force.
+        if layer.gated && (layer.needs_trust || config.replaces(&layer.config)) {
+            untrusted = Some(repo.clone());
+        }
         config = config.overlay(layer.config);
-        untrusted = layer.untrusted;
     }
 
     Ok(Loaded {
@@ -152,8 +157,12 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
 /// One config file, as it applies.
 struct Layer {
     config: Config,
-    /// The file, where what it sets is being held back for want of trust.
-    untrusted: Option<PathBuf>,
+    /// Whether the file has not been trusted as it stands, so that `config` is
+    /// what [`Config::untrusted`] leaves of it.
+    gated: bool,
+    /// Whether the file, read whole, sets something that takes effect only
+    /// once it has been trusted.
+    needs_trust: bool,
 }
 
 /// The config of the repository whose file is `path`: whole where the operator
@@ -167,16 +176,18 @@ fn repository(path: &Path) -> Result<Option<Layer>, String> {
         return Ok(None);
     };
     let config = Config::parse(&text, path).map_err(|e| e.to_string())?;
+    let needs_trust = config.needs_trust();
     if trusted(path, &text)? {
         return Ok(Some(Layer {
             config,
-            untrusted: None,
+            gated: false,
+            needs_trust,
         }));
     }
-    let untrusted = config.needs_trust().then(|| path.to_path_buf());
     Ok(Some(Layer {
         config: config.untrusted(),
-        untrusted,
+        gated: true,
+        needs_trust,
     }))
 }
 

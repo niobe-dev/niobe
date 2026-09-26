@@ -62,7 +62,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`
   array at the byte range the parser gives it, so the operator's comments and ordering survive;
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
-  `auth_refresh` in front of a backend, as each file's SHA-256 under the user's own config
+  `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
+  profile, or replace one of the user's — as each file's SHA-256 under the user's own config
   directory, because a repository's file arrives with the clone; `lib.rs` layers a repository's file over the user's, withholds
   what an untrusted file may not set, and selects the profile a session runs under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
@@ -185,8 +186,9 @@ These hold for every change. Breaking one is a bug even when the feature ships g
    reads their token files and never sets their user agents. No token extraction, no header
    spoofing — this is the line the whole bridge-first design stands on. A repository's config
    is not where that line is crossed either: a profile it defines does not set an `env`, pass
-   `args`, name a `settings` file or run an `auth_refresh` until the operator has trusted that
-   file's contents.
+   `args`, name a `settings` file, run an `auth_refresh` or say how the account is billed, the
+   file does not choose the default profile, and it does not replace a profile the user's file
+   defines, until the operator has trusted that file's contents.
 2. **No telemetry.** Network calls go only to configured providers and the CLIs.
 3. **The terminal is restored on every exit path**, including panics and SIGTERM. This is why the
    release profile keeps `panic = "unwind"`.

@@ -181,6 +181,7 @@ impl File<'_> {
             auth_refresh,
             source: self.path.to_path_buf(),
             withheld: None,
+            shadowed_by: None,
         })
     }
 

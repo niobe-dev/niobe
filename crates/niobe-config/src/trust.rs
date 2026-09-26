@@ -13,6 +13,14 @@
 //! environment both on its own command line and out of a settings file — so
 //! all four are the same exposure.
 //!
+//! Nor does a file nobody read decide which of the operator's accounts a
+//! session runs on, or what its bill reads: a profile's `billing` — which
+//! makes the shell lead with a plan's windows rather than with money — the
+//! `default_profile`, and a profile named like one the user's file defines,
+//! which would replace the operator's profile, settings file and all, under a
+//! name they trust. Until the file is trusted its profiles are added beside
+//! the user's and replace none.
+//!
 //! So they take effect only once the operator has said, of the contents they
 //! read, that this file may do that. The decision is recorded against the
 //! file's SHA-256, under the user's own config directory: a record kept beside

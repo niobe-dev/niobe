@@ -527,12 +527,13 @@ fn list_sessions() -> Result<(), String> {
 /// explanation on screen.
 const UNTRUSTED: &str = "\
 This repository's config sets what a backend is started with — a profile's \
-`env`, `args`, `settings` or `auth_refresh`. A config arrives with a clone, \
-and those are how the official CLI would be pointed at somewhere other than \
-where it is signed in, or signed in as something else, so they are not in \
-force until you have read the file. `niobe profiles` shows what it sets; \
-`niobe trust` puts it in force as it now stands, and editing it afterwards \
-asks again.";
+`env`, `args`, `settings` or `auth_refresh` — or which account a session runs \
+on and how it is billed: a `billing`, a `default_profile`, or a profile named \
+like one of yours. A config arrives with a clone, and those are how the \
+official CLI would be pointed at somewhere other than where it is signed in, \
+or signed in as something else, so they are not in force until you have read \
+the file. `niobe profiles` shows what it sets; `niobe trust` puts it in force \
+as it now stands, and editing it afterwards asks again.";
 
 /// The shell, saying so when this repository's config has not been trusted.
 /// The shell with a price sheet, so that a turn the backend has not priced yet
@@ -567,8 +568,9 @@ fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
 }
 
 /// Records this repository's config as one the operator has read, so that the
-/// `env`, `args`, `settings` and `auth_refresh` of the profiles it defines
-/// take effect.
+/// `env`, `args`, `settings`, `auth_refresh` and `billing` of the profiles it
+/// defines take effect, along with its `default_profile` and the profiles it
+/// defines under names the user's config already uses.
 fn trust() -> Result<(), String> {
     let (path, text) = repo_config()?;
     let record = trust_record()?;
@@ -578,8 +580,9 @@ fn trust() -> Result<(), String> {
 
     println!("trusted {}", path.display());
     println!(
-        "the env, args, settings and auth_refresh of the profiles it defines are in force \
-         here; `niobe profiles` lists them, and editing the file asks again"
+        "the profiles it defines are in force here as it defines them, env, args, settings, \
+         auth_refresh and billing included, and so is its default_profile; `niobe profiles` \
+         lists them, and editing the file asks again"
     );
     Ok(())
 }
@@ -597,8 +600,9 @@ fn untrust() -> Result<(), String> {
     }
     trusted.write(&record).map_err(|e| e.to_string())?;
     println!(
-        "{} is no longer trusted; the env, args, settings and auth_refresh of the profiles \
-         it defines are not in force",
+        "{} is no longer trusted; the env, args, settings, auth_refresh and billing of the \
+         profiles it defines are not in force, nor its default_profile, nor a profile it \
+         names like one of yours",
         path.display()
     );
     Ok(())

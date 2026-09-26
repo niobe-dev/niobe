@@ -56,6 +56,12 @@ pub fn table(
 
         lines.extend(details(profile, forcing_bedrock, name_width));
     }
+    if let Some((name, path)) = config.withheld_default() {
+        lines.push(format!(
+            "  default_profile `{name}` in {} is not in force: that file is not trusted",
+            path.display()
+        ));
+    }
     lines
 }
 
@@ -102,6 +108,16 @@ fn details(profile: &Profile, forcing_bedrock: Option<&Path>, name_width: usize)
             "`niobe trust` reads that file as it stands and puts them in force".to_owned(),
         ));
     }
+    if let Some(path) = profile.shadowed_by() {
+        rows.push(detail(
+            "not in force",
+            format!("the profile of this name in {}", path.display()),
+        ));
+        rows.push(detail(
+            "not trusted",
+            "`niobe trust` reads that file as it stands and puts its profile in force".to_owned(),
+        ));
+    }
     rows
 }
 
@@ -120,6 +136,9 @@ fn listed(withheld: &Withheld) -> String {
     }
     if withheld.auth_refresh {
         parts.push("auth_refresh".to_owned());
+    }
+    if withheld.billing {
+        parts.push("billing".to_owned());
     }
     parts.join(", ")
 }

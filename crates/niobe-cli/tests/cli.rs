@@ -505,11 +505,12 @@ fn a_profile_with_no_settings_file_says_what_this_machines_own_settings_run_it_o
 }
 
 #[test]
-fn repo_config_overrides_user_config() {
+fn a_trusted_repo_config_overrides_user_config() {
     let setup = Configured::new(
         USER_CONFIG,
         "default_profile = \"work\"\n\n[profiles.work]\nbackend = \"codex\"\n",
     );
+    assert!(setup.run(&["trust"]).status.success());
     let output = setup.run(&["profiles"]);
     let out = stdout(&output);
 
@@ -895,6 +896,82 @@ fn a_repository_config_that_has_not_been_trusted_sets_no_environment() {
         "a settings file is what a clone would sign the CLI in with: {out}"
     );
     assert!(!out.contains("their-settings.json"), "{out}");
+}
+
+/// A repository config that sets nothing a backend is started with, and still
+/// decides which account a session runs on and what its bill reads: it
+/// replaces one of the operator's profiles, picks another as the default and
+/// calls a third billed by plan.
+const REPO_CONFIG_CHOOSING_THE_ACCOUNT: &str = r#"
+default_profile = "work"
+
+[profiles.personal]
+backend = "codex"
+
+[profiles.api]
+backend = "claude"
+billing = "plan"
+"#;
+
+#[test]
+fn a_repository_config_that_has_not_been_trusted_chooses_no_account_and_no_billing() {
+    let setup = Configured::new(USER_CONFIG, REPO_CONFIG_CHOOSING_THE_ACCOUNT);
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+    let repo = repo_config(
+        &setup
+            .repo
+            .path()
+            .canonicalize()
+            .expect("the repository is there"),
+    )
+    .display()
+    .to_string();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(out.contains("not trusted"), "{out}");
+    let personal = profile_row(&out, "personal");
+    assert!(
+        personal.starts_with('*'),
+        "the operator's default, not the repository's: {out}"
+    );
+    assert!(
+        personal.contains("claude") && !personal.contains(&repo),
+        "the operator's own profile, not the repository's: {out}"
+    );
+    assert!(
+        out.contains(&format!("not in force the profile of this name in {repo}")),
+        "{out}"
+    );
+    assert!(out.contains("not in force billing"), "{out}");
+    assert!(
+        out.contains(&format!("default_profile `work` in {repo} is not in force")),
+        "{out}"
+    );
+
+    assert!(setup.run(&["trust"]).status.success());
+    let out = stdout(&setup.run(&["profiles"]));
+    assert!(!out.contains("not in force"), "{out}");
+    assert!(profile_row(&out, "work").starts_with('*'), "{out}");
+    assert!(profile_row(&out, "personal").contains("codex"), "{out}");
+}
+
+#[test]
+fn a_repository_profile_named_like_the_users_does_not_take_its_settings_away() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let settings = dir.path().join("max.json");
+    let user = format!(
+        "[profiles.max]\nbackend = \"claude\"\nsettings = \"{}\"\n",
+        settings.display()
+    );
+    let setup = Configured::new(&user, "[profiles.max]\nbackend = \"claude\"\n");
+    let out = stdout(&setup.run(&["profiles"]));
+
+    assert!(
+        out.contains(&format!("settings     {}", settings.display())),
+        "{out}"
+    );
+    assert!(out.contains("not trusted"), "{out}");
 }
 
 #[test]
