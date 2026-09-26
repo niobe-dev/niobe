@@ -2961,8 +2961,9 @@ fn session_file_rows(
 /// A run whose output did not hold the whole run says that it ran and that
 /// its result was not read, with the status it exited with where that was a
 /// failure — never a count it did not find. One the backend still knows
-/// failed after its tests started says that it failed, and that its counts
-/// were not read. Where the pane is too narrow for all of it, the suites go
+/// failed after its tests started, or that listed a failing test, says that
+/// it failed and that its counts were not read, with each list it left under
+/// the header. Where the pane is too narrow for all of it, the suites go
 /// first, then the age, then the ignored and the passed: the failures are what
 /// the section is for.
 fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
@@ -2978,40 +2979,46 @@ fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         width,
         theme,
     )];
-    if let Some(failures) = run.failures.as_ref().filter(|_| !folded) {
-        rows.extend(failure_rows(failures, width, theme));
+    if !folded {
+        rows.extend(failure_rows(&run.failures, width, theme));
     }
     rows
 }
 
-/// The most failing tests the section names one to a row; the rest are
-/// counted on a row of their own.
+/// The most failing tests the section names one to a row, across every
+/// binary; the rest are counted, each binary's on a row of its own.
 const NAMED_FAILURES: usize = 8;
 
-/// `failing in --test cli`, then a row per test that binary listed failing.
+/// For each binary that listed its failures, `failing in --test cli` and a
+/// row per test it listed, in the order they ran.
 ///
-/// Labelled as the binary's because that is all they are: a run that went on
-/// past a failing binary, or whose output was cut, may have failed in another
-/// one too.
-fn failure_rows(failures: &FailedTests, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// Labelled as each binary's because that is all they are: a binary whose
+/// list was cut away or filtered out may have failed too, and is not here.
+fn failure_rows(failures: &[FailedTests], width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
-    let mut rows = vec![Line::from(Span::styled(
-        text::truncate(&format!("  failing in {}", failures.binary), width),
-        dim,
-    ))];
     let room = width.saturating_sub(text::width("  ✗ "));
-    rows.extend(failures.tests.iter().take(NAMED_FAILURES).map(|test| {
-        Line::from(vec![
-            Span::styled("  ✗ ", Style::new().fg(theme.del)),
-            Span::styled(text::truncate(test, room), Style::new().fg(theme.del)),
-        ])
-    }));
-    let more = failures.tests.len().saturating_sub(NAMED_FAILURES);
-    if more > 0 {
+    let mut left = NAMED_FAILURES;
+    let mut rows = Vec::new();
+    for list in failures {
         rows.push(Line::from(Span::styled(
-            format!("    … {more} more"),
-            dim.italic(),
+            text::truncate(&format!("  failing in {}", list.binary), width),
+            dim,
         )));
+        let shown = list.tests.len().min(left);
+        left = left.saturating_sub(shown);
+        rows.extend(list.tests.iter().take(shown).map(|test| {
+            Line::from(vec![
+                Span::styled("  ✗ ", Style::new().fg(theme.del)),
+                Span::styled(text::truncate(test, room), Style::new().fg(theme.del)),
+            ])
+        }));
+        let more = list.tests.len().saturating_sub(shown);
+        if more > 0 {
+            rows.push(Line::from(Span::styled(
+                format!("    … {more} more"),
+                dim.italic(),
+            )));
+        }
     }
     rows
 }
@@ -3087,12 +3094,16 @@ fn test_not_read(exit_code: Option<i32>, theme: &Theme) -> Vec<Figure> {
 /// `failed · exit 101 · counts not read`: a run known to have failed after its
 /// tests started, whose output did not hold the counts — how many failed, or
 /// how many ran, is not something the rest of it can say.
+///
+/// A status of `0` is left unsaid: that is a run known to have failed from the
+/// failures it listed, piped through a filter whose status the command's is,
+/// and `exit 0` beside `failed` would read as a contradiction.
 fn test_failed_uncounted(exit_code: Option<i32>, theme: &Theme) -> Vec<Figure> {
     let mut figures = vec![Figure::lead(
         0,
         Span::styled("failed", Style::new().fg(theme.del).bold()),
     )];
-    if let Some(code) = exit_code {
+    if let Some(code) = exit_code.filter(|code| *code != 0) {
         figures.push(Figure::after(
             " · ",
             1,
@@ -4872,19 +4883,19 @@ mod tests {
             }),
             exit_code: Some(101),
             failed: true,
-            failures: None,
+            failures: Vec::new(),
         };
         let uncounted = TestRunRecord {
             counts: None,
             exit_code: Some(101),
             failed: true,
-            failures: None,
+            failures: Vec::new(),
         };
         let unread = TestRunRecord {
             counts: None,
             exit_code: Some(101),
             failed: false,
-            failures: None,
+            failures: Vec::new(),
         };
         let age = Some(Duration::from_secs(95));
         vec![

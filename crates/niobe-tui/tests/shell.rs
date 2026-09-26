@@ -1871,22 +1871,22 @@ fn a_run_known_to_have_failed_without_counts_says_it_failed_and_gives_no_count()
     );
 }
 
-/// A failed run whose output still held the last failing binary's list of
-/// what failed names those tests under the section's header, as that
-/// binary's: an earlier binary's failures may be in the part that was cut.
+/// A failed run whose output still held a failing binary's list of what
+/// failed names those tests under the section's header, as that binary's: an
+/// earlier binary's failures may be in the part that was cut.
 #[test]
 fn the_tests_a_failed_run_named_are_listed_as_the_failures_of_their_binary() {
     let run = TestRunRecord::new(
         None,
         Some(101),
         true,
-        Some(FailedTests {
+        vec![FailedTests {
             binary: "--test statement".to_owned(),
             tests: vec![
                 "a_statement_line_037_rounds_like_the_ledger".to_owned(),
                 "a_statement_line_088_rounds_like_the_ledger".to_owned(),
             ],
-        }),
+        }],
     );
     let mut app = session_with_test_records(&[run]);
     let frame = changes_scrolled_down(&mut app, 200, 60);
@@ -1917,6 +1917,80 @@ fn the_tests_a_failed_run_named_are_listed_as_the_failures_of_their_binary() {
     assert!(folded.contains("▸ Tests  failed"), "{folded}");
     assert!(!folded.contains("failing in --test statement"), "{folded}");
     assert!(!folded.contains("✗ a_statement_line_037"), "{folded}");
+}
+
+/// A run that went on past a failing binary lists each binary's failures
+/// under its own label, in the order the binaries ran.
+#[test]
+fn a_run_that_failed_in_two_binaries_lists_each_binarys_failures_under_its_own_label() {
+    let counts = TestCounts {
+        passed: 5,
+        failed: 2,
+        ignored: 1,
+        suites: 3,
+    };
+    let run = TestRunRecord::new(
+        Some(counts),
+        Some(101),
+        true,
+        vec![
+            FailedTests {
+                binary: "--lib".to_owned(),
+                tests: vec!["tests::wrong".to_owned()],
+            },
+            FailedTests {
+                binary: "--test api".to_owned(),
+                tests: vec!["from_outside".to_owned()],
+            },
+        ],
+    );
+    let mut app = session_with_test_records(&[run]);
+    let frame = changes_scrolled_down(&mut app, 200, 60);
+
+    let row = |text: &str| {
+        frame
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{text:?} is drawn:\n{frame}"))
+    };
+    let header = row("▾ Tests  5 passed · 2 failed");
+    assert_eq!(
+        [
+            row("│   failing in --lib "),
+            row("│   ✗ tests::wrong "),
+            row("│   failing in --test api "),
+            row("│   ✗ from_outside "),
+        ],
+        [header + 1, header + 2, header + 3, header + 4],
+        "{frame}"
+    );
+}
+
+/// `cargo test 2>&1 | tail -30` of a failing run exits with tail's status,
+/// and the list its tail kept proves the failure by itself: the section says
+/// the run failed, with no count and no `exit 0` beside it.
+#[test]
+fn a_tailed_run_that_listed_a_failure_reads_as_failed_with_no_count() {
+    let run = TestRunRecord::new(
+        None,
+        Some(0),
+        false,
+        vec![FailedTests {
+            binary: "--lib".to_owned(),
+            tests: vec!["tests::wrong".to_owned()],
+        }],
+    );
+    let mut app = session_with_test_records(&[run]);
+    let frame = changes_scrolled_down(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("▾ Tests  failed · counts not read · 1m ago"),
+        "{frame}"
+    );
+    assert!(frame.contains("│   failing in --lib "), "{frame}");
+    assert!(frame.contains("│   ✗ tests::wrong "), "{frame}");
+    let header = tests_header(&frame);
+    assert!(!header.contains("exit"), "{header}");
 }
 
 #[test]
@@ -3360,8 +3434,8 @@ error: test failed, to rerun pass `--lib`
     assert!(
         produced.iter().any(|event| matches!(
             event,
-            Event::TestRun { id: run, failed: true, failures: Some(failures), .. }
-                if *run == id && *failures == named
+            Event::TestRun { id: run, failed: true, failures, .. }
+                if *run == id && *failures == [named.clone()]
         )),
         "the failures are not named: {produced:?}"
     );

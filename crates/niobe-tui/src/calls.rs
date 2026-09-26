@@ -259,7 +259,7 @@ fn printed_lines(
 
 /// What a test run reported, hung under its call: `637 passed · 0 failed`,
 /// with the failures in the failure colour where there are any, and the first
-/// test the last failing binary listed, where its list was left.
+/// test a failing binary listed, where a list was left.
 ///
 /// Where the room runs out, the ignored go first, then the passed and then
 /// the failing test's name: the failures are what the line is for. A run
@@ -267,10 +267,8 @@ fn printed_lines(
 /// have failed.
 fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
-    let named = run.failures.as_ref().map(|failures| {
-        let said = failing_within(failures, usize::MAX).unwrap_or_default();
-        (NAMED, Span::styled(said, theme_del(theme)))
-    });
+    let named = failing_within(&run.failures, usize::MAX)
+        .map(|said| (NAMED, Span::styled(said, theme_del(theme))));
     let mut figures = match run.counts {
         Some(counts) => {
             let (passed, failed) = match counts.failing() {
@@ -304,12 +302,11 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
         // it is from is what keeps it from reading as the run's whole list.
         let excess = figures_width(&figures).saturating_sub(room);
         let shortened = (figures[least].0 == NAMED)
-            .then_some(run.failures.as_ref())
-            .flatten()
-            .and_then(|failures| {
+            .then(|| {
                 let columns = text::width(&figures[least].1.content).saturating_sub(excess);
-                failing_within(failures, columns)
-            });
+                failing_within(&run.failures, columns)
+            })
+            .flatten();
         match shortened {
             Some(said) => {
                 figures[least].1.content = said.into();
@@ -338,15 +335,24 @@ const NAMED: u8 = 1;
 /// columns than this name nothing.
 const NAME_AT_LEAST: usize = 8;
 
-/// `tests::wrong in --lib`, or `tests::wrong +2 in --lib` where the binary
-/// listed more — the first of them, and whose list it was — in `columns` at
-/// most. The name is cut to fit and the rest is kept whole; `None` where that
-/// leaves less than [`NAME_AT_LEAST`] of the name.
-fn failing_within(failures: &FailedTests, columns: usize) -> Option<String> {
-    let first = failures.tests.first()?;
-    let whose = match failures.tests.len().saturating_sub(1) {
-        0 => format!(" in {}", failures.binary),
-        more => format!(" +{more} in {}", failures.binary),
+/// `tests::wrong in --lib`, `tests::wrong +2 in --lib` where the binary
+/// listed more, or `tests::wrong +3 in 2 binaries` where more than one binary
+/// listed its failures — the first test named, and whose lists they were — in
+/// `columns` at most. The name is cut to fit and the rest is kept whole;
+/// `None` where that leaves less than [`NAME_AT_LEAST`] of the name, or where
+/// no list was left.
+fn failing_within(failures: &[FailedTests], columns: usize) -> Option<String> {
+    let first = failures.first()?.tests.first()?;
+    let named = failures
+        .iter()
+        .fold(0usize, |named, list| named.saturating_add(list.tests.len()));
+    let more = match named.saturating_sub(1) {
+        0 => String::new(),
+        more => format!(" +{more}"),
+    };
+    let whose = match failures {
+        [only] => format!("{more} in {}", only.binary),
+        lists => format!("{more} in {} binaries", lists.len()),
     };
     let room = columns.saturating_sub(text::width(&whose));
     (room >= NAME_AT_LEAST.min(text::width(first)))
@@ -693,16 +699,16 @@ mod tests {
 
     /// A `cargo test` call that ended with `status`, and the run it reported.
     fn tested(app: &mut App, status: i32, counts: Option<niobe_core::TestCounts>, failed: bool) {
-        tested_naming(app, status, counts, failed, None);
+        tested_naming(app, status, counts, failed, Vec::new());
     }
 
-    /// The same, with the tests the last failing binary named.
+    /// The same, with the tests each failing binary named.
     fn tested_naming(
         app: &mut App,
         status: i32,
         counts: Option<niobe_core::TestCounts>,
         failed: bool,
-        failures: Option<niobe_core::FailedTests>,
+        failures: Vec<niobe_core::FailedTests>,
     ) {
         let outcome = match status {
             0 => ToolOutcome::Ok,
@@ -810,11 +816,11 @@ mod tests {
         assert_eq!(under.trim(), "└ 630 passed · 7 failed");
     }
 
-    fn named(binary: &str, tests: &[&str]) -> Option<niobe_core::FailedTests> {
-        Some(niobe_core::FailedTests {
+    fn named(binary: &str, tests: &[&str]) -> Vec<niobe_core::FailedTests> {
+        vec![niobe_core::FailedTests {
             binary: binary.to_owned(),
             tests: tests.iter().map(|&test| test.to_owned()).collect(),
-        })
+        }]
     }
 
     const STATEMENT: [&str; 2] = [
@@ -823,7 +829,7 @@ mod tests {
     ];
 
     #[test]
-    fn a_failed_run_names_the_first_test_its_last_failing_binary_listed_and_that_binary() {
+    fn a_failed_run_names_the_first_test_its_failing_binary_listed_and_that_binary() {
         let mut app = app();
         tested_naming(
             &mut app,
@@ -880,6 +886,32 @@ mod tests {
             lines(&app.entries()[0], 36, Detail::default(), &Theme::default()).swap_remove(1);
         let under: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(under.trim(), "└ 1 failed · tests::wrong in --lib");
+    }
+
+    #[test]
+    fn a_run_that_failed_in_several_binaries_names_its_first_test_and_how_many_binaries() {
+        let mut app = app();
+        let mut failures = named("--lib", &["tests::wrong"]);
+        failures.extend(named("--test statement", &STATEMENT));
+        tested_naming(&mut app, 101, counts(4, 3, 0), true, failures);
+
+        assert_eq!(
+            drawn(&app, false)[1].trim(),
+            "└ 4 passed · 3 failed · tests::wrong +2 in 2 binaries"
+        );
+    }
+
+    #[test]
+    fn a_tailed_run_that_named_a_failing_test_says_it_failed_with_no_count() {
+        // `cargo test 2>&1 | tail -30`: the status is tail's, the list is whole.
+        let mut app = app();
+        tested_naming(&mut app, 0, None, true, named("--lib", &["tests::wrong"]));
+
+        let rows = drawn(&app, false);
+        assert_eq!(
+            rows[1].trim(),
+            "└ tests failed · tests::wrong in --lib · counts not read"
+        );
     }
 
     #[test]

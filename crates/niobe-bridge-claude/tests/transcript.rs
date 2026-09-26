@@ -751,7 +751,7 @@ const CUT_RUN: [&str; 2] = [
 
 /// What a test run reported: its counts, its exit status, whether it failed
 /// and the tests it named.
-type Reported = (Option<TestCounts>, Option<i32>, bool, Option<FailedTests>);
+type Reported = (Option<TestCounts>, Option<i32>, bool, Vec<FailedTests>);
 
 /// The test run a transcript of [`CUT_RUN`] reports, with `cut` as the
 /// result.
@@ -805,7 +805,7 @@ fn a_failing_run_the_cli_cut_is_failed_and_counts_nothing() {
 
     assert_eq!(
         cut_test_runs(&cut),
-        [(None, Some(101), true, None)],
+        [(None, Some(101), true, Vec::new())],
         "the list of what failed was cut away with the end of the run"
     );
 }
@@ -827,7 +827,7 @@ fn a_failing_run_the_cli_cut_names_the_tests_its_kept_end_lists() {
             "a_statement_line_088_rounds_like_the_ledger".to_owned(),
         ],
     };
-    assert_eq!(cut_test_runs(&cut), [(None, Some(101), true, Some(named))]);
+    assert_eq!(cut_test_runs(&cut), [(None, Some(101), true, vec![named])]);
 }
 
 #[test]
@@ -839,7 +839,7 @@ fn a_cut_run_that_shows_no_test_binary_starting_is_not_failed() {
         .split_once("     Running unittests")
         .expect("the recording starts a test binary");
 
-    assert_eq!(cut_test_runs(built), [(None, Some(101), false, None)]);
+    assert_eq!(cut_test_runs(built), [(None, Some(101), false, Vec::new())]);
 }
 
 #[test]

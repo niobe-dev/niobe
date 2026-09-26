@@ -2696,22 +2696,14 @@ impl App {
             _ => ToolOutcome::Failed,
         };
         let tested = niobe_core::test_run::is_test_run(&command).then(|| {
-            let counts = ran
-                .whole
-                .then(|| niobe_core::test_run::counts(&ran.output, ran.exit_code))
-                .flatten();
-            let failed = match counts {
-                Some(counts) => counts.failing(),
-                None => niobe_core::test_run::failed(&command, &ran.output, ran.exit_code),
-            };
+            let whole = ran.whole.then_some(ran.output.as_str());
+            let run = TestRunRecord::read(&command, &ran.output, whole, ran.exit_code);
             Event::TestRun {
                 id: ran.id.clone(),
-                counts,
-                exit_code: ran.exit_code,
-                failed,
-                failures: failed
-                    .then(|| niobe_core::test_run::failures(&ran.output))
-                    .flatten(),
+                counts: run.counts,
+                exit_code: run.exit_code,
+                failed: run.failed,
+                failures: run.failures,
             }
         });
         self.produce(Event::ToolCallEnd {
@@ -5367,7 +5359,7 @@ mod tests {
             }),
             exit_code: Some(0),
             failed: false,
-            failures: None,
+            failures: Vec::new(),
         };
         let mut app = app();
         assert_eq!(app.test_run(), None, "no run is not a run of nothing");

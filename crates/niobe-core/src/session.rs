@@ -21,7 +21,7 @@
 //! far. That record says so ([`crate::event::Usage::settles_model`]), and the
 //! records it covers stop being owed for.
 
-use crate::test_run::{FailedTests, TestCounts};
+use crate::test_run::{self, FailedTests, TestCounts};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
@@ -284,28 +284,49 @@ pub struct TestRunRecord {
     /// The status the command exited with, where the backend reported one.
     pub exit_code: Option<i32>,
     /// Whether the run is known to have failed after its tests started,
-    /// counted or not. A run whose counts say a test failed always has.
+    /// counted or not. A run whose counts say a test failed, or that named a
+    /// failing test, always has.
     pub failed: bool,
-    /// The tests the last failing binary named, where its whole list was
-    /// left: that binary's, never the run's whole list.
-    pub failures: Option<FailedTests>,
+    /// The tests each failing binary named, in the order they ran, where
+    /// its whole list was left: each is its binary's, and together they are
+    /// never known to be the run's whole list.
+    pub failures: Vec<FailedTests>,
 }
 
 impl TestRunRecord {
     /// The run an [`Event::TestRun`] reported, with `failed` set wherever its
-    /// counts say a test failed, whatever the event said.
+    /// counts say a test failed or it named one, whatever the event said.
     pub fn new(
         counts: Option<TestCounts>,
         exit_code: Option<i32>,
         failed: bool,
-        failures: Option<FailedTests>,
+        failures: Vec<FailedTests>,
     ) -> Self {
         Self {
             counts,
             exit_code,
-            failed: failed || counts.is_some_and(|counts| counts.failing()),
+            failed: failed || counts.is_some_and(|counts| counts.failing()) || !failures.is_empty(),
             failures,
         }
+    }
+
+    /// What a shell command that ran `cargo test` reported, read out of what
+    /// it printed, so that every backend reads a run the same way.
+    ///
+    /// `output` is what the backend handed over, cut or whole; `whole` is the
+    /// whole of it, where the backend can tell it has that, which is the only
+    /// output the counts are read from. Which tests failed is read from the
+    /// whole output where there is one and from what is left otherwise, and
+    /// whether the run failed from what is left: the start of a run is what
+    /// survives a cut from the end.
+    pub fn read(command: &str, output: &str, whole: Option<&str>, exit_code: Option<i32>) -> Self {
+        let counts = whole.and_then(|whole| test_run::counts(whole, exit_code));
+        let failed = match counts {
+            Some(counts) => counts.failing(),
+            None => test_run::failed(command, output, exit_code),
+        };
+        let failures = test_run::failures(whole.unwrap_or(output));
+        Self::new(counts, exit_code, failed, failures)
     }
 }
 
@@ -1377,7 +1398,7 @@ mod tests {
             counts,
             exit_code,
             failed: false,
-            failures: None,
+            failures: Vec::new(),
         }
     }
 
@@ -1399,7 +1420,7 @@ mod tests {
                 counts: None,
                 exit_code: Some(0),
                 failed: false,
-                failures: None,
+                failures: Vec::new(),
             }),
             "an earlier run's counts are not carried over a run that was not read"
         );
@@ -1424,7 +1445,7 @@ mod tests {
             counts: None,
             exit_code: Some(101),
             failed: true,
-            failures: None,
+            failures: Vec::new(),
         };
         assert_eq!(
             SessionState::replay(&[cut]).test_run(),
@@ -1432,7 +1453,7 @@ mod tests {
                 counts: None,
                 exit_code: Some(101),
                 failed: true,
-                failures: None,
+                failures: Vec::new(),
             })
         );
     }
@@ -1448,13 +1469,42 @@ mod tests {
             counts: None,
             exit_code: Some(101),
             failed: true,
-            failures: Some(named.clone()),
+            failures: vec![named.clone()],
         };
         let state = SessionState::replay(&[cut]);
         assert_eq!(
-            state.test_run().and_then(|run| run.failures.as_ref()),
-            Some(&named)
+            state.test_run().map(|run| run.failures.as_slice()),
+            Some(&[named][..])
         );
+    }
+
+    #[test]
+    fn a_run_that_named_a_failing_test_failed_whatever_its_status_said() {
+        // `cargo test 2>&1 | tail -8` of a failing run: the status is tail's,
+        // and the list left in the tail proves itself.
+        let tail = "failures:\n    tests::wrong\n\n\
+                    test result: FAILED. 3 passed; 1 failed; 1 ignored; 0 measured; \
+                    0 filtered out; finished in 0.00s\n\n\
+                    error: test failed, to rerun pass `--lib`\n";
+        let run = TestRunRecord::read("cargo test 2>&1 | tail -8", tail, None, Some(0));
+        assert_eq!(run.counts, None, "a tail holds no count");
+        assert!(run.failed);
+        assert_eq!(
+            run.failures,
+            [FailedTests {
+                binary: "--lib".to_owned(),
+                tests: vec!["tests::wrong".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_passing_tail_is_a_run_whose_result_was_not_read() {
+        let tail = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; \
+                    0 filtered out; finished in 0.07s\n";
+        let run = TestRunRecord::read("cargo test | tail -1", tail, None, Some(0));
+        assert_eq!((run.counts, run.failed), (None, false));
+        assert!(run.failures.is_empty());
     }
 
     #[test]

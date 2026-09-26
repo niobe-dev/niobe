@@ -652,12 +652,19 @@ pub enum Event {
         /// it. A build that failed ran no tests and is not a failed run.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         failed: bool,
-        /// The tests the last failing binary named, where the run failed and
+        /// The tests each failing binary named, in the order they ran, where
         /// what is left of its output holds that binary's whole list, as
-        /// [`crate::test_run::failures`] reads it. That binary's, never the
-        /// run's whole list.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failures: Option<crate::test_run::FailedTests>,
+        /// [`crate::test_run::failures`] reads it. Each list is its binary's,
+        /// and together they are never known to be the run's whole list.
+        ///
+        /// A record written when only the last list was kept holds one list
+        /// rather than an array of them, and reads as that one.
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "crate::test_run::one_or_many"
+        )]
+        failures: Vec<crate::test_run::FailedTests>,
     },
 
     /// A structured `decide` record: why a plan, a model, a file or a declined
@@ -828,7 +835,7 @@ mod tests {
             counts: None,
             exit_code: Some(101),
             failed,
-            failures: None,
+            failures: Vec::new(),
         };
         for failed in [true, false] {
             let line = serde_json::to_string(&run(failed)).expect("a test run record");
@@ -854,12 +861,32 @@ mod tests {
                 "src/lib.rs - add (line 3)".to_owned(),
             ],
         };
-        for failures in [Some(named), None] {
+        let other = crate::test_run::FailedTests {
+            binary: "--lib".to_owned(),
+            tests: vec!["tests::wrong".to_owned()],
+        };
+        for failures in [vec![named, other], Vec::new()] {
             let line = serde_json::to_string(&run(failures.clone())).expect("a test run record");
             let read: Event = serde_json::from_str(&line).expect("what was written reads back");
             assert_eq!(read, run(failures.clone()));
-            assert_eq!(line.contains("failures"), failures.is_some(), "{line}");
+            assert_eq!(line.contains("failures"), !failures.is_empty(), "{line}");
         }
+    }
+
+    #[test]
+    fn a_record_that_kept_one_list_of_failures_reads_as_that_list() {
+        let json = r#"{"type":"test_run","id":"t","counts":null,"exit_code":101,"failed":true,"failures":{"binary":"--lib","tests":["tests::wrong"]}}"#;
+        let read: Event = serde_json::from_str(json).expect("the older shape reads");
+        let Event::TestRun { failures, .. } = read else {
+            panic!("a test run record reads as one: {read:?}");
+        };
+        assert_eq!(
+            failures,
+            [crate::test_run::FailedTests {
+                binary: "--lib".to_owned(),
+                tests: vec!["tests::wrong".to_owned()],
+            }]
+        );
     }
 
     #[test]

@@ -1625,8 +1625,8 @@ fn exit_code(
 
 /// What a shell call that ran `cargo test` reported, where it was one: the
 /// counts, where its output held the whole run, the status it exited with,
-/// whether it is known to have failed after its tests started and, where it
-/// did, the tests the last failing binary named.
+/// whether it is known to have failed after its tests started and the tests
+/// each failing binary named, where its list was left whole.
 ///
 /// A refused call ran nothing and is not a test run. The counts are read
 /// only from the whole of the output, which is what [`whole_output`] finds.
@@ -1635,7 +1635,7 @@ fn exit_code(
 /// whatever the CLI handed over, whole or not: a failed command's output past
 /// about 30,000 characters loses its end before it is cut from the middle,
 /// and the start of a run is all that says its tests ran. A shorter one keeps
-/// its end, and with it the last failing binary's list of what failed.
+/// its end, and with it the lists of what failed that the cut left.
 fn test_run(
     name: &str,
     arguments: &serde_json::Value,
@@ -1653,15 +1653,13 @@ fn test_run(
     if !ran || !test_run::is_test_run(command) {
         return None;
     }
-    let counts = exit_code
-        .and_then(|_| whole_output(output, reported, read_spilled))
-        .and_then(|whole| test_run::counts(&whole, exit_code));
-    let failed = match counts {
-        Some(counts) => counts.failing(),
-        None => test_run::failed(command, output, exit_code),
-    };
-    let failures = failed.then(|| test_run::failures(output)).flatten();
-    Some(TestRunRecord::new(counts, exit_code, failed, failures))
+    let whole = exit_code.and_then(|_| whole_output(output, reported, read_spilled));
+    Some(TestRunRecord::read(
+        command,
+        output,
+        whole.as_deref(),
+        exit_code,
+    ))
 }
 
 /// The whole of what a shell command printed, where it can be had.
@@ -3990,6 +3988,41 @@ error: could not compile `demo` (lib test) due to 1 previous error";
         let events = translator.line(&result_with("t1", summary, &shell_report("")));
 
         assert_eq!(test_runs(&events), [(None, Some(0))]);
+    }
+
+    #[test]
+    fn a_failing_test_run_filtered_to_its_tail_names_the_list_the_tail_kept() {
+        let mut translator = translator();
+        translator.line(&call(
+            "t1",
+            "Bash",
+            r#"{"command":"cargo test 2>&1 | tail -5"}"#,
+        ));
+
+        let tail = "failures:\n    tests::wrong\n\n\
+                    test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; \
+                    0 filtered out; finished in 0.00s\n\n\
+                    error: test failed, to rerun pass `--lib`";
+        let events = translator.line(&result_with("t1", tail, &shell_report("")));
+
+        let named: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::TestRun {
+                    counts,
+                    exit_code,
+                    failed,
+                    failures,
+                    ..
+                } => Some((*counts, *exit_code, *failed, failures.clone())),
+                _ => None,
+            })
+            .collect();
+        let lib = niobe_core::FailedTests {
+            binary: "--lib".to_owned(),
+            tests: vec!["tests::wrong".to_owned()],
+        };
+        assert_eq!(named, [(None, Some(0), true, vec![lib])]);
     }
 
     #[test]

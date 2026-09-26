@@ -499,7 +499,9 @@ pub fn running_session() -> App {
 pub fn session_with_test_runs(runs: &[(Option<TestCounts>, Option<i32>, bool)]) -> App {
     let runs: Vec<_> = runs
         .iter()
-        .map(|&(counts, exit_code, failed)| TestRunRecord::new(counts, exit_code, failed, None))
+        .map(|&(counts, exit_code, failed)| {
+            TestRunRecord::new(counts, exit_code, failed, Vec::new())
+        })
         .collect();
     session_with_test_records(&runs)
 }

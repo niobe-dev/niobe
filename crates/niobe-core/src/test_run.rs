@@ -37,9 +37,9 @@
 //! A run whose counts cannot be read can still be known to have failed:
 //! [`failed`] reads that from the start of its output and its status, which
 //! is what survives when a long failing output is cut. It says nothing about
-//! how many tests failed. Which did is [`failures`]: the last failing binary's
-//! own list, read from the end of the output where a cut from the middle left
-//! it, and named as that binary's, never as the run's.
+//! how many tests failed. Which did is [`failures`]: each failing binary's own
+//! list, read wherever a cut or a filter left it whole, and named as that
+//! binary's, never as the run's.
 
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +77,24 @@ pub struct FailedTests {
     /// Its failing tests, in the order its `failures:` list gives them. Never
     /// empty.
     pub tests: Vec<String>,
+}
+
+/// Reads the failures an event carries as a list of them, or as the one list
+/// a record written before every list was kept holds.
+pub(crate) fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<FailedTests>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Kept {
+        Many(Vec<FailedTests>),
+        One(FailedTests),
+    }
+    Ok(match Kept::deserialize(deserializer)? {
+        Kept::Many(lists) => lists,
+        Kept::One(list) => vec![list],
+    })
 }
 
 /// Whether a shell command runs `cargo test`.
@@ -164,26 +182,29 @@ pub fn failed(command: &str, output: &str, exit_code: Option<i32>) -> bool {
     exit_code == Some(FAILED_STATUS) && ends_in_cargo_test(command) && tests_started(output)
 }
 
-/// The tests the last failing binary in `output` named, where its list is
-/// whole.
+/// The tests each failing binary in `output` named, in the order they ran,
+/// wherever that binary's list is whole.
 ///
 /// libtest ends a failing binary's block with a `failures:` line, a line per
 /// failing test, a blank line and its `test result: FAILED.` summary, and
 /// cargo then says which binary it was: `error: test failed, to rerun pass
 /// `--test cli``, with only rustdoc's timing line between for the doc-tests.
-/// A list is named only where all of that is there, line for
-/// line, and it holds as many tests as the summary says failed, so a list the
-/// CLI cut into, or one whose summary was lost, is not mistaken for a shorter
-/// one. `None` wherever no list survives.
+/// A list is named only where all of that is there, line for line, and it
+/// holds as many tests as the summary says failed, so a list the CLI or a
+/// `| tail` cut into, or one whose summary was lost, is not mistaken for a
+/// shorter one. Empty wherever no list survives.
 ///
-/// It reads the end of a run, which is what survives when a failed command's
-/// output is cut from the middle only. Nothing in it says the run as a whole
-/// failed, or how many of its tests did.
-pub fn failures(output: &str) -> Option<FailedTests> {
+/// A whole list proves by itself that its binary failed, so it is read
+/// whatever the command exited with: the status of `cargo test | tail -30` is
+/// `tail`'s. It is read from anywhere in the output, which is what survives
+/// when a failed command's output is cut from the middle or filtered. Nothing
+/// in it says how many tests the run as a whole ran or failed, nor that no
+/// other binary failed: one whose list was lost is not in it.
+pub fn failures(output: &str) -> Vec<FailedTests> {
     let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
     (0..lines.len())
-        .rev()
-        .find_map(|at| failures_closed_at(&lines, at))
+        .filter_map(|at| failures_closed_at(&lines, at))
+        .collect()
 }
 
 /// The failures list whose summary is `lines[at]`, where it is whole and the
@@ -786,10 +807,11 @@ error: could not compile `demo` (lib test) due to 1 previous error
     }
 
     #[test]
-    fn a_failing_runs_last_whole_failures_list_is_named_as_its_binarys() {
-        let named = failures(FAILED).expect("the list and its summary are whole");
-        assert_eq!(named.binary, "--lib");
-        assert_eq!(named.tests, ["tests::wrong"]);
+    fn a_failing_runs_whole_failures_list_is_named_as_its_binarys() {
+        let named = failures(FAILED);
+        assert_eq!(named.len(), 1, "the list and its summary are whole");
+        assert_eq!(named[0].binary, "--lib");
+        assert_eq!(named[0].tests, ["tests::wrong"]);
     }
 
     #[test]
@@ -799,27 +821,78 @@ error: could not compile `demo` (lib test) due to 1 previous error
             .expect("the recording has a passing test");
         let kept =
             format!("    Finished `test` profile\n\n... [9000 characters truncated] ...\n\n{end}");
-        let named = failures(&kept).expect("the end of the run survived the cut");
         assert_eq!(
-            (named.binary.as_str(), named.tests),
-            ("--lib", vec!["tests::wrong".to_owned()])
+            failures(&kept),
+            [FailedTests {
+                binary: "--lib".to_owned(),
+                tests: vec!["tests::wrong".to_owned()],
+            }]
+        );
+    }
+
+    /// [`FAILED_EVERY_BINARY`] with the integration test failing too.
+    fn failed_in_two_binaries() -> String {
+        FAILED_EVERY_BINARY
+            .replace(
+                "test from_outside ... ok\n\ntest result: ok. 1 passed; 0 failed",
+                "test from_outside ... FAILED\n\nfailures:\n\nfailures:\n    from_outside\n\n\
+                 test result: FAILED. 0 passed; 1 failed",
+            )
+            .replace(
+                "finished in 0.01s\n\n   Doc-tests",
+                "finished in 0.01s\n\nerror: test failed, to rerun pass `--test api`\n   Doc-tests",
+            )
+    }
+
+    #[test]
+    fn a_run_that_kept_going_names_every_failing_binarys_list_in_order() {
+        let named = failures(&failed_in_two_binaries());
+        let whose: Vec<(&str, &[String])> = named
+            .iter()
+            .map(|list| (list.binary.as_str(), list.tests.as_slice()))
+            .collect();
+        assert_eq!(
+            whose,
+            [
+                ("--lib", &["tests::wrong".to_owned()][..]),
+                ("--test api", &["from_outside".to_owned()][..]),
+            ]
         );
     }
 
     #[test]
-    fn a_run_that_kept_going_names_only_the_last_failing_binarys_list() {
-        let two = FAILED_EVERY_BINARY.replace(
-            "test from_outside ... ok\n\ntest result: ok. 1 passed; 0 failed",
-            "test from_outside ... FAILED\n\nfailures:\n\nfailures:\n    from_outside\n\n\
-             test result: FAILED. 0 passed; 1 failed",
+    fn a_tailed_failing_run_names_the_list_its_tail_kept() {
+        // `cargo test 2>&1 | tail -8` of FAILED: the status is tail's, and the
+        // list proves itself.
+        let lines: Vec<&str> = FAILED.lines().collect();
+        let tail = lines[lines.len() - 8..].join("\n");
+        assert_eq!(counts(&tail, Some(0)), None);
+        assert!(!failed("cargo test 2>&1 | tail -8", &tail, Some(0)));
+        assert_eq!(
+            failures(&tail),
+            [FailedTests {
+                binary: "--lib".to_owned(),
+                tests: vec!["tests::wrong".to_owned()],
+            }]
         );
-        let two = two.replace(
-            "finished in 0.01s\n\n   Doc-tests",
-            "finished in 0.01s\n\nerror: test failed, to rerun pass `--test api`\n   Doc-tests",
+    }
+
+    #[test]
+    fn a_tail_that_cut_into_the_list_names_nothing() {
+        let two = failed_in_two_binaries();
+        let (_, from) = two
+            .split_once("failures:\n    tests::wrong\n")
+            .expect("the first binary's list is in the recording");
+        let cut_into = format!("    tests::wrong\n{from}");
+        let named = failures(&cut_into);
+        assert_eq!(
+            named
+                .iter()
+                .map(|list| list.binary.as_str())
+                .collect::<Vec<_>>(),
+            ["--test api"],
+            "the list the tail opened inside is not named"
         );
-        let named = failures(&two).expect("the second binary's list is whole");
-        assert_eq!(named.binary, "--test api");
-        assert_eq!(named.tests, ["from_outside"]);
     }
 
     // The end of a failing doc-test, recorded from `cargo test` 1.91 on an
@@ -836,14 +909,15 @@ error: doctest failed, to rerun pass `--doc`
 
     #[test]
     fn a_doc_test_that_failed_is_named_with_the_doc_tests() {
-        let named = failures(DOC_FAILED).expect("a doc-test's list is whole");
-        assert_eq!(named.binary, "--doc");
-        assert_eq!(named.tests, ["src/lib.rs - two (line 1)"]);
+        let named = failures(DOC_FAILED);
+        assert_eq!(named.len(), 1, "a doc-test's list is whole");
+        assert_eq!(named[0].binary, "--doc");
+        assert_eq!(named[0].tests, ["src/lib.rs - two (line 1)"]);
 
         let earlier = DOC_FAILED.replace("all doctests ran in", "all doctests took");
         assert_eq!(
             failures(&earlier),
-            None,
+            [],
             "only rustdoc's own line comes between"
         );
     }
@@ -851,20 +925,16 @@ error: doctest failed, to rerun pass `--doc`
     #[test]
     fn a_list_that_is_not_whole_names_nothing() {
         let short = FAILED.replace("3 passed; 1 failed", "2 passed; 2 failed");
-        assert_eq!(
-            failures(&short),
-            None,
-            "the summary counts two, the list one"
-        );
+        assert_eq!(failures(&short), [], "the summary counts two, the list one");
         let cut_into = FAILED.replace(
             "failures:\n    tests::wrong",
             "failures:\n    tests::wr\n\n... [300 characters truncated] ...\n\nong",
         );
-        assert_eq!(failures(&cut_into), None);
+        assert_eq!(failures(&cut_into), []);
         let headless = FAILED.replace("\nfailures:\n    tests::wrong", "\n    tests::wrong");
         assert_eq!(
             failures(&headless),
-            None,
+            [],
             "no `failures:` line opens the list"
         );
     }
@@ -874,16 +944,16 @@ error: doctest failed, to rerun pass `--doc`
         let (unnamed, _) = FAILED
             .split_once("error: test failed")
             .expect("the recording names the binary");
-        assert_eq!(failures(unnamed), None);
+        assert_eq!(failures(unnamed), []);
         let malformed = FAILED.replace("finished in 0.00s\n\nerror", "finished in soon\n\nerror");
-        assert_eq!(failures(&malformed), None, "the summary is not libtest's");
+        assert_eq!(failures(&malformed), [], "the summary is not libtest's");
     }
 
     #[test]
     fn a_passing_run_or_one_cut_before_its_end_names_nothing() {
-        assert_eq!(failures(PASSED), None);
-        assert_eq!(failures(&cut(FAILED)), None);
-        assert_eq!(failures(BUILD_FAILED), None);
+        assert_eq!(failures(PASSED), []);
+        assert_eq!(failures(&cut(FAILED)), []);
+        assert_eq!(failures(BUILD_FAILED), []);
     }
 
     #[test]
