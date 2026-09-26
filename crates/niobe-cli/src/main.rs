@@ -21,6 +21,7 @@ mod config;
 mod journal;
 mod prices;
 mod profiles;
+mod reaper;
 mod repo;
 mod rules;
 mod sessions;
@@ -236,7 +237,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     // Started with the shell and stopped with it: the thread behind it reads
     // the repository while the session runs, and a piped run never gets here.
     let mut watching = repo::watch(&cwd);
-    let mut commands = commands::Commands::at(&cwd);
+    let mut commands = commands_for(&cwd, &backend);
     let ended = niobe_tui::run(
         app,
         &mut journal,
@@ -265,6 +266,22 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
 
 /// Opens the shell on a recorded session and keeps recording into it. Without
 /// a terminal, prints what the session folds to.
+/// The operator's `!` commands, in `cwd`, with a reaper told of their groups
+/// and of the backend's.
+///
+/// A session whose reaper cannot be started still stops what it started on
+/// every way out it is given; only SIGKILL gives it none.
+fn commands_for(cwd: &Path, backend: &backend::Attachment) -> commands::Commands {
+    let commands = commands::Commands::at(cwd);
+    let Ok(reaper) = reaper::Reaper::start() else {
+        return commands;
+    };
+    if let Some(group) = backend.process_group() {
+        reaper.watch(group);
+    }
+    commands.reaped_by(reaper)
+}
+
 fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
@@ -350,7 +367,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&cwd);
-    let mut commands = commands::Commands::at(&cwd);
+    let mut commands = commands_for(&cwd, &backend);
     niobe_tui::run(
         app,
         &mut journal,
@@ -448,7 +465,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&cwd);
-    let mut commands = commands::Commands::at(&cwd);
+    let mut commands = commands_for(&cwd, &backend);
     let ended = niobe_tui::run(
         app,
         &mut journal,

@@ -34,6 +34,11 @@
 //! decides whether the operator is left with a reason, a status, or a crash.
 //! The stream it is arranged on is not a pty, for a reason that test carries.
 //!
+//! What a session started is not left behind on any of these ways out,
+//! SIGKILL included: the CLI's process group, and each `!` command's group
+//! even after its `sh` has ended with something still running in the
+//! background.
+//!
 //! A test binary of its own, because it measures how long the shell takes to
 //! notice; tests that draw or replay in the same binary would be measured
 //! with it.
@@ -1457,4 +1462,111 @@ fn a_sigquit_hands_back_the_terminal_and_ends_a_running_bang_command() {
 #[test]
 fn a_sigterm_hands_back_the_terminal_and_ends_a_running_bang_command() {
     a_signal_hands_back_the_terminal_and_ends_the_bang_command("a SIGTERM", Signal::TERM);
+}
+
+/// A `claude` that starts something of its own with every descriptor it was
+/// given let go — as a server a tool call left running is — writes down its
+/// own process and that one, answers one turn, and leaves as soon as its
+/// standard input closes. What it started holds nothing of the session's, so
+/// only the process group it shares with the CLI can take it along.
+const LEAVES_SOMETHING_DETACHED_CLAUDE: &str = "#!/bin/sh\n\
+    echo $$ > claude.pid\n\
+    sleep 77102 </dev/null >/dev/null 2>&1 &\n\
+    echo $! > started.pid\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"replied-with-something-detached\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    while read -r line; do :; done\n";
+
+/// Ends the shell down `path` once the CLI has left something detached
+/// running and a `!` command has ended with something of its own still
+/// running in the background, and asserts that within `within` of the shell
+/// ending nothing of either process group is left.
+///
+/// A `!` command's `sh` ending does not end what it put in the background,
+/// and a shell that forgets the command's group once its `sh` has gone has
+/// nothing left to stop at the end of the session.
+fn ends_with_nothing_left_running(
+    path: &str,
+    within: Duration,
+    end: impl FnOnce(&Terminal, &Child),
+) {
+    let repo = repo();
+    let home = stand_in(repo.path(), LEAVES_SOMETHING_DETACHED_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"say something\r");
+    terminal.shows("replied-with-something-detached");
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal
+        .typed(b"(sleep 77106 >/dev/null 2>&1 & echo $$ $! > bang.tmp && mv bang.tmp bang.pid)\r");
+    terminal.shows("exit 0");
+    let pids = |file: &str| -> Vec<Pid> {
+        std::fs::read_to_string(repo.path().join(file))
+            .expect("the processes were written down before the call ended")
+            .split_whitespace()
+            .map(|raw| {
+                let raw: i32 = raw.parse().expect("a pid is a number");
+                Pid::from_raw(raw).expect("a pid is positive")
+            })
+            .collect()
+    };
+    let (cli, started) = (pids("claude.pid")[0], pids("started.pid")[0]);
+    let bang = pids("bang.pid");
+    let (bang_group, backgrounded) = (bang[0], bang[1]);
+    assert!(
+        rustix::process::test_kill_process(backgrounded).is_ok(),
+        "what the `!` command put in the background ended with it"
+    );
+
+    end(&terminal, &shell);
+
+    ended(&mut shell);
+    drop(slave);
+    terminal.drained();
+    // What was killed is reaped by whoever inherited it, a moment later.
+    let deadline = Instant::now() + within;
+    let left = || {
+        [started, backgrounded]
+            .into_iter()
+            .any(|pid| rustix::process::test_kill_process(pid).is_ok())
+            || [cli, bang_group]
+                .into_iter()
+                .any(|group| rustix::process::test_kill_process_group(group).is_ok())
+    };
+    while left() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let state = |pid: Pid| match rustix::process::test_kill_process(pid) {
+        Ok(()) => "still there",
+        Err(_) => "gone",
+    };
+    assert!(
+        !left(),
+        "{within:?} after {path} the CLI's detached process was {} and the `!` command's \
+         background {}",
+        state(started),
+        state(backgrounded),
+    );
+}
+
+#[test]
+fn a_quit_takes_along_what_the_cli_and_an_ended_bang_command_left_running() {
+    ends_with_nothing_left_running("a clean quit", DEADLINE, |terminal, _| {
+        terminal.typed(CTRL_Q);
+    });
+}
+
+/// Nothing runs in the shell after SIGKILL, so what the session started is
+/// ended by something that outlives it and hears it go.
+#[test]
+fn a_sigkill_leaves_nothing_the_session_started_running() {
+    ends_with_nothing_left_running("a SIGKILL", 2 * DEADLINE, |_, shell| {
+        signal(shell, Signal::KILL);
+    });
 }

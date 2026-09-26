@@ -10,12 +10,14 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use niobe_core::event::ToolCallId;
 use niobe_tui::shell::{Ran, Shell, ShellError};
+
+use crate::reaper::Reaper;
 
 /// How much of what a command printed is kept: the end of it, since that is
 /// where a command says how it went. A command that prints more is still
@@ -36,16 +38,37 @@ const GRACE: Duration = Duration::from_secs(2);
 /// few milliseconds, so only one that does not is waited for this long.
 const QUIT_GRACE: Duration = Duration::from_millis(500);
 
+/// How long, once `sh` has ended, what it printed is given to reach its end.
+/// Something `sh` put in the background may hold its output open for as long
+/// as it runs; the command has ended all the same, and what reaches the output
+/// after this is not recorded as the command's.
+const LINGER: Duration = Duration::from_millis(100);
+
 /// The operator's commands, run in the directory the session runs in.
 #[derive(Debug)]
 pub struct Commands {
     cwd: PathBuf,
     ended: Receiver<Ran>,
     ends: Sender<Ran>,
-    /// The process of each command still running, by the call it is recorded
-    /// as. Each leads a process group of its own, so that what it started can
-    /// be stopped with it.
-    running: Arc<Mutex<Vec<(ToolCallId, u32)>>>,
+    /// The process group of each command, by the call it is recorded as,
+    /// until the group is seen with nobody left in it. Each command's `sh`
+    /// leads a group of its own, so that what it started can be stopped with
+    /// it, and the group is kept after `sh` has ended: what `sh` put in the
+    /// background is still in it, and is still the session's to stop.
+    groups: Arc<Mutex<Vec<Group>>>,
+    /// Told of every group, so that a session killed outright does not leave
+    /// them running.
+    reaper: Option<Reaper>,
+}
+
+/// The process group one command's `sh` leads.
+#[derive(Debug)]
+struct Group {
+    id: ToolCallId,
+    leader: u32,
+    /// Whether `sh` has ended and been reaped. Until then its group cannot be
+    /// empty, and is the command's own.
+    ended: bool,
 }
 
 impl Commands {
@@ -56,27 +79,49 @@ impl Commands {
             cwd: cwd.to_path_buf(),
             ended,
             ends,
-            running: Arc::new(Mutex::new(Vec::new())),
+            groups: Arc::new(Mutex::new(Vec::new())),
+            reaper: None,
         }
+    }
+
+    /// Tells `reaper` of every group a command starts, and of every one seen
+    /// empty.
+    pub fn reaped_by(mut self, reaper: Reaper) -> Self {
+        self.reaper = Some(reaper);
+        self
     }
 }
 
 impl Shell for Commands {
     fn run(&mut self, id: &ToolCallId, command: &str) -> Result<(), ShellError> {
+        if let Ok(mut groups) = self.groups.lock() {
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
+        }
         let mut child = spawn(&self.cwd, command)?;
-        let pid = child.id();
+        let leader = child.id();
         let printed = child.stdout.take();
-        if let Ok(mut running) = self.running.lock() {
-            running.push((id.clone(), pid));
+        if let Ok(mut groups) = self.groups.lock() {
+            groups.push(Group {
+                id: id.clone(),
+                leader,
+                ended: false,
+            });
+        }
+        if let Some(reaper) = &self.reaper {
+            reaper.watch(leader);
         }
 
         let id = id.clone();
         let ends = self.ends.clone();
-        let running = Arc::clone(&self.running);
+        let groups = Arc::clone(&self.groups);
+        let reaper = self.reaper.clone();
         std::thread::spawn(move || {
             let ran = wait(id, &mut child, printed);
-            if let Ok(mut running) = running.lock() {
-                running.retain(|(_, running)| *running != pid);
+            if let Ok(mut groups) = groups.lock() {
+                for group in groups.iter_mut().filter(|group| group.leader == leader) {
+                    group.ended = true;
+                }
+                let_go_of_the_empty(&mut groups, reaper.as_ref());
             }
             // The shell has gone: the session ended while this ran, and there
             // is nobody left to tell.
@@ -89,21 +134,23 @@ impl Shell for Commands {
     /// within [`GRACE`]. Its end, with what it printed up to then, is read by
     /// the thread already waiting on it.
     fn stop(&mut self, id: &ToolCallId) {
-        let Some(pid) = still_running(&self.running, id) else {
+        let Some(leader) = still_running(&self.groups, id) else {
             return;
         };
-        stop(pid);
-        let running = Arc::clone(&self.running);
+        stop(leader);
+        let groups = Arc::clone(&self.groups);
         let id = id.clone();
         std::thread::spawn(move || {
             std::thread::sleep(GRACE);
-            // Only while it is still listed: the thread waiting on it takes it
-            // off the list after reaping it, so a group killed here cannot be
-            // one a new process has taken the number of.
-            if let Ok(running) = running.lock()
-                && running.contains(&(id, pid))
+            // Only while it is still listed: a group is taken off the list
+            // once it is seen empty, so a group killed here cannot be one a
+            // new process has taken the number of.
+            if let Ok(groups) = groups.lock()
+                && groups
+                    .iter()
+                    .any(|group| group.id == id && group.leader == leader)
             {
-                kill(pid);
+                kill(leader);
             }
         });
     }
@@ -114,44 +161,65 @@ impl Shell for Commands {
 }
 
 impl Drop for Commands {
-    /// Stops every command still running, and whatever it started: the
-    /// session is over, and nothing it ran on the operator's behalf is left
-    /// running with no one to see it end. Each is asked first and killed if it
-    /// is still running after [`QUIT_GRACE`]; a quit with nothing still
-    /// running, or only what ends when asked, is not held up.
+    /// Stops every command still running, and whatever any command started
+    /// that is still running: the session is over, and nothing it ran on the
+    /// operator's behalf is left running with no one to see it end. Each
+    /// group is asked first and killed if anything in it is still running
+    /// after [`QUIT_GRACE`]; a quit with nothing still running, or only what
+    /// ends when asked, is not held up.
     fn drop(&mut self) {
-        if let Ok(running) = self.running.lock() {
-            for (_, pid) in running.iter() {
-                stop(*pid);
+        if let Ok(mut groups) = self.groups.lock() {
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
+            for group in groups.iter() {
+                stop(group.leader);
             }
         }
         let until = Instant::now() + QUIT_GRACE;
-        while Instant::now() < until && !none_running(&self.running) {
+        while Instant::now() < until && !none_running(&self.groups) {
             std::thread::sleep(Duration::from_millis(5));
         }
-        // Under the lock, as in `stop`: the thread waiting on a command takes
-        // it off the list after reaping it, so a group killed here is still
-        // the command's own.
-        if let Ok(running) = self.running.lock() {
-            for (_, pid) in running.iter() {
-                kill(*pid);
+        // Under the lock, as in `stop`: a group is taken off the list once it
+        // is seen empty, so a group killed here is still the command's own.
+        if let Ok(groups) = self.groups.lock() {
+            for group in groups.iter() {
+                kill(group.leader);
             }
         }
     }
 }
 
-/// Whether every command has ended and been reaped.
-fn none_running(running: &Mutex<Vec<(ToolCallId, u32)>>) -> bool {
-    running.lock().map_or(true, |running| running.is_empty())
+/// Takes off `groups` each group whose `sh` has ended with nothing it
+/// started still running, and tells `reaper` so.
+///
+/// A group's number is not given to a new process while anyone is in it, so
+/// until it is seen empty it can only be signalled as the command's own.
+fn let_go_of_the_empty(groups: &mut Vec<Group>, reaper: Option<&Reaper>) {
+    groups.retain(|group| {
+        let kept = !group.ended || occupied(group.leader);
+        if !kept && let Some(reaper) = reaper {
+            reaper.forget(group.leader);
+        }
+        kept
+    });
 }
 
-/// The process the command recorded as `id` runs as, while it runs.
-fn still_running(running: &Mutex<Vec<(ToolCallId, u32)>>, id: &ToolCallId) -> Option<u32> {
-    let running = running.lock().ok()?;
-    running
+/// Whether every command has ended and been reaped, and nothing any of them
+/// started is still running.
+fn none_running(groups: &Mutex<Vec<Group>>) -> bool {
+    groups.lock().map_or(true, |groups| {
+        groups
+            .iter()
+            .all(|group| group.ended && !occupied(group.leader))
+    })
+}
+
+/// The group the command recorded as `id` leads, while its `sh` runs.
+fn still_running(groups: &Mutex<Vec<Group>>, id: &ToolCallId) -> Option<u32> {
+    let groups = groups.lock().ok()?;
+    groups
         .iter()
-        .find(|(running, _)| running == id)
-        .map(|(_, pid)| *pid)
+        .find(|group| group.id == *id && !group.ended)
+        .map(|group| group.leader)
 }
 
 /// Starts `command` under `sh`, in `cwd`.
@@ -176,15 +244,34 @@ fn spawn(cwd: &Path, command: &str) -> Result<Child, ShellError> {
         .map_err(|error| format!("cannot start sh: {error}").into())
 }
 
-/// Reads what the command prints until it is done, then waits for it.
+/// Reads what the command prints while it runs, and ends once `sh` has:
+/// with everything it printed where its output closes within [`LINGER`], and
+/// with what it printed up to then where something it put in the background
+/// holds the output open.
 fn wait(id: ToolCallId, child: &mut Child, printed: Option<ChildStdout>) -> Ran {
-    let (kept, bytes) = printed.map(read_end).unwrap_or_default();
-    let whole = u64::try_from(kept.len()).is_ok_and(|kept| kept == bytes);
-    let output = String::from_utf8_lossy(&kept).into_owned();
+    let tail = Arc::new(Mutex::new(Tail::default()));
+    let (read, all_read) = channel::<()>();
+    match printed {
+        Some(printed) => {
+            let tail = Arc::clone(&tail);
+            std::thread::spawn(move || {
+                read_end(printed, &tail);
+                let _ = read.send(());
+            });
+        }
+        None => drop(read),
+    }
     let (exit_code, error) = match child.wait() {
         Ok(status) => (status.code(), signalled(status)),
         Err(error) => (None, Some(format!("cannot wait for it: {error}"))),
     };
+    let finished = !matches!(
+        all_read.recv_timeout(LINGER),
+        Err(RecvTimeoutError::Timeout)
+    );
+    let (kept, bytes) = tail.lock().map(|tail| tail.end()).unwrap_or_default();
+    let whole = finished && u64::try_from(kept.len()).is_ok_and(|kept| kept == bytes);
+    let output = String::from_utf8_lossy(&kept).into_owned();
     Ran {
         id,
         output,
@@ -195,33 +282,51 @@ fn wait(id: ToolCallId, child: &mut Child, printed: Option<ChildStdout>) -> Ran 
     }
 }
 
-/// The last [`KEPT`] bytes `from` gives before it ends, and how many it gave
-/// in all.
-fn read_end(mut from: impl Read) -> (Vec<u8>, u64) {
-    let mut kept = Vec::new();
-    let mut bytes: u64 = 0;
+/// The end of what a command has printed so far, and how much it printed in
+/// all.
+#[derive(Debug, Default)]
+struct Tail {
+    kept: Vec<u8>,
+    bytes: u64,
+}
+
+impl Tail {
+    fn add(&mut self, read: &[u8]) {
+        self.kept.extend_from_slice(read);
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(read.len()).unwrap_or(u64::MAX));
+        // Dropped a slice at a time rather than on every read, which would
+        // move the whole buffer for each chunk.
+        if self.kept.len() > 2 * KEPT {
+            self.kept.drain(..self.kept.len() - KEPT);
+        }
+    }
+
+    /// The last [`KEPT`] bytes, and how many were printed in all.
+    fn end(&self) -> (Vec<u8>, u64) {
+        let from = self.kept.len().saturating_sub(KEPT);
+        let kept = self.kept.get(from..).unwrap_or_default().to_vec();
+        (kept, self.bytes)
+    }
+}
+
+/// Reads `from` into `into` until it ends.
+fn read_end(mut from: impl Read, into: &Mutex<Tail>) {
     let mut chunk = [0_u8; 64 * 1024];
     loop {
         match from.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
                 let read = chunk.get(..n).unwrap_or_default();
-                kept.extend_from_slice(read);
-                bytes = bytes.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
-                // Dropped a slice at a time rather than on every read, which
-                // would move the whole buffer for each chunk.
-                if kept.len() > 2 * KEPT {
-                    kept.drain(..kept.len() - KEPT);
+                if let Ok(mut tail) = into.lock() {
+                    tail.add(read);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }
-    if kept.len() > KEPT {
-        kept.drain(..kept.len() - KEPT);
-    }
-    (kept, bytes)
 }
 
 /// Why a command ended without an exit status of its own, where a signal
@@ -258,6 +363,20 @@ fn signal_group(pid: u32, signal: rustix::process::Signal) {
         // A group that has already gone is what was wanted.
         let _ = rustix::process::kill_process_group(group, signal);
     }
+}
+
+/// Whether anyone is left in the process group `leader` leads.
+#[cfg(unix)]
+fn occupied(leader: u32) -> bool {
+    i32::try_from(leader)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|group| rustix::process::test_kill_process_group(group).is_ok())
+}
+
+#[cfg(not(unix))]
+fn occupied(_leader: u32) -> bool {
+    false
 }
 
 #[cfg(not(unix))]
@@ -399,6 +518,66 @@ mod tests {
         assert!(
             held < QUIT_GRACE / 2,
             "a command that ended on SIGTERM held up the quit for {held:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_ends_when_its_shell_does_though_what_it_left_running_holds_its_output() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("left-running");
+        let mut commands = Commands::at(dir.path());
+        commands
+            .run(
+                &ToolCallId::new("t"),
+                &format!("echo before; (sleep 30 & echo $! > {})", marker.display()),
+            )
+            .expect("sh starts");
+        let child = pid_in(&marker);
+
+        let ran = ended(&mut commands, Duration::from_secs(2))
+            .expect("the command was still running after its shell ended");
+
+        assert_eq!(ran.output, "before\n");
+        assert_eq!(ran.exit_code, Some(0));
+        assert!(!ran.whole, "what reaches the output later is not in it");
+        drop(commands);
+        gone(child, "what the command left running outlived the session");
+    }
+
+    #[test]
+    fn what_an_ended_command_left_running_is_stopped_when_the_session_ends() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("left-running");
+        let mut commands = Commands::at(dir.path());
+        let ran = ran_in(
+            &mut commands,
+            &format!(
+                "(sleep 30 >/dev/null 2>&1 & echo $! > {})",
+                marker.display()
+            ),
+        );
+        assert!(ran.whole, "nothing held the output open");
+        let child = pid_in(&marker);
+
+        drop(commands);
+
+        gone(
+            child,
+            "what an ended command left running outlived the session",
+        );
+    }
+
+    #[test]
+    fn a_command_whose_group_has_emptied_is_let_go_of() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let mut commands = Commands::at(dir.path());
+
+        ran_in(&mut commands, "true");
+
+        let groups = commands.groups.lock().expect("nothing else holds the list");
+        assert!(
+            groups.is_empty(),
+            "an empty group is still kept: {groups:?}"
         );
     }
 

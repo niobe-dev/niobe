@@ -541,6 +541,13 @@ impl Session {
         format!("niobe-{}", self.control_requests)
     }
 
+    /// The process group the CLI leads, which is also where everything it
+    /// starts runs unless that moves itself out. Ended with the session; the
+    /// number is for what must end it when the session is not there to.
+    pub fn process_group(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Everything the CLI has produced since the last call.
     ///
     /// Never blocks: it runs on the thread that draws the screen. A session

@@ -38,6 +38,7 @@ pub struct Attach {
 pub struct Attachment {
     bridge: Box<dyn Bridge>,
     attached: bool,
+    process_group: Option<u32>,
 }
 
 impl Attachment {
@@ -45,6 +46,12 @@ impl Attachment {
     /// prompt has somewhere to go.
     pub fn attached(&self) -> bool {
         self.attached
+    }
+
+    /// The process group the backend's subprocess leads, where one was
+    /// started.
+    pub fn process_group(&self) -> Option<u32> {
+        self.process_group
     }
 
     /// The backend, for the event loop.
@@ -80,6 +87,7 @@ pub fn attach(
             let options = claude_options(root, selected, with, home)?;
             let session = Session::spawn(&options).map_err(describe)?;
             Ok(Attachment {
+                process_group: Some(session.process_group()),
                 bridge: Box::new(Claude(session)),
                 attached: true,
             })
@@ -266,6 +274,7 @@ fn detached() -> Attachment {
     Attachment {
         bridge: Box::new(Detached),
         attached: false,
+        process_group: None,
     }
 }
 
