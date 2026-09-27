@@ -246,6 +246,82 @@ fn a_running_turn_redraws_inside_a_frame_budget_in_every_theme() {
     }
 }
 
+/// Records owed for in a session that never settles — a transcript read in
+/// with no money in it, a backend that never reports any — which the shell
+/// values one record at a time, as the request each was, on every frame.
+const OWED_RECORDS: usize = 10_000;
+
+/// A metered session owing for [`OWED_RECORDS`] requests over two models,
+/// with the Usage pane drawing each model's valued cost and the session's.
+///
+/// The price sheet here stands in for the ledger's, which this crate cannot
+/// name: each record is looked up by its model and priced by its own prompt
+/// against a long-context threshold, which is the work the ledger does per
+/// record. Timed against the bundled table itself on the machine this was
+/// written on (M2 Pro, release): one valuation of all 10,000 took 365 µs and
+/// the frame 1.5 ms.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_session_owing_for_many_requests_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session().with_prices(Box::new(Tiered));
+    app.apply(&Event::Billing {
+        billing: niobe_core::event::Billing::Metered,
+    });
+    for n in 0..OWED_RECORDS as u64 {
+        app.apply(&Event::Usage(niobe_core::event::Usage {
+            input: 100 + n,
+            output: 50,
+            cache_read: 1_000 * (n % 300),
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: TIERED_MODELS[(n % 2) as usize].to_owned(),
+            cost_usd: None,
+            cost_basis: None,
+            settles_model: false,
+        }));
+    }
+    let frame = screen(&mut app, 200, 60);
+    assert!(frame.contains("~$"), "the owed tokens are valued: {frame}");
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame owing for {OWED_RECORDS} requests at 200x60 took {median:?}, over \
+         the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// The models [`Tiered`] prices.
+const TIERED_MODELS: [&str; 2] = ["claude-sonnet-4-5", "claude-opus-5"];
+
+/// Prices a request as the ledger does: its model's rates, dearer past a
+/// 200K prompt.
+#[derive(Debug)]
+struct Tiered;
+
+impl niobe_tui::Prices for Tiered {
+    fn estimate(&self, usage: &niobe_core::event::Usage) -> Option<f64> {
+        let (input, output, read) = match TIERED_MODELS.iter().position(|m| *m == usage.model)? {
+            0 => (3.0, 15.0, 0.3),
+            _ => (5.0, 25.0, 0.5),
+        };
+        let prompt = usage.input + usage.cache_read + usage.cache_write;
+        let dearer = if prompt > 200_000 { 2.0 } else { 1.0 };
+        Some(
+            dearer
+                * (usage.input as f64 * input
+                    + usage.output as f64 * output
+                    + usage.cache_read as f64 * read)
+                / 1e6,
+        )
+    }
+}
+
 /// The median time to draw one frame, cycling through `sizes`. A frame the scheduler took the core away
 /// from says nothing about the drawing code, and a mean lets one such frame
 /// push the whole figure over the budget. The median holds until half the
