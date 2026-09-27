@@ -164,6 +164,21 @@ fn a_resumed_session_shows_the_totals_the_log_it_recorded_folds_to() {
     let resumed = stdout(&resumed);
     assert!(resumed.starts_with("session 1 · 603 events"), "{resumed}");
     assert_eq!(body(&resumed), body(&stdout(&replayed)));
+    // The same two paths could agree on a wrong fold, so the figures are also
+    // held against the ones `jq` derives from the fixture, with the program in
+    // `crates/niobe-core/tests/fixtures/README.md`: 120 + 19,606 + 460,375 +
+    // 82,887 tokens, 14 of 25 usage records with no cost on them, 26 calls
+    // ended of which 3 failed and 1 was denied, 6 prompts and 15 replies, and
+    // one file at +21 −4.
+    for figure in [
+        "tokens      562,988 — 120 in · 19,606 out · 460,375 cache read · 82,887 cache write",
+        "14 of 25 usage records no reported cost covers",
+        "tool calls  26 finished · 3 failed · 1 denied",
+        "messages    6 from you · 15 from the agent",
+        "files       1 changed — +21 −4",
+    ] {
+        assert!(resumed.contains(figure), "{figure:?} in {resumed}");
+    }
 }
 
 #[test]

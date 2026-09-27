@@ -619,6 +619,23 @@ args = ["--model", "gpt-4"]
         assert_eq!(codex.auth_refresh(), None);
     }
 
+    /// A file saved on Windows, or by an editor set to write its line
+    /// endings, is the same config: the carriage returns are not part of any
+    /// value, and an error still names the line it is on.
+    #[test]
+    fn a_file_with_windows_line_endings_is_the_same_config() {
+        let crlf = EXAMPLE.replace('\n', "\r\n");
+        assert_eq!(parsed(&crlf), parsed(EXAMPLE));
+        assert_eq!(
+            parsed(&crlf).profiles()["work"].auth_refresh(),
+            Some("aws sso login --profile corp-sso")
+        );
+        assert_eq!(
+            invalid("[profiles.max]\r\nbackend = \"claude\"\r\nbilling = \"flat\"\r\n"),
+            "/configs/user/config.toml:3: profiles.max.billing: `flat` is not a billing mode; expected `plan` or `metered`"
+        );
+    }
+
     #[test]
     fn the_environment_passes_through_exactly_as_written() {
         let config = parsed(

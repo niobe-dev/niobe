@@ -177,3 +177,93 @@ fn a_release_that_cannot_be_downloaded_says_which_file_and_installs_nothing() {
     );
     assert!(!root.path().join("bin/niobe").exists());
 }
+
+/// Every tool in the system's directories, linked into `dir`, but for the
+/// ones `leave_out` names: a machine with fewer tools than this one.
+fn tools_without(dir: &Path, leave_out: &[&str]) {
+    fs::create_dir_all(dir).expect("the temporary directory is writable");
+    for system in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+        let Ok(entries) = fs::read_dir(system) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let link = dir.join(&name);
+            if leave_out.iter().any(|left| name == *left) || link.exists() {
+                continue;
+            }
+            let _ = std::os::unix::fs::symlink(entry.path(), link);
+        }
+    }
+}
+
+/// Writes an executable `sh` script at `path`.
+fn script(path: &Path, body: &str) {
+    fs::write(path, format!("#!/bin/sh\n{body}")).expect("the directory is writable");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .expect("the script was just written");
+}
+
+/// The first of `names` in the system's directories.
+fn system_tool(names: &[&str]) -> Option<PathBuf> {
+    names.iter().find_map(|name| {
+        ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            .iter()
+            .map(|dir| Path::new(dir).join(name))
+            .find(|path| path.is_file())
+    })
+}
+
+/// A machine with neither `curl` nor `sha256sum` downloads with `wget` and
+/// verifies with `shasum`, and installs what it verified.
+#[test]
+fn the_installer_falls_back_to_wget_and_shasum() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+    let tools = root.path().join("tools");
+    tools_without(&tools, &["curl", "wget", "sha256sum", "shasum"]);
+    let used = root.path().join("used");
+    // `wget -q --https-only <url> -O <file>`, reading the `file://` release
+    // the way the real one reads a URL.
+    script(
+        &tools.join("wget"),
+        &format!(
+            "echo wget >> '{used}'\nurl=$3\ncp \"${{url#file://}}\" \"$5\"\n",
+            used = used.display()
+        ),
+    );
+    // `shasum -a 256 <file>`, answered by whichever SHA-256 tool this machine
+    // really has.
+    let digest = match (system_tool(&["sha256sum"]), system_tool(&["shasum"])) {
+        (Some(sum), _) => format!("'{}' \"$3\"", sum.display()),
+        (None, Some(sum)) => format!("'{}' -a 256 \"$3\"", sum.display()),
+        (None, None) => return,
+    };
+    script(
+        &tools.join("shasum"),
+        &format!("echo shasum >> '{}'\n{digest}\n", used.display()),
+    );
+
+    let output = Command::new("sh")
+        .arg(installer())
+        .env_clear()
+        .env("PATH", &tools)
+        .env("HOME", root.path())
+        .env("NIOBE_INSTALL_DIR", root.path().join("bin"))
+        .env(
+            "NIOBE_DOWNLOAD_URL",
+            format!("file://{}", release.display()),
+        )
+        .output()
+        .expect("sh is on every machine the tests run on");
+
+    assert!(output.status.success(), "{}", said(&output));
+    let used = fs::read_to_string(&used).expect("the stand-ins were run");
+    assert!(used.contains("wget"), "{used}");
+    assert!(used.contains("shasum"), "{used}");
+    let version = Command::new(root.path().join("bin/niobe"))
+        .arg("--version")
+        .output()
+        .expect("the installer made the binary executable");
+    assert_eq!(String::from_utf8_lossy(&version.stdout), "niobe 9.9.9\n");
+}

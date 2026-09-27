@@ -1191,6 +1191,57 @@ mod tests {
         assert!(!totals.unsettled.contains_key("opus-5"));
     }
 
+    /// Two models each settled by their own record leave nothing owed,
+    /// whichever settles first, and each keeps its own bill.
+    #[test]
+    fn two_models_settle_in_either_order() {
+        for (first, second) in [("opus-5", "haiku-4-5"), ("haiku-4-5", "opus-5")] {
+            let owing = [
+                on_model("opus-5", 100, 10, None),
+                on_model("haiku-4-5", 300, 30, None),
+                on_model("opus-5", 200, 20, None),
+            ];
+            let halfway = SessionState::replay(owing.iter().chain([&settlement(first, 0.5)]));
+            let owed: Vec<&String> = halfway.totals().unsettled.keys().collect();
+            assert_eq!(owed, [second], "{first} settled first");
+            let expected = if second == "opus-5" { 2 } else { 1 };
+            assert_eq!(
+                halfway.totals().records_unsettled,
+                expected,
+                "{first} first"
+            );
+
+            let settled = SessionState::replay(
+                owing
+                    .iter()
+                    .chain([&settlement(first, 0.5), &settlement(second, 0.25)]),
+            );
+            let totals = settled.totals();
+            assert_eq!(totals.records_unsettled, 0, "{first} first");
+            assert!(totals.unsettled.is_empty(), "{first} first");
+            assert!((totals.reported_cost_by_model[first] - 0.5).abs() < 1e-9);
+            assert!((totals.reported_cost_by_model[second] - 0.25).abs() < 1e-9);
+        }
+    }
+
+    /// A settlement for a model nothing is owed for takes nothing off what
+    /// another model owes: the count of records owed for never goes below
+    /// the records that are.
+    #[test]
+    fn a_settlement_with_nothing_owed_leaves_what_is_owed_alone() {
+        let state = SessionState::replay(&[
+            on_model("haiku-4-5", 300, 30, None),
+            on_model("haiku-4-5", 300, 30, None),
+            settlement("opus-5", 0.75),
+            settlement("opus-5", 0.75),
+        ]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 2);
+        assert_eq!(totals.unsettled["haiku-4-5"].records().len(), 2);
+        assert!((totals.reported_cost_usd - 1.5).abs() < 1e-9);
+    }
+
     #[test]
     fn tokens_reported_after_a_settlement_are_unsettled_again() {
         let state = SessionState::replay(&[
