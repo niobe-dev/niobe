@@ -60,6 +60,8 @@ sha2 = { version = "0.10", default-features = false }
 ratatui = "0.30"
 ratatui-textarea = "0.9"
 unicode-width = "0.2"
+# What the operator sees as one character, which the composer deletes whole.
+unicode-segmentation = "1.13"
 signal-hook = "0.4"
 
 # Safe wrappers for the POSIX calls the workspace needs — `unsafe` is denied,

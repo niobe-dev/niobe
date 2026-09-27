@@ -25,6 +25,7 @@ use niobe_core::event::{
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
 use ratatui_textarea::{Input, TextArea, WrapMode};
+use unicode_segmentation::UnicodeSegmentation;
 
 use ratatui::style::Style;
 
@@ -3732,7 +3733,11 @@ impl App {
             // follows it back: the Enter after it has to send it.
             _ => {
                 self.focus = Focus::Session;
-                if self.composer.input(Input::from(key)) {
+                let changed = match delete_whole(&mut self.composer, key) {
+                    Some(changed) => changed,
+                    None => self.composer.input(Input::from(key)),
+                };
+                if changed {
                     self.offer_selected = 0;
                     self.reopen_offers();
                 }
@@ -3807,7 +3812,12 @@ impl App {
             }
             KeyCode::Char(c) => self.ask_draft.push(c),
             KeyCode::Backspace => {
-                self.ask_draft.pop();
+                let kept = self
+                    .ask_draft
+                    .grapheme_indices(true)
+                    .next_back()
+                    .map_or(0, |(at, _)| at);
+                self.ask_draft.truncate(kept);
             }
             KeyCode::Esc => self.ask_focus = AskFocus::Choosing,
             _ => {}
@@ -4029,6 +4039,49 @@ impl App {
     /// Feeds a key straight to the composer, for tests and for a paste.
     pub fn type_into_composer(&mut self, input: impl Into<Input>) {
         self.composer.input(input);
+    }
+}
+
+/// Backspace or Delete on the composer, taking what the operator sees as one
+/// character — a letter and the accents on it, an emoji and the ones joined
+/// to it — rather than the one code point the editor would. `None` where the
+/// editor's own handling is already that: a selection, a line break, a
+/// character that is one code point, or any other key.
+///
+/// `Some` says whether the text changed, as the editor's own input does.
+fn delete_whole(
+    composer: &mut TextArea<'static>,
+    key: ratatui::crossterm::event::KeyEvent,
+) -> Option<bool> {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use ratatui_textarea::CursorMove;
+
+    if key.modifiers != KeyModifiers::NONE || composer.selection_range().is_some() {
+        return None;
+    }
+    let ratatui_textarea::DataCursor(row, col) = composer.cursor();
+    let line = composer.lines().get(row)?;
+    let split = line
+        .char_indices()
+        .nth(col)
+        .map_or(line.len(), |(at, _)| at);
+    let (before, after) = line.split_at(split);
+    match key.code {
+        KeyCode::Backspace => {
+            let chars = before.graphemes(true).next_back()?.chars().count();
+            if chars < 2 {
+                return None;
+            }
+            for _ in 0..chars {
+                composer.move_cursor(CursorMove::Back);
+            }
+            Some(composer.delete_str(chars))
+        }
+        KeyCode::Delete => {
+            let chars = after.graphemes(true).next()?.chars().count();
+            (chars >= 2).then(|| composer.delete_str(chars))
+        }
+        _ => None,
     }
 }
 
@@ -5534,6 +5587,52 @@ mod tests {
         let mut app = sent(sent(app().attached(), "first"), "second");
         app.apply(&prompt(Some("rm -rf build")));
         assert_eq!(app.asking().map(|ask| ask.turn), Some(2));
+    }
+
+    /// What the operator sees as one character can be several code points: a
+    /// family emoji joined by zero-width joiners, a letter and the accent
+    /// that combines with it. Backspace takes it whole, or what is sent to
+    /// the model is half of it.
+    #[test]
+    fn backspace_deletes_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        for (typed, left) in [
+            ("hi \u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}", "hi "),
+            ("a\u{301}", ""),
+            ("ab", "a"),
+        ] {
+            let mut app = app();
+            for c in typed.chars() {
+                app.on_key(key(KeyCode::Char(c)));
+            }
+            app.on_key(key(KeyCode::Backspace));
+            assert_eq!(app.composed(), left, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn delete_deletes_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        for c in "a\u{301}b".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Home));
+        app.on_key(key(KeyCode::Delete));
+        assert_eq!(app.composed(), "b");
+    }
+
+    #[test]
+    fn backspace_in_a_written_answer_deletes_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+        app.on_key(key(KeyCode::Tab));
+        for c in "no e\u{301}".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.ask_draft(), "no ");
     }
 
     #[test]
