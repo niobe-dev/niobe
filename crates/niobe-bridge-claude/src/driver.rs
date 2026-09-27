@@ -33,7 +33,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -258,7 +258,9 @@ pub enum SpawnError {
     },
     /// The binary is there and could not be started.
     Failed {
-        /// The name that was looked up.
+        /// The file that was found for the name looked up, where `PATH` found
+        /// one — which of several on `PATH` is what the operator has to know
+        /// to fix it — and otherwise the name itself.
         binary: PathBuf,
         /// What the operating system said.
         error: std::io::Error,
@@ -290,6 +292,23 @@ impl std::error::Error for SpawnError {
             Self::Failed { error, .. } => Some(error),
         }
     }
+}
+
+/// The file `binary` names as a command would find it: itself where it has a
+/// directory in it, and otherwise the first file of that name in a directory
+/// of `path` — the child's own `PATH` where the profile sets one, as the
+/// spawn looks it up — or of this process's.
+fn found_on_path(binary: &Path, path: Option<&String>) -> Option<PathBuf> {
+    if binary.components().count() > 1 {
+        return Some(binary.to_path_buf());
+    }
+    let path = match path {
+        Some(path) => OsString::from(path),
+        None => std::env::var_os("PATH")?,
+    };
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
 }
 
 /// A running `claude` session.
@@ -365,7 +384,8 @@ impl Session {
                 }
             } else {
                 SpawnError::Failed {
-                    binary: options.binary.clone(),
+                    binary: found_on_path(&options.binary, options.env.get("PATH"))
+                        .unwrap_or_else(|| options.binary.clone()),
                     error,
                 }
             }
@@ -1245,6 +1265,31 @@ mod tests {
         let said = error.to_string();
         assert!(said.contains("is not on PATH"), "{said}");
         assert!(said.contains("/login"), "{said}");
+    }
+
+    /// A `claude` that is there and cannot be run is named by where it was
+    /// found: the operator has to find the file to fix it, and PATH can hold
+    /// several.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_found_that_cannot_be_run_is_named_by_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let found = dir.path().join("claude");
+        std::fs::write(&found, "#!/bin/sh\n").expect("the file is written");
+        std::fs::set_permissions(&found, std::fs::Permissions::from_mode(0o644))
+            .expect("the mode can be set");
+        let mut options = options();
+        options.cwd = dir.path().to_path_buf();
+        options
+            .env
+            .insert("PATH".to_owned(), dir.path().display().to_string());
+
+        let error = Session::spawn(&options).expect_err("the file is not executable");
+
+        let said = error.to_string();
+        assert!(matches!(error, SpawnError::Failed { .. }), "{said}");
+        assert!(said.contains(&found.display().to_string()), "{said}");
     }
 
     #[test]

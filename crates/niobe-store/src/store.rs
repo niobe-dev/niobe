@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use niobe_core::event::Event;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 /// The schema this build creates and reads. Stored in SQLite's `user_version`
 /// so that a store written by a newer build is refused instead of misread.
@@ -190,6 +190,46 @@ impl Store {
         Self::prepare(Connection::open(path)?)
     }
 
+    /// Opens the store at `path` to read it, as [`Store::open`] does where the
+    /// file can be written, and as it is where it cannot.
+    ///
+    /// A store on a read-only mount, or whose file and directory were made
+    /// read-only, is still one the operator can list. [`Store::open`] refuses
+    /// it: putting the file in WAL mode is a write. Where that is the refusal,
+    /// the file is opened read-only, and where SQLite cannot read a WAL file
+    /// that way either — a clean close leaves no `-shm` beside it, and one
+    /// cannot be made in a directory that is not writable — it is read as
+    /// immutable: as it is on disk, with no locking, which is right because
+    /// nothing can be writing to it. A store opened this way refuses writes.
+    pub fn open_to_read(path: &Path) -> Result<Self, StoreError> {
+        match Self::open(path) {
+            Err(StoreError::Sqlite(error)) if refused_a_write(&error) => {}
+            opened => return opened,
+        }
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI;
+        match Self::readable(Connection::open_with_flags(path, flags)?) {
+            Err(StoreError::Sqlite(error)) if refused_a_write(&error) => {}
+            opened => return opened,
+        }
+        Self::readable(Connection::open_with_flags(immutable_uri(path), flags)?)
+    }
+
+    /// A read-only connection, once it has shown it can read the store and
+    /// that the store is one this build reads.
+    fn readable(conn: Connection) -> Result<Self, StoreError> {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found != SCHEMA_VERSION {
+            return Err(StoreError::UnsupportedSchema {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        Ok(Self { conn })
+    }
+
     /// A store that lives only as long as the value, for tests and for a
     /// session that is not to be kept.
     pub fn open_in_memory() -> Result<Self, StoreError> {
@@ -329,6 +369,32 @@ impl Store {
 
         Ok(rows.collect::<Result<_, _>>()?)
     }
+}
+
+/// Whether SQLite refused because something had to be written — a read-only
+/// file, or a directory it could not make its `-shm` file in.
+fn refused_a_write(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(failure.code, rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen)
+    )
+}
+
+/// The `file:` URI that opens `path` as immutable, with every byte a URI
+/// gives a meaning to written as `%XX`.
+fn immutable_uri(path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for byte in path.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(char::from(*byte));
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
 }
 
 /// Creates the schema in a new file and checks the version of an existing one.

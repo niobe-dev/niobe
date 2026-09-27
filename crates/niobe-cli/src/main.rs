@@ -506,7 +506,7 @@ fn list_sessions() -> Result<(), String> {
         .as_ref()
         .and_then(|loaded| loaded.select(None).ok().flatten());
 
-    let recorded = match repo::open_existing_store(&root)? {
+    let recorded = match repo::read_existing_store(&root)? {
         Some(store) => store.sessions().map_err(|e| e.to_string())?,
         None => Vec::new(),
     };

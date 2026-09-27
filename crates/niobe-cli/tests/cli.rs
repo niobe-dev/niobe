@@ -179,6 +179,42 @@ fn the_session_list_shows_what_the_store_holds() {
     assert!(row.contains("Read catalog/fetch.py"), "{out}");
 }
 
+/// A store the operator can read and not write — a checkout on a read-only
+/// mount, or one whose files they made read-only — is listed as it is.
+#[cfg(unix)]
+#[test]
+fn the_session_list_reads_a_store_that_cannot_be_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_the_fixture_recorded();
+    let dir = repo.path().join(".niobe");
+    let store = dir.join("sessions.db");
+    let set = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("the mode can be set");
+    };
+    set(&store, 0o444);
+    set(&dir, 0o555);
+    // Where permissions bind nobody, as for root, there is nothing to prove.
+    let binds = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&store)
+        .is_err();
+
+    let output = niobe(repo.path(), &["sessions"]);
+    set(&dir, 0o755);
+    set(&store, 0o644);
+    if !binds {
+        return;
+    }
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("Read catalog/fetch.py"),
+        "{}",
+        stdout(&output)
+    );
+}
+
 #[test]
 fn the_session_list_is_the_same_from_a_subdirectory_of_the_repository() {
     let repo = repo_with_the_fixture_recorded();

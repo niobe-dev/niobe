@@ -208,6 +208,39 @@ fn a_read_only_store_is_refused_with_an_error_that_says_so() {
     assert!(error.to_string().contains("readonly"), "{error}");
 }
 
+/// Reading needs no write: a store whose file and directory cannot be
+/// written is read as it is, every session and every event of it, though a
+/// store opened to record into refuses it.
+#[cfg(unix)]
+#[test]
+fn a_read_only_store_is_read_as_it_is() {
+    let (_dir, path) = scratch();
+    let session = {
+        let mut recorder = Recorder::new(Store::open(&path).expect("the store opens"));
+        recorder.record(&user("kept")).expect("record");
+        recorder.session().expect("the record opened a session")
+    };
+    let Some(_read_only) = ReadOnly::new(&path) else {
+        return;
+    };
+
+    let store = Store::open_to_read(&path).expect("a read-only store is read");
+    let sessions = store.sessions().expect("the list reads");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].first_prompt.as_deref(), Some("kept"));
+    assert_eq!(store.events(session).expect("the session reads").len(), 1);
+}
+
+#[test]
+fn a_store_opened_to_read_that_can_be_written_is_read_too() {
+    let (_dir, path) = scratch();
+    Recorder::new(Store::open(&path).expect("the store opens"))
+        .record(&user("kept"))
+        .expect("record");
+    let store = Store::open_to_read(&path).expect("the store is read");
+    assert_eq!(store.sessions().expect("the list reads").len(), 1);
+}
+
 /// A row that is not even JSON — a torn write, or a file edited by hand —
 /// fails the load of its own session, and only that: the list still shows
 /// every session, and every other session still loads.

@@ -96,6 +96,19 @@ pub fn open_existing_store(root: &Path) -> Result<Option<Store>, String> {
         .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))
 }
 
+/// Opens the session store of `root` to read it, if one has been created:
+/// one that cannot be written, as on a read-only mount, is read as it is. See
+/// [`Store::open_to_read`].
+pub fn read_existing_store(root: &Path) -> Result<Option<Store>, String> {
+    let path = store_path(root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    Store::open_to_read(&path)
+        .map(Some)
+        .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))
+}
+
 /// Where git keeps the state of the checkout whose `.git` is `dot_git`: that
 /// directory itself in an ordinary clone, and the directory its `gitdir:` line
 /// names where `.git` is a file instead — which is what a linked worktree
