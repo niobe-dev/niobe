@@ -129,6 +129,39 @@ const MENU_GAP: usize = 2;
 
 /// Draws one frame.
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    draw_frame(frame, app);
+    strip_direction_marks(frame.buffer_mut());
+}
+
+/// The characters that reorder the text around them rather than show
+/// anything: the embeddings and overrides U+202A–U+202E, the isolates
+/// U+2066–U+2069 and the marks U+200E and U+200F.
+fn is_direction_mark(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+}
+
+/// Takes every direction mark out of what was drawn.
+///
+/// ratatui drops control characters as it lays text out but keeps a
+/// zero-width character with the cell before it, so a right-to-left override
+/// in a title, a repository's name or anything a backend said reaches the
+/// terminal and reverses what is drawn after it. Done once over the finished
+/// frame rather than at every place text is drawn, so that no place can be
+/// missed.
+fn strip_direction_marks(buffer: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buffer.content {
+        if cell.symbol().chars().any(is_direction_mark) {
+            let kept: String = cell
+                .symbol()
+                .chars()
+                .filter(|c| !is_direction_mark(*c))
+                .collect();
+            cell.set_symbol(if kept.is_empty() { " " } else { &kept });
+        }
+    }
+}
+
+fn draw_frame(frame: &mut Frame, app: &mut App) {
     let theme = *app.theme();
     let area = frame.area();
 
