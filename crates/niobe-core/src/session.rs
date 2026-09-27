@@ -172,10 +172,12 @@ impl Totals {
         self.cache_write_1h = self.cache_write_1h.saturating_add(usage.cache_write_1h);
         self.reasoning = self.reasoning.saturating_add(usage.reasoning);
         self.records += 1;
-        self.tokens_by_model
-            .entry(usage.model.clone())
-            .and_modify(|spent| *spent = spent.saturating_add(usage.tokens()))
-            .or_insert_with(|| usage.tokens());
+        if let Some(spent) = self.tokens_by_model.get_mut(&usage.model) {
+            *spent = spent.saturating_add(usage.tokens());
+        } else {
+            self.tokens_by_model
+                .insert(usage.model.clone(), usage.tokens());
+        }
 
         // A settlement is read before its own cost is taken, so that a record
         // both settling the model and carrying tokens of its own — which the
@@ -189,10 +191,11 @@ impl Totals {
         match cost {
             Some(cost) => {
                 self.reported_cost_usd += cost;
-                *self
-                    .reported_cost_by_model
-                    .entry(usage.model.clone())
-                    .or_default() += cost;
+                if let Some(c) = self.reported_cost_by_model.get_mut(&usage.model) {
+                    *c += cost;
+                } else {
+                    self.reported_cost_by_model.insert(usage.model.clone(), cost);
+                }
             }
             None => self.owe(usage),
         }
@@ -201,10 +204,13 @@ impl Totals {
     /// Records tokens that no reported cost covers.
     fn owe(&mut self, usage: &Usage) {
         self.records_unsettled += 1;
-        self.unsettled
-            .entry(usage.model.clone())
-            .or_insert_with(|| Owed::new(&usage.model))
-            .push(usage);
+        if let Some(owed) = self.unsettled.get_mut(&usage.model) {
+            owed.push(usage);
+        } else {
+            let mut owed = Owed::new(&usage.model);
+            owed.push(usage);
+            self.unsettled.insert(usage.model.clone(), owed);
+        }
     }
 
     /// Forgets what `model` was owed for, because a cost has now covered it.
@@ -601,12 +607,20 @@ impl SessionState {
             } => {
                 self.tools.finished += 1;
                 self.tools.output_bytes = self.tools.output_bytes.saturating_add(*bytes);
-                *self.tools.by_name.entry(name.clone()).or_default() += 1;
+                if let Some(count) = self.tools.by_name.get_mut(name) {
+                    *count += 1;
+                } else {
+                    self.tools.by_name.insert(name.clone(), 1);
+                }
                 match outcome {
                     ToolOutcome::Ok => {}
                     ToolOutcome::Failed => {
                         self.tools.failed += 1;
-                        *self.tools.failed_by_name.entry(name.clone()).or_default() += 1;
+                        if let Some(count) = self.tools.failed_by_name.get_mut(name) {
+                            *count += 1;
+                        } else {
+                            self.tools.failed_by_name.insert(name.clone(), 1);
+                        }
                     }
                     ToolOutcome::Denied => self.tools.denied += 1,
                 }

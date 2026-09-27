@@ -152,6 +152,7 @@ fn the_recorded_session_replays_inside_the_budget() {
     );
 }
 
+
 #[test]
 fn every_event_in_the_logs_round_trips_through_its_wire_form() {
     for (name, log) in [("claude-session", SESSION), ("producer-gaps", GAPS)] {
