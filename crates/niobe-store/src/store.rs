@@ -294,13 +294,21 @@ impl Store {
     }
 
     /// Every session in the store, newest first.
+    ///
+    /// A row that is not JSON is passed over when looking for the first
+    /// prompt, because `json_extract` fails the whole statement on one: a torn
+    /// row in one session would otherwise hide every session from the list.
+    /// The `CASE` is what guarantees `json_extract` never sees it; SQLite may
+    /// evaluate the terms of an `AND` in either order.
     pub fn sessions(&self) -> Result<Vec<SessionSummary>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.started_at, COUNT(e.seq), MAX(e.at),
                     (SELECT json_extract(f.event, '$.text')
                        FROM events f
                       WHERE f.session_id = s.id
-                        AND json_extract(f.event, '$.type') = 'user_message'
+                        AND CASE WHEN json_valid(f.event)
+                                 THEN json_extract(f.event, '$.type') = 'user_message'
+                            END
                       ORDER BY f.seq
                       LIMIT 1)
                FROM sessions s
@@ -377,6 +385,53 @@ mod tests {
     fn wall_clock_millis_round_trip() {
         let at = UNIX_EPOCH + Duration::from_millis(1_789_000_000_123);
         assert_eq!(from_unix_millis(unix_millis(at)), at);
+    }
+
+    /// A full disk fails the append with an error rather than dropping the
+    /// event, and once there is room again the next event is numbered after
+    /// the last one kept, so the session has no hole where the disk was full.
+    /// `max_page_count` stands in for the disk: it is SQLite's own way to make
+    /// a write report `SQLITE_FULL`.
+    #[test]
+    fn a_full_disk_fails_the_append_and_the_session_goes_on_without_a_gap() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let store = Store::open(&dir.path().join("sessions.db")).expect("a store opens");
+        let session = store.create_session().expect("a session is created");
+        let text = |i: usize| Event::UserMessage {
+            text: format!("{i} {}", "x".repeat(2_000)),
+        };
+        store.append(session, &text(0)).expect("append");
+
+        let pages: i64 = store
+            .conn
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .expect("the page count reads");
+        store
+            .conn
+            .pragma_update(None, "max_page_count", pages)
+            .expect("the page limit is set");
+        let error = (1..100)
+            .find_map(|i| store.append(session, &text(i)).err())
+            .expect("the capped file fills up");
+        assert!(
+            matches!(&error, StoreError::Sqlite(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)),
+            "{error}"
+        );
+
+        store
+            .conn
+            .pragma_update(None, "max_page_count", 1_000_000)
+            .expect("the page limit is lifted");
+        let kept = store.events(session).expect("the session loads");
+        let next = store.append(session, &text(999)).expect("append");
+        assert_eq!(next, kept.len() as u64 + 1);
+        let seqs: Vec<u64> = store
+            .events(session)
+            .expect("the session loads")
+            .iter()
+            .map(|stored| stored.seq)
+            .collect();
+        assert_eq!(seqs, (1..=next).collect::<Vec<_>>());
     }
 
     #[test]

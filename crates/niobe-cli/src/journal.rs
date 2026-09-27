@@ -200,6 +200,51 @@ mod tests {
         );
     }
 
+    /// A store that cannot be written is reported on every event, so the shell
+    /// says so each time rather than going quiet after the first, and the
+    /// journal opens it once it can be written again.
+    #[test]
+    fn a_read_only_store_is_reported_and_recording_starts_once_it_can_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().to_path_buf();
+        drop(repo::open_or_create_store(&root).expect("the store is created"));
+        let path = repo::store_path(&root);
+        let mode = |p: &std::path::Path, m| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m))
+                .expect("the mode can be set");
+        };
+        mode(&path, 0o444);
+        mode(path.parent().expect("the store has a directory"), 0o555);
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            // Permissions do not bind this user, as for root.
+            mode(path.parent().expect("the store has a directory"), 0o755);
+            return;
+        }
+
+        let mut journal = StoreJournal::Pending(root.clone());
+        let event = Event::UserMessage {
+            text: "hello".to_owned(),
+        };
+        for _ in 0..2 {
+            let error = journal
+                .append(&event)
+                .expect_err("a read-only store keeps nothing");
+            assert!(error.to_string().contains("readonly"), "{error}");
+        }
+        assert_eq!(journal.session(), None);
+
+        mode(path.parent().expect("the store has a directory"), 0o755);
+        mode(&path, 0o644);
+        journal.append(&event).expect("a writable store keeps it");
+        let session = journal.session().expect("a session was opened");
+        let store = repo::open_existing_store(&root)
+            .expect("the store opens")
+            .expect("the store exists");
+        assert_eq!(store.events(session).expect("load").len(), 1);
+    }
+
     #[test]
     fn a_resumed_journal_appends_after_what_was_there() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
