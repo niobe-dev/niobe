@@ -55,8 +55,18 @@ struct Machine<'a> {
     wait: &'a mut Wait,
     clock: &'a crate::clock::Clock,
     /// Hands the terminal back, stops the process, and takes the terminal
-    /// again once the process is continued.
-    suspend: &'a mut dyn FnMut() -> io::Result<()>,
+    /// again once the process is continued; or, for a stop the process could
+    /// not catch, takes the terminal again as it finds it.
+    suspend: &'a mut dyn FnMut(Hold) -> io::Result<()>,
+}
+
+/// What the loop asks of the terminal around a stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// Hand it back, stop, and take it again when continued.
+    Suspend,
+    /// Take it again after a stop nothing caught.
+    Reassert,
 }
 
 /// Everything the loop hands what the operator does to, and takes what
@@ -136,10 +146,15 @@ pub fn run(
     // What the session started — the CLI and the `!` commands, each in a
     // process group of its own — is not stopped with it: a turn goes on while
     // the operator is at their shell, and is on screen when they come back.
-    let mut suspend = || -> io::Result<()> {
-        guard.suspend()?;
-        stop_until_continued()?;
-        guard.resume()
+    let mut suspend = |hold: Hold| -> io::Result<()> {
+        match hold {
+            Hold::Suspend => {
+                guard.suspend()?;
+                stop_until_continued()?;
+                guard.resume()
+            }
+            Hold::Reassert => guard.reassert(),
+        }
     };
 
     let ended = event_loop(
@@ -280,14 +295,21 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // Both are read, so that a Ctrl+Z and a SIGTSTP arriving in one tick
         // are one stop rather than a second waiting for the continue.
         let suspend = app.take_suspend() | machine.shutdown.take_suspend();
-        if suspend && !app.should_quit() {
-            (machine.suspend)()?;
+        let suspended = suspend && !app.should_quit();
+        if suspended {
+            (machine.suspend)(Hold::Suspend)?;
         }
         // After a stop the screen holds whatever was drawn on it meanwhile, and
         // a draw sends only what changed since the last frame. A resize to the
         // same size clears the screen and forgets that frame, without asking
         // the terminal where its cursor is the way `Terminal::clear` does.
         if machine.shutdown.take_continued() && !app.should_quit() {
+            // A continue that did not follow a stop of the shell's own was
+            // one nothing caught, and the terminal is as the operator's shell
+            // left it.
+            if !suspended {
+                (machine.suspend)(Hold::Reassert)?;
+            }
             let area = terminal.size()?;
             terminal.resize(area.into())?;
         }

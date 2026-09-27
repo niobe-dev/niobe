@@ -436,6 +436,33 @@ impl<W: Write> TerminalGuard<W> {
         self.ask_keyboard(self.keyboard)
     }
 
+    /// Takes the terminal again after a stop the process could not catch.
+    ///
+    /// A SIGSTOP stops the process with the terminal as it held it, and the
+    /// operator's shell may have taken it back meanwhile and left it cooked.
+    /// crossterm believes raw mode is still on and would do nothing when asked
+    /// for it, so it is let go and taken again, which reads the terminal's
+    /// modes as they are now. The screen, the mouse and pastes are asked for
+    /// again, which changes nothing where they are already on; the enhanced
+    /// keys are let go before they are asked for, because a terminal keeps
+    /// them as a stack and a second push would outlive the quit's one pop.
+    /// Does nothing to a terminal handed back or suspended.
+    pub fn reassert(&mut self) -> io::Result<()> {
+        if self.restored || self.suspended {
+            return Ok(());
+        }
+        if self.raw_mode {
+            disable_raw_mode()?;
+            enable_raw_mode()?;
+            TERMINAL_ENTERED.store(true, Ordering::SeqCst);
+        }
+        enter_screen(&mut self.out)?;
+        if self.keyboard == Asked::Enhancement {
+            self.out.write_all(KEYBOARD_OFF)?;
+        }
+        self.ask_keyboard(self.keyboard)
+    }
+
     /// Writes what takes the terminal out of the drawing mode, once, however
     /// many of the ways out reach it.
     fn hand_back(&mut self) -> io::Result<()> {

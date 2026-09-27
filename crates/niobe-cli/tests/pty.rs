@@ -1827,6 +1827,64 @@ fn a_stop_hands_the_terminal_back_and_a_continue_takes_it_again(
     assert_eq!(after.matches(KEYBOARD_OFF).count(), 1, "{after:?}");
 }
 
+/// A SIGSTOP cannot be caught: the shell stops holding the terminal as it
+/// had it, and the operator's shell may take it back and leave it cooked, as
+/// bash does. Continued, the shell takes the terminal again whatever it
+/// finds — raw mode, the screen, the keys — and draws the whole frame; a quit
+/// afterwards still hands it back once.
+#[test]
+fn a_sigstop_nothing_could_catch_is_followed_by_taking_the_terminal_again() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+    assert!(
+        !cooked(&slave),
+        "the shell never put the terminal in raw mode"
+    );
+
+    signal(&shell, Signal::STOP);
+    stopped(&shell);
+    let mut modes = rustix::termios::tcgetattr(&slave).expect("the pty's modes can be read");
+    modes.local_modes |= rustix::termios::LocalModes::ICANON
+        | rustix::termios::LocalModes::ECHO
+        | rustix::termios::LocalModes::ISIG;
+    rustix::termios::tcsetattr(&slave, rustix::termios::OptionalActions::Now, &modes)
+        .expect("the pty's modes can be set");
+    assert!(cooked(&slave), "the test could not cook the terminal");
+
+    let continued = terminal.mark();
+    signal(&shell, Signal::CONT);
+    terminal.shows_since(continued, ENTER_ALTERNATE_SCREEN);
+    terminal.shows_since(continued, KEYBOARD_ON);
+    terminal.shows_since(continued, OPENING_FRAME);
+    assert!(
+        !cooked(&slave),
+        "the shell was continued without taking raw mode back"
+    );
+
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert!(
+        status.success(),
+        "a quit after the continue ended with {status}"
+    );
+    let after = &drawn[continued..];
+    assert_eq!(
+        after.matches(LEAVE_ALTERNATE_SCREEN).count(),
+        1,
+        "the quit did not leave the screen exactly once: {after:?}"
+    );
+    assert_eq!(after.matches(RESTORED).count(), 1, "{after:?}");
+    assert!(
+        after.rfind(KEYBOARD_OFF) > after.rfind(KEYBOARD_ON),
+        "the keys were left enhanced: {after:?}"
+    );
+}
+
 #[test]
 fn a_sigtstp_hands_the_terminal_back_and_a_sigcont_takes_it_again() {
     a_stop_hands_the_terminal_back_and_a_continue_takes_it_again("a SIGTSTP", |_, shell| {
