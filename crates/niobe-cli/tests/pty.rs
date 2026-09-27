@@ -292,11 +292,10 @@ impl Terminal {
             drop(drawn);
             std::thread::sleep(Duration::from_millis(5));
         }
-        let drawn = self.drawn.lock().expect("the reader thread did not panic");
-        panic!(
-            "the shell never drew {wanted:?}; after the mark it drew: {:?}",
-            &drawn[from..]
-        );
+        // Copied out before panicking: a panic with the lock held poisons it,
+        // and the reader's panic on that would bury this message in the log.
+        let after = self.drawn.lock().expect("the reader thread did not panic")[from..].to_owned();
+        panic!("the shell never drew {wanted:?}; after the mark it drew: {after:?}");
     }
 
     /// Everything the shell has written so far, once the reader has taken all
