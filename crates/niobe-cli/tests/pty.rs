@@ -1412,6 +1412,73 @@ fn quits_without_waiting_on_what_the_cli_started(path: &str, end: impl FnOnce(&T
     );
 }
 
+/// A `claude` that starts something of its own on its standard output, as
+/// [`LEAVES_SOMETHING_RUNNING_CLAUDE`] does, answers one turn and then falls
+/// over, saying why on standard error, while what it started still holds the
+/// pipes the session reads it from.
+const DIES_WITH_SOMETHING_RUNNING_CLAUDE: &str = "#!/bin/sh\n\
+    echo $$ > claude.pid\n\
+    sleep 77103 &\n\
+    echo $! > started.pid\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"replied-before-falling-over\"}]}}'\n\
+    echo 'fell-over-mid-session' >&2\n\
+    exit 1\n";
+
+/// A CLI that dies mid-session is reported as ended, in its own words and
+/// after the reply it wrote first, even though something it started still
+/// holds its standard output open — and that something is ended with it.
+#[test]
+fn a_cli_that_dies_while_something_it_started_holds_its_output_is_reported_ended() {
+    let repo = repo();
+    let home = stand_in(repo.path(), DIES_WITH_SOMETHING_RUNNING_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"say something\r");
+    terminal.shows("replied-before-falling-over");
+    let replied = Instant::now();
+    terminal.shows("fell-over-mid-session");
+    let took = replied.elapsed();
+    let pid = |file: &str| {
+        let written = std::fs::read_to_string(repo.path().join(file))
+            .expect("the stand-in wrote down its processes before it answered");
+        let raw: i32 = written.trim().parse().expect("a pid is a number");
+        Pid::from_raw(raw).expect("a pid is positive")
+    };
+    let (cli, started) = (pid("claude.pid"), pid("started.pid"));
+    let left = || {
+        rustix::process::test_kill_process(started).is_ok()
+            || rustix::process::test_kill_process_group(cli).is_ok()
+    };
+    let deadline = Instant::now() + DEADLINE;
+    while left() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let still_running = left();
+
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(
+        took < DEADLINE,
+        "the end was drawn {took:?} after the reply, over the {DEADLINE:?} it has"
+    );
+    assert!(
+        !still_running,
+        "what the CLI started was still running after its end was reported"
+    );
+    let reply = drawn.find("replied-before-falling-over");
+    let end = drawn.find("fell-over-mid-session");
+    assert!(reply < end, "the end was drawn before the reply: {drawn}");
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back(&drawn, "a quit after the CLI fell over");
+}
+
 #[test]
 fn a_quit_does_not_wait_on_what_the_cli_started_and_takes_it_along() {
     quits_without_waiting_on_what_the_cli_started("a clean quit", |terminal, _| {

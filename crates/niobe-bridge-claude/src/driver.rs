@@ -268,6 +268,8 @@ impl std::error::Error for SpawnError {
 /// Dropping it closes the session: standard input is closed so the CLI can
 /// write its own transcript out, the process is killed if it has not left
 /// by then, and then so is everything it started that has not left either.
+/// A CLI that leaves on its own has what it started ended as it is found
+/// gone, since that would otherwise hold its output open and its end unsaid.
 #[derive(Debug)]
 pub struct Session {
     child: Child,
@@ -290,6 +292,11 @@ pub struct Session {
     /// reported until one or the other — the process gone, or [`GOODBYE`]
     /// passed with it still there — and never by waiting on it.
     output_closed: Option<Instant>,
+    /// When the CLI was first found to have left while its standard output
+    /// was still open, which is what something it started that holds the
+    /// pipe keeps it: EOF does not come while that runs, so the end is not
+    /// waited for there.
+    exited: Option<Instant>,
 }
 
 impl Session {
@@ -395,6 +402,7 @@ impl Session {
             control_requests: 0,
             reported: false,
             output_closed: None,
+            exited: None,
         };
         // A CLI that cannot be written to has already left, and the next
         // drain reports that in the CLI's own words; failing the spawn here
@@ -555,12 +563,23 @@ impl Session {
     /// whose subprocess has gone reports that once, with whatever the CLI
     /// wrote to standard error, and then nothing. One whose subprocess closed
     /// its standard output and stayed is stopped, and reported as a failure.
+    /// One whose subprocess left while something it started holds its
+    /// standard output open has that ended, and is reported like any other.
     pub fn drain(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         loop {
             match self.events.try_recv() {
+                // Only a pipe held by something that left the CLI's group
+                // can still deliver a line after the end was reported, and
+                // it is not the CLI's.
+                Ok(_) if self.reported => {}
                 Ok(event) => events.push(event),
-                Err(TryRecvError::Empty) => return events,
+                Err(TryRecvError::Empty) => {
+                    if let Some(ended) = self.left_holding_output() {
+                        events.push(ended);
+                    }
+                    return events;
+                }
                 Err(TryRecvError::Disconnected) => {
                     if let Some(ended) = self.ended() {
                         events.push(ended);
@@ -632,6 +651,41 @@ impl Session {
                 fatal: true,
             }),
         }
+    }
+
+    /// The end of a CLI that has left while its standard output is still
+    /// open, or nothing while it is still running or its end may still come
+    /// the ordinary way.
+    ///
+    /// Something the CLI started — a command a tool call left in the
+    /// background, an MCP server — holds its pipes, and they do not close
+    /// while that runs. It is asked to end, which closes them, and the end is
+    /// then reported as any other once what was in the pipe has been read.
+    /// Only what left the CLI's group can hold them past [`GOODBYE`]; the end
+    /// is reported then without waiting on it, since everything the CLI wrote
+    /// before it left has been read by that time.
+    fn left_holding_output(&mut self) -> Option<Event> {
+        if self.reported {
+            return None;
+        }
+        let exited = match self.exited {
+            Some(exited) => exited,
+            None => {
+                if !matches!(self.child.try_wait(), Ok(Some(_))) {
+                    return None;
+                }
+                ask_group_to_end(self.child.id());
+                *self.exited.insert(Instant::now())
+            }
+        };
+        if exited.elapsed() >= LEFTOVERS {
+            kill_group(self.child.id());
+        }
+        if exited.elapsed() < GOODBYE {
+            return None;
+        }
+        self.output_closed.get_or_insert(exited);
+        self.ended()
     }
 
     /// The tool calls the CLI was still waiting on an answer about, which are
@@ -926,19 +980,16 @@ impl Drop for Session {
 /// signalled is still the CLI's, or is gone and the signal finds nothing.
 #[cfg(unix)]
 fn end_group(leader: u32) {
-    use rustix::process::{Pid, Signal};
-
-    let Some(group) = i32::try_from(leader).ok().and_then(Pid::from_raw) else {
-        return;
-    };
     // A group with nobody left in it is what was wanted.
-    if rustix::process::kill_process_group(group, Signal::TERM).is_err() {
+    if !ask_group_to_end(leader) {
         return;
     }
     let until = Instant::now() + LEFTOVERS;
-    while rustix::process::test_kill_process_group(group).is_ok() {
+    while group_of(leader)
+        .is_some_and(|group| rustix::process::test_kill_process_group(group).is_ok())
+    {
         if Instant::now() >= until {
-            let _ = rustix::process::kill_process_group(group, Signal::KILL);
+            kill_group(leader);
             return;
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -947,6 +998,42 @@ fn end_group(leader: u32) {
 
 #[cfg(not(unix))]
 fn end_group(_leader: u32) {}
+
+/// Sends SIGTERM to the process group the CLI led, without waiting on it,
+/// and says whether anything was there to take it.
+///
+/// Called only once the CLI has been reaped, for the reason [`end_group`]
+/// gives.
+#[cfg(unix)]
+fn ask_group_to_end(leader: u32) -> bool {
+    group_of(leader).is_some_and(|group| {
+        rustix::process::kill_process_group(group, rustix::process::Signal::TERM).is_ok()
+    })
+}
+
+#[cfg(not(unix))]
+fn ask_group_to_end(_leader: u32) -> bool {
+    false
+}
+
+/// Kills whatever is left of the process group the CLI led.
+#[cfg(unix)]
+fn kill_group(leader: u32) {
+    if let Some(group) = group_of(leader) {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_leader: u32) {}
+
+/// The process group a CLI with process id `leader` leads.
+#[cfg(unix)]
+fn group_of(leader: u32) -> Option<rustix::process::Pid> {
+    i32::try_from(leader)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1202,6 +1289,44 @@ mod tests {
             said.ends_with("the real reason"),
             "{}",
             &said[said.len().saturating_sub(200)..]
+        );
+    }
+
+    /// Something that left the CLI's group cannot be ended with it, so its
+    /// hold on the CLI's output is not waited out: the end is reported in the
+    /// CLI's words, after what the CLI wrote before it, and nothing else.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_dies_while_something_outside_its_group_holds_its_output_is_reported_ended() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pid = dir.path().join("detached.pid");
+        let reply = r#"{"type":"assistant","message":{"model":"claude-opus-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"replied first"}]}}"#;
+        let started = Instant::now();
+        let (session, events) = stand_in(&format!(
+            "perl -e 'setpgrp(0, 0); open(my $f, \">\", $ARGV[0]); print $f $$; close($f); exec \"sleep\", \"77104\"' '{pid}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nprintf '%s\\n' '{reply}'\necho 'fell over' >&2\nexit 1\n",
+            pid = pid.display()
+        ));
+        let took = started.elapsed();
+        if let Some(detached) = std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|written| written.trim().parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(detached, rustix::process::Signal::KILL);
+        }
+        drop(session);
+
+        assert!(took < Duration::from_secs(10), "the end took {took:?}");
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::AssistantMessage { text, .. } if text == "replied first")
+            ),
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session ended with exit status: 1: fell over"),
+            "{events:#?}"
         );
     }
 

@@ -116,7 +116,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   session starts with are listed, `commands_changed` only reports a change to them — keeps its
   standard input open for the life of the session, answers the permission prompts the CLI
   stops turns on, and starts it as the leader of a process group of its own, which a closing
-  session ends whole, so nothing the CLI started outlives it or holds the quit up on its pipes; `spilled.rs` reads the file the CLI saves a shell output
+  session ends whole, and so does a CLI that leaves mid-session, so nothing the CLI started
+  outlives it or holds the quit, or the report of its end, up on its pipes; `spilled.rs` reads the file the CLI saves a shell output
   too large to hand over to, so a whole test run is counted from it rather than from the
   preview, and both the driver and the transcript reader hand it to the translator;
   `transcript.rs` reads the session files the CLI keeps for
