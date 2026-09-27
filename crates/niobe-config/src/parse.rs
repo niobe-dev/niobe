@@ -44,36 +44,12 @@ impl File<'_> {
             let at = Key::root(key.get_ref());
             match key.get_ref().as_ref() {
                 "default_profile" => {
-                    let name = self.non_empty_string(value, &at)?;
-                    config.default_profile = Some(DefaultProfile {
-                        name: name.to_owned(),
-                        path: self.path.to_path_buf(),
-                        line: self.line(&value.span()),
-                    });
+                    config.default_profile = Some(self.default_profile(value, &at)?)
                 }
-                "theme" => {
-                    config.theme = Some(ThemeName {
-                        name: self.non_empty_string(value, &at)?.to_owned(),
-                        path: self.path.to_path_buf(),
-                        line: self.line(&value.span()),
-                    });
-                }
+                "theme" => config.theme = Some(self.theme(value, &at)?),
                 "effects" => config.effects = Some(self.boolean(value, &at)?),
                 "permissions" => config.allowed = self.permissions(value, &at)?,
-                "profiles" => {
-                    for (name, profile) in in_file_order(self.table(value, &at)?) {
-                        let at = at.child(name.get_ref());
-                        if name.get_ref().is_empty() {
-                            return Err(self.invalid(
-                                &name.span(),
-                                &at,
-                                "a profile name cannot be empty",
-                            ));
-                        }
-                        let profile = self.profile(name, profile, &at)?;
-                        config.profiles.insert(name.get_ref().to_string(), profile);
-                    }
-                }
+                "profiles" => config.profiles.extend(self.profiles(value, &at)?),
                 _ => {
                     return Err(self.invalid(
                         &key.span(),
@@ -93,6 +69,44 @@ impl File<'_> {
     /// A rule that is not one is reported at its line: a config that silently
     /// dropped one would leave the operator expecting a prompt not to come
     /// back when it will.
+    fn default_profile(
+        &self,
+        value: &Spanned<DeValue<'_>>,
+        at: &Key,
+    ) -> Result<DefaultProfile, ConfigError> {
+        let name = self.non_empty_string(value, at)?;
+        Ok(DefaultProfile {
+            name: name.to_owned(),
+            path: self.path.to_path_buf(),
+            line: self.line(&value.span()),
+        })
+    }
+
+    fn theme(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<ThemeName, ConfigError> {
+        Ok(ThemeName {
+            name: self.non_empty_string(value, at)?.to_owned(),
+            path: self.path.to_path_buf(),
+            line: self.line(&value.span()),
+        })
+    }
+
+    fn profiles(
+        &self,
+        value: &Spanned<DeValue<'_>>,
+        at: &Key,
+    ) -> Result<Vec<(String, Profile)>, ConfigError> {
+        let mut profiles = Vec::new();
+        for (name, profile) in in_file_order(self.table(value, at)?) {
+            let at = at.child(name.get_ref());
+            if name.get_ref().is_empty() {
+                return Err(self.invalid(&name.span(), &at, "a profile name cannot be empty"));
+            }
+            let profile = self.profile(name, profile, &at)?;
+            profiles.push((name.get_ref().to_string(), profile));
+        }
+        Ok(profiles)
+    }
+
     fn permissions(
         &self,
         value: &Spanned<DeValue<'_>>,
