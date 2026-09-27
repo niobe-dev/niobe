@@ -3828,11 +3828,29 @@ fn model_cost(totals: &Totals, model: &str, prices: Option<&dyn Prices>) -> Stri
     if reported.is_none() && owed.is_none() {
         return "—".to_owned();
     }
+    if owed.is_none() && reported == Some(0.0) && billed_under_its_window(totals, model) {
+        return BILLED_UNDER_THE_WINDOW.to_owned();
+    }
     let valued = match owed.and_then(|owed| prices?.estimate_owed(owed)) {
         Some(usd) => Valued::All(usd),
         None => Valued::Nothing,
     };
     labelled(reported.unwrap_or_default(), owed.is_none(), valued).unwrap_or_else(|| "—".to_owned())
+}
+
+/// What a model's row says where its tokens were billed under the 1M-window
+/// id beside it, whose row carries the money.
+const BILLED_UNDER_THE_WINDOW: &str = "in [1m]";
+
+/// Whether `model` has a 1M-window sibling, `<model>[1m]`, that was reported a
+/// cost: the CLI bills a family's tokens there when a sub-agent's messages
+/// name the family and the session runs on the window, and settles the
+/// family at nothing. `$0.00` beside those tokens would read as free.
+fn billed_under_its_window(totals: &Totals, model: &str) -> bool {
+    totals
+        .reported_cost_by_model
+        .get(&format!("{model}[1m]"))
+        .is_some_and(|usd| *usd > 0.0)
 }
 
 /// A cost, labelled for how much of it is known: `$` where a reported cost
@@ -4666,6 +4684,40 @@ mod tests {
                 + std::time::Duration::from_secs(A_FRIDAY + 13 * 3_600 + 41 * 60))),
         );
         app
+    }
+
+    /// A sub-agent's messages can name the family while the CLI bills them
+    /// under the 1M-window id beside it, which settles the family's row at
+    /// no cost of its own. Its money is in the `[1m]` row, and the row says
+    /// so rather than drawing `$0.00` beside tokens that were spent.
+    #[test]
+    fn a_family_row_billed_under_its_1m_window_says_where_its_money_is() {
+        let usage = |model: &str, input: u64, cost: Option<f64>, settles: bool| {
+            niobe_core::event::Event::Usage(Usage {
+                input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: model.to_owned(),
+                cost_usd: cost,
+                cost_basis: None,
+                settles_model: settles,
+            })
+        };
+        let session = SessionState::replay(&[
+            usage("opus-5[1m]", 100, None, false),
+            usage("opus-5", 50, None, false),
+            usage("opus-5[1m]", 0, Some(0.9), true),
+            usage("opus-5", 0, Some(0.0), true),
+        ]);
+
+        assert_eq!(model_cost(session.totals(), "opus-5", None), "in [1m]");
+        assert_eq!(model_cost(session.totals(), "opus-5[1m]", None), "$0.90");
+
+        let free = SessionState::replay(&[usage("opus-5", 50, Some(0.0), true)]);
+        assert_eq!(model_cost(free.totals(), "opus-5", None), "$0.00");
     }
 
     /// A model's cost carries the same labels the session's does, with an em
