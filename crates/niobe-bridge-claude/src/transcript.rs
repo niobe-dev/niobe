@@ -418,13 +418,19 @@ struct Record<'a> {
 }
 
 /// Every record of the transcript `text`, in the order it holds them.
+///
+/// The CLI writes a record as a line and its line break, so a transcript
+/// whose CLI is still running can end part-way through the next one. A last
+/// line with no break after it that does not read is that record on its way
+/// and is left out; one that reads is whole, and is kept.
 fn records(text: &str) -> Vec<Record<'_>> {
     #[derive(Deserialize)]
     struct Stamp {
         timestamp: Option<String>,
     }
 
-    text.lines()
+    let mut records: Vec<Record<'_>> = text
+        .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| Record {
             line,
@@ -433,7 +439,11 @@ fn records(text: &str) -> Vec<Record<'_>> {
                 .and_then(|stamp| stamp.timestamp),
             record: serde_json::from_str::<Line>(line),
         })
-        .collect()
+        .collect();
+    if !text.ends_with('\n') && records.last().is_some_and(|last| last.record.is_err()) {
+        records.pop();
+    }
+    records
 }
 
 /// The usage of the last record the CLI wrote of each API response, by its
@@ -1652,6 +1662,53 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let path = transcript(dir.path(), "s-1", Duration::ZERO, &lines.join("\n"));
         events(&path, "max", Path::new("/repo")).expect("the transcript reads")
+    }
+
+    /// A session opened while its CLI is still writing it ends in the part of
+    /// a line the CLI has not finished: that is a record on its way, not one
+    /// that could not be read.
+    #[test]
+    fn a_last_line_the_cli_is_still_writing_is_left_for_later_quietly() {
+        let events = imported(&[
+            &prompt("folded"),
+            r#"{"type":"assistant","message":{"id":"m"#,
+        ]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. } | Event::Notice { .. })),
+            "{events:?}"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&Event::UserMessage {
+                text: "folded".to_owned()
+            }),
+        );
+    }
+
+    /// A line the CLI finished, with its line break after it, is a record,
+    /// wherever it is: one that cannot be read says so, last or not.
+    #[test]
+    fn a_finished_line_that_cannot_be_read_says_so_wherever_it_is() {
+        for lines in [
+            vec![
+                prompt("folded"),
+                "{\"type\":\"assi".to_owned(),
+                prompt("after"),
+            ],
+            vec![prompt("folded"), "{\"type\":\"assi\n".to_owned()],
+        ] {
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let events = imported(&lines);
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Event::Error { message, fatal: false } if message.contains("could not read")
+                )),
+                "{events:?}"
+            );
+        }
     }
 
     #[test]
