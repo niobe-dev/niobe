@@ -279,6 +279,12 @@ pub struct Translator {
     turn: Counts,
     /// Per model, everything reported for it so far this session.
     reported: BTreeMap<String, Reported>,
+    /// Messages whose usage arrived before anything named their model — a
+    /// `message_delta` with no `message_start` ahead of it, before `init` —
+    /// held until the turn's `result` says which id billed them. Filed under
+    /// no model, they would be priced as unknown and then counted again when
+    /// the bill named the id they were spent on.
+    unattributed: Vec<Usage>,
     /// The context window the CLI last reported for each model id, from the
     /// `modelUsage` of its `result`s.
     windows: BTreeMap<String, u64>,
@@ -342,6 +348,7 @@ impl Translator {
             denied: BTreeMap::new(),
             turn: Counts::default(),
             reported: BTreeMap::new(),
+            unattributed: Vec::new(),
             windows: BTreeMap::new(),
             context: None,
             checked_release: false,
@@ -832,6 +839,7 @@ impl Translator {
     /// before.
     fn reset(&mut self, out: &mut Vec<Event>) {
         self.reported.clear();
+        self.unattributed.clear();
         self.turn = Counts::default();
         self.context = None;
         out.push(Event::Cleared);
@@ -1207,16 +1215,10 @@ impl Translator {
                 let model = self
                     .in_flight
                     .remove(&stream)
-                    .or_else(|| self.model.clone())
-                    .unwrap_or_default();
+                    .or_else(|| self.model.clone());
                 let counts = Counts::from(&usage);
                 self.turn.add(counts);
-                self.reported
-                    .entry(model.clone())
-                    .or_default()
-                    .tokens
-                    .add(counts);
-                out.push(Event::Usage(Usage {
+                let record = Usage {
                     input: counts.input,
                     output: counts.output,
                     cache_read: counts.cache_read,
@@ -1227,14 +1229,18 @@ impl Translator {
                     // reasoning tokens would count those tokens twice, in the
                     // total and again in the bill.
                     reasoning: 0,
-                    model,
+                    model: model.clone().unwrap_or_default(),
                     // The CLI reports no money per message; the turn's
                     // `result` does, for the session so far, and settles this
                     // record along with it.
                     cost_usd: None,
                     cost_basis: None,
                     settles_model: false,
-                }));
+                };
+                match model {
+                    Some(model) => self.file(model, record, out),
+                    None => self.unattributed.push(record),
+                }
                 if stream.is_none() {
                     self.report_context(usage.last_prompt(), out);
                 }
@@ -1293,6 +1299,7 @@ impl Translator {
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         self.reconcile_turn(outcome.usage.as_ref(), out);
         self.report_billing(Some(&outcome.model_usage), out);
+        self.attribute_held(&outcome.model_usage, out);
         self.report_cost(&outcome, out);
         self.learn_windows(&outcome.model_usage, out);
 
@@ -1509,6 +1516,72 @@ impl Translator {
                 "the CLI's per-model costs add up to ${costs:.6}, and it reported \
                  ${total:.6} for the session. The per-model figures are what was counted."
             )));
+        }
+    }
+
+    /// Reports a message's usage under `model`, counted as filed there.
+    fn file(&mut self, model: String, mut record: Usage, out: &mut Vec<Event>) {
+        let counts = Counts {
+            input: record.input,
+            output: record.output,
+            cache_read: record.cache_read,
+            cache_write: record.cache_write,
+        };
+        self.reported
+            .entry(model.clone())
+            .or_default()
+            .tokens
+            .add(counts);
+        record.model = model;
+        out.push(Event::Usage(record));
+    }
+
+    /// Files the messages no model was named for under the id the turn's
+    /// bill names, where it names exactly one — or, where the `result`
+    /// carries no per-model bill, under the model the session has since
+    /// been named on. Where neither names one, they stay held: the CLI's
+    /// bill is a running total, so a later one still carries them, and filing
+    /// them before it is reconciled keeps them from being counted twice.
+    ///
+    /// Where the bill names several ids, nothing says which one a message
+    /// was spent on. Its tokens are then counted from the bill alone, which
+    /// reports every token no message was filed for, so they are counted
+    /// once and at the right price; the operator is told why the per-message
+    /// records do not carry them.
+    fn attribute_held(
+        &mut self,
+        model_usage: &BTreeMap<String, wire::ModelUsage>,
+        out: &mut Vec<Event>,
+    ) {
+        if self.unattributed.is_empty() {
+            return;
+        }
+        let billed = match model_usage.len() {
+            0 => match self.model.clone() {
+                Some(model) => Some(model),
+                None => return,
+            },
+            1 => model_usage.keys().next().cloned(),
+            _ => None,
+        };
+        let held = std::mem::take(&mut self.unattributed);
+        let Some(model) = billed else {
+            let tokens = held.iter().fold(0u64, |sum, record| {
+                sum.saturating_add(record.input)
+                    .saturating_add(record.output)
+                    .saturating_add(record.cache_read)
+                    .saturating_add(record.cache_write)
+            });
+            out.push(warn(format!(
+                "{tokens} tokens arrived in messages that named no model, and the turn's \
+                 bill names {} models. They are counted from the bill's per-model totals \
+                 instead of from the messages.",
+                model_usage.len()
+            )));
+            return;
+        };
+        for record in held {
+            self.file(model.clone(), record, out);
         }
     }
 
@@ -2609,6 +2682,80 @@ mod tests {
         ]);
 
         assert_counted_once(&totals, 50, 5);
+    }
+
+    fn billed_models(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some(usage.model.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `message_delta` whose `message_start` never arrived, before anything
+    /// named the session's model, is filed under the one id the turn's bill
+    /// names, rather than under no model and then again under that id.
+    #[test]
+    fn a_message_no_model_was_named_for_is_billed_to_the_one_id_the_result_names() {
+        let lines = [
+            &delta(100, 10) as &str,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":10},"modelUsage":{"claude-opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5}},"total_cost_usd":0.5}"#,
+        ];
+        let totals = folded(&lines);
+        assert_counted_once(&totals, 100, 10);
+        assert!((totals.reported_cost_usd - 0.5).abs() < 1e-9);
+
+        let mut translator = Translator::new("max");
+        let events: Vec<Event> = lines
+            .iter()
+            .flat_map(|line| translator.line(line))
+            .collect();
+        assert!(
+            billed_models(&events).iter().all(|model| !model.is_empty()),
+            "billed to no model: {events:?}"
+        );
+        assert_eq!(warnings(&events), Vec::<String>::new());
+    }
+
+    /// A `result` that names no model holds the message over to the next
+    /// one, whose running total still carries it.
+    #[test]
+    fn a_message_no_model_was_named_for_waits_for_a_bill_that_names_one() {
+        let totals = folded(&[
+            &delta(100, 10),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":10}}"#,
+            &delta(40, 4),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"claude-opus-5":{"inputTokens":140,"outputTokens":14,"costUSD":0.7}},"total_cost_usd":0.7}"#,
+        ]);
+        assert_counted_once(&totals, 140, 14);
+    }
+
+    /// Where the bill names more than one id, nothing says which the message
+    /// was: its tokens are counted from the bill, once, and the operator is
+    /// told why.
+    #[test]
+    fn a_message_no_model_was_named_for_is_counted_from_a_bill_naming_several() {
+        let lines = [
+            &delta(150, 15) as &str,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":150,"output_tokens":15},"modelUsage":{"claude-opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5},"claude-haiku-4-5":{"inputTokens":50,"outputTokens":5,"costUSD":0.01}},"total_cost_usd":0.51}"#,
+        ];
+        let totals = folded(&lines);
+        assert_counted_once(&totals, 150, 15);
+
+        let mut translator = Translator::new("max");
+        let events: Vec<Event> = lines
+            .iter()
+            .flat_map(|line| translator.line(line))
+            .collect();
+        assert!(
+            billed_models(&events).iter().all(|model| !model.is_empty()),
+            "billed to no model: {events:?}"
+        );
+        let said = warnings(&events);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("named no model"), "{said:?}");
     }
 
     fn contexts(events: &[Event]) -> Vec<niobe_core::event::Context> {
