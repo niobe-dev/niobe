@@ -78,7 +78,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
-  enters and restores the terminal, the mouse it takes for the wheel and clicks, the bracketing it
+  enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel and clicks, the bracketing it
   asks pastes to arrive in, and the keyboard
   enhancement it pushes where the terminal says it can tell Shift+Enter from Enter — or the
   modifyOtherKeys it asks for where the terminal answers only its attributes, as tmux does —
@@ -321,7 +321,8 @@ Where tests live:
     of 31 frames so that a frame the scheduler interrupted cannot fail it.
   - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached
     the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM,
-    SIGINT or SIGQUIT and a panic; a unit test cannot, because the panic hook writes to the
+    SIGINT or SIGQUIT and a panic, and around a stop — a SIGTSTP or Ctrl+Z hands the terminal
+    back and a SIGCONT takes it again and redraws; a unit test cannot, because the panic hook writes to the
     process's own standard output and the signal disposition belongs to the process. Watch it
     after touching `terminal.rs` or `run.rs`.
 

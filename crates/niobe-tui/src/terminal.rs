@@ -14,6 +14,13 @@
 //!   process to stop, SIGHUP says the terminal it ran on has gone, and the
 //!   session ended for different reasons.
 //!
+//! A stop is not an exit, but it hands the terminal to whatever stopped the
+//! process, which is usually the operator's own shell: SIGTSTP is caught by
+//! [`Shutdown`] as well, and the event loop hands the terminal back with
+//! [`TerminalGuard::suspend`], stops the process with [`stop_until_continued`]
+//! and takes the terminal again with [`TerminalGuard::resume`] when it is
+//! continued.
+//!
 //! Where the terminal can report keys the legacy encoding cannot tell apart —
 //! Shift+Enter from Enter, above all — the guard asks it to: with the kitty
 //! protocol where the terminal answers its query, and with xterm's
@@ -292,6 +299,9 @@ pub struct TerminalGuard<W: Write> {
     /// What this guard asked the terminal to report keys with, and so owes
     /// taking back.
     keyboard: Asked,
+    /// Whether the terminal is handed back for a stop, and so owes being
+    /// taken again rather than handed back a second time.
+    suspended: bool,
     restored: bool,
 }
 
@@ -311,6 +321,7 @@ impl<W: Write> TerminalGuard<W> {
             out,
             raw_mode: true,
             keyboard: Asked::Nothing,
+            suspended: false,
             restored: false,
         };
         // Set before the screen is entered, not after: it is what
@@ -371,6 +382,7 @@ impl<W: Write> TerminalGuard<W> {
             out,
             raw_mode: false,
             keyboard: Asked::Nothing,
+            suspended: false,
             restored: false,
         })
     }
@@ -381,7 +393,52 @@ impl<W: Write> TerminalGuard<W> {
             return Ok(());
         }
         self.restored = true;
+        // A terminal handed back for a stop that was never taken again is
+        // already the operator's.
+        if self.suspended {
+            return Ok(());
+        }
+        self.hand_back()
+    }
 
+    /// Hands the terminal back for a stop, as [`Self::restore`] would, but
+    /// keeps what was asked of it so that [`Self::resume`] can ask again.
+    /// Does nothing to a terminal already handed back.
+    pub fn suspend(&mut self) -> io::Result<()> {
+        if self.restored || self.suspended {
+            return Ok(());
+        }
+        self.suspended = true;
+        self.hand_back()
+    }
+
+    /// Takes the terminal again after [`Self::suspend`]: raw mode, the
+    /// alternate screen, the mouse, bracketed pastes, and the keys as they
+    /// were first asked for. The terminal is not asked again what it can
+    /// report — it is the same terminal, and waiting on the answer would hold
+    /// the frame up.
+    ///
+    /// What the last frame drew is not assumed to be on the screen any more,
+    /// so the caller owes a whole frame rather than what changed since it.
+    pub fn resume(&mut self) -> io::Result<()> {
+        if self.restored || !self.suspended {
+            return Ok(());
+        }
+        if self.raw_mode {
+            enable_raw_mode()?;
+            TERMINAL_ENTERED.store(true, Ordering::SeqCst);
+        }
+        // Cleared only once raw mode is back: until then, a failure has
+        // nothing to undo, and a restore that followed would write a
+        // hand-back the terminal already had.
+        self.suspended = false;
+        enter_screen(&mut self.out)?;
+        self.ask_keyboard(self.keyboard)
+    }
+
+    /// Writes what takes the terminal out of the drawing mode, once, however
+    /// many of the ways out reach it.
+    fn hand_back(&mut self) -> io::Result<()> {
         if !self.raw_mode {
             return leave(&mut self.out, self.keyboard);
         }
@@ -427,6 +484,25 @@ pub fn install_panic_hook() {
     }));
 }
 
+/// Stops the process as SIGTSTP's default action would, and returns once it
+/// has been continued.
+///
+/// With SIGSTOP rather than by raising SIGTSTP again: the kernel discards a
+/// SIGTSTP whose default action would stop a process in an orphaned process
+/// group, and the process has already handed its terminal back by the time it
+/// gets here, so it would go on drawing on a terminal it no longer holds.
+#[cfg(unix)]
+pub fn stop_until_continued() -> io::Result<()> {
+    signal_hook::low_level::emulate_default_handler(signal_hook::consts::SIGTSTP)
+}
+
+/// Stops the process until it is continued. There is no job control to stop
+/// for off the POSIX side, so this returns at once.
+#[cfg(not(unix))]
+pub fn stop_until_continued() -> io::Result<()> {
+    Ok(())
+}
+
 /// Why a signal is ending the session.
 ///
 /// The two are not the same ending. A process asked to stop ran on a terminal
@@ -451,12 +527,23 @@ pub enum Stop {
 /// task runners of editors send them, and their default disposition kills the
 /// process just as outright. SIGHUP is caught for the same reason and kept
 /// apart from them, because it carries more: the terminal is gone.
+///
+/// SIGTSTP and SIGCONT are caught too, though neither ends anything. SIGTSTP's
+/// default action stops the process where it stands, raw on the alternate
+/// screen, and hands that terminal to the operator's shell; caught, it asks
+/// the loop to hand the terminal back first. SIGCONT says the process ran
+/// again after a stop, including one it could not catch, and that whatever
+/// drew on the terminal meanwhile is on the screen now.
 #[derive(Debug, Clone)]
 pub struct Shutdown {
     #[cfg(unix)]
     requested: std::sync::Arc<AtomicBool>,
     #[cfg(unix)]
     hung_up: std::sync::Arc<AtomicBool>,
+    #[cfg(unix)]
+    suspend: std::sync::Arc<AtomicBool>,
+    #[cfg(unix)]
+    continued: std::sync::Arc<AtomicBool>,
 }
 
 impl Shutdown {
@@ -474,7 +561,22 @@ impl Shutdown {
             signal_hook::flag::register(asked, std::sync::Arc::clone(&requested))?;
         }
         signal_hook::flag::register(signal_hook::consts::SIGHUP, std::sync::Arc::clone(&hung_up))?;
-        Ok(Self { requested, hung_up })
+        let suspend = std::sync::Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(
+            signal_hook::consts::SIGTSTP,
+            std::sync::Arc::clone(&suspend),
+        )?;
+        let continued = std::sync::Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(
+            signal_hook::consts::SIGCONT,
+            std::sync::Arc::clone(&continued),
+        )?;
+        Ok(Self {
+            requested,
+            hung_up,
+            suspend,
+            continued,
+        })
     }
 
     /// Registers the handlers.
@@ -503,6 +605,32 @@ impl Shutdown {
     #[cfg(not(unix))]
     pub fn requested(&self) -> Option<Stop> {
         None
+    }
+
+    /// Whether a SIGTSTP has asked the process to stop since this was last
+    /// asked. Each one is answered once.
+    #[cfg(unix)]
+    pub fn take_suspend(&self) -> bool {
+        self.suspend.swap(false, Ordering::SeqCst)
+    }
+
+    /// Whether a SIGTSTP has asked the process to stop.
+    #[cfg(not(unix))]
+    pub fn take_suspend(&self) -> bool {
+        false
+    }
+
+    /// Whether the process has been continued after a stop since this was
+    /// last asked, and so owes the terminal a whole frame.
+    #[cfg(unix)]
+    pub fn take_continued(&self) -> bool {
+        self.continued.swap(false, Ordering::SeqCst)
+    }
+
+    /// Whether the process has been continued after a stop.
+    #[cfg(not(unix))]
+    pub fn take_continued(&self) -> bool {
+        false
     }
 }
 
@@ -647,6 +775,62 @@ mod tests {
     }
 
     #[test]
+    fn a_suspended_guard_hands_back_then_asks_for_it_all_again_and_restores_once() {
+        let mut sink = Vec::new();
+        let resumed_at;
+        {
+            let mut guard =
+                TerminalGuard::enter_screen_only(&mut sink).expect("a Vec sink cannot fail");
+            guard
+                .ask_keyboard(Asked::Enhancement)
+                .expect("a Vec sink cannot fail");
+            guard.suspend().expect("a Vec sink cannot fail");
+            guard.suspend().expect("a Vec sink cannot fail");
+            resumed_at = guard.out.len();
+            guard.resume().expect("a Vec sink cannot fail");
+        }
+
+        let (before, after) = sink.split_at(resumed_at);
+        let (before, after) = (written(before), written(after));
+        assert_eq!(
+            before.matches(LEAVE_ALTERNATE_SCREEN).count(),
+            1,
+            "{before:?}"
+        );
+        assert_eq!(before.matches("\x1b[<1u").count(), 1, "{before:?}");
+        let entered = after
+            .find(ENTER_ALTERNATE_SCREEN)
+            .expect("resuming did not enter the alternate screen again");
+        let pushed = after
+            .find("\x1b[>1u")
+            .expect("resuming did not ask for the keyboard it had before");
+        assert!(entered < pushed, "pushed onto the main screen: {after:?}");
+        assert!(
+            after.contains(MOUSE_ON) && after.contains(PASTE_ON),
+            "{after:?}"
+        );
+        assert_eq!(
+            after.matches(LEAVE_ALTERNATE_SCREEN).count(),
+            1,
+            "{after:?}"
+        );
+        assert_eq!(after.matches("\x1b[<1u").count(), 1, "{after:?}");
+    }
+
+    #[test]
+    fn a_guard_dropped_while_suspended_does_not_hand_back_twice() {
+        let mut sink = Vec::new();
+        {
+            let mut guard =
+                TerminalGuard::enter_screen_only(&mut sink).expect("a Vec sink cannot fail");
+            guard.suspend().expect("a Vec sink cannot fail");
+        }
+
+        let out = written(&sink);
+        assert_eq!(out.matches(LEAVE_ALTERNATE_SCREEN).count(), 1, "{out:?}");
+    }
+
+    #[test]
     fn what_was_asked_of_the_keyboard_is_read_back_as_it_was_stored() {
         for asked in [Asked::Nothing, Asked::Enhancement, Asked::OtherKeys] {
             assert_eq!(Asked::from_stored(asked as u8), asked);
@@ -742,5 +926,34 @@ mod tests {
         // shell then tries to hand that terminal back and to print on it, and
         // reports failing at both as a session that failed.
         assert_eq!(shutdown.requested(), Some(Stop::TerminalGone));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigtstp_asks_for_one_suspend_and_ends_nothing() {
+        let _turn = SIGNALLING.lock().expect("no test panics holding this");
+        let shutdown = Shutdown::install().expect("registering the signals cannot fail here");
+
+        // Caught, as SIGTERM is above: the default action would stop the test.
+        signal_hook::low_level::raise(signal_hook::consts::SIGTSTP)
+            .expect("raising a signal we handle cannot fail");
+
+        assert!(shutdown.take_suspend());
+        assert!(!shutdown.take_suspend(), "one SIGTSTP is one stop");
+        assert_eq!(shutdown.requested(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigcont_says_the_process_was_continued_once() {
+        let _turn = SIGNALLING.lock().expect("no test panics holding this");
+        let shutdown = Shutdown::install().expect("registering the signals cannot fail here");
+
+        signal_hook::low_level::raise(signal_hook::consts::SIGCONT)
+            .expect("raising a signal we handle cannot fail");
+
+        assert!(shutdown.take_continued());
+        assert!(!shutdown.take_continued());
+        assert_eq!(shutdown.requested(), None);
     }
 }

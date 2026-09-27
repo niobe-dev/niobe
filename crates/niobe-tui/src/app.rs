@@ -986,6 +986,8 @@ pub struct App {
     /// transcript was scrolled back, until the next draw puts it back there.
     held: Option<crate::ui::Anchor>,
     should_quit: bool,
+    /// Whether the operator pressed Ctrl+Z since the loop last asked.
+    suspend: bool,
 }
 
 /// A search through the transcript, from `/` on an empty composer to Esc.
@@ -1149,6 +1151,7 @@ impl App {
             drawn: crate::ui::DrawnEntries::default(),
             held: None,
             should_quit: false,
+            suspend: false,
         }
     }
 
@@ -3242,6 +3245,13 @@ impl App {
         self.should_quit = true;
     }
 
+    /// Whether the operator asked to suspend the shell since this was last
+    /// asked. Raw mode reads Ctrl+Z as a key rather than letting the terminal
+    /// turn it into SIGTSTP, so the loop is what stops the process for it.
+    pub fn take_suspend(&mut self) -> bool {
+        std::mem::take(&mut self.suspend)
+    }
+
     /// Records what the last draw measured, so that paging moves by a screen
     /// the operator actually saw rather than by a guess.
     pub fn measured(&mut self, transcript_lines: usize, viewport_lines: usize) {
@@ -3488,6 +3498,12 @@ impl App {
             (key.code, key.modifiers)
         {
             self.quit();
+            return;
+        }
+        // Suspending is always available for the same reason: it hands the
+        // terminal back and leaves the prompt where it is.
+        if (key.code, key.modifiers) == (KeyCode::Char('z'), KeyModifiers::CONTROL) {
+            self.suspend = true;
             return;
         }
         // Stopping a command is always available for the same reason: `! yes`
@@ -5309,6 +5325,21 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
 
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_z_asks_to_suspend_once_even_with_a_prompt_on_screen() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+        assert!(app.take_suspend());
+        assert!(!app.take_suspend(), "one Ctrl+Z is one stop");
+        assert!(!app.should_quit());
+        assert!(app.asking().is_some(), "the question is still waiting");
+        assert_eq!(app.composed(), "");
     }
 
     #[test]

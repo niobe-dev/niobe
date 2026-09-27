@@ -17,6 +17,10 @@
 //! proves the last two — the hook writes to the process's own standard output,
 //! and the signal disposition belongs to the process.
 //!
+//! A stop is not a way out, but it hands the terminal over all the same: a
+//! SIGTSTP, or Ctrl+Z read as a key, hands it back before the process stops,
+//! and a SIGCONT takes it again and draws the whole frame.
+//!
 //! The fourth case is the terminal closing under the shell, and the shell has
 //! three ways of finding out. A process outside the session that owns a
 //! terminal is not sent SIGHUP when it goes, so for these tests the hangup on
@@ -266,17 +270,41 @@ impl Terminal {
 
     /// Waits until the shell has drawn `wanted`.
     fn shows(&self, wanted: &str) {
+        self.shows_since(0, wanted);
+    }
+
+    /// How much the shell has drawn so far, as a place to read on from.
+    fn mark(&self) -> usize {
+        self.drawn
+            .lock()
+            .expect("the reader thread did not panic")
+            .len()
+    }
+
+    /// Waits until the shell has drawn `wanted` after `from`, a [`Self::mark`].
+    fn shows_since(&self, from: usize, wanted: &str) {
         let deadline = Instant::now() + PATIENCE;
         while Instant::now() < deadline {
             let drawn = self.drawn.lock().expect("the reader thread did not panic");
-            if drawn.contains(wanted) {
+            if drawn[from..].contains(wanted) {
                 return;
             }
             drop(drawn);
             std::thread::sleep(Duration::from_millis(5));
         }
         let drawn = self.drawn.lock().expect("the reader thread did not panic");
-        panic!("the shell never drew {wanted:?}; it drew: {drawn:?}");
+        panic!(
+            "the shell never drew {wanted:?}; after the mark it drew: {:?}",
+            &drawn[from..]
+        );
+    }
+
+    /// Everything the shell has drawn so far, without waiting for it to end.
+    fn drawn_so_far(&self) -> String {
+        self.drawn
+            .lock()
+            .expect("the reader thread did not panic")
+            .clone()
     }
 
     /// Types into the shell.
@@ -1678,5 +1706,119 @@ fn a_quit_takes_along_what_the_cli_and_an_ended_bang_command_left_running() {
 fn a_sigkill_leaves_nothing_the_session_started_running() {
     ends_with_nothing_left_running("a SIGKILL", 2 * DEADLINE, |_, shell| {
         signal(shell, Signal::KILL);
+    });
+}
+
+/// Ctrl+Z, which a terminal in raw mode hands the shell as a key rather than
+/// as SIGTSTP.
+const CTRL_Z: &[u8] = b"\x1a";
+
+/// Waits until the shell has stopped, as the operator's job-control shell
+/// would see it.
+fn stopped(shell: &Child) {
+    let raw = i32::try_from(shell.id()).expect("a pid fits in an i32");
+    let pid = Pid::from_raw(raw).expect("the shell has a pid");
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        let waited = rustix::process::waitpid(
+            Some(pid),
+            rustix::process::WaitOptions::UNTRACED | rustix::process::WaitOptions::NOHANG,
+        )
+        .expect("the shell can be waited on");
+        match waited {
+            Some((_, status)) if status.stopped() => return,
+            Some((_, status)) => panic!("the shell ended instead of stopping: {status:?}"),
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    panic!("the shell was still running {PATIENCE:?} after it was asked to stop");
+}
+
+/// Whether the pty's line discipline is cooked: the operator's shell reads
+/// lines, echoes them and turns Ctrl+C into a signal.
+fn cooked(slave: &File) -> bool {
+    let modes = rustix::termios::tcgetattr(slave).expect("the pty's modes can be read");
+    modes.local_modes.contains(
+        rustix::termios::LocalModes::ICANON
+            | rustix::termios::LocalModes::ECHO
+            | rustix::termios::LocalModes::ISIG,
+    )
+}
+
+/// Stops the shell with `stop`, and asserts that it handed the terminal back
+/// before it stopped, took it again and drew the whole frame when continued,
+/// and that a quit afterwards hands it back once more, exactly once.
+///
+/// A stop is not an exit, but it hands the terminal to the operator's shell,
+/// which needs it cooked, on the main screen and reporting no mouse; and the
+/// shell that is continued finds a screen the operator's shell drew over.
+fn a_stop_hands_the_terminal_back_and_a_continue_takes_it_again(
+    path: &str,
+    stop: impl FnOnce(&Terminal, &Child),
+) {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+    assert!(
+        !cooked(&slave),
+        "the shell never put the terminal in raw mode"
+    );
+
+    stop(&terminal, &shell);
+    stopped(&shell);
+
+    let before_stop = terminal.drawn_so_far();
+    assert_eq!(
+        before_stop.matches(RESTORED).count(),
+        1,
+        "on {path} the shell did not hand the terminal back once before stopping: \
+         {before_stop:?}"
+    );
+    assert!(
+        cooked(&slave),
+        "on {path} the shell stopped with the terminal raw"
+    );
+
+    let continued = terminal.mark();
+    signal(&shell, Signal::CONT);
+    terminal.shows_since(continued, ENTER_ALTERNATE_SCREEN);
+    terminal.shows_since(continued, KEYBOARD_ON);
+    // The whole frame, not only what changed: the operator's shell drew over
+    // the screen while the shell was stopped, and a diff against the last
+    // frame would leave that on it.
+    terminal.shows_since(continued, OPENING_FRAME);
+    assert!(
+        !cooked(&slave),
+        "on {path} the shell was continued without taking raw mode back"
+    );
+
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert!(status.success(), "{path} then a quit ended with {status}");
+    let after = &drawn[continued..];
+    assert_eq!(
+        after.matches(LEAVE_ALTERNATE_SCREEN).count(),
+        1,
+        "on {path} the quit after continuing did not leave the screen exactly once: {after:?}"
+    );
+    assert!(after.contains(RESTORED), "{after:?}");
+    assert_eq!(after.matches(KEYBOARD_OFF).count(), 1, "{after:?}");
+}
+
+#[test]
+fn a_sigtstp_hands_the_terminal_back_and_a_sigcont_takes_it_again() {
+    a_stop_hands_the_terminal_back_and_a_continue_takes_it_again("a SIGTSTP", |_, shell| {
+        signal(shell, Signal::TSTP);
+    });
+}
+
+#[test]
+fn ctrl_z_suspends_the_shell_as_a_sigtstp_would() {
+    a_stop_hands_the_terminal_back_and_a_continue_takes_it_again("Ctrl+Z", |terminal, _| {
+        terminal.typed(CTRL_Z);
     });
 }

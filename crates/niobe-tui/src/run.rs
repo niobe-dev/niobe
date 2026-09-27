@@ -23,7 +23,7 @@ use crate::input::{Input, Wait};
 use crate::journal::Journal;
 use crate::rules::Rules;
 use crate::shell::Shell;
-use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
+use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued};
 use crate::ui;
 use crate::watch::Watch;
 
@@ -45,14 +45,18 @@ const TICK: Duration = Duration::from_millis(100);
 const BUSY_TICK: Duration = Duration::from_millis(33);
 
 /// What the loop asks the machine about: whether the process has been told to
-/// stop, whether the terminal has anything to read, and what time it is.
+/// stop, whether the terminal has anything to read, and what time it is; and
+/// how it suspends the process when asked to.
 ///
-/// One value rather than three arguments, because the loop takes them all the
+/// One value rather than four arguments, because the loop takes them all the
 /// same way — once, at the top, before it looks at anything else.
 struct Machine<'a> {
     shutdown: &'a Shutdown,
     wait: &'a mut Wait,
     clock: &'a crate::clock::Clock,
+    /// Hands the terminal back, stops the process, and takes the terminal
+    /// again once the process is continued.
+    suspend: &'a mut dyn FnMut() -> io::Result<()>,
 }
 
 /// Everything the loop hands what the operator does to, and takes what
@@ -129,6 +133,14 @@ pub fn run(
     // first draw covers it. `clear` also asks the terminal where its cursor is
     // and waits for the reply, which never comes when stdin is a pipe.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    // What the session started — the CLI and the `!` commands, each in a
+    // process group of its own — is not stopped with it: a turn goes on while
+    // the operator is at their shell, and is on screen when they come back.
+    let mut suspend = || -> io::Result<()> {
+        guard.suspend()?;
+        stop_until_continued()?;
+        guard.resume()
+    };
 
     let ended = event_loop(
         &mut terminal,
@@ -144,6 +156,7 @@ pub fn run(
             shutdown: &shutdown,
             wait: &mut wait,
             clock: &clock,
+            suspend: &mut suspend,
         },
     );
 
@@ -262,6 +275,21 @@ fn event_loop<B: Backend<Error = io::Error>>(
                 ended = Ended::TerminalGone;
                 app.quit();
             }
+        }
+
+        // Both are read, so that a Ctrl+Z and a SIGTSTP arriving in one tick
+        // are one stop rather than a second waiting for the continue.
+        let suspend = app.take_suspend() | machine.shutdown.take_suspend();
+        if suspend && !app.should_quit() {
+            (machine.suspend)()?;
+        }
+        // After a stop the screen holds whatever was drawn on it meanwhile, and
+        // a draw sends only what changed since the last frame. A resize to the
+        // same size clears the screen and forgets that frame, without asking
+        // the terminal where its cursor is the way `Terminal::clear` does.
+        if machine.shutdown.take_continued() && !app.should_quit() {
+            let area = terminal.size()?;
+            terminal.resize(area.into())?;
         }
     }
 
