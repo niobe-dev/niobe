@@ -4243,7 +4243,17 @@ fn what_it_does(summary: Option<&str>, input: &str) -> String {
 /// Collapses whitespace so a tool's arguments stay on the one line beside its
 /// name.
 fn one_line(input: &str) -> String {
-    input.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut words = input.split_whitespace();
+    let Some(first) = words.next() else {
+        return String::new();
+    };
+    let mut result = String::with_capacity(input.len());
+    result.push_str(first);
+    for word in words {
+        result.push(' ');
+        result.push_str(word);
+    }
+    result
 }
 
 /// Bytes, short enough for a meta line.
@@ -7398,5 +7408,53 @@ mod tests {
 
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
         assert_eq!(app.take_produced().len(), 1);
+    }
+
+    #[test]
+    fn one_line_collapses_whitespace_into_single_spaces_and_handles_edge_cases() {
+        assert_eq!(one_line(""), "");
+        assert_eq!(one_line("   \t\n\r  "), "");
+        assert_eq!(one_line("hello"), "hello");
+        assert_eq!(one_line("  hello   world  "), "hello world");
+        assert_eq!(
+            one_line(
+                "{\n  \"command\": \"cargo test\",\n  \"args\": [\n    \"--workspace\"\n  ]\n}"
+            ),
+            "{\n  \"command\": \"cargo test\",\n  \"args\": [\n    \"--workspace\"\n  ]\n}"
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn one_line_performance_benchmark() {
+        let sample_inputs = [
+            "",
+            "   \t\n\r  ",
+            "short_arg",
+            "   hello   world   from   niobe   tui   ",
+            "{\n  \"command\": \"cargo test\",\n  \"args\": [\n    \"--workspace\",\n    \"--all-targets\"\n  ],\n  \"env\": {\n    \"RUST_LOG\": \"info\"\n  }\n}",
+        ];
+        let iterations = if std::env::var_os("BENCHMARK").is_some() {
+            200_000
+        } else {
+            1
+        };
+        let start = Instant::now();
+        for _ in 0..iterations {
+            for input in &sample_inputs {
+                std::hint::black_box(one_line(std::hint::black_box(input)));
+            }
+        }
+        let elapsed = start.elapsed();
+        if std::env::var_os("BENCHMARK").is_some() {
+            println!(
+                "Benchmark: {} total calls took {:?}",
+                iterations * sample_inputs.len(),
+                elapsed
+            );
+        }
     }
 }
