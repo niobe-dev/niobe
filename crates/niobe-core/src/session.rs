@@ -466,6 +466,10 @@ pub struct SessionState {
     turn_last_ended: TurnMark,
     /// Whether a window has been reported since the last turn began or ended.
     window_reported: bool,
+    /// Whether the last event folded ended a turn — its end, or a fatal
+    /// error — which an end straight after it repeats rather than closes a
+    /// turn of its own.
+    ended_last: bool,
     /// Whether a usage record has landed since the last turn began or ended,
     /// which is the span a turn's tokens are counted over.
     usage_reported: bool,
@@ -533,8 +537,15 @@ impl SessionState {
     ///
     /// Every case is total: an end without a start, an exit without a spawn, a
     /// response without a request are all counted rather than dropped, because
-    /// a silently ignored event is a total that cannot be defended.
+    /// a silently ignored event is a total that cannot be defended. The one
+    /// event that changes nothing is a turn's end said again straight after
+    /// the end it repeats.
     pub fn apply(&mut self, event: &Event) {
+        self.fold(event);
+        self.ended_last = matches!(event, Event::TurnEnded | Event::Error { fatal: true, .. });
+    }
+
+    fn fold(&mut self, event: &Event) {
         match event {
             Event::SessionMeta(meta) => {
                 self.model = Some(meta.model.clone());
@@ -566,6 +577,12 @@ impl SessionState {
                 self.turn_running = true;
             }
 
+            // An end with no turn running is still a turn, one the fold did
+            // not see begin — a command the CLI answers itself sends no
+            // prompt — as long as anything came between it and the last end.
+            // With nothing between, it is the last turn's end said again,
+            // and a turn recorded for it would be one nobody ran.
+            Event::TurnEnded if self.ended_last => {}
             Event::TurnEnded => self.end_turn(),
 
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
@@ -2243,6 +2260,47 @@ mod tests {
         ]);
         let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
         assert_eq!(tokens, [None, Some(30), None]);
+    }
+
+    /// A backend that says a turn ended twice has ended one turn: nothing
+    /// ran and nothing was spent between the two, so the second records no
+    /// turn of its own.
+    #[test]
+    fn a_turn_end_with_no_turn_running_and_nothing_spent_records_no_turn() {
+        let state = SessionState::replay(&[
+            prompt(),
+            usage(100, 0, None),
+            Event::TurnEnded,
+            Event::TurnEnded,
+        ]);
+        let turns: Vec<(u64, Option<u64>)> = state
+            .turns()
+            .iter()
+            .map(|turn| (turn.number, turn.tokens))
+            .collect();
+        assert_eq!(turns, [(1, Some(100))]);
+    }
+
+    /// The same holds for an end said after a fatal error already ended the
+    /// turn; and an end the fold never saw begin, with a reply before it, is
+    /// a turn — a command the CLI answers itself sends no prompt.
+    #[test]
+    fn only_an_end_straight_after_an_end_is_a_repeat() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+            Event::TurnEnded,
+            Event::AssistantMessage {
+                text: "## Context Usage".to_owned(),
+                agent: None,
+            },
+            Event::TurnEnded,
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns().len(), 2, "{:?}", state.turns());
     }
 
     #[test]
