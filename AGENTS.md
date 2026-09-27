@@ -318,7 +318,10 @@ Where tests live:
     session of markdown replies, against a 16 ms budget, and a long line typed or pasted into
     the composer: a 100 KB paste against 50 ms, and keys read together against a linear ratio. It is a test binary of its own and its
     tests take turns on a lock, so that nothing shares their cores, and each asserts the median
-    of 31 frames so that a frame the scheduler interrupted cannot fail it.
+    of 31 frames so that a frame the scheduler interrupted cannot fail it. The frames are timed
+    only in an optimised build, `cargo test --release -p niobe-tui --test frame_budget`, because
+    a debug build draws them at 10–18 ms, where the budget measures the machine's load rather
+    than the drawing code; `cargo test --workspace` reports them ignored.
   - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached
     the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM,
     SIGINT or SIGQUIT and a panic, and around a stop — a SIGTSTP or Ctrl+Z hands the terminal
@@ -334,6 +337,7 @@ Run all of it, in this order, and report exact pass/fail counts — never infer 
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test --release -p niobe-tui --test frame_budget
 cargo xtask layering
 cargo xtask headers
 cargo xtask version --check
@@ -492,7 +496,8 @@ at the moment the maintainer approves them.
   terminal, not to a writer. Tests use `TerminalGuard::enter_screen_only`, never `enter`.
 - **Release binary over budget**: check what a new dependency pulls in with
   `cargo tree -p niobe-cli -e normal` before tuning the profile.
-- **Timing tests flake**: the replay and frame budgets are generous for debug builds; a failure
+- **Timing tests flake**: the replay budget is generous for debug builds, and the frame budgets
+  are timed in an optimised build only, because a debug frame lands within noise of 16 ms; a failure
   on a loaded machine should be re-run once before being treated as a regression, then
   investigated. A timing test that shares a binary with tests that draw or replay is timing them
   too: give it a binary of its own, as `frame_budget.rs` has.

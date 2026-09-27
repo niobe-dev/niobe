@@ -37,6 +37,11 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The frame budgets hold for what ships, so they are timed in an
+      # optimised build; the debug run above skips them.
+      - name: Frame budgets
+        run: cargo test --release -p niobe-tui --test frame_budget
+
       - name: Crate layering
         run: cargo xtask layering
 

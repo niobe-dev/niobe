@@ -1222,6 +1222,30 @@ mod tests {
         ))
     }
 
+    /// Starts a session on a stand-in written moments ago.
+    ///
+    /// Linux will not run a file that any process holds open for writing, and a
+    /// test beside this one that forks while the stand-in is being written takes
+    /// a copy of that descriptor into its child, where it stays until the child
+    /// runs its own program. Putting the file in place by a rename does not help:
+    /// the copy refers to the same file. It is gone within moments, so "text
+    /// file busy" is tried again rather than failed on.
+    #[cfg(unix)]
+    fn spawn_written(options: &Options) -> Session {
+        let started = Instant::now();
+        loop {
+            match Session::spawn(options) {
+                Err(SpawnError::Failed { error, .. })
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && started.elapsed() < Duration::from_secs(5) =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                spawned => return spawned.expect("the stand-in starts"),
+            }
+        }
+    }
+
     /// Spawns a `claude` that is the shell script `body`, sends it a turn,
     /// and drains it until it has said it ended. The session is returned with
     /// what it said.
@@ -1237,7 +1261,7 @@ mod tests {
         let mut options = options();
         options.binary = script;
         options.cwd = dir.path().to_path_buf();
-        let mut session = Session::spawn(&options).expect("the stand-in starts");
+        let mut session = spawn_written(&options);
         // A stand-in that has already left cannot take the turn, and that is
         // reported by the drain rather than here.
         let _ = session.send("list the files");

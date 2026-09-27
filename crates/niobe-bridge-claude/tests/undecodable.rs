@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use niobe_bridge_claude::{Options, Session};
+use niobe_bridge_claude::{Options, Session, SpawnError};
 use niobe_core::event::Event;
 
 /// The longest one [`Session::drain`] may take. It runs on the thread that
@@ -60,6 +60,29 @@ fn stand_in(dir: &Path, body: &str) -> PathBuf {
     script
 }
 
+/// Starts a session on a stand-in written moments ago.
+///
+/// Linux will not run a file that any process holds open for writing, and a
+/// test beside this one that forks while the stand-in is being written takes
+/// a copy of that descriptor into its child, where it stays until the child
+/// runs its own program. Putting the file in place by a rename does not help:
+/// the copy refers to the same file. It is gone within moments, so "text
+/// file busy" is tried again rather than failed on.
+fn spawn_written(options: &Options) -> Session {
+    let started = Instant::now();
+    loop {
+        match Session::spawn(options) {
+            Err(SpawnError::Failed { error, .. })
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && started.elapsed() < Duration::from_secs(5) =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            spawned => return spawned.expect("the stand-in starts"),
+        }
+    }
+}
+
 /// Runs one turn against a stand-in running `body`, draining until `done`
 /// says the events so far are enough, and returns them with the longest any
 /// one drain took.
@@ -67,7 +90,7 @@ fn turn(body: &str, done: impl Fn(&[Event]) -> bool) -> (Vec<Event>, Duration) {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let mut options = Options::new(dir.path(), "max");
     options.binary = stand_in(dir.path(), body);
-    let mut session = Session::spawn(&options).expect("the stand-in starts");
+    let mut session = spawn_written(&options);
     session.send("say something").expect("the turn is sent");
 
     let started = Instant::now();

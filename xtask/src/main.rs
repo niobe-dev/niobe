@@ -97,6 +97,14 @@ fn ci() -> Result<(), String> {
         "warnings",
     ])?;
     cargo(&["test", "--workspace"])?;
+    cargo(&[
+        "test",
+        "--release",
+        "--package",
+        "niobe-tui",
+        "--test",
+        "frame_budget",
+    ])?;
     layering()?;
     headers()?;
     version::run(&["--check".to_owned()])?;

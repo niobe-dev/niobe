@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use niobe_bridge_claude::{Options, Session};
+use niobe_bridge_claude::{Options, Session, SpawnError};
 use niobe_core::event::{Event, PermissionDecision, ToolCallId, ToolOutcome};
 
 /// How long the exchange may take once the stand-in is running. The stand-in
@@ -55,8 +55,9 @@ fn recording() -> PathBuf {
 /// One script serves every test, and every run while its bytes are the same:
 /// a script the agent has already looked at starts without the wait [`START`]
 /// allows for. It is put in place by a rename, never written where it runs, so
-/// nothing ever executes a file that something holds open for writing — which
-/// Linux refuses as "text file busy".
+/// a run still executing the old one is never handed half of the new one. The
+/// descriptor a forked sibling may still hold on it is what [`spawn_written`]
+/// waits out.
 fn stand_in() -> &'static Path {
     static SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     SCRIPT.get_or_init(|| {
@@ -93,6 +94,29 @@ fn stand_in() -> &'static Path {
         std::fs::rename(&written, &script).expect("the stand-in is put in place");
         script
     })
+}
+
+/// Starts a session on a stand-in written moments ago.
+///
+/// Linux will not run a file that any process holds open for writing, and a
+/// test beside this one that forks while the stand-in is being written takes
+/// a copy of that descriptor into its child, where it stays until the child
+/// runs its own program. Putting the file in place by a rename does not help:
+/// the copy refers to the same file. It is gone within moments, so "text
+/// file busy" is tried again rather than failed on.
+fn spawn_written(options: &Options) -> Session {
+    let started = Instant::now();
+    loop {
+        match Session::spawn(options) {
+            Err(SpawnError::Failed { error, .. })
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && started.elapsed() < Duration::from_secs(5) =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            spawned => return spawned.expect("the stand-in starts"),
+        }
+    }
 }
 
 /// How far the stand-in writing to `dir` got, as it wrote it down.
@@ -135,7 +159,7 @@ fn exchange(decide: impl Fn(&str) -> PermissionDecision) -> Exchanged {
         .env
         .insert("ANSWERS_DIR".to_owned(), dir.path().display().to_string());
     options.ask_over_stdio = true;
-    let mut session = Session::spawn(&options).expect("the stand-in starts");
+    let mut session = spawn_written(&options);
     session.send("edit the notes").expect("the turn is sent");
 
     let started = Instant::now();
