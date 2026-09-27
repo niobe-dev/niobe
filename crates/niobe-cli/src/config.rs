@@ -137,6 +137,7 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
         None => Config::default(),
     };
     let mut untrusted = None;
+    repo::inside(root, &repo)?;
     if let Some(layer) = repository(&repo)? {
         // A file that defines a profile the user's does is worth trusting
         // even where it sets nothing else: until it is trusted, its profile of

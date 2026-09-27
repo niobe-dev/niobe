@@ -1048,6 +1048,51 @@ fn a_profile_from_the_users_own_config_needs_no_trust() {
     );
 }
 
+/// A file that is not a config says nothing the operator could have read and
+/// agreed to, so it is not trusted, and nothing is recorded for it.
+#[test]
+fn a_file_that_is_not_a_config_is_not_trusted() {
+    let setup = Configured::new(USER_CONFIG, "this is not = toml at all\n");
+
+    let output = setup.run(&["trust"]);
+
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let said = stderr(&output);
+    assert!(said.contains("not trusted"), "{said}");
+    assert!(said.contains("config.toml:1"), "the line is named: {said}");
+    assert!(
+        !setup
+            .user
+            .path()
+            .join("niobe")
+            .join("trusted.list")
+            .exists(),
+        "nothing was recorded"
+    );
+}
+
+/// A cloned repository whose config is a link to a file of the operator's
+/// elsewhere would otherwise choose which of their files is read, and a line
+/// of it quoted in the error that says it is no config.
+#[cfg(unix)]
+#[test]
+fn a_config_that_links_outside_the_repository_is_not_read() {
+    let setup = Configured::new(USER_CONFIG, "");
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    let secret = elsewhere.path().join("secret.txt");
+    std::fs::write(&secret, "API_KEY=sk-live-SECRETVALUE\n").expect("the file is written");
+    std::fs::create_dir(setup.repo.path().join(".niobe")).expect("a .niobe directory");
+    std::os::unix::fs::symlink(&secret, repo_config(setup.repo.path())).expect("the link is made");
+
+    for args in [&["trust"][..], &["profiles"]] {
+        let output = setup.run(args);
+        let said = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(!output.status.success(), "{args:?}: {said}");
+        assert!(!said.contains("SECRETVALUE"), "{args:?}: {said}");
+        assert!(said.contains("outside the repository"), "{args:?}: {said}");
+    }
+}
+
 #[test]
 fn a_repository_config_that_sets_no_environment_needs_no_trust() {
     let setup = Configured::new(USER_CONFIG, "[profiles.plain]\nbackend = \"codex\"\n");

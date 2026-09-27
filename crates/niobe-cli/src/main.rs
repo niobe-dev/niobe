@@ -590,6 +590,10 @@ fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
 /// defines under names the user's config already uses.
 fn trust() -> Result<(), String> {
     let (path, text) = repo_config()?;
+    // What is trusted is what the operator could read and agree to: a file
+    // that is not a config says nothing of the kind.
+    niobe_config::Config::parse(&text, &path)
+        .map_err(|error| format!("{} is not trusted: {error}", path.display()))?;
     let record = trust_record()?;
     let mut trusted = niobe_config::trust::Trusted::read(&record).map_err(|e| e.to_string())?;
     trusted.trust(&path, &text).map_err(|e| e.to_string())?;
@@ -628,7 +632,9 @@ fn untrust() -> Result<(), String> {
 /// This repository's config and what is in it, for a command that acts on the
 /// file rather than on what it parses to.
 fn repo_config() -> Result<(PathBuf, String), String> {
-    let path = repo::config_path(&repo::root(&cwd()?));
+    let root = repo::root(&cwd()?);
+    let path = repo::config_path(&root);
+    repo::inside(&root, &path)?;
     match niobe_config::read::text(&path) {
         Ok(text) => Ok((path, text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(

@@ -96,6 +96,33 @@ pub fn open_existing_store(root: &Path) -> Result<Option<Store>, String> {
         .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))
 }
 
+/// Refuses a file of the repository rooted at `root` that is a link to one
+/// outside it, whether the file is the link or a directory above it is.
+///
+/// A cloned repository chooses its links, so one there would choose which of
+/// the operator's own files is read — and quoted back, in the error that says
+/// it is not a config. A path that is not there, a link that leads nowhere
+/// and one to something that is not a regular file — which is never read —
+/// are left to the read that follows to report.
+pub fn inside(root: &Path, path: &Path) -> Result<(), String> {
+    let Ok(target) = std::fs::canonicalize(path) else {
+        return Ok(());
+    };
+    if !target.is_file() {
+        return Ok(());
+    }
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    match target.starts_with(&root) {
+        true => Ok(()),
+        false => Err(format!(
+            "{} links to {}, outside the repository; niobe reads a repository's config \
+             only from inside it",
+            path.display(),
+            target.display()
+        )),
+    }
+}
+
 /// Opens the session store of `root` to read it, if one has been created:
 /// one that cannot be written, as on a read-only mount, is read as it is. See
 /// [`Store::open_to_read`].
