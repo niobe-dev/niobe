@@ -299,12 +299,27 @@ impl Terminal {
         );
     }
 
-    /// Everything the shell has drawn so far, without waiting for it to end.
-    fn drawn_so_far(&self) -> String {
-        self.drawn
-            .lock()
-            .expect("the reader thread did not panic")
-            .clone()
+    /// Everything the shell has written so far, once the reader has taken all
+    /// of it off the pty.
+    ///
+    /// For a shell that can write no more — stopped, say — this is all it
+    /// wrote. What the reader has kept so far may not be: a stopped process
+    /// has put its bytes on the pty, but on a loaded machine the reader is
+    /// often not yet scheduled to take them off.
+    fn caught_up(&self) -> String {
+        let deadline = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            let drawn = self.drawn.lock().expect("the reader thread did not panic");
+            let mut fds = [PollFd::new(&*self.master, PollFlags::IN)];
+            let unread = rustix::event::poll(&mut fds, Some(&Timespec::default()))
+                .expect("the pty can be polled");
+            if unread == 0 {
+                return drawn.clone();
+            }
+            drop(drawn);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the pty still held unread output {PATIENCE:?} later");
     }
 
     /// Types into the shell.
@@ -356,12 +371,16 @@ fn read_until_stopped(master: &OwnedFd, drawn: &Mutex<String>, stop: &AtomicBool
         if ready == 0 {
             continue;
         }
+        // Read under the lock the bytes are kept under, so that a test holding
+        // it and finding the pty empty knows everything written is in `drawn`
+        // (see `Terminal::caught_up`). Poll said there is something to read,
+        // so the read does not block with the lock held.
+        let mut drawn = drawn
+            .lock()
+            .expect("the test thread did not panic holding the lock");
         match rustix::io::read(master, &mut buffer) {
             Ok(0) | Err(_) => return,
             Ok(read) => {
-                let mut drawn = drawn
-                    .lock()
-                    .expect("the test thread did not panic holding the lock");
                 drawn.push_str(&String::from_utf8_lossy(&buffer[..read]));
                 if !answered && drawn.contains(KEYBOARD_QUERY) {
                     answered = true;
@@ -1768,7 +1787,7 @@ fn a_stop_hands_the_terminal_back_and_a_continue_takes_it_again(
     stop(&terminal, &shell);
     stopped(&shell);
 
-    let before_stop = terminal.drawn_so_far();
+    let before_stop = terminal.caught_up();
     assert_eq!(
         before_stop.matches(RESTORED).count(),
         1,
