@@ -114,7 +114,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `translate.rs` turns one message of it into events and owns no process, `driver.rs` spawns the
   binary, asks it with `initialize` what it offers — the answer is where the slash commands a
   session starts with are listed, `commands_changed` only reports a change to them — keeps its
-  standard input open for the life of the session, answers the permission prompts the CLI
+  standard input open for the life of the session and writes it from a queue on a thread of its
+  own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on, and starts it as the leader of a process group of its own, which a closing
   session ends whole, and so does a CLI that leaves mid-session, so nothing the CLI started
   outlives it or holds the quit, or the report of its end, up on its pipes; `spilled.rs` reads the file the CLI saves a shell output

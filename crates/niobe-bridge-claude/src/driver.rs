@@ -9,6 +9,13 @@
 //! line and then goes on without one, so a session that closed stdin between
 //! turns would get one turn and a dead subprocess.
 //!
+//! What goes to the CLI is written by a thread of its own, from a queue:
+//! a CLI busy elsewhere does not read its standard input, and a line longer
+//! than the pipe holds — a pasted log — would otherwise stop the thread that
+//! draws the screen until the CLI came back to it. A write that is still
+//! waiting after [`STALLED`] is said to be, and one that fails is reported,
+//! both as events like anything else the session has to say.
+//!
 //! Two threads read the child, because a pipe that nobody drains fills up and
 //! stops the writer: one turns standard output into events, one keeps whatever
 //! the CLI writes to standard error so that a failure can be reported with the
@@ -28,7 +35,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -72,6 +79,13 @@ const LEFTOVERS: Duration = Duration::from_millis(250);
 /// with the process, and a quit is not held up for as long as that runs.
 const LET_GO: Duration = Duration::from_millis(100);
 
+/// How long a line can wait on the CLI to read it before the session says so.
+///
+/// The CLI reads its standard input while a turn runs, so a line that has not
+/// gone in by then is waiting on a CLI that has stopped reading, not on one
+/// that is busy; saying so sooner would fire on a slow machine.
+const STALLED: Duration = Duration::from_secs(5);
+
 /// What the CLI is told when the operator refuses a call.
 ///
 /// The CLI hands it to the model as the refused call's result, where it is
@@ -101,6 +115,21 @@ type Waiting = Arc<Mutex<BTreeMap<String, (String, serde_json::Value)>>>;
 /// it reads the call as a tool that broke. Written before the answer goes out
 /// and drained before every line, which is what puts it there first.
 type Refusals = Arc<Mutex<Vec<ToolCallId>>>;
+
+/// The line being written to the CLI's standard input, what it is, and when
+/// the writing started; nothing while the writer is waiting for a line.
+///
+/// Written by the thread that writes and read by the drain, which is how a
+/// write the CLI is not reading becomes something the operator is told.
+type Writing = Arc<Mutex<Option<(Instant, &'static str)>>>;
+
+/// One line for the CLI's standard input, and what it is, for a report that
+/// it could not be sent.
+#[derive(Debug)]
+struct Line {
+    text: String,
+    what: &'static str,
+}
 
 /// How the CLI spells a mode, on the command line and over the control
 /// channel.
@@ -273,12 +302,23 @@ impl std::error::Error for SpawnError {
 #[derive(Debug)]
 pub struct Session {
     child: Child,
-    stdin: Option<ChildStdin>,
+    /// The queue the thread writing the CLI's standard input takes lines
+    /// from. Dropping it closes standard input once what is queued has gone
+    /// in, which is how the CLI is asked to leave.
+    stdin: Option<Sender<Line>>,
+    /// What the thread writing standard input could not send, as events.
+    unsent: Receiver<Event>,
+    writing: Writing,
+    /// When the write that was last said to be stalled started, so a stall is
+    /// said once rather than on every drain.
+    said_stalled: Option<Instant>,
     events: Receiver<Event>,
     waiting: Waiting,
     refusals: Refusals,
     stderr: Arc<Mutex<Tail>>,
-    readers: Vec<JoinHandle<()>>,
+    /// The threads reading standard output and standard error, in that
+    /// order, and the one writing standard input.
+    threads: Vec<JoinHandle<()>>,
     /// How many requests this side has made, which is what the next one is
     /// addressed by. The CLI numbers its own requests, so Niobe's carry a
     /// prefix of their own: two requests answered by the same id would have
@@ -297,6 +337,9 @@ pub struct Session {
     /// pipe keeps it: EOF does not come while that runs, so the end is not
     /// waited for there.
     exited: Option<Instant>,
+    /// How long a write waits before it is said to be stalled: [`STALLED`],
+    /// but for tests that cannot wait that long.
+    stalled_after: Duration,
 }
 
 impl Session {
@@ -388,25 +431,35 @@ impl Session {
         });
 
         let kept = Arc::new(Mutex::new(Tail::default()));
-        let writing = Arc::clone(&kept);
-        let errors = std::thread::spawn(move || read_tail(stderr, &writing));
+        let tail = Arc::clone(&kept);
+        let errors = std::thread::spawn(move || read_tail(stderr, &tail));
+
+        let (lines, queued) = mpsc::channel();
+        let (failures, unsent) = mpsc::channel();
+        let writing: Writing = Arc::new(Mutex::new(None));
+        let progress = Arc::clone(&writing);
+        let writer = std::thread::spawn(move || write_lines(stdin, &queued, &progress, &failures));
 
         let mut session = Self {
             child,
-            stdin: Some(stdin),
+            stdin: Some(lines),
+            unsent,
+            writing,
+            said_stalled: None,
             events,
             waiting,
             refusals,
             stderr: kept,
-            readers: vec![reader, errors],
+            threads: vec![reader, errors, writer],
             control_requests: 0,
             reported: false,
             output_closed: None,
             exited: None,
+            stalled_after: STALLED,
         };
-        // A CLI that cannot be written to has already left, and the next
-        // drain reports that in the CLI's own words; failing the spawn here
-        // would report it without them.
+        // The writer has only just been started, so the queue cannot be
+        // closed yet; a CLI that has already left is reported by the next
+        // drain, in its own words.
         let _ = session.initialize();
         Ok(session)
     }
@@ -429,27 +482,22 @@ impl Session {
     /// Sends one turn.
     ///
     /// The CLI reads turns as JSON lines on its standard input for as long as
-    /// the session lasts, so this is a write and a flush and nothing else: the
-    /// reply arrives through [`Session::drain`].
+    /// the session lasts, so this queues one line and nothing else: it never
+    /// waits on the CLI, and the reply — or word that the turn could not be
+    /// sent — arrives through [`Session::drain`].
     pub fn send(&mut self, prompt: &str) -> std::io::Result<()> {
-        let Some(stdin) = self.stdin.as_mut() else {
-            return Err(std::io::Error::other(
-                "the session has ended; its standard input is closed",
-            ));
-        };
         let line = serde_json::json!({
             "type": "user",
             "message": { "role": "user", "content": prompt },
         });
-        writeln!(stdin, "{line}")?;
-        stdin.flush()
+        self.queue(line.to_string(), "turn")
     }
 
     /// Answers a permission prompt the CLI is waiting on.
     ///
     /// The CLI stops the turn on a gated call and goes on the moment an answer
-    /// for its `request_id` arrives, so this is a write and a flush and
-    /// nothing else. An answer for a call the CLI is not waiting on is refused
+    /// for its `request_id` arrives, so this queues one line and nothing
+    /// else. An answer for a call the CLI is not waiting on is refused
     /// rather than written: the protocol would ignore it, and a session that
     /// silently dropped a decision would look as though the call had been
     /// allowed.
@@ -491,17 +539,10 @@ impl Session {
             refusals.push(id.clone());
         }
 
-        let Some(stdin) = self.stdin.as_mut() else {
-            return Err(std::io::Error::other(
-                "the session has ended; its standard input is closed",
-            ));
-        };
-        writeln!(
-            stdin,
-            "{}",
-            control_response(&request_id, &input, decision, message)
-        )?;
-        stdin.flush()
+        self.queue(
+            control_response(&request_id, &input, decision, message).to_string(),
+            "answer",
+        )
     }
 
     /// Asks the CLI to gate tool calls a different way, from now on.
@@ -533,15 +574,23 @@ impl Session {
         ))
     }
 
-    /// Writes one control request to the CLI's standard input.
+    /// Queues one control request for the CLI's standard input.
     fn ask(&mut self, request: &serde_json::Value) -> std::io::Result<()> {
-        let Some(stdin) = self.stdin.as_mut() else {
-            return Err(std::io::Error::other(
-                "the session has ended; its standard input is closed",
-            ));
+        self.queue(request.to_string(), "request")
+    }
+
+    /// Hands one line to the thread writing the CLI's standard input.
+    ///
+    /// Refused only where nothing can be written any more: the session has
+    /// ended, or a write has already failed and the writer has gone, which
+    /// the drain reports.
+    fn queue(&mut self, text: String, what: &'static str) -> std::io::Result<()> {
+        let closed =
+            || std::io::Error::other("the session has ended; its standard input is closed");
+        let Some(stdin) = self.stdin.as_ref() else {
+            return Err(closed());
         };
-        writeln!(stdin, "{request}")?;
-        stdin.flush()
+        stdin.send(Line { text, what }).map_err(|_| closed())
     }
 
     /// The id the next request this side makes is addressed by.
@@ -566,7 +615,8 @@ impl Session {
     /// One whose subprocess left while something it started holds its
     /// standard output open has that ended, and is reported like any other.
     pub fn drain(&mut self) -> Vec<Event> {
-        let mut events = Vec::new();
+        let mut events: Vec<Event> = self.unsent.try_iter().collect();
+        events.extend(self.stalled());
         loop {
             match self.events.try_recv() {
                 // Only a pipe held by something that left the CLI's group
@@ -588,6 +638,27 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Word that the line being written has waited on the CLI for longer
+    /// than [`Session::stalled_after`], once for each line that has.
+    ///
+    /// Not an end: the line stays queued and goes in when the CLI reads it,
+    /// or is reported unsent when the CLI leaves without reading it.
+    fn stalled(&mut self) -> Option<Event> {
+        let (since, what) = (*self.writing.lock().ok()?)?;
+        if self.reported || self.said_stalled == Some(since) || since.elapsed() < self.stalled_after
+        {
+            return None;
+        }
+        self.said_stalled = Some(since);
+        Some(Event::Error {
+            message: format!(
+                "the `claude` CLI has not read the {what} sent {}s ago; it goes in when the CLI reads it",
+                since.elapsed().as_secs()
+            ),
+            fatal: false,
+        })
     }
 
     /// The event a session's subprocess leaving produces, the once, or
@@ -701,7 +772,7 @@ impl Session {
     /// Whether standard error has been read to its end, which is when
     /// everything the CLI said is in [`Session::said`].
     fn heard_out(&self) -> bool {
-        self.readers.get(1).is_none_or(JoinHandle::is_finished)
+        self.threads.get(1).is_none_or(JoinHandle::is_finished)
     }
 
     /// The end of what the CLI has written to standard error so far, led by
@@ -712,6 +783,51 @@ impl Session {
             .map(|tail| tail.said())
             .unwrap_or_default()
     }
+}
+
+/// Writes each queued line to the CLI's standard input, in order, until the
+/// queue is closed or a write fails.
+///
+/// A failed write is reported, with how many lines were queued behind it,
+/// and ends the thread: the pipe does not reopen, and the session learns
+/// from the queue refusing its next line that nothing more can be sent.
+fn write_lines(
+    mut stdin: ChildStdin,
+    queued: &Receiver<Line>,
+    writing: &Mutex<Option<(Instant, &'static str)>>,
+    failures: &Sender<Event>,
+) {
+    for Line { mut text, what } in queued {
+        text.push('\n');
+        if let Ok(mut writing) = writing.lock() {
+            *writing = Some((Instant::now(), what));
+        }
+        let written = stdin
+            .write_all(text.as_bytes())
+            .and_then(|()| stdin.flush());
+        if let Ok(mut writing) = writing.lock() {
+            *writing = None;
+        }
+        if let Err(error) = written {
+            let behind = queued.try_iter().count();
+            let _ = failures.send(Event::Error {
+                message: not_sent(what, &error, behind),
+                fatal: false,
+            });
+            return;
+        }
+    }
+}
+
+/// What the operator is told about a line the CLI's standard input would not
+/// take, and the lines queued behind it that go with it.
+fn not_sent(what: &str, error: &std::io::Error, behind: usize) -> String {
+    let also = match behind {
+        0 => String::new(),
+        1 => ", nor could the one line queued after it".to_owned(),
+        n => format!(", nor could the {n} lines queued after it"),
+    };
+    format!("the {what} could not be sent to the `claude` session: {error}{also}")
 }
 
 /// The end of what the CLI has written to standard error, and how much it
@@ -936,6 +1052,8 @@ impl Drop for Session {
         // Closing standard input is how the CLI is asked to stop: it finishes
         // the turn it is on and writes its session out. Killing it first would
         // lose that, and the CLI's own transcript is what `--resume` reads.
+        // Dropping the queue closes it once what is queued has gone in; a
+        // CLI that is not reading keeps it open, and is killed below.
         self.stdin = None;
 
         let deadline = Instant::now() + GOODBYE;
@@ -957,16 +1075,18 @@ impl Drop for Session {
         end_group(self.child.id());
 
         // The threads end when their pipes close, which the group leaving
-        // does. Joined so that no thread outlives the session it reads, but
+        // does: the writer too, whose queue is closed and whose last write
+        // fails once nothing reads it. Joined so that no thread outlives the
+        // session it serves, but
         // never waited on without a bound: a pipe still held by something
         // outside the group would hold the quit up for as long as that runs.
         let until = Instant::now() + LET_GO;
-        for reader in self.readers.drain(..) {
-            while !reader.is_finished() && Instant::now() < until {
+        for thread in self.threads.drain(..) {
+            while !thread.is_finished() && Instant::now() < until {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            if reader.is_finished() {
-                let _ = reader.join();
+            if thread.is_finished() {
+                let _ = thread.join();
             }
         }
     }
@@ -1246,11 +1366,10 @@ mod tests {
         }
     }
 
-    /// Spawns a `claude` that is the shell script `body`, sends it a turn,
-    /// and drains it until it has said it ended. The session is returned with
-    /// what it said.
+    /// Starts a session on a `claude` that is the shell script `body`, and
+    /// hands it back untouched, with the directory the script is in.
     #[cfg(unix)]
-    fn stand_in(body: &str) -> (Session, Vec<Event>) {
+    fn started(body: &str) -> (Session, tempfile::TempDir) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("a scratch directory");
         let script = dir.path().join("claude");
@@ -1261,7 +1380,15 @@ mod tests {
         let mut options = options();
         options.binary = script;
         options.cwd = dir.path().to_path_buf();
-        let mut session = spawn_written(&options);
+        (spawn_written(&options), dir)
+    }
+
+    /// Spawns a `claude` that is the shell script `body`, sends it a turn,
+    /// and drains it until it has said it ended. The session is returned with
+    /// what it said.
+    #[cfg(unix)]
+    fn stand_in(body: &str) -> (Session, Vec<Event>) {
+        let (mut session, _dir) = started(body);
         // A stand-in that has already left cannot take the turn, and that is
         // reported by the drain rather than here.
         let _ = session.send("list the files");
@@ -1399,6 +1526,92 @@ mod tests {
                 .lock()
                 .expect("nothing panicked holding it")
                 .is_empty()
+        );
+    }
+
+    /// More than a pipe holds, so a CLI that is not reading cannot take it
+    /// all: a pasted log, say.
+    #[cfg(unix)]
+    fn a_long_paste() -> String {
+        "a pasted log line\n".repeat(64 * 1024)
+    }
+
+    /// Drains `session` until one of its events is `wanted`, and returns them
+    /// all.
+    #[cfg(unix)]
+    fn drained_until(session: &mut Session, wanted: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !events.iter().any(&wanted) {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "it never came: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        events
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_is_not_reading_does_not_hold_up_whoever_writes_to_it() {
+        let (mut session, _dir) = started("exec sleep 30\n");
+
+        let started = Instant::now();
+        session.send(&a_long_paste()).expect("the turn is queued");
+        session.set_mode(Mode::Plan).expect("the request is queued");
+        session.set_model("haiku").expect("the request is queued");
+        let took = started.elapsed();
+
+        assert!(took < Duration::from_millis(100), "writing took {took:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_the_cli_does_not_read_in_time_is_said_to_be_waiting() {
+        let (mut session, _dir) = started("exec sleep 30\n");
+        session.stalled_after = Duration::from_millis(200);
+
+        session.send(&a_long_paste()).expect("the turn is queued");
+        let events = drained_until(&mut session, |event| {
+            matches!(event, Event::Error { fatal: false, .. })
+        });
+
+        let said = events
+            .iter()
+            .filter(|event| matches!(event, Event::Error { .. }))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(said.as_slice(), [Event::Error { message, fatal: false }]
+                if message.contains("has not read the turn")),
+            "{events:#?}"
+        );
+        let later = session.drain();
+        assert!(
+            !later
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "a stall is said once: {later:#?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_the_cli_leaves_without_reading_is_reported_as_not_sent() {
+        let (mut session, _dir) = started("exec sleep 1\n");
+
+        session.send(&a_long_paste()).expect("the turn is queued");
+        let events = drained_until(
+            &mut session,
+            |event| matches!(event, Event::Error { message, .. } if message.contains("could not be sent")),
+        );
+
+        assert!(
+            events.iter().any(|event| matches!(event,
+                Event::Error { message, fatal: false }
+                    if message.starts_with("the turn could not be sent to the `claude` session"))),
+            "{events:#?}"
         );
     }
 
