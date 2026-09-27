@@ -362,19 +362,32 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
 /// types; the longer is four times it.
 const TYPED_LINE: usize = 5_000;
 
+/// How many times each line is typed. The fastest of them is the one compared.
+const TYPINGS: usize = 11;
+
 /// Keys the terminal hands over in one read — a paste it did not bracket —
 /// go into the composer as one insert. The composer's editor lays its whole
 /// text out again after every edit, so the same line put in a key at a time
 /// costs its length once per key: 10 000 characters took 1.4 s that way.
 /// Four times the line has to take about four times as long, not sixteen.
+///
+/// The fastest typing of each line is compared rather than the median: load
+/// on the machine only ever adds time, so the fastest is the one it touched
+/// least. The two lines are typed in turn, so a burst of load falls on both.
+/// With every core of an M2 Pro kept busy, the median of five put the ratio
+/// anywhere up to 18; the fastest of eleven kept it between 3.9 and 6.
 #[test]
 fn keys_read_together_type_a_long_line_in_time_linear_in_its_length() {
     let _alone = ALONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let short = median_typing(TYPED_LINE);
-    let long = median_typing(4 * TYPED_LINE);
+    let (short, long) = (0..TYPINGS).fold((Duration::MAX, Duration::MAX), |(short, long), _| {
+        (
+            short.min(typing(TYPED_LINE)),
+            long.min(typing(4 * TYPED_LINE)),
+        )
+    });
 
     let ratio = long.as_secs_f64() / short.as_secs_f64().max(f64::EPSILON);
     assert!(
@@ -417,41 +430,35 @@ fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
     );
 }
 
-/// The median time a line of `length` characters takes to type into the
-/// composer, read from the terminal all at once.
-fn median_typing(length: usize) -> Duration {
+/// How long a line of `length` characters takes to type into the composer,
+/// read from the terminal all at once.
+fn typing(length: usize) -> Duration {
     let keys: Vec<KeyEvent> = typed_line(length)
         .chars()
         .map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
         .collect();
-    let mut times: Vec<Duration> = (0..5)
-        .map(|_| {
-            let mut app = running_session();
-            // Drawn once, so the composer knows its width and wraps what is
-            // typed into it, as it does in a session.
-            let _ = screen(&mut app, 200, 60);
-            let started = Instant::now();
-            app.on_keys_read(
-                &keys,
-                Arrival {
-                    at: started,
-                    alone: false,
-                },
-            );
-            let took = started.elapsed();
-            assert_eq!(
-                app.composer()
-                    .lines()
-                    .first()
-                    .map(|line| line.chars().count()),
-                Some(length),
-                "the line did not reach the composer whole"
-            );
-            took
-        })
-        .collect();
-    times.sort_unstable();
-    times[2]
+    let mut app = running_session();
+    // Drawn once, so the composer knows its width and wraps what is typed
+    // into it, as it does in a session.
+    let _ = screen(&mut app, 200, 60);
+    let started = Instant::now();
+    app.on_keys_read(
+        &keys,
+        Arrival {
+            at: started,
+            alone: false,
+        },
+    );
+    let took = started.elapsed();
+    assert_eq!(
+        app.composer()
+            .lines()
+            .first()
+            .map(|line| line.chars().count()),
+        Some(length),
+        "the line did not reach the composer whole"
+    );
+    took
 }
 
 /// Prose of `length` characters on one line: words of six letters.
