@@ -23,6 +23,11 @@
 //! off part-way is not. Those leave a run that happened and whose result was
 //! not read, never a total of the suites that happened to survive the filter.
 //!
+//! A quiet run, `cargo test -q`, is a test run whose counts are never read:
+//! it prints no line saying where the build ended, so its whole output and
+//! the last part of it look the same. Colour codes cargo puts around its
+//! status words are read past.
+//!
 //! Nor does the output say when the run is over: `cargo test` prints nothing
 //! after its last binary, so a run killed between two binaries reads as a
 //! whole run of fewer. What says it finished is the status it exited with,
@@ -103,10 +108,13 @@ where
 /// that `&&`, `||`, `&`, `;`, `|`, a newline or a subshell's parentheses
 /// separate. A redirection — `2>&1`, `&> log`, `>| log` — is part of the
 /// command it redirects, not a separator.
-/// One of them has to be `cargo test` or `cargo +<toolchain> test`, after any
-/// `NAME=value` assignments and the wrappers `env`, `time` and `nice` that
-/// change nothing about what is printed. A `cargo test` that builds the tests
-/// and runs none — `--no-run`, `--help`, `-- --list` — is not a test run.
+/// One of them has to be `cargo test`, or its alias `cargo t`, after any
+/// `NAME=value` assignments and the wrappers `env`, `time`, `nice`, `timeout`
+/// and `sudo` with their own options, which change nothing about what is
+/// printed; cargo may be given a `+<toolchain>` and its own options before
+/// the subcommand (`cargo -q --locked test`). A `cargo test` that builds the
+/// tests and runs none — `--no-run`, `--help`, `-- --list` — is not a test
+/// run.
 ///
 /// It does not look inside a quoted string, so neither `echo "cargo test"` nor
 /// `git commit -m "fix; cargo test passes"` is one; nor inside a `$(…)` or
@@ -200,23 +208,89 @@ fn separates(bytes: &[u8], at: usize) -> bool {
     }
 }
 
-fn runs_cargo_test<'a>(mut words: impl Iterator<Item = &'a str>) -> bool {
-    let mut word = words.next();
-    while let Some(w) = word
-        && (is_assignment(w) || matches!(w, "env" | "time" | "nice"))
-    {
-        word = words.next();
+fn runs_cargo_test<'a>(words: impl Iterator<Item = &'a str>) -> bool {
+    let mut words = words.peekable();
+    loop {
+        match words.next() {
+            Some(word) if is_assignment(word) => {}
+            Some(word) => match Wrapper::named(word) {
+                Some(wrapper) => {
+                    if !wrapper.skip_its_own(&mut words) {
+                        return false;
+                    }
+                }
+                None if word == "cargo" => break,
+                None => return false,
+            },
+            None => return false,
+        }
     }
-    if word != Some("cargo") {
+    let _toolchain = words.next_if(|word| word.starts_with('+'));
+    if !skip_options(&mut words, CARGO_TAKES_A_VALUE) {
         return false;
     }
-    let mut word = words.next();
-    if let Some(toolchain) = word
-        && toolchain.starts_with('+')
-    {
-        word = words.next();
+    matches!(words.next(), Some("test" | "t"))
+        && words.all(|w| !matches!(w, "--no-run" | "--help" | "-h" | "--list"))
+}
+
+/// The options cargo takes before its subcommand that are followed by a
+/// value: `--color always`, `--config net.offline=true`, `-Z <flag>`,
+/// `-C <dir>`.
+const CARGO_TAKES_A_VALUE: &[&str] = &["--color", "--config", "-Z", "-C"];
+
+/// A command that runs the command after it with its output and its status
+/// left as they are, so that what it runs is what is read.
+#[derive(Debug, Clone, Copy)]
+struct Wrapper {
+    /// Its options that are followed by a value.
+    takes_a_value: &'static [&'static str],
+    /// The words it takes after its options and before the command, as
+    /// `timeout` takes its duration.
+    operands: usize,
+}
+
+impl Wrapper {
+    fn named(word: &str) -> Option<Wrapper> {
+        let (takes_a_value, operands): (&'static [&'static str], usize) = match word {
+            "env" => (&["-u", "--unset", "-C", "--chdir"], 0),
+            "time" => (&["-f", "--format", "-o", "--output"], 0),
+            "nice" => (&["-n", "--adjustment"], 0),
+            "timeout" => (&["-s", "--signal", "-k", "--kill-after"], 1),
+            "sudo" => (&["-u", "--user", "-g", "--group"], 0),
+            _ => return None,
+        };
+        Some(Wrapper {
+            takes_a_value,
+            operands,
+        })
     }
-    word == Some("test") && words.all(|w| !matches!(w, "--no-run" | "--help" | "-h" | "--list"))
+
+    /// Moves `words` past this wrapper's options and operands, or says there
+    /// was nothing after them.
+    fn skip_its_own<'a>(
+        self,
+        words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    ) -> bool {
+        if !skip_options(words, self.takes_a_value) {
+            return false;
+        }
+        (0..self.operands).all(|_| words.next().is_some()) && words.peek().is_some()
+    }
+}
+
+/// Moves `words` past the options at their head — each a word that starts
+/// with `-`, and the value after one of `takes_a_value` — or says a value
+/// was missing.
+fn skip_options<'a>(
+    words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    takes_a_value: &[&str],
+) -> bool {
+    while let Some(option) = words.next_if(|word| word.starts_with('-')) {
+        if takes_a_value.contains(&option) && words.next().is_none() {
+            return false;
+        }
+    }
+    true
 }
 
 /// `NAME=value`, where the name is one a shell would take as a variable.
@@ -243,7 +317,7 @@ fn is_assignment(word: &str) -> bool {
 /// `output` is what the command printed, with its standard error in it: the
 /// headers that say which binary is running are written there.
 pub fn counts(output: &str, exit_code: Option<i32>) -> Option<TestCounts> {
-    let counts = whole_run(output)?;
+    let counts = whole_run(&uncoloured(output))?;
     match (exit_code, counts.failing()) {
         (Some(0), false) | (Some(FAILED_STATUS), true) => Some(counts),
         _ => None,
@@ -264,7 +338,9 @@ pub fn counts(output: &str, exit_code: Option<i32>) -> Option<TestCounts> {
 /// status of `cargo test && cargo clippy` may be clippy's, which also exits
 /// `101`. Nothing here says how many tests failed, or which.
 pub fn failed(command: &str, output: &str, exit_code: Option<i32>) -> bool {
-    exit_code == Some(FAILED_STATUS) && ends_in_cargo_test(command) && tests_started(output)
+    exit_code == Some(FAILED_STATUS)
+        && ends_in_cargo_test(command)
+        && tests_started(&uncoloured(output))
 }
 
 /// The tests each failing binary in `output` named, in the order they ran,
@@ -286,6 +362,7 @@ pub fn failed(command: &str, output: &str, exit_code: Option<i32>) -> bool {
 /// in it says how many tests the run as a whole ran or failed, nor that no
 /// other binary failed: one whose list was lost is not in it.
 pub fn failures(output: &str) -> Vec<FailedTests> {
+    let output = uncoloured(output);
     let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
     (0..lines.len())
         .filter_map(|at| failures_closed_at(&lines, at))
@@ -352,10 +429,15 @@ fn ends_in_cargo_test(command: &str) -> bool {
         .is_some_and(|simple| runs_cargo_test(simple.split_whitespace()))
 }
 
-/// Whether an output shows a build finishing and a test binary starting after
-/// it, and no crate failing to compile.
+/// Whether an output shows a build finishing and a test binary starting to
+/// run its tests after it, and no crate failing to compile.
+///
+/// A binary has started its tests once it says how many it is running. One
+/// that stops between its header and that line refused what it was asked to
+/// run — a flag only a nightly harness takes — and ran no test.
 fn tests_started(output: &str) -> bool {
     let mut built = false;
+    let mut headed = false;
     let mut started = false;
     for line in output.lines() {
         if line.trim_start().starts_with("error: could not compile ") {
@@ -363,11 +445,39 @@ fn tests_started(output: &str) -> bool {
         }
         match Line::of(line) {
             Line::Finished => built = true,
-            Line::Header => started |= built,
-            Line::Running(_) | Line::Result(_) | Line::Other => {}
+            Line::Header => headed = built,
+            Line::Running(_) => started |= headed,
+            Line::Result(_) | Line::Other => {}
         }
     }
     started
+}
+
+/// `output` without the colour codes cargo writes around its status words
+/// when told to colour what it prints, as `CARGO_TERM_COLOR=always` does.
+///
+/// Every escape sequence of the `ESC [ … <final byte>` form is removed, which
+/// is the form colour takes; nothing else is changed.
+fn uncoloured(output: &str) -> std::borrow::Cow<'_, str> {
+    if !output.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(output);
+    }
+    let mut plain = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.next_if_eq(&'[').is_some() {
+            // Parameters and intermediates run up to the final byte, which
+            // is in `@`..=`~`.
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+            continue;
+        }
+        plain.push(c);
+    }
+    std::borrow::Cow::Owned(plain)
 }
 
 /// The counts in an output that holds a whole run, however it ended.
@@ -812,6 +922,22 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "echo 'a;b' && cargo test",
             "git commit -m \"$(cat msg)\" && cargo test",
             "echo \\\"; cargo test",
+            "cargo t",
+            "cargo t -p niobe-core",
+            "cargo -q test",
+            "cargo --locked test",
+            "cargo --color always test",
+            "cargo --color=always --offline test",
+            "cargo +nightly -Z unstable-options test",
+            "cargo --config net.offline=true test",
+            "timeout 600 cargo test",
+            "timeout -k 5 -s INT 10m cargo test",
+            "env -u RUSTFLAGS cargo test",
+            "env -i PATH=/bin cargo test",
+            "sudo cargo test",
+            "sudo -u ci cargo test",
+            "nice -n 10 cargo test",
+            "time -p cargo test",
         ] {
             assert!(is_test_run(command), "{command:?} runs the tests");
         }
@@ -843,6 +969,15 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "cargo nextest run",
             "pytest",
             "",
+            "cargo t --no-run",
+            "cargo tree",
+            "cargo -q build",
+            "cargo --color test",
+            "timeout 600 cargo build",
+            "timeout 600",
+            "env -u cargo test",
+            "sudo -u cargo test",
+            "nice -n cargo test",
         ] {
             assert!(!is_test_run(command), "{command:?} runs no tests");
         }
@@ -856,6 +991,85 @@ error: could not compile `demo` (lib test) due to 1 previous error
             .split_once("test tests::adds ... ok")
             .expect("the recording has a passing test");
         format!("{head}test tests::add\n\n... [20014 characters truncated] ...\n\nsult: ok. 1 pas")
+    }
+
+    // Recorded from `cargo test -q` 1.91 on a crate with two unit tests and
+    // no doc-test.
+    const QUIET: &str = "
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+";
+
+    /// A quiet run prints no line saying where the build ended, which is
+    /// what tells an output that holds the whole run from the last part of
+    /// one; its counts are not read.
+    #[test]
+    fn a_quiet_run_is_a_test_run_whose_counts_are_not_read() {
+        assert!(is_test_run("cargo test -q"));
+        assert!(is_test_run("cargo -q test"));
+        assert_eq!(counts(QUIET, Some(0)), None);
+    }
+
+    // The same crate under `CARGO_TERM_COLOR=always`: cargo's own status
+    // words arrive wrapped in colour codes.
+    const COLOURED: &str = "\x1b[1m\x1b[92m   Compiling\x1b[0m demo v0.1.0 (/work/demo)
+\x1b[1m\x1b[92m    Finished\x1b[0m `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+\x1b[1m\x1b[92m     Running\x1b[0m unittests src/lib.rs (target/debug/deps/demo-760e00b68511d171)
+
+running 2 tests
+test tests::b ... ok
+test tests::a ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+\x1b[1m\x1b[92m   Doc-tests\x1b[0m demo
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+";
+
+    #[test]
+    fn a_coloured_run_is_read_as_the_same_run_uncoloured() {
+        assert!(is_test_run("CARGO_TERM_COLOR=always cargo test"));
+        assert_eq!(counts(COLOURED, Some(0)), counted(2, 0, 0, 2));
+    }
+
+    #[test]
+    fn a_coloured_failing_runs_list_is_named_as_its_binarys() {
+        let coloured = FAILED.replace(
+            "error: test failed",
+            "\x1b[1m\x1b[91merror\x1b[0m: test failed",
+        );
+        let named = failures(&coloured);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!(named[0].binary, "--lib");
+    }
+
+    // Recorded from `cargo test -- -Z unstable-options --format json` on a
+    // stable 1.91: the binary refuses the flag before it runs a test, and
+    // cargo exits as it does for a failed test.
+    const REFUSED_FLAG: &str =
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/demo-760e00b68511d171)
+error: the option `Z` is only accepted on the nightly compiler
+error: test failed, to rerun pass `--lib`
+";
+
+    #[test]
+    fn a_binary_that_refused_its_flags_ran_no_tests_and_did_not_fail() {
+        let command = "cargo test -- -Z unstable-options --format json";
+        assert!(is_test_run(command));
+        assert_eq!(counts(REFUSED_FLAG, Some(101)), None);
+        assert!(!failed(command, REFUSED_FLAG, Some(101)));
     }
 
     #[test]
