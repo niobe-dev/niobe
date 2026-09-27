@@ -111,14 +111,44 @@ impl Drop for Watcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::ExitStatus;
     use std::time::{Duration, Instant};
+
+    /// How long a test waits for something the reaper does. A `sh` takes a
+    /// tenth of a second or more to start on an idle Mac and seconds on a
+    /// loaded one, and the reaper starts one and forks a `sleep` before its
+    /// SIGKILL, so a budget of a few seconds measures the machine rather than
+    /// the reaper. Waiting returns as soon as the thing has happened.
+    const PATIENCE: Duration = Duration::from_secs(20);
 
     /// A process leading a group of its own, as a `!` command is.
     fn group() -> Child {
         let mut sleep = Command::new("sleep");
-        sleep.arg("30");
-        std::os::unix::process::CommandExt::process_group(&mut sleep, 0);
+        sleep.arg("30").process_group(0);
         sleep.spawn().expect("sleep starts")
+    }
+
+    /// A group of one process that ignores SIGTERM, returned once it has said
+    /// the trap is in place: a SIGTERM that arrives before the trap ends it,
+    /// and no fixed wait is long enough for `sh` to start on a loaded machine.
+    /// It then execs `sleep`, which keeps the ignored signal, so that nothing
+    /// is left in the group to exit on its own when `sleep` is killed: the
+    /// group is signalled one process at a time, and a `sh` could see its
+    /// child killed and exit with 128 + 9 before its own turn came.
+    fn group_ignoring_term() -> Child {
+        let mut sh = Command::new("sh");
+        sh.args(["-c", "trap '' TERM; echo trapped; exec sleep 30"])
+            .stdout(Stdio::piped())
+            .process_group(0);
+        let mut ignoring = sh.spawn().expect("sh starts");
+        let mut said = String::new();
+        BufReader::new(ignoring.stdout.take().expect("its output is piped"))
+            .read_line(&mut said)
+            .expect("sh says the trap is in place");
+        assert_eq!(said, "trapped\n");
+        ignoring
     }
 
     /// The session going the way SIGKILL takes it: the pipe closes, and the
@@ -128,19 +158,35 @@ mod tests {
         watcher.told = None;
     }
 
-    fn ended_within(child: &mut Child, patience: Duration) -> bool {
+    /// Whether the reaper's `sh` has exited, which it does only once it has
+    /// sent every signal it is going to.
+    fn reaper_ended_within(reaper: &Reaper, patience: Duration) -> bool {
         let until = Instant::now() + patience;
         while Instant::now() < until {
-            if child
+            let mut watcher = reaper.0.lock().expect("nothing else holds the reaper");
+            if watcher
+                .sh
                 .try_wait()
-                .expect("the child can be waited on")
+                .expect("sh can be waited on")
                 .is_some()
             {
                 return true;
             }
+            drop(watcher);
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    fn ended_within(child: &mut Child, patience: Duration) -> Option<ExitStatus> {
+        let until = Instant::now() + patience;
+        while Instant::now() < until {
+            if let Some(status) = child.try_wait().expect("the child can be waited on") {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
     }
 
     #[test]
@@ -152,7 +198,7 @@ mod tests {
         session_killed(&reaper);
 
         assert!(
-            ended_within(&mut started, Duration::from_secs(2)),
+            ended_within(&mut started, PATIENCE).is_some(),
             "the group outlived the session"
         );
     }
@@ -160,18 +206,17 @@ mod tests {
     #[test]
     fn a_group_that_will_not_end_when_asked_is_killed_a_second_later() {
         let reaper = Reaper::start().expect("sh starts");
-        let mut sh = Command::new("sh");
-        sh.args(["-c", "trap '' TERM; sleep 30"]);
-        std::os::unix::process::CommandExt::process_group(&mut sh, 0);
-        let mut ignoring = sh.spawn().expect("sh starts");
+        let mut ignoring = group_ignoring_term();
         reaper.watch(ignoring.id());
-        std::thread::sleep(Duration::from_millis(100));
 
         session_killed(&reaper);
 
-        assert!(
-            ended_within(&mut ignoring, Duration::from_secs(3)),
-            "a group that ignores SIGTERM outlived the session"
+        let status = ended_within(&mut ignoring, PATIENCE)
+            .expect("a group that ignores SIGTERM outlived the session");
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "the group ended on something other than SIGKILL: {status:?}"
         );
     }
 
@@ -186,9 +231,13 @@ mod tests {
 
         session_killed(&reaper);
 
-        assert!(ended_within(&mut watched, Duration::from_secs(2)));
+        assert!(ended_within(&mut watched, PATIENCE).is_some());
         assert!(
-            !ended_within(&mut forgotten, Duration::from_millis(1500)),
+            reaper_ended_within(&reaper, PATIENCE),
+            "the reaper never ended"
+        );
+        assert!(
+            ended_within(&mut forgotten, Duration::from_millis(500)).is_none(),
             "a group taken off the list was signalled"
         );
         let _ = forgotten.kill();
@@ -204,7 +253,7 @@ mod tests {
         drop(reaper);
 
         assert!(
-            !ended_within(&mut started, Duration::from_millis(1500)),
+            ended_within(&mut started, Duration::from_millis(1500)).is_none(),
             "the reaper signalled a group the session was left to stop"
         );
         let _ = started.kill();
