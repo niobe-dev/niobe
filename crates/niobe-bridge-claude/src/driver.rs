@@ -1446,18 +1446,30 @@ mod tests {
     /// Something that left the CLI's group cannot be ended with it, so its
     /// hold on the CLI's output is not waited out: the end is reported in the
     /// CLI's words, after what the CLI wrote before it, and nothing else.
+    ///
+    /// The wait is timed from the stand-in's last instruction rather than
+    /// from the spawn: starting a freshly written script takes seconds on a
+    /// loaded machine, and that is not the driver's to answer for. On an idle
+    /// machine the end is reported 510–520 ms after it, which is [`GOODBYE`]
+    /// and the drain's polling; the bound leaves room for a loaded one while
+    /// still failing a driver that waits on the detached process.
     #[cfg(unix)]
     #[test]
     fn a_cli_that_dies_while_something_outside_its_group_holds_its_output_is_reported_ended() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let pid = dir.path().join("detached.pid");
+        let gone = dir.path().join("gone");
         let reply = r#"{"type":"assistant","message":{"model":"claude-opus-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"replied first"}]}}"#;
-        let started = Instant::now();
         let (session, events) = stand_in(&format!(
-            "perl -e 'setpgrp(0, 0); open(my $f, \">\", $ARGV[0]); print $f $$; close($f); exec \"sleep\", \"77104\"' '{pid}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nprintf '%s\\n' '{reply}'\necho 'fell over' >&2\nexit 1\n",
-            pid = pid.display()
+            "perl -e 'setpgrp(0, 0); open(my $f, \">\", $ARGV[0]); print $f $$; close($f); exec \"sleep\", \"77104\"' '{pid}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nprintf '%s\\n' '{reply}'\necho 'fell over' >&2\ntouch '{gone}'\nexit 1\n",
+            pid = pid.display(),
+            gone = gone.display()
         ));
-        let took = started.elapsed();
+        let took = std::fs::metadata(&gone)
+            .and_then(|written| written.modified())
+            .ok()
+            .and_then(|left| std::time::SystemTime::now().duration_since(left).ok())
+            .expect("the stand-in marked its last instruction before it left");
         if let Some(detached) = std::fs::read_to_string(&pid)
             .ok()
             .and_then(|written| written.trim().parse().ok())
@@ -1467,7 +1479,10 @@ mod tests {
         }
         drop(session);
 
-        assert!(took < Duration::from_secs(10), "the end took {took:?}");
+        assert!(
+            took < Duration::from_secs(2),
+            "the end was reported {took:?} after the CLI left"
+        );
         assert!(
             events.iter().any(
                 |event| matches!(event, Event::AssistantMessage { text, .. } if text == "replied first")
