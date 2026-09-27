@@ -15,20 +15,43 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// One place the query was found: its line in the whole transcript, and the
-/// characters of that line it covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// characters of that line it covers — and where the pane wrapped the phrase
+/// it matched, the lines after that it runs on to.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Found {
-    /// The wrapped transcript line, counted from the first.
+    /// The wrapped transcript line the match starts on, counted from the
+    /// first.
     pub(crate) line: usize,
     /// The first character of the match, counted in characters of the line.
     pub(crate) start: usize,
-    /// How many characters the match covers.
+    /// How many characters of that line the match covers.
     pub(crate) len: usize,
+    /// The rest of a match the pane wrapped, one `(line, start, len)` per
+    /// line it runs on to, in order. Empty for a match on one line.
+    pub(crate) more: Vec<(usize, usize, usize)>,
+}
+
+impl Found {
+    /// Every line the match covers part of, as `(line, start, len)`.
+    pub(crate) fn parts(&self) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
+        std::iter::once((self.line, self.start, self.len)).chain(self.more.iter().copied())
+    }
+
+    /// The last line the match covers part of.
+    pub(crate) fn last_line(&self) -> usize {
+        self.more.last().map_or(self.line, |(line, _, _)| *line)
+    }
 }
 
 /// A query, ready to be compared against lines.
+///
+/// A run of whitespace in it is one space, and matches any run of whitespace
+/// in the transcript — including the break where the pane wrapped a line and
+/// the indent the next one starts with, so a phrase is found wherever it was
+/// cut.
 #[derive(Debug)]
 pub(crate) struct Query {
     chars: Vec<char>,
@@ -39,36 +62,113 @@ impl Query {
     /// The query, or `None` for one with nothing in it, which finds nothing.
     pub(crate) fn new(query: &str) -> Option<Self> {
         let exact = query.chars().any(char::is_uppercase);
-        let chars: Vec<char> = query.chars().map(|c| fold(c, exact)).collect();
+        let mut chars: Vec<char> = Vec::new();
+        for c in query.chars().map(|c| fold(c, exact)) {
+            let space = c.is_whitespace();
+            if !(space && chars.last().is_some_and(|last| last.is_whitespace())) {
+                chars.push(if space { ' ' } else { c });
+            }
+        }
         (!chars.is_empty()).then_some(Self { chars, exact })
     }
 
-    /// Every place the query is in `line`, left to right and not overlapping,
-    /// found on line `at` of the transcript.
-    pub(crate) fn in_line(&self, line: &Line<'_>, at: usize) -> Vec<Found> {
-        let text: Vec<char> = line
-            .spans
-            .iter()
-            .flat_map(|span| span.content.chars())
-            .map(|c| fold(c, self.exact))
-            .collect();
-        let len = self.chars.len();
+    /// Every place the query is in `lines` — one transcript entry's lines as
+    /// drawn, the first of them line `first` of the transcript — top to
+    /// bottom and not overlapping.
+    ///
+    /// The lines are read as one text with a space between each, so a match
+    /// can run from one line on to the next. Lines of different entries are
+    /// never joined.
+    pub(crate) fn in_lines(&self, lines: &[Line<'_>], first: usize) -> Vec<Found> {
+        let mut text: Vec<(char, Option<(usize, usize)>)> = Vec::new();
+        for (row, line) in lines.iter().enumerate() {
+            if row > 0 {
+                text.push((' ', None));
+            }
+            let chars = line.spans.iter().flat_map(|span| span.content.chars());
+            for (column, c) in chars.enumerate() {
+                text.push((fold(c, self.exact), Some((first + row, column))));
+            }
+        }
         let mut found = Vec::new();
-        let mut start = 0;
-        while start + len <= text.len() {
-            if text.get(start..start + len) == Some(self.chars.as_slice()) {
-                found.push(Found {
-                    line: at,
-                    start,
-                    len,
+        let mut at = 0;
+        while at < text.len() {
+            match self.matches_at(&text, at).and_then(|end| {
+                let located = text.get(at..end)?.iter().filter_map(|(c, place)| {
+                    let (line, column) = (*place)?;
+                    Some((line, column, c.is_whitespace()))
                 });
-                start += len;
-            } else {
-                start += 1;
+                Some((end, parts(located)?))
+            }) {
+                Some((end, parts)) => {
+                    found.push(parts);
+                    at = end;
+                }
+                None => at += 1,
             }
         }
         found
     }
+
+    /// Where a match that starts at `at` in `text` ends, if one does.
+    fn matches_at(&self, text: &[(char, Option<(usize, usize)>)], at: usize) -> Option<usize> {
+        let mut here = at;
+        for want in &self.chars {
+            let (c, _) = text.get(here)?;
+            match want {
+                ' ' => {
+                    if !c.is_whitespace() {
+                        return None;
+                    }
+                    while text.get(here).is_some_and(|(c, _)| c.is_whitespace()) {
+                        here += 1;
+                    }
+                }
+                _ if c == want => here += 1,
+                _ => return None,
+            }
+        }
+        Some(here)
+    }
+}
+
+/// A match, from the places of the characters it covers, in order, each
+/// with whether it is whitespace: one part per line. Where a match runs on
+/// to another line, the whitespace either side of the break — the end of one
+/// line and the indent of the next — is the space between two words rather
+/// than something found, and is not marked. `None` where the match covers no
+/// character of a line at all.
+fn parts(places: impl Iterator<Item = (usize, usize, bool)>) -> Option<Found> {
+    let mut lines: Vec<(usize, Vec<(usize, bool)>)> = Vec::new();
+    for (line, column, space) in places {
+        match lines.last_mut() {
+            Some((last, columns)) if *last == line => columns.push((column, space)),
+            _ => lines.push((line, vec![(column, space)])),
+        }
+    }
+    let last = lines.len().checked_sub(1)?;
+    let mut kept = lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (line, columns))| {
+            let words = |(_, space): &&(usize, bool)| !*space;
+            let from = match index {
+                0 => columns.first(),
+                _ => columns.iter().find(words),
+            }?;
+            let to = match index == last {
+                true => columns.last(),
+                false => columns.iter().rev().find(words),
+            }?;
+            Some((line, from.0, to.0 + 1 - from.0))
+        });
+    let (line, start, len) = kept.next()?;
+    Some(Found {
+        line,
+        start,
+        len,
+        more: kept.collect(),
+    })
 }
 
 /// A character as a comparison sees it.
@@ -101,14 +201,17 @@ pub(crate) fn highlight(line: Line<'static>, marks: &[(usize, usize, Style)]) ->
     for span in &line.spans {
         let mut run = String::new();
         let mut run_style = span.style;
-        for c in span.content.chars() {
+        // By what is drawn as one character rather than by code point: an
+        // accent that combines with its letter split into a span of its own
+        // would be dropped by the terminal.
+        for grapheme in span.content.graphemes(true) {
             let style = mark_at(at).map_or(span.style, |mark| span.style.patch(mark));
             if style != run_style && !run.is_empty() {
                 spans.push(Span::styled(std::mem::take(&mut run), run_style));
             }
             run_style = style;
-            run.push(c);
-            at += 1;
+            run.push_str(grapheme);
+            at += grapheme.chars().count();
         }
         if !run.is_empty() {
             spans.push(Span::styled(run, run_style));
@@ -126,7 +229,7 @@ mod tests {
     fn found(query: &str, line: &str) -> Vec<(usize, usize)> {
         Query::new(query)
             .expect("the query has something in it")
-            .in_line(&Line::from(line.to_owned()), 0)
+            .in_lines(&[Line::from(line.to_owned())], 0)
             .into_iter()
             .map(|found| (found.start, found.len))
             .collect()
@@ -142,6 +245,54 @@ mod tests {
     fn matches_do_not_overlap_and_are_counted_in_characters() {
         assert_eq!(found("aa", "aaaa"), vec![(0, 2), (2, 2)]);
         assert_eq!(found("é", "café é"), vec![(3, 1), (5, 1)]);
+    }
+
+    /// Where the query's parts are in `lines`, one entry's lines as drawn.
+    fn found_in(query: &str, lines: &[&str]) -> Vec<Vec<(usize, usize, usize)>> {
+        let lines: Vec<Line<'static>> = lines
+            .iter()
+            .map(|line| Line::from((*line).to_owned()))
+            .collect();
+        Query::new(query)
+            .expect("the query has something in it")
+            .in_lines(&lines, 10)
+            .into_iter()
+            .map(|found| found.parts().collect())
+            .collect()
+    }
+
+    /// A phrase the pane wrapped is found where it was cut: the line break
+    /// and the indent the next line starts with are the space between two
+    /// words.
+    #[test]
+    fn a_phrase_wrapped_across_two_lines_is_found_as_one_match() {
+        assert_eq!(
+            found_in("zebra quokka", &["  a zebra", "  quokka b"]),
+            vec![vec![(10, 4, 5), (11, 2, 6)]]
+        );
+        assert_eq!(
+            found_in("zebra quokka", &["  a zebra quokka"]),
+            vec![vec![(10, 4, 12)]]
+        );
+        assert!(found_in("zebra quokka", &["a zebra", "• quokka"]).is_empty());
+    }
+
+    /// Drawn with a combining accent, a letter is one cell and the accent
+    /// rides on it: marking the letter keeps the accent with it rather than
+    /// leaving it in a span of its own, which the terminal drops.
+    #[test]
+    fn a_mark_keeps_a_combining_accent_with_its_letter() {
+        let marked = highlight(
+            Line::from("cafe\u{301} ok".to_owned()),
+            &[(0, 4, Style::new().bg(Color::Yellow))],
+        );
+        let text: String = marked
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "cafe\u{301} ok");
+        assert_eq!(marked.spans[0].content, "cafe\u{301}");
     }
 
     #[test]

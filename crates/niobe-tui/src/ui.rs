@@ -1326,15 +1326,20 @@ fn mark_found(
     let other = Style::new().fg(theme.hot).underlined();
     for (row, line) in lines.iter_mut().enumerate() {
         let at = start + row;
-        let first = found.partition_point(|found| found.line < at);
-        let marks: Vec<(usize, usize, Style)> = found
+        // Matches do not overlap, so those that reach this line are the last
+        // ones to start on or above it, back to the first that ends above it.
+        let upto = found.partition_point(|found| found.line <= at);
+        let marks: Vec<(usize, usize, Style)> = found[..upto]
             .iter()
             .enumerate()
-            .skip(first)
-            .take_while(|(_, found)| found.line == at)
-            .map(|(index, found)| {
+            .rev()
+            .take_while(|(_, found)| found.last_line() >= at)
+            .flat_map(|(index, found)| {
                 let style = if Some(index) == current { here } else { other };
-                (found.start, found.len, style)
+                found
+                    .parts()
+                    .filter(move |(line, _, _)| *line == at)
+                    .map(move |(_, start, len)| (start, len, style))
             })
             .collect();
         if !marks.is_empty() {
@@ -1375,12 +1380,13 @@ impl DrawnEntries {
 
     /// Every place `query` is in the transcript as drawn, top to bottom.
     fn find(&self, query: &crate::find::Query) -> Vec<crate::find::Found> {
-        self.drawn
-            .iter()
-            .flat_map(|(_, lines)| lines)
-            .enumerate()
-            .flat_map(|(at, line)| query.in_line(line, at))
-            .collect()
+        let mut first = 0;
+        let mut found = Vec::new();
+        for (_, lines) in &self.drawn {
+            found.extend(query.in_lines(lines, first));
+            first += lines.len();
+        }
+        found
     }
 
     fn line_count(&self) -> usize {
