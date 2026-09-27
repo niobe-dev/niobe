@@ -978,6 +978,12 @@ pub struct App {
     /// fold says is running may be one read back from a record, which nothing
     /// is working on now; only one sent from here can be shown as working.
     sent_here: bool,
+    /// Whether the first prompt of the session never reached the backend,
+    /// which leaves it out of the session's caption: nothing was asked.
+    first_prompt_unsent: bool,
+    /// Whether an event has come in through [`App::apply`] rather than from
+    /// the operator.
+    heard: bool,
     /// The timezone a moment an event names is read in. `None` until the
     /// event loop hands over the one it read: a fold with no clock behind it
     /// has no local times to draw, which is what a shell drawn in a test has.
@@ -1172,6 +1178,8 @@ impl App {
             budget_warned: false,
             attached: false,
             sent_here: false,
+            first_prompt_unsent: false,
+            heard: false,
             clock: None,
             now: None,
             at: None,
@@ -1191,6 +1199,18 @@ impl App {
     /// Folds one event in: the session totals the panes read, and the
     /// transcript entry it produces, if it produces one.
     pub fn apply(&mut self, event: &Event) {
+        self.heard = true;
+        self.fold_event(event);
+    }
+
+    /// Whether anything has come in that the shell did not produce itself:
+    /// the backend has said something — or a record of one was read back.
+    pub fn heard(&self) -> bool {
+        self.heard
+    }
+
+    /// Folds one event in, from wherever it came.
+    fn fold_event(&mut self, event: &Event) {
         let turns = self.session.turns().len();
         if matches!(event, Event::UserMessage { .. }) && !self.session.turn_running() {
             self.turn_began_at = self.at;
@@ -1839,7 +1859,7 @@ impl App {
 
     /// Folds in an event the operator produced here and queues it to be kept.
     fn produce(&mut self, event: Event) {
-        self.apply(&event);
+        self.fold_event(&event);
         self.produced.push(event);
     }
 
@@ -2474,6 +2494,17 @@ impl App {
     /// Whether a backend is listening.
     pub fn is_attached(&self) -> bool {
         self.attached
+    }
+
+    /// What the session is about: the title the backend gave it, or else the
+    /// first thing the operator asked, as [`SessionState::caption`] has it —
+    /// unless that first prompt never reached the backend. `None` where
+    /// nothing says yet.
+    pub fn caption(&self) -> Option<String> {
+        match self.first_prompt_unsent && self.session.title().is_none() {
+            true => None,
+            false => self.session.caption(),
+        }
     }
 
     /// Where the session is running.
@@ -3984,6 +4015,9 @@ impl App {
     /// prompt with no reply is not read as a backend thinking about it.
     pub fn not_sent(&mut self, error: &str) {
         self.sent_here = false;
+        if self.session.user_messages() == 1 {
+            self.first_prompt_unsent = true;
+        }
         self.push(Entry {
             kind: EntryKind::Failure,
             head: "not sent".to_owned(),

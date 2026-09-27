@@ -975,6 +975,12 @@ impl SessionState {
         &self.pending_permissions
     }
 
+    /// The title the backend last gave the session. `None` where it has
+    /// given none.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// What the session is about, on one line: the last title the backend
     /// gave it, or else the first line of the operator's first message.
     ///

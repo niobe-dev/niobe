@@ -437,13 +437,24 @@ fn identity_segments(app: &App, theme: &Theme) -> Vec<Segment> {
 /// nowhere it will be answered from.
 fn state_label(app: &App) -> String {
     let pulse = app.pulse();
-    // A turn that is running settles it: whatever the backend has or has not
-    // said about itself, the session is working and nothing else is truer.
+    // A turn that is running settles it: the session is working and nothing
+    // else is truer — unless the backend has not said a word since it
+    // started, which is a turn waiting on an answer that may never come.
     if pulse.working {
-        return pulse_label(pulse);
+        return match (app.heard(), pulse.since) {
+            (false, Some(since)) => {
+                format!("\u{25cf} no answer yet {}", clock::spent(since))
+            }
+            (false, None) => "\u{25cf} no answer yet".to_owned(),
+            (true, _) => pulse_label(pulse),
+        };
     }
     if !app.is_attached() {
         return "\u{25cb} not attached".to_owned();
+    }
+    // A backend that ended is not starting, however little it said first.
+    if app.session().fatal_error().is_some() {
+        return "\u{25cb} ended".to_owned();
     }
     if app.session().meta().is_none() {
         return "\u{25cb} starting".to_owned();
@@ -653,7 +664,7 @@ fn pane(title: impl Into<String>, area: Rect, border: Border, theme: &Theme) -> 
 /// whether the right-hand stack is on screen beside it, which decides whether
 /// Tab has anywhere to go.
 fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme: &Theme) {
-    let title = session_caption(app.session(), &app.repo().name, area.width);
+    let title = session_caption(app.caption(), &app.repo().name, area.width);
 
     app.measured_session(area);
     app.drew_jump(None);
@@ -884,13 +895,13 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
 const TITLE_MARGIN: u16 = 6;
 
 /// The session pane's title on a pane `width` wide: what the session is about
-/// where it says ([`SessionState::caption`]), and the repository it runs in
-/// where it does not yet.
+/// where it says ([`App::caption`]), and the repository it runs in where it
+/// does not yet.
 ///
 /// Cut between words where it is longer than the edge has room for, so that
 /// the corners and a cell of the edge either side survive at every width.
-fn session_caption(session: &SessionState, repo: &str, width: u16) -> String {
-    let title = match session.caption() {
+fn session_caption(caption: Option<String>, repo: &str, width: u16) -> String {
+    let title = match caption {
         Some(caption) => caption,
         None if repo.is_empty() => "Session".to_owned(),
         None => format!("Session ─ {repo}"),
@@ -3992,15 +4003,18 @@ mod tests {
     #[test]
     fn a_session_with_nothing_said_is_titled_by_its_repository() {
         let session = SessionState::new();
-        assert_eq!(session_caption(&session, "niobe", 80), "Session ─ niobe");
-        assert_eq!(session_caption(&session, "", 80), "Session");
+        assert_eq!(
+            session_caption(session.caption(), "niobe", 80),
+            "Session ─ niobe"
+        );
+        assert_eq!(session_caption(session.caption(), "", 80), "Session");
     }
 
     #[test]
     fn a_session_is_titled_by_what_it_is_about() {
         let session = SessionState::replay(&[said("Cost floors and replay pricing")]);
         assert_eq!(
-            session_caption(&session, "niobe", 80),
+            session_caption(session.caption(), "niobe", 80),
             "Cost floors and replay pricing"
         );
     }
@@ -4011,11 +4025,11 @@ mod tests {
         // Thirty columns of caption and six of margin: one short, and the
         // last word goes whole.
         assert_eq!(
-            session_caption(&session, "niobe", 35),
+            session_caption(session.caption(), "niobe", 35),
             "Cost floors and replay…"
         );
         for width in 0..=40 {
-            let caption = session_caption(&session, "niobe", width);
+            let caption = session_caption(session.caption(), "niobe", width);
             assert!(
                 text::width(&caption) <= usize::from(width.saturating_sub(TITLE_MARGIN)),
                 "{width}: {caption}"
@@ -4225,6 +4239,76 @@ mod tests {
             vec!["claude · max".to_owned(), "○ starting".to_owned()],
             "a subprocess that has not spoken is starting, not absent"
         );
+    }
+
+    fn started_on_max() -> App {
+        App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+            ..Default::default()
+        })
+        .with_profile(SelectedProfile {
+            name: "max".to_owned(),
+            backend: Backend::Claude,
+            models: Vec::new(),
+        })
+        .attached()
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.type_into_composer(ratatui_textarea::Input {
+                key: ratatui_textarea::Key::Char(c),
+                ..Default::default()
+            });
+        }
+    }
+
+    /// A CLI that died as it started never says what it runs, and the row
+    /// that said "starting" would say it for ever. A prompt it could not take
+    /// does not become the session's caption either: nothing was asked.
+    #[test]
+    fn a_backend_that_ended_before_it_spoke_is_ended_not_starting() {
+        let mut app = started_on_max();
+        app.apply(&niobe_core::event::Event::Error {
+            message: "the `claude` session ended with exit status: 1".to_owned(),
+            fatal: true,
+        });
+        assert_eq!(row_of(&app).last(), Some(&"○ ended".to_owned()));
+
+        typed(&mut app, "hello there");
+        app.submit();
+        app.not_sent("the `claude` session has ended");
+        assert_eq!(row_of(&app).last(), Some(&"○ ended".to_owned()));
+        assert_eq!(
+            session_caption(app.caption(), &app.repo().name, 80),
+            "Session ─ niobe"
+        );
+    }
+
+    /// A turn sent to a CLI that has not said a word since it started — not
+    /// even what it runs — is not the same as one it is working on, and the
+    /// row says so rather than counting "working" up.
+    #[test]
+    fn a_turn_the_backend_has_said_nothing_about_is_waiting_on_an_answer() {
+        let mut app = started_on_max();
+        typed(&mut app, "hello there");
+        app.submit();
+        let sent = std::time::Instant::now();
+        app.tick(sent, None);
+        app.tick(sent + std::time::Duration::from_secs(30), None);
+        assert_eq!(
+            row_of(&app),
+            vec!["claude · max".to_owned(), "● no answer yet 30s".to_owned()]
+        );
+
+        app.apply(&niobe_core::event::Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+        assert_eq!(row_of(&app).last(), Some(&"● working 30s".to_owned()));
     }
 
     /// What the menu row's right-hand group reads as, segment by segment.
