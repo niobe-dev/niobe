@@ -163,40 +163,9 @@ impl<'t> Renderer<'t> {
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
             Tag::Paragraph => self.gap(),
-            Tag::Heading { level, .. } => {
-                self.gap();
-                let underline = level == HeadingLevel::H1;
-                let title = self.theme.title;
-                self.push_style(|style| {
-                    let style = style.fg(title).add_modifier(Modifier::BOLD);
-                    match underline {
-                        true => style.add_modifier(Modifier::UNDERLINED),
-                        false => style,
-                    }
-                });
-            }
-            Tag::BlockQuote(_) => {
-                self.gap();
-                self.indents.push(Indent {
-                    first: QUOTE_BAR.to_owned(),
-                    rest: QUOTE_BAR.to_owned(),
-                    style: Style::new().fg(self.theme.dim),
-                    used: false,
-                });
-                let dim = self.theme.dim;
-                self.push_style(|style| style.fg(dim).add_modifier(Modifier::ITALIC));
-            }
-            Tag::CodeBlock(kind) => {
-                self.flush();
-                self.gap();
-                if let CodeBlockKind::Fenced(language) = kind
-                    && !language.is_empty()
-                {
-                    let label = format!("╭ {language}");
-                    self.emit(vec![Span::styled(label, Style::new().fg(self.theme.dim))]);
-                }
-                self.code = Some(String::new());
-            }
+            Tag::Heading { level, .. } => self.start_heading(level),
+            Tag::BlockQuote(_) => self.start_block_quote(),
+            Tag::CodeBlock(kind) => self.start_code_block(kind),
             // No blank line before a list: it most often follows the sentence
             // that introduces it (`It does three things:`), and reads as part
             // of it. A list inside an item ends the item's own text first.
@@ -204,32 +173,8 @@ impl<'t> Renderer<'t> {
                 self.flush();
                 self.lists.push(start);
             }
-            Tag::Item => {
-                self.flush();
-                let marker = match self.lists.last_mut() {
-                    Some(Some(number)) => {
-                        let marker = format!("{number}. ");
-                        *number += 1;
-                        marker
-                    }
-                    _ => "• ".to_owned(),
-                };
-                let rest = " ".repeat(text::width(&marker));
-                self.indents.push(Indent {
-                    first: marker,
-                    rest,
-                    style: Style::new().fg(self.theme.hot),
-                    used: false,
-                });
-            }
-            Tag::Table(alignments) => {
-                self.flush();
-                self.gap();
-                self.table = Some(Table {
-                    alignments,
-                    ..Table::default()
-                });
-            }
+            Tag::Item => self.start_item(),
+            Tag::Table(alignments) => self.start_table(alignments),
             Tag::TableHead => {
                 if let Some(table) = &mut self.table {
                     table.in_header = true;
@@ -258,6 +203,71 @@ impl<'t> Renderer<'t> {
             | Tag::Superscript
             | Tag::Subscript => {}
         }
+    }
+
+    fn start_heading(&mut self, level: HeadingLevel) {
+        self.gap();
+        let underline = level == HeadingLevel::H1;
+        let title = self.theme.title;
+        self.push_style(|style| {
+            let style = style.fg(title).add_modifier(Modifier::BOLD);
+            match underline {
+                true => style.add_modifier(Modifier::UNDERLINED),
+                false => style,
+            }
+        });
+    }
+
+    fn start_block_quote(&mut self) {
+        self.gap();
+        self.indents.push(Indent {
+            first: QUOTE_BAR.to_owned(),
+            rest: QUOTE_BAR.to_owned(),
+            style: Style::new().fg(self.theme.dim),
+            used: false,
+        });
+        let dim = self.theme.dim;
+        self.push_style(|style| style.fg(dim).add_modifier(Modifier::ITALIC));
+    }
+
+    fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
+        self.flush();
+        self.gap();
+        if let CodeBlockKind::Fenced(language) = kind
+            && !language.is_empty()
+        {
+            let label = format!("╭ {language}");
+            self.emit(vec![Span::styled(label, Style::new().fg(self.theme.dim))]);
+        }
+        self.code = Some(String::new());
+    }
+
+    fn start_item(&mut self) {
+        self.flush();
+        let marker = match self.lists.last_mut() {
+            Some(Some(number)) => {
+                let marker = format!("{number}. ");
+                *number += 1;
+                marker
+            }
+            _ => "• ".to_owned(),
+        };
+        let rest = " ".repeat(text::width(&marker));
+        self.indents.push(Indent {
+            first: marker,
+            rest,
+            style: Style::new().fg(self.theme.hot),
+            used: false,
+        });
+    }
+
+    fn start_table(&mut self, alignments: Vec<Alignment>) {
+        self.flush();
+        self.gap();
+        self.table = Some(Table {
+            alignments,
+            ..Table::default()
+        });
     }
 
     fn end(&mut self, tag: TagEnd) {
