@@ -366,8 +366,9 @@ fn send_produced(
     rules: &mut dyn Rules,
 ) {
     for event in app.take_produced() {
-        if let Err(error) = journal.append(&event) {
-            app.not_kept(&error.to_string());
+        match journal.append(&event) {
+            Ok(()) => app.kept(),
+            Err(error) => app.not_kept(&error.to_string()),
         }
         if !app.is_attached() {
             continue;
@@ -471,8 +472,9 @@ fn fold_backend(
         if matches!(event, SessionEvent::FileChange { .. }) {
             watch.changed();
         }
-        if let Err(error) = journal.append(event) {
-            app.not_kept(&error.to_string());
+        match journal.append(event) {
+            Ok(()) => app.kept(),
+            Err(error) => app.not_kept(&error.to_string()),
         }
     }
     true
@@ -840,6 +842,76 @@ mod tests {
             .find(|entry| entry.head == "not saved")
             .expect("the failure is on screen");
         assert!(saved.body.ends_with("the store is read-only"));
+    }
+
+    #[test]
+    fn a_store_that_keeps_refusing_is_one_failure_and_a_recovery_says_how_many_were_lost() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept {
+            refuse: true,
+            ..Kept::default()
+        };
+        let mut backend = Attached {
+            produces: (0..60)
+                .map(|n| SessionEvent::AssistantDelta {
+                    text: format!("{n} "),
+                })
+                .collect(),
+            ..Attached::default()
+        };
+
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+
+        let heads = |app: &App| {
+            app.entries()
+                .iter()
+                .map(|entry| entry.head.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            heads(&app),
+            ["agent", "not saved"],
+            "a refusing store buried the reply"
+        );
+        assert_eq!(app.entries()[1].meta, "60 events");
+        assert!(app.entries()[0].body.starts_with("0 1 2 "));
+        assert!(app.entries()[0].body.ends_with("58 59 "));
+
+        journal.refuse = false;
+        backend.produces = vec![SessionEvent::AssistantMessage {
+            text: "done".to_owned(),
+            agent: None,
+        }];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+
+        assert_eq!(heads(&app), ["agent", "not saved", "saved again"]);
+        let recovered = &app.entries()[2];
+        assert_eq!(recovered.kind, crate::app::EntryKind::Notice);
+        assert_eq!(recovered.meta, "60 events not saved");
+        assert_eq!(journal.events.len(), 1);
+    }
+
+    #[test]
+    fn a_store_that_refuses_again_after_it_recovered_opens_a_new_failure() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached::default();
+        for refuse in [true, false, true] {
+            journal.refuse = refuse;
+            backend.produces = vec![SessionEvent::AssistantMessage {
+                text: "said".to_owned(),
+                agent: None,
+            }];
+            fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+        }
+
+        let failures = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "not saved")
+            .map(|entry| entry.meta.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(failures, ["1 event", "1 event"]);
     }
 
     #[test]

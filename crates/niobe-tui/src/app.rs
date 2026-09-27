@@ -674,6 +674,25 @@ struct Ending {
     error: Option<String>,
 }
 
+/// A run of events the journal refused, which the transcript shows as one
+/// failure entry.
+#[derive(Debug, Clone, Copy)]
+struct Unsaved {
+    /// Where the failure entry is in the transcript.
+    entry: usize,
+    /// How many events were refused, the first included.
+    count: u64,
+}
+
+/// `count` events, in the words a count of them is shown in.
+fn events(count: u64) -> String {
+    if count == 1 {
+        "1 event".to_owned()
+    } else {
+        format!("{count} events")
+    }
+}
+
 /// The lines a call changed in a file, and how the call came to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
@@ -974,6 +993,9 @@ pub struct App {
     /// was stamped with: what a turn's duration is counted from. `None`
     /// between turns, and for a turn whose prompt came with no time.
     turn_began_at: Option<Stamp>,
+    /// The failure entry that stands for the run of events the journal has
+    /// refused since it last kept one, while it keeps refusing.
+    unsaved: Option<Unsaved>,
     /// How long the turns that have ended ran, each from its first prompt to
     /// its end by the clocks they were folded at. `None` from the first turn
     /// that ended without both ends stamped — an imported transcript, a log
@@ -1152,6 +1174,7 @@ impl App {
             clock: None,
             now: None,
             at: None,
+            unsaved: None,
             turn_began_at: None,
             turns_took: Some(Duration::ZERO),
             last_folded_at: None,
@@ -2071,15 +2094,51 @@ impl App {
 
     /// Says in the transcript that an event could not be kept, so the operator
     /// does not find out from a resumed session that is missing it.
+    ///
+    /// A store that refuses one event refuses the next, and a streamed reply is
+    /// hundreds of events: the refusals until the store keeps one again are one
+    /// entry, counted, rather than one each burying the reply they came from.
     pub fn not_kept(&mut self, error: &str) {
+        let body = format!(
+            "What happened since is on screen but not in the session store, so a \
+             resumed session will not show it: {error}"
+        );
+        if let Some(unsaved) = &mut self.unsaved {
+            unsaved.count = unsaved.count.saturating_add(1);
+            if let Some(entry) = self.entries.get_mut(unsaved.entry) {
+                entry.meta = events(unsaved.count);
+                entry.body = body;
+            }
+            return;
+        }
+        self.unsaved = Some(Unsaved {
+            entry: self.entries.len(),
+            count: 1,
+        });
         self.push(Entry {
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
-            meta: String::new(),
-            body: format!(
-                "What you just did is on screen but not in the session store, so a \
-                 resumed session will not show it: {error}"
-            ),
+            meta: events(1),
+            body,
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
+    /// Says in the transcript that the journal kept an event again after
+    /// refusing, and how many it refused, so the gap a resumed session will
+    /// have is known to be closed and how wide it is.
+    pub fn kept(&mut self) {
+        let Some(unsaved) = self.unsaved.take() else {
+            return;
+        };
+        self.push(Entry {
+            kind: EntryKind::Notice,
+            head: "saved again".to_owned(),
+            meta: format!("{} not saved", events(unsaved.count)),
+            body: "The session store is keeping events again, from this one on.".to_owned(),
             streaming: false,
             at: self.at,
             calls: Vec::new(),
@@ -2267,12 +2326,17 @@ impl App {
     fn streaming_agent_entry(&mut self) -> Option<&mut Entry> {
         // A sub-agent's rows land while the session is still writing, and do
         // not end its reply: the reply keeps its place above them rather than
-        // being started again below.
+        // being started again below. Nor does the store refusing the reply's
+        // first fragment, or every fragment after it would start a reply of
+        // its own under the failure.
+        let unsaved = self.unsaved.as_ref().map(|unsaved| unsaved.entry);
         match self
             .entries
             .iter_mut()
+            .enumerate()
             .rev()
-            .find(|entry| entry.agent.is_none())
+            .find(|(at, entry)| entry.agent.is_none() && Some(*at) != unsaved)
+            .map(|(_, entry)| entry)
         {
             Some(entry) if entry.kind == EntryKind::Agent && entry.streaming => Some(entry),
             _ => None,
