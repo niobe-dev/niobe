@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -47,6 +47,15 @@ pub const BINARY: &str = "claude";
 /// The CLI has a session of its own to write out. Long enough for that on a
 /// loaded machine, short enough that quitting the shell stays instant.
 const GOODBYE: Duration = Duration::from_millis(500);
+
+/// How much of what the CLI writes to standard error is kept: the end of it,
+/// since a CLI that fails says why last.
+///
+/// Everything it wrote reaches the screen and the store as one error, so the
+/// bound is what keeps a CLI that floods the pipe from burying its exit
+/// status under megabytes nobody reads, and from leaving the screen a message
+/// too large to lay out on every frame.
+const SAID: usize = 8 * 1024;
 
 /// How long what the CLI started is given to end on SIGTERM once the CLI has
 /// gone, before its group is killed.
@@ -266,7 +275,7 @@ pub struct Session {
     events: Receiver<Event>,
     waiting: Waiting,
     refusals: Refusals,
-    stderr: Arc<Mutex<String>>,
+    stderr: Arc<Mutex<Tail>>,
     readers: Vec<JoinHandle<()>>,
     /// How many requests this side has made, which is what the next one is
     /// addressed by. The CLI numbers its own requests, so Niobe's carry a
@@ -371,17 +380,9 @@ impl Session {
             }
         });
 
-        let kept = Arc::new(Mutex::new(String::new()));
+        let kept = Arc::new(Mutex::new(Tail::default()));
         let writing = Arc::clone(&kept);
-        let errors = std::thread::spawn(move || {
-            let mut stderr = BufReader::new(stderr);
-            while let Some((line, _)) = next_line(&mut stderr) {
-                if let Ok(mut kept) = writing.lock() {
-                    kept.push_str(&line);
-                    kept.push('\n');
-                }
-            }
-        });
+        let errors = std::thread::spawn(move || read_tail(stderr, &writing));
 
         let mut session = Self {
             child,
@@ -583,6 +584,10 @@ impl Session {
         let closed = *self.output_closed.get_or_insert_with(Instant::now);
 
         let status = match self.child.try_wait() {
+            // The CLI can leave with the end of what it said still in the
+            // pipe, and that end is where it says why. Reported without it,
+            // a CLI that wrote a lot would read as one that said nothing.
+            Ok(Some(_)) if !self.heard_out() && closed.elapsed() < GOODBYE => return None,
             Ok(Some(status)) => status,
             Ok(None) if closed.elapsed() < GOODBYE => return None,
             Ok(None) => {
@@ -639,12 +644,92 @@ impl Session {
             .unwrap_or_default()
     }
 
-    /// Everything the CLI has written to standard error so far.
+    /// Whether standard error has been read to its end, which is when
+    /// everything the CLI said is in [`Session::said`].
+    fn heard_out(&self) -> bool {
+        self.readers.get(1).is_none_or(JoinHandle::is_finished)
+    }
+
+    /// The end of what the CLI has written to standard error so far, led by
+    /// how much of it was left out where that is not all of it.
     fn said(&self) -> String {
         self.stderr
             .lock()
-            .map(|kept| kept.trim().to_owned())
+            .map(|tail| tail.said())
             .unwrap_or_default()
+    }
+}
+
+/// The end of what the CLI has written to standard error, and how much it
+/// wrote in all.
+#[derive(Debug, Default)]
+struct Tail {
+    kept: Vec<u8>,
+    bytes: u64,
+}
+
+impl Tail {
+    fn add(&mut self, read: &[u8]) {
+        self.kept.extend_from_slice(read);
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(read.len()).unwrap_or(u64::MAX));
+        // Dropped a slice at a time rather than on every read, which would
+        // move the whole buffer for each chunk.
+        if self.kept.len() > 2 * SAID {
+            self.kept.drain(..self.kept.len() - SAID);
+        }
+    }
+
+    /// The last [`SAID`] bytes as text, trimmed, with how many came before
+    /// them in front where any did.
+    ///
+    /// Bytes that are not UTF-8 read as U+FFFD, as a line of output does; a
+    /// character the cut went through is left out whole rather than read as
+    /// one.
+    fn said(&self) -> String {
+        let mut from = self.kept.len().saturating_sub(SAID);
+        let cut = self
+            .bytes
+            .saturating_sub(u64::try_from(self.kept.len() - from).unwrap_or(u64::MAX));
+        if cut > 0 {
+            while self
+                .kept
+                .get(from)
+                .is_some_and(|byte| byte & 0b1100_0000 == 0b1000_0000)
+            {
+                from += 1;
+            }
+        }
+        let text = String::from_utf8_lossy(self.kept.get(from..).unwrap_or_default());
+        let text = text.trim();
+        match cut {
+            0 => text.to_owned(),
+            _ => format!(
+                "[the first {cut} of {} bytes it wrote are left out] {text}",
+                self.bytes
+            ),
+        }
+    }
+}
+
+/// Reads the CLI's standard error into `into` until it closes.
+///
+/// Read a chunk at a time rather than a line at a time, so that a CLI that
+/// writes a great deal without a line break is held to [`SAID`] as well.
+fn read_tail(mut from: impl Read, into: &Mutex<Tail>) {
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        match from.read(&mut chunk) {
+            Ok(0) => return,
+            Ok(n) => {
+                if let Ok(mut tail) = into.lock() {
+                    tail.add(chunk.get(..n).unwrap_or_default());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
     }
 }
 
@@ -1040,21 +1125,25 @@ mod tests {
     /// until it has said it ended. The session is returned with what it said.
     #[cfg(unix)]
     fn asks_then_leaves(status: u8) -> (Session, Vec<Event>) {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("a scratch directory");
-        let script = dir.path().join("claude");
         let request = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#;
         let crash = match status {
             0 => String::new(),
             _ => "echo crashed >&2\n".to_owned(),
         };
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nread -r first\nread -r turn\nprintf '%s\\n' '{request}'\n{crash}exit {status}\n"
-            ),
-        )
-        .expect("the stand-in is written");
+        stand_in(&format!(
+            "read -r first\nread -r turn\nprintf '%s\\n' '{request}'\n{crash}exit {status}\n"
+        ))
+    }
+
+    /// Spawns a `claude` that is the shell script `body`, sends it a turn,
+    /// and drains it until it has said it ended. The session is returned with
+    /// what it said.
+    #[cfg(unix)]
+    fn stand_in(body: &str) -> (Session, Vec<Event>) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let script = dir.path().join("claude");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}")).expect("the stand-in is written");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("the stand-in is made executable");
 
@@ -1062,7 +1151,9 @@ mod tests {
         options.binary = script;
         options.cwd = dir.path().to_path_buf();
         let mut session = Session::spawn(&options).expect("the stand-in starts");
-        session.send("list the files").expect("the turn is sent");
+        // A stand-in that has already left cannot take the turn, and that is
+        // reported by the drain rather than here.
+        let _ = session.send("list the files");
 
         // Generous for the reason `tests/answers.rs` gives: a freshly written
         // script can be held at its first instruction for seconds.
@@ -1077,6 +1168,41 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         (session, events)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_floods_standard_error_ends_with_its_status_and_the_end_of_what_it_said() {
+        let (_, events) = stand_in(
+            "read -r first\nhead -c 20000000 /dev/zero | tr '\\0' E >&2\necho 'the real reason' >&2\nexit 1\n",
+        );
+
+        let said = events
+            .iter()
+            .find_map(|event| match event {
+                Event::Error {
+                    message,
+                    fatal: true,
+                } => Some(message.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the end was not a failure: {events:#?}"));
+        assert!(said.len() < 16 * 1024, "{} bytes", said.len());
+        assert!(
+            said.starts_with("the `claude` session ended with exit status: 1"),
+            "{}",
+            &said[..said.len().min(200)]
+        );
+        assert!(
+            said.contains("20000016 bytes"),
+            "{}",
+            &said[..said.len().min(200)]
+        );
+        assert!(
+            said.ends_with("the real reason"),
+            "{}",
+            &said[said.len().saturating_sub(200)..]
+        );
     }
 
     #[cfg(unix)]
@@ -1206,6 +1332,42 @@ mod tests {
 
         assert_ne!(first, second);
         assert!(first.starts_with("niobe-"), "{first}");
+    }
+
+    #[test]
+    fn a_cut_through_a_character_leaves_the_character_out_rather_than_misreading_it() {
+        let mut tail = Tail::default();
+        // A run of two-byte characters and then one byte, so the cut at
+        // [`SAID`] from the end falls between the two bytes of a character.
+        tail.add("é".repeat(SAID).as_bytes());
+        tail.add(b"x");
+
+        let said = tail.said();
+
+        let text = said
+            .split_once("] ")
+            .map(|(_, text)| text)
+            .expect("the cut is said");
+        assert!(!text.contains('\u{fffd}'), "{said}");
+        assert!(text.ends_with("éx"), "{said}");
+        assert_eq!(text.len(), SAID - 1, "{said}");
+        let written = 2 * SAID + 1;
+        assert!(
+            said.starts_with(&format!(
+                "[the first {} of {written} bytes it wrote are left out]",
+                written - SAID
+            )),
+            "{}",
+            &said[..80]
+        );
+    }
+
+    #[test]
+    fn what_fits_is_kept_whole_with_nothing_said_about_a_cut() {
+        let mut tail = Tail::default();
+        tail.add(b"Error: not signed in\n");
+
+        assert_eq!(tail.said(), "Error: not signed in");
     }
 
     #[test]
