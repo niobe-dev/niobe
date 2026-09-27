@@ -13,7 +13,7 @@
 //! `sqlite3` shell is legible without this crate.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use niobe_core::event::Event;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -205,7 +205,7 @@ impl Store {
         // can lose the last few events but never corrupts the file. Every
         // streamed delta is its own commit, so `FULL` would pay a sync for each
         // fragment of every reply.
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+        use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         migrate(&mut conn)?;
         Ok(Self { conn })
@@ -335,6 +335,27 @@ impl Store {
 ///
 /// The version is read inside an immediate transaction, so two processes
 /// opening the same new file cannot both decide to create the tables.
+/// Puts the file in WAL mode, which it keeps from then on.
+///
+/// Two shells creating the store at once both convert it, and SQLite answers
+/// the loser of that race busy at once rather than through the busy timeout,
+/// because waiting there could deadlock; so the conversion is tried again,
+/// under the same timeout, until the other shell's has finished.
+fn use_wal(conn: &Connection) -> Result<(), StoreError> {
+    let started = Instant::now();
+    loop {
+        match conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(())) {
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy
+                    && started.elapsed() < BUSY_TIMEOUT =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            done => return Ok(done?),
+        }
+    }
+}
+
 fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let found: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
