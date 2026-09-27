@@ -118,11 +118,15 @@ impl Wait {
                 Err(errno) => return Err(errno.into()),
             };
             if read == 0 {
+                self.decoder.settle(events);
                 return Ok(());
             }
             self.decoder
                 .feed(&buffer[..read], read == buffer.len(), events);
             if poll_input(stdin.as_fd(), Duration::ZERO)? != Input::Ready {
+                // A read that filled the buffer said more was coming; nothing
+                // did, so an Esc it ended on was the key.
+                self.decoder.settle(events);
                 return Ok(());
             }
         }

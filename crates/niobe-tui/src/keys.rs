@@ -61,6 +61,9 @@ pub(crate) struct Decoder {
     /// not bounded by [`LONGEST_SEQUENCE`]: a paste is as long as what the
     /// operator copied, and cutting it would type the rest as keys.
     pasting: Option<Vec<u8>>,
+    /// Whether the bytes are the rest of a sequence too long to wait out,
+    /// which are passed over up to the byte that ends it.
+    discarding: bool,
 }
 
 impl Decoder {
@@ -81,6 +84,19 @@ impl Decoder {
                 }
                 continue;
             }
+            if self.discarding {
+                self.discarding = false;
+                match byte {
+                    // Parameters and intermediates, then the byte that ends a
+                    // control sequence.
+                    0x20..=0x3f => {
+                        self.discarding = true;
+                        continue;
+                    }
+                    0x40..=0x7e => continue,
+                    _ => {}
+                }
+            }
             self.pending.push(*byte);
             let more = more || index + 1 < bytes.len();
             match step(&self.pending, more) {
@@ -93,9 +109,27 @@ impl Decoder {
                     self.pending.clear();
                     self.pasting = Some(Vec::new());
                 }
-                Step::Wait if self.pending.len() > LONGEST_SEQUENCE => self.pending.clear(),
+                Step::Wait if self.pending.len() > LONGEST_SEQUENCE => {
+                    self.pending.clear();
+                    self.discarding = true;
+                }
                 Step::Wait => {}
             }
+        }
+    }
+}
+
+impl Decoder {
+    /// Says the terminal has nothing more to read for now.
+    ///
+    /// An Esc a read ended on was held in case the rest of a sequence was on
+    /// its way; with nothing come, it was the Esc key. Held any longer, it
+    /// would make the next key that key with Alt. A sequence cut part-way is
+    /// still waited on: only its own end says what it was.
+    pub(crate) fn settle(&mut self, events: &mut Vec<Event>) {
+        if self.pasting.is_none() && self.pending == [0x1b] {
+            self.pending.clear();
+            events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         }
     }
 }
@@ -710,12 +744,56 @@ mod tests {
 
     #[test]
     fn garbage_that_never_ends_a_sequence_is_not_held_for_ever() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
         let mut long = b"\x1b[".to_vec();
-        long.extend(std::iter::repeat_n(b'1', LONGEST_SEQUENCE));
-        long.push(b'x');
+        long.extend(std::iter::repeat_n(b'1', LONGEST_SEQUENCE * 4));
+        decoder.feed(&long, false, &mut events);
+        assert!(decoder.pending.len() <= LONGEST_SEQUENCE + 1);
+        decoder.feed(b"\r", false, &mut events);
+        assert_eq!(events, [pressed(KeyCode::Enter, KeyModifiers::NONE)]);
+    }
+
+    /// A sequence too long to wait out is still a sequence: its tail is not
+    /// typed into the prompt as though the operator had written it.
+    #[test]
+    fn a_sequence_too_long_to_wait_out_is_passed_over_to_its_end() {
+        let mut long = b"\x1b[".to_vec();
+        long.extend(std::iter::repeat_n(b'1', 100));
+        long.extend(b"~x");
         assert_eq!(
-            read(&long).last(),
-            Some(&pressed(KeyCode::Char('x'), KeyModifiers::NONE))
+            read(&long),
+            [pressed(KeyCode::Char('x'), KeyModifiers::NONE)]
         );
+    }
+
+    /// An Esc a read ended on while saying more was coming is the Esc key
+    /// once the terminal has nothing more to give: held, the next key would
+    /// be read as that key with Alt.
+    #[test]
+    fn an_esc_held_for_what_never_came_is_the_esc_key_once_the_terminal_is_quiet() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"a\x1b", true, &mut events);
+        decoder.settle(&mut events);
+        decoder.feed(b"b", false, &mut events);
+        assert_eq!(
+            events,
+            [
+                pressed(KeyCode::Char('a'), KeyModifiers::NONE),
+                pressed(KeyCode::Esc, KeyModifiers::NONE),
+                pressed(KeyCode::Char('b'), KeyModifiers::NONE),
+            ]
+        );
+    }
+
+    #[test]
+    fn settling_leaves_a_sequence_cut_mid_way_and_a_paste_alone() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"\x1b[1;5", true, &mut events);
+        decoder.settle(&mut events);
+        decoder.feed(b"A", false, &mut events);
+        assert_eq!(events, [pressed(KeyCode::Up, KeyModifiers::CONTROL)]);
     }
 }
