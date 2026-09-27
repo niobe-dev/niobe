@@ -65,57 +65,91 @@ pub fn table(
     lines
 }
 
+/// Formats a detail row for a profile property, aligned under the profile name.
+fn detail_row(label: &str, value: String, name_width: usize) -> String {
+    format!("  {:<name_width$}  {label:<13}{value}", "")
+}
+
 /// What a profile sets beyond its backend, one indented row each, under the
 /// row that named it.
 fn details(profile: &Profile, forcing_bedrock: Option<&Path>, name_width: usize) -> Vec<String> {
-    let detail = |label: &str, value: String| format!("  {:<name_width$}  {label:<13}{value}", "");
+    let mut rows = configured_details(profile, name_width);
+    rows.extend(status_details(profile, forcing_bedrock, name_width));
+    rows
+}
+
+/// Detail rows for properties configured on a profile.
+fn configured_details(profile: &Profile, name_width: usize) -> Vec<String> {
     let mut rows = Vec::new();
 
     if !profile.env().is_empty() {
         let names: Vec<&str> = profile.env().keys().map(String::as_str).collect();
-        rows.push(detail("env", names.join(", ")));
+        rows.push(detail_row("env", names.join(", "), name_width));
     }
     if !profile.args().is_empty() {
-        rows.push(detail("args", profile.args().join(" ")));
+        rows.push(detail_row("args", profile.args().join(" "), name_width));
     }
     if !profile.models().is_empty() {
-        rows.push(detail("models", profile.models().join(", ")));
+        rows.push(detail_row(
+            "models",
+            profile.models().join(", "),
+            name_width,
+        ));
     }
     if let Some(settings) = profile.settings() {
-        rows.push(detail("settings", settings.path().to_owned()));
+        rows.push(detail_row(
+            "settings",
+            settings.path().to_owned(),
+            name_width,
+        ));
     }
     if let Some(command) = profile.auth_refresh() {
-        rows.push(detail("auth_refresh", command.to_owned()));
+        rows.push(detail_row("auth_refresh", command.to_owned(), name_width));
     }
+    rows
+}
+
+/// Detail rows for profile status, machine overrides, or trust state.
+fn status_details(
+    profile: &Profile,
+    forcing_bedrock: Option<&Path>,
+    name_width: usize,
+) -> Vec<String> {
+    let mut rows = Vec::new();
+
     // A profile whose settings file is withheld for want of trust names none
     // here, which is right: a file that is not in force runs nothing under it.
     if let Some(path) = forcing_bedrock {
         if profile.backend() == Backend::Claude && profile.settings().is_none() {
-            rows.push(detail(
+            rows.push(detail_row(
                 "no settings",
                 format!(
                     "{} sets CLAUDE_CODE_USE_BEDROCK for every session; a `settings` file \
                      here is what would run this profile elsewhere",
                     path.display()
                 ),
+                name_width,
             ));
         }
     }
     if let Some(withheld) = profile.withheld() {
-        rows.push(detail("not in force", listed(withheld)));
-        rows.push(detail(
+        rows.push(detail_row("not in force", listed(withheld), name_width));
+        rows.push(detail_row(
             "not trusted",
             "`niobe trust` reads that file as it stands and puts them in force".to_owned(),
+            name_width,
         ));
     }
     if let Some(path) = profile.shadowed_by() {
-        rows.push(detail(
+        rows.push(detail_row(
             "not in force",
             format!("the profile of this name in {}", path.display()),
+            name_width,
         ));
-        rows.push(detail(
+        rows.push(detail_row(
             "not trusted",
             "`niobe trust` reads that file as it stands and puts its profile in force".to_owned(),
+            name_width,
         ));
     }
     rows
