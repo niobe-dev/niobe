@@ -815,6 +815,24 @@ fn session_at_work() -> App {
     app
 }
 
+/// A terminal cell cannot hold a tab, and a row drawn on one line has no
+/// column for one to line up: a literal tab in what a call does is a space,
+/// in the call's row and in the activity row under the transcript.
+#[test]
+fn a_tab_in_what_a_call_does_is_drawn_as_a_space() {
+    let mut app = at_work(running_session(), std::time::Duration::from_secs(5));
+    app.apply(&Event::ToolCallStart {
+        id: "t1".into(),
+        name: "Bash".to_owned(),
+        input: r#"{"command":"printf 'a\tb'"}"#.to_owned(),
+        summary: Some("printf 'a\tb'".to_owned()),
+        agent: None,
+    });
+    let frame = screen(&mut app, 120, 40);
+    assert!(!frame.contains("printf 'ab'"), "{frame}");
+    assert!(frame.contains("running Bash  printf 'a b'"), "{frame}");
+}
+
 #[test]
 fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
     let mut app = session_at_work();

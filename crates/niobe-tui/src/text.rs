@@ -136,6 +136,8 @@ pub fn split_to_width(text: &str, columns: usize) -> Vec<String> {
 
 /// Shortens `text` to `columns` cells, ending in `…` when anything was cut.
 pub fn truncate(text: &str, columns: usize) -> String {
+    let line = one_line(text);
+    let text: &str = &line;
     if width(text) <= columns {
         return text.to_owned();
     }
@@ -160,6 +162,19 @@ pub fn truncate(text: &str, columns: usize) -> String {
     out
 }
 
+/// `text` with each tab a space, for a row drawn on one line.
+///
+/// A terminal cell cannot hold a tab, and a width that counted one as no
+/// cells would cut the row in the wrong place; a single row has no column
+/// for a tab stop to line up either, so it is the space it separates words
+/// with.
+fn one_line(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.contains('\t') {
+        true => std::borrow::Cow::Owned(text.replace('\t', " ")),
+        false => std::borrow::Cow::Borrowed(text),
+    }
+}
+
 /// Shortens `text` to `columns` cells at a word boundary, ending in `…` when
 /// anything was cut.
 ///
@@ -167,6 +182,8 @@ pub fn truncate(text: &str, columns: usize) -> String {
 /// that is itself wider than the room is cut inside it, as [`truncate`] would:
 /// a caption of nothing but the ellipsis says less than part of a word.
 pub fn truncate_words(text: &str, columns: usize) -> String {
+    let line = one_line(text);
+    let text: &str = &line;
     if width(text) <= columns {
         return text.to_owned();
     }
@@ -191,6 +208,8 @@ pub fn truncate_words(text: &str, columns: usize) -> String {
 /// For a path, which is what this is for: the file's own name and the
 /// directory it sits in are what tell two rows apart, and they are at the end.
 pub fn truncate_start(text: &str, columns: usize) -> String {
+    let line = one_line(text);
+    let text: &str = &line;
     if width(text) <= columns {
         return text.to_owned();
     }
@@ -217,6 +236,14 @@ pub fn truncate_start(text: &str, columns: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tab_in_a_row_cut_to_one_line_is_a_space() {
+        assert_eq!(truncate("a\tb", 10), "a b");
+        assert_eq!(truncate("a\tbcdef", 4), "a b…");
+        assert_eq!(truncate_words("one\ttwo three", 9), "one two…");
+        assert_eq!(truncate_start("dir\tname.rs", 20), "dir name.rs");
+    }
 
     #[test]
     fn a_leading_tab_is_one_level_of_indentation_per_tab() {
