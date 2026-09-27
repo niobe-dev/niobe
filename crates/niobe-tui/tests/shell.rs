@@ -2170,6 +2170,51 @@ fn a_sub_agents_state_is_legible_without_its_colour() {
     assert!(frame.contains("✗ doc-writer"), "failed:\n{frame}");
 }
 
+/// A session whose backend died runs nothing: the agent it was running and
+/// the call it was making are drawn as cut short, not as still running, and
+/// neither is counted as a failure.
+#[test]
+fn a_session_that_ended_draws_nothing_as_still_running() {
+    let mut app = running_session();
+    app.apply(&Event::ToolCallStart {
+        id: "toolu_cut".into(),
+        name: "Bash".to_owned(),
+        input: r#"{"command":"cargo build"}"#.to_owned(),
+        summary: Some("cargo build".to_owned()),
+        agent: None,
+    });
+    assert!(screen(&mut app, 200, 60).contains("◆ test-writer"));
+
+    app.apply(&Event::Error {
+        message: "the `claude` session ended: exit status 1".to_owned(),
+        fatal: true,
+    });
+    let frame = screen(&mut app, 200, 60);
+
+    let agent = frame
+        .lines()
+        .find(|line| line.contains("test-writer"))
+        .unwrap_or_default();
+    assert!(agent.contains("⊘ test-writer"), "{agent:?}");
+    assert!(
+        agent.trim_end_matches(['│', ' ']).ends_with("cut short"),
+        "{agent:?}"
+    );
+    let call = frame
+        .lines()
+        .find(|line| line.contains("cargo build"))
+        .unwrap_or_default();
+    assert!(call.contains("cut short"), "{call:?}");
+    assert!(frame.contains("0 running"), "{frame}");
+    assert!(frame.contains("1 cut short"), "{frame}");
+    assert!(
+        !frame
+            .lines()
+            .any(|line| line.contains("running") && !line.contains("0 running")),
+        "something is still drawn as running:\n{frame}"
+    );
+}
+
 /// A list of only what is running now would erase the failure at the moment
 /// it matters most.
 #[test]

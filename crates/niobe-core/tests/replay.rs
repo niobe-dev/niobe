@@ -208,11 +208,13 @@ fn the_gaps_log_exercises_what_no_producer_emits() {
     assert_eq!(state.decisions().len(), 1);
     assert_eq!(state.checkpoints().len(), 1);
 
-    // Two agents, one killed and one still running when the log ends.
+    // Two agents, one killed and one still running when the fatal error
+    // ended the session under it: interrupted, and running no longer.
     assert_eq!(state.agents_spawned(), 2);
     assert_eq!(state.agents_cancelled(), 1);
+    assert_eq!(state.agents_interrupted(), 1);
     assert_eq!(state.peak_running_agents(), 2);
-    assert_eq!(state.running_agents().len(), 1);
+    assert!(state.running_agents().is_empty());
 
     // One error the session carried on past, and the one that ended it.
     assert_eq!(state.errors(), 2);

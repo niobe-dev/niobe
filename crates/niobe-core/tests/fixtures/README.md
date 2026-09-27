@@ -89,8 +89,9 @@ that the fold is still held to handling them:
 
 - a `tool_call_end` whose `tool_call_start` never arrived. A producer that
   dropped an event is not something that can be recorded from one that did not;
-- a sub-agent that was **cancelled**, and one still running when the log ends.
-  The Claude bridge reads a sub-agent the CLI stopped as cancelled, and every
+- a sub-agent that was **cancelled**, and one still running when the fatal
+  error that ends the log arrives, which the fold records as interrupted. The
+  Claude bridge reads a sub-agent the CLI stopped as cancelled, and every
   sub-agent in the recorded session completed;
 - a `Decision` and a `Checkpoint`. Nothing produces either yet;
 - an error the session **carried on past** — the one the bridge gives for a

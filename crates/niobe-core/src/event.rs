@@ -326,6 +326,14 @@ pub struct SlashCommand {
     pub argument_hint: Option<String>,
 }
 
+/// The tool name a command the operator ran with `!` is recorded under.
+///
+/// No backend names a tool this way, so the operator's commands are never
+/// counted as one of the agent's tools, nor grouped with its calls. It is
+/// shared vocabulary because the session fold tells them apart too: a backend
+/// that ends does not end a command the operator started.
+pub const OPERATOR_SHELL: &str = "! shell";
+
 /// How a tool call ended. Drives waste accounting: a failed call is spend with
 /// nothing to show for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

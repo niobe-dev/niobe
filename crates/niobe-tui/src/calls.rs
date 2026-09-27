@@ -486,11 +486,21 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| text::width(&span.content)).sum()
 }
 
+/// What a call the session ended under says in place of its cost: it has
+/// none, and it did not fail.
+const CUT_SHORT: &str = "cut short";
+
 /// What one call cost, as the backend and the clock reported it.
 fn result(call: &Call, theme: &Theme) -> Vec<Span<'static>> {
     let dim = Style::new().fg(theme.dim);
     let Some(outcome) = call.outcome else {
-        return vec![Span::styled("running", dim)];
+        return vec![Span::styled(
+            match call.interrupted {
+                true => CUT_SHORT,
+                false => "running",
+            },
+            dim,
+        )];
     };
     let mut spans = match (outcome, call.exit_code, call.lines) {
         (ToolOutcome::Denied, _, _) => return vec![Span::styled("denied", theme_del(theme))],
@@ -516,7 +526,8 @@ fn result(call: &Call, theme: &Theme) -> Vec<Span<'static>> {
 
 /// What a run of calls cost, summed: the lines its changes added and removed
 /// where every call that succeeded changed a file, and otherwise the bytes
-/// every call returned; how many failed; and how long they ran.
+/// every call returned; how many failed, and how many the session ended
+/// under; and how long they ran.
 ///
 /// A sum is marked `≥` where one of the calls in it had no figure to add, the
 /// same way the Changes pane marks a file some call did not count — and a
@@ -526,8 +537,12 @@ fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
     if calls.iter().any(Call::running) {
         return vec![Span::styled("running", dim)];
     }
-    let succeeded: Vec<&Call> = calls.iter().filter(|call| !call.failed()).collect();
-    let failed = calls.len() - succeeded.len();
+    let succeeded: Vec<&Call> = calls
+        .iter()
+        .filter(|call| !call.failed() && !call.interrupted)
+        .collect();
+    let cut = calls.iter().filter(|call| call.interrupted).count();
+    let failed = calls.len() - succeeded.len() - cut;
 
     let mut spans = match succeeded
         .iter()
@@ -546,6 +561,16 @@ fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
             vec![Span::styled(human_bytes(bytes), dim)]
         }
     };
+    if cut > 0 {
+        let said = match cut == calls.len() {
+            true => format!("{CUT_SHORT} ×{cut}"),
+            false => format!("{cut} {CUT_SHORT}"),
+        };
+        match succeeded.is_empty() && failed == 0 {
+            true => spans = vec![Span::styled(said, dim)],
+            false => spans.push(Span::styled(format!(" · {said}"), dim)),
+        }
+    }
     if failed > 0 {
         let said = match failed == calls.len() {
             true => format!("failed ×{failed}"),
@@ -813,6 +838,29 @@ mod tests {
         app.apply(&start("t1", "Bash"));
 
         assert!(drawn(&app, false)[0].ends_with("running"));
+    }
+
+    #[test]
+    fn a_call_the_session_ended_under_says_it_was_cut_short() {
+        let fatal = Event::Error {
+            message: "the `claude` session ended: exit status 1".to_owned(),
+            fatal: true,
+        };
+        let mut alone = app();
+        alone.apply(&start("t1", "Bash"));
+        alone.apply(&fatal);
+        let rows = drawn(&alone, false);
+        assert!(rows[0].ends_with("cut short"), "{rows:?}");
+
+        let mut run = app();
+        run.apply(&start("t1", "Read"));
+        run.apply(&end("t1", "Read", ToolOutcome::Ok, None));
+        run.apply(&start("t2", "Read"));
+        run.apply(&fatal);
+        let rows = drawn(&run, true);
+        assert!(!rows[0].contains("running"), "{rows:?}");
+        assert!(rows[0].contains("1 cut short"), "{rows:?}");
+        assert!(!rows[0].contains("failed"), "{rows:?}");
     }
 
     /// A `cargo test` call that ended with `status`, and the run it reported.

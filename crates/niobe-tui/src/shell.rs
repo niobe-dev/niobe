@@ -56,11 +56,7 @@
 
 use niobe_core::event::ToolCallId;
 
-/// The tool name a command run with `!` is recorded under.
-///
-/// No backend names a tool this way, so the operator's commands are never
-/// counted as one of the agent's tools, nor grouped with its calls.
-pub const OPERATOR_SHELL: &str = "! shell";
+pub use niobe_core::event::OPERATOR_SHELL;
 
 /// The key that stops a command the operator ran, as the help and the hints
 /// name it.

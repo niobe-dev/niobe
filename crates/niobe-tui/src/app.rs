@@ -557,6 +557,10 @@ pub struct Call {
     /// output held the whole run, and otherwise that it ran and whether it is
     /// known to have failed. `None` for every call that was not one.
     pub tested: Option<TestRunRecord>,
+    /// Whether the session ended while the call was running, so that no end
+    /// will arrive for it. It is not running, and it did not fail: the
+    /// backend that was running it is gone.
+    pub interrupted: bool,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -577,6 +581,7 @@ impl Call {
             change: None,
             printed: None,
             tested: None,
+            interrupted: false,
             started: at,
         }
     }
@@ -595,7 +600,7 @@ impl Call {
 
     /// Whether the call is still running.
     pub fn running(&self) -> bool {
-        self.outcome.is_none()
+        self.outcome.is_none() && !self.interrupted
     }
 
     /// Whether the call ran and did not succeed, or was not allowed to run.
@@ -757,8 +762,12 @@ pub struct SubAgent {
     pub label: String,
     /// When it was spawned, where the shell had a clock at the time.
     pub at: Option<Stamp>,
-    /// How it finished, or `None` while it is still running.
+    /// How it finished, or `None` while it is still running or where the
+    /// session ended under it.
     pub outcome: Option<AgentOutcome>,
+    /// Whether the session ended while it was running, so that no outcome
+    /// will arrive for it.
+    pub interrupted: bool,
     /// The model its own messages were answered by, where its backend said.
     pub model: Option<String>,
     /// The tokens in its conversation at its latest message, where its
@@ -1405,6 +1414,7 @@ impl App {
                 // ended on is not left on screen asking for one.
                 if *fatal {
                     self.forget_asks();
+                    self.interrupt_what_the_fold_stopped();
                 }
                 self.push(Entry {
                     kind: EntryKind::Failure,
@@ -1559,6 +1569,7 @@ impl App {
                     label: label.clone(),
                     at: self.at,
                     outcome: None,
+                    interrupted: false,
                     model: None,
                     context_tokens: None,
                     latest: None,
@@ -1704,6 +1715,35 @@ impl App {
         }
         entry.streaming = entry.calls.iter().any(Call::running);
         Some((at, index))
+    }
+
+    /// Marks every call and sub-agent the fold no longer counts as running as
+    /// cut short, after a fatal error ended the backend under them. The fold
+    /// decides which: a command the operator ran is not the backend's, and
+    /// runs on to an end of its own.
+    fn interrupt_what_the_fold_stopped(&mut self) {
+        let running = self.session.in_flight_tools();
+        let cut: Vec<(usize, usize)> = self
+            .tool_entries
+            .iter()
+            .filter(|(id, _)| !running.contains_key(*id))
+            .map(|(_, place)| *place)
+            .collect();
+        self.tool_entries.retain(|id, _| running.contains_key(id));
+        for (at, index) in cut {
+            if let Some(entry) = self.entries.get_mut(at) {
+                if let Some(call) = entry.calls.get_mut(index) {
+                    call.interrupted = true;
+                }
+                entry.streaming = entry.calls.iter().any(Call::running);
+            }
+        }
+        let running = self.session.running_agents();
+        for agent in &mut self.agents {
+            if agent.outcome.is_none() && !running.contains(&agent.id) {
+                agent.interrupted = true;
+            }
+        }
     }
 
     /// Starts a call's clock again from now, because the operator has just
@@ -5179,6 +5219,56 @@ mod tests {
         // that could not take it.
         app.on_key(key(KeyCode::Enter));
         assert!(app.take_produced().is_empty());
+    }
+
+    #[test]
+    fn a_session_that_ended_leaves_no_call_or_agent_running_but_the_operators() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "review it".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            label: "Review fetch".to_owned(),
+        });
+        app.apply(&start("t1", "Bash", "cargo test", None));
+        app.apply(&start("t2", "Bash", "cargo build", None));
+        app.apply(&start("op1", crate::shell::OPERATOR_SHELL, "git log", None));
+
+        app.apply(&Event::Error {
+            message: "the `claude` session ended with exit status: 3: crashed".to_owned(),
+            fatal: true,
+        });
+
+        let calls: Vec<(&str, bool, bool)> = app
+            .entries()
+            .iter()
+            .flat_map(|entry| &entry.calls)
+            .map(|call| (call.what.as_str(), call.running(), call.interrupted))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("cargo test", false, true),
+                ("cargo build", false, true),
+                ("git log", true, false),
+            ]
+        );
+        let bash = &app.entries()[1];
+        assert!(
+            !bash.streaming,
+            "the calls the session cut short still spin"
+        );
+        assert!(!bash.calls.iter().any(Call::failed));
+        assert_eq!(
+            app.agents()
+                .iter()
+                .map(|agent| (agent.outcome, agent.interrupted))
+                .collect::<Vec<_>>(),
+            [(None, true)]
+        );
+        assert!(app.activity().is_none(), "{:?}", app.activity());
     }
 
     #[test]

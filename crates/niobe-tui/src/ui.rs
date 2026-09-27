@@ -2459,12 +2459,12 @@ fn activity_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
 ///
 /// The glyph carries the state on its own: a sixteen-colour terminal in a
 /// theme the operator chose is not somewhere a colour can be the only
-/// difference between an agent that finished and one that failed.
-fn agent_state(
-    outcome: Option<AgentOutcome>,
-    theme: &Theme,
-) -> (&'static str, Color, &'static str) {
-    match outcome {
+/// difference between an agent that finished and one that failed. One the
+/// session ended under is neither running nor failed: nobody will say how it
+/// went.
+fn agent_state(agent: &SubAgent, theme: &Theme) -> (&'static str, Color, &'static str) {
+    match agent.outcome {
+        None if agent.interrupted => ("⊘", theme.dim, "cut short"),
         None => ("◆", theme.agent, "running"),
         Some(AgentOutcome::Completed) => ("◇", theme.dim, "done"),
         Some(AgentOutcome::Failed) => ("✗", theme.del, "failed"),
@@ -2477,23 +2477,26 @@ fn agent_state(
 ///
 /// A count that is zero is left out rather than drawn: `0 failed` is a line
 /// the operator has to read to learn nothing. Where the pane is narrow what is
-/// running now is kept longest, and what failed after it: the total spawned
-/// and the cancellations are history the rows below already tell.
+/// running now is kept longest, and what failed after it: the total spawned,
+/// the cancellations and the agents the session ended under are history the
+/// rows below already tell.
 fn agent_summary(session: &SessionState, theme: &Theme) -> Vec<Figure> {
     agent_figures(
         session.running_agents().len(),
         session.agents_spawned(),
         session.agents_failed(),
-        session.agents_cancelled(),
+        (session.agents_cancelled(), session.agents_interrupted()),
         theme,
     )
 }
 
+/// The section's figures, from its counts: the cancelled and the cut short
+/// travel together because they are drawn at the same rank.
 fn agent_figures(
     running: usize,
     spawned: u64,
     failed: u64,
-    cancelled: u64,
+    (cancelled, interrupted): (u64, u64),
     theme: &Theme,
 ) -> Vec<Figure> {
     let dim = Style::new().fg(theme.dim);
@@ -2504,7 +2507,11 @@ fn agent_figures(
         ),
         Figure::after(" · ", 3, Span::styled(format!("{spawned} spawned"), dim)),
     ];
-    for (count, word, rank) in [(failed, "failed", 1), (cancelled, "cancelled", 2)] {
+    for (count, word, rank) in [
+        (failed, "failed", 1),
+        (cancelled, "cancelled", 2),
+        (interrupted, "cut short", 2),
+    ] {
         if count > 0 {
             figures.push(Figure::after(
                 " · ",
@@ -2548,7 +2555,7 @@ fn agent_rows(
 
     let models = agent_models(app.agents());
     for (agent, model) in app.agents().iter().zip(models) {
-        let (glyph, colour, word) = agent_state(agent.outcome, theme);
+        let (glyph, colour, word) = agent_state(agent, theme);
         let status = agent_status(agent, word, app.stamp());
 
         let room = width
@@ -2629,8 +2636,12 @@ fn agent_name(label: &str, model: Option<String>, room: usize) -> (String, Optio
 /// where its backend counted one, marked `ctx` because that is what it is: the
 /// tokens the agent's latest message was answered over, not what the agent
 /// was billed. A failed or cancelled agent carries its state alone; why it
-/// stopped is on the row beneath it.
+/// stopped is on the row beneath it. So does one the session ended under: its
+/// clock stopped with the session, at a moment nobody recorded.
 fn agent_status(agent: &SubAgent, word: &str, now: Option<Stamp>) -> String {
+    if agent.interrupted {
+        return word.to_owned();
+    }
     if let Some(outcome) = agent.outcome {
         return match (outcome, agent.context_tokens) {
             (AgentOutcome::Completed, Some(tokens)) => format!("{word} {} ctx", compact(tokens)),
@@ -5050,7 +5061,7 @@ mod tests {
         };
         let age = Some(Duration::from_secs(95));
         vec![
-            ("Sub-agents", agent_figures(2, 13, 4, 1, theme)),
+            ("Sub-agents", agent_figures(2, 13, 4, (1, 0), theme)),
             (
                 "Working tree",
                 changed_figures(23, "+9770".to_owned(), "−2590".to_owned(), theme),
@@ -5161,7 +5172,7 @@ mod tests {
     #[test]
     fn the_least_important_figure_gives_way_first_and_the_rest_keep_their_order() {
         let theme = Theme::default();
-        let figures = agent_figures(2, 13, 4, 1, &theme);
+        let figures = agent_figures(2, 13, 4, (1, 0), &theme);
         let full = section_header(false, "Sub-agents", figures.clone(), 200, &theme);
         assert_eq!(
             line_text(&full),

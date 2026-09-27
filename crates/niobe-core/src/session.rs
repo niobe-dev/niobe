@@ -25,8 +25,8 @@ use crate::test_run::{self, FailedTests, TestCounts};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, Billing, CheckpointId, Context, Event, Mode, SessionMeta, SlashCommand,
-    ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Billing, CheckpointId, Context, Event, Mode, OPERATOR_SHELL,
+    SessionMeta, SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -250,6 +250,10 @@ pub struct ToolTotals {
     /// Ends that arrived without a matching start. A non-zero count means the
     /// producer is dropping events, so it is surfaced rather than swallowed.
     pub unmatched_ends: u64,
+    /// Calls the session ended under: still running when a fatal error ended
+    /// the backend, so no end will arrive for them. Neither finished nor
+    /// failed — the agent did not fail them, the session stopped them.
+    pub interrupted: u64,
 }
 
 /// A recorded `decide` event, kept in order for the changes pane and for the
@@ -500,6 +504,8 @@ pub struct SessionState {
     agents_completed: u64,
     agents_failed: u64,
     agents_cancelled: u64,
+    /// Sub-agents still running when a fatal error ended the session.
+    agents_interrupted: u64,
     running_agents: BTreeSet<AgentId>,
     peak_running_agents: u64,
     errors: u64,
@@ -712,6 +718,7 @@ impl SessionState {
                     // ended on was asked and never answered, and waits on no
                     // one now.
                     self.pending_permissions.clear();
+                    self.interrupt_backend_work();
                     // The turn it cut short spent what it spent, and is
                     // recorded with it; with no turn running there is none
                     // to end.
@@ -726,6 +733,28 @@ impl SessionState {
             Event::Notice { .. } => {}
             Event::Commands { commands } => self.commands = commands.clone(),
         }
+    }
+
+    /// Records every call and sub-agent the backend had running as cut short
+    /// by its end: none of them will report an end now, and one counted as
+    /// running for good is a session the panes say is still working.
+    ///
+    /// A command the operator ran with `!` is not the backend's, keeps
+    /// running, and ends with a report of its own.
+    fn interrupt_backend_work(&mut self) {
+        let cut: Vec<ToolCallId> = self
+            .in_flight_tools
+            .iter()
+            .filter(|(_, name)| name.as_str() != OPERATOR_SHELL)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in cut {
+            self.in_flight_tools.remove(&id);
+            self.agent_calls.remove(&id);
+            self.tools.interrupted += 1;
+        }
+        let agents = std::mem::take(&mut self.running_agents);
+        self.agents_interrupted = self.agents_interrupted.saturating_add(agents.len() as u64);
     }
 
     /// Where the session stands now, as a turn beginning or ending here would
@@ -868,7 +897,9 @@ impl SessionState {
         &self.tools
     }
 
-    /// Tool calls that started and have not ended, by name.
+    /// Tool calls that started and have not ended, by name. A fatal error
+    /// leaves only the operator's own commands here: it cuts the backend's
+    /// short ([`ToolTotals::interrupted`]).
     pub fn in_flight_tools(&self) -> &BTreeMap<ToolCallId, String> {
         &self.in_flight_tools
     }
@@ -980,6 +1011,13 @@ impl SessionState {
     /// Sub-agents that were killed or hit a budget.
     pub fn agents_cancelled(&self) -> u64 {
         self.agents_cancelled
+    }
+
+    /// Sub-agents that were still running when a fatal error ended the
+    /// session. Kept apart from the cancelled and the failed: nobody stopped
+    /// them and they did not fail, the session ended under them.
+    pub fn agents_interrupted(&self) -> u64 {
+        self.agents_interrupted
     }
 
     /// Sub-agents running now.
@@ -1468,6 +1506,108 @@ mod tests {
         // refusal is taken back.
         assert_eq!(state.permission_requests(), 1);
         assert_eq!(state.permissions_denied(), 0);
+    }
+
+    fn start(id: &str, name: &str, agent: Option<&str>) -> Event {
+        Event::ToolCallStart {
+            id: id.into(),
+            name: name.to_owned(),
+            input: String::new(),
+            summary: None,
+            agent: agent.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_fatal_error_records_the_calls_it_cut_short_and_leaves_none_running() {
+        let mut state = SessionState::new();
+        state.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            label: "test-writer".to_owned(),
+        });
+        state.apply(&start("t1", "Bash", None));
+        state.apply(&start("t2", "Read", Some("a1")));
+        state.apply(&Event::Error {
+            message: "retrying".to_owned(),
+            fatal: false,
+        });
+        assert_eq!(state.in_flight_tools().len(), 2);
+
+        state.apply(&Event::Error {
+            message: "the CLI exited".to_owned(),
+            fatal: true,
+        });
+
+        let tools = state.tools();
+        assert!(state.in_flight_tools().is_empty());
+        assert_eq!(tools.interrupted, 2);
+        // Cut short is not an end the backend reported, and not a failure
+        // the agent made.
+        assert_eq!(tools.finished, 0);
+        assert_eq!(tools.failed, 0);
+        assert_eq!(tools.unmatched_ends, 0);
+    }
+
+    #[test]
+    fn a_fatal_error_leaves_the_operators_own_commands_running() {
+        let mut state = SessionState::new();
+        state.apply(&start("t1", "Bash", None));
+        state.apply(&start("op1", OPERATOR_SHELL, None));
+
+        state.apply(&Event::Error {
+            message: "the CLI exited".to_owned(),
+            fatal: true,
+        });
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("op1")],
+            "the backend ending does not end what the operator ran"
+        );
+        assert_eq!(state.tools().interrupted, 1);
+
+        state.apply(&Event::ToolCallEnd {
+            id: "op1".into(),
+            name: OPERATOR_SHELL.to_owned(),
+            input: "git status".to_owned(),
+            output: String::new(),
+            bytes: 0,
+            outcome: ToolOutcome::Ok,
+            summary: None,
+            exit_code: Some(0),
+            error: None,
+        });
+        assert!(state.in_flight_tools().is_empty());
+        assert_eq!(state.tools().unmatched_ends, 0);
+    }
+
+    #[test]
+    fn a_fatal_error_leaves_no_agent_running_and_counts_none_as_failed() {
+        let mut state = SessionState::new();
+        for id in ["a1", "a2"] {
+            state.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                label: "test-writer".to_owned(),
+            });
+        }
+        state.apply(&Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Completed,
+        });
+
+        state.apply(&Event::Error {
+            message: "the CLI exited".to_owned(),
+            fatal: true,
+        });
+
+        assert!(state.running_agents().is_empty());
+        assert_eq!(state.agents_interrupted(), 1);
+        assert_eq!(state.agents_completed(), 1);
+        assert_eq!(state.agents_failed(), 0);
+        assert_eq!(state.agents_cancelled(), 0);
+        assert_eq!(state.peak_running_agents(), 2);
     }
 
     #[test]
