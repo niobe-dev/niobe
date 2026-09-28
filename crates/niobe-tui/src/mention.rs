@@ -41,10 +41,14 @@ pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Ment
 /// Where in `line` the character at `column` starts, or its end where
 /// `column` is just past its last character; `None` further out.
 ///
-/// The one walk over the line is the one the prompt's editor makes on every
-/// key as well; nothing here copies the line, which would cost its length in
-/// allocations for every key typed into it.
+/// Asked on every key typed into the prompt, so a line of plain ASCII, where
+/// a column is a byte, is answered without walking its characters; nothing
+/// here copies the line, which would cost its length in allocations for
+/// every key typed into it.
 fn byte_of_column(line: &str, column: usize) -> Option<usize> {
+    if line.is_ascii() {
+        return (column <= line.len()).then_some(column);
+    }
     line.char_indices()
         .map(|(byte, _)| byte)
         .chain(std::iter::once(line.len()))
@@ -123,6 +127,11 @@ mod tests {
         assert_eq!(at_cursor(&lines("ops@example.com"), (0, 15)), None);
         assert_eq!(at_cursor(&lines("@src done"), (0, 9)), None);
         assert_eq!(at_cursor(&lines("no at here"), (0, 10)), None);
+        assert_eq!(
+            at_cursor(&lines("@src"), (0, 9)),
+            None,
+            "a cursor past the end of the line"
+        );
     }
 
     #[test]

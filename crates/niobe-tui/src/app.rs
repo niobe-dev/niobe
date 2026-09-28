@@ -4090,7 +4090,10 @@ fn delete_whole(
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
     use ratatui_textarea::CursorMove;
 
-    if key.modifiers != KeyModifiers::NONE || composer.selection_range().is_some() {
+    if key.modifiers != KeyModifiers::NONE
+        || !matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+        || composer.selection_range().is_some()
+    {
         return None;
     }
     let ratatui_textarea::DataCursor(row, col) = composer.cursor();
