@@ -55,13 +55,108 @@ fn byte_of_column(line: &str, column: usize) -> Option<usize> {
         .nth(column)
 }
 
-/// Up to `limit` of `files` that `typed` could name, the likeliest first.
+/// The listed files, lowercased once, and the last list ranked from them.
+///
+/// A repository can list hundreds of thousands of files, and the list under
+/// an `@` word is asked for on every key and drawn on every frame; lowering
+/// every path and ranking them all each time cost 70 ms a key over 200,000
+/// paths. So the lowercased paths are made when the listing changes, and a
+/// ranking is kept for the text it was ranked for, which is what a frame
+/// with nothing newly typed asks for again.
+#[derive(Debug, Default)]
+pub(crate) struct Files {
+    /// Each file's path lowercased, and where its name starts in it.
+    lowered: Vec<(String, usize)>,
+    /// The text last ranked for, and what it ranked: indices into the files.
+    ranked: std::cell::RefCell<Option<(String, Vec<usize>)>>,
+}
+
+impl Files {
+    /// The index of `files`.
+    pub(crate) fn new(files: &[String]) -> Self {
+        let lowered = files
+            .iter()
+            .map(|path| {
+                let lower = path.to_lowercase();
+                let name = lower.rfind('/').map_or(0, |slash| slash + 1);
+                (lower, name)
+            })
+            .collect();
+        Self {
+            lowered,
+            ranked: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// Up to `limit` of `files` — the ones this index was made of — that
+    /// `typed` could name, the likeliest first, ranked as [`candidates`]
+    /// ranks them.
+    pub(crate) fn candidates<'a>(
+        &self,
+        files: &'a [String],
+        typed: &str,
+        limit: usize,
+    ) -> Vec<&'a str> {
+        let mut ranked = self.ranked.borrow_mut();
+        let fresh = match ranked.as_ref() {
+            Some((was, _)) => was != typed,
+            None => true,
+        };
+        if fresh {
+            *ranked = Some((typed.to_owned(), self.rank(files, typed, limit)));
+        }
+        ranked
+            .as_ref()
+            .map(|(_, at)| {
+                at.iter()
+                    .filter_map(|at| files.get(*at).map(String::as_str))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn rank(&self, files: &[String], typed: &str, limit: usize) -> Vec<usize> {
+        let typed = typed.to_lowercase();
+        let mut ranked: Vec<(u8, usize, usize, &str, usize)> = self
+            .lowered
+            .iter()
+            .zip(files)
+            .enumerate()
+            .filter_map(|(at, ((lower, name), path))| {
+                let rank = match_rank(&lower[*name..], lower, &typed)?;
+                let depth = path.matches('/').count();
+                Some((rank, depth, path.chars().count(), path.as_str(), at))
+            })
+            .collect();
+        ranked.sort_unstable();
+        ranked.into_iter().take(limit).map(|(.., at)| at).collect()
+    }
+}
+
+/// How well a file named `name`, at `path`, both lowercased, matches `typed`:
+/// its name starting with it, holding it, or its directories holding it.
+fn match_rank(name: &str, path: &str, typed: &str) -> Option<u8> {
+    if name.starts_with(typed) {
+        Some(0)
+    } else if name.contains(typed) {
+        Some(1)
+    } else if path.contains(typed) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Up to `limit` of `files` that `typed` could name, the likeliest first,
+/// ranked from scratch: the plain statement of the ranking, which [`Files`]
+/// is held to agree with.
 ///
 /// A file matches when its path holds what was typed, ignoring case. A file
 /// whose name starts with it comes first, then one whose name holds it, then
 /// one whose directories do; within each, the shallower file and then the
 /// shorter path first, since the operator reaching for a deep file keeps
 /// typing.
+#[cfg(test)]
 pub(crate) fn candidates<'a>(files: &'a [String], typed: &str, limit: usize) -> Vec<&'a str> {
     let typed = typed.to_lowercase();
     let mut ranked: Vec<(u8, usize, usize, &str)> = files
@@ -69,15 +164,7 @@ pub(crate) fn candidates<'a>(files: &'a [String], typed: &str, limit: usize) -> 
         .filter_map(|path| {
             let lower = path.to_lowercase();
             let name = lower.rsplit('/').next().unwrap_or(&lower);
-            let rank = if name.starts_with(&typed) {
-                0
-            } else if name.contains(&typed) {
-                1
-            } else if lower.contains(&typed) {
-                2
-            } else {
-                return None;
-            };
+            let rank = match_rank(name, &lower, &typed)?;
             let depth = path.matches('/').count();
             Some((rank, depth, path.chars().count(), path.as_str()))
         })
@@ -178,5 +265,33 @@ mod tests {
             .to_vec();
 
         assert_eq!(candidates(&files, "", 2), ["top.rs", "a/mid.rs"]);
+    }
+
+    #[test]
+    fn the_index_ranks_as_the_plain_ranking_does_and_keeps_its_last_answer() {
+        let files: Vec<String> = [
+            "src/Main.rs",
+            "src/app/main_menu.rs",
+            "docs/main/readme.md",
+            "tests/domain.rs",
+            "README.md",
+        ]
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect();
+        let index = Files::new(&files);
+
+        for typed in ["", "main", "MAIN", "ma", "readme", "zzz", "src/"] {
+            assert_eq!(
+                index.candidates(&files, typed, 3),
+                candidates(&files, typed, 3),
+                "{typed:?}"
+            );
+            // Asked again, as a frame with nothing newly typed asks.
+            assert_eq!(
+                index.candidates(&files, typed, 3),
+                candidates(&files, typed, 3)
+            );
+        }
     }
 }

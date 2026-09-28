@@ -835,6 +835,8 @@ pub struct Pulse {
 #[derive(Debug)]
 pub struct App {
     repo: Repo,
+    /// The repository's files, indexed for the list under an `@` word.
+    mention_index: crate::mention::Files,
     /// Sections the operator has folded away, in whichever pane they belong
     /// to. One set, because a section is in exactly one pane.
     folded: std::collections::BTreeSet<Section>,
@@ -1130,6 +1132,7 @@ impl App {
         paint_composer(&mut composer, &theme);
 
         Self {
+            mention_index: crate::mention::Files::new(&repo.files),
             repo,
             folded: std::collections::BTreeSet::new(),
             changes: Scroller::default(),
@@ -2776,6 +2779,9 @@ impl App {
     /// nothing at all, so what is on screen is the last read that worked rather
     /// than an emptied pane.
     pub fn set_repo(&mut self, repo: Repo) {
+        if repo.files != self.repo.files {
+            self.mention_index = crate::mention::Files::new(&repo.files);
+        }
         self.repo = repo;
     }
 
@@ -3009,7 +3015,9 @@ impl App {
         let Some(mention) = self.mention() else {
             return (Vec::new(), 0);
         };
-        let files = crate::mention::candidates(&self.repo.files, &mention.typed, MENTION_ROWS);
+        let files = self
+            .mention_index
+            .candidates(&self.repo.files, &mention.typed, MENTION_ROWS);
         let selected = self.offer_selected.min(files.len().saturating_sub(1));
         (files, selected)
     }

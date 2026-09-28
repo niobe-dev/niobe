@@ -544,3 +544,37 @@ fn typed_line(length: usize) -> String {
         .map(|n| if n % 7 == 6 { ' ' } else { 'a' })
         .collect()
 }
+
+/// A repository as large as any the list under an `@` word has to rank.
+const LISTED_FILES: usize = 200_000;
+
+/// The list under an `@` word, open over a very large repository: every
+/// frame draws it, so what ranking the listed files costs is what a frame
+/// costs, and it is ranked once for the text typed rather than on every one.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn the_file_list_under_an_at_redraws_inside_a_frame_budget_over_a_large_repository() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    let mut repo = app.repo().clone();
+    repo.files = (0..LISTED_FILES)
+        .map(|n| format!("crates/part_{}/src/file{n}.rs", n % 97))
+        .collect();
+    app.set_repo(repo);
+    app.on_paste("look @file12");
+    assert!(
+        !app.mention_files().0.is_empty(),
+        "the list is open, or its frame would time nothing"
+    );
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame with the @ list open over {LISTED_FILES} files at 200x60 took \
+         {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
