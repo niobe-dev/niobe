@@ -1616,7 +1616,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_cli_that_is_not_reading_does_not_hold_up_whoever_writes_to_it() {
-        let (mut session, _dir) = started("exec sleep 30\n");
+        let (mut session, _dir) = started("exec sleep 300\n");
 
         let started = Instant::now();
         session.send(&a_long_paste()).expect("the turn is queued");
@@ -1624,7 +1624,10 @@ mod tests {
         session.set_model("haiku").expect("the request is queued");
         let took = started.elapsed();
 
-        assert!(took < Duration::from_millis(100), "writing took {took:?}");
+        // A write that waited on the CLI would wait until it left, five
+        // minutes on; queued, the lines took 105 ms at worst with two
+        // whole-workspace test runs sharing the machine.
+        assert!(took < Duration::from_secs(10), "writing took {took:?}");
     }
 
     #[cfg(unix)]
