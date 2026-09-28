@@ -571,6 +571,32 @@ pub struct Shutdown {
     suspend: std::sync::Arc<AtomicBool>,
     #[cfg(unix)]
     continued: std::sync::Arc<AtomicBool>,
+    /// Set once the shell is done with the terminal, when this is dropped:
+    /// from then on SIGTERM, SIGINT and SIGQUIT do what they would have
+    /// without the shell, so a teardown that stalls after the terminal was
+    /// handed back can still be ended by sending one again. Never while the
+    /// shell holds the terminal, where ending at once would leave it raw.
+    ///
+    /// `None` until [`Shutdown::hands_back_signals_when_dropped`]: signals are
+    /// the process's, and a `Shutdown` a test installs and drops must not
+    /// leave the next test's SIGTERM ending the test binary.
+    #[cfg(unix)]
+    released: Option<std::sync::Arc<AtomicBool>>,
+}
+
+/// The signals that ask the session to stop.
+#[cfg(unix)]
+const STOPPING: [i32; 3] = [
+    signal_hook::consts::SIGTERM,
+    signal_hook::consts::SIGINT,
+    signal_hook::consts::SIGQUIT,
+];
+
+impl Drop for Shutdown {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        self.release();
+    }
 }
 
 impl Shutdown {
@@ -580,11 +606,7 @@ impl Shutdown {
     pub fn install() -> io::Result<Self> {
         let requested = std::sync::Arc::new(AtomicBool::new(false));
         let hung_up = std::sync::Arc::new(AtomicBool::new(false));
-        for asked in [
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGINT,
-            signal_hook::consts::SIGQUIT,
-        ] {
+        for asked in STOPPING {
             signal_hook::flag::register(asked, std::sync::Arc::clone(&requested))?;
         }
         signal_hook::flag::register(signal_hook::consts::SIGHUP, std::sync::Arc::clone(&hung_up))?;
@@ -603,7 +625,42 @@ impl Shutdown {
             hung_up,
             suspend,
             continued,
+            released: None,
         })
+    }
+
+    /// The same handlers, and once this is dropped — after the shell has
+    /// handed the terminal back — SIGTERM, SIGINT and SIGQUIT do what they
+    /// would have without them: see [`Shutdown::released`]. For the one
+    /// `Shutdown` a process runs its shell under.
+    #[cfg(unix)]
+    pub fn hands_back_signals_when_dropped(mut self) -> io::Result<Self> {
+        let released = std::sync::Arc::new(AtomicBool::new(false));
+        for asked in STOPPING {
+            signal_hook::flag::register_conditional_default(
+                asked,
+                std::sync::Arc::clone(&released),
+            )?;
+        }
+        self.released = Some(released);
+        Ok(self)
+    }
+
+    /// [`Shutdown::hands_back_signals_when_dropped`], where there are no
+    /// POSIX signals to hand back.
+    #[cfg(not(unix))]
+    pub fn hands_back_signals_when_dropped(self) -> io::Result<Self> {
+        Ok(self)
+    }
+
+    /// Hands the three stopping signals back their own behaviour: see
+    /// [`Shutdown::released`]. Done when the shell drops this, which is after
+    /// it has handed the terminal back.
+    #[cfg(unix)]
+    fn release(&self) {
+        if let Some(released) = &self.released {
+            released.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Registers the handlers.

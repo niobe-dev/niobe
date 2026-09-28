@@ -122,7 +122,10 @@ fn run(
     let asked = Asked {
         budget,
         theme,
-        depth: Depth::from_colorterm(std::env::var("COLORTERM").ok().as_deref()),
+        depth: Depth::from_env(
+            std::env::var("COLORTERM").ok().as_deref(),
+            std::env::var("NO_COLOR").ok().as_deref(),
+        ),
     };
     match command {
         Command::Shell => shell(profile, &asked),
@@ -1079,7 +1082,7 @@ THEME:
     colour scheme is what they mean. cyber, neo and modern are drawn in their
     own 24-bit colours where COLORTERM is truecolor or 24bit, and in the
     sixteen everywhere else, so a session stays legible over SSH and in
-    screen.
+    screen. NO_COLOR set to anything draws every theme in the sixteen.
 
     While a turn runs, the desktop behind the panes moves: rain in neo,
     drifting words in cyber, a radar in modern; classic stays still. You see

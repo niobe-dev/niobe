@@ -652,14 +652,26 @@ impl Printed {
     }
 }
 
-/// A line of output as a terminal would have left it: what follows the last
-/// carriage return, tabs as spaces, and no control characters.
+/// A line of output as a terminal would have left it: each carriage return
+/// takes the cursor back to the start of the line and what follows is written
+/// over what was there — `abcdef\rXY` reads `XYcdef`, and a progress bar that
+/// ends on a bare `\r` keeps its last bar — with tabs as spaces and no control
+/// characters.
 fn terminal_line(line: &str) -> String {
-    let shown = line.rsplit('\r').next().unwrap_or(line);
-    crate::text::expand_tabs(shown)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
+    let mut shown: Vec<char> = Vec::new();
+    for pass in line.split('\r') {
+        let written: Vec<char> = crate::text::expand_tabs(pass)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        for (at, c) in written.into_iter().enumerate() {
+            match shown.get_mut(at) {
+                Some(cell) => *cell = c,
+                None => shown.push(c),
+            }
+        }
+    }
+    shown.into_iter().collect()
 }
 
 /// The shortest time between a call's start and its end that this shell can
@@ -6218,6 +6230,14 @@ mod tests {
         app.settle_budget();
 
         assert!(app.entries().iter().all(|entry| entry.head != "budget"));
+    }
+
+    #[test]
+    fn a_carriage_return_writes_over_the_line_as_a_terminal_does() {
+        assert_eq!(terminal_line("abcdef\rXY"), "XYcdef");
+        assert_eq!(terminal_line("[#####     ] 50%\r"), "[#####     ] 50%");
+        assert_eq!(terminal_line("10%\r20%\r100%"), "100%");
+        assert_eq!(terminal_line("plain"), "plain");
     }
 
     #[test]

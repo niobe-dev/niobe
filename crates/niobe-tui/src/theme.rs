@@ -54,6 +54,21 @@ impl Depth {
     /// that does not understand it never sends, and a terminal that says
     /// nothing gets the sixteen, which are legible by construction.
     pub fn from_colorterm(colorterm: Option<&str>) -> Self {
+        Self::from_env(colorterm, None)
+    }
+
+    /// The depth `COLORTERM` announces, unless `NO_COLOR` is set to anything
+    /// but nothing: then the sixteen, whatever `COLORTERM` says. The sixteen
+    /// are the operator's own terminal colours, which is the nearest a shell
+    /// that marks what it draws by colour can come to using none of its own.
+    pub fn from_env(colorterm: Option<&str>, no_color: Option<&str>) -> Self {
+        if no_color.is_some_and(|value| !value.is_empty()) {
+            return Depth::Sixteen;
+        }
+        Self::announced(colorterm)
+    }
+
+    fn announced(colorterm: Option<&str>) -> Self {
         match colorterm {
             Some(value)
                 if value.eq_ignore_ascii_case("truecolor")
@@ -1038,5 +1053,16 @@ mod tests {
     #[test]
     fn the_names_are_listed_the_way_a_sentence_lists_them() {
         assert_eq!(listed(), "`cyber`, `classic`, `neo` or `modern`");
+    }
+
+    #[test]
+    fn no_color_draws_the_sixteen_whatever_colorterm_says() {
+        assert_eq!(Depth::from_env(Some("truecolor"), None), Depth::TrueColour);
+        assert_eq!(
+            Depth::from_env(Some("truecolor"), Some("1")),
+            Depth::Sixteen
+        );
+        assert_eq!(Depth::from_env(Some("24bit"), Some("")), Depth::TrueColour);
+        assert_eq!(Depth::from_env(None, Some("1")), Depth::Sixteen);
     }
 }

@@ -119,7 +119,10 @@ pub fn run(
     shell: &mut dyn Shell,
 ) -> io::Result<Ended> {
     install_panic_hook();
-    let shutdown = Shutdown::install()?;
+    // Declared before the terminal guard so it is dropped after it: dropping
+    // it hands the stopping signals back their own behaviour, which is safe
+    // only once the terminal has been handed back.
+    let shutdown = Shutdown::install()?.hands_back_signals_when_dropped()?;
     let mut wait = Wait::on_the_terminal();
 
     // Read once: the timezone is a file on disk and the loop asks for the time
