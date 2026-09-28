@@ -40,10 +40,15 @@ fn installer() -> PathBuf {
 
 /// A release directory with an archive and a checksum for every target.
 fn release(root: &Path) -> PathBuf {
+    release_of(root, STAND_IN)
+}
+
+/// A release whose binary is the script `stand_in`.
+fn release_of(root: &Path, stand_in: &str) -> PathBuf {
     let staging = root.join("staging");
     fs::create_dir_all(&staging).expect("the temporary directory is writable");
     let binary = staging.join("niobe");
-    fs::write(&binary, STAND_IN).expect("the staging directory is writable");
+    fs::write(&binary, stand_in).expect("the staging directory is writable");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
         .expect("the stand-in was just written");
 
@@ -266,4 +271,84 @@ fn the_installer_falls_back_to_wget_and_shasum() {
         .output()
         .expect("the installer made the binary executable");
     assert_eq!(String::from_utf8_lossy(&version.stdout), "niobe 9.9.9\n");
+}
+
+/// What the install directory holds after a failed install: the staged copy
+/// must not be among it.
+fn assert_nothing_staged(root: &Path) {
+    assert!(
+        !root.join("bin").join(".niobe.new").exists(),
+        "the staged copy was left behind"
+    );
+}
+
+#[test]
+fn an_install_target_that_is_a_directory_fails_and_says_so() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let release = release(root.path());
+    fs::create_dir_all(root.path().join("bin").join("niobe")).expect("the directory is made");
+
+    let output = install(root.path(), &release);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("is a directory"),
+        "{}",
+        said(&output)
+    );
+    assert!(
+        !said(&output).contains("installed niobe"),
+        "{}",
+        said(&output)
+    );
+    assert_nothing_staged(root.path());
+    assert!(
+        fs::read_dir(root.path().join("bin").join("niobe"))
+            .expect("the directory is still there")
+            .next()
+            .is_none(),
+        "the binary was moved into the directory"
+    );
+}
+
+#[test]
+fn an_install_target_that_is_a_link_is_left_alone() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let release = release(root.path());
+    let elsewhere = root.path().join("elsewhere");
+    fs::write(&elsewhere, "someone else's").expect("written");
+    fs::create_dir_all(root.path().join("bin")).expect("the directory is made");
+    std::os::unix::fs::symlink(&elsewhere, root.path().join("bin").join("niobe"))
+        .expect("the link is made");
+
+    let output = install(root.path(), &release);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(said(&output).contains("is a link"), "{}", said(&output));
+    assert_nothing_staged(root.path());
+    assert_eq!(
+        fs::read_to_string(&elsewhere).expect("read"),
+        "someone else's"
+    );
+}
+
+#[test]
+fn a_binary_that_does_not_run_installs_nothing() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let release = release_of(
+        root.path(),
+        "#!/bin/sh\necho 'exec format error' >&2\nexit 126\n",
+    );
+
+    let output = install(root.path(), &release);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(said(&output).contains("does not run"), "{}", said(&output));
+    assert!(
+        said(&output).contains("exec format error"),
+        "{}",
+        said(&output)
+    );
+    assert_nothing_staged(root.path());
+    assert!(!root.path().join("bin").join("niobe").exists());
 }

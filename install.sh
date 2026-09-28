@@ -117,13 +117,33 @@ main() {
     [ -f "$scratch/niobe" ] || fail "$archive holds no niobe binary"
 
     mkdir -p "$install_dir"
-    # Copied beside the target and renamed over it, so a niobe that is running
-    # keeps its file and a failed copy leaves the old one in place.
-    cp "$scratch/niobe" "$install_dir/.niobe.new"
-    chmod 755 "$install_dir/.niobe.new"
-    mv -f "$install_dir/.niobe.new" "$install_dir/niobe"
+    target="$install_dir/niobe"
+    # A directory there would take the binary inside it, and a link would be
+    # replaced by it: neither leaves a niobe where the message says it is.
+    if [ -d "$target" ] && [ ! -L "$target" ]; then
+        fail "$target is a directory; nothing was installed"
+    fi
+    if [ -L "$target" ]; then
+        fail "$target is a link; remove it or set NIOBE_INSTALL_DIR, nothing was installed"
+    fi
 
-    say "installed $("$install_dir/niobe" --version) to $install_dir/niobe"
+    # Copied beside the target and renamed over it, so a niobe that is running
+    # keeps its file and a failed copy leaves the old one in place. Run before
+    # the rename, so a binary that does not run on this machine replaces
+    # nothing.
+    staged="$install_dir/.niobe.new"
+    cp "$scratch/niobe" "$staged"
+    chmod 755 "$staged"
+    if ! installed=$("$staged" --version 2>&1); then
+        rm -f "$staged"
+        fail "the niobe in $archive does not run on this machine ($installed); nothing was installed"
+    fi
+    mv -f "$staged" "$target" || {
+        rm -f "$staged"
+        fail "could not put niobe at $target; nothing was installed"
+    }
+
+    say "installed $installed to $target"
     case ":$PATH:" in
         *":$install_dir:"*) ;;
         *)
