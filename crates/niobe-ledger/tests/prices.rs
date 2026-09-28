@@ -332,3 +332,418 @@ fn one_hour_writes_on_a_model_with_no_one_hour_rate_are_unpriced_not_guessed() {
     };
     assert_eq!(bundled().cost(&usage, date(2026, 9, 16)), Cost::Unpriced);
 }
+
+/// Which of an entry's rates a case is billed at.
+#[derive(Debug, Clone, Copy)]
+enum Tier {
+    /// The standard rates, on a prompt under every long-context threshold.
+    Standard,
+    /// The standard rates times the entry's `fast` multiple.
+    Fast,
+    /// The entry's long-context rates, on a prompt over its threshold.
+    Long,
+}
+
+/// One `[[model.price]]` entry, or one of its tiers, and what a
+/// [`request`] costs at it, worked out by hand beside it.
+#[derive(Debug)]
+struct Case {
+    id: &'static str,
+    from: (u16, u8, u8),
+    tier: Tier,
+    /// Whether the entry has a 1-hour write rate; a request writing for an
+    /// hour to a model with none is unpriced.
+    one_hour: bool,
+    usd: f64,
+}
+
+/// A request with 10,000 tokens of each kind the entry prices — input,
+/// output, cache read, 5-minute write and, where there is a rate for it, a
+/// 1-hour write — so that its cost is the sum of the entry's rates over 100.
+/// Every rate counts, so a digit mistyped in any one of them moves the
+/// figure. The long-context tier is ten times as much of each: a prompt of
+/// 400,000 tokens, over every threshold in the table, costing the sum of the
+/// long-context rates over 10.
+fn request(case: &Case) -> Usage {
+    let scale = match case.tier {
+        Tier::Standard | Tier::Fast => 10_000,
+        Tier::Long => 100_000,
+    };
+    let one_hour = if case.one_hour { scale } else { 0 };
+    Usage {
+        input: scale,
+        output: scale,
+        cache_read: scale,
+        cache_write: scale + one_hour,
+        cache_write_1h: one_hour,
+        fast: matches!(case.tier, Tier::Fast),
+        ..usage(case.id)
+    }
+}
+
+/// Every entry of the bundled table, at the published rates its comments in
+/// `prices.toml` cite, written out here rather than read from the table.
+const CASES: [Case; 44] = [
+    // claude-fable-5-1, from 2026-09-01, standard: (10 + 50 + 0.25 + 12.5 + 20) / 100 = 0.9275
+    Case {
+        id: "claude-fable-5-1",
+        from: (2026, 9, 1),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.9275,
+    },
+    // claude-fable-5, from 2026-06-09, standard: (10 + 50 + 1 + 12.5 + 20) / 100 = 0.935
+    Case {
+        id: "claude-fable-5",
+        from: (2026, 6, 9),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.935,
+    },
+    // claude-opus-5-5, from 2026-09-22, standard: (4 + 20 + 0.2 + 5 + 8) / 100 = 0.372
+    Case {
+        id: "claude-opus-5-5",
+        from: (2026, 9, 22),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.372,
+    },
+    // claude-opus-5-5, from 2026-09-22, fast: (4 + 20 + 0.2 + 5 + 8) / 100 × 2 = 0.744
+    Case {
+        id: "claude-opus-5-5",
+        from: (2026, 9, 22),
+        tier: Tier::Fast,
+        one_hour: true,
+        usd: 0.744,
+    },
+    // claude-opus-5, from 2026-07-24, standard: (5 + 25 + 0.5 + 6.25 + 10) / 100 = 0.4675
+    Case {
+        id: "claude-opus-5",
+        from: (2026, 7, 24),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.4675,
+    },
+    // claude-opus-5, from 2026-07-24, fast: (5 + 25 + 0.5 + 6.25 + 10) / 100 × 2 = 0.935
+    Case {
+        id: "claude-opus-5",
+        from: (2026, 7, 24),
+        tier: Tier::Fast,
+        one_hour: true,
+        usd: 0.935,
+    },
+    // claude-opus-4-8, from 2026-05-28, standard: (5 + 25 + 0.5 + 6.25 + 10) / 100 = 0.4675
+    Case {
+        id: "claude-opus-4-8",
+        from: (2026, 5, 28),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.4675,
+    },
+    // claude-opus-4-8, from 2026-05-28, fast: (5 + 25 + 0.5 + 6.25 + 10) / 100 × 2 = 0.935
+    Case {
+        id: "claude-opus-4-8",
+        from: (2026, 5, 28),
+        tier: Tier::Fast,
+        one_hour: true,
+        usd: 0.935,
+    },
+    // claude-opus-4-7, from 2026-04-16, standard: (5 + 25 + 0.5 + 6.25 + 10) / 100 = 0.4675
+    Case {
+        id: "claude-opus-4-7",
+        from: (2026, 4, 16),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.4675,
+    },
+    // claude-opus-4-6, from 2026-02-05, standard: (5 + 25 + 0.5 + 6.25 + 10) / 100 = 0.4675
+    Case {
+        id: "claude-opus-4-6",
+        from: (2026, 2, 5),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.4675,
+    },
+    // claude-opus-4-6, from 2026-02-05, long: (10 + 37.5 + 1 + 12.5 + 20) / 10 = 8.1
+    Case {
+        id: "claude-opus-4-6",
+        from: (2026, 2, 5),
+        tier: Tier::Long,
+        one_hour: true,
+        usd: 8.1,
+    },
+    // claude-opus-4-6, from 2026-03-13, standard: (5 + 25 + 0.5 + 6.25 + 10) / 100 = 0.4675
+    Case {
+        id: "claude-opus-4-6",
+        from: (2026, 3, 13),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.4675,
+    },
+    // claude-opus-4-5-20251101, from 2025-11-24, standard: (5 + 25 + 0.5 + 6.25 + 10) / 100 = 0.4675
+    Case {
+        id: "claude-opus-4-5-20251101",
+        from: (2025, 11, 24),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.4675,
+    },
+    // claude-sonnet-5, from 2026-06-30, standard: (2 + 10 + 0.2 + 2.5 + 4) / 100 = 0.187
+    Case {
+        id: "claude-sonnet-5",
+        from: (2026, 6, 30),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.187,
+    },
+    // claude-sonnet-4-6, from 2026-02-17, standard: (3 + 15 + 0.3 + 3.75 + 6) / 100 = 0.2805
+    Case {
+        id: "claude-sonnet-4-6",
+        from: (2026, 2, 17),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.2805,
+    },
+    // claude-sonnet-4-6, from 2026-02-17, long: (6 + 22.5 + 0.6 + 7.5 + 12) / 10 = 4.86
+    Case {
+        id: "claude-sonnet-4-6",
+        from: (2026, 2, 17),
+        tier: Tier::Long,
+        one_hour: true,
+        usd: 4.86,
+    },
+    // claude-sonnet-4-6, from 2026-03-13, standard: (3 + 15 + 0.3 + 3.75 + 6) / 100 = 0.2805
+    Case {
+        id: "claude-sonnet-4-6",
+        from: (2026, 3, 13),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.2805,
+    },
+    // claude-sonnet-4-5-20250929, from 2025-09-29, standard: (3 + 15 + 0.3 + 3.75 + 6) / 100 = 0.2805
+    Case {
+        id: "claude-sonnet-4-5-20250929",
+        from: (2025, 9, 29),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.2805,
+    },
+    // claude-sonnet-4-5-20250929, from 2025-09-29, long: (6 + 22.5 + 0.6 + 7.5 + 12) / 10 = 4.86
+    Case {
+        id: "claude-sonnet-4-5-20250929",
+        from: (2025, 9, 29),
+        tier: Tier::Long,
+        one_hour: true,
+        usd: 4.86,
+    },
+    // claude-haiku-4-5-20251001, from 2025-10-15, standard: (1 + 5 + 0.1 + 1.25 + 2) / 100 = 0.0935
+    Case {
+        id: "claude-haiku-4-5-20251001",
+        from: (2025, 10, 15),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.0935,
+    },
+    // eu.anthropic.claude-fable-5, from 2026-06-09, standard: (11 + 55 + 1.1 + 13.75 + 22) / 100 = 1.0285
+    Case {
+        id: "eu.anthropic.claude-fable-5",
+        from: (2026, 6, 9),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 1.0285,
+    },
+    // eu.anthropic.claude-opus-5, from 2026-07-24, standard: (5.5 + 27.5 + 0.55 + 6.875 + 11) / 100 = 0.51425
+    Case {
+        id: "eu.anthropic.claude-opus-5",
+        from: (2026, 7, 24),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.51425,
+    },
+    // eu.anthropic.claude-opus-4-8, from 2026-05-28, standard: (5.5 + 27.5 + 0.55 + 6.875 + 11) / 100 = 0.51425
+    Case {
+        id: "eu.anthropic.claude-opus-4-8",
+        from: (2026, 5, 28),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.51425,
+    },
+    // eu.anthropic.claude-opus-4-7, from 2026-04-16, standard: (5.5 + 27.5 + 0.55 + 6.875 + 11) / 100 = 0.51425
+    Case {
+        id: "eu.anthropic.claude-opus-4-7",
+        from: (2026, 4, 16),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.51425,
+    },
+    // eu.anthropic.claude-sonnet-5, from 2026-06-30, standard: (2.2 + 11 + 0.22 + 2.75 + 4.4) / 100 = 0.2057
+    Case {
+        id: "eu.anthropic.claude-sonnet-5",
+        from: (2026, 6, 30),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.2057,
+    },
+    // global.anthropic.claude-opus-4-6-v1, from 2026-03-13, standard: (5 + 25 + 0.5 + 6.25 + 10) / 100 = 0.4675
+    Case {
+        id: "global.anthropic.claude-opus-4-6-v1",
+        from: (2026, 3, 13),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.4675,
+    },
+    // eu.anthropic.claude-opus-4-6-v1, from 2026-03-13, standard: (5.5 + 27.5 + 0.55 + 6.875 + 11) / 100 = 0.51425
+    Case {
+        id: "eu.anthropic.claude-opus-4-6-v1",
+        from: (2026, 3, 13),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.51425,
+    },
+    // global.anthropic.claude-sonnet-4-6, from 2026-03-13, standard: (3 + 15 + 0.3 + 3.75 + 6) / 100 = 0.2805
+    Case {
+        id: "global.anthropic.claude-sonnet-4-6",
+        from: (2026, 3, 13),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.2805,
+    },
+    // eu.anthropic.claude-sonnet-4-6, from 2026-03-13, standard: (3.3 + 16.5 + 0.33 + 4.125 + 6.6) / 100 = 0.30855
+    Case {
+        id: "eu.anthropic.claude-sonnet-4-6",
+        from: (2026, 3, 13),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.30855,
+    },
+    // global.anthropic.claude-haiku-4-5-20251001-v1:0, from 2025-10-15, standard: (1 + 5 + 0.1 + 1.25 + 2) / 100 = 0.0935
+    Case {
+        id: "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+        from: (2025, 10, 15),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.0935,
+    },
+    // eu.anthropic.claude-haiku-4-5-20251001-v1:0, from 2025-10-15, standard: (1.1 + 5.5 + 0.11 + 1.375 + 2.2) / 100 = 0.10285
+    Case {
+        id: "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        from: (2025, 10, 15),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.10285,
+    },
+    // gpt-5.6-sol, from 2026-07-09, standard: (5 + 30 + 0.5 + 6.25) / 100 = 0.4175
+    Case {
+        id: "gpt-5.6-sol",
+        from: (2026, 7, 9),
+        tier: Tier::Standard,
+        one_hour: false,
+        usd: 0.4175,
+    },
+    // gpt-5.6-sol, from 2026-07-09, long: (10 + 45 + 1 + 12.5) / 10 = 6.85
+    Case {
+        id: "gpt-5.6-sol",
+        from: (2026, 7, 9),
+        tier: Tier::Long,
+        one_hour: false,
+        usd: 6.85,
+    },
+    // gpt-5.6-sol, from 2026-08-21, standard: (4 + 20 + 0.4 + 5) / 100 = 0.294
+    Case {
+        id: "gpt-5.6-sol",
+        from: (2026, 8, 21),
+        tier: Tier::Standard,
+        one_hour: false,
+        usd: 0.294,
+    },
+    // gpt-5.6-sol, from 2026-08-21, long: (8 + 30 + 0.8 + 10) / 10 = 4.88
+    Case {
+        id: "gpt-5.6-sol",
+        from: (2026, 8, 21),
+        tier: Tier::Long,
+        one_hour: false,
+        usd: 4.88,
+    },
+    // gpt-5.6-terra, from 2026-07-09, standard: (2.5 + 15 + 0.25 + 3.125) / 100 = 0.20875
+    Case {
+        id: "gpt-5.6-terra",
+        from: (2026, 7, 9),
+        tier: Tier::Standard,
+        one_hour: false,
+        usd: 0.20875,
+    },
+    // gpt-5.6-terra, from 2026-07-09, long: (5 + 22.5 + 0.5 + 6.25) / 10 = 3.425
+    Case {
+        id: "gpt-5.6-terra",
+        from: (2026, 7, 9),
+        tier: Tier::Long,
+        one_hour: false,
+        usd: 3.425,
+    },
+    // gpt-5.6-terra, from 2026-07-30, standard: (2 + 12 + 0.2 + 2.5) / 100 = 0.167
+    Case {
+        id: "gpt-5.6-terra",
+        from: (2026, 7, 30),
+        tier: Tier::Standard,
+        one_hour: false,
+        usd: 0.167,
+    },
+    // gpt-5.6-terra, from 2026-07-30, long: (4 + 18 + 0.4 + 5) / 10 = 2.74
+    Case {
+        id: "gpt-5.6-terra",
+        from: (2026, 7, 30),
+        tier: Tier::Long,
+        one_hour: false,
+        usd: 2.74,
+    },
+    // gpt-5.6-luna, from 2026-07-09, standard: (1 + 6 + 0.1 + 1.25) / 100 = 0.0835
+    Case {
+        id: "gpt-5.6-luna",
+        from: (2026, 7, 9),
+        tier: Tier::Standard,
+        one_hour: false,
+        usd: 0.0835,
+    },
+    // gpt-5.6-luna, from 2026-07-09, long: (2 + 9 + 0.2 + 2.5) / 10 = 1.37
+    Case {
+        id: "gpt-5.6-luna",
+        from: (2026, 7, 9),
+        tier: Tier::Long,
+        one_hour: false,
+        usd: 1.37,
+    },
+    // gpt-5.6-luna, from 2026-07-30, standard: (0.2 + 1.2 + 0.02 + 0.25) / 100 = 0.0167
+    Case {
+        id: "gpt-5.6-luna",
+        from: (2026, 7, 30),
+        tier: Tier::Standard,
+        one_hour: false,
+        usd: 0.0167,
+    },
+    // gpt-5.6-luna, from 2026-07-30, long: (0.4 + 1.8 + 0.04 + 0.5) / 10 = 0.274
+    Case {
+        id: "gpt-5.6-luna",
+        from: (2026, 7, 30),
+        tier: Tier::Long,
+        one_hour: false,
+        usd: 0.274,
+    },
+    // gpt-5.3-codex, from 2026-02-24, standard: (1.75 + 14 + 0.175 + 1.75) / 100 = 0.17675
+    Case {
+        id: "gpt-5.3-codex",
+        from: (2026, 2, 24),
+        tier: Tier::Standard,
+        one_hour: false,
+        usd: 0.17675,
+    },
+];
+
+#[test]
+fn every_price_in_the_table_matches_a_hand_computed_cost() {
+    let table = bundled();
+    for case in &CASES {
+        let (year, month, day) = case.from;
+        let cost = usd(table.cost(&request(case), date(year, month, day)));
+        assert!((cost - case.usd).abs() < 1e-9, "{case:?} cost {cost}");
+    }
+}
