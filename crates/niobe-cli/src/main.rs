@@ -976,8 +976,11 @@ SESSIONS:
     folds to instead of opening the shell.
 
     niobe sessions lists two kinds. The first is niobe's own, by the number the
-    store gave them. The second is the sessions the claude CLI recorded for
-    this repository, by the id it calls them by: --resume with one of those
+    store gave them. The second is the sessions the claude CLI recorded at the
+    root of this repository, by the id it calls them by. The CLI keeps a
+    session under the directory it was started in and resumes it only from
+    there, and niobe runs it at the root, so one started in a subdirectory is
+    not listed and cannot be carried on here. --resume with one of those
     reads the CLI's own transcript in as the history of a new niobe session and
     asks the CLI to carry the conversation on, so a session started in plain
     Claude Code continues here. From then on it is a niobe session like any

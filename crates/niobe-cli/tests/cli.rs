@@ -755,6 +755,21 @@ fn the_help_says_a_session_read_back_is_estimated_at_todays_rates() {
     assert!(!out.contains("the rates of the day it ran."), "{out}");
 }
 
+/// The CLI resumes a session only from the directory it started in, and
+/// niobe runs it at the repository's root: the help says which sessions that
+/// leaves out rather than promise every one in the repository.
+#[test]
+fn the_help_says_a_claude_session_from_a_subdirectory_is_not_listed() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    assert!(
+        out.contains("recorded at the\n    root of this repository"),
+        "{out}"
+    );
+    assert!(out.contains("one started in a subdirectory is"), "{out}");
+}
+
 /// A profile's `auth_refresh` is read and listed and not run; the help says
 /// so rather than let an operator think a login will happen on its own.
 #[test]
