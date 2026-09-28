@@ -77,9 +77,15 @@ use rustix::termios::Winsize;
 const DEADLINE: Duration = Duration::from_secs(1);
 
 /// How long a test waits for the shell to draw, to record or to end before
-/// calling it hung. Long enough that a loaded machine does not fail it, short
-/// enough that a hung test is not mistaken for a slow one.
-const PATIENCE: Duration = Duration::from_secs(10);
+/// calling it hung.
+///
+/// Every wait returns as soon as what it waits for happens, so a passing test
+/// waits no longer for this being long; a hung one never gets there either
+/// way. With two whole-workspace test runs sharing a 12-core Mac (load
+/// average 17), the opening frame came after 0.12 s at the median and 11.06 s
+/// at worst — the binary starting, not the harness — and a shell ended within
+/// 9.27 s of being asked; ten seconds failed there.
+const PATIENCE: Duration = Duration::from_secs(60);
 
 /// How long a wait on the pty blocks before looking at the stop flag again.
 const POLL: Timespec = Timespec {
