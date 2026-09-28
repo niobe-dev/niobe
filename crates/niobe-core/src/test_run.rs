@@ -23,6 +23,10 @@
 //! off part-way is not. Those leave a run that happened and whose result was
 //! not read, never a total of the suites that happened to survive the filter.
 //!
+//! A verbose run, `cargo test -v`, is read like any other: it names each
+//! binary by the command that runs it rather than by its target, and the
+//! doc-tests by the `rustdoc` command under their own header.
+//!
 //! A quiet run, `cargo test -q`, is a test run whose counts are never read:
 //! it prints no line saying where the build ended, so its whole output and
 //! the last part of it look the same. Colour codes cargo puts around its
@@ -445,7 +449,7 @@ fn tests_started(output: &str) -> bool {
         }
         match Line::of(line) {
             Line::Finished => built = true,
-            Line::Header => headed = built,
+            Line::Header | Line::Invocation => headed = built,
             Line::Running(_) => started |= headed,
             Line::Result(_) | Line::Other => {}
         }
@@ -493,7 +497,12 @@ fn whole_run(output: &str) -> Option<TestCounts> {
         state = match (state, Line::of(line)) {
             (_, Line::Other) => state,
             (Block::Building | Block::Between, Line::Finished) => Block::Between,
-            (Block::Between, Line::Header) => Block::Headed,
+            (Block::Between, Line::Header | Line::Invocation) => Block::Headed,
+            // `cargo test -v` names the `rustdoc` it runs on a line of its
+            // own, under the `Doc-tests` header of the block it belongs to.
+            // Only that line: a header straight after a header is a block
+            // cut out of the middle of the run.
+            (Block::Headed, Line::Invocation) => Block::Headed,
             (Block::Headed, Line::Running(tests)) => Block::Running(tests),
             (Block::Running(tests), Line::Result(result)) if result.total() == Some(tests) => {
                 counts.passed = counts.passed.saturating_add(result.passed);
@@ -534,6 +543,9 @@ enum Line {
     /// `     Running unittests src/lib.rs (target/debug/deps/…)` or
     /// `   Doc-tests demo`.
     Header,
+    /// ``     Running `/repo/target/debug/deps/demo-…` ``, as `cargo test
+    /// -v` names a binary, or the `rustdoc` it runs the doc-tests with.
+    Invocation,
     /// `running 5 tests`.
     Running(u64),
     /// `test result: ok. 4 passed; 0 failed; …`.
@@ -554,6 +566,8 @@ impl Line {
                     Line::Finished
                 } else if is_header(words) {
                     Line::Header
+                } else if is_invocation(words) {
+                    Line::Invocation
                 } else {
                     Line::Other
                 }
@@ -564,6 +578,15 @@ impl Line {
                 .unwrap_or(Line::Other),
         }
     }
+}
+
+/// ``Running `<the command>` ``, which is how `cargo test -v` names what it
+/// runs: a test binary, where it heads a block, or the `rustdoc` that runs
+/// the doc-tests, under their own header.
+fn is_invocation(words: &str) -> bool {
+    words
+        .strip_prefix("Running `")
+        .is_some_and(|rest| rest.len() > 1 && rest.ends_with('`'))
 }
 
 /// `Running <what> (<binary>)` or `Doc-tests <crate>`.
@@ -1010,6 +1033,93 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     /// A quiet run prints no line saying where the build ended, which is
     /// what tells an output that holds the whole run from the last part of
     /// one; its counts are not read.
+    /// `cargo test -v` on a crate with unit tests, an integration test and a
+    /// doc test, recorded with cargo 1.9x on 28 September 2026 and cut to the
+    /// lines after the build; the paths are scrubbed.
+    const VERBOSE_PASS: &str = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.68s
+     Running `/repo/target/debug/deps/demo-760e00b68511d171`
+
+running 2 tests
+test tests::a ... ok
+test tests::b ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/repo/target/debug/deps/it-ba8b357ade733549`
+
+running 1 test
+test it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests demo
+     Running `/home/user/.rustup/toolchains/stable/bin/rustdoc --edition=2024 --crate-type lib --crate-name demo --test src/lib.rs`
+
+running 1 test
+test src/lib.rs - two (line 1) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+";
+
+    /// The same crate with one unit test failing, which stops the run at its
+    /// first binary.
+    const VERBOSE_FAIL: &str =
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.52s
+     Running `/repo/target/debug/deps/demo-760e00b68511d171`
+
+running 2 tests
+test tests::a ... ok
+test tests::b ... FAILED
+
+failures:
+
+---- tests::b stdout ----
+
+thread 'tests::b' panicked at src/lib.rs:6:78:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::b
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+";
+
+    #[test]
+    fn a_verbose_run_is_read_like_any_other() {
+        let passed = counts(VERBOSE_PASS, Some(0)).expect("a whole verbose run is read");
+        assert_eq!((passed.passed, passed.failed, passed.suites), (4, 0, 3));
+
+        let failing = counts(VERBOSE_FAIL, Some(101)).expect("a whole failing run is read");
+        assert_eq!((failing.passed, failing.failed, failing.suites), (1, 1, 1));
+        assert!(failed("cargo test -v", VERBOSE_FAIL, Some(101)));
+        let cut = &VERBOSE_FAIL[..VERBOSE_FAIL.find("failures:").expect("a list")];
+        assert!(
+            failed("cargo test -v", cut, Some(101)),
+            "a cut failing run failed too"
+        );
+    }
+
+    #[test]
+    fn a_header_straight_after_a_header_is_a_run_with_a_block_cut_out() {
+        let cut = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.68s
+     Running unittests src/lib.rs (target/debug/deps/demo-1)
+... (12 lines truncated)
+     Running tests/it.rs (target/debug/deps/it-2)
+
+running 1 test
+test it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        assert_eq!(counts(cut, Some(0)), None);
+    }
+
     #[test]
     fn a_quiet_run_is_a_test_run_whose_counts_are_not_read() {
         assert!(is_test_run("cargo test -q"));
