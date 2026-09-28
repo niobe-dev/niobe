@@ -35,7 +35,11 @@ impl std::error::Error for LogError {
 /// Parses a whole log. Blank lines are skipped; the first line that is not an
 /// event fails the read, because a log with a hole in it folds into totals that
 /// look right and are not.
+///
+/// A byte-order mark at the start is passed over: an editor that saves UTF-8
+/// with one has not changed a single event in the file.
 pub fn read_log(text: &str) -> Result<Vec<Event>, LogError> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     text.lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
@@ -69,5 +73,15 @@ mod tests {
         let error = read_log(log).expect_err("an unknown type does not parse");
         assert_eq!(error.line(), 3);
         assert!(error.to_string().starts_with("line 3 is not an event"));
+    }
+
+    #[test]
+    fn a_log_saved_with_a_byte_order_mark_reads_as_the_same_events() {
+        let line = r#"{"type":"user_message","text":"hi"}"#;
+
+        assert_eq!(
+            read_log(&format!("\u{feff}{line}\n")).expect("the mark is passed over"),
+            read_log(line).expect("a log")
+        );
     }
 }

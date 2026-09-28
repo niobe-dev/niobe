@@ -26,7 +26,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// its own before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The whole schema at [`SCHEMA_VERSION`].
+/// The whole schema at [`SCHEMA_VERSION`], less [`REPLACE_GUARDS`].
 ///
 /// The triggers are the append-only rule. They make an `UPDATE` or `DELETE`
 /// fail in the database itself, so the rule holds for the `sqlite3` shell and
@@ -56,6 +56,24 @@ CREATE TRIGGER sessions_are_append_only_on_update BEFORE UPDATE ON sessions
 BEGIN SELECT RAISE(ABORT, 'sessions are append-only'); END;
 
 CREATE TRIGGER sessions_are_append_only_on_delete BEFORE DELETE ON sessions
+BEGIN SELECT RAISE(ABORT, 'sessions are append-only'); END;
+";
+
+/// The rest of the append-only rule: a row inserted over one already there.
+///
+/// `REPLACE` and `INSERT OR REPLACE` delete the row in the way and insert the
+/// new one, and SQLite fires no delete trigger for that unless recursive
+/// triggers are on, so without these a stored event could be rewritten in
+/// place from the `sqlite3` shell. Created where missing on every open that
+/// can write, rather than by a new schema version, so that a store an
+/// earlier build made gains them and an earlier build can still read it.
+const REPLACE_GUARDS: &str = "
+CREATE TRIGGER IF NOT EXISTS events_are_append_only_on_replace BEFORE INSERT ON events
+WHEN EXISTS (SELECT 1 FROM events WHERE session_id = NEW.session_id AND seq = NEW.seq)
+BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+
+CREATE TRIGGER IF NOT EXISTS sessions_are_append_only_on_replace BEFORE INSERT ON sessions
+WHEN NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM sessions WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'sessions are append-only'); END;
 ";
 
@@ -439,6 +457,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             });
         }
     }
+    tx.execute_batch(REPLACE_GUARDS)?;
 
     tx.commit()?;
     Ok(())

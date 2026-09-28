@@ -165,23 +165,44 @@ fn the_database_itself_refuses_to_edit_or_delete_an_event() {
     }
 
     let conn = raw(&path);
+    let forged = r#"{"type":"user_message","text":"forged"}"#;
     let update = conn.execute("UPDATE events SET event = '{}'", []);
     let delete = conn.execute("DELETE FROM events", []);
     let drop_session = conn.execute("DELETE FROM sessions", []);
+    let update_session = conn.execute("UPDATE sessions SET started_at = 42", []);
+    // A replace deletes the row in the way and fires no delete trigger, so it
+    // is refused on the way in instead.
+    let replace = conn.execute(
+        "REPLACE INTO events (session_id, seq, at, event) VALUES (1, 1, 0, ?1)",
+        [forged],
+    );
+    let insert_or_replace = conn.execute(
+        "INSERT OR REPLACE INTO events (session_id, seq, at, event) VALUES (1, 1, 0, ?1)",
+        [forged],
+    );
+    let replace_session = conn.execute("REPLACE INTO sessions (id, started_at) VALUES (1, 42)", []);
 
     for (what, result) in [
         ("update", update),
         ("delete", delete),
         ("session delete", drop_session),
+        ("session update", update_session),
+        ("replace", replace),
+        ("insert or replace", insert_or_replace),
+        ("session replace", replace_session),
     ] {
         let error = result.expect_err(what).to_string();
         assert!(error.contains("append-only"), "{what}: {error}");
     }
 
     let store = Store::open(&path).expect("the store opens again");
-    let session = store.sessions().expect("listing works")[0].id;
+    let listed = store.sessions().expect("listing works");
+    assert_ne!(
+        listed[0].started_at,
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(42)
+    );
     assert_eq!(
-        store.events(session).expect("load")[0].event,
+        store.events(listed[0].id).expect("load")[0].event,
         user("keep me")
     );
 }
