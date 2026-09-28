@@ -2401,17 +2401,35 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         ]),
     }];
     if let Some(budget) = app.budget() {
-        let spent = app.session().totals().reported_cost_usd;
-        lines.push(
-            Line::from(format!("budget {}/{}", dollars(spent), dollars(budget))).style(
-                match spent >= budget * BUDGET_SHOWN_HOT {
-                    true => Style::new().fg(theme.hot).bold(),
-                    false => Style::new().fg(theme.fg),
-                },
-            ),
-        );
+        lines.push(budget_line(app, budget, width, theme));
     }
     lines
+}
+
+/// The `budget ~$1.15/$5.00` row: what the session has spent, labelled as
+/// the session's cost is, against the budget it was given.
+///
+/// An em dash where nothing was reported and nothing could be valued, never a
+/// `$0.00` that would read as a session that has cost nothing. On a plan the
+/// figure is what the work would have cost on the API — the budget is counted
+/// in that money too — so the row says so, shortened only where the pane has
+/// no room for the whole word.
+fn budget_line(app: &App, budget: f64, width: usize, theme: &Theme) -> Line<'static> {
+    let spent = known_spend(app.session(), app.prices());
+    let figure = spent.as_ref().map_or("—", |(text, _)| text.as_str());
+    let amounts = format!("{figure}/{}", dollars(budget));
+    let head = match app.session().billing() {
+        Some(Billing::Plan) => ["API-equivalent budget ", "API-eq. budget "]
+            .into_iter()
+            .find(|head| text::width(head) + text::width(&amounts) <= width)
+            .unwrap_or("API-eq. budget "),
+        Some(Billing::Metered) | None => "budget ",
+    };
+    let hot = spent.is_some_and(|(_, usd)| usd >= budget * BUDGET_SHOWN_HOT);
+    Line::from(format!("{head}{amounts}")).style(match hot {
+        true => Style::new().fg(theme.hot).bold(),
+        false => Style::new().fg(theme.fg),
+    })
 }
 
 /// Columns a tool's name gets in the Usage pane's mix.
@@ -3790,6 +3808,26 @@ pub fn session_cost(session: &SessionState, prices: Option<&dyn Prices>) -> Stri
     .unwrap_or_else(|| "unpriced".to_owned())
 }
 
+/// What the session has spent, drawn with the label [`session_cost`] gives it,
+/// and the figure behind that label, which is a floor or an estimate wherever
+/// the label says so. `None` where there is no usage, or where nothing was
+/// reported and nothing could be valued.
+pub(crate) fn known_spend(
+    session: &SessionState,
+    prices: Option<&dyn Prices>,
+) -> Option<(String, f64)> {
+    let totals = session.totals();
+    if totals.records == 0 {
+        return None;
+    }
+    let (label, usd) = known_cost(
+        totals.reported_cost_usd,
+        totals.cost_fully_reported(),
+        value_unsettled(totals, prices),
+    )?;
+    Some((label.format(usd), usd))
+}
+
 /// The least time worked a spend rate is drawn over.
 ///
 /// Over the first seconds of a session one request's price is the whole
@@ -4750,6 +4788,51 @@ mod tests {
     /// The column above the pane is laid out from the height it asks for, so
     /// a row it draws and did not count is a row cut off the bottom, and one
     /// it counted and did not draw is a blank the other panes lose.
+    /// The budget row of a session billed `billing` that has seen `events`,
+    /// drawn `width` columns wide.
+    fn budget_row(billing: Billing, events: &[niobe_core::event::Event], width: usize) -> String {
+        let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+        app.apply(&niobe_core::event::Event::Billing { billing });
+        for event in events {
+            app.apply(event);
+        }
+        let lines = money_lines(&app, width, &crate::theme::CLASSIC);
+        line_text(lines.last().expect("a budget draws its row"))
+    }
+
+    #[test]
+    fn a_budget_against_a_cost_nobody_reported_draws_a_dash_not_a_zero() {
+        assert_eq!(
+            budget_row(Billing::Metered, &[priced(None)], 40),
+            "budget —/$5.00"
+        );
+        assert_eq!(budget_row(Billing::Metered, &[], 40), "budget —/$5.00");
+    }
+
+    #[test]
+    fn a_budget_against_a_partly_reported_cost_draws_the_floor() {
+        assert_eq!(
+            budget_row(Billing::Metered, &[priced(Some(1.25)), priced(None)], 40),
+            "budget ≥$1.25/$5.00"
+        );
+    }
+
+    #[test]
+    fn a_budget_on_a_plan_is_named_in_api_equivalent_money() {
+        assert_eq!(
+            budget_row(Billing::Plan, &[priced(Some(1.25))], 40),
+            "API-equivalent budget $1.25/$5.00"
+        );
+        assert_eq!(
+            budget_row(Billing::Plan, &[priced(Some(1.25))], 24),
+            "API-eq. budget $1.25/$5.00"
+        );
+        assert_eq!(
+            budget_row(Billing::Plan, &[priced(None)], 40),
+            "API-equivalent budget —/$5.00"
+        );
+    }
+
     #[test]
     fn the_usage_pane_asks_for_exactly_the_rows_it_draws() {
         let windows = niobe_core::event::Event::UsageWindows(UsageWindows {

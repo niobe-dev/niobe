@@ -2251,8 +2251,13 @@ impl App {
         if self.budget_warned || budget <= 0.0 {
             return;
         }
-        let spent = self.session.totals().reported_cost_usd;
-        if spent < budget * BUDGET_WARNING {
+        // The same labelled figure the Usage pane draws: a floor or an
+        // estimate past the line is past the line, and a cost nobody reported
+        // is no reason to warn.
+        let Some((spent, usd)) = crate::ui::known_spend(&self.session, self.prices()) else {
+            return;
+        };
+        if usd < budget * BUDGET_WARNING {
             return;
         }
 
@@ -2260,11 +2265,7 @@ impl App {
         self.push(Entry {
             kind: EntryKind::Notice,
             head: "budget".to_owned(),
-            meta: format!(
-                "{} of {}",
-                crate::ui::dollars(spent),
-                crate::ui::dollars(budget)
-            ),
+            meta: format!("{spent} of {}", crate::ui::dollars(budget)),
             body: "Most of this session's budget is spent. The backend stops the session \
                    when the budget is reached, and it checks between turns rather than \
                    inside one, so the session can finish above the figure by what the turn \
@@ -6076,6 +6077,31 @@ mod tests {
             "the warning let the budget read as a hard ceiling: {}",
             warnings[0].body
         );
+    }
+
+    #[test]
+    fn a_floor_past_four_fifths_of_the_budget_is_warned_about_as_a_floor() {
+        let mut app = app().with_budget(1.0);
+        let mut unreported = priced(0.0);
+        if let Event::Usage(usage) = &mut unreported {
+            usage.cost_usd = None;
+        }
+
+        app.apply(&unreported);
+        app.settle_budget();
+        assert!(
+            app.entries().iter().all(|entry| entry.head != "budget"),
+            "a cost nobody reported was warned about"
+        );
+
+        app.apply(&priced(0.85));
+        app.settle_budget();
+        let warning = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "budget")
+            .expect("a floor past the line is warned about");
+        assert_eq!(warning.meta, "≥$0.85 of $1.00");
     }
 
     #[test]

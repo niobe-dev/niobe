@@ -925,9 +925,13 @@ fn a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it() {
 
     let frame = screen(&mut app, 120, 30);
 
-    // The fixture reports $0.04 of cost and one record without any, so the
-    // figure beside the budget is what was actually reported and no more.
-    assert!(frame.contains("budget $0.04/$0.50"), "{frame}");
+    // The fixture reports $0.04 of cost and one record without any, on a
+    // plan, so the figure beside the budget is the floor of what the work
+    // would have cost on the API, and is labelled both ways.
+    assert!(
+        frame.contains("API-equivalent budget ≥$0.04/$0.50"),
+        "{frame}"
+    );
     assert!(
         !screen(&mut running_session(), 120, 30).contains("budget"),
         "a session with no budget was given one"
@@ -1161,7 +1165,7 @@ fn a_plan_shows_no_spend_rate() {
 fn a_metered_profiles_budget_stands_under_its_cost() {
     let frame = screen(&mut metered_session().with_budget(0.50), 120, 30);
     let session = frame.find("session ").expect("the cost is drawn");
-    let budget = frame.find("budget $").expect("the budget is drawn");
+    let budget = frame.find("budget ").expect("the budget is drawn");
     let model = frame.find("opus-5    ").expect("the model rows are drawn");
     assert!(session < budget && budget < model, "{frame}");
 }
