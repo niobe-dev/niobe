@@ -143,23 +143,32 @@ impl Shell for Commands {
         };
         stop(leader);
         let groups = Arc::clone(&self.groups);
+        let reaper = self.reaper.clone();
         let id = id.clone();
         std::thread::spawn(move || {
             std::thread::sleep(GRACE);
-            // Only while it is still listed: a group is taken off the list
-            // once it is seen empty, so a group killed here cannot be one a
-            // new process has taken the number of.
-            if let Ok(groups) = groups.lock()
-                && groups
+            // Only while it is still listed, looked at again first: a group
+            // is taken off the list once it is seen empty, so a group killed
+            // here cannot be one a new process has taken the number of.
+            if let Ok(mut groups) = groups.lock() {
+                let_go_of_the_empty(&mut groups, reaper.as_ref());
+                if groups
                     .iter()
                     .any(|group| group.id == id && group.leader == leader)
-            {
-                kill(leader);
+                {
+                    kill(leader);
+                }
             }
         });
     }
 
+    /// Also lets go of every group that has emptied since the last look, so
+    /// that neither the quit nor the reaper is left holding the number of a
+    /// group that is gone: once empty, it can be given to anyone's.
     fn drain(&mut self) -> Vec<Ran> {
+        if let Ok(mut groups) = self.groups.lock() {
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
+        }
         self.ended.try_iter().collect()
     }
 }
@@ -182,9 +191,11 @@ impl Drop for Commands {
         while Instant::now() < until && !none_running(&self.groups) {
             std::thread::sleep(Duration::from_millis(5));
         }
-        // Under the lock, as in `stop`: a group is taken off the list once it
-        // is seen empty, so a group killed here is still the command's own.
-        if let Ok(groups) = self.groups.lock() {
+        // Under the lock, as in `stop`, and looked at again first: a group
+        // that emptied while this waited is let go of rather than killed, so a
+        // group killed here is still the command's own.
+        if let Ok(mut groups) = self.groups.lock() {
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
             for group in groups.iter() {
                 kill(group.leader);
             }
@@ -604,6 +615,26 @@ mod tests {
         assert!(
             groups.is_empty(),
             "an empty group is still kept: {groups:?}"
+        );
+    }
+
+    /// A group can empty after its `sh` has ended, when what the command left
+    /// running exits on its own. It is let go of at the next look rather than
+    /// kept for the quit to signal, by which time its number could be
+    /// someone else's.
+    #[test]
+    fn a_group_that_empties_after_its_shell_ended_is_let_go_of_at_the_next_drain() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let mut commands = Commands::at(dir.path());
+
+        ran_in(&mut commands, "(sleep 0.3 >/dev/null 2>&1 &)");
+        std::thread::sleep(Duration::from_millis(600));
+        commands.drain();
+
+        let groups = commands.groups.lock().expect("nothing else holds the list");
+        assert!(
+            groups.is_empty(),
+            "a group emptied after its shell was kept for the quit: {groups:?}"
         );
     }
 

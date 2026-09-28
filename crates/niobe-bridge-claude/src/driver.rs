@@ -350,6 +350,11 @@ pub struct Session {
     /// Whether the child's exit has already been turned into an event, so that
     /// a session that has ended says so once rather than on every drain.
     reported: bool,
+    /// Whether the process group the CLI led has been ended, which is done
+    /// once, as soon as the CLI has been reaped. Once the group is empty its
+    /// id is free for any process to lead a group under, and a signal sent to
+    /// it later — at the quit, hours on — could reach a stranger's group.
+    group_ended: bool,
     /// When the CLI's standard output was first found closed. The process
     /// leaving closes it a moment before it can be reaped, so the end is not
     /// reported until one or the other — the process gone, or [`GOODBYE`]
@@ -478,6 +483,7 @@ impl Session {
             threads: vec![reader, errors, writer],
             control_requests: 0,
             reported: false,
+            group_ended: false,
             output_closed: None,
             exited: None,
             stalled_after: STALLED,
@@ -710,6 +716,7 @@ impl Session {
                 self.unanswered();
                 let _ = self.child.kill();
                 let _ = self.child.wait();
+                self.end_the_group();
                 return Some(Event::Error {
                     message: kept_running(&self.said()),
                     fatal: true,
@@ -725,6 +732,7 @@ impl Session {
             }
         };
         self.reported = true;
+        self.end_the_group();
         let said = self.said();
         let unanswered = self.unanswered();
 
@@ -782,6 +790,15 @@ impl Session {
         }
         self.output_closed.get_or_insert(exited);
         self.ended()
+    }
+
+    /// Ends what is left of the CLI's process group, the once: see
+    /// [`Session::group_ended`]. Called only once the CLI has been reaped.
+    fn end_the_group(&mut self) {
+        if !self.group_ended {
+            self.group_ended = true;
+            end_group(self.child.id());
+        }
     }
 
     /// The tool calls the CLI was still waiting on an answer about, which are
@@ -1097,7 +1114,7 @@ impl Drop for Session {
             }
         }
 
-        end_group(self.child.id());
+        self.end_the_group();
 
         // The threads end when their pipes close, which the group leaving
         // does: the writer too, whose queue is closed and whose last write
@@ -1120,9 +1137,11 @@ impl Drop for Session {
 /// Ends what is left of the process group the CLI led: asked with SIGTERM,
 /// then killed if anything is still in it after [`LEFTOVERS`].
 ///
-/// Called once the CLI has been reaped. A process group's id is not given to
-/// a new process while any member of the group is alive, so the group
-/// signalled is still the CLI's, or is gone and the signal finds nothing.
+/// Called once the CLI has been reaped, and straight after: a process group's
+/// id is not given to a new process while any member of the group is alive,
+/// so the group signalled is still the CLI's, or is gone and the signal finds
+/// nothing. Called later, the group could have emptied and its id been given
+/// to someone else's.
 #[cfg(unix)]
 fn end_group(leader: u32) {
     // A group with nobody left in it is what was wanted.
@@ -1491,6 +1510,39 @@ mod tests {
             "{}",
             &said[said.len().saturating_sub(200)..]
         );
+    }
+
+    /// What the CLI left running in its group is ended as soon as the CLI is
+    /// reaped, not at the quit: by then the group could have emptied and its
+    /// id been handed to a stranger's group, which the quit would signal.
+    #[cfg(unix)]
+    #[test]
+    fn the_clis_group_is_ended_when_the_cli_is_reaped_and_not_again_at_the_quit() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pid = dir.path().join("left.pid");
+        let (session, _) = stand_in(&format!(
+            "sleep 77105 >/dev/null 2>&1 &\necho $! > '{pid}'\nread -r first\nread -r turn\nexit 0\n",
+            pid = pid.display()
+        ));
+
+        assert!(
+            session.group_ended,
+            "the group was left for the quit to end"
+        );
+        let left = std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|written| written.trim().parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("the stand-in wrote the pid of what it left running");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            rustix::process::test_kill_process(left).is_err(),
+            "what the CLI left running outlived the CLI's end"
+        );
+        drop(session);
     }
 
     /// Something that left the CLI's group cannot be ended with it, so its
