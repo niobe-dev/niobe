@@ -893,3 +893,35 @@ for meta in transcripts/7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73/subagents/*.meta.js
     "${meta%.meta.json}.jsonl" | tail -1
 done
 ```
+
+## `resumed.jsonl`, `resumed-transcript.jsonl`
+
+A session resumed with `--resume`, recorded from Claude Code 2.1.282 on 28
+September 2026 with the flags above, `--setting-sources project` and
+`--model sonnet`, in an empty directory. A first process ran two one-word turns
+and left; `resumed-transcript.jsonl` is what the CLI's transcript of the
+session held at that point, cut to its prompts, its replies and the
+`cost-state` the CLI wrote as it left, with `cwd` rewritten to `/repo` and
+`gitBranch` to `main`. `resumed.jsonl` is a second process started with
+`--resume` on that session, which ran one more one-word turn; its answer to
+`initialize` is cut to an empty `commands` list and its `system`/`init` to the
+keys that say what ran, with `cwd` rewritten to `/repo`.
+
+What it settles: **the CLI restores its running totals on `--resume`.** The
+resumed process's first `result` reports `modelUsage` for the whole session,
+not for its own turn:
+
+```sh
+jq -s '[.[] | select(.type=="cost-state")] | last | .modelUsage["claude-sonnet-5"]' \
+  resumed-transcript.jsonl
+# inputTokens 4, outputTokens 6, cacheRead 46894, cacheCreation 11652, costUSD 0.0560548
+jq -s '[.[] | select(.type=="result")][0] | .modelUsage["claude-sonnet-5"]' resumed.jsonl
+# inputTokens 6, outputTokens 9, cacheRead 77185, cacheCreation 12270, costUSD 0.064619
+```
+
+The differences are the turn's own `result.usage` exactly — 2 input, 3 output,
+30,291 cache read and 618 cache write — and $0.0085642. `tests/stream.rs`
+expects that turn, translated by a translator that starts from the
+transcript's last `cost-state`, to cost $0.0085642 and carry those tokens; and
+the same stream translated from nothing to cost $0.064619, which is the whole
+earlier session billed a second time.

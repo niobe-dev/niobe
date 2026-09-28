@@ -226,6 +226,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
             budget_usd: asked.budget,
             ..backend::Attach::default()
         },
+        std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     )?;
     let app = if backend.attached() {
@@ -358,6 +359,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
             mode: app.session().mode(),
             budget_usd: asked.budget,
         },
+        std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     )?;
     let app = if backend.attached() {
@@ -456,6 +458,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
             mode: app.session().mode(),
             budget_usd: asked.budget,
         },
+        std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     )?;
     let app = if backend.attached() {

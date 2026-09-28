@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use niobe_core::event::{Billing, Event, Mode, PermissionDecision, ToolCallId};
 
 use crate::spilled;
-use crate::translate::Translator;
+use crate::translate::{Spent, Translator};
 
 /// The binary this bridge drives, as looked up on `PATH`.
 pub const BINARY: &str = "claude";
@@ -174,6 +174,9 @@ pub struct Options {
     pub budget_usd: Option<f64>,
     /// A session of the CLI's own to continue, rather than starting a new one.
     pub resume: Option<String>,
+    /// What the CLI had recorded the resumed session as spending, which its
+    /// first turn reports on top of; see [`Spent`]. Empty for a new session.
+    pub spent: Spent,
     /// Settings to run under, as the JSON document `--settings` takes or the
     /// path of a file holding one.
     pub settings: Option<String>,
@@ -200,6 +203,7 @@ impl Options {
             mode: Mode::Ask,
             budget_usd: None,
             resume: None,
+            spent: Spent::default(),
             settings: None,
             ask_over_stdio: false,
         }
@@ -407,6 +411,7 @@ impl Session {
 
         let (sender, events) = mpsc::channel();
         let mut translator = Translator::new(options.profile.clone())
+            .resuming(&options.spent)
             .in_dir(options.cwd.clone())
             .reading_spilled_with(spilled::read);
         if let Some(billing) = options.billing {

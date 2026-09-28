@@ -123,7 +123,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   preview, and both the driver and the transcript reader hand it to the translator;
   `transcript.rs` reads the session files the CLI keeps for
   itself, so a session started in plain Claude Code can be listed and carried on — it writes
-  nothing back, and folds through the same `translate.rs` as the live stream; a sub-agent's
+  nothing back, and folds through the same `translate.rs` as the live stream — and a resumed
+  session's translator starts from the spend its last `cost-state` records, because the CLI
+  restores those running totals on `--resume`; a sub-agent's
   own messages — its calls, its edits, its model and its tokens — are read from the file the CLI
   keeps for that agent beside the session's and folded in where the CLI's timestamps put them,
   and its answer from the same file; `conformance.rs`

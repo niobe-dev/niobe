@@ -51,7 +51,7 @@ pub mod conformance;
 pub mod transcript;
 
 pub use driver::{BINARY, Options, Session, SpawnError};
-pub use translate::{Asked, Translator};
+pub use translate::{Asked, Spent, Translator};
 
 #[cfg(test)]
 mod tests {

@@ -72,10 +72,14 @@ impl Attachment {
 /// `with.resume` is the id the backend calls an earlier session by, where one
 /// was recorded: Niobe's session id names the recording, and only the CLI's own
 /// id can hand its transcript back.
+///
+/// `config_dir` and `home` are the values of `CLAUDE_CONFIG_DIR` and `HOME`,
+/// which say where a resumed session's transcript is.
 pub fn attach(
     root: &Path,
     profile: Option<&Selected<'_>>,
     with: &Attach,
+    config_dir: Option<OsString>,
     home: Option<OsString>,
 ) -> Result<Attachment, String> {
     let Some(selected) = profile else {
@@ -84,7 +88,10 @@ pub fn attach(
 
     match selected.profile.backend() {
         Backend::Claude => {
-            let options = claude_options(root, selected, with, home)?;
+            let mut options = claude_options(root, selected, with, home.clone())?;
+            if let Some(id) = &with.resume {
+                options.spent = spent(selected, root, id, config_dir, home);
+            }
             let session = Session::spawn(&options).map_err(describe)?;
             Ok(Attachment {
                 process_group: Some(session.process_group()),
@@ -238,6 +245,25 @@ pub fn history(
     transcript::events(&path, name, cwd).map_err(|e| e.to_string())
 }
 
+/// What the `claude` CLI had recorded session `id` as spending when it last
+/// left it, which it restores on `--resume` and which the resumed process's
+/// first turn therefore reports on top of.
+///
+/// Nothing where the transcript cannot be found or read: the CLI then has
+/// nothing to restore from either, as far as anything here can tell, and the
+/// resume itself is what reports a session that is not there.
+fn spent(
+    profile: &Selected<'_>,
+    root: &Path,
+    id: &str,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> niobe_bridge_claude::Spent {
+    transcripts(Some(profile), root, config_dir, home)
+        .and_then(|dir| transcript::spent(&dir.join(format!("{id}.jsonl"))).ok())
+        .unwrap_or_default()
+}
+
 /// What the `claude` bridge is spawned with under `profile`.
 ///
 /// Written apart from the spawn so that what a profile turns into can be
@@ -336,8 +362,44 @@ mod tests {
     const NO_HOME: Option<OsString> = None;
 
     #[test]
+    fn a_resumed_session_starts_from_what_its_transcript_last_recorded_it_spending() {
+        let config = config("[profiles.max]\nbackend = \"claude\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let claude = tempfile::tempdir().expect("a temporary directory");
+        let root = Path::new("/repo");
+        let dir = transcript::directory(claude.path(), root);
+        std::fs::create_dir_all(&dir).expect("the project directory is made");
+        std::fs::write(
+            dir.join("s-1.jsonl"),
+            r#"{"type":"cost-state","totalCostUSD":0.25,"modelUsage":{"opus-5":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4,"costUSD":0.25}}}"#,
+        )
+        .expect("the transcript is written");
+
+        let found = spent(
+            &selected,
+            root,
+            "s-1",
+            Some(claude.path().as_os_str().to_owned()),
+            NO_HOME,
+        );
+        assert_eq!(found.cost_usd("opus-5"), Some(0.25));
+
+        let missing = spent(
+            &selected,
+            root,
+            "s-2",
+            Some(claude.path().as_os_str().to_owned()),
+            NO_HOME,
+        );
+        assert!(missing.is_empty());
+    }
+
+    #[test]
     fn a_session_under_no_profile_is_attached_to_nothing() {
-        let attachment = attach(Path::new("/repo"), None, &Attach::default(), NO_HOME)
+        let attachment = attach(Path::new("/repo"), None, &Attach::default(), None, NO_HOME)
             .expect("nothing to start");
 
         assert!(!attachment.attached());
@@ -355,6 +417,7 @@ mod tests {
             Path::new("/repo"),
             Some(&selected),
             &Attach::default(),
+            None,
             NO_HOME,
         )
         .expect("nothing to start");

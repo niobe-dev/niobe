@@ -67,6 +67,7 @@ use niobe_core::event::Event;
 
 use crate::conformance;
 use crate::spilled;
+use crate::translate::Spent;
 use crate::translate::{self, RecordedAgent, Translator};
 use crate::wire;
 
@@ -335,6 +336,28 @@ pub fn list(dir: &Path) -> Result<Vec<Transcript>, TranscriptError> {
     // `None` is not a claim that it is old.
     transcripts.sort_by(|a, b| b.last_at.cmp(&a.last_at).then_with(|| a.id.cmp(&b.id)));
     Ok(transcripts)
+}
+
+/// What the transcript at `path` last recorded the session as spending: the
+/// running totals the CLI restores when that session is resumed, which the
+/// resumed process's first turn reports on top of. Nothing where the CLI never
+/// wrote a `cost-state`, which is a session it did not leave cleanly.
+pub fn spent(path: &Path) -> Result<Spent, TranscriptError> {
+    let text = std::fs::read_to_string(path).map_err(|error| TranscriptError::File {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    let last = text
+        .lines()
+        .rev()
+        .filter(|line| line.contains(r#""cost-state""#))
+        .find_map(|line| match serde_json::from_str::<Line>(line) {
+            Ok(Line::CostState(record)) => Some(record),
+            _ => None,
+        });
+    Ok(last.map_or_else(Spent::default, |record| {
+        Spent::from_model_usage(&record.model_usage)
+    }))
 }
 
 /// Everything the transcript at `path` says happened, as events, for a session

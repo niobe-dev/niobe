@@ -228,10 +228,54 @@ pub struct Asked {
 }
 
 /// What has been reported for one model so far in this session.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Reported {
     tokens: Counts,
     cost_usd: f64,
+}
+
+/// What the CLI had recorded a session as spending, per model, when it last
+/// left it.
+///
+/// The CLI restores these running totals when the session is resumed, so the
+/// first `result` of the resumed process carries the whole earlier session
+/// plus its own turn — recorded live on Claude Code 2.1.282: a session left at
+/// $0.0560548 came back from one more turn reporting $0.064619. A translator
+/// that starts from nothing reports all of it as that turn's cost, on top of
+/// the earlier turns already on screen, so a resumed session's translator
+/// starts from this instead.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Spent {
+    by_model: BTreeMap<String, Reported>,
+}
+
+impl Spent {
+    /// The totals a `modelUsage` block states, which is what the CLI's
+    /// `cost-state` record carries.
+    pub(crate) fn from_model_usage(model_usage: &BTreeMap<String, wire::ModelUsage>) -> Self {
+        let by_model = model_usage
+            .iter()
+            .map(|(model, usage)| {
+                let reported = Reported {
+                    tokens: Counts::from(usage),
+                    cost_usd: usage.cost_usd.unwrap_or_default(),
+                };
+                (model.clone(), reported)
+            })
+            .collect();
+        Self { by_model }
+    }
+
+    /// Whether nothing was recorded as spent: a session the CLI never left
+    /// cleanly, or one that has not run a turn.
+    pub fn is_empty(&self) -> bool {
+        self.by_model.is_empty()
+    }
+
+    /// What was recorded as spent on `model`, in USD.
+    pub fn cost_usd(&self, model: &str) -> Option<f64> {
+        self.by_model.get(model).map(|reported| reported.cost_usd)
+    }
 }
 
 /// Translates the CLI's stream-json into the shared event model.
@@ -367,6 +411,15 @@ impl Translator {
             billing: None,
             read_spilled: None,
         }
+    }
+
+    /// The same translator, for a resumed session the CLI had recorded as
+    /// having spent `spent`: what the CLI restores is counted as already
+    /// reported, so the first turn reports only its own cost.
+    #[must_use]
+    pub fn resuming(mut self, spent: &Spent) -> Self {
+        self.reported = spent.by_model.clone();
+        self
     }
 
     /// The same translator, told how the session is billed by the profile it

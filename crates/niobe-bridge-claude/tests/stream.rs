@@ -8,7 +8,7 @@
 //! numbers this crate produced, so a bug in the translation cannot agree with
 //! itself.
 
-use niobe_bridge_claude::Translator;
+use niobe_bridge_claude::{Translator, transcript};
 use niobe_core::event::{
     AgentOutcome, Backend, Billing, CostBasis, Event, PermissionDecision, ToolOutcome, UsageWindow,
 };
@@ -1473,5 +1473,75 @@ fn a_compaction_asked_for_by_command_is_billed_and_explained() {
         state.user_messages(),
         0,
         "the summary it hands the model is not a prompt"
+    );
+}
+
+/// A turn of a session resumed with `--resume`, and the transcript that
+/// session had left behind when it was resumed.
+const RESUMED: &str = include_str!("fixtures/resumed.jsonl");
+
+fn resumed_transcript() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resumed-transcript.jsonl")
+}
+
+/// The CLI restores its running totals on `--resume`, so the first `result`
+/// carries the whole earlier session. The resumed turn costs the difference
+/// from the transcript's last `cost-state`: 0.064619 − 0.0560548 = 0.0085642,
+/// and its tokens are the message's own, 2 + 3 + 30,291 + 618.
+#[test]
+fn a_resumed_sessions_first_turn_costs_what_it_added_to_the_restored_totals() {
+    let spent = transcript::spent(&resumed_transcript()).expect("the transcript reads");
+    assert_eq!(spent.cost_usd("claude-sonnet-5"), Some(0.0560548));
+
+    let mut translator = Translator::new("max").resuming(&spent);
+    let events: Vec<Event> = RESUMED
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect();
+    let totals = SessionState::replay(&events).totals().clone();
+
+    assert!(
+        (totals.reported_cost_usd - 0.0085642).abs() < 1e-9,
+        "the resumed turn cost {} rather than the 0.0085642 it added",
+        totals.reported_cost_usd
+    );
+    assert_eq!(
+        (
+            totals.input,
+            totals.output,
+            totals.cache_read,
+            totals.cache_write
+        ),
+        (2, 3, 30_291, 618)
+    );
+    assert!(warnings(&events).is_empty(), "{events:?}");
+}
+
+/// What the same turn would read as with nothing restored: the whole earlier
+/// session again, which is the figure the fix exists to keep off the screen.
+#[test]
+fn a_resumed_turn_read_from_nothing_would_bill_the_earlier_session_again() {
+    let totals = SessionState::replay(&translate(RESUMED)).totals().clone();
+
+    assert!((totals.reported_cost_usd - 0.064619).abs() < 1e-9);
+}
+
+#[test]
+fn a_transcript_with_no_cost_state_restores_nothing() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("open.jsonl");
+    let text = std::fs::read_to_string(resumed_transcript()).expect("the fixture reads");
+    let open: String = text
+        .lines()
+        .filter(|line| !line.contains("cost-state"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&path, open).expect("written");
+
+    assert!(
+        transcript::spent(&path)
+            .expect("the transcript reads")
+            .is_empty()
     );
 }
