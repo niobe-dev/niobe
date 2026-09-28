@@ -1068,6 +1068,16 @@ impl Translator {
     /// The report's patch is of the whole file, so it settles both. Where no
     /// usable patch was reported the counts stay unstated rather than filled
     /// in.
+    ///
+    /// What the patch does not settle is a change of line endings. The CLI
+    /// takes them off before it diffs — neither the patch's lines nor
+    /// `originalFile` carry a `\r` — and a `Write` writes `\n`: recorded with
+    /// 2.1.282, a `Write` of one/TWO/three over `one\r\ntwo\r\nthree\r\n`
+    /// left `one\nTWO\nthree\n` on disk and reported one line changed, where
+    /// `git diff --numstat` counts all three. Nothing in the report says the
+    /// file had `\r\n` endings, and by the time it arrives the file on disk
+    /// has none, so such a change is counted as its words' change alone. An
+    /// `Edit` keeps the endings the file had.
     fn file_change(
         &self,
         name: &str,
