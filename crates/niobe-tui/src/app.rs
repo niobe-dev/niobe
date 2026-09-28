@@ -328,9 +328,14 @@ pub struct Ask {
 
 impl Ask {
     /// Whether this prompt can be given `answer`. A standing answer about the
-    /// target needs a target to be about.
+    /// target needs a target to be about, and a standing answer is offered
+    /// only where its rule can be written into a config and read back.
     pub fn offers(&self, answer: Answer) -> bool {
-        answer != Answer::AlwaysTarget || self.target.is_some()
+        match answer {
+            Answer::Once | Answer::No => true,
+            Answer::AlwaysTool => self.tool_rule().is_some(),
+            Answer::AlwaysTarget => self.target_rule().is_some(),
+        }
     }
 
     /// The answers this prompt offers, in the order they are numbered.
@@ -341,17 +346,20 @@ impl Ask {
             .collect()
     }
 
-    /// The standing rule "always this tool".
-    pub fn tool_rule(&self) -> Rule {
-        Rule::tool(self.tool.clone())
+    /// The standing rule "always this tool", where its name can be written
+    /// down and read back as itself.
+    pub fn tool_rule(&self) -> Option<Rule> {
+        Some(Rule::tool(self.tool.clone())).filter(Rule::reads_back)
     }
 
     /// The standing rule "always this tool, on this target", where the prompt
-    /// has a target to write one about.
+    /// has a target to write one about and the rule reads back as itself —
+    /// not for an empty target, which would be written as no rule at all.
     pub fn target_rule(&self) -> Option<Rule> {
         self.target
             .as_ref()
             .map(|target| Rule::targeted(self.tool.clone(), target.clone()))
+            .filter(Rule::reads_back)
     }
 }
 
@@ -2044,7 +2052,7 @@ impl App {
 
         let rule = match answer {
             Answer::Once | Answer::No => None,
-            Answer::AlwaysTool => Some(ask.tool_rule()),
+            Answer::AlwaysTool => ask.tool_rule(),
             Answer::AlwaysTarget => ask.target_rule(),
         };
         if let Some(rule) = rule.clone()
@@ -5553,6 +5561,19 @@ mod tests {
         assert_eq!(entry.head, "denied");
         assert_eq!(entry.meta, "Bash · rm -rf build");
         assert_eq!(app.session().permissions_denied(), 1);
+    }
+
+    /// A rule about an empty target is written `Bash()`, which the next start
+    /// refuses to read, so the answer that would write it is not offered.
+    #[test]
+    fn a_prompt_with_an_empty_target_offers_no_standing_answer_about_it() {
+        let mut app = app();
+        app.apply(&prompt(Some("")));
+
+        let ask = app.asking().expect("the prompt is up");
+        assert!(ask.target_rule().is_none());
+        assert!(!ask.options().contains(&Answer::AlwaysTarget));
+        assert!(ask.options().contains(&Answer::AlwaysTool));
     }
 
     #[test]

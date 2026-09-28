@@ -182,6 +182,15 @@ impl Rule {
         }
     }
 
+    /// Whether this rule, written down as a config file writes it, reads
+    /// back as itself. Not every tool name and target can be: an empty
+    /// target is written `Bash()`, which is no rule, and a tool name with a
+    /// bracket or surrounding spaces in it reads back as another. A rule
+    /// that does not would be written into a config the next start refuses.
+    pub fn reads_back(&self) -> bool {
+        Self::parse(&self.to_string()).is_ok_and(|read| read == *self)
+    }
+
     /// Whether every call `other` answers, this rule answers too — so that
     /// holding this rule makes `other` redundant.
     pub fn includes(&self, other: &Self) -> bool {
@@ -506,6 +515,70 @@ mod tests {
         assert!(!list.insert(Rule::prefixed("Bash", "cargo test ")));
         assert!(!list.insert(Rule::prefixed("Bash", "cargo ")));
         assert_eq!(list.rules().len(), 2);
+    }
+
+    /// Strings from the characters a rule's text form gives meaning to, and
+    /// a few it does not, built deterministically so that a failure names
+    /// the same input on every run.
+    fn awkward_strings() -> Vec<String> {
+        const PIECES: [&str; 14] = [
+            "",
+            "a",
+            " ",
+            "(",
+            ")",
+            "*",
+            "\\",
+            "\\*",
+            "\n",
+            "\"",
+            "#",
+            "é",
+            "cargo test",
+            "..",
+        ];
+        let mut out = Vec::new();
+        for first in PIECES {
+            for second in PIECES {
+                for third in PIECES {
+                    out.push(format!("{first}{second}{third}"));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_exact_rule_that_says_it_reads_back_does_and_every_non_empty_target_does() {
+        for target in awkward_strings() {
+            let rule = Rule::targeted("Bash", target.clone());
+            let read = Rule::parse(&rule.to_string());
+            assert_eq!(
+                rule.reads_back(),
+                read.as_ref().is_ok_and(|read| *read == rule),
+                "{target:?}"
+            );
+            // Whatever a call acts on, the rule about it can be kept.
+            assert_eq!(rule.reads_back(), !target.is_empty(), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn a_tool_name_that_would_not_read_back_says_so() {
+        for tool in awkward_strings() {
+            let rule = Rule::tool(tool.clone());
+            let read = Rule::parse(&rule.to_string());
+            assert_eq!(
+                rule.reads_back(),
+                read.as_ref().is_ok_and(|read| *read == rule),
+                "{tool:?}"
+            );
+        }
+        assert!(Rule::tool("Bash").reads_back());
+        assert!(Rule::tool("mcp__claude_ai_Notion__notion-fetch").reads_back());
+        assert!(!Rule::tool(" Bash").reads_back());
+        assert!(!Rule::tool("Ba(sh").reads_back());
+        assert!(!Rule::targeted("Bash", "").reads_back());
     }
 
     #[test]

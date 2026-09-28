@@ -1755,7 +1755,9 @@ fn option_words(answer: Answer, ask: &Ask) -> (String, String) {
         Answer::Once => ("Allow once".to_owned(), "this call only".to_owned()),
         Answer::AlwaysTool => (
             format!("Always allow {}", tool_label(&ask.tool)),
-            format!("niobe saves {}", ask.tool_rule()),
+            ask.tool_rule()
+                .map(|rule| format!("niobe saves {rule}"))
+                .unwrap_or_default(),
         ),
         Answer::AlwaysTarget => (
             "Always allow this target".to_owned(),
