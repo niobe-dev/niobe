@@ -103,7 +103,7 @@ use niobe_core::permission::Allowlist;
 use niobe_core::{Backend, Billing};
 
 pub use error::ConfigError;
-pub use write::remember;
+pub use write::{Remembered, remember};
 
 /// The file name of a config, in the user's config directory and in a
 /// repository's `.niobe` directory alike.

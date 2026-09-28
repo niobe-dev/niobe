@@ -167,6 +167,30 @@ impl Trusted {
         text
     }
 
+    /// Reads the record at `path`, lets `change` change it, and writes it
+    /// back, holding the lock on its directory throughout, so that two
+    /// sessions changing it at once each change what the other wrote rather
+    /// than what both read. What `change` returns is handed back; an error
+    /// from it writes nothing.
+    pub fn update<T>(
+        path: &Path,
+        change: impl FnOnce(&mut Self) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
+        let failed = |error: std::io::Error| ConfigError::Write {
+            path: path.to_path_buf(),
+            error,
+        };
+        let target = crate::replace::resolved(path).map_err(failed)?;
+        let dir = crate::replace::parent(&target);
+        std::fs::create_dir_all(dir).map_err(failed)?;
+        let _lock = crate::replace::Lock::directory(dir).map_err(failed)?;
+
+        let mut record = Self::read(&target)?;
+        let changed = change(&mut record)?;
+        crate::replace::replace(&target, record.render().as_bytes()).map_err(failed)?;
+        Ok(changed)
+    }
+
     /// Writes the record to `path`, creating its directory if this is the
     /// first file trusted on this machine.
     ///
@@ -317,5 +341,39 @@ mod tests {
 
         assert!(said.starts_with("cannot record trust for "), "{said}");
         assert!(said.contains("line break"), "{said}");
+    }
+
+    #[test]
+    fn two_updates_at_once_each_keep_what_the_other_added() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let record = dir.path().join("trusted.list");
+
+        let threads: Vec<_> = (0..8)
+            .map(|n| {
+                let record = record.clone();
+                std::thread::spawn(move || {
+                    Trusted::update(&record, |trusted| {
+                        let read = trusted.clone();
+                        // Long enough for another update to read the same
+                        // record, were nothing holding it off.
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        *trusted = read;
+                        trusted.trust(&PathBuf::from(format!("/repo{n}/config.toml")), "text")
+                    })
+                    .expect("the record is updated")
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("an update did not panic");
+        }
+
+        let kept = Trusted::read(&record).expect("the record reads");
+        for n in 0..8 {
+            assert!(
+                kept.trusts(&PathBuf::from(format!("/repo{n}/config.toml")), "text"),
+                "the entry of update {n} was lost to another"
+            );
+        }
     }
 }

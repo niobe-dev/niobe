@@ -36,8 +36,23 @@ const INDENT: &str = "    ";
 ///
 /// A rule the file's own allowlist already covers is not written again: the
 /// operator answering "always" twice must not grow the file twice.
-pub fn remember(path: &Path, rule: &Rule) -> Result<(), ConfigError> {
+///
+/// Says what the file held when the lock was taken and what it holds when it
+/// is let go, both read under it: whoever decides whether the new text is
+/// trusted decides about exactly these, and not about whatever a later read
+/// finds once another writer has had its turn.
+pub fn remember(path: &Path, rule: &Rule) -> Result<Remembered, ConfigError> {
     remember_with(path, rule, |file, bytes| file.write_all(bytes))
+}
+
+/// The config file's text either side of [`remember`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remembered {
+    /// What the file held before, or `None` where there was no file.
+    pub before: Option<String>,
+    /// What it holds now: the text written, or the text as it was where the
+    /// rule was already covered and nothing was.
+    pub after: String,
 }
 
 /// [`remember`], with the write of the new text handed in so that a test can
@@ -51,7 +66,7 @@ fn remember_with(
     path: &Path,
     rule: &Rule,
     write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
-) -> Result<(), ConfigError> {
+) -> Result<Remembered, ConfigError> {
     let failed = |error| ConfigError::Write {
         path: path.to_path_buf(),
         error,
@@ -61,9 +76,9 @@ fn remember_with(
     std::fs::create_dir_all(dir).map_err(failed)?;
     let _lock = replace::Lock::directory(dir).map_err(failed)?;
 
-    let text = match crate::read::text(&target) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+    let before = match crate::read::text(&target) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(ConfigError::Read {
                 path: path.to_path_buf(),
@@ -71,12 +86,16 @@ fn remember_with(
             });
         }
     };
+    let text = before.clone().unwrap_or_default();
 
     // Parsed before anything is written, so a rule is never added to a file
     // that would not load afterwards.
     let config = Config::parse(&text, path)?;
     if config.allowed().includes(rule) {
-        return Ok(());
+        return Ok(Remembered {
+            before,
+            after: text,
+        });
     }
 
     let mut rules: Vec<String> = config
@@ -88,7 +107,11 @@ fn remember_with(
     rules.push(rule.to_string());
 
     let written = splice(&text, path, &rules)?;
-    replace::replace_with(&target, written.as_bytes(), write).map_err(failed)
+    replace::replace_with(&target, written.as_bytes(), write).map_err(failed)?;
+    Ok(Remembered {
+        before,
+        after: written,
+    })
 }
 
 /// The file's text with `rules` as its `permissions.allow` array.

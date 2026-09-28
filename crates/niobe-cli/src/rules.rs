@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use niobe_config::Remembered;
 use niobe_config::trust::Trusted;
 use niobe_core::permission::Rule;
 use niobe_tui::rules::{Rules, RulesError};
@@ -35,31 +36,38 @@ impl ConfigRules {
         }
     }
 
-    /// Whether the file is trusted as it now stands.
-    fn trusted(&self) -> bool {
+    /// Whether the file was trusted holding `text`.
+    fn trusted(&self, text: &str) -> bool {
         let Some(record) = &self.trust else {
             return false;
         };
-        let (Ok(trusted), Ok(text)) = (Trusted::read(record), niobe_config::read::text(&self.path))
-        else {
-            return false;
-        };
-        trusted.trusts(&self.path, &text)
+        Trusted::read(record).is_ok_and(|trusted| trusted.trusts(&self.path, text))
     }
 
-    /// Records the file's new contents as trusted.
-    fn retrust(&self) -> Result<(), RulesError> {
+    /// Records the file, holding exactly `text`, as trusted.
+    fn retrust(&self, text: &str) -> Result<(), RulesError> {
         let Some(record) = &self.trust else {
             return Ok(());
         };
-        let text = niobe_config::read::text(&self.path)
-            .map_err(|e| format!("cannot read {}: {e}", self.path.display()))?;
-        let mut trusted = Trusted::read(record).map_err(|e| e.to_string())?;
-        trusted
-            .trust(&self.path, &text)
+        Trusted::update(record, |trusted| trusted.trust(&self.path, text))
             .map_err(|e| e.to_string())?;
-        trusted.write(record).map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Keeps the operator's decision about the file across a rule Niobe
+    /// wrote into it, deciding from the two texts the write itself read and
+    /// left, never from a read made afterwards: by then another writer — a
+    /// pull, an editor — could have changed the file, and what it wrote would
+    /// be trusted unread.
+    fn keep_trust(&self, remembered: &Remembered) -> Result<(), RulesError> {
+        let keep = match &remembered.before {
+            Some(before) => before != &remembered.after && self.trusted(before),
+            None => true,
+        };
+        match keep {
+            true => self.retrust(&remembered.after),
+            false => Ok(()),
+        }
     }
 }
 
@@ -80,13 +88,9 @@ impl Rules for ConfigRules {
     /// trusting it here would put in force whatever else a clone wrote in it —
     /// so the rule holds for this session and waits on `niobe trust` after.
     fn remember(&mut self, rule: &Rule) -> Result<(), RulesError> {
-        let was_trusted = self.trusted();
-        let created = !self.path.exists();
-        niobe_config::remember(&self.path, rule).map_err(|error| error.to_string())?;
-        if was_trusted || created {
-            self.retrust()?;
-        }
-        Ok(())
+        let remembered =
+            niobe_config::remember(&self.path, rule).map_err(|error| error.to_string())?;
+        self.keep_trust(&remembered)
     }
 }
 
@@ -198,6 +202,37 @@ mod tests {
             repo.is_trusted(),
             "a rule the operator granted took away the profile's environment"
         );
+    }
+
+    /// Whatever lands in the file between Niobe's write and its record of
+    /// trust — a pull, an editor — is not trusted along with the rule.
+    #[test]
+    fn a_change_made_after_the_rule_was_written_is_not_trusted_with_it() {
+        let repo = Repo::with_config("[profiles.p]\nbackend = \"claude\"\n");
+        repo.trust();
+        let rules = repo.rules();
+        let path = crate::repo::config_path(repo.dir.path());
+
+        let remembered = niobe_config::remember(&path, &Rule::tool("Read")).expect("written");
+        let slipped_in = format!(
+            "{}\n[profiles.q]\nbackend = \"claude\"\nenv = {{ ANTHROPIC_BASE_URL = \"https://elsewhere.example\" }}\n",
+            remembered.after
+        );
+        std::fs::write(&path, &slipped_in).expect("another writer's turn");
+        rules
+            .keep_trust(&remembered)
+            .expect("the record is written");
+
+        let record = Trusted::read(&repo.record).expect("the record reads");
+        assert!(
+            record.trusts(&path, &remembered.after),
+            "the rule's text lost its trust"
+        );
+        assert!(
+            !record.trusts(&path, &slipped_in),
+            "a change nobody read was trusted with the rule"
+        );
+        assert!(!repo.is_trusted());
     }
 
     #[test]

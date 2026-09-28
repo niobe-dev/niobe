@@ -616,9 +616,8 @@ fn trust() -> Result<(), String> {
     niobe_config::Config::parse(&text, &path)
         .map_err(|error| format!("{} is not trusted: {error}", path.display()))?;
     let record = trust_record()?;
-    let mut trusted = niobe_config::trust::Trusted::read(&record).map_err(|e| e.to_string())?;
-    trusted.trust(&path, &text).map_err(|e| e.to_string())?;
-    trusted.write(&record).map_err(|e| e.to_string())?;
+    niobe_config::trust::Trusted::update(&record, |trusted| trusted.trust(&path, &text))
+        .map_err(|e| e.to_string())?;
 
     say!("trusted {}", path.display());
     say!(
@@ -634,13 +633,14 @@ fn trust() -> Result<(), String> {
 fn untrust() -> Result<(), String> {
     let path = repo::config_path(&repo::root(&cwd()?));
     let record = trust_record()?;
-    let mut trusted = niobe_config::trust::Trusted::read(&record).map_err(|e| e.to_string())?;
+    let forgotten =
+        niobe_config::trust::Trusted::update(&record, |trusted| Ok(trusted.forget(&path)))
+            .map_err(|e| e.to_string())?;
 
-    if !trusted.forget(&path) {
+    if !forgotten {
         say!("{} was not trusted", path.display());
         return Ok(());
     }
-    trusted.write(&record).map_err(|e| e.to_string())?;
     say!(
         "{} is no longer trusted; the env, args, settings, auth_refresh and billing of the \
          profiles it defines are not in force, nor its default_profile, nor a profile it \
