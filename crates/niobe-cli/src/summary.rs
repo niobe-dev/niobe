@@ -103,18 +103,26 @@ fn files(session: &SessionState) -> String {
         return "—".to_owned();
     }
 
-    let added: u64 = changed.iter().map(|file| file.added).sum();
-    let removed: u64 = changed.iter().map(|file| file.removed).sum();
+    let added = side(
+        changed.iter().map(|file| file.added),
+        changed
+            .iter()
+            .any(|file| file.changes > file.added_unstated),
+    );
+    let removed = side(
+        changed.iter().map(|file| file.removed),
+        changed
+            .iter()
+            .any(|file| file.changes > file.removed_unstated),
+    );
     let unstated = changed
         .iter()
         .filter(|file| !file.added_stated() || !file.removed_stated())
         .count();
 
     let mut line = format!(
-        "{} changed — +{} −{}",
-        grouped(changed.len() as u64),
-        grouped(added),
-        grouped(removed)
+        "{} changed — +{added} −{removed}",
+        grouped(changed.len() as u64)
     );
     if unstated > 0 {
         line.push_str(&format!(
@@ -123,6 +131,16 @@ fn files(session: &SessionState) -> String {
         ));
     }
     line
+}
+
+/// One side of the files' figure: the lines the calls that stated them add
+/// up to, or an em dash where no call stated any — a sum of nothing stated is
+/// not a zero.
+fn side(lines: impl Iterator<Item = u64>, stated: bool) -> String {
+    match stated {
+        true => grouped(lines.fold(0, u64::saturating_add)),
+        false => "—".to_owned(),
+    }
 }
 
 fn tool_calls(session: &SessionState) -> String {
@@ -177,6 +195,31 @@ mod tests {
         let mut app = App::new(Repo::default());
         app.extend(events);
         app
+    }
+
+    #[test]
+    fn files_nobody_stated_a_count_for_read_as_dashes_not_zeros() {
+        let app = folded(&[changed("a.txt", None, None), changed("b.txt", None, None)]);
+
+        assert_eq!(
+            files(app.session()),
+            "2 changed — +— −— (a floor: 2 of them changed by an amount the backend did not \
+             state)"
+        );
+    }
+
+    #[test]
+    fn files_some_of_which_stated_a_count_read_as_a_floor() {
+        let app = folded(&[
+            changed("a.txt", Some(4), Some(2)),
+            changed("b.txt", None, None),
+        ]);
+
+        assert_eq!(
+            files(app.session()),
+            "2 changed — +4 −2 (a floor: 1 of them changed by an amount the backend did not \
+             state)"
+        );
     }
 
     #[test]
