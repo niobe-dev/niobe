@@ -690,12 +690,16 @@ fn prompt(record: &Line) -> Option<String> {
     let Line::User(user) = record else {
         return None;
     };
-    if user.is_meta {
+    if user.is_meta || user.is_compact_summary || user.transcript_only {
         return None;
     }
     let said = user.message.content.as_ref().and_then(said)?;
     (!CLI_WROTE_IT.iter().any(|mark| said.starts_with(mark))).then_some(said)
 }
+
+/// What an imported session says where the CLI compacted its context.
+const COMPACTED: &str = "the context was compacted; the session carried on from the CLI's own \
+                         summary of the conversation before it.";
 
 /// Folds one transcript into events.
 struct Fold {
@@ -868,6 +872,18 @@ impl Fold {
         // the caveat that precedes a local command's output, and the like —
         // and marks them. They are not what the operator said.
         if record.is_meta {
+            return;
+        }
+        // After a compaction the CLI carries the session on from its own
+        // summary of the conversation, written as a user turn. Nobody typed
+        // it; that the context was compacted is what it says.
+        if record.is_compact_summary {
+            self.out.push(Event::Notice {
+                message: COMPACTED.to_owned(),
+            });
+            return;
+        }
+        if record.transcript_only {
             return;
         }
         // Background work stopping is written as a user turn too, and it is
@@ -1114,6 +1130,14 @@ struct User {
     /// operator sent.
     #[serde(rename = "isMeta", default)]
     is_meta: bool,
+    /// Set on the summary the CLI continues a compacted session from, which
+    /// is written as a user turn and is not one.
+    #[serde(rename = "isCompactSummary", default)]
+    is_compact_summary: bool,
+    /// Set on a turn the CLI keeps for its own transcript view and never sent
+    /// as the operator's; it comes with the compaction summary.
+    #[serde(rename = "isVisibleInTranscriptOnly", default)]
+    transcript_only: bool,
     /// Where the turn came from. The CLI writes it both as a bare word
     /// (`"cli"`) and as an object with a `kind`, so it is read as a value: a
     /// shape this cannot type would otherwise lose the turn it is on.
@@ -1305,6 +1329,49 @@ mod tests {
 
     fn prompt(text: &str) -> String {
         format!(r#"{{"type":"user","message":{{"role":"user","content":{text:?}}}}}"#)
+    }
+
+    /// The record the CLI continues a compacted session from, as it writes
+    /// it: a user turn, marked, holding the CLI's own words.
+    const COMPACT_SUMMARY: &str = r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}"#;
+
+    #[test]
+    fn a_compaction_summary_is_neither_the_first_prompt_nor_the_title() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let text = format!("{COMPACT_SUMMARY}\n{}", prompt("now fix the bug"));
+        transcript(dir.path(), "compacted", Duration::from_secs(60), &text);
+
+        let listed = list(dir.path()).expect("the directory lists");
+        assert_eq!(listed[0].first_prompt.as_deref(), Some("now fix the bug"));
+
+        let events = events(
+            &dir.path().join("compacted.jsonl"),
+            "max",
+            Path::new("/repo"),
+        )
+        .expect("the transcript folds");
+        let titles: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Titled { title } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["now fix the bug"]);
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["now fix the bug"]);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Notice { message } if message == COMPACTED)),
+            "{events:?}"
+        );
     }
 
     #[test]

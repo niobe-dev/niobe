@@ -705,6 +705,13 @@ It carries what the transcript does differently from the live stream:
   into a turn of markup, and the prompt that was actually typed. The history
   keeps all but the marked one; the session list names the first the CLI did
   not write;
+- **a compaction**: the `system`/`compact_boundary` record and, after it, the
+  summary the CLI carries the session on from, written as a user turn marked
+  `isCompactSummary` and `isVisibleInTranscriptOnly` rather than `isMeta`. In
+  every transcript on the machine this was written on that held one, it was
+  the first user turn that was not a command. It is folded as a notice that
+  the context was compacted, and is neither in the history as something the
+  operator said nor what the session list names it by;
 - **one API response written out over two records** — `msg_1`, once for its
   thinking and once for its text and its call — with the *same* `usage` stamped
   on both. Unlike the live stream's per-record snapshots these repeated figures

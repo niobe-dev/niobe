@@ -107,6 +107,33 @@ fn warnings(events: &[Event]) -> Vec<&str> {
         .collect()
 }
 
+/// The summary a compacted session carries on from is the CLI's, and the
+/// history says the context was compacted rather than putting the summary in
+/// the operator's mouth.
+#[test]
+fn a_compaction_is_a_notice_and_not_something_the_operator_said() {
+    let events = folded();
+
+    let said: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::UserMessage { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        said.iter().all(|text| !text.contains("being continued")),
+        "{said:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice { message } if message.contains("the context was compacted")
+        )),
+        "{events:?}"
+    );
+}
+
 #[test]
 fn a_transcript_is_listed_by_the_id_that_continues_it_and_by_what_was_asked() {
     let listed = transcript::list(&transcripts()).expect("the directory lists");
