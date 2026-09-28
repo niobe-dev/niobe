@@ -582,6 +582,9 @@ as it now stands, and editing it afterwards asks again.";
 /// the reason it is not in force.
 fn say_prices(app: App) -> App {
     match prices::load() {
+        // Today's rates, for a session read back as for a live one: what is
+        // owed is folded per model with no day on it, so there is no older
+        // day to price it at. The help and the price table say so.
         Ok(loaded) => app.with_prices(Box::new(prices::Sheet::new(
             loaded.table,
             Date::of(SystemTime::now()),
@@ -885,9 +888,12 @@ TRUST:
 
 PRICES:
     Costs are computed from a price table bundled into niobe: USD per million
-    tokens for each model id, each price dated from the day it took effect, so
-    a session is priced at the rates of the day it ran. A model id the table
-    does not list is unpriced; nothing is guessed from a similar id.
+    tokens for each model id, each price dated from the day it took effect.
+    They value the tokens a backend reported no cost for, at the rates in
+    force today: a session replayed or resumed later is estimated at today's
+    rates, not those of the day it ran. A cost the backend reported is shown
+    as it reported it. A model id the table does not list is unpriced;
+    nothing is guessed from a similar id.
     ~/.config/niobe/prices.toml ($XDG_CONFIG_HOME/niobe when that is set) has
     the same shape and replaces the whole price history of every id it lists.
 

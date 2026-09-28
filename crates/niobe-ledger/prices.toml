@@ -24,8 +24,11 @@
 # `ids` are matched exactly against the model a backend reports. An id that is
 # not listed is unpriced; nothing is inferred from a near match.
 #
-# Each price is in force from its `from` date (UTC) until the next one. That is
-# what lets a session be priced at the rates of the day it ran. A date is the
+# Each price is in force from its `from` date (UTC) until the next one, so a
+# price can be looked up for any day. The shell values what no reported cost
+# covers at the rates in force on the day it is showing them: a session read
+# back later is estimated at that day's rates, not at those of the day it ran,
+# which differ only where a price changed in between. A date is the
 # day the price is first known to have applied: the model's release, or the
 # day a change was announced to take effect. A session from before a model's
 # first date is unpriced.

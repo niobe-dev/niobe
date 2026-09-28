@@ -740,6 +740,21 @@ fn a_config_that_is_not_toml_names_the_line() {
     );
 }
 
+/// What no reported cost covers is valued at today's rates, whenever the
+/// session ran; the help says so rather than promise the rates of that day.
+#[test]
+fn the_help_says_a_session_read_back_is_estimated_at_todays_rates() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    assert!(out.contains("at the rates in"), "{out}");
+    assert!(
+        out.contains("resumed later is estimated at today's"),
+        "{out}"
+    );
+    assert!(!out.contains("the rates of the day it ran."), "{out}");
+}
+
 /// A profile's `auth_refresh` is read and listed and not run; the help says
 /// so rather than let an operator think a login will happen on its own.
 #[test]
