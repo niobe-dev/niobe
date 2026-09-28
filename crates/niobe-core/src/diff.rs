@@ -65,7 +65,10 @@ pub fn lines_changed(before: &str, after: &str) -> Option<(u64, u64)> {
 /// the last line of each is continued by the same text rather than ended where
 /// the argument ends. It is counted as a line the file ends with a newline,
 /// which is exact wherever the replacement stops at the end of a line — the
-/// usual case, since an edit is usually of whole lines.
+/// usual case, since an edit is usually of whole lines. Where it stops
+/// mid-line and the new text adds a line, the rest of the file's line moves
+/// onto the new last line, which is a change these two strings cannot show;
+/// a diff of the file's whole lines, where there is one, is the better count.
 pub fn replacement_changed(old: &str, new: &str) -> Option<(u64, u64)> {
     lines_changed(&format!("{old}\n"), &format!("{new}\n"))
 }

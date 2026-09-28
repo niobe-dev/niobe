@@ -1125,9 +1125,13 @@ impl Translator {
 
     /// What a finished call did to a file, where it was a call that edits one.
     ///
-    /// The counts come from the call's own arguments where those settle them,
-    /// and otherwise from the diff the CLI reported beside the result. Two
-    /// cases the arguments do not settle:
+    /// The counts come from the diff the CLI reported beside the result, and
+    /// from the call's own arguments only where no usable diff came with it.
+    /// The arguments are the text an `Edit` matched, which can start or stop
+    /// mid-line: `foo();` → `foo();\nbar();` on the line `    foo(); // c`
+    /// moves ` // c` onto the new line, which `git diff --numstat` counts as
+    /// `2 1` and a diff of the two strings as `1 0`. Two cases the arguments
+    /// do not settle at all:
     ///
     /// * **A replacement the CLI applied everywhere.** `replace_all` says the
     ///   CLI matched `old_string` as many times as it appears in the file, and
@@ -1165,12 +1169,17 @@ impl Translator {
             EDIT_TOOL => {
                 let path = string_at(arguments, "file_path")?;
                 let hunks = reported_hunks(reported, path);
-                let counts = match arguments
+                let replace_all = arguments
                     .get("replace_all")
                     .and_then(serde_json::Value::as_bool)
-                {
-                    Some(true) => diff::hunks_changed(&hunks),
-                    Some(false) | None => diff::replacement_changed(
+                    .unwrap_or(false);
+                // The CLI's hunks are of the whole lines the edit touched; the
+                // arguments are the text it matched, which can stop mid-line
+                // and leave the rest of that line out of any diff of them.
+                let counts = match (hunks.is_empty(), replace_all) {
+                    (false, _) => diff::hunks_changed(&hunks),
+                    (true, true) => None,
+                    (true, false) => diff::replacement_changed(
                         string_at(arguments, "old_string").unwrap_or_default(),
                         string_at(arguments, "new_string").unwrap_or_default(),
                     ),
@@ -4053,6 +4062,30 @@ mod tests {
         assert_eq!(
             changes(&events),
             vec![("f.txt".to_owned(), None, None)],
+            "{events:?}"
+        );
+    }
+
+    /// The arguments stop mid-line; the CLI's hunks are of whole lines, and
+    /// `git diff --numstat` on the same edit says `2 1`.
+    #[test]
+    fn an_edit_that_stops_mid_line_is_counted_from_the_clis_hunks() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/f.c","old_string":"foo();","new_string":"foo();\nbar();"}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            UPDATED,
+            r#"{"filePath":"/repo/f.c","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":2,"lines":["-    foo(); // c","+    foo();","+bar(); // c"]}]}"#,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("f.c".to_owned(), Some(2), Some(1))],
             "{events:?}"
         );
     }
