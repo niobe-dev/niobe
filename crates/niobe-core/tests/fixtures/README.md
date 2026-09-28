@@ -17,8 +17,9 @@ alongside it — the prompt the operator typed, the answer they gave a
 permission prompt, the model they moved the session to. None of it was written
 by hand.
 
-The CLI's raw stream was kept beside it, and this file is that stream folded
-again through the bridge as it stands, with the shell's events where they were:
+The CLI's raw stream was kept beside it, outside this repository, and this
+file is that stream folded again through the bridge as it stood then, with the
+shell's events where they were:
 616 of the bridge's events compared equal to the ones produced live, and 14
 per-message usage records gained the one-hour share of their cache writes,
 which the live run read as none. Folded once more after the bridge learned to
@@ -26,6 +27,13 @@ pass over the CLI's background-task bookkeeping, 588 compared equal again and
 the 28 entries that had called that bookkeeping unreadable were gone. The last two prompted turns of that stream,
 and the two the CLI started after them, are `niobe-bridge-claude`'s
 `tests/fixtures/sub-agents.jsonl`.
+
+It has not been folded since, so it predates the bridge's `turn_ended`,
+`context`, `billing` and `titled` events and carries none of them: the fold of
+it records no turn, measures no context, knows no billing, and leaves the turn
+the recording was cut in running. `tests/replay.rs` asserts exactly that. The
+fold's handling of those events is held by the Claude bridge's recordings,
+whose tests fold them through the bridge as it stands.
 
 The session works on a small Python catalog client, in a repository scrubbed to
 `/repo`: a `Read` and a `grep`, two `Edit`s that add etag support to
@@ -143,7 +151,9 @@ jq -s '{
   decisions: (map(select(.type=="decision")) | length),
   checkpoints: (map(select(.type=="checkpoint")) | length),
   agents_spawned: (map(select(.type=="agent_spawn")) | length),
+  agents_completed: (map(select(.type=="agent_exit" and .outcome=="completed")) | length),
   agents_cancelled: (map(select(.type=="agent_exit" and .outcome=="cancelled")) | length),
+  turns_ended: (map(select(.type=="turn_ended")) | length),
   errors: (map(select(.type=="error")) | length),
   fatal_errors: (map(select(.type=="error" and .fatal==true)) | length),
   usage_windows: (map(select(.type=="usage_windows")) | length),
@@ -167,7 +177,7 @@ equality.
 
 The recording was made by driving `niobe_bridge_claude::Session` with
 `ask_over_stdio` on, answering each permission prompt the way the shell does
-and writing every event out as it arrived. Three things have to be true of the
+and writing every event out as it arrived. Four things have to be true of the
 machine it runs on, or the recording is of that machine rather than of the CLI:
 
 - **no `PreToolUse` hook that rewrites commands.** One that does will put its
