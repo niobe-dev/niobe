@@ -172,7 +172,7 @@ impl Totals {
         self.cache_write = self.cache_write.saturating_add(usage.cache_write);
         self.cache_write_1h = self.cache_write_1h.saturating_add(usage.cache_write_1h);
         self.reasoning = self.reasoning.saturating_add(usage.reasoning);
-        self.records += 1;
+        bump(&mut self.records);
         self.tokens_by_model
             .entry(usage.model.clone())
             .and_modify(|spent| *spent = spent.saturating_add(usage.tokens()))
@@ -201,7 +201,7 @@ impl Totals {
 
     /// Records tokens that no reported cost covers.
     fn owe(&mut self, usage: &Usage) {
-        self.records_unsettled += 1;
+        bump(&mut self.records_unsettled);
         self.unsettled
             .entry(usage.model.clone())
             .or_insert_with(|| Owed::new(&usage.model))
@@ -561,12 +561,12 @@ impl SessionState {
             // choice did not land.
             Event::ModelSelected { model } => self.model = Some(model.clone()),
 
-            // A prompt sent while a turn runs joins it: the turn began with
-            // the first one.
             Event::Titled { title } => self.title = Some(title.clone()),
 
+            // A prompt sent while a turn runs joins it: the turn began with
+            // the first one.
             Event::UserMessage { text } => {
-                self.user_messages += 1;
+                bump(&mut self.user_messages);
                 if self.first_prompt.is_none() {
                     self.first_prompt = Some(text.clone());
                 }
@@ -589,7 +589,7 @@ impl SessionState {
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
 
             Event::AssistantMessage { text, agent: None } => {
-                self.assistant_messages += 1;
+                bump(&mut self.assistant_messages);
                 self.pending_assistant.clear();
                 self.last_assistant = Some(text.clone());
             }
@@ -603,7 +603,7 @@ impl SessionState {
             Event::ToolCallStart {
                 id, name, agent, ..
             } => {
-                self.tools.started += 1;
+                bump(&mut self.tools.started);
                 self.in_flight_tools.insert(id.clone(), name.clone());
                 if let Some(agent) = agent {
                     self.agent_calls.insert(id.clone(), agent.clone());
@@ -617,19 +617,19 @@ impl SessionState {
                 outcome,
                 ..
             } => {
-                self.tools.finished += 1;
+                bump(&mut self.tools.finished);
                 self.tools.output_bytes = self.tools.output_bytes.saturating_add(*bytes);
-                *self.tools.by_name.entry(name.clone()).or_default() += 1;
+                bump(self.tools.by_name.entry(name.clone()).or_default());
                 match outcome {
                     ToolOutcome::Ok => {}
                     ToolOutcome::Failed => {
-                        self.tools.failed += 1;
-                        *self.tools.failed_by_name.entry(name.clone()).or_default() += 1;
+                        bump(&mut self.tools.failed);
+                        bump(self.tools.failed_by_name.entry(name.clone()).or_default());
                     }
-                    ToolOutcome::Denied => self.tools.denied += 1,
+                    ToolOutcome::Denied => bump(&mut self.tools.denied),
                 }
                 if self.in_flight_tools.remove(id).is_none() {
-                    self.tools.unmatched_ends += 1;
+                    bump(&mut self.tools.unmatched_ends);
                 }
                 self.ended_by = self.agent_calls.remove(id);
             }
@@ -659,7 +659,7 @@ impl SessionState {
             Event::Cleared => self.context = None,
 
             Event::PermissionRequest { id, .. } => {
-                self.permission_requests += 1;
+                bump(&mut self.permission_requests);
                 self.pending_permissions.insert(id.clone());
             }
 
@@ -670,7 +670,7 @@ impl SessionState {
             Event::PermissionResponse { id, decision, .. } => {
                 self.pending_permissions.remove(id);
                 if !decision.allowed() {
-                    self.permissions_denied += 1;
+                    bump(&mut self.permissions_denied);
                 }
             }
 
@@ -712,7 +712,7 @@ impl SessionState {
             }
 
             Event::AgentSpawn { id, .. } => {
-                self.agents_spawned += 1;
+                bump(&mut self.agents_spawned);
                 self.running_agents.insert(id.clone());
                 let running = self.running_agents.len() as u64;
                 self.peak_running_agents = self.peak_running_agents.max(running);
@@ -723,23 +723,29 @@ impl SessionState {
             // session's usage records, so nothing here counts them again.
             Event::AgentProgress { .. } => {}
 
+            // Counted only for an agent still running: one the backend's end
+            // already counted as interrupted did not also complete, and an
+            // exit reported twice is one exit.
             Event::AgentExit { id, outcome } => {
-                self.running_agents.remove(id);
+                if !self.running_agents.remove(id) {
+                    return;
+                }
                 match outcome {
-                    AgentOutcome::Completed => self.agents_completed += 1,
-                    AgentOutcome::Failed => self.agents_failed += 1,
-                    AgentOutcome::Cancelled => self.agents_cancelled += 1,
+                    AgentOutcome::Completed => bump(&mut self.agents_completed),
+                    AgentOutcome::Failed => bump(&mut self.agents_failed),
+                    AgentOutcome::Cancelled => bump(&mut self.agents_cancelled),
                 }
             }
 
             Event::Error { message, fatal } => {
-                self.errors += 1;
+                bump(&mut self.errors);
                 if *fatal {
                     self.fatal_error = Some(message.clone());
                     // Nothing is left to take an answer: a prompt the session
                     // ended on was asked and never answered, and waits on no
                     // one now.
                     self.pending_permissions.clear();
+                    self.pending_assistant.clear();
                     self.interrupt_backend_work();
                     // The turn it cut short spent what it spent, and is
                     // recorded with it; with no turn running there is none
@@ -773,7 +779,7 @@ impl SessionState {
         for id in cut {
             self.in_flight_tools.remove(&id);
             self.agent_calls.remove(&id);
-            self.tools.interrupted += 1;
+            bump(&mut self.tools.interrupted);
         }
         let agents = std::mem::take(&mut self.running_agents);
         self.agents_interrupted = self.agents_interrupted.saturating_add(agents.len() as u64);
@@ -791,8 +797,10 @@ impl SessionState {
     /// Ends the running turn, and records what it spent.
     fn end_turn(&mut self) {
         // Nothing more comes until the next prompt, so a question the turn
-        // left open waits on nobody: an answer to it would reach nothing.
+        // left open waits on nobody: an answer to it would reach nothing. A
+        // reply it left half-streamed is not the start of the next one.
         self.pending_permissions.clear();
+        self.pending_assistant.clear();
         let ended = self.mark();
         let began = self.turn_began.take().unwrap_or(self.turn_last_ended);
         let five_hour_share = match self.window_reported {
@@ -851,14 +859,14 @@ impl SessionState {
         let Some(file) = self.files.get_mut(at) else {
             return;
         };
-        file.changes += 1;
+        bump(&mut file.changes);
         match added {
             Some(lines) => file.added = file.added.saturating_add(lines),
-            None => file.added_unstated += 1,
+            None => bump(&mut file.added_unstated),
         }
         match removed {
             Some(lines) => file.removed = file.removed.saturating_add(lines),
-            None => file.removed_unstated += 1,
+            None => bump(&mut file.removed_unstated),
         }
         // A change the model said nothing before keeps whatever it said before
         // the last one: an explanation that disappeared on the second edit to
@@ -1098,6 +1106,12 @@ fn window_share(before: Option<UsageWindow>, after: Option<UsageWindow>) -> Opti
 /// half a thought beside a file.
 fn first_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+/// Adds one to a counter, stopping at its largest value rather than wrapping:
+/// a count that wrapped would read as a session that did almost nothing.
+fn bump(counter: &mut u64) {
+    *counter = counter.saturating_add(1);
 }
 
 #[cfg(test)]
@@ -2373,11 +2387,75 @@ mod tests {
         assert_eq!(tokens, [None, Some(30), None]);
     }
 
-    /// A backend that says a turn ended twice has ended one turn: nothing
-    /// ran and nothing was spent between the two, so the second records no
-    /// turn of its own.
     #[test]
-    fn a_turn_end_with_no_turn_running_and_nothing_spent_records_no_turn() {
+    fn a_reply_left_half_streamed_by_its_turn_is_not_the_start_of_the_next() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::AssistantDelta {
+                text: "Hello wor".to_owned(),
+            },
+            Event::TurnEnded,
+            prompt(),
+            Event::AssistantDelta {
+                text: "New".to_owned(),
+            },
+        ]);
+        assert_eq!(state.pending_assistant(), "New");
+
+        let ended = SessionState::replay(&[
+            prompt(),
+            Event::AssistantDelta {
+                text: "cut".to_owned(),
+            },
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+        ]);
+        assert_eq!(ended.pending_assistant(), "");
+    }
+
+    #[test]
+    fn an_agent_the_end_interrupted_does_not_also_complete() {
+        let state = SessionState::replay(&[
+            Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                label: "review".to_owned(),
+            },
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+            Event::AgentExit {
+                id: "a1".into(),
+                outcome: AgentOutcome::Completed,
+            },
+        ]);
+
+        assert_eq!(state.agents_spawned(), 1);
+        assert_eq!(state.agents_interrupted(), 1);
+        assert_eq!(state.agents_completed(), 0);
+    }
+
+    #[test]
+    fn token_totals_stop_at_their_largest_value_rather_than_wrapping() {
+        let huge = usage(u64::MAX, u64::MAX, None);
+        let state = SessionState::replay(&[huge.clone(), huge]);
+
+        assert_eq!(state.totals().input, u64::MAX);
+        assert_eq!(state.totals().output, u64::MAX);
+        assert_eq!(state.totals().tokens(), u64::MAX);
+        assert_eq!(state.totals().records, 2);
+    }
+
+    /// A backend that says a turn ended twice in a row has ended one turn,
+    /// so the second records no turn of its own. What makes it a repeat is
+    /// that nothing came between the two: any event between them, a notice
+    /// included, makes the second the end of a turn the fold did not see
+    /// begin (see [`only_an_end_straight_after_an_end_is_a_repeat`]).
+    #[test]
+    fn a_turn_end_said_again_straight_after_an_end_records_no_turn() {
         let state = SessionState::replay(&[
             prompt(),
             usage(100, 0, None),
