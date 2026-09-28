@@ -21,7 +21,6 @@
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
 
 use crate::text;
 use crate::theme::Theme;
@@ -631,15 +630,14 @@ fn split_word(word: &[Run], width: usize) -> Vec<(Vec<Span<'static>>, usize)> {
     let mut piece: Vec<Span<'static>> = Vec::new();
     let mut used = 0;
     for (text, style) in word {
-        for c in text.chars() {
-            let w = c.width().unwrap_or(0);
+        for (grapheme, w) in crate::text::graphemes(text) {
             if used + w > width && used > 0 {
                 pieces.push((std::mem::take(&mut piece), used));
                 used = 0;
             }
             match piece.last_mut() {
-                Some(last) if last.style == *style => last.content.to_mut().push(c),
-                _ => piece.push(Span::styled(c.to_string(), *style)),
+                Some(last) if last.style == *style => last.content.to_mut().push_str(grapheme),
+                _ => piece.push(Span::styled(grapheme.to_owned(), *style)),
             }
             used += w;
         }

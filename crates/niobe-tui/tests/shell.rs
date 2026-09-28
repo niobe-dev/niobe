@@ -4005,3 +4005,21 @@ fn ctrl_g_with_no_command_running_says_so() {
     assert_eq!(app.hint(), Some("No ! command is running"));
     assert!(!app.should_quit());
 }
+
+/// A `❤️` is two cells as ratatui draws it and one apiece by character, so a
+/// reply of them wrapped by characters overran its line and lost its end.
+#[test]
+fn a_reply_of_emoji_is_wrapped_as_wide_as_it_is_drawn() {
+    let mut app = App::new(Repo::default());
+    app.apply(&Event::AssistantMessage {
+        text: format!("{} END", "\u{2764}\u{fe0f}".repeat(40)),
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(
+        frame.contains("END"),
+        "the end of the reply was cut off:\n{frame}"
+    );
+}

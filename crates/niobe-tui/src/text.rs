@@ -9,11 +9,37 @@
 //! internally and does not say, which makes the scroll offset a guess. Wrapping
 //! up front costs one pass over the text and makes the offset exact.
 
-use unicode_width::UnicodeWidthChar;
+use ratatui::buffer::CellWidth as _;
+use unicode_segmentation::UnicodeSegmentation as _;
 
-/// Display width of a string in terminal cells.
+/// Display width of a string in terminal cells, as ratatui will draw it.
+///
+/// Measured a grapheme at a time with ratatui's own measure, because a
+/// string's width is not the sum of its characters': `❤️` is a heart and a
+/// presentation selector, one cell apiece by character and two as the emoji
+/// it draws; a family joined by zero-width joiners goes the other way. A
+/// width summed by character put text in a line ratatui then clipped, and cut
+/// a row that pushed the columns after it out of line.
 pub fn width(text: &str) -> usize {
-    text.chars().map(|c| c.width().unwrap_or(0)).sum()
+    if text.is_ascii() {
+        return text.bytes().filter(|b| !b.is_ascii_control()).count();
+    }
+    graphemes(text).map(|(_, cells)| cells).sum()
+}
+
+/// Each grapheme cluster of `text` and the cells ratatui draws it in. A
+/// cluster holding a control character draws in none: ratatui drops it.
+pub(crate) fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = (&str, usize)> {
+    text.graphemes(true)
+        .map(|grapheme| (grapheme, cells(grapheme)))
+}
+
+/// The cells one grapheme cluster is drawn in.
+fn cells(grapheme: &str) -> usize {
+    match grapheme.contains(char::is_control) {
+        true => 0,
+        false => usize::from(grapheme.cell_width()),
+    }
 }
 
 /// Columns between tab stops where the shell expands a tab itself.
@@ -33,16 +59,16 @@ pub fn expand_tabs(line: &str) -> String {
     }
     let mut out = String::with_capacity(line.len() + TAB_STOP);
     let mut column = 0;
-    for c in line.chars() {
-        match c {
-            '\t' => {
+    for (grapheme, w) in graphemes(line) {
+        match grapheme {
+            "\t" => {
                 let fill = TAB_STOP - column % TAB_STOP;
                 out.extend(std::iter::repeat_n(' ', fill));
                 column += fill;
             }
             _ => {
-                out.push(c);
-                column += c.width().unwrap_or(0);
+                out.push_str(grapheme);
+                column += w;
             }
         }
     }
@@ -118,13 +144,12 @@ pub fn split_to_width(text: &str, columns: usize) -> Vec<String> {
     let mut chunk = String::new();
     let mut chunk_width = 0;
 
-    for c in text.chars() {
-        let w = c.width().unwrap_or(0);
+    for (grapheme, w) in graphemes(text) {
         if chunk_width + w > columns && !chunk.is_empty() {
             chunks.push(std::mem::take(&mut chunk));
             chunk_width = 0;
         }
-        chunk.push(c);
+        chunk.push_str(grapheme);
         chunk_width += w;
     }
 
@@ -150,12 +175,11 @@ pub fn truncate(text: &str, columns: usize) -> String {
 
     let mut out = String::new();
     let mut out_width = 0;
-    for c in text.chars() {
-        let w = c.width().unwrap_or(0);
+    for (grapheme, w) in graphemes(text) {
         if out_width + w > columns - 1 {
             break;
         }
-        out.push(c);
+        out.push_str(grapheme);
         out_width += w;
     }
     out.push('…');
@@ -220,22 +244,52 @@ pub fn truncate_start(text: &str, columns: usize) -> String {
         return "…".to_owned();
     }
 
-    let mut kept: Vec<char> = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
     let mut kept_width = 0;
-    for c in text.chars().rev() {
-        let w = c.width().unwrap_or(0);
+    for (grapheme, w) in graphemes(text).rev() {
         if kept_width + w > columns - 1 {
             break;
         }
-        kept.push(c);
+        kept.push(grapheme);
         kept_width += w;
     }
-    std::iter::once('…').chain(kept.into_iter().rev()).collect()
+    std::iter::once("…").chain(kept.into_iter().rev()).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_emoji_with_a_presentation_selector_is_as_wide_as_ratatui_draws_it() {
+        use unicode_width::UnicodeWidthStr as _;
+
+        let heart = "\u{2764}\u{fe0f}";
+        assert_eq!(width(heart), heart.width());
+        assert_eq!(width(heart), 2);
+        assert_eq!(width(&heart.repeat(40)), 80);
+    }
+
+    #[test]
+    fn a_joined_emoji_sequence_is_as_wide_as_ratatui_draws_it() {
+        use unicode_width::UnicodeWidthStr as _;
+
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        assert_eq!(width(family), family.width());
+    }
+
+    #[test]
+    fn an_emoji_is_never_split_or_cut_in_half() {
+        let heart = "\u{2764}\u{fe0f}";
+        let hearts = heart.repeat(3);
+
+        assert_eq!(
+            split_to_width(&hearts, 4),
+            [heart.repeat(2), heart.to_owned()]
+        );
+        assert_eq!(truncate(&hearts, 5), format!("{}…", heart.repeat(2)));
+        assert_eq!(truncate_start(&hearts, 5), format!("…{}", heart.repeat(2)));
+    }
 
     #[test]
     fn a_tab_in_a_row_cut_to_one_line_is_a_space() {
