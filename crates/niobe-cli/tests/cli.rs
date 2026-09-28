@@ -1322,3 +1322,53 @@ fn a_claude_session_directory_that_cannot_be_read_does_not_hide_niobes_sessions(
         "the note names what could not be read: {out}"
     );
 }
+
+/// Printing a session writes nothing, so a store niobe cannot write — a
+/// read-only checkout, a mount — still prints.
+#[test]
+fn a_session_on_a_read_only_store_is_printed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repo = repo_with_the_fixture_recorded();
+    let dir = repo.path().join(".niobe");
+    let db = dir.join("sessions.db");
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("read-only");
+
+    let output = niobe(repo.path(), &["--resume", "1"]);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("writable");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("562,988"), "{}", stdout(&output));
+}
+
+/// A log that is not a file — a device, a FIFO named by mistake — is refused
+/// at once, not read until memory runs out or waited on for ever.
+#[test]
+fn replaying_something_that_is_not_a_file_fails_at_once_naming_it() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let fifo = dir.path().join("events.jsonl");
+    let made = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+
+    for log in [Path::new("/dev/zero"), fifo.as_path()] {
+        let started = std::time::Instant::now();
+        let output = niobe(dir.path(), &["replay", log.to_str().expect("a UTF-8 path")]);
+
+        assert!(!output.status.success(), "{}", log.display());
+        assert!(
+            stderr(&output).contains(&log.display().to_string()),
+            "{}",
+            stderr(&output)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{} took {:?}",
+            log.display(),
+            started.elapsed()
+        );
+    }
+}

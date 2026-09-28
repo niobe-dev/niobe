@@ -322,24 +322,30 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
     }
 
     let started = Instant::now();
-    let store = repo::open_existing_store(&root)?.ok_or_else(|| {
+    // Without a terminal the session is only read and printed, so the store
+    // is opened as a reader: one on a read-only mount still prints.
+    let piped = !std::io::stdout().is_terminal();
+    let opened = match piped {
+        true => repo::read_existing_store(&root)?,
+        false => repo::open_existing_store(&root)?,
+    };
+    let store = opened.ok_or_else(|| {
         format!(
             "no session {session}: nothing has been recorded in {}",
             root.display()
         )
     })?;
-    let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
-    let stored = recorder
-        .store()
-        .events(session)
-        .map_err(|e| e.to_string())?;
+    if !store.has_session(session).map_err(|e| e.to_string())? {
+        return Err(niobe_store::StoreError::NoSuchSession(session).to_string());
+    }
+    let stored = store.events(session).map_err(|e| e.to_string())?;
     // At the times the store recorded, not at the time it was read: a session
     // resumed on Thursday did not happen on Thursday.
     let clock = niobe_tui::clock::Clock::system();
     app.extend_at(stored.iter().map(|s| (&s.event, clock.at(s.at))));
     let elapsed = started.elapsed();
 
-    if !std::io::stdout().is_terminal() {
+    if piped {
         print_summary(
             &format!(
                 "session {session} · {} events · loaded and folded in {}",
@@ -350,6 +356,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
         );
         return Ok(());
     }
+    let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
 
     // The recorded session says what the backend called it, which is the only
     // id that can hand its transcript back: Niobe's session id names the
@@ -738,8 +745,7 @@ fn list_prices(model: Option<&str>) -> Result<(), String> {
 /// Folds a JSON Lines event log into the shell, for development. Nothing typed
 /// into a replayed log is recorded. Without a terminal, prints the fold.
 fn replay(log: &Path) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(log).map_err(|e| format!("cannot read {}: {e}", log.display()))?;
+    let text = log_text(log)?;
 
     let started = Instant::now();
     let events = read_log(&text).map_err(|e| format!("{}: {e}", log.display()))?;
@@ -782,6 +788,36 @@ fn print_summary(header: &str, app: &App) {
     for line in summary::lines(app) {
         say!("{line}");
     }
+}
+
+/// The most of a log `niobe replay` reads. The longest recorded session in
+/// the repository's fixtures is under a megabyte; a log a hundred times that
+/// is more than anyone replays to look at.
+const LOG_LIMIT: u64 = 128 * 1024 * 1024;
+
+/// The text of the event log at `log`: a regular file, read without waiting
+/// on it and no further than [`LOG_LIMIT`], so that a FIFO or a device named
+/// by mistake is refused at once rather than read for ever.
+fn log_text(log: &Path) -> Result<String, String> {
+    let failed = |e: &dyn std::fmt::Display| format!("cannot read {}: {e}", log.display());
+    // Looked at before it is opened: opening a FIFO waits for a writer.
+    if !std::fs::metadata(log).map_err(|e| failed(&e))?.is_file() {
+        return Err(failed(&"not a regular file"));
+    }
+    let file = std::fs::File::open(log).map_err(|e| failed(&e))?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, LOG_LIMIT.saturating_add(1)),
+        &mut bytes,
+    )
+    .map_err(|e| failed(&e))?;
+    if bytes.len() as u64 > LOG_LIMIT {
+        return Err(failed(&format!(
+            "larger than {} MiB",
+            LOG_LIMIT / (1024 * 1024)
+        )));
+    }
+    String::from_utf8(bytes).map_err(|e| failed(&e))
 }
 
 fn cwd() -> Result<PathBuf, String> {
