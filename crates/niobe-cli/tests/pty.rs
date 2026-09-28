@@ -76,6 +76,11 @@ use rustix::termios::Winsize;
 /// SIGTERM. Both are noticed once per tick of the event loop.
 const DEADLINE: Duration = Duration::from_secs(1);
 
+/// How long a test waits, once the shell has drawn what a line typed into it
+/// did, before pressing Enter, so that the shell reads the two apart as it
+/// would a person's keys. Far longer than a debug build takes to read a key.
+const KEY_GAP: Duration = Duration::from_millis(100);
+
 /// How long a test waits for the shell to draw, to record or to end before
 /// calling it hung.
 ///
@@ -328,7 +333,38 @@ impl Terminal {
     }
 
     /// Types into the shell.
+    ///
+    /// A line ending in Enter is typed, and then the Enter pressed on its own
+    /// once the shell has had time to read the line: sent in one write, the
+    /// two arrive in one read, which is what a paste from a terminal that
+    /// does not bracket pastes looks like, and a pasted Enter is a line break.
     fn typed(&self, keys: &[u8]) {
+        match keys.split_last() {
+            Some((b'\r', line)) if !line.is_empty() => {
+                let before = self.mark();
+                self.write(line);
+                self.drew_since(before);
+                std::thread::sleep(KEY_GAP);
+                self.write(b"\r");
+            }
+            _ => self.write(keys),
+        }
+    }
+
+    /// Waits until the shell has drawn anything after `from`, a
+    /// [`Self::mark`], which it does once it has read what was typed.
+    fn drew_since(&self, from: usize) {
+        let deadline = Instant::now() + PATIENCE;
+        while self.mark() <= from {
+            assert!(
+                Instant::now() < deadline,
+                "the shell drew nothing {PATIENCE:?} after keys were typed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn write(&self, keys: &[u8]) {
         rustix::io::write(&*self.master, keys).expect("the pty takes what is typed");
     }
 

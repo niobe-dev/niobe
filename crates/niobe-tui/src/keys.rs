@@ -32,6 +32,10 @@ use ratatui::crossterm::event::{
 /// to be bracketed. The marker before one, `CSI 200 ~`, is read as a sequence.
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// The marker before a paste, as bytes, for telling one paste's end from the
+/// next one's start.
+const PASTE_START: &[u8] = b"\x1b[200~";
+
 /// The longest sequence waited out before the bytes are taken to be none the
 /// shell reads. Every sequence a terminal sends for a key or a click is far
 /// shorter; this only bounds what a stream of garbage can hold back.
@@ -76,7 +80,7 @@ impl Decoder {
         for (index, byte) in bytes.iter().enumerate() {
             if let Some(pasted) = self.pasting.as_mut() {
                 pasted.push(*byte);
-                if pasted.ends_with(PASTE_END) {
+                if pasted.ends_with(PASTE_END) && !closes_later(&bytes[index + 1..]) {
                     pasted.truncate(pasted.len() - PASTE_END.len());
                     let text = String::from_utf8_lossy(pasted).into_owned();
                     events.push(Event::Paste(text));
@@ -117,6 +121,28 @@ impl Decoder {
             }
         }
     }
+}
+
+/// Whether the rest of the read closes the paste again, with no paste opened
+/// in between: then the end marker just read was in the pasted text itself,
+/// and a terminal that does not take it out of what it pastes has sent it on.
+///
+/// Read as the end, it would cut the paste short and type everything after
+/// it as keys — `\r` as Enter included, which runs a command or sends a
+/// prompt nobody pressed Enter on. The terminal writes a paste in one go, so
+/// its own closing marker is in the same read as the text's.
+fn closes_later(rest: &[u8]) -> bool {
+    let Some(end) = find(rest, PASTE_END) else {
+        return false;
+    };
+    find(&rest[..end], PASTE_START).is_none()
+}
+
+/// Where `needle` first starts in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 impl Decoder {
@@ -665,6 +691,25 @@ mod tests {
             [
                 Event::Paste("one\rtwo\x1b[A\tthree".to_owned()),
                 pressed(KeyCode::Char('x'), KeyModifiers::NONE),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_paste_holding_its_own_end_marker_is_pasted_whole_and_types_nothing() {
+        assert_eq!(
+            read(b"\x1b[200~safe\x1b[201~\rrm -rf\r\x1b[201~"),
+            [Event::Paste("safe\x1b[201~\rrm -rf\r".to_owned())]
+        );
+    }
+
+    #[test]
+    fn two_pastes_in_one_read_are_two_pastes() {
+        assert_eq!(
+            read(b"\x1b[200~one\x1b[201~\x1b[200~two\x1b[201~"),
+            [
+                Event::Paste("one".to_owned()),
+                Event::Paste("two".to_owned())
             ]
         );
     }

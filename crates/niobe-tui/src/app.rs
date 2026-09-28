@@ -3496,6 +3496,9 @@ impl App {
     /// Handles the keys one read of the terminal held, in order, as
     /// [`App::on_key_read`] would one at a time.
     ///
+    /// An Enter among several keys is a line break, never a send: see the
+    /// comment on it below.
+    ///
     /// Where a character has just been typed into the prompt, the characters
     /// that follow it in the same read go in with one insert, as a paste
     /// does. The composer's editor lays out its whole text again after every
@@ -3504,8 +3507,16 @@ impl App {
     pub fn on_keys_read(&mut self, keys: &[ratatui::crossterm::event::KeyEvent], arrival: Arrival) {
         let mut rest = keys;
         while let Some((&key, after)) = rest.split_first() {
-            self.on_key_read(key, arrival);
             rest = after;
+            // An Enter in a read of several keys was pasted, not pressed: a
+            // terminal that does not bracket pastes sends the line breaks of
+            // one as Enter. Pressed, it would send the prompt or run the `!`
+            // command the paste typed, which nobody asked for.
+            if !arrival.alone && is_plain_enter(key) && self.composer_has_the_keyboard() {
+                self.composer.insert_newline();
+                continue;
+            }
+            self.on_key_read(key, arrival);
             if typed_char(key).is_none() || !self.types_into_the_prompt() {
                 continue;
             }
@@ -3521,6 +3532,17 @@ impl App {
             }
             rest = after;
         }
+    }
+
+    /// Whether keys go to the composer — the prompt or the `!` command line —
+    /// rather than to a question, a list or the search.
+    fn composer_has_the_keyboard(&self) -> bool {
+        self.focus() == Focus::Session
+            && self.find.is_none()
+            && self.picking.is_none()
+            && !self
+                .asking()
+                .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
     }
 
     /// Whether a character typed now would go into the prompt as itself: the
@@ -4207,6 +4229,13 @@ fn typed_char(key: ratatui::crossterm::event::KeyEvent) -> Option<char> {
         (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) if !c.is_control() => Some(c),
         _ => None,
     }
+}
+
+/// Whether `key` is Enter with nothing held, which sends the prompt.
+fn is_plain_enter(key: ratatui::crossterm::event::KeyEvent) -> bool {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE
 }
 
 /// Whether `key` opens a line in the composer rather than sending it.
@@ -7425,6 +7454,43 @@ mod tests {
         app.composer().lines().to_vec()
     }
 
+    /// A terminal that does not bracket pastes sends a pasted line break as
+    /// Enter, in the same read as the text around it.
+    #[test]
+    fn an_enter_pasted_after_a_bang_runs_no_command() {
+        let mut app = app().runs_commands();
+
+        read(&mut app, b"!echo pwned\r", Instant::now());
+
+        assert!(app.take_commands().is_empty(), "a pasted line ran");
+        assert_eq!(app.composer().lines(), ["echo pwned", ""]);
+    }
+
+    #[test]
+    fn an_enter_pasted_into_a_prompt_sends_nothing() {
+        let mut app = app();
+
+        read(&mut app, b"hello\rworld\r", Instant::now());
+
+        let sent: Vec<Event> = app
+            .take_produced()
+            .into_iter()
+            .filter(|event| matches!(event, Event::UserMessage { .. }))
+            .collect();
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(app.composer().lines(), ["hello", "world", ""]);
+    }
+
+    #[test]
+    fn an_enter_pressed_alone_still_sends() {
+        let mut app = app();
+        read(&mut app, b"hello", Instant::now());
+
+        read(&mut app, b"\r", Instant::now());
+
+        assert!(app.composer().is_empty());
+    }
+
     #[test]
     fn keys_read_together_type_what_they_type_one_at_a_time() {
         let text = "look at @src/ma, /tmp and ops@example.com! 2 then @x";
@@ -7448,18 +7514,19 @@ mod tests {
         assert!(app.composer().is_empty(), "the query went into the prompt");
     }
 
+    /// Typed quickly while the shell was busy, `run it` and its Enter can
+    /// come in one read; so does a paste of the same bytes from a terminal
+    /// that does not bracket pastes, and nothing tells the two apart. The
+    /// Enter is taken as the paste's line break: a prompt left unsent costs
+    /// one more press, a pasted line sent or run costs whatever it said.
     #[test]
-    fn an_enter_read_with_the_keys_before_it_sends_them() {
+    fn an_enter_read_with_the_keys_before_it_is_a_line_break() {
         let mut app = app();
 
         read(&mut app, b"run it\r", Instant::now());
 
-        assert_eq!(
-            app.take_produced(),
-            [Event::UserMessage {
-                text: "run it".to_owned()
-            }]
-        );
+        assert!(app.take_produced().is_empty());
+        assert_eq!(app.composer().lines(), ["run it", ""]);
     }
 
     /// A prompt for `rm -rf build`, put on screen by the tick at `shown`.
