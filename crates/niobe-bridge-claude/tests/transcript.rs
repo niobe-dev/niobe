@@ -175,8 +175,12 @@ fn a_transcript_folds_into_what_the_session_said_and_did() {
     };
     // A turn the CLI wrote for itself is still a turn the model was given, so
     // the history carries it; only the session list passes over it.
-    assert!(
-        matches!(first, Event::UserMessage { text } if text.starts_with("<command-name>/clear")),
+    // Read as the command line that was typed, as a live session sees it.
+    assert_eq!(
+        *first,
+        &Event::UserMessage {
+            text: "/clear".to_owned()
+        }
     );
     assert_eq!(
         *second,

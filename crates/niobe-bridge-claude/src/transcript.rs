@@ -905,6 +905,7 @@ impl Fold {
         if agent.is_none()
             && let Some(text) = record.message.content.as_ref().and_then(said)
         {
+            let text = typed_command(&text).unwrap_or(text);
             self.out.push(Event::UserMessage { text });
         }
         // The same record carries the results of the calls the turn before it
@@ -1018,6 +1019,20 @@ impl Fold {
 
 /// The text of the first `<name>` element in a turn the CLI wrote in its own
 /// markup, such as a task notification.
+/// The command line the operator typed, where `text` is the markup the CLI
+/// writes for one it expanded: `<command-name>/clear</command-name>` with its
+/// `<command-args>`, which a live session sees as the `/clear` typed.
+fn typed_command(text: &str) -> Option<String> {
+    if !text.starts_with("<command-name>") {
+        return None;
+    }
+    let name = tag(text, "command-name")?.trim();
+    Some(match tag(text, "command-args").map(str::trim) {
+        Some(args) if !args.is_empty() => format!("{name} {args}"),
+        _ => name.to_owned(),
+    })
+}
+
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");

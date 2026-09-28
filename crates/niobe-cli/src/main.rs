@@ -451,14 +451,6 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
         return Ok(());
     }
 
-    // Recorded only once there is a terminal to continue it on: a piped run is
-    // a look at the transcript, and leaving a session behind for one would put
-    // a conversation in the list that nobody carried on.
-    let mut recorder = Recorder::new(repo::open_or_create_store(&root)?);
-    for event in &events {
-        recorder.record(event).map_err(|e| e.to_string())?;
-    }
-
     let mut backend = backend::attach(
         &root,
         selected.as_ref(),
@@ -472,6 +464,15 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     )?;
+
+    // Recorded only once there is a terminal to continue it on and a backend
+    // started to continue it with: a piped run is a look at the transcript,
+    // and a resume that failed is one nobody carried on — recorded, either
+    // would put a conversation in the list, and each retry another copy.
+    let mut recorder = Recorder::new(repo::open_or_create_store(&root)?);
+    for event in &events {
+        recorder.record(event).map_err(|e| e.to_string())?;
+    }
     let app = if backend.attached() {
         app.attached()
     } else {

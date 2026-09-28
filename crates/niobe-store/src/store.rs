@@ -353,6 +353,10 @@ impl Store {
 
     /// Every session in the store, newest first.
     ///
+    /// A slash command is passed over when looking for the first prompt: it
+    /// is an instruction to the CLI, such as `/clear`, and not what the
+    /// session was asked to do.
+    ///
     /// A row that is not JSON is passed over when looking for the first
     /// prompt, because `json_extract` fails the whole statement on one: a torn
     /// row in one session would otherwise hide every session from the list.
@@ -366,6 +370,7 @@ impl Store {
                       WHERE f.session_id = s.id
                         AND CASE WHEN json_valid(f.event)
                                  THEN json_extract(f.event, '$.type') = 'user_message'
+                                      AND substr(json_extract(f.event, '$.text'), 1, 1) <> '/'
                             END
                       ORDER BY f.seq
                       LIMIT 1)

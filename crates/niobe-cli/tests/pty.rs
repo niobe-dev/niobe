@@ -664,6 +664,36 @@ fn a_claude_session_read_in_is_a_niobe_session_from_then_on() {
     assert!(out.contains("1 changed — +3 −1"), "{out}");
 }
 
+/// A resume whose backend will not start is a session nobody carried on, and
+/// is not left in the list: every retry would add another copy.
+#[test]
+fn a_claude_session_whose_backend_will_not_start_is_not_recorded() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let home = user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .env("PATH", "/usr/bin:/bin")
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert_eq!(status.code(), Some(1), "{drawn}");
+    assert!(drawn.contains("not on PATH"), "{drawn}");
+    let listed = niobe(repo.path(), &["sessions"]);
+    let out = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
+    assert!(
+        !out.contains("EVENTS"),
+        "the failed resume left a session behind:\n{out}"
+    );
+}
+
 /// A user config directory holding `config`, to run the shell under.
 fn user_config(config: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("a temporary directory can be created");

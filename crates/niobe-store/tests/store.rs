@@ -461,3 +461,17 @@ fn a_resumed_recorder_appends_to_the_session_it_resumed() {
         Err(StoreError::NoSuchSession(_))
     ));
 }
+
+#[test]
+fn a_session_that_opens_with_a_slash_command_is_listed_by_the_prompt_after_it() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let session = store.create_session().expect("a session is created");
+    store.append(session, &user("/clear")).expect("append");
+    store
+        .append(session, &user("add etag support"))
+        .expect("append");
+
+    let listed = store.sessions().expect("listing works");
+
+    assert_eq!(listed[0].first_prompt.as_deref(), Some("add etag support"));
+}
