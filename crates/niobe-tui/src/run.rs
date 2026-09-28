@@ -269,7 +269,15 @@ fn event_loop<B: Backend<Error = io::Error>>(
                 run_commands(app, shell);
                 send_produced(app, journal, backend, rules);
             }
-            Input::Idle => {}
+            Input::Idle => {
+                let mut events = Vec::new();
+                machine.wait.settle(&mut events);
+                if !events.is_empty() {
+                    hand_over(app, events);
+                    run_commands(app, shell);
+                    send_produced(app, journal, backend, rules);
+                }
+            }
             // The terminal is gone: there is no one left to type and nothing
             // left to draw on, so the session ends the way a quit does and the
             // guard hands back what there is to hand back.
@@ -329,6 +337,12 @@ fn event_loop<B: Backend<Error = io::Error>>(
 fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
     let mut events = Vec::new();
     wait.read(&mut events)?;
+    hand_over(app, events);
+    Ok(())
+}
+
+/// Hands the app `events`, all of them read from the terminal together.
+fn hand_over(app: &mut App, events: Vec<Event>) {
     let arrival = arrival(&events, std::time::Instant::now());
     // The keys between two other events are handed over together, so that a
     // paste the terminal did not bracket is typed as one insert.
@@ -352,7 +366,6 @@ fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
         }
     }
     app.on_keys_read(&keys, arrival);
-    Ok(())
 }
 
 /// How the keys among `events`, one read of the terminal made at `at`,

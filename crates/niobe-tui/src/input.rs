@@ -103,6 +103,18 @@ impl Wait {
         crossterm_read(events)
     }
 
+    /// Hands over what the terminal has left the shell waiting on, where
+    /// nothing has come to finish it: a paste whose closing marker never
+    /// arrived. Called when a wait found nothing to read.
+    pub(crate) fn settle(&mut self, events: &mut Vec<Event>) {
+        #[cfg(unix)]
+        if self.polls_the_terminal {
+            self.decoder.settle(events);
+        }
+        #[cfg(not(unix))]
+        let _ = events;
+    }
+
     /// The shell's own read of standard input.
     ///
     /// A read that ends the terminal — end-of-file, a hangup — reads as
