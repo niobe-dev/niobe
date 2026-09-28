@@ -288,6 +288,52 @@ fn a_failure_reported_onto_a_closed_standard_error_ends_as_a_reported_failure() 
     );
 }
 
+/// Characters that act on a terminal rather than show: an escape, a bell and a
+/// right-to-left override.
+const ACTING: [char; 3] = ['\u{1b}', '\u{7}', '\u{202e}'];
+
+fn assert_only_text(out: &str) {
+    for c in ACTING {
+        assert!(!out.contains(c), "{c:?} reached the terminal: {out:?}");
+    }
+}
+
+#[test]
+fn a_profile_listing_prints_a_configs_escape_sequences_as_text() {
+    let setup = Configured::new(
+        "",
+        "[profiles.\"x\\u001b]0;PWNED\\u0007\"]\nbackend = \"claude\"\nmodels = [\"m\\u001b[2J\\u202e\"]\n",
+    );
+
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_only_text(&out);
+    assert!(out.contains("x␛]0;PWNED␇"), "{out}");
+    assert!(out.contains("m␛[2J\u{fffd}"), "{out}");
+}
+
+#[test]
+fn a_session_listing_prints_a_stored_prompts_escape_sequences_as_text() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::create_dir(dir.path().join(".git")).expect("a .git directory can be made");
+    std::fs::create_dir(dir.path().join(".niobe")).expect("a .niobe directory can be made");
+    let store = Store::open(&dir.path().join(".niobe").join("sessions.db")).expect("store");
+    let session = store.create_session().expect("a session is created");
+    let line = r#"{"type":"user_message","text":"hi\u001b]0;PWNED-TITLE\u0007\u001b[2J\u202e"}"#;
+    for event in read_log(line).expect("the event parses") {
+        store.append(session, &event).expect("an append succeeds");
+    }
+
+    let output = niobe(dir.path(), &["sessions"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_only_text(&out);
+    assert!(out.contains("hi␛]0;PWNED-TITLE␇␛[2J"), "{out}");
+}
+
 #[test]
 fn listing_sessions_where_nothing_was_recorded_creates_nothing() {
     let dir = tempfile::tempdir().expect("a temporary directory can be created");

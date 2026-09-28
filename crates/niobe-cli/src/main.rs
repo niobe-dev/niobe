@@ -20,6 +20,7 @@ mod commands;
 mod config;
 mod journal;
 mod prices;
+mod printable;
 mod profiles;
 mod reaper;
 mod repo;
@@ -38,6 +39,16 @@ use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
 use niobe_tui::theme::{self, Depth};
 use niobe_tui::{Detached, Ended, Forgotten, NoShell, Theme, Unwatched};
+
+/// Prints a line the way `println!` does, with anything in it that would act
+/// on the terminal shown as text instead; see [`printable`]. Every line this
+/// binary prints goes through it, because most carry a name, a path or a
+/// prompt that came from a config, the store or a transcript.
+macro_rules! say {
+    ($($arg:tt)*) => {
+        println!("{}", crate::printable::printable(&format!($($arg)*)))
+    };
+}
 
 use crate::args::{Command, Invocation, Resume};
 use crate::journal::StoreJournal;
@@ -93,7 +104,7 @@ const FAILED_UNREPORTED: u8 = 2;
 /// ignoring the write would do to every other reason a write to standard error
 /// fails.
 fn report(message: &str, stderr: &mut dyn Write) -> u8 {
-    match writeln!(stderr, "niobe: {message}") {
+    match writeln!(stderr, "niobe: {}", printable::printable(message)) {
         Ok(()) => FAILED,
         Err(_) => FAILED_UNREPORTED,
     }
@@ -128,7 +139,7 @@ fn run(
             Ok(())
         }
         Command::Version => {
-            println!("{} {}", niobe_core::APP_NAME, niobe_core::VERSION);
+            say!("{} {}", niobe_core::APP_NAME, niobe_core::VERSION);
             Ok(())
         }
     }
@@ -262,7 +273,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
         Ended::Quit => {}
     }
     if let Some(session) = journal.session() {
-        println!(
+        say!(
             "session {session} saved in {} — `niobe --resume {session}` continues it",
             repo::store_path(&root).display()
         );
@@ -489,7 +500,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
         Ended::Quit => {}
     }
     if let Some(recorded) = journal.session() {
-        println!(
+        say!(
             "claude session {session} is niobe session {recorded} in {} — \
              `niobe --resume {recorded}` continues it",
             repo::store_path(&root).display()
@@ -526,7 +537,7 @@ fn list_sessions() -> Result<(), String> {
     )?;
 
     if recorded.is_empty() && imported.is_empty() {
-        println!("no sessions recorded in {}", root.display());
+        say!("no sessions recorded in {}", root.display());
         return Ok(());
     }
     let mut lines = match recorded.is_empty() {
@@ -538,7 +549,7 @@ fn list_sessions() -> Result<(), String> {
         lines.extend(sessions::recorded(&imported));
     }
     for line in lines {
-        println!("{line}");
+        say!("{line}");
     }
     Ok(())
 }
@@ -609,8 +620,8 @@ fn trust() -> Result<(), String> {
     trusted.trust(&path, &text).map_err(|e| e.to_string())?;
     trusted.write(&record).map_err(|e| e.to_string())?;
 
-    println!("trusted {}", path.display());
-    println!(
+    say!("trusted {}", path.display());
+    say!(
         "the profiles it defines are in force here as it defines them, env, args, settings, \
          auth_refresh and billing included, and so are its default_profile and its \
          permissions; `niobe profiles` lists them, and editing the file asks again"
@@ -626,11 +637,11 @@ fn untrust() -> Result<(), String> {
     let mut trusted = niobe_config::trust::Trusted::read(&record).map_err(|e| e.to_string())?;
 
     if !trusted.forget(&path) {
-        println!("{} was not trusted", path.display());
+        say!("{} was not trusted", path.display());
         return Ok(());
     }
     trusted.write(&record).map_err(|e| e.to_string())?;
-    println!(
+    say!(
         "{} is no longer trusted; the env, args, settings, auth_refresh and billing of the \
          profiles it defines are not in force, nor its default_profile, nor a profile it \
          names like one of yours",
@@ -675,7 +686,7 @@ fn list_profiles(profile: Option<&str>) -> Result<(), String> {
     let selected = loaded.selected(profile)?;
 
     if loaded.config.profiles().is_empty() {
-        println!("{}", profiles::none_defined(&loaded.searched));
+        say!("{}", profiles::none_defined(&loaded.searched));
         return Ok(());
     }
     let bedrock = backend::bedrock_settings(
@@ -687,7 +698,7 @@ fn list_profiles(profile: Option<&str>) -> Result<(), String> {
         selected.as_ref().map(|s| s.name.as_str()),
         bedrock.as_deref(),
     ) {
-        println!("{line}");
+        say!("{line}");
     }
     Ok(())
 }
@@ -703,7 +714,7 @@ fn list_prices(model: Option<&str>) -> Result<(), String> {
         },
     };
     for line in lines {
-        println!("{line}");
+        say!("{line}");
     }
     Ok(())
 }
@@ -751,9 +762,9 @@ fn replay(log: &Path) -> Result<(), String> {
 }
 
 fn print_summary(header: &str, app: &App) {
-    println!("{header}");
+    say!("{header}");
     for line in summary::lines(app) {
-        println!("{line}");
+        say!("{line}");
     }
 }
 
@@ -768,7 +779,7 @@ fn millis(elapsed: Duration) -> String {
 }
 
 fn print_help() {
-    println!(
+    say!(
         "\
 {name} {version}
 A terminal coding agent that keeps you aware of what is being built and how:
