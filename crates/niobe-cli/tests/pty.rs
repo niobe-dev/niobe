@@ -500,13 +500,27 @@ fn signal(shell: &Child, signal: Signal) {
 
 /// Asserts that the shell handed the terminal back exactly once on `path`, the
 /// way out of the shell it was driven down.
-fn assert_handed_back(drawn: &str, path: &str) {
-    assert_handed_back_as(drawn, path, Keys::Reported);
+fn assert_handed_back(drawn: &str, cooked: bool, path: &str) {
+    assert_handed_back_as(drawn, cooked, path, Keys::Reported);
+}
+
+/// Everything the shell drew, once the test lets go of its end of the pty,
+/// and whether the pty's line discipline was cooked again when it did: the
+/// escape sequences say the screen was handed back, and only the modes say
+/// raw mode was turned off.
+fn released(terminal: Terminal, slave: File) -> (String, bool) {
+    let cooked = cooked(&slave);
+    drop(slave);
+    (terminal.drained(), cooked)
 }
 
 /// Asserts that the shell handed back exactly once, on `path`, a terminal that
 /// answered the keyboard query as `keys` says.
-fn assert_handed_back_as(drawn: &str, path: &str, keys: Keys) {
+fn assert_handed_back_as(drawn: &str, cooked: bool, path: &str, keys: Keys) {
+    assert!(
+        cooked,
+        "on {path} the shell left the terminal in raw mode: no line editing, no echo, no Ctrl+C"
+    );
     assert!(
         drawn.contains(ENTER_ALTERNATE_SCREEN),
         "on {path} the shell never entered the alternate screen, so leaving it would prove nothing"
@@ -860,11 +874,10 @@ fn a_clean_quit_hands_the_terminal_back() {
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert!(status.success(), "a clean quit ended with {status}");
-    assert_handed_back(&drawn, "a clean quit");
+    assert_handed_back(&drawn, cooked, "a clean quit");
 }
 
 #[test]
@@ -877,8 +890,7 @@ fn a_sigterm_hands_the_terminal_back() {
     signal(&shell, Signal::TERM);
 
     let (took, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert!(
         took < DEADLINE,
@@ -887,7 +899,7 @@ fn a_sigterm_hands_the_terminal_back() {
     // The default disposition kills the process outright, on the alternate
     // screen in raw mode; catching the signal is what turns it into a quit.
     assert!(status.success(), "a SIGTERM ended the shell with {status}");
-    assert_handed_back(&drawn, "a SIGTERM");
+    assert_handed_back(&drawn, cooked, "a SIGTERM");
 }
 
 #[test]
@@ -900,11 +912,10 @@ fn a_sigterm_takes_back_the_modify_other_keys_a_legacy_terminal_was_asked_for() 
     signal(&shell, Signal::TERM);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert!(status.success(), "a SIGTERM ended the shell with {status}");
-    assert_handed_back_as(&drawn, "a SIGTERM", Keys::Legacy);
+    assert_handed_back_as(&drawn, cooked, "a SIGTERM", Keys::Legacy);
 }
 
 #[test]
@@ -999,10 +1010,9 @@ fn shift_enter_in_modify_other_keys_opens_a_line_and_the_bar_names_it_from_then_
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(status.success(), "the shell ended with {status}");
-    assert_handed_back_as(&drawn, "a clean quit", Keys::Legacy);
+    assert_handed_back_as(&drawn, cooked, "a clean quit", Keys::Legacy);
 }
 
 /// Only with debug assertions on: the panic the binary is asked for is
@@ -1040,15 +1050,14 @@ fn panics_and_hands_back(keys: Keys) {
     terminal.typed(b"anything\r");
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert_eq!(
         status.code(),
         Some(PANICKED),
         "the shell was asked to panic and ended with {status}"
     );
-    assert_handed_back_as(&drawn, "a panic", keys);
+    assert_handed_back_as(&drawn, cooked, "a panic", keys);
 
     // The guard would restore on its own as the stack unwinds, so restoring is
     // not what the hook is for: it restores *first*, so that the message is
@@ -1280,15 +1289,14 @@ fn a_hangup_ends_the_session_as_a_terminal_that_went_away_rather_than_as_a_quit(
     signal(&shell, Signal::HUP);
 
     let (took, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert!(
         took < DEADLINE,
         "the shell took {took:?} to act on a hangup, over the {DEADLINE:?} it has"
     );
     assert!(status.success(), "a hangup ended the shell with {status}");
-    assert_handed_back(&drawn, "a hangup");
+    assert_handed_back(&drawn, cooked, "a hangup");
     assert!(
         !drawn.contains("niobe --resume"),
         "a hangup printed the line a quit prints, onto the terminal the hangup says has gone: \
@@ -1398,14 +1406,13 @@ fn a_line_from_the_cli_that_is_not_utf8_costs_neither_the_reply_nor_the_shell() 
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(status.success(), "the shell ended with {status}: {drawn}");
     assert!(
         !drawn.contains("standard input is closed"),
         "the session closed the CLI's input under it: {drawn}"
     );
-    assert_handed_back(&drawn, "a quit after a line that was not UTF-8");
+    assert_handed_back(&drawn, cooked, "a quit after a line that was not UTF-8");
 }
 
 /// A `claude` that writes down every turn it is sent, one line each, and
@@ -1437,8 +1444,7 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(status.success(), "the shell ended with {status}: {drawn}");
     let turns = std::fs::read_to_string(repo.path().join("turns.jsonl"))
         .expect("the stand-in wrote down the turn it was sent");
@@ -1448,7 +1454,7 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
         turns[0].contains(r"here is the log:\nerror: boom\nat foo.rs:3"),
         "the turn sent was not the paste with its lines: {turns:?}"
     );
-    assert_handed_back(&drawn, "a quit after a paste");
+    assert_handed_back(&drawn, cooked, "a quit after a paste");
 }
 
 /// Puts `script` in `cwd` as the `claude` a session runs, and gives back a
@@ -1521,8 +1527,7 @@ fn quits_without_waiting_on_what_the_cli_started(path: &str, end: impl FnOnce(&T
     end(&terminal, &shell);
 
     let (took, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(
         took < DEADLINE,
         "on {path} the shell took {took:?} to end, over the {DEADLINE:?} it has"
@@ -1531,7 +1536,7 @@ fn quits_without_waiting_on_what_the_cli_started(path: &str, end: impl FnOnce(&T
         status.success(),
         "on {path} the shell ended with {status}: {drawn}"
     );
-    assert_handed_back(&drawn, path);
+    assert_handed_back(&drawn, cooked, path);
 
     // What was killed is reaped by whoever inherited it, a moment later.
     let deadline = Instant::now() + DEADLINE;
@@ -1598,8 +1603,7 @@ fn a_cli_that_dies_while_something_it_started_holds_its_output_is_reported_ended
 
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(
         took < DEADLINE,
         "the end was drawn {took:?} after the reply, over the {DEADLINE:?} it has"
@@ -1612,7 +1616,7 @@ fn a_cli_that_dies_while_something_it_started_holds_its_output_is_reported_ended
     let end = drawn.find("fell-over-mid-session");
     assert!(reply < end, "the end was drawn before the reply: {drawn}");
     assert!(status.success(), "the shell ended with {status}: {drawn}");
-    assert_handed_back(&drawn, "a quit after the CLI fell over");
+    assert_handed_back(&drawn, cooked, "a quit after the CLI fell over");
 }
 
 #[test]
@@ -1666,14 +1670,13 @@ fn a_signal_hands_back_the_terminal_and_ends_the_bang_command(path: &str, sent: 
 
     let (took, status) = ended(&mut shell);
     let modes = rustix::termios::tcgetattr(&slave).expect("the pty's modes can be read");
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(
         took < DEADLINE,
         "the shell took {took:?} to act on {path}, over the {DEADLINE:?} it has"
     );
     assert!(status.success(), "{path} ended the shell with {status}");
-    assert_handed_back(&drawn, path);
+    assert_handed_back(&drawn, cooked, path);
     let cooked = rustix::termios::LocalModes::ICANON
         | rustix::termios::LocalModes::ECHO
         | rustix::termios::LocalModes::ISIG;

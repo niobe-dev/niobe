@@ -275,6 +275,9 @@ fn workspace_dependencies_of(package: &str) -> Result<Vec<String>, String> {
 /// Builds the release binary and returns its size in bytes, failing if it is
 /// over budget.
 fn size() -> Result<u64, String> {
+    let manifest = std::fs::read_to_string(workspace_root().join("Cargo.toml"))
+        .map_err(|e| format!("cannot read the workspace manifest: {e}"))?;
+    release_unwinds(&manifest)?;
     cargo(&["build", "--release", "--package", "niobe-cli"])?;
 
     let binary = target_dir().join("release").join("niobe");
@@ -292,6 +295,44 @@ fn size() -> Result<u64, String> {
 
     println!("niobe release binary: {mib:.2} MiB of a {budget_mib:.0} MiB budget");
     Ok(bytes)
+}
+
+/// Fails unless the release profile in `manifest` lets a panic unwind.
+///
+/// The terminal is restored on a panic by a guard's `Drop`, and by a panic
+/// hook the tests can only reach in a debug build: with `panic = "abort"` the
+/// released binary would leave the operator's terminal in raw mode on every
+/// panic while every test still passed.
+fn release_unwinds(manifest: &str) -> Result<(), String> {
+    match release_panic(manifest).as_deref() {
+        None | Some("unwind") => Ok(()),
+        Some(other) => Err(format!(
+            "[profile.release] sets panic = \"{other}\"; it must unwind, or a panic leaves the \
+             terminal in raw mode (AGENTS.md §2)"
+        )),
+    }
+}
+
+/// The `panic` setting of `[profile.release]` in `manifest`, unquoted, where
+/// it sets one.
+fn release_panic(manifest: &str) -> Option<String> {
+    let mut in_release = false;
+    for line in manifest.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if line.starts_with('[') {
+            in_release = line == "[profile.release]";
+            continue;
+        }
+        if !in_release {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "panic"
+        {
+            return Some(value.trim().trim_matches('"').to_owned());
+        }
+    }
+    None
 }
 
 fn target_dir() -> PathBuf {
@@ -358,5 +399,36 @@ fn cargo(args: &[&str]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("cargo {} failed with {status}", args.join(" ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_workspace_release_profile_unwinds() {
+        let manifest = std::fs::read_to_string(workspace_root().join("Cargo.toml"))
+            .expect("the workspace manifest is readable");
+
+        assert_eq!(release_panic(&manifest).as_deref(), Some("unwind"));
+        assert!(release_unwinds(&manifest).is_ok());
+    }
+
+    #[test]
+    fn a_release_profile_that_aborts_is_refused() {
+        let manifest = "[profile.dev]\npanic = \"unwind\"\n\n[profile.release]\nlto = \"thin\"\npanic = \"abort\" # smaller\n";
+
+        assert_eq!(release_panic(manifest).as_deref(), Some("abort"));
+        let said = release_unwinds(manifest).expect_err("abort is refused");
+        assert!(said.contains("raw mode"), "{said}");
+    }
+
+    #[test]
+    fn a_release_profile_that_says_nothing_unwinds_by_default() {
+        let manifest = "[profile.release]\nlto = \"thin\"\n\n[profile.dev]\npanic = \"abort\"\n";
+
+        assert_eq!(release_panic(manifest), None);
+        assert!(release_unwinds(manifest).is_ok());
     }
 }
