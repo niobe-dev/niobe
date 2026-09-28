@@ -17,6 +17,10 @@
 //!   where what follows neither starts another command (`;`, `&&`, `|`, a
 //!   redirection, a substitution) nor climbs above the prefix with `..`.
 //!
+//! A target that itself ends in `*` — `rm -rf build/*` — is written with the
+//! star escaped, `Bash(rm -rf build/\*)`, so that it reads back as that
+//! command and nothing else. A prefix therefore cannot end in `\`.
+//!
 //! **Niobe writes only the first two.** A prompt answered with "always this
 //! target" stores the target as it stood, never a generalisation of it:
 //! turning `cargo test` into `cargo *` would be Niobe deciding on its own that
@@ -38,12 +42,56 @@ use serde::{Deserialize, Serialize};
 /// The character that makes the rest of a target a prefix match.
 const WILDCARD: char = '*';
 
+/// How a target whose own last character is a `*` is written, so that it is
+/// not read back as a prefix.
+const ESCAPED_WILDCARD: &str = "\\*";
+
+/// What a targeted rule is limited to.
+///
+/// The two kinds are kept apart rather than told apart by a trailing `*`,
+/// because a shell command can end in a `*` of its own: approving
+/// `rm -rf build/*` must not allow `rm -rf build/ ~`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Target {
+    /// Exactly this text, whatever characters it holds.
+    Exact(String),
+    /// Text starting with this, where what follows is more of the same call;
+    /// see [`Rule::covers`].
+    Prefix(String),
+}
+
+impl Target {
+    /// Reads a target as a rule writes it: a trailing `*` makes a prefix, and
+    /// a trailing `\*` is a literal star.
+    fn parse(text: &str) -> Self {
+        if let Some(before) = text.strip_suffix(ESCAPED_WILDCARD) {
+            return Self::Exact(format!("{before}{WILDCARD}"));
+        }
+        match text.strip_suffix(WILDCARD) {
+            Some(prefix) => Self::Prefix(prefix.to_owned()),
+            None => Self::Exact(text.to_owned()),
+        }
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exact(text) => match text.strip_suffix(WILDCARD) {
+                Some(before) => write!(f, "{before}{ESCAPED_WILDCARD}"),
+                None => f.write_str(text),
+            },
+            Self::Prefix(prefix) => write!(f, "{prefix}{WILDCARD}"),
+        }
+    }
+}
+
 /// A standing answer: a tool, and optionally the target it is allowed on.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Rule {
     tool: String,
-    target: Option<String>,
+    target: Option<Target>,
 }
 
 impl Rule {
@@ -55,13 +103,22 @@ impl Rule {
         }
     }
 
-    /// Calls to `tool` on `target`, which is matched as a prefix when it ends
-    /// in `*` and exactly otherwise. What a `*` may stand for is narrower than
-    /// any text at all; see [`Rule::covers`].
+    /// Calls to `tool` on exactly `target`, a `*` in it included. This is the
+    /// rule "always this target" leaves behind.
     pub fn targeted(tool: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
             tool: tool.into(),
-            target: Some(target.into()),
+            target: Some(Target::Exact(target.into())),
+        }
+    }
+
+    /// Calls to `tool` on a target starting with `prefix`, where what follows
+    /// is more of the same call; see [`Rule::covers`]. Only an operator writes
+    /// one of these, in their own config.
+    pub fn prefixed(tool: impl Into<String>, prefix: impl Into<String>) -> Self {
+        Self {
+            tool: tool.into(),
+            target: Some(Target::Prefix(prefix.into())),
         }
     }
 
@@ -85,7 +142,10 @@ impl Rule {
         if tool.trim().is_empty() || target.is_empty() {
             return Err(invalid());
         }
-        Ok(Self::targeted(tool.trim(), target))
+        Ok(Self {
+            tool: tool.trim().to_owned(),
+            target: Some(Target::parse(target)),
+        })
     }
 
     /// The tool this rule answers for.
@@ -94,8 +154,8 @@ impl Rule {
     }
 
     /// What it is limited to, where it is limited to anything.
-    pub fn target(&self) -> Option<&str> {
-        self.target.as_deref()
+    pub fn target(&self) -> Option<&Target> {
+        self.target.as_ref()
     }
 
     /// Whether this rule answers a call to `tool` on `target`.
@@ -115,10 +175,27 @@ impl Rule {
         match (&self.target, target) {
             (None, _) => true,
             (Some(_), None) => false,
-            (Some(allowed), Some(target)) => match allowed.strip_suffix(WILDCARD) {
-                Some(prefix) => target.strip_prefix(prefix).is_some_and(star_stands_for),
-                None => allowed == target,
-            },
+            (Some(Target::Exact(allowed)), Some(target)) => allowed == target,
+            (Some(Target::Prefix(prefix)), Some(target)) => target
+                .strip_prefix(prefix.as_str())
+                .is_some_and(star_stands_for),
+        }
+    }
+
+    /// Whether every call `other` answers, this rule answers too — so that
+    /// holding this rule makes `other` redundant.
+    pub fn includes(&self, other: &Self) -> bool {
+        if self.tool != other.tool {
+            return false;
+        }
+        match (&self.target, &other.target) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(_), Some(Target::Exact(target))) => self.covers(&other.tool, Some(target)),
+            (Some(Target::Exact(_)), Some(Target::Prefix(_))) => false,
+            (Some(Target::Prefix(outer)), Some(Target::Prefix(inner))) => inner
+                .strip_prefix(outer.as_str())
+                .is_some_and(star_stands_for),
         }
     }
 }
@@ -235,11 +312,16 @@ impl Allowlist {
     /// a config that grew a line for every approval would be a config nobody
     /// could read.
     pub fn insert(&mut self, rule: Rule) -> bool {
-        if self.rules.contains(&rule) || self.allows(rule.tool_name(), rule.target()) {
+        if self.includes(&rule) {
             return false;
         }
         self.rules.push(rule);
         true
+    }
+
+    /// Whether a rule already here answers every call `rule` would.
+    pub fn includes(&self, rule: &Rule) -> bool {
+        self.rules.iter().any(|held| held.includes(rule))
     }
 
     /// Every rule, in the order it was written.
@@ -308,7 +390,7 @@ mod tests {
 
     #[test]
     fn a_trailing_star_matches_by_prefix() {
-        let rule = Rule::targeted("Bash", "cargo *");
+        let rule = Rule::prefixed("Bash", "cargo ");
 
         assert!(rule.covers("Bash", Some("cargo test")));
         assert!(rule.covers("Bash", Some("cargo publish")));
@@ -377,8 +459,53 @@ mod tests {
 
         let targeted = Rule::parse("Bash(cargo test)").expect("valid");
         assert_eq!(targeted.tool_name(), "Bash");
-        assert_eq!(targeted.target(), Some("cargo test"));
+        assert_eq!(
+            targeted.target(),
+            Some(&Target::Exact("cargo test".to_owned()))
+        );
+        assert_eq!(
+            Rule::parse("Bash(cargo *)").expect("valid").target(),
+            Some(&Target::Prefix("cargo ".to_owned()))
+        );
         assert_eq!(Rule::parse("Read").expect("valid").target(), None);
+    }
+
+    #[test]
+    fn a_target_that_ends_in_a_star_of_its_own_covers_only_itself() {
+        // The operator approved one command; its glob is the shell's, not a
+        // rule's wildcard.
+        let rule = Rule::targeted("Bash", "rm -rf build/*");
+
+        assert!(rule.covers("Bash", Some("rm -rf build/*")));
+        assert!(!rule.covers("Bash", Some("rm -rf build/ ~")));
+        assert!(!rule.covers("Bash", Some("rm -rf build/ /")));
+    }
+
+    #[test]
+    fn a_literal_star_is_written_escaped_and_reads_back_as_itself() {
+        let rule = Rule::targeted("Bash", "rm -rf build/*");
+        let written = rule.to_string();
+
+        assert_eq!(written, r"Bash(rm -rf build/\*)");
+        let read = Rule::parse(&written).expect("what was written reads back");
+        assert_eq!(read, rule);
+        assert!(!read.covers("Bash", Some("rm -rf build/ ~")));
+
+        for text in [r"Bash(ls \\*)", r"Bash(echo \)", "Bash(a*b)"] {
+            let rule = Rule::parse(text).expect("the rule is valid");
+            assert_eq!(rule.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn a_prefix_rule_is_not_made_redundant_by_an_exact_one_of_the_same_text() {
+        let mut list = Allowlist::new();
+
+        assert!(list.insert(Rule::targeted("Bash", "cargo *")));
+        assert!(list.insert(Rule::prefixed("Bash", "cargo ")));
+        assert!(!list.insert(Rule::prefixed("Bash", "cargo test ")));
+        assert!(!list.insert(Rule::prefixed("Bash", "cargo ")));
+        assert_eq!(list.rules().len(), 2);
     }
 
     #[test]
@@ -386,7 +513,7 @@ mod tests {
         // A command is a target, and commands have brackets in them.
         let rule = Rule::parse("Bash(echo (one))").expect("the rule is valid");
 
-        assert_eq!(rule.target(), Some("echo (one)"));
+        assert_eq!(rule.target(), Some(&Target::Exact("echo (one)".to_owned())));
         assert_eq!(rule.to_string(), "Bash(echo (one))");
         assert!(rule.covers("Bash", Some("echo (one)")));
     }

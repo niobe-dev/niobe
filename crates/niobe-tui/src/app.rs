@@ -5506,6 +5506,25 @@ mod tests {
     }
 
     #[test]
+    fn always_this_target_on_a_command_ending_in_a_glob_allows_only_that_command() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build/*")));
+        let rule = app
+            .asking()
+            .and_then(Ask::target_rule)
+            .expect("the prompt has a target");
+        assert!(!rule.covers("Bash", Some("rm -rf build/ ~")));
+
+        app.on_key(key(KeyCode::Char('3')));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_rules(), [Rule::targeted("Bash", "rm -rf build/*")]);
+        assert!(app.allowed().allows("Bash", Some("rm -rf build/*")));
+        assert!(!app.allowed().allows("Bash", Some("rm -rf build/ ~")));
+    }
+
+    #[test]
     fn always_this_tool_and_always_this_target_store_the_rule_they_name() {
         use ratatui::crossterm::event::KeyCode;
 

@@ -75,7 +75,7 @@ fn remember_with(
     // Parsed before anything is written, so a rule is never added to a file
     // that would not load afterwards.
     let config = Config::parse(&text, path)?;
-    if config.allowed().allows(rule.tool_name(), rule.target()) {
+    if config.allowed().includes(rule) {
         return Ok(());
     }
 
@@ -276,8 +276,8 @@ backend = \"claude\"
 
         let config = Config::parse(&written, &path()).expect("what was written reads back");
         assert_eq!(
-            config.allowed().rules()[0].target(),
-            Some(r#"echo "one" \ two"#)
+            config.allowed().rules()[0],
+            Rule::targeted("Bash", r#"echo "one" \ two"#)
         );
     }
 
