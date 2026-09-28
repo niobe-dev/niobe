@@ -62,6 +62,18 @@ pub fn table(
             path.display()
         ));
     }
+    if let Some((rules, path)) = config.withheld_rules() {
+        let rules: Vec<String> = rules
+            .rules()
+            .iter()
+            .map(|rule| format!("`{rule}`"))
+            .collect();
+        lines.push(format!(
+            "  permissions allow {} in {} are not in force: that file is not trusted",
+            rules.join(", "),
+            path.display()
+        ));
+    }
     lines
 }
 

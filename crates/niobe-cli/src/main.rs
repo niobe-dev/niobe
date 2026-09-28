@@ -552,12 +552,13 @@ fn list_sessions() -> Result<(), String> {
 /// explanation on screen.
 const UNTRUSTED: &str = "\
 This repository's config sets what a backend is started with — a profile's \
-`env`, `args`, `settings` or `auth_refresh` — or which account a session runs \
-on and how it is billed: a `billing`, a `default_profile`, or a profile named \
-like one of yours. A config arrives with a clone, and those are how the \
-official CLI would be pointed at somewhere other than where it is signed in, \
-or signed in as something else, so they are not in force until you have read \
-the file. `niobe profiles` shows what it sets; `niobe trust` puts it in force \
+`env`, `args`, `settings` or `auth_refresh` — which account a session runs \
+on and how it is billed — a `billing`, a `default_profile`, or a profile named \
+like one of yours — or which tool calls run without asking: `[permissions]` \
+rules. A config arrives with a clone, and those are how the official CLI would \
+be pointed at somewhere other than where it is signed in, signed in as \
+something else, or let run what nobody here approved, so they are not in force \
+until you have read the file. `niobe profiles` shows what it sets; `niobe trust` puts it in force \
 as it now stands, and editing it afterwards asks again.";
 
 /// The shell, saying so when this repository's config has not been trusted.
@@ -594,8 +595,9 @@ fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
 
 /// Records this repository's config as one the operator has read, so that the
 /// `env`, `args`, `settings`, `auth_refresh` and `billing` of the profiles it
-/// defines take effect, along with its `default_profile` and the profiles it
-/// defines under names the user's config already uses.
+/// defines take effect, along with its `default_profile`, its `[permissions]`
+/// rules and the profiles it defines under names the user's config already
+/// uses.
 fn trust() -> Result<(), String> {
     let (path, text) = repo_config()?;
     // What is trusted is what the operator could read and agree to: a file
@@ -610,8 +612,8 @@ fn trust() -> Result<(), String> {
     println!("trusted {}", path.display());
     println!(
         "the profiles it defines are in force here as it defines them, env, args, settings, \
-         auth_refresh and billing included, and so is its default_profile; `niobe profiles` \
-         lists them, and editing the file asks again"
+         auth_refresh and billing included, and so are its default_profile and its \
+         permissions; `niobe profiles` lists them, and editing the file asks again"
     );
     Ok(())
 }

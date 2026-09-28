@@ -1034,6 +1034,34 @@ fn a_repository_config_that_has_not_been_trusted_chooses_no_account_and_no_billi
 }
 
 #[test]
+fn a_repository_configs_permissions_answer_nothing_until_it_is_trusted() {
+    let setup = Configured::new(USER_CONFIG, "[permissions]\nallow = [\"Bash\"]\n");
+    let repo = repo_config(
+        &setup
+            .repo
+            .path()
+            .canonicalize()
+            .expect("the repository is there"),
+    )
+    .display()
+    .to_string();
+
+    let out = stdout(&setup.run(&["profiles"]));
+    assert!(out.contains("not trusted"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "permissions allow `Bash` in {repo} are not in force"
+        )),
+        "{out}"
+    );
+
+    assert!(setup.run(&["trust"]).status.success());
+    let out = stdout(&setup.run(&["profiles"]));
+    assert!(!out.contains("not in force"), "{out}");
+    assert!(!out.contains("not trusted"), "{out}");
+}
+
+#[test]
 fn a_repository_profile_named_like_the_users_does_not_take_its_settings_away() {
     let dir = tempfile::tempdir().expect("a temporary directory can be created");
     let settings = dir.path().join("max.json");

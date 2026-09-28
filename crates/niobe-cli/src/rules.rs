@@ -73,10 +73,17 @@ impl Rules for ConfigRules {
     /// because splicing the `allow` array is all it does. Leaving the file
     /// untrusted here would take a profile's environment away in the middle of
     /// a session, for a change the operator asked for and Niobe made.
+    ///
+    /// A file this write creates holds nothing but the operator's own answer,
+    /// so it is trusted too: untrusted, the rule would be withheld from the
+    /// next session. A file that was there and not trusted stays that way —
+    /// trusting it here would put in force whatever else a clone wrote in it —
+    /// so the rule holds for this session and waits on `niobe trust` after.
     fn remember(&mut self, rule: &Rule) -> Result<(), RulesError> {
         let was_trusted = self.trusted();
+        let created = !self.path.exists();
         niobe_config::remember(&self.path, rule).map_err(|error| error.to_string())?;
-        if was_trusted {
+        if was_trusted || created {
             self.retrust()?;
         }
         Ok(())
@@ -130,7 +137,10 @@ mod tests {
     #[test]
     fn a_rule_is_written_into_the_repositorys_own_config() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let mut rules = ConfigRules::at(dir.path());
+        let mut rules = ConfigRules {
+            path: crate::repo::config_path(dir.path()),
+            trust: Some(dir.path().join("trusted.list")),
+        };
 
         rules
             .remember(&Rule::targeted("Bash", "cargo test"))
@@ -142,6 +152,21 @@ mod tests {
         assert_eq!(
             config.allowed().rules(),
             [Rule::targeted("Bash", "cargo test")]
+        );
+    }
+
+    #[test]
+    fn a_config_niobe_creates_for_a_rule_is_trusted_so_the_rule_holds_next_session() {
+        let repo = Repo::with_config("");
+        std::fs::remove_file(crate::repo::config_path(repo.dir.path())).expect("removed");
+
+        repo.rules()
+            .remember(&Rule::targeted("Bash", "cargo test"))
+            .expect("the config is written");
+
+        assert!(
+            repo.is_trusted(),
+            "the operator's own answer would be withheld from the next session"
         );
     }
 
