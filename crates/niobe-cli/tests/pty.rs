@@ -766,6 +766,54 @@ fn a_config_naming_a_theme_that_does_not_exist_stops_the_session_at_its_line() {
     assert!(!repo.path().join(".niobe").exists(), "{drawn}");
 }
 
+/// Starts the shell in `repo` with `planted` a link at `.niobe/<name>`, and
+/// returns what it drew and how it ended.
+#[cfg(unix)]
+fn started_with_a_link(repo: &Path, name: &str, planted: &Path) -> (ExitStatus, String) {
+    std::fs::create_dir_all(repo.join(".niobe")).expect("the directory can be made");
+    std::os::unix::fs::symlink(planted, repo.join(".niobe").join(name))
+        .expect("the link is planted");
+    let (terminal, slave) = Terminal::open();
+
+    let mut shell = shell_command(&slave, repo)
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    (status, terminal.drained())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_store_linked_out_of_the_repository_stops_the_session_and_writes_nothing_there() {
+    for (name, exists) in [
+        ("sessions.db", false),
+        ("sessions.db", true),
+        (".gitignore", false),
+        ("sessions.db-wal", false),
+    ] {
+        let repo = repo();
+        let outside = tempfile::tempdir().expect("a temporary directory can be created");
+        let planted = outside.path().join("leak");
+        if exists {
+            std::fs::write(&planted, "").expect("the file outside is written");
+        }
+
+        let (status, drawn) = started_with_a_link(repo.path(), name, &planted);
+
+        assert_eq!(status.code(), Some(1), "{name}: {drawn}");
+        assert!(drawn.contains(name), "the failure names the link: {drawn}");
+        let written = std::fs::read(&planted).unwrap_or_default();
+        assert!(written.is_empty(), "{name}: niobe wrote through the link");
+        assert_eq!(
+            std::fs::read_dir(outside.path()).expect("lists").count(),
+            usize::from(exists),
+            "{name}: niobe created a file outside the repository"
+        );
+    }
+}
+
 #[test]
 fn a_clean_quit_hands_the_terminal_back() {
     let repo = repo();

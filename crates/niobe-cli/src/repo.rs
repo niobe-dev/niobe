@@ -76,6 +76,7 @@ pub fn open_or_create_store(root: &Path) -> Result<Store, String> {
         format!("cannot open the session store at {}: {e}", path.display())
     };
 
+    store_stays_inside(root)?;
     std::fs::create_dir_all(&dir).map_err(|e| failed(&e))?;
     let ignore = dir.join(".gitignore");
     if !ignore.exists() {
@@ -88,12 +89,67 @@ pub fn open_or_create_store(root: &Path) -> Result<Store, String> {
 /// creates one: listing or resuming sessions leaves a directory as it was.
 pub fn open_existing_store(root: &Path) -> Result<Option<Store>, String> {
     let path = store_path(root);
+    store_stays_inside(root)?;
     if !path.exists() {
         return Ok(None);
     }
     Store::open(&path)
         .map(Some)
         .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))
+}
+
+/// The files beside the store that SQLite creates and writes at the store's
+/// path plus a suffix: its write-ahead log, its shared-memory index and its
+/// rollback journal.
+const STORE_SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+/// Refuses a session store of the repository rooted at `root` that would be
+/// written through a link to somewhere else.
+///
+/// Niobe creates `.niobe`, its ignore file and the store itself, and writes
+/// every prompt and tool output of a session into the store. A cloned
+/// repository chooses its links, so one committed at any of those names would
+/// choose where that goes — a tracked file the next push publishes, or a file
+/// of the operator's own outside the checkout. A link is followed only where
+/// it leads to something that exists inside the repository; one that leads
+/// nowhere is refused too, because writing through it creates a file where
+/// the link says.
+pub fn store_stays_inside(root: &Path) -> Result<(), String> {
+    let dir = root.join(DIR);
+    let store = store_path(root);
+    let mut paths = vec![dir.clone(), dir.join(".gitignore"), store.clone()];
+    paths.extend(STORE_SIDE_FILES.iter().map(|suffix| {
+        let mut name = store.clone().into_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    }));
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    paths
+        .iter()
+        .try_for_each(|path| link_stays_inside(&real_root, path))
+}
+
+/// Whether `path`, if it is a link, leads to something that exists under
+/// `real_root`, which is already canonical.
+fn link_stays_inside(real_root: &Path, path: &Path) -> Result<(), String> {
+    let is_link = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !is_link {
+        return Ok(());
+    }
+    match std::fs::canonicalize(path) {
+        Ok(target) if target.starts_with(real_root) => Ok(()),
+        Ok(target) => Err(format!(
+            "{} links to {}, outside the repository; niobe keeps its session store only \
+             inside it",
+            path.display(),
+            target.display()
+        )),
+        Err(_) => Err(format!(
+            "{} is a link to nothing; niobe does not create its session store through a \
+             repository's links",
+            path.display()
+        )),
+    }
 }
 
 /// Refuses a file of the repository rooted at `root` that is a link to one
@@ -128,6 +184,7 @@ pub fn inside(root: &Path, path: &Path) -> Result<(), String> {
 /// [`Store::open_to_read`].
 pub fn read_existing_store(root: &Path) -> Result<Option<Store>, String> {
     let path = store_path(root);
+    store_stays_inside(root)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -1031,6 +1088,36 @@ mod tests {
         std::fs::create_dir_all(&checkout).expect("the checkout can be made");
         std::fs::write(checkout.join(".git"), pointer).expect("the pointer file is written");
         checkout
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_linked_to_a_file_inside_the_repository_is_opened_there() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        std::fs::create_dir_all(dir.path().join(".niobe")).expect("the directory is made");
+        std::fs::create_dir_all(dir.path().join("kept")).expect("the directory is made");
+        let real = dir.path().join("kept").join("sessions.db");
+        std::fs::write(&real, "").expect("the file is written");
+        std::os::unix::fs::symlink(&real, store_path(dir.path())).expect("the link is made");
+
+        open_or_create_store(dir.path()).expect("a link inside the repository is followed");
+
+        assert!(std::fs::metadata(&real).expect("stat").len() > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_niobe_directory_linked_out_of_the_repository_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let outside = tempfile::tempdir().expect("a temporary directory can be created");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(DIR)).expect("linked");
+
+        let said = open_or_create_store(dir.path()).expect_err("the store would be outside");
+
+        assert!(said.contains("outside the repository"), "{said}");
+        assert_eq!(std::fs::read_dir(outside.path()).expect("lists").count(), 0);
+        let said = read_existing_store(dir.path()).expect_err("so would the one read");
+        assert!(said.contains(".niobe"), "{said}");
     }
 
     #[test]

@@ -211,6 +211,11 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
         return Ok(());
     }
 
+    // Checked before anything starts, so a store the repository has linked
+    // elsewhere is refused on a screen that is still the operator's, rather
+    // than on the first event the session records.
+    repo::store_stays_inside(&root)?;
+
     // Spawned after the terminal check and before the shell takes the screen:
     // a piped run starts no subprocess, and a backend that will not start says
     // why on a screen that is still the operator's.
