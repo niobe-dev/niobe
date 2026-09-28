@@ -28,7 +28,12 @@ pub(crate) fn read(path: &Path, size: u64) -> Option<String> {
     if size > LIMIT {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = open(path).ok()?;
+    // A path the report names is only the CLI's word: a device or a FIFO
+    // there would be read for ever or waited on, and hold the session up.
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut bytes = Vec::new();
     // One byte past the size, so that a file that has grown is seen to have.
     file.take(size.saturating_add(1))
@@ -38,6 +43,25 @@ pub(crate) fn read(path: &Path, size: u64) -> Option<String> {
         return None;
     }
     String::from_utf8(bytes).ok()
+}
+
+/// Opens `path` for reading without waiting for a writer, which opening a
+/// FIFO otherwise does. On a regular file the flag changes nothing.
+#[cfg(unix)]
+fn open(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // The flag's bits fit an `i32`; were they not to, the regular-file check
+    // after the open would still refuse a FIFO, only after waiting on it.
+    let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblock)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 #[cfg(test)]
@@ -82,5 +106,31 @@ mod tests {
         assert_eq!(read(&dir.path().join("gone.txt"), 3), None);
         assert_eq!(read(dir.path(), 3), None, "a directory is no output");
         assert_eq!(read(&path, LIMIT + 1), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_as_the_saved_output_is_refused_at_once() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let fifo = dir.path().join("b1x24ppwb.txt");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "the FIFO is made");
+
+        let started = std::time::Instant::now();
+        assert_eq!(read(&fifo, 100), None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "waited {:?} on the FIFO",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_directory_named_as_the_saved_output_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        assert_eq!(read(dir.path(), 0), None);
     }
 }
