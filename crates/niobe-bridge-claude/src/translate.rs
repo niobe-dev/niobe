@@ -1138,9 +1138,12 @@ impl Translator {
     /// * **A `Write` over a file that already existed.** The call carries what
     ///   the file becomes and never what it was.
     ///
-    /// The report's patch is of the whole file, so it settles both. Where no
-    /// usable patch was reported the counts stay unstated rather than filled
-    /// in.
+    /// The report's patch is of the whole file, so it settles both; an update
+    /// reported with no hunks at all wrote what was already there. Where no
+    /// usable patch was reported — as for every sub-agent's call, whose
+    /// results carry no report on the live stream — the counts stay unstated
+    /// rather than filled in: the lines a `Write` wrote are not the lines it
+    /// changed.
     ///
     /// What the patch does not settle is a change of line endings. The CLI
     /// takes them off before it diffs — neither the patch's lines nor
@@ -1190,14 +1193,13 @@ impl Translator {
                     true => created_hunk(reported, path),
                     false => reported_hunks(reported, path),
                 };
-                match (created, diff::hunks_changed(&hunks)) {
-                    (false, Some((added, removed))) => (path, Some(added), Some(removed), hunks),
-                    (true, _) | (false, None) => (
-                        path,
-                        Some(written.lines().count() as u64),
-                        created.then_some(0),
-                        hunks,
-                    ),
+                let counts = match created {
+                    true => Some((written.lines().count() as u64, 0)),
+                    false => overwrite_changed(reported, path, &hunks),
+                };
+                match counts {
+                    Some((added, removed)) => (path, Some(added), Some(removed), hunks),
+                    None => (path, None, None, hunks),
                 }
             }
 
@@ -2116,6 +2118,23 @@ fn reported_hunks(reported: Option<&serde_json::Value>, path: &str) -> Vec<Hunk>
         .map(hunk_of)
         .collect::<Option<Vec<Hunk>>>()
         .unwrap_or_default()
+}
+
+/// What a `Write` over a file that was already there changed: the reported
+/// patch's counts, nothing where the CLI reported an update with no hunks —
+/// the file was written as it stood — and `None` where no usable patch says.
+fn overwrite_changed(
+    reported: Option<&serde_json::Value>,
+    path: &str,
+    hunks: &[Hunk],
+) -> Option<(u64, u64)> {
+    if !hunks.is_empty() {
+        return diff::hunks_changed(hunks);
+    }
+    file_report(reported, path)
+        .filter(|report| report.kind.as_deref() == Some("update"))
+        .filter(|report| report.structured_patch.is_empty())
+        .map(|_| (0, 0))
 }
 
 /// A created file as one hunk, from what the CLI reported it created.
@@ -4012,27 +4031,72 @@ mod tests {
         );
     }
 
-    /// A `Write` carries what the file becomes and never what it was, so the
-    /// lines it dropped are not in the stream. Measured: overwriting a
-    /// three-line file with one line shows as `1 3`, and the call says `1`.
+    /// A `Write` carries what the file becomes and never what it was, so with
+    /// no patch beside it neither count is known: overwriting a five-line
+    /// file with one line changed is `1 1` to `git diff --numstat`, and the
+    /// call wrote five.
     #[test]
-    fn a_written_file_that_was_already_there_states_no_removal() {
+    fn an_overwrite_with_no_patch_states_neither_count() {
         let mut translator = translator().in_dir("/repo");
         translator.line(&call(
             "t1",
             "Write",
-            r#"{"file_path":"/repo/doomed.txt","content":"gone"}"#,
+            r#"{"file_path":"/repo/f.txt","content":"a\nb\nC\nd\ne\n"}"#,
         ));
 
         let events = translator.line(&result(
             "t1",
-            "The file /repo/doomed.txt has been updated successfully.",
+            "The file /repo/f.txt has been updated successfully.",
             false,
         ));
 
         assert_eq!(
             changes(&events),
-            vec![("doomed.txt".to_owned(), Some(1), None)],
+            vec![("f.txt".to_owned(), None, None)],
+            "{events:?}"
+        );
+    }
+
+    /// A sub-agent's results carry no report on the live stream, so every
+    /// file one overwrites is a file whose counts nothing states.
+    #[test]
+    fn a_sub_agents_overwrite_states_neither_count() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_task","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"/repo/f.txt","content":"a\nb\nC\nd\ne\n"}}]}}"#,
+        );
+
+        let events = translator.line(
+            r#"{"type":"user","parent_tool_use_id":"toolu_task","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"The file /repo/f.txt has been updated successfully."}]}}"#,
+        );
+
+        assert_eq!(
+            changes(&events),
+            vec![("f.txt".to_owned(), None, None)],
+            "{events:?}"
+        );
+    }
+
+    /// Written as it stood: the CLI reports an update whose patch has no
+    /// hunks, and `git diff --numstat` shows no change.
+    #[test]
+    fn an_overwrite_reported_with_an_empty_patch_changed_nothing() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Write",
+            r#"{"file_path":"/repo/f.txt","content":"a\nb\nc\n"}"#,
+        ));
+
+        let events = translator.line(&result_with(
+            "t1",
+            "The file /repo/f.txt has been updated successfully.",
+            r#"{"type":"update","filePath":"/repo/f.txt","content":"a\nb\nc\n","structuredPatch":[],"originalFile":"a\nb\nc\n"}"#,
+        ));
+
+        assert_eq!(
+            changes(&events),
+            vec![("f.txt".to_owned(), Some(0), Some(0))],
             "{events:?}"
         );
     }

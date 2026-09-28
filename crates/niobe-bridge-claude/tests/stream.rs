@@ -663,14 +663,13 @@ mod edits {
         let state = folded();
 
         // `1  4  notes.md`: the overwrite says what the file becomes and never
-        // what it was, so the four lines it dropped are nowhere in the stream.
+        // what it was, so the four lines it dropped are nowhere in the stream,
+        // and the lines it wrote are not the lines it changed.
         let notes = &state.files()[2];
-        assert_eq!(notes.added, 1);
-        assert!(notes.added_stated());
-        assert_eq!(notes.removed, 0);
+        assert_eq!((notes.added, notes.removed), (0, 0));
         assert!(
-            !notes.removed_stated(),
-            "a removal the stream never carried was shown as the whole figure"
+            !notes.added_stated() && !notes.removed_stated(),
+            "a count the stream never carried was shown as the whole figure"
         );
 
         // `2  2  catalog/cache.ts`: the CLI replaced both occurrences and the

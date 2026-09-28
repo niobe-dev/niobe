@@ -202,7 +202,7 @@ of that file and the `Write` that then succeeds, and an `Edit` with
 | ------- | ---- | -------------------- |
 | `4  2`  | `catalog/fetch.ts`       | **`+4 −2`** — two `Edit` calls, each carrying the text it replaced and the text it wrote |
 | `3  0`  | `catalog/conditional.ts` | **`+3 −0`** — a `Write` the CLI answered with `File created successfully at:`, so there was nothing there to remove |
-| `1  4`  | `notes.md`               | **`+1`, removal unstated** — a `Write` carries what the file becomes and never what it was |
+| `1  4`  | `notes.md`               | **both unstated** — a `Write` carries what the file becomes and never what it was, and the lines it wrote are not the lines it changed |
 | `2  2`  | `catalog/cache.ts`       | **both unstated** — `replace_all` matched twice and the call describes one occurrence |
 
 The last two are the cases the calls' arguments cannot support. The CLI also
