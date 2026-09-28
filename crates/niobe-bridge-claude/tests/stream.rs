@@ -896,6 +896,75 @@ mod long_context {
     }
 }
 
+/// A session that asked for fast mode on an account with no usage credits
+/// left, which the CLI served at the standard speed while its `init` and its
+/// `result` both said fast mode was on. The numbers are the recording's own,
+/// as `tests/fixtures/README.md` sets out.
+mod fast_mode_refused {
+    use super::*;
+
+    const FAST_MODE_REFUSED: &str = include_str!("fixtures/fast-mode-refused.jsonl");
+
+    fn translated() -> Vec<Event> {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        FAST_MODE_REFUSED
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .collect()
+    }
+
+    /// The message's own `speed` is `standard`, and that, not the session's
+    /// `fast_mode_state`, is what it is billed by: valued as fast, the
+    /// running estimate would be twice the $0.1001588 the CLI reported.
+    #[test]
+    fn a_message_served_at_the_standard_speed_is_not_valued_as_fast() {
+        let events = translated();
+        let records = usage_records(&events);
+
+        assert_eq!(records.len(), 2, "the message and the bill: {records:?}");
+        assert!(records.iter().all(|usage| !usage.fast), "{records:?}");
+        let message = records[0];
+        assert_eq!(message.model, "claude-opus-5-5");
+        assert_eq!(
+            (
+                message.input,
+                message.output,
+                message.cache_read,
+                message.cache_write
+            ),
+            (2, 4, 10_234, 12_253)
+        );
+        assert_eq!(message.cache_write_1h, 12_253);
+    }
+
+    /// The only place the stream says fast mode was turned off is the CLI's
+    /// notification, which reaches the operator in its own words.
+    #[test]
+    fn the_cli_saying_fast_mode_was_turned_off_reaches_the_operator() {
+        let events = translated();
+
+        assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+        assert!(
+            notices(&events).contains(&"Fast mode disabled · usage credits exhausted"),
+            "{:?}",
+            notices(&events)
+        );
+    }
+
+    #[test]
+    fn the_reported_cost_settles_the_message() {
+        let totals = SessionState::replay(&translated()).totals().clone();
+
+        assert_eq!(totals.records_unsettled, 0, "{:?}", totals.unsettled);
+        assert!(
+            (totals.reported_cost_usd - 0.100_158_8).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+    }
+}
+
 fn translated_sub_agents() -> Vec<Event> {
     let mut translator = Translator::new("max").in_dir("/repo");
     SUB_AGENTS

@@ -91,6 +91,9 @@ pub(crate) struct System {
     pub(crate) usage: Option<TaskUsage>,
     /// On `commands_changed`: every slash command the CLI now runs.
     pub(crate) commands: Option<Vec<Command>>,
+    /// On `notification`: what the CLI tells its own operator, in its words —
+    /// `Fast mode disabled · usage credits exhausted`.
+    pub(crate) text: Option<String>,
 }
 
 /// One slash command, as the CLI lists it in its answer to `initialize` and in
@@ -298,10 +301,19 @@ pub(crate) enum StreamBody {
     Other,
 }
 
-/// The head of a message: the only place the model it runs on is named.
+/// The head of a message: the only place the model it runs on is named, and
+/// on the live stream the only place its speed is.
 #[derive(Debug, Deserialize)]
 pub(crate) struct StartMessage {
     pub(crate) model: Option<String>,
+    pub(crate) usage: Option<Usage>,
+}
+
+impl StartMessage {
+    /// Whether the message is served in fast mode.
+    pub(crate) fn fast(&self) -> bool {
+        self.usage.as_ref().is_some_and(Usage::fast)
+    }
 }
 
 /// A fragment of one content block.
@@ -342,7 +354,9 @@ pub(crate) struct Usage {
     pub(crate) iterations: Vec<Iteration>,
     /// `"fast"` for a request the API served in fast mode, which it bills at
     /// a multiple of the standard rates, and `"standard"` otherwise — every
-    /// recorded message says `"standard"`. The API documents both values.
+    /// recorded message says `"standard"`, including one sent while the
+    /// session's `fast_mode_state` read `on`. The API documents both values.
+    /// On the live stream it is on `message_start`, never on `message_delta`.
     pub(crate) speed: Option<String>,
 }
 

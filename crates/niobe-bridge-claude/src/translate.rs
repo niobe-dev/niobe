@@ -181,6 +181,15 @@ impl From<&wire::ModelUsage> for Counts {
     }
 }
 
+/// A message whose `message_start` has arrived and whose usage has not.
+#[derive(Debug)]
+struct InFlight {
+    /// The id its tokens are filed under.
+    model: String,
+    /// Whether it is served in fast mode.
+    fast: bool,
+}
+
 /// What a `tool_use` id was called, called with, and acts on.
 ///
 /// Kept whole so that the `tool_result` can repeat it without the consumer
@@ -246,9 +255,10 @@ pub struct Translator {
     unavailable: Vec<String>,
     /// The model of the message in flight, per stream: the main session is
     /// `None` and each sub-agent is the id of the call that spawned it. `message_delta`
-    /// carries the turn's authoritative usage and no model, so the model is
-    /// remembered from the `message_start` that opened the same stream.
-    in_flight: BTreeMap<Option<String>, String>,
+    /// carries the turn's authoritative usage and neither the model nor the
+    /// speed, so both are remembered from the `message_start` that opened the
+    /// same stream.
+    in_flight: BTreeMap<Option<String>, InFlight>,
     /// What each outstanding `tool_use` id was called and called with, so that
     /// the `tool_result` can repeat both without the consumer holding state.
     tool_calls: BTreeMap<String, Call>,
@@ -609,6 +619,16 @@ impl Translator {
             Some("commands_changed") => {
                 if let Some(commands) = system.commands {
                     out.push(self.listed(commands));
+                }
+            }
+            // Something the CLI would have shown its own operator. Claude Code
+            // 2.1.282 sends one when it turns fast mode off because the
+            // account cannot pay for it, while every `init` and `result`
+            // still says fast mode is on: this is where the operator learns
+            // the session runs at the standard speed.
+            Some("notification") => {
+                if let Some(message) = system.text {
+                    out.push(Event::Notice { message });
                 }
             }
             other => out.push(unread(format!(
@@ -1194,6 +1214,7 @@ impl Translator {
         let stream = event.parent_tool_use_id;
         match event.event {
             wire::StreamBody::MessageStart { message } => {
+                let fast = message.fast();
                 let Some(model) = message.model else { return };
                 let windowed = self
                     .model
@@ -1217,14 +1238,21 @@ impl Translator {
                         model
                     }
                 };
-                self.in_flight.insert(stream, billed);
+                self.in_flight.insert(
+                    stream,
+                    InFlight {
+                        model: billed,
+                        fast,
+                    },
+                );
             }
 
             wire::StreamBody::MessageDelta { usage } => {
                 let Some(usage) = usage else { return };
-                let model = self
-                    .in_flight
-                    .remove(&stream)
+                let started = self.in_flight.remove(&stream);
+                let fast = usage.fast() || started.as_ref().is_some_and(|message| message.fast);
+                let model = started
+                    .map(|message| message.model)
                     .or_else(|| self.model.clone());
                 let counts = Counts::from(&usage);
                 self.turn.add(counts);
@@ -1246,11 +1274,7 @@ impl Translator {
                     cost_usd: None,
                     cost_basis: None,
                     settles_model: false,
-                    // The CLI's transcripts write each message's speed; its
-                    // live `message_delta` has carried none in any recording,
-                    // so a live fast message is valued at the standard rates
-                    // until the turn's cost settles it.
-                    fast: usage.fast(),
+                    fast,
                 };
                 match model {
                     Some(model) => self.file(model, record, out),
@@ -2550,6 +2574,51 @@ mod tests {
         };
         assert_eq!(usage.model, "opus-5[1m]");
         assert_eq!((usage.input, usage.output), (5, 7));
+    }
+
+    fn live_record(start_usage: &str) -> Usage {
+        let mut translator = Translator::new("max");
+        translator
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+        translator.line(&format!(
+            r#"{{"type":"stream_event","event":{{"type":"message_start","message":{{"model":"opus-5","usage":{start_usage}}}}}}}"#
+        ));
+        let events = translator.line(&delta(5, 7));
+        let [Event::Usage(usage), Event::Context(_)] = events.as_slice() else {
+            panic!("a usage record and the context: {events:?}");
+        };
+        usage.clone()
+    }
+
+    /// The live stream names a message's speed in its `message_start` and
+    /// not in the `message_delta` its record is built from, so a message
+    /// served in fast mode is valued at the fast price while its turn runs.
+    #[test]
+    fn a_live_message_started_in_fast_mode_is_counted_as_fast() {
+        assert!(live_record(r#"{"input_tokens":2,"output_tokens":1,"speed":"fast"}"#).fast);
+    }
+
+    /// Claude Code 2.1.282 reports `fast_mode_state: "on"` for a session whose
+    /// fast mode the account could not pay for, and serves it at the standard
+    /// speed: only the message's own speed says how it is billed.
+    #[test]
+    fn a_live_message_served_at_the_standard_speed_is_not_fast() {
+        assert!(!live_record(r#"{"input_tokens":2,"output_tokens":1,"speed":"standard"}"#).fast);
+    }
+
+    /// The CLI's word that it did not do what the session asked for, as
+    /// Claude Code 2.1.282 sent it when the account could not pay for fast
+    /// mode, reaches the operator in its own words.
+    #[test]
+    fn a_notification_from_the_cli_is_passed_on_in_its_words() {
+        let events = Translator::new("max").line(
+            r#"{"type":"system","subtype":"notification","key":"fast-mode-overage-rejected","text":"Fast mode disabled · usage credits exhausted","priority":"immediate","color":"error"}"#,
+        );
+
+        let [Event::Notice { message }] = events.as_slice() else {
+            panic!("one notice: {events:?}");
+        };
+        assert_eq!(message, "Fast mode disabled · usage credits exhausted");
     }
 
     /// A sub-agent's message is the agent's, on whatever the agent runs on;

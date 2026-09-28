@@ -545,6 +545,54 @@ Each turn is one request, so its prompt — the context it filled — is its
 `contextWindow` of the `modelUsage` entry keyed `claude-opus-5[1m]`,
 **1,000,000**, which the first `result` is the first to report.
 
+## `fast-mode-refused.jsonl`
+
+One turn on `claude-opus-5-5`, recorded from Claude Code 2.1.282 on 28
+September 2026 under
+
+```sh
+claude -p --setting-sources project --model claude-opus-5-5 \
+  --settings '{"fastMode": true}' --output-format stream-json --verbose \
+  --include-partial-messages "Reply with the single word: hi"
+```
+
+on an account whose usage credits — which fast mode is billed to, even on a
+subscription — had run out. The lines are the CLI's own. The only
+edits: `system`/`init` cut down to the keys that say what ran, with its `cwd`
+rewritten to `/repo`; and `system`/`status`, `content_block_start`,
+`content_block_stop` and `message_stop` left out, because the bridge reads
+none of them.
+
+It exists because the session says it is in fast mode and was not served in
+it:
+
+| Where | Says |
+| ----- | ---- |
+| `system`/`init` `fast_mode_state` | `on` |
+| `system`/`notification` `text` | `Fast mode disabled · usage credits exhausted` |
+| `stream_event`/`message_start` `message.usage.speed` | `standard` |
+| `stream_event`/`message_delta` `usage` | no `speed` |
+| `rate_limit_event` `overageStatus`, `overageDisabledReason` | `rejected`, `out_of_credits` |
+| `result` `fast_mode_state` | `on` |
+| `result` `usage.speed` | `standard` |
+
+So a message's price is read off its own `speed`, which the live stream
+carries on `message_start` and not on the `message_delta` the record is built
+from; `fast_mode_state` says what was asked for, not what was billed. The
+notification is the only line that says fast mode was turned off, and it is
+passed on to the operator as it is.
+
+### The arithmetic the tests assert
+
+| in | out | cache read | cache write (1h) | `total_cost_usd` |
+| -- | --- | ---------- | ---------------- | ---------------- |
+| 2  | 4   | 10,234     | 12,253           | $0.1001588 |
+
+At Opus 5.5's standard rates — $4 in, $20 out, $0.20 cache read and $8 for a
+one-hour cache write, per million tokens — that is 0.000008 + 0.00008 +
+0.0020468 + 0.098024 = **$0.1001588**, the CLI's figure to the last digit. At
+the fast price it would be twice that.
+
 ## `sub-agents.jsonl`
 
 The last two turns of a real session and the two turns the CLI started on its

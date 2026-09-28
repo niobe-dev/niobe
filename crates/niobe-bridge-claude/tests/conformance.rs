@@ -61,6 +61,8 @@ const SHAPES: &[&str] = &[
     "stream_event/message_stop",
     "system/compact_boundary",
     "system/init",
+    // What the CLI would show its own operator, passed on in its words.
+    "system/notification",
     "system/permission_denied",
     "system/status",
     // Read where it names a sub-agent's call: the first is how a sub-agent

@@ -770,7 +770,10 @@ impl Fold {
         if let Some(model) = message.model.filter(|model| model != NO_MODEL) {
             self.fold(wire::Message::StreamEvent(wire::StreamEvent {
                 event: wire::StreamBody::MessageStart {
-                    message: wire::StartMessage { model: Some(model) },
+                    message: wire::StartMessage {
+                        model: Some(model),
+                        usage: None,
+                    },
                 },
                 parent_tool_use_id: parent.clone(),
             }));
