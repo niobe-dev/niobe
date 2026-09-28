@@ -4800,6 +4800,70 @@ mod tests {
         line_text(lines.last().expect("a budget draws its row"))
     }
 
+    /// A line ratatui measures wider than the width it was laid out for is
+    /// clipped at the pane's edge, and what it held past it is lost with no
+    /// mark. A drawn buffer cannot show that — every write is clipped to it —
+    /// so the lines themselves are measured, the way ratatui measures them.
+    #[test]
+    fn every_line_laid_out_fits_the_width_ratatui_draws_it_in() {
+        use niobe_core::event::Event;
+
+        let heart = "\u{2764}\u{fe0f}";
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+        for event in [
+            Event::UserMessage {
+                text: format!("{} end {}", heart.repeat(30), family.repeat(12)),
+            },
+            Event::AssistantMessage {
+                text: format!(
+                    "{} 漢字かな混じり文 {}\n\n```\n\tindented\t{}\n```\n- {}",
+                    heart.repeat(25),
+                    "終わり".repeat(9),
+                    heart.repeat(8),
+                    family.repeat(20)
+                ),
+                agent: None,
+            },
+            Event::ToolCallStart {
+                id: "t1".into(),
+                name: "Bash".to_owned(),
+                input: format!(r#"{{"command":"echo {}"}}"#, heart.repeat(40)),
+                summary: Some(format!("echo {}", heart.repeat(40))),
+                agent: None,
+            },
+            priced(None),
+        ] {
+            app.apply(&event);
+        }
+
+        // From narrower than the session pane is at the shell's least size,
+        // and than the Usage pane is inside its border, up.
+        let transcript = (40..=120).step_by(7).map(|width| {
+            let lines: Vec<Line<'static>> = app
+                .entries()
+                .iter()
+                .flat_map(|entry| {
+                    entry_lines(entry, width, Detail::default(), &crate::theme::CLASSIC)
+                })
+                .collect();
+            (width, lines)
+        });
+        let usage = (30..=60)
+            .step_by(3)
+            .map(|width| (width, usage_lines(&app, width, &crate::theme::CLASSIC)));
+        for (width, lines) in transcript.chain(usage) {
+            for line in &lines {
+                assert!(
+                    line.width() <= width,
+                    "a line ratatui draws {} wide was laid out for {width}: {:?}",
+                    line.width(),
+                    line_text(line)
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_budget_against_a_cost_nobody_reported_draws_a_dash_not_a_zero() {
         assert_eq!(

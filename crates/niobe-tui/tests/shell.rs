@@ -1513,8 +1513,13 @@ fn a_window_under_the_minimum_says_so_instead_of_drawing_a_broken_shell() {
     assert!(!small.contains("Session ─"), "{small}");
 }
 
+/// Every row of every size is drawn, and nothing panics. The buffer clips
+/// every write to its own width, so text running past a pane cannot show
+/// here: that ratatui draws every laid-out line inside its pane is what
+/// `ui`'s own `every_line_laid_out_fits_the_width_ratatui_draws_it_in`
+/// checks, on the lines themselves.
 #[test]
-fn every_size_between_the_two_renders_without_a_panic_or_an_overrun() {
+fn every_size_between_the_two_renders_without_a_panic() {
     let mut app = running_session();
 
     for width in (80..=200).step_by(3) {
@@ -1553,16 +1558,72 @@ fn scrolling_back_moves_the_transcript_and_says_that_it_did() {
     assert_eq!(screen(&mut app, 80, 24), tail, "paging back did not return");
 }
 
+/// The rows inside the Usage pane's border, read off a drawn frame: the
+/// figures a test about the bill is about, and none of the transcript's text,
+/// which can hold a dash or a zero of its own.
+fn usage_pane(frame: &str) -> Vec<String> {
+    let lines: Vec<Vec<char>> = frame.lines().map(|line| line.chars().collect()).collect();
+    let (top, left) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| {
+            let text: String = line.iter().collect();
+            let title = text.find(" Usage ")?;
+            let before = text[..title].chars().count();
+            let corner = line[..before]
+                .iter()
+                .rposition(|c| *c == '┌' || *c == FOCUS_TOP_LEFT)?;
+            Some((row, corner))
+        })
+        .expect("the frame has a Usage pane");
+    lines[top + 1..]
+        .iter()
+        .take_while(|line| {
+            line.get(left)
+                .is_some_and(|c| *c != '└' && *c != FOCUS_BOTTOM_LEFT)
+        })
+        .map(|line| line[left + 1..].iter().collect())
+        .collect()
+}
+
 #[test]
 fn nothing_the_backends_did_not_report_appears_as_a_number() {
     // Two usage records, one of them without a cost: the pane must show the sum
     // as a floor rather than as the session's bill.
-    let wide = screen(&mut running_session(), 120, 30);
-    assert!(wide.contains("≥$0.04"), "{wide}");
+    let floor = usage_pane(&screen(&mut running_session(), 120, 30)).join("\n");
+    assert!(floor.contains("≥$0.04"), "{floor}");
 
-    // An empty session has no cost at all, and says so.
-    let empty = screen(&mut empty_session(), 120, 30);
-    assert!(empty.contains("No backend attached"), "{empty}");
+    // A metered session with a budget, whose only record carries no cost:
+    // nothing in the pane may read as money that was measured.
+    let mut unreported = empty_session().with_budget(5.0);
+    unreported.apply(&Event::Billing {
+        billing: niobe_core::Billing::Metered,
+    });
+    unreported.apply(&Event::Usage(niobe_core::Usage {
+        input: 1_000,
+        output: 100,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: 0,
+        reasoning: 0,
+        model: "opus-5".to_owned(),
+        cost_usd: None,
+        cost_basis: None,
+        settles_model: false,
+        fast: false,
+    }));
+    // Its tokens were measured, so a cache hit of none is a figure; money
+    // nobody reported is not.
+    let pane = usage_pane(&screen(&mut unreported, 120, 30)).join("\n");
+    assert!(
+        !pane.contains("$0.00"),
+        "a zero bill in the Usage pane:\n{pane}"
+    );
+    assert!(pane.contains("session unpriced"), "{pane}");
+    assert!(pane.contains("budget —/$5.00"), "{pane}");
+
+    // An empty session has no cost at all, and the pane says so itself.
+    let empty = usage_pane(&screen(&mut empty_session(), 120, 30)).join("\n");
     assert!(empty.contains('—'), "{empty}");
 }
 
