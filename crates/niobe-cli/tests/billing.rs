@@ -126,7 +126,7 @@ fn assert_snapshot(name: &str, pane: &str) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/snapshots")
         .join(format!("{name}.txt"));
-    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+    if niobe_tui::snapshots::updating().unwrap_or_else(|refused| panic!("{refused}")) {
         std::fs::create_dir_all(path.parent().expect("the path has a directory"))
             .expect("the snapshot directory can be made");
         std::fs::write(&path, pane).expect("the snapshot can be written");

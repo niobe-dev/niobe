@@ -108,7 +108,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   that is a pure function of the theme, the screen's size and how long the turn has run, so a
   frame of it can be asserted rather than merely observed to move. The panes cover it: it is
   worked out only for the cells they leave uncovered, and a test proves no pane cell changes. Snapshot pictures of the screen live in
-  `tests/snapshots/`.
+  `tests/snapshots/`, and `snapshots.rs` is the one switch that has a test rewrite them —
+  `UPDATE_SNAPSHOTS=1` exactly, and never on a CI runner.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,

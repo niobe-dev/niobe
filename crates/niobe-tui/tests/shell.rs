@@ -103,7 +103,7 @@ fn assert_snapshot(name: &str, screen: &str) {
     let path = snapshot_path(name);
     let screen = format!("{screen}\n");
 
-    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+    if niobe_tui::snapshots::updating().unwrap_or_else(|refused| panic!("{refused}")) {
         std::fs::write(&path, &screen).expect("the snapshot directory is committed");
         return;
     }

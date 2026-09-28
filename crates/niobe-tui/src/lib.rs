@@ -41,6 +41,7 @@ pub mod rules;
 pub mod run;
 pub mod shell;
 mod slash;
+pub mod snapshots;
 pub mod terminal;
 mod text;
 pub mod theme;
