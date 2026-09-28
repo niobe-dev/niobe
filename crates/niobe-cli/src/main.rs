@@ -529,15 +529,23 @@ fn list_sessions() -> Result<(), String> {
         Some(store) => store.sessions().map_err(|e| e.to_string())?,
         None => Vec::new(),
     };
-    let imported = backend::recorded(
+    // The CLI's sessions are listed where they can be read; where they
+    // cannot, that is said under niobe's own rather than hiding them.
+    let (imported, unread) = match backend::recorded(
         selected.as_ref(),
         &root,
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
-    )?;
+    ) {
+        Ok(imported) => (imported, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
 
     if recorded.is_empty() && imported.is_empty() {
         say!("no sessions recorded in {}", root.display());
+        if let Some(error) = unread {
+            say!("{error}");
+        }
         return Ok(());
     }
     let mut lines = match recorded.is_empty() {
@@ -547,6 +555,10 @@ fn list_sessions() -> Result<(), String> {
     if !imported.is_empty() {
         lines.push(String::new());
         lines.extend(sessions::recorded(&imported));
+    }
+    if let Some(error) = unread {
+        lines.push(String::new());
+        lines.push(error);
     }
     for line in lines {
         say!("{line}");

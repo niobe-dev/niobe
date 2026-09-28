@@ -1290,3 +1290,35 @@ fn there_is_nothing_to_trust_where_a_repository_has_no_config() {
     assert!(err.contains("no config to trust"), "{err}");
     assert!(err.contains(".niobe"), "{err}");
 }
+
+/// The `claude` CLI's sessions are listed beside niobe's where they can be
+/// read. Where they cannot, niobe's own are still listed, and the reason the
+/// others are not is said under them.
+#[test]
+fn a_claude_session_directory_that_cannot_be_read_does_not_hide_niobes_sessions() {
+    let repo = repo_with_the_fixture_recorded();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let projects = claude.path().join("projects");
+    let project = std::fs::read_dir(&projects)
+        .expect("the projects directory lists")
+        .next()
+        .expect("one project")
+        .expect("an entry")
+        .path();
+    std::fs::remove_dir_all(&project).expect("the project directory is removed");
+    std::fs::write(&project, "not a directory").expect("a file stands in its place");
+    let home = tempfile::tempdir().expect("a temporary directory can be created");
+
+    let output = niobe_with(repo.path(), home.path(), claude.path(), &["sessions"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        out.contains("Read catalog/fetch.py"),
+        "niobe's session is listed: {out}"
+    );
+    assert!(
+        out.contains(&project.display().to_string()),
+        "the note names what could not be read: {out}"
+    );
+}
