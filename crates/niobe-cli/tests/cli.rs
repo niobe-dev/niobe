@@ -740,6 +740,24 @@ fn a_config_that_is_not_toml_names_the_line() {
     );
 }
 
+/// A profile's `auth_refresh` is read and listed and not run; the help says
+/// so rather than let an operator think a login will happen on its own.
+#[test]
+fn the_help_says_auth_refresh_is_not_run_yet() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    assert!(
+        out.contains("auth_refresh names the command that renews"),
+        "{out}"
+    );
+    assert!(out.contains("and not run\n    yet"), "{out}");
+    assert!(
+        out.contains("Run it yourself when a session will not sign in."),
+        "{out}"
+    );
+}
+
 #[test]
 fn the_help_says_how_the_mode_the_model_the_budget_and_the_theme_are_changed() {
     let setup = Configured::new("", "");

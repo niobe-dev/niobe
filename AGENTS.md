@@ -56,7 +56,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the backend has not reported one. `tests/prices.rs` checks the table against costs computed by
   hand, and `tests/contexts.rs` its windows against the published sizes.
 - **`crates/niobe-config/`** — the config: profiles, each a backend plus the environment,
-  arguments and credential refresh it runs with and, where the backend cannot tell, how the
+  arguments and credential refresh it runs with (the refresh command is read and listed, and not
+  run yet: nothing tells an expired login from another failure) and, where the backend cannot tell, how the
   account behind it is billed, and the `[permissions]` rules a session answers
   prompts with before asking. `parse.rs` walks the spanned TOML document by hand so that an
   invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`

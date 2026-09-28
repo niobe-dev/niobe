@@ -856,12 +856,19 @@ PROFILES:
     is started. niobe profiles shows which profiles name one — and, where this
     machine's own claude settings set CLAUDE_CODE_USE_BEDROCK, which do not.
 
+    auth_refresh names the command that renews a backend's credentials, such
+    as a single sign-on login. It is read, trust-gated and listed, and not run
+    yet: niobe cannot yet tell a backend whose credentials have expired from
+    one that failed another way, which is when it would run the command, and
+    running a login before every session would ask you to sign in each time.
+    Run it yourself when a session will not sign in.
+
 TRUST:
     A repository's config arrives with the clone, and env, args, settings and
     auth_refresh are what a backend is started with — enough to point the
     official CLI at a host the repository chose, to sign it in as something
-    else, or to run a command of its own. So those four do nothing until you
-    have read the file and said so:
+    else, or to name a command of its own to sign in with. So those four do
+    nothing until you have read the file and said so:
 
         niobe trust        this repository's config, as it now stands
         niobe untrust      take it back

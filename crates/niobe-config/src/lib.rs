@@ -228,6 +228,11 @@ impl Profile {
     /// A shell command that renews the backend's credentials when they have
     /// expired, such as a single sign-on login. Never empty when present.
     ///
+    /// Read, gated on trust and listed, and not run yet: nothing tells a
+    /// backend whose credentials expired from one that failed another way,
+    /// which is when it would run, and running a login before every session
+    /// would ask the operator to sign in each time.
+    ///
     /// `None` for a profile from a file that has not been trusted.
     pub fn auth_refresh(&self) -> Option<&str> {
         self.auth_refresh.as_deref()
