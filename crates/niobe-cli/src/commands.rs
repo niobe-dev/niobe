@@ -59,6 +59,9 @@ pub struct Commands {
     /// Told of every group, so that a session killed outright does not leave
     /// them running.
     reaper: Option<Reaper>,
+    /// How long what is still running when the session ends is given to end
+    /// on SIGTERM before it is killed: [`QUIT_GRACE`], but for a test.
+    grace: Duration,
 }
 
 /// The process group one command's `sh` leads.
@@ -81,6 +84,7 @@ impl Commands {
             ends,
             groups: Arc::new(Mutex::new(Vec::new())),
             reaper: None,
+            grace: QUIT_GRACE,
         }
     }
 
@@ -174,7 +178,7 @@ impl Drop for Commands {
                 stop(group.leader);
             }
         }
-        let until = Instant::now() + QUIT_GRACE;
+        let until = Instant::now() + self.grace;
         while Instant::now() < until && !none_running(&self.groups) {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -389,13 +393,32 @@ fn kill(_pid: u32) {}
 mod tests {
     use super::*;
 
+    /// How long a test waits for a command, a child of one, or its end before
+    /// calling it hung.
+    ///
+    /// A command that hangs never comes, so a long wait costs a passing test
+    /// nothing. With three copies of this binary running at once, starting
+    /// `sh` took 0.87 s at the median and the slowest wait measured was 7.25 s,
+    /// on a 12-core Mac; ten seconds had been failing under more load than
+    /// that.
+    const PATIENCE: Duration = Duration::from_secs(60);
+
+    impl Commands {
+        /// The same commands, given `grace` rather than [`QUIT_GRACE`] to end
+        /// when the session does.
+        fn with_grace(mut self, grace: Duration) -> Self {
+            self.grace = grace;
+            self
+        }
+    }
+
     /// Runs `command` in `cwd` and waits for it to end.
     fn ran(cwd: &Path, command: &str) -> Ran {
         let mut commands = Commands::at(cwd);
         commands
             .run(&ToolCallId::new("t"), command)
             .expect("sh starts");
-        ended(&mut commands, Duration::from_secs(10)).expect("the command ends")
+        ended(&mut commands, PATIENCE).expect("the command ends")
     }
 
     fn ended(commands: &mut Commands, patience: Duration) -> Option<Ran> {
@@ -459,7 +482,7 @@ mod tests {
         commands
             .run(
                 &ToolCallId::new("t"),
-                &format!("sleep 30 & echo $! > {}; wait", marker.display()),
+                &format!("sleep 300 & echo $! > {}; wait", marker.display()),
             )
             .expect("sh starts");
         let child = pid_in(&marker);
@@ -480,7 +503,7 @@ mod tests {
             .run(
                 &ToolCallId::new("t"),
                 &format!(
-                    "trap '' TERM; sleep 30 & echo $! > {}; wait",
+                    "trap '' TERM; sleep 300 & echo $! > {}; wait",
                     marker.display()
                 ),
             )
@@ -490,11 +513,10 @@ mod tests {
 
         drop(commands);
 
+        // The grace and then the kill, not the five minutes the command would
+        // run for.
         let held = quit.elapsed();
-        assert!(
-            held < QUIT_GRACE + Duration::from_millis(500),
-            "the quit was held up for {held:?}"
-        );
+        assert!(held < PATIENCE, "the quit was held up for {held:?}");
         gone(child, "a command that ignores SIGTERM outlived the session");
     }
 
@@ -502,11 +524,14 @@ mod tests {
     fn a_command_that_ends_when_asked_does_not_hold_up_the_quit_for_the_grace() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let marker = dir.path().join("running");
-        let mut commands = Commands::at(dir.path());
+        // A grace no loaded machine takes that long over: only a quit that
+        // waits it out can reach half of it.
+        let grace = 2 * PATIENCE;
+        let mut commands = Commands::at(dir.path()).with_grace(grace);
         commands
             .run(
                 &ToolCallId::new("t"),
-                &format!("echo $$ > {}; exec sleep 30", marker.display()),
+                &format!("echo $$ > {}; exec sleep 300", marker.display()),
             )
             .expect("sh starts");
         pid_in(&marker);
@@ -516,7 +541,7 @@ mod tests {
 
         let held = quit.elapsed();
         assert!(
-            held < QUIT_GRACE / 2,
+            held < grace / 2,
             "a command that ended on SIGTERM held up the quit for {held:?}"
         );
     }
@@ -529,12 +554,13 @@ mod tests {
         commands
             .run(
                 &ToolCallId::new("t"),
-                &format!("echo before; (sleep 30 & echo $! > {})", marker.display()),
+                &format!("echo before; (sleep 300 & echo $! > {})", marker.display()),
             )
             .expect("sh starts");
         let child = pid_in(&marker);
 
-        let ran = ended(&mut commands, Duration::from_secs(2))
+        // Well short of the five minutes the child holds the output for.
+        let ran = ended(&mut commands, PATIENCE)
             .expect("the command was still running after its shell ended");
 
         assert_eq!(ran.output, "before\n");
@@ -552,7 +578,7 @@ mod tests {
         let ran = ran_in(
             &mut commands,
             &format!(
-                "(sleep 30 >/dev/null 2>&1 & echo $! > {})",
+                "(sleep 300 >/dev/null 2>&1 & echo $! > {})",
                 marker.display()
             ),
         );
@@ -583,7 +609,7 @@ mod tests {
 
     /// Waits for `marker` to hold the pid a command wrote into it.
     fn pid_in(marker: &Path) -> i32 {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + PATIENCE;
         loop {
             let pid = std::fs::read_to_string(marker).unwrap_or_default();
             if let Ok(pid) = pid.trim().parse::<i32>() {
@@ -600,7 +626,7 @@ mod tests {
     /// Waits for the process `pid` to be gone.
     fn gone(pid: i32, what: &str) {
         let pid = rustix::process::Pid::from_raw(pid).expect("a pid is positive");
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + PATIENCE;
         while rustix::process::test_kill_process(pid).is_ok() {
             assert!(Instant::now() < until, "{what}");
             std::thread::sleep(Duration::from_millis(10));
@@ -617,7 +643,7 @@ mod tests {
             .run(
                 &id,
                 &format!(
-                    "echo before; sleep 30 & echo $! > {}; wait",
+                    "echo before; sleep 300 & echo $! > {}; wait",
                     marker.display()
                 ),
             )
@@ -626,7 +652,7 @@ mod tests {
 
         commands.stop(&id);
 
-        let ran = ended(&mut commands, Duration::from_secs(10)).expect("the command ends");
+        let ran = ended(&mut commands, PATIENCE).expect("the command ends");
         assert_eq!(ran.id, id);
         // `sh` may add a line of its own saying what the signal ended.
         assert!(
@@ -651,7 +677,7 @@ mod tests {
         commands
             .run(
                 &id,
-                &format!("trap '' TERM; echo $$ > {}; sleep 30", marker.display()),
+                &format!("trap '' TERM; echo $$ > {}; sleep 300", marker.display()),
             )
             .expect("sh starts");
         pid_in(&marker);
@@ -659,7 +685,7 @@ mod tests {
 
         commands.stop(&id);
 
-        let ran = ended(&mut commands, Duration::from_secs(10)).expect("the command ends");
+        let ran = ended(&mut commands, PATIENCE).expect("the command ends");
         assert!(
             asked.elapsed() >= GRACE,
             "it was killed before it was asked"
@@ -684,7 +710,7 @@ mod tests {
         commands
             .run(
                 &ToolCallId::new("other"),
-                &format!("sleep 30 & echo $! > {}; wait", marker.display()),
+                &format!("sleep 300 & echo $! > {}; wait", marker.display()),
             )
             .expect("sh starts");
         let child = pid_in(&marker);
@@ -704,7 +730,7 @@ mod tests {
     fn ran_in(commands: &mut Commands, command: &str) -> Ran {
         let id = ToolCallId::new(command);
         commands.run(&id, command).expect("sh starts");
-        ended(commands, Duration::from_secs(10)).expect("the command ends")
+        ended(commands, PATIENCE).expect("the command ends")
     }
 
     #[test]

@@ -873,7 +873,10 @@ mod tests {
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
 
         let mut watching = watch(&work);
-        let read = within(&mut watching, Duration::from_secs(10)).expect("a read comes back");
+        // Reading the repository starts `git` more than once; with three
+        // copies of this binary running at once the slowest read measured came
+        // back in 7.25 s, and one that never comes waits the same either way.
+        let read = within(&mut watching, Duration::from_secs(60)).expect("a read comes back");
 
         assert_eq!(read.name, "work");
         assert_eq!(read.branch.as_deref(), Some("main"));
