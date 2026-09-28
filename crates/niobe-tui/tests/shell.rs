@@ -4084,3 +4084,30 @@ fn a_reply_of_emoji_is_wrapped_as_wide_as_it_is_drawn() {
         "the end of the reply was cut off:\n{frame}"
     );
 }
+
+/// Git counts no lines in a binary file, so a working tree whose only change
+/// is one has no figure to add up: its header says so rather than `+0 −0`.
+#[test]
+fn a_working_tree_of_nothing_but_a_binary_file_has_no_line_counts() {
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        working: vec![niobe_tui::app::WorkingFile {
+            path: "docs/diagram.png".to_owned(),
+            added: None,
+            removed: None,
+        }],
+        ..Repo::default()
+    });
+
+    let frame = screen(&mut app, 120, 30);
+    let header = frame
+        .lines()
+        .find(|line| line.contains("Working tree"))
+        .expect("the working tree is drawn");
+
+    // The same dash a file's own row draws where git gave it no count.
+    assert!(header.contains("1 file  — —"), "{header}");
+    assert!(!header.contains("+0"), "{header}");
+}

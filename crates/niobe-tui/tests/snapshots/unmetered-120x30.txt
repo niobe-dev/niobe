@@ -10,7 +10,7 @@
  ┃   116 +     etag: res.headers.get("ETag"),                               ┃ ┌─────────────── Changes ───────────────┐
  ┃   117       body,                                                        ┃ │                                       │
  ┃   └ allowed by you                                                       ┃ │ ⎇ main ↑3                             █
- ┃                                                                          ┃ │ ▾ Working tree  23 files  +977 −259   █
+ ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃ ◆ claude                                                                 ┃ │   .                                   │
  ┃   Rewriting the 304 test around the cached body.                         ┃ │     CHANGELOG.md                +0 −0 │
  ┃                                                                          ┃ │   catalog/                            │

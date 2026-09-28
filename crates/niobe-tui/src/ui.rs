@@ -3018,23 +3018,29 @@ fn working_tree_rows(
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let (added, removed) = repo.working.iter().fold((0u64, 0u64), |(a, r), file| {
-        (
-            a.saturating_add(file.added.unwrap_or(0)),
-            r.saturating_add(file.removed.unwrap_or(0)),
+    // Git gives a binary file no line counts, and the header marks that the
+    // way a file's own row does: a floor where some file had none, and a dash
+    // where no file had any, never a zero standing in for the count.
+    let side = |count_of: fn(&crate::app::WorkingFile) -> Option<u64>, sign: char| {
+        let lines = repo
+            .working
+            .iter()
+            .filter_map(count_of)
+            .fold(0u64, u64::saturating_add);
+        count(
+            sign,
+            lines,
+            repo.working.iter().all(|file| count_of(file).is_some()),
         )
-    });
+    };
+    let added = side(|file| file.added, '+');
+    let removed = side(|file| file.removed, '−');
     let summary = match repo.read {
         false => vec![Figure::lead(
             0,
             Span::styled("—", Style::new().fg(theme.dim)),
         )],
-        true => changed_figures(
-            repo.working.len(),
-            format!("+{added}"),
-            format!("−{removed}"),
-            theme,
-        ),
+        true => changed_figures(repo.working.len(), added, removed, theme),
     };
 
     let folded = app.folded(Section::WorkingTree);

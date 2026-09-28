@@ -15,7 +15,7 @@
  ┃   Rewriting the 304 test around the cached body.                         ┃ ┌─────────────── Changes ───────────────┐
  ┃                                                                          ┃ │                                       │
  ┃ ◆ claude                                                                 █ │ ⎇ main ↑3                             █
- ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │ ▾ Working tree  23 files  +977 −259   │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │ ▾ Working tree  23 files  +≥977 −≥259 │
  ┃                                                                          █ │   .                                   │
  ┃ ✗ Bash                       npm test -- fetch             exit 1 · 0.4s █ │     CHANGELOG.md                +0 −0 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │   catalog/                            │

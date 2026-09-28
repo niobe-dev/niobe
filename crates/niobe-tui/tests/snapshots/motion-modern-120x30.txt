@@ -13,7 +13,7 @@
  ┃ ◆ claude                                                                 ┃ ┌─────────────── Changes ───────────────┐
  ┃   The notebook that demonstrates the fetcher needs the new call shape.   ┃ │                                       │
  ┃                                                                          ┃ │ ⎇ main ↑3                             █
-·┃ ✗ Bash                       npm test -- fetch             exit 1 · 0.4s ┃·│ ▾ Working tree  23 files  +977 −259   │·
+·┃ ✗ Bash                       npm test -- fetch             exit 1 · 0.4s ┃·│ ▾ Working tree  23 files  +≥977 −≥259 │·
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │   .                                   │
  ┃                                                                          █ │     CHANGELOG.md                +0 −0 │
  ┃ ◆ claude                                                                 █ │   catalog/                            │

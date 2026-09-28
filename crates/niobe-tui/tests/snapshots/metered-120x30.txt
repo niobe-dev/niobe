@@ -12,7 +12,7 @@
  ┃ ◆ claude                                                                 ┃ ┌─────────────── Changes ───────────────┐
  ┃   Rewriting the 304 test around the cached body.                         ┃ │                                       │
  ┃                                                                          ┃ │ ⎇ main ↑3                             █
- ┃ ◆ claude                                                                 ┃ │ ▾ Working tree  23 files  +977 −259   │
+ ┃ ◆ claude                                                                 ┃ │ ▾ Working tree  23 files  +≥977 −≥259 │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.   ┃ │   .                                   │
  ┃                                                                          █ │     CHANGELOG.md                +0 −0 │
  ┃ ✗ Bash                       npm test -- fetch             exit 1 · 0.4s █ │   catalog/                            │

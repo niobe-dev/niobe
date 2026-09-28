@@ -13,7 +13,7 @@
  ┃   └ tests/fetch.test.ts                                                                                        4.9 kB · 1.2s ┃ ┌───────────────────────────── Changes ─────────────────────────────┐
  ┃                                                                                                                              ┃ │                                                                   │
  ┃ ⚙ Notion·search              {}                                                                                       1.1 kB ┃ │ ⎇ main ↑3                                                         █
- ┃                                                                                                                              ┃ │ ▾ Working tree  23 files  +977 −259                               █
+ ┃                                                                                                                              ┃ │ ▾ Working tree  23 files  +≥977 −≥259                             █
  ┃ ⚙ Notion·fetch               {}                                                                                       2.5 kB ┃ │   .                                                               █
  ┃                                                                                                                              ┃ │     CHANGELOG.md                                            +0 −0 █
  ┃ ✗ Notion·update-page         {}                                                                                       failed ┃ │   catalog/                                                        █

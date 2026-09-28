@@ -10,7 +10,7 @@
  ┃ ── turn 1 13:36 · 6400 tok · 22s ─────────────────────────────────────── ┃ ┌─────────────── Changes ───────────────┐
  ┃                                                                          ┃ │                                       │
  ┃ > you                                                                    ┃ │ ⎇ main ↑3                             █
- ┃   keep the cached copy on a 304 instead                                  ┃ │ ▾ Working tree  23 files  +977 −259   █
+ ┃   keep the cached copy on a 304 instead                                  ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃                                                                          ┃ │   .                                   │
  ┃ ◆ claude                                                                 ┃ │     CHANGELOG.md                +0 −0 │
  ┃   Done: a 304 now returns the cached manifest.                           ┃ │   catalog/                            │

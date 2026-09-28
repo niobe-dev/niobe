@@ -13,7 +13,7 @@
  ┃   │ to run Bash                                                        │ ┃ ┌─────────────── Changes ───────────────┐
  ┃   │ python3 probe.py                                                   │ ┃ │                                       │
  ┃   │                                                                    │ ┃ │ ⎇ main ↑3                             █
- ┃   │ {"command":"python3 probe.py"}                                     │ ┃ │ ▾ Working tree  23 files  +977 −259   │
+ ┃   │ {"command":"python3 probe.py"}                                     │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 │
  ┃   │                                                                    │ ┃ │   .                                   │
  ┃   │ ▶ 1. Allow once                                     this call only │ ┃ │     CHANGELOG.md                +0 −0 │
  ┃   │   2. Always allow Bash                            niobe saves Bash │ ┃ │   catalog/                            │

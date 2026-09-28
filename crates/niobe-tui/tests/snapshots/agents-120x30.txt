@@ -13,7 +13,7 @@
  ┃   └ deep-reasoner: Review cache.py                                 120 B ┃ ┌─────────────── Changes ───────────────┐
  ┃                                                                          ┃ │                                       │
  ┃ ⚙ Read                       …fetch.py › catalog/fetch.py         4.0 kB ┃ │ ⎇ main ↑3                             █
- ┃                                                                          ┃ │ ▾ Working tree  23 files  +977 −259   │
+ ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 │
  ┃ ↳ deep-reasoner: Review cache.py  sub-agent                              ┃ │   .                                   │
  ┃   Let me check how eviction is triggered.                                ┃ │     CHANGELOG.md                +0 −0 │
  ┃                                                                          ┃ │   catalog/                            │

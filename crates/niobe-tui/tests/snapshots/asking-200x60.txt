@@ -13,7 +13,7 @@
  ┃ ⚙ Edit                       catalog/fetch.ts                                                                   +6 −2 · 0.4s █ ┌───────────────────────────── Changes ─────────────────────────────┐
  ┃    41     const cached = cache.get(url);                                                                                     █ │                                                                   │
  ┃    42     const headers = new Headers(init.headers);                                                                         █ │ ⎇ main ↑3                                                         █
- ┃    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                             █ │ ▾ Working tree  23 files  +977 −259                               █
+ ┃    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                             █ │ ▾ Working tree  23 files  +≥977 −≥259                             █
  ┃    44 -   const res = await fetch(url, init);                                                                                █ │   .                                                               █
  ┃    43 +   if (cached?.etag) {                                                                                                █ │     CHANGELOG.md                                            +0 −0 █
  ┃    44 +     headers.set("If-None-Match", cached.etag);                                                                       █ │   catalog/                                                        █
