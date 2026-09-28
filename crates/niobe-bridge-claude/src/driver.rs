@@ -260,6 +260,14 @@ pub enum SpawnError {
         /// The name that was looked up.
         binary: PathBuf,
     },
+    /// The directory the session is to run in is not there — deleted, as a
+    /// worktree removed under a terminal still in it is. Checked apart from
+    /// the binary because the operating system reports both as the same
+    /// "not found".
+    NoDirectory {
+        /// The directory the CLI was to run in.
+        directory: PathBuf,
+    },
     /// The binary is there and could not be started.
     Failed {
         /// The file that was found for the name looked up, where `PATH` found
@@ -282,6 +290,12 @@ impl std::fmt::Display for SpawnError {
                 binary.display(),
                 binary.display(),
             ),
+            Self::NoDirectory { directory } => write!(
+                f,
+                "the directory the session was to run in, {}, is not there; start niobe \
+                 again from one that is",
+                directory.display()
+            ),
             Self::Failed { binary, error } => {
                 write!(f, "cannot start `{}`: {error}", binary.display())
             }
@@ -292,7 +306,7 @@ impl std::fmt::Display for SpawnError {
 impl std::error::Error for SpawnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotInstalled { .. } => None,
+            Self::NotInstalled { .. } | Self::NoDirectory { .. } => None,
             Self::Failed { error, .. } => Some(error),
         }
     }
@@ -373,6 +387,11 @@ pub struct Session {
 impl Session {
     /// Spawns the CLI and starts reading it.
     pub fn spawn(options: &Options) -> Result<Self, SpawnError> {
+        if !options.cwd.is_dir() {
+            return Err(SpawnError::NoDirectory {
+                directory: options.cwd.clone(),
+            });
+        }
         let mut command = Command::new(&options.binary);
         command
             .args(options.argv().iter().map(OsString::from))
@@ -1450,6 +1469,20 @@ mod tests {
         options.binary = script;
         options.cwd = dir.path().to_path_buf();
         (spawn_written(&options), dir)
+    }
+
+    #[test]
+    fn a_directory_that_is_not_there_is_named_rather_than_the_binary() {
+        let mut options = options();
+        options.binary = PathBuf::from("/bin/sh");
+        options.cwd = PathBuf::from("/nonexistent/niobe-audit-dir");
+
+        let said = Session::spawn(&options)
+            .expect_err("there is nowhere to run it")
+            .to_string();
+
+        assert!(said.contains("/nonexistent/niobe-audit-dir"), "{said}");
+        assert!(!said.contains("PATH"), "{said}");
     }
 
     /// Spawns a `claude` that is the shell script `body`, sends it a turn,
