@@ -371,6 +371,7 @@ fn reported_costs_come_back_bit_for_bit() {
                     cost_usd: Some(*cost),
                     cost_basis: None,
                     settles_model: false,
+                    fast: false,
                 }),
             )
             .expect("append");

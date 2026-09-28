@@ -1088,6 +1088,7 @@ fn metered_turn(worked_seconds: u64, cost_usd: Option<f64>) -> App {
         cost_usd,
         cost_basis: cost_usd.map(|_| niobe_core::event::CostBasis::Measured),
         settles_model: false,
+        fast: false,
     });
     for event in [&billing, &prompt, &usage] {
         app.apply_at(event, at(0));
@@ -1260,6 +1261,7 @@ fn session_on_three_models() -> App {
             cost_usd: Some(0.01),
             cost_basis: None,
             settles_model: false,
+            fast: false,
         }));
     }
     app

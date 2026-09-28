@@ -5195,6 +5195,7 @@ mod tests {
             cost_usd: Some(cost_usd),
             cost_basis: None,
             settles_model: false,
+            fast: false,
         })
     }
 
@@ -6464,6 +6465,7 @@ mod tests {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         })
     }
 

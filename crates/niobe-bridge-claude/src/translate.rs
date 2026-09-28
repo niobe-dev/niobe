@@ -1246,6 +1246,11 @@ impl Translator {
                     cost_usd: None,
                     cost_basis: None,
                     settles_model: false,
+                    // The CLI's transcripts write each message's speed; its
+                    // live `message_delta` has carried none in any recording,
+                    // so a live fast message is valued at the standard rates
+                    // until the turn's cost settles it.
+                    fast: usage.fast(),
                 };
                 match model {
                     Some(model) => self.file(model, record, out),
@@ -1719,6 +1724,7 @@ impl Translator {
             // reported. Between them the two cover every record emitted under
             // the model so far, so this figure settles them.
             settles_model: true,
+            fast: false,
         })
     }
 }
@@ -1741,6 +1747,7 @@ fn covered_elsewhere(model: String) -> Event {
         cost_usd: Some(0.0),
         cost_basis: Some(CostBasis::ApiEquivalent),
         settles_model: true,
+        fast: false,
     })
 }
 

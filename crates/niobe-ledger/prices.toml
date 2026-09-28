@@ -17,6 +17,10 @@
 # A `[model.price.long_context]` table replaces all of those rates for a
 # request whose prompt, cached tokens included, is longer than `above` tokens.
 #
+# `fast` is what a request served in the provider's fast mode costs, as a
+# multiple of what it costs at the rates that apply to it. A model without it
+# leaves a fast request unpriced.
+#
 # `ids` are matched exactly against the model a backend reports. An id that is
 # not listed is unpriced; nothing is inferred from a near match.
 #
@@ -32,7 +36,9 @@
 
 # Anthropic, the Claude API.
 #
-# https://platform.claude.com/docs/en/about-claude/pricing for the rates,
+# https://platform.claude.com/docs/en/about-claude/pricing for the rates, and
+# its fast-mode section for `fast`: twice the standard rates on every token,
+# for Claude Opus 5.5, 5 and 4.8 (read 28 September 2026);
 # https://platform.claude.com/docs/en/release-notes/overview for the dates they
 # changed on, and each model's page for its release date. The `[1m]` ids are
 # the spelling Claude Code uses for a model with its 1M-token window selected;
@@ -83,6 +89,7 @@ output = 20.00
 cache_read = 0.20
 cache_write = 5.00
 cache_write_1h = 8.00
+fast = 2
 
 # Claude Opus 5
 [[model]]
@@ -98,6 +105,7 @@ output = 25.00
 cache_read = 0.50
 cache_write = 6.25
 cache_write_1h = 10.00
+fast = 2
 
 # Claude Opus 4.8
 [[model]]
@@ -113,6 +121,7 @@ output = 25.00
 cache_read = 0.50
 cache_write = 6.25
 cache_write_1h = 10.00
+fast = 2
 
 # Claude Opus 4.7
 [[model]]

@@ -142,6 +142,7 @@ pub struct Price {
     pub(crate) from: Date,
     pub(crate) rates: Rates,
     pub(crate) long_context: Option<LongContext>,
+    pub(crate) fast: Option<u64>,
 }
 
 impl Price {
@@ -160,6 +161,14 @@ impl Price {
         self.long_context.as_ref()
     }
 
+    /// What a request served in the provider's fast mode costs, as a multiple
+    /// of what it costs at the rates above, in millionths: `2_000_000` is
+    /// twice. `None` where the model has no published fast-mode price, and a
+    /// fast request is then unpriced rather than priced at the standard rates.
+    pub fn fast(&self) -> Option<u64> {
+        self.fast
+    }
+
     /// What `usage` costs at this price, in picodollars.
     ///
     /// The prompt is every input token, cached or not. A long-context rate
@@ -175,7 +184,12 @@ impl Price {
             Some(long) if prompt > long.above => &long.rates,
             Some(_) | None => &self.rates,
         };
-        rates.cost(usage)
+        let cost = rates.cost(usage)?;
+        match (usage.fast, self.fast) {
+            (false, _) => Some(cost),
+            (true, Some(times)) => Some(cost.saturating_mul(u128::from(times)) / 1_000_000),
+            (true, None) => None,
+        }
     }
 }
 
@@ -209,6 +223,7 @@ mod tests {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         }
     }
 
@@ -287,6 +302,7 @@ mod tests {
                 above: 200,
                 rates: long,
             }),
+            fast: None,
         };
         let at_threshold = Usage {
             input: 100,
@@ -302,6 +318,35 @@ mod tests {
         assert_eq!(price.cost(&at_threshold), rates().cost(&at_threshold));
         assert_eq!(price.cost(&past_it), long.cost(&past_it));
         assert_ne!(price.cost(&past_it), rates().cost(&past_it));
+    }
+
+    /// Fast mode is billed as a multiple of what the request costs at the
+    /// rates that apply to it; a model with no published fast price leaves a
+    /// fast request unpriced rather than priced as a standard one.
+    #[test]
+    fn a_fast_request_costs_its_multiple_and_nothing_where_there_is_none() {
+        let with = |fast| Price {
+            from: Date::new(2026, 1, 1).expect("a real date"),
+            rates: rates(),
+            long_context: None,
+            fast,
+        };
+        let standard = Usage {
+            input: 1_000,
+            output: 100,
+            cache_read: 10_000,
+            ..usage()
+        };
+        let fast = Usage {
+            fast: true,
+            ..standard.clone()
+        };
+        // 1,000 × 3 + 100 × 15 + 10,000 × 0.3 = 7,500 millionths of a dollar,
+        // in picodollars; twice that fast.
+        assert_eq!(with(Some(2_000_000)).cost(&standard), Some(7_500_000_000));
+        assert_eq!(with(Some(2_000_000)).cost(&fast), Some(15_000_000_000));
+        assert_eq!(with(None).cost(&fast), None);
+        assert_eq!(with(None).cost(&standard), Some(7_500_000_000));
     }
 
     #[test]

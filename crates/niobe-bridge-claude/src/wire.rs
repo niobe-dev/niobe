@@ -340,6 +340,17 @@ pub(crate) struct Usage {
     /// as an error lost the message the operator had been shown.
     #[serde(default, deserialize_with = "none_as_empty")]
     pub(crate) iterations: Vec<Iteration>,
+    /// `"fast"` for a request the API served in fast mode, which it bills at
+    /// a multiple of the standard rates, and `"standard"` otherwise — every
+    /// recorded message says `"standard"`. The API documents both values.
+    pub(crate) speed: Option<String>,
+}
+
+impl Usage {
+    /// Whether the request was served in fast mode.
+    pub(crate) fn fast(&self) -> bool {
+        self.speed.as_deref() == Some("fast")
+    }
 }
 
 /// A list the CLI writes as `null` where it has nothing in it.

@@ -114,6 +114,7 @@ impl Owed {
                 cost_usd: None,
                 cost_basis: None,
                 settles_model: false,
+                fast: false,
             },
             records: Vec::new(),
         }
@@ -1113,6 +1114,7 @@ mod tests {
             cost_usd: cost,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         })
     }
 
@@ -1356,6 +1358,7 @@ mod tests {
                 cost_usd: Some(0.04),
                 cost_basis: None,
                 settles_model: false,
+                fast: false,
             }),
             on_model("haiku-4-5", 300, 30, None),
         ]);
@@ -1408,6 +1411,7 @@ mod tests {
                 cost_usd: None,
                 cost_basis: None,
                 settles_model: false,
+                fast: false,
             })
         };
         let state = SessionState::replay(&[write(100, 100), write(50, 0), write(10, 4)]);
@@ -2244,6 +2248,7 @@ mod tests {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         })
     }
 

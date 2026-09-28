@@ -224,6 +224,7 @@ mod tests {
             cost_usd: Some(0.01),
             cost_basis: None,
             settles_model: false,
+            fast: false,
         }
     }
 

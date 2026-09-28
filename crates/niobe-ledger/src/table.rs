@@ -279,6 +279,7 @@ cache_write = 0.625
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         };
         let cost = table().cost(&usage, date(2026, 1, 10));
         assert_eq!(cost, Cost::ApiEquivalent(0.001));

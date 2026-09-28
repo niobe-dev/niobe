@@ -121,6 +121,7 @@ fn session_events() -> Vec<Event> {
             cost_usd: Some(0.04),
             cost_basis: None,
             settles_model: false,
+            fast: false,
         }),
         // The prompt that request sent: its input, reads and writes.
         Event::Context(Context {
@@ -353,6 +354,7 @@ fn session_events() -> Vec<Event> {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         }),
         // The later, larger prompt is the one the pane shows: 25,400 of
         // 200,000 is 12.7%, drawn as 13%.
@@ -640,6 +642,7 @@ pub fn metered_session() -> App {
         cost_usd: None,
         cost_basis: None,
         settles_model: false,
+        fast: false,
     }));
     let mut app = session_read_at_a_fixed_moment(&events);
     app.apply(&Event::TurnEnded);
@@ -840,6 +843,7 @@ pub fn session_with_finished_turns() -> App {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         })
     };
     let turns = [

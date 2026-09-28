@@ -282,6 +282,7 @@ fn a_session_owing_for_many_requests_redraws_inside_a_frame_budget() {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         }));
     }
     let frame = screen(&mut app, 200, 60);

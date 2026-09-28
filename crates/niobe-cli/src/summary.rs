@@ -169,6 +169,7 @@ mod tests {
             cost_usd,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         })
     }
 

@@ -3994,6 +3994,7 @@ mod tests {
             cost_usd: cost,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         })
     }
 
@@ -4710,6 +4711,7 @@ mod tests {
                 cost_usd: cost,
                 cost_basis: None,
                 settles_model: settles,
+                fast: false,
             })
         };
         let session = SessionState::replay(&[
@@ -4959,6 +4961,7 @@ mod tests {
                 cost_usd: Some(0.01),
                 cost_basis: None,
                 settles_model: false,
+                fast: false,
             }));
         }
         app
@@ -5190,6 +5193,7 @@ mod tests {
             cost_usd: Some(0.01),
             cost_basis: None,
             settles_model: false,
+            fast: false,
         }));
 
         let rows = spend_of(&app, 66);
@@ -5509,6 +5513,7 @@ mod tests {
                 cost_usd: Some(cost),
                 cost_basis: None,
                 settles_model: false,
+                fast: false,
             }));
             let rows = spend_of(&app, 66);
             let (count, cost_drawn) = rows[0]

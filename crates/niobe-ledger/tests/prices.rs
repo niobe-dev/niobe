@@ -35,6 +35,7 @@ fn usage(model: &str) -> Usage {
         cost_usd: None,
         cost_basis: None,
         settles_model: false,
+        fast: false,
     }
 }
 
@@ -62,6 +63,36 @@ fn claude_opus_5_on_the_claude_api_matches_a_hand_computed_cost() {
         ..usage("claude-opus-5")
     };
     assert_eq!(usd(bundled().cost(&usage, date(2026, 9, 16))), 0.5975);
+}
+
+#[test]
+fn claude_opus_5_in_fast_mode_costs_twice_the_standard_rates() {
+    // Fast mode: $10 input and $50 output, twice the standard $5 and $25, and
+    // twice every other rate with them.
+    //   12,000 input × 10  = 120,000
+    //    3,000 output × 50 = 150,000
+    //  200,000 cache read × 1 = 200,000
+    //                        470,000 / 1e6 = $0.47
+    let usage = Usage {
+        input: 12_000,
+        output: 3_000,
+        cache_read: 200_000,
+        fast: true,
+        ..usage("claude-opus-5")
+    };
+    assert_eq!(usd(bundled().cost(&usage, date(2026, 9, 16))), 0.47);
+}
+
+#[test]
+fn a_fast_request_on_a_model_with_no_fast_price_is_unpriced() {
+    // Claude Opus 4.7 lists no fast-mode price: a fast request on it is
+    // not priced at its standard rates.
+    let usage = Usage {
+        input: 1_000,
+        fast: true,
+        ..usage("claude-opus-4-7")
+    };
+    assert_eq!(bundled().cost(&usage, date(2026, 9, 16)).usd(), None);
 }
 
 #[test]

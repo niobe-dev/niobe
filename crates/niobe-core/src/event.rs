@@ -224,6 +224,11 @@ pub struct Usage {
     /// themselves.
     #[serde(default)]
     pub settles_model: bool,
+    /// Whether the provider served the request in its fast mode, which it
+    /// bills at a premium over the model's standard rates. `false` where the
+    /// backend did not say, and in records written before this was kept.
+    #[serde(default)]
+    pub fast: bool,
 }
 
 impl Usage {
@@ -834,6 +839,7 @@ mod tests {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         };
         assert_eq!(usage.tokens(), 150);
     }
@@ -851,6 +857,7 @@ mod tests {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         };
         assert_eq!(usage.tokens(), 150);
     }
@@ -1024,6 +1031,7 @@ mod tests {
             cost_usd: Some(0.084_735),
             cost_basis: Some(CostBasis::ApiEquivalent),
             settles_model: false,
+            fast: false,
         };
 
         let line = serde_json::to_string(&Event::Usage(usage.clone())).expect("a usage record");
@@ -1106,6 +1114,7 @@ mod tests {
             cost_usd: None,
             cost_basis: None,
             settles_model: false,
+            fast: false,
         };
         assert!(usage.cost_usd.is_none());
     }

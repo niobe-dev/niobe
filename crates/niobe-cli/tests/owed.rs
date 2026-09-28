@@ -52,6 +52,7 @@ fn request(input: u64, cache_read: u64, output: u64) -> Event {
         cost_usd: None,
         cost_basis: None,
         settles_model: false,
+        fast: false,
     })
 }
 
@@ -103,4 +104,39 @@ fn a_request_over_the_long_context_threshold_is_still_priced_at_long_context_rat
         .expect("the bundled table prices claude-sonnet-4-5");
     assert_usd(estimate, 0.1833);
     assert_eq!(niobe_tui::session_cost(&state, Some(&prices)), "~$0.18");
+}
+
+#[test]
+fn a_request_served_in_fast_mode_is_owed_for_at_the_fast_price() {
+    // Claude Opus 5 in fast mode bills twice its $5 input and $25 output:
+    //   2,000 input × 10  = 20,000
+    //   1,000 output × 50 = 50,000
+    //                       70,000 / 1e6 = $0.07
+    // and one on a model with no fast price is a floor, not a guess.
+    let fast = |model: &str| {
+        Event::Usage(Usage {
+            input: 2_000,
+            output: 1_000,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: model.to_owned(),
+            cost_usd: None,
+            cost_basis: None,
+            settles_model: false,
+            fast: true,
+        })
+    };
+    let prices = bundled();
+
+    let state = SessionState::replay(&[fast("claude-opus-5")]);
+    let owed = &state.totals().unsettled["claude-opus-5"];
+    let estimate = niobe_tui::Prices::estimate_owed(&prices, owed)
+        .expect("the bundled table prices claude-opus-5 in fast mode");
+    assert_usd(estimate, 0.07);
+
+    let unpriced = SessionState::replay(&[fast("claude-opus-4-7")]);
+    let owed = &unpriced.totals().unsettled["claude-opus-4-7"];
+    assert_eq!(niobe_tui::Prices::estimate_owed(&prices, owed), None);
 }

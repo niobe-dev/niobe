@@ -1814,6 +1814,7 @@ mod tests {
                 cost_usd: None,
                 cost_basis: None,
                 settles_model: false,
+                fast: false,
             })]
         );
     }
@@ -1845,8 +1846,34 @@ mod tests {
                 cost_usd: None,
                 cost_basis: None,
                 settles_model: false,
+                fast: false,
             })]
         );
+    }
+
+    /// The CLI writes the speed each request was served at beside its
+    /// counts. A message served in fast mode is owed for at the fast price,
+    /// which the price table knows as a multiple of the standard one; read as
+    /// standard, an unclosed session's estimate would be half of it.
+    #[test]
+    fn a_message_served_in_fast_mode_is_counted_as_fast() {
+        let at = |speed: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"msg_1","role":"assistant","model":"claude-opus-5","content":[{{"type":"text","text":"said"}}],"usage":{{"input_tokens":3,"output_tokens":40,"speed":"{speed}"}}}}}}"#
+            )
+        };
+        let fast = |speed: &str| -> Vec<bool> {
+            folded(&[&at(speed)])
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Usage(usage) => Some(usage.fast),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(fast("fast"), [true]);
+        assert_eq!(fast("standard"), [false]);
     }
 
     #[test]

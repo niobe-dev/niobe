@@ -264,18 +264,22 @@ impl File<'_> {
         let table = self.table(value, at)?;
         let mut from = None;
         let mut long_context = None;
+        let mut fast = None;
         let mut rates = RateFields::default();
         for (key, value) in in_file_order(table) {
             let at = at.child(key.get_ref());
             match key.get_ref().as_ref() {
                 "from" => from = Some(self.date(value, &at)?),
                 "long_context" => long_context = Some(self.long_context(value, &at)?),
+                "fast" => fast = Some(self.multiple(value, &at)?),
                 name if RateFields::is_rate(name) => rates.set(name, self.rate(value, &at)?),
                 _ => {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        &format!("unknown key; expected `from`, {RATE_KEYS}, or `long_context`"),
+                        &format!(
+                            "unknown key; expected `from`, {RATE_KEYS}, `fast`, or `long_context`"
+                        ),
                     ));
                 }
             }
@@ -286,6 +290,7 @@ impl File<'_> {
             from,
             rates,
             long_context,
+            fast,
         })
     }
 
@@ -319,6 +324,15 @@ impl File<'_> {
         })?;
         let rates = self.complete(rates, value, at)?;
         Ok(LongContext { above, rates })
+    }
+
+    /// A multiple of a price, such as the `2` fast mode costs, in millionths.
+    fn multiple(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<u64, PriceError> {
+        let times = self.rate(value, at)?.micros();
+        if times == 0 {
+            return Err(self.invalid(&value.span(), at, "expected a positive multiple"));
+        }
+        Ok(times)
     }
 
     /// The rates, once every one that is not optional has been given.
@@ -608,6 +622,24 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_mode_multiple_parses_and_must_be_positive() {
+        let day = Date::new(2026, 7, 24).expect("a date");
+        let fast = |price: &str| {
+            parse(&one_model(price))
+                .expect("the table is valid")
+                .price("m", day)
+                .expect("priced")
+                .fast()
+        };
+        assert_eq!(fast(&format!("{PRICE}fast = 2\n")), Some(2_000_000));
+        assert_eq!(fast(PRICE), None);
+        assert_eq!(
+            error(&one_model(&format!("{PRICE}fast = 0\n"))),
+            "p.toml:10: model[0].price[0].fast: expected a positive multiple"
+        );
+    }
+
+    #[test]
     fn a_long_context_tier_parses() {
         let text = one_model(&format!(
             "{PRICE}\n[model.price.long_context]\nabove = 272_000\ninput = 8\noutput = 30\ncache_read = 0.8\ncache_write = 10\n"
@@ -655,7 +687,7 @@ mod tests {
             ),
             (
                 one_model(&format!("{PRICE}cache_writes = 1\n")),
-                "p.toml:10: model[0].price[0].cache_writes: unknown key; expected `from`, `input`, `output`, `cache_read`, `cache_write`, `cache_write_1h`, or `long_context`",
+                "p.toml:10: model[0].price[0].cache_writes: unknown key; expected `from`, `input`, `output`, `cache_read`, `cache_write`, `cache_write_1h`, `fast`, or `long_context`",
             ),
             (
                 one_model(&format!(
