@@ -1487,6 +1487,55 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
     assert_handed_back(&drawn, cooked, "a quit after a paste");
 }
 
+/// With nothing to read keys from — standard input from `/dev/null` and no
+/// controlling terminal to fall back on — the shell says so before it starts
+/// the backend or takes the screen.
+#[test]
+fn a_shell_with_no_keys_to_read_stops_before_it_starts_anything() {
+    let repo = repo();
+    let home = stand_in(repo.path(), "#!/bin/sh\ntouch started\nsleep 5\n");
+    let (terminal, slave) = Terminal::open();
+    let null = File::open("/dev/null").expect("/dev/null opens");
+    // A session of its own, so there is no controlling terminal behind it
+    // whatever terminal the tests themselves were started from.
+    let mut shell = Command::new("perl")
+        .args(["-MPOSIX", "-e", "POSIX::setsid(); exec @ARGV or die $!"])
+        .arg(env!("CARGO_BIN_EXE_niobe"))
+        .current_dir(repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env(
+            "PATH",
+            format!("{}:/bin:/usr/bin", repo.path().join("bin").display()),
+        )
+        .stdin(Stdio::from(null))
+        .stdout(Stdio::from(
+            slave.try_clone().expect("the slave can be duplicated"),
+        ))
+        .stderr(Stdio::from(
+            slave.try_clone().expect("the slave can be duplicated"),
+        ))
+        .spawn()
+        .expect("perl runs niobe");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert_eq!(status.code(), Some(1), "{drawn}");
+    assert!(
+        drawn.contains("standard input is not a terminal"),
+        "{drawn}"
+    );
+    assert!(
+        !drawn.contains(ENTER_ALTERNATE_SCREEN),
+        "the screen was taken: {drawn:?}"
+    );
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started for a shell that could not read a key"
+    );
+}
+
 /// Puts `script` in `cwd` as the `claude` a session runs, and gives back a
 /// user config whose default profile runs it.
 fn stand_in(cwd: &Path, script: &str) -> tempfile::TempDir {

@@ -221,6 +221,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
         print_help();
         return Ok(());
     }
+    keys_can_be_read()?;
 
     // Checked before anything starts, so a store the repository has linked
     // elsewhere is refused on a screen that is still the operator's, rather
@@ -356,6 +357,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
         );
         return Ok(());
     }
+    keys_can_be_read()?;
     let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
 
     // The recorded session says what the backend called it, which is the only
@@ -457,6 +459,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
         );
         return Ok(());
     }
+    keys_can_be_read()?;
 
     let mut backend = backend::attach(
         &root,
@@ -768,6 +771,7 @@ fn replay(log: &Path) -> Result<(), String> {
         );
         return Ok(());
     }
+    keys_can_be_read()?;
 
     // A recorded log is being looked at, not continued: nothing is attached
     // and nothing is kept.
@@ -788,6 +792,25 @@ fn print_summary(header: &str, app: &App) {
     for line in summary::lines(app) {
         say!("{line}");
     }
+}
+
+/// Fails, before anything is started, where the shell would have no keys to
+/// read: standard input is not a terminal and there is no controlling one to
+/// read from instead — a job with no terminal, input redirected from a file.
+/// Found out later, a backend would have been started and the screen taken
+/// for a frame, only for the shell to stop at its first read.
+///
+/// Standard input that is not a terminal is fine where the process has one:
+/// the keys are read from `/dev/tty`, as in `echo prompt | niobe`.
+fn keys_can_be_read() -> Result<(), String> {
+    if std::io::stdin().is_terminal() || std::fs::File::open("/dev/tty").is_ok() {
+        return Ok(());
+    }
+    Err(
+        "standard input is not a terminal, and there is no terminal to read keys from; \
+         run niobe in one"
+            .to_owned(),
+    )
 }
 
 /// The most of a log `niobe replay` reads. The longest recorded session in
