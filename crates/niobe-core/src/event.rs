@@ -631,6 +631,14 @@ pub enum Event {
         message: Option<String>,
     },
 
+    /// The backend stopped asking about a call: the turn it gated was
+    /// interrupted before an answer came. An answer given after this reaches
+    /// nothing, so the question is not left open.
+    PermissionWithdrawn {
+        /// The call that had been gated.
+        id: ToolCallId,
+    },
+
     /// How tool calls are gated: the mode a session started under, or the one
     /// the operator moved it to.
     ModeSelected {

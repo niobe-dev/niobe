@@ -551,21 +551,38 @@ fn a_prompt_the_cli_is_waiting_on_is_asked_and_kept_to_be_answered() {
 }
 
 #[test]
-fn a_prompt_with_no_answer_in_the_recording_stays_pending() {
+fn a_prompt_with_no_answer_in_the_recording_waits_until_its_turn_ends() {
     // The fixture is what the CLI printed; Niobe's answer goes the other way,
-    // on standard input, so folding the recording alone leaves the prompt up.
-    let state = SessionState::replay(&translated());
+    // on standard input, so folding the recording alone leaves the prompt up
+    // for as long as its turn runs — and no longer, because nothing waits on
+    // an answer once the turn has ended.
+    let events = translated();
+    let asked = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::PermissionRequest { id, .. } if id.as_str() == "toolu_read")
+        })
+        .expect("the recording asks about the read");
+    let turn_end = asked
+        + events[asked..]
+            .iter()
+            .position(|event| matches!(event, Event::TurnEnded))
+            .expect("the turn ends after the prompt");
 
-    assert_eq!(state.permission_requests(), 2);
-    assert_eq!(state.permissions_denied(), 1);
+    let running = SessionState::replay(&events[..turn_end]);
     assert_eq!(
-        state
+        running
             .pending_permissions()
             .iter()
             .map(|id| id.as_str())
             .collect::<Vec<_>>(),
         ["toolu_read"]
     );
+
+    let state = SessionState::replay(&events);
+    assert_eq!(state.permission_requests(), 2);
+    assert_eq!(state.permissions_denied(), 1);
+    assert!(state.pending_permissions().is_empty());
 }
 
 #[test]

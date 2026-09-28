@@ -333,6 +333,9 @@ pub struct Translator {
     turn: Counts,
     /// Per model, everything reported for it so far this session.
     reported: BTreeMap<String, Reported>,
+    /// The call each permission prompt the CLI has asked is about, by the
+    /// id the CLI asked it under, so that a prompt it withdraws is known.
+    open_requests: BTreeMap<String, ToolCallId>,
     /// Messages whose usage arrived before anything named their model — a
     /// `message_delta` with no `message_start` ahead of it, before `init` —
     /// held until the turn's `result` says which id billed them. Filed under
@@ -402,6 +405,7 @@ impl Translator {
             denied: BTreeMap::new(),
             turn: Counts::default(),
             reported: BTreeMap::new(),
+            open_requests: BTreeMap::new(),
             unattributed: Vec::new(),
             windows: BTreeMap::new(),
             context: None,
@@ -550,6 +554,7 @@ impl Translator {
             wire::Message::User(envelope) => self.user(envelope, &mut out),
             wire::Message::StreamEvent(event) => self.stream(event, &mut out),
             wire::Message::ControlRequest(request) => self.control(request, &mut out),
+            wire::Message::ControlCancelRequest(cancel) => self.withdrawn(cancel, &mut out),
             wire::Message::Result(outcome) => self.result(outcome, &mut out),
             wire::Message::ControlResponse(response) => self.answered(response, &mut out),
             wire::Message::RateLimitEvent(event) => rate_limit(event, &mut out),
@@ -1361,6 +1366,18 @@ impl Translator {
         }
     }
 
+    /// Takes back a prompt the CLI stopped waiting on, so the question does
+    /// not stay on screen for an answer that would reach nothing.
+    fn withdrawn(&mut self, cancel: wire::CancelRequest, out: &mut Vec<Event>) {
+        let Some(id) = cancel
+            .request_id
+            .and_then(|request_id| self.open_requests.remove(&request_id))
+        else {
+            return;
+        };
+        out.push(Event::PermissionWithdrawn { id });
+    }
+
     /// Records a prompt the CLI is waiting on, and asks the session it.
     ///
     /// A request with no `request_id` is reported as a prompt and never
@@ -1384,6 +1401,7 @@ impl Translator {
             .and_then(|call| call.agent.clone());
         let id = ToolCallId::new(call_id);
         if let Some(request_id) = request.request_id {
+            self.open_requests.insert(request_id.clone(), id.clone());
             self.asked.push(Asked {
                 id: id.clone(),
                 request_id,
@@ -3330,6 +3348,25 @@ mod tests {
             translator.take_asked().is_empty(),
             "the shell would have waited on a modal whose answer goes nowhere"
         );
+    }
+
+    #[test]
+    fn a_prompt_the_cli_withdraws_is_withdrawn_from_the_session() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#,
+        );
+
+        let events = translator.line(r#"{"type":"control_cancel_request","request_id":"c1"}"#);
+        assert_eq!(
+            events,
+            [Event::PermissionWithdrawn {
+                id: "toolu_1".into()
+            }]
+        );
+
+        let again = translator.line(r#"{"type":"control_cancel_request","request_id":"c1"}"#);
+        assert!(again.is_empty(), "{again:?}");
     }
 
     #[test]

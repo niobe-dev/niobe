@@ -663,6 +663,10 @@ impl SessionState {
                 self.pending_permissions.insert(id.clone());
             }
 
+            Event::PermissionWithdrawn { id } => {
+                self.pending_permissions.remove(id);
+            }
+
             Event::PermissionResponse { id, decision, .. } => {
                 self.pending_permissions.remove(id);
                 if !decision.allowed() {
@@ -786,6 +790,9 @@ impl SessionState {
 
     /// Ends the running turn, and records what it spent.
     fn end_turn(&mut self) {
+        // Nothing more comes until the next prompt, so a question the turn
+        // left open waits on nobody: an answer to it would reach nothing.
+        self.pending_permissions.clear();
         let ended = self.mark();
         let began = self.turn_began.take().unwrap_or(self.turn_last_ended);
         let five_hour_share = match self.window_reported {
@@ -1556,6 +1563,48 @@ mod tests {
         assert!(state.pending_permissions().is_empty());
         assert_eq!(state.permission_requests(), 1);
         assert_eq!(state.permissions_denied(), 1);
+    }
+
+    fn asked(id: &str) -> Event {
+        Event::PermissionRequest {
+            id: id.into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"ls"}"#.to_owned(),
+            target: Some("ls".to_owned()),
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn a_prompt_left_open_when_the_turn_ends_waits_on_nobody() {
+        let state = SessionState::replay(&[
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            asked("a"),
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "again".to_owned(),
+            },
+        ]);
+
+        assert!(state.pending_permissions().is_empty());
+        assert_eq!(state.permission_requests(), 1);
+    }
+
+    #[test]
+    fn a_withdrawn_prompt_waits_on_nobody_and_was_not_denied() {
+        let state = SessionState::replay(&[
+            asked("a"),
+            asked("b"),
+            Event::PermissionWithdrawn { id: "a".into() },
+        ]);
+
+        assert_eq!(
+            state.pending_permissions().iter().collect::<Vec<_>>(),
+            [&ToolCallId::from("b")]
+        );
+        assert_eq!(state.permissions_denied(), 0);
     }
 
     #[test]

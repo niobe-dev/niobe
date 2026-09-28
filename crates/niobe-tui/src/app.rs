@@ -1451,7 +1451,13 @@ impl App {
             // The working line reads the end off the fold; the transcript has
             // already shown everything the turn said. A turn's calls are not
             // grouped with the next turn's.
-            Event::TurnEnded => self.run = None,
+            // A question still open when the turn ended waits on nobody.
+            Event::TurnEnded => {
+                self.run = None;
+                self.forget_asks();
+            }
+
+            Event::PermissionWithdrawn { id } => self.withdraw_ask(id),
 
             Event::Error { message, fatal } => {
                 // A session that ended cannot take an answer, so a prompt it
@@ -1906,6 +1912,20 @@ impl App {
 
     /// Drops every prompt waiting, and whatever the operator had begun
     /// answering the one on screen with.
+    /// Takes the question about `id` off the queue, where it is still there:
+    /// the backend stopped asking it.
+    fn withdraw_ask(&mut self, id: &ToolCallId) {
+        let Some(at) = self.asks.iter().position(|ask| ask.id == *id) else {
+            return;
+        };
+        self.asks.remove(at);
+        if at == 0 {
+            self.ask_selected = 0;
+            self.ask_focus = AskFocus::Choosing;
+            self.ask_draft.clear();
+        }
+    }
+
     fn forget_asks(&mut self) {
         if self.asks.is_empty() {
             return;
@@ -5776,6 +5796,35 @@ mod tests {
         // Written in the box, not on the options: `n` selected nothing.
         assert_eq!(app.ask_selected(), Answer::Once);
         assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn a_question_left_open_by_a_turn_that_ended_is_not_waited_on() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&prompt(Some("rm -rf build")));
+        app.apply(&Event::TurnEnded);
+        let mut app = sent(app, "again");
+        app.take_produced();
+
+        assert!(app.asking().is_none(), "the question is still up");
+        assert_ne!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("waiting on you")
+        );
+    }
+
+    #[test]
+    fn a_question_the_backend_withdrew_is_taken_down() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+
+        assert!(app.asking().is_none());
+        assert_ne!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("waiting on you")
+        );
     }
 
     #[test]

@@ -36,6 +36,9 @@ pub(crate) enum Message {
     ControlRequest(ControlRequest),
     /// The CLI answering something Niobe asked it.
     ControlResponse(ControlResponse),
+    /// The CLI withdrawing a question it asked, as it does when the turn
+    /// waiting on the answer is interrupted.
+    ControlCancelRequest(CancelRequest),
     /// How much of the plan's usage windows is gone.
     RateLimitEvent(RateLimit),
     /// The conversation started over, as `/clear` starts it.
@@ -489,6 +492,13 @@ pub(crate) struct Window {
 pub(crate) struct ControlRequest {
     pub(crate) request_id: Option<String>,
     pub(crate) request: Option<ControlBody>,
+}
+
+/// A `control_cancel_request`: the `control_request` of this id is no
+/// longer waiting on an answer.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CancelRequest {
+    pub(crate) request_id: Option<String>,
 }
 
 /// What a `control_request` is asking.
