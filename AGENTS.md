@@ -203,7 +203,9 @@ These hold for every change. Breaking one is a bug even when the feature ships g
    file does not choose the default profile, its `[permissions]` rules answer no prompt, and it
    does not replace a profile the user's file defines, until the operator has trusted that
    file's contents.
-2. **No telemetry.** Network calls go only to configured providers and the CLIs.
+2. **No telemetry.** Network calls go only to configured providers and the CLIs. `cargo xtask
+   layering` fails on a network or TLS crate in the dependency tree, and on code that reads a
+   CLI's credentials file or sets a user agent.
 3. **The terminal is restored on every exit path**, including panics and SIGTERM. This is why the
    release profile keeps `panic = "unwind"`.
 4. **Every cost number is traceable to a `usage` field, or it is labelled** "estimate" /

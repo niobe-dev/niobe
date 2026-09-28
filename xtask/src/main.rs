@@ -9,6 +9,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod headers;
+mod network;
 mod version;
 
 use std::io::ErrorKind;
@@ -67,7 +68,8 @@ usage: cargo xtask <task>
 
 tasks:
     ci        fmt --check, clippy -D warnings, tests, layering, headers, versions, then size
-    layering  check that no crate depends on a workspace crate it may not name
+    layering  check that no crate depends on a workspace crate it may not name, that no
+              network crate is in the tree and that no code reads a CLI's credentials
     headers   check that every file carries the SPDX copyright header
     version   report what a release would be; --check that the manifest agrees with itself;
               <patch|minor|major|X.Y.Z> to move the workspace to that version
@@ -124,19 +126,71 @@ fn layering() -> Result<(), String> {
         }
     }
 
-    if violations.is_empty() {
-        println!(
-            "layering: {} crates, no forbidden edges",
-            ALLOWED_WORKSPACE_DEPS.len()
-        );
-        return Ok(());
+    if !violations.is_empty() {
+        return Err(format!(
+            "forbidden dependency edges:\n  {}\nthe crate graph is what keeps backend-specific \
+             types out of niobe-tui; widen ALLOWED_WORKSPACE_DEPS only on purpose",
+            violations.join("\n  ")
+        ));
+    }
+    println!(
+        "layering: {} crates, no forbidden edges",
+        ALLOWED_WORKSPACE_DEPS.len()
+    );
+    off_the_network()
+}
+
+/// Checks that nothing in the workspace can talk over the network or reach
+/// for a CLI's credentials: see [`network`].
+fn off_the_network() -> Result<(), String> {
+    let tree = cargo_output(&[
+        "tree",
+        "--workspace",
+        "--edges",
+        "normal,build",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+    ])?;
+    let crates = network::network_crates_in(&tree);
+    if !crates.is_empty() {
+        return Err(format!(
+            "network crates in the dependency tree: {}\nniobe makes no network calls of its \
+             own; the official CLIs are what talk to the providers (AGENTS.md §2)",
+            crates.join(", ")
+        ));
     }
 
-    Err(format!(
-        "forbidden dependency edges:\n  {}\nthe crate graph is what keeps backend-specific types \
-         out of niobe-tui; widen ALLOWED_WORKSPACE_DEPS only on purpose",
-        violations.join("\n  ")
-    ))
+    let listing = command_output(
+        "git",
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "crates",
+        ],
+    )?;
+    let mut marks = Vec::new();
+    for path in listing.split('\0').filter(|path| path.ends_with(".rs")) {
+        let source = match std::fs::read_to_string(workspace_root().join(path)) {
+            Ok(source) => source,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("cannot read {path}: {e}")),
+        };
+        marks.extend(network::credential_marks_in(path, &source));
+    }
+    if !marks.is_empty() {
+        return Err(format!(
+            "code that reads a CLI's credentials or sets a user agent:\n  {}\nonly the official \
+             binaries touch their credentials (AGENTS.md §2)",
+            marks.join("\n  ")
+        ));
+    }
+    println!("network: no network crates, no credential reads");
+    Ok(())
 }
 
 /// Checks every file git would publish — tracked, or untracked and not ignored
