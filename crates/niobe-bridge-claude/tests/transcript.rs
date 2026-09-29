@@ -416,6 +416,7 @@ fn a_read_back_sub_agent_ends_where_the_transcript_says_it_did() {
             ),
             "{id}"
         );
+        assert!(!reports.is_empty(), "{id} reported nothing");
         assert!(
             reports.iter().all(|at| *at < exit),
             "{id} reported after its end"

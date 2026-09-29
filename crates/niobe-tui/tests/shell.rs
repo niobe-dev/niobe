@@ -1673,7 +1673,7 @@ fn the_desktop_moves_between_the_panes_while_a_turn_runs() {
         "a running turn left the desktop blank"
     );
 
-    // Two tenths of a second later the strip has moved on.
+    // Two hundred seconds later the strip has moved on.
     app.tick(std::time::Instant::now() + Duration::from_secs(200), None);
     let later = gutter(&screen(&mut app, 120, 30));
     assert_ne!(first, later, "the desktop drew the same frame twice");

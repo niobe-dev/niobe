@@ -495,7 +495,13 @@ fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
             let _ = screen(&mut app, 200, 60);
             let started = Instant::now();
             app.on_paste(&text);
-            started.elapsed()
+            let took = started.elapsed();
+            assert_eq!(
+                app.composer().lines()[0].chars().count(),
+                100_000,
+                "the paste did not land whole, so its time says nothing"
+            );
+            took
         })
         .collect();
     times.sort_unstable();

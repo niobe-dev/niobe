@@ -6818,6 +6818,7 @@ mod tests {
             },
         ]);
 
+        assert!(!app.entries().is_empty());
         assert!(
             app.entries().iter().all(|entry| entry.at.is_none()),
             "a log that kept no times was stamped with the moment it was parsed"
@@ -7088,10 +7089,15 @@ mod tests {
             hunks: one_hunk(),
         });
 
+        let calls: Vec<_> = app
+            .entries()
+            .iter()
+            .flat_map(|entry| &entry.calls)
+            .collect();
+        assert!(!calls.is_empty());
         assert!(
-            app.entries()
+            calls
                 .iter()
-                .flat_map(|entry| &entry.calls)
                 .all(|call| call.change.is_none() && call.lines.is_none())
         );
     }
@@ -7837,36 +7843,5 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-    }
-
-    #[test]
-    #[allow(clippy::print_stdout)]
-    fn one_line_performance_benchmark() {
-        let sample_inputs = [
-            "",
-            "   \t\n\r  ",
-            "short_arg",
-            "   hello   world   from   niobe   tui   ",
-            "{\n  \"command\": \"cargo test\",\n  \"args\": [\n    \"--workspace\",\n    \"--all-targets\"\n  ],\n  \"env\": {\n    \"RUST_LOG\": \"info\"\n  }\n}",
-        ];
-        let iterations = if std::env::var_os("BENCHMARK").is_some() {
-            200_000
-        } else {
-            1
-        };
-        let start = Instant::now();
-        for _ in 0..iterations {
-            for input in &sample_inputs {
-                std::hint::black_box(one_line(std::hint::black_box(input)));
-            }
-        }
-        let elapsed = start.elapsed();
-        if std::env::var_os("BENCHMARK").is_some() {
-            println!(
-                "Benchmark: {} total calls took {:?}",
-                iterations * sample_inputs.len(),
-                elapsed
-            );
-        }
     }
 }

@@ -155,14 +155,22 @@ mod tests {
         assert_eq!(shares(&[5, 4, 4]).iter().sum::<u64>(), 100);
     }
 
-    /// A model that spent under half a percent is not rounded to nothing while
-    /// the column still adds up: the leftovers are handed out by remainder, so
-    /// the smallest row can be the one that gets one.
+    /// The column always adds up to 100, so a model that spent under half a
+    /// percent can round to nothing when the others take every point.
     #[test]
-    fn a_tiny_share_is_still_a_share() {
+    fn a_share_under_half_a_percent_can_round_to_zero() {
         let apportioned = shares(&[99_600, 200, 200]);
         assert_eq!(apportioned.iter().sum::<u64>(), 100);
         assert_eq!(apportioned, vec![100, 0, 0]);
+    }
+
+    /// The points left over after rounding down go by remainder, so a smaller
+    /// row can be the one that gets one.
+    #[test]
+    fn the_points_left_over_go_to_the_largest_remainders() {
+        let apportioned = shares(&[5, 4, 4]);
+        assert_eq!(apportioned.iter().sum::<u64>(), 100);
+        assert_eq!(apportioned, vec![38, 31, 31]);
     }
 
     #[test]

@@ -2275,20 +2275,31 @@ mod tests {
         );
     }
 
+    /// Folding is a function of the events alone: the same events folded in
+    /// two runs, into a state that has already folded the first of them,
+    /// land where folding them all in one does.
     #[test]
-    fn replaying_the_same_events_twice_lands_in_the_same_place() {
+    fn folding_events_in_two_runs_lands_where_folding_them_in_one_does() {
         let events = vec![
             Event::UserMessage {
                 text: "add etags".to_owned(),
             },
             usage(1_000, 100, Some(0.04)),
-            Event::Decision {
-                summary: "Reuse the existing LRU".to_owned(),
-                rationale: None,
-                rejected: vec!["A second Map".to_owned()],
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "and the tests".to_owned(),
             },
+            usage(500, 50, None),
         ];
-        assert_eq!(SessionState::replay(&events), SessionState::replay(&events));
+        let (first, second) = events.split_at(3);
+        let mut state = SessionState::replay(first);
+        for event in second {
+            state.apply(event);
+        }
+
+        assert_eq!(state, SessionState::replay(&events));
+        assert_eq!(state.turns().len(), 1);
+        assert_eq!(state.totals().records, 2);
     }
 
     fn prompt() -> Event {

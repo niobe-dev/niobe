@@ -59,6 +59,8 @@ mod tests {
 
     #[test]
     fn drives_the_official_binary() {
+        let options = Options::new("/repo", "max");
+        assert_eq!(options.binary, std::path::PathBuf::from(BINARY));
         assert_eq!(BINARY, "claude");
     }
 }
