@@ -67,7 +67,8 @@ fn main() -> ExitCode {
 usage: cargo xtask <task>
 
 tasks:
-    ci        fmt --check, clippy -D warnings, tests, layering, headers, versions, then size
+    ci        fmt --check, clippy, tests, layering, headers, versions, shellcheck, then size,
+              with RUSTFLAGS denying warnings as CI does
     layering  check that no crate depends on a workspace crate it may not name, that no
               network crate is in the tree and that no code reads a CLI's credentials
     headers   check that every file carries the SPDX copyright header
@@ -89,6 +90,11 @@ tasks:
 }
 
 fn ci() -> Result<(), String> {
+    // CI sets `RUSTFLAGS: -D warnings` for every job, so a warning outside
+    // clippy's reach — a build script's, a test target's — fails it there;
+    // the local run has to refuse the same warnings to be the same gate.
+    let rustflags = denying_warnings(std::env::var("RUSTFLAGS").ok().as_deref());
+    let cargo = |args: &[&str]| cargo_with(args, Some(&rustflags));
     cargo(&["fmt", "--all", "--check"])?;
     cargo(&[
         "clippy",
@@ -110,7 +116,37 @@ fn ci() -> Result<(), String> {
     layering()?;
     headers()?;
     version::run(&["--check".to_owned()])?;
+    shellcheck()?;
     size().map(|_| ())
+}
+
+/// `flags` with `-D warnings` added, unless they already deny warnings.
+fn denying_warnings(flags: Option<&str>) -> String {
+    match flags.map(str::trim).filter(|flags| !flags.is_empty()) {
+        Some(flags) if flags.contains("-D warnings") => flags.to_owned(),
+        Some(flags) => format!("{flags} -D warnings"),
+        None => "-D warnings".to_owned(),
+    }
+}
+
+/// Lints `install.sh` as the POSIX `sh` it is run with. CI runs this on the
+/// Ubuntu image, which has shellcheck; a machine without it says it skipped
+/// the check rather than failing a gate it cannot run.
+fn shellcheck() -> Result<(), String> {
+    println!("$ shellcheck -s sh install.sh");
+    match Command::new("shellcheck")
+        .args(["-s", "sh", "install.sh"])
+        .current_dir(workspace_root())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("shellcheck -s sh install.sh failed with {status}")),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            println!("shellcheck is not installed: install.sh was not linted");
+            Ok(())
+        }
+        Err(e) => Err(format!("failed to run shellcheck: {e}")),
+    }
 }
 
 /// Checks every workspace crate's dependency tree against
@@ -425,10 +461,19 @@ pub(crate) fn command_output(program: &str, args: &[&str]) -> Result<String, Str
 }
 
 fn cargo(args: &[&str]) -> Result<(), String> {
-    let cargo = cargo_program();
+    cargo_with(args, None)
+}
+
+/// Runs cargo with `RUSTFLAGS` set to `rustflags` where it is given, and
+/// with the caller's environment otherwise.
+fn cargo_with(args: &[&str], rustflags: Option<&str>) -> Result<(), String> {
     println!("$ cargo {}", args.join(" "));
 
-    let status = Command::new(cargo)
+    let mut command = Command::new(cargo_program());
+    if let Some(rustflags) = rustflags {
+        command.env("RUSTFLAGS", rustflags);
+    }
+    let status = command
         .args(args)
         .current_dir(workspace_root())
         .status()
@@ -444,6 +489,17 @@ fn cargo(args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gate_denies_warnings_whatever_rustflags_already_hold() {
+        assert_eq!(denying_warnings(None), "-D warnings");
+        assert_eq!(denying_warnings(Some("  ")), "-D warnings");
+        assert_eq!(
+            denying_warnings(Some("-C target-cpu=native")),
+            "-C target-cpu=native -D warnings"
+        );
+        assert_eq!(denying_warnings(Some("-D warnings")), "-D warnings");
+    }
 
     /// What `cargo tree --prefix none --format {p}` prints, cut down.
     const TREE: &str = "\

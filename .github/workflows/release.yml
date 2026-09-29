@@ -21,9 +21,30 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Read-only by default; the one job that publishes asks for more.
+permissions:
+  contents: read
+
 jobs:
+  # The whole gate, on the commit the tag names: a tag pushed on a commit CI
+  # never saw green, or saw red, publishes nothing.
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: The gate
+        run: cargo xtask ci
+
   build:
     name: ${{ matrix.target }}
+    needs: gate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -42,7 +63,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: The tag names the workspace version
         if: startsWith(github.ref, 'refs/tags/')
@@ -76,6 +97,12 @@ jobs:
         if: matrix.target != 'x86_64-apple-darwin'
         run: target/${{ matrix.target }}/release/niobe --version
 
+      # The Intel build is cross-compiled on the Apple-silicon runner, and
+      # runs there under Rosetta.
+      - name: The Intel macOS binary starts
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: arch -x86_64 target/${{ matrix.target }}/release/niobe --version
+
       - name: Package
         shell: bash
         run: |
@@ -84,7 +111,7 @@ jobs:
           shasum -a 256 "$archive" > "$archive.sha256"
           cat "$archive.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: niobe-${{ matrix.target }}
           path: niobe-${{ matrix.target }}.tar.gz*
@@ -98,9 +125,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true

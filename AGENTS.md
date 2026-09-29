@@ -352,7 +352,8 @@ cargo xtask version --check
 cargo xtask size
 ```
 
-`cargo xtask ci` runs the same sequence with `fmt --check`, exactly as CI does.
+`cargo xtask ci` runs the same sequence with `fmt --check` and `RUSTFLAGS` denying warnings,
+exactly as CI does, and lints `install.sh` with `shellcheck -s sh` where shellcheck is installed.
 
 **Definition of done**: the gate is green, every acceptance criterion of the change has passed
 RED-GREEN-REFACTOR, and the work is committed (§7.9). If a subagent reports a failure as

@@ -13,7 +13,9 @@
 #                       GitHub; any URL curl can read, file:// included
 #
 # The archive is checked against the SHA-256 published beside it before
-# anything is installed, and nothing outside the install directory is touched:
+# anything is installed. The checksum comes from the same place as the archive,
+# so it catches a download that arrived damaged or cut short, not one replaced
+# where it is published. Nothing outside the install directory is touched:
 # no shell profile is edited, no sudo is asked for.
 #
 # POSIX sh only, and the whole script is one function called on its last line,
