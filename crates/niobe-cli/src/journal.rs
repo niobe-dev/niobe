@@ -218,8 +218,13 @@ mod tests {
         mode(&path, 0o444);
         mode(path.parent().expect("the store has a directory"), 0o555);
         if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
-            // Permissions do not bind this user, as for root.
+            // Permissions do not bind this user, as for root. A check this
+            // machine cannot make, which a CI runner must be able to.
             mode(path.parent().expect("the store has a directory"), 0o755);
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "file permissions do not bind this user, so a read-only store cannot be tested"
+            );
             return;
         }
 

@@ -177,6 +177,12 @@ impl ReadOnly {
             file: file.to_path_buf(),
         };
         let binds = std::fs::OpenOptions::new().write(true).open(file).is_err();
+        // A check this machine cannot make, which a CI runner must be able
+        // to: skipped quietly there, it would be a pass that proved nothing.
+        assert!(
+            binds || std::env::var_os("CI").is_none(),
+            "file permissions do not bind this user, so a read-only store cannot be tested"
+        );
         binds.then_some(guard)
     }
 }
@@ -193,6 +199,7 @@ impl Drop for ReadOnly {
 /// an error that says so, rather than opened and quietly keeping nothing.
 /// SQLite cannot read a write-ahead-logged file from a directory it cannot
 /// create the file's shared-memory index in, so the refusal covers reading too.
+#[cfg(unix)]
 #[test]
 fn a_read_only_store_is_refused_with_an_error_that_says_so() {
     let (_dir, path) = scratch();

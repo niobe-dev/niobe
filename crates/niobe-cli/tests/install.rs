@@ -242,7 +242,15 @@ fn the_installer_falls_back_to_wget_and_shasum() {
     let digest = match (system_tool(&["sha256sum"]), system_tool(&["shasum"])) {
         (Some(sum), _) => format!("'{}' \"$3\"", sum.display()),
         (None, Some(sum)) => format!("'{}' -a 256 \"$3\"", sum.display()),
-        (None, None) => return,
+        (None, None) => {
+            // A check this machine cannot make, which a CI runner must be
+            // able to: skipped quietly there, it would prove nothing.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "this machine has neither sha256sum nor shasum to stand in for"
+            );
+            return;
+        }
     };
     script(
         &tools.join("shasum"),

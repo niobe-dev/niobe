@@ -219,6 +219,12 @@ fn the_session_list_reads_a_store_that_cannot_be_written() {
     set(&dir, 0o755);
     set(&store, 0o644);
     if !binds {
+        // A check this machine cannot make, which a CI runner must be able
+        // to: skipped quietly there, it would be a pass that proved nothing.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "file permissions do not bind this user, so a read-only store cannot be tested"
+        );
         return;
     }
 

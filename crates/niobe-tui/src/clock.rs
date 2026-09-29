@@ -370,9 +370,20 @@ mod tests {
     /// not land on a boundary, and far from any daylight-saving change.
     const A_MOMENT: Duration = Duration::from_secs(1_789_000_020);
 
+    /// A machine with no timezone makes the two tests below prove nothing;
+    /// a CI runner always has one, so there it is a failure rather than a
+    /// quiet pass.
+    fn a_zone_where_ci_runs(clock: &Clock) {
+        assert!(
+            clock.knows_the_zone() || std::env::var_os("CI").is_none(),
+            "this machine names no timezone, so a time of day cannot be tested"
+        );
+    }
+
     #[test]
     fn a_stamp_has_a_time_of_day_exactly_when_the_machine_named_a_timezone() {
         let clock = Clock::system();
+        a_zone_where_ci_runs(&clock);
         let stamp = clock.at(SystemTime::UNIX_EPOCH + A_MOMENT);
 
         assert_eq!(stamp.local().is_some(), clock.knows_the_zone());
@@ -381,6 +392,7 @@ mod tests {
     #[test]
     fn a_stamp_a_minute_later_reads_a_minute_later_on_the_clock() {
         let clock = Clock::system();
+        a_zone_where_ci_runs(&clock);
         let at = SystemTime::UNIX_EPOCH + A_MOMENT;
         let (Some(first), Some(later)) = (
             clock.at(at).local(),

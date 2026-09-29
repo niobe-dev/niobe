@@ -552,8 +552,10 @@ fn the_installed_cli_is_a_release_these_recordings_cover() {
         .output()
     else {
         // The CLI is not on this machine, which is every CI runner: there is
-        // no installed release to check the recordings against, and saying so
-        // beats a green tick that means nothing.
+        // no installed release to check the recordings against, and the test
+        // passes having checked nothing. The line below says so only where
+        // output is shown (`cargo test -- --nocapture`); where the CLI is
+        // installed, as on a developer's machine, the check runs.
         println!("skipped: the `claude` CLI is not installed here");
         return;
     };
