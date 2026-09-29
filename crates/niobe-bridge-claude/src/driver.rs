@@ -624,6 +624,21 @@ impl Session {
         ))
     }
 
+    /// Asks the CLI to stop the turn it is running.
+    ///
+    /// The session and its conversation are kept, as they are when Esc stops
+    /// a turn in the CLI's own interface. Recorded from 2.1.285 in
+    /// `tests/fixtures/interrupted.jsonl`: the CLI answers the request, cuts
+    /// off the call running or the reply being written, and closes the turn
+    /// with a `result` whose `terminal_reason` says it was aborted.
+    pub fn interrupt(&mut self) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "interrupt" }),
+        ))
+    }
+
     /// Queues one control request for the CLI's standard input.
     fn ask(&mut self, request: &serde_json::Value) -> std::io::Result<()> {
         self.queue(request.to_string(), "request")

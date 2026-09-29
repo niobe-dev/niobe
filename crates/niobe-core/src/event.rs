@@ -350,6 +350,9 @@ pub enum ToolOutcome {
     Failed,
     /// The user denied the permission request that gated the call.
     Denied,
+    /// The operator stopped the turn before the call ran to its end: it was
+    /// cut off while running, or never started.
+    Interrupted,
 }
 
 /// The answer to a permission request.

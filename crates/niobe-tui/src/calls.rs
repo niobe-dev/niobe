@@ -384,6 +384,7 @@ fn reason(call: &Call, room: usize, theme: &Theme) -> Line<'static> {
         None => (
             match call.outcome {
                 Some(ToolOutcome::Denied) => "not allowed to run; no reason was given",
+                Some(ToolOutcome::Interrupted) => "stopped by the operator",
                 Some(ToolOutcome::Failed | ToolOutcome::Ok) | None => {
                     "the call failed and the backend said nothing about why"
                 }
@@ -506,6 +507,7 @@ fn result(call: &Call, theme: &Theme) -> Vec<Span<'static>> {
     };
     let mut spans = match (outcome, call.exit_code, call.lines) {
         (ToolOutcome::Denied, _, _) => return vec![Span::styled("denied", theme_del(theme))],
+        (ToolOutcome::Interrupted, _, _) => vec![Span::styled("stopped", dim)],
         (ToolOutcome::Failed, Some(status), _) => {
             vec![Span::styled(format!("exit {status}"), theme_del(theme))]
         }

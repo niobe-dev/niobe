@@ -340,6 +340,10 @@ impl Bridge for Claude {
         self.0.set_model(model).map_err(BridgeError::from)
     }
 
+    fn interrupt(&mut self) -> Result<(), BridgeError> {
+        self.0.interrupt().map_err(BridgeError::from)
+    }
+
     fn drain(&mut self) -> Vec<Event> {
         self.0.drain()
     }

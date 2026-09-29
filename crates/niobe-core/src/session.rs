@@ -627,6 +627,9 @@ impl SessionState {
                         bump(self.tools.failed_by_name.entry(name.clone()).or_default());
                     }
                     ToolOutcome::Denied => bump(&mut self.tools.denied),
+                    // The operator's own stop: the tool neither failed nor
+                    // was refused, so it counts against neither.
+                    ToolOutcome::Interrupted => {}
                 }
                 if self.in_flight_tools.remove(id).is_none() {
                     bump(&mut self.tools.unmatched_ends);

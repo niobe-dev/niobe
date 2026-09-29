@@ -1032,8 +1032,13 @@ IN THE SHELL:
     read, runs until it ends, Ctrl+G stops it or niobe quits, and is kept in
     the session as a call, with the end of what it printed shown under it. A
     stopped command is asked to end, killed if it has not two seconds later,
-    and its call ends as stopped by the operator. Ctrl+C quits, as always.
+    and its call ends as stopped by the operator. Ctrl+C does not stop one.
     The agent is not told it ran and does not see what it printed.
+    Esc, Ctrl+C            While a turn runs, stop it: the call it is running
+                           or the reply it is writing is cut off, and the
+                           session stays for the next prompt. A second Ctrl+C
+                           in the same turn quits; with no turn running,
+                           Ctrl+C quits at once and Esc leads to an F-key
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
     F1, Esc 1              Say which keys move around the shell
     F5, Esc 5              On a plan, say when its usage windows come back

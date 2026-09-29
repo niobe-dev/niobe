@@ -1051,6 +1051,13 @@ pub struct App {
     should_quit: bool,
     /// Whether the operator pressed Ctrl+Z since the loop last asked.
     suspend: bool,
+    /// Whether the operator asked the running turn to stop since the loop
+    /// last asked.
+    interrupt: bool,
+    /// The turn a stop was asked for, counted as the turns that had ended
+    /// before it, so a second Ctrl+C in the same turn quits and one in the
+    /// next turn stops that turn.
+    stop_asked_in: Option<usize>,
 }
 
 /// A search through the transcript, from `/` on an empty composer to Esc.
@@ -1224,6 +1231,8 @@ impl App {
             held: None,
             should_quit: false,
             suspend: false,
+            interrupt: false,
+            stop_asked_in: None,
         }
     }
 
@@ -3450,6 +3459,43 @@ impl App {
         std::mem::take(&mut self.suspend)
     }
 
+    /// Whether the operator asked the running turn to stop since this was
+    /// last asked. The loop hands it to the backend, which ends the turn and
+    /// keeps the session.
+    pub fn take_interrupt(&mut self) -> bool {
+        std::mem::take(&mut self.interrupt)
+    }
+
+    /// Asks the running turn to stop, once per turn.
+    fn stop_turn(&mut self) {
+        let turn = self.session.turns().len();
+        if self.stop_asked_in != Some(turn) {
+            self.stop_asked_in = Some(turn);
+            self.interrupt = true;
+        }
+        self.hint = Some(STOPPING_HINT.to_owned());
+    }
+
+    /// Whether a stop has been asked for the turn that is running.
+    fn stopping(&self) -> bool {
+        self.working() && self.stop_asked_in == Some(self.session.turns().len())
+    }
+
+    /// Says in the transcript that the backend did not take a stop, so the
+    /// turn runs on.
+    pub fn not_stopped(&mut self, error: &str) {
+        self.push(Entry {
+            kind: EntryKind::Failure,
+            head: "not stopped".to_owned(),
+            meta: "turn".to_owned(),
+            body: format!("The backend did not take the stop, so the turn runs on: {error}"),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
     /// Records what the last draw measured, so that paging moves by a screen
     /// the operator actually saw rather than by a guess.
     pub fn measured(&mut self, transcript_lines: usize, viewport_lines: usize) {
@@ -3714,6 +3760,16 @@ impl App {
         // Quitting is always available: a session with a prompt up is still a
         // session the operator may need to leave, and the backend is told the
         // same way it is told about any other way out.
+        // Except that Ctrl+C is what an operator presses to stop a thing: with
+        // a turn running it stops the turn, and only a second press — or one
+        // with nothing running — ends the session.
+        if (key.code, key.modifiers) == (KeyCode::Char('c'), KeyModifiers::CONTROL)
+            && self.working()
+            && !self.stopping()
+        {
+            self.stop_turn();
+            return;
+        }
         if let (KeyCode::F(10), _) | (KeyCode::Char('q' | 'c'), KeyModifiers::CONTROL) =
             (key.code, key.modifiers)
         {
@@ -3820,6 +3876,13 @@ impl App {
             // An Esc nothing else wanted leaves the composer as it is and
             // makes the next digit an F-key, which is how the bar's actions
             // are reached where the F-keys never arrive.
+            // With a turn running, it stops the turn instead, as it does in
+            // the CLI's own interface: stopping the agent is the more urgent
+            // of the two, and the F-keys are there again once the turn ends.
+            (KeyCode::Esc, _) if self.working() => {
+                self.focus = Focus::Session;
+                self.stop_turn();
+            }
             (KeyCode::Esc, _) => {
                 self.focus = Focus::Session;
                 self.escaped = true;
@@ -4373,6 +4436,9 @@ fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
     composer.set_cursor_line_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
     composer.set_cursor_style(Style::new().fg(theme.pane_bg).bg(theme.hot));
 }
+
+/// What the bar says once a stop of the running turn has been asked for.
+const STOPPING_HINT: &str = "Stopping the turn · Ctrl+C again quits";
 
 /// What the shell says once Esc has made the next digit an F-key.
 const ESCAPED_HINT: &str = "Esc — a digit now presses its F-key: 1 Help · 5 Usage · 6 Files · \
@@ -6410,6 +6476,86 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(4_096), "4.0 kB");
         assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    fn ctrl_c() -> ratatui::crossterm::event::KeyEvent {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn esc_during_a_running_turn_asks_the_backend_to_stop_it() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Esc));
+
+        assert!(app.take_interrupt(), "nothing asked the turn to stop");
+        assert!(!app.take_interrupt(), "the stop is asked for once");
+        assert!(!app.should_quit());
+        assert!(
+            !app.escaped,
+            "the next digit would press an F-key rather than type"
+        );
+    }
+
+    #[test]
+    fn esc_with_no_turn_running_is_still_the_way_to_the_f_keys() {
+        let mut app = app().attached();
+
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Esc));
+
+        assert!(!app.take_interrupt());
+        assert!(app.escaped);
+    }
+
+    #[test]
+    fn ctrl_c_stops_a_running_turn_first_and_quits_on_the_second_press() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+
+        app.on_key(ctrl_c());
+        assert!(app.take_interrupt());
+        assert!(!app.should_quit(), "the first Ctrl+C ended the session");
+
+        app.on_key(ctrl_c());
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_c_with_no_turn_running_quits_at_once() {
+        let mut app = app().attached();
+
+        app.on_key(ctrl_c());
+
+        assert!(app.should_quit());
+        assert!(!app.take_interrupt());
+    }
+
+    #[test]
+    fn a_turn_that_ended_after_a_stop_lets_the_next_turn_be_stopped_too() {
+        let mut app = sent(app().attached(), "go");
+        app.on_key(ctrl_c());
+        app.take_interrupt();
+        app.apply(&Event::TurnEnded);
+        let mut app = sent(app, "again");
+        app.take_produced();
+
+        app.on_key(ctrl_c());
+
+        assert!(app.take_interrupt());
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_stop_the_backend_would_not_take_is_said_in_the_transcript() {
+        let mut app = sent(app().attached(), "go");
+
+        app.not_stopped("the pipe is closed");
+
+        let last = app.entries().last().expect("an entry");
+        assert_eq!(last.kind, EntryKind::Failure);
+        assert!(last.body.contains("the pipe is closed"), "{}", last.body);
     }
 
     fn sent(mut app: App, prompt: &str) -> App {

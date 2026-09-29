@@ -1587,3 +1587,67 @@ fn a_withdrawn_prompt_and_a_budgets_end_fold_as_the_fixtures_readme_says() {
         "the budget's end did not say what stopped the turn: {events:#?}"
     );
 }
+
+fn interrupted() -> Vec<Event> {
+    translate(include_str!("fixtures/interrupted.jsonl"))
+}
+
+/// Two turns the operator stopped — one while a command ran, one while the
+/// reply was being written — and a third that ran to its end, as the README
+/// beside the recording lays out.
+#[test]
+fn a_recorded_turn_the_operator_stopped_ends_and_reads_as_stopped_rather_than_failed() {
+    use niobe_core::event::ToolOutcome;
+
+    let events = interrupted();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::TurnEnded))
+            .count(),
+        3
+    );
+    let outcomes: Vec<(&str, ToolOutcome)> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolCallEnd { id, outcome, .. } => Some((id.as_str(), *outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [("toolu_013GGPoispcXD3cJuo1J8vgh", ToolOutcome::Interrupted)]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Error { .. })),
+        "a stop the operator asked for read as a failure: {events:?}"
+    );
+    let stopped = notices(&events)
+        .into_iter()
+        .filter(|notice| notice.contains("stopped"))
+        .count();
+    assert_eq!(stopped, 2, "{events:?}");
+}
+
+/// The tokens are what the CLI reported in the end: its running totals after
+/// the third turn. The turn stopped while the reply was written reports none
+/// — its `result` carries zeros and `modelUsage` does not move.
+#[test]
+fn a_recorded_session_with_stopped_turns_counts_the_tokens_the_cli_reported() {
+    let state = SessionState::replay(&interrupted());
+    let totals = state.totals();
+
+    assert_eq!(totals.input, 4);
+    assert_eq!(totals.output, 129);
+    assert_eq!(totals.cache_read, 31_168);
+    assert_eq!(totals.cache_write, 11_349);
+    assert!(
+        (totals.reported_cost_usd - 0.052_927_6).abs() < 1e-9,
+        "{}",
+        totals.reported_cost_usd
+    );
+    assert_eq!(state.turns().len(), 3);
+}

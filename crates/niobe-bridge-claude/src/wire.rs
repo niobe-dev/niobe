@@ -152,9 +152,33 @@ pub(crate) struct Envelope {
     /// it.
     #[serde(default)]
     pub(crate) tool_use_result: Option<serde_json::Value>,
+    /// On a `user` line that carries a tool result for a call that did not
+    /// run to its end: why, per call. Only the live stream carries it — the
+    /// CLI's own transcripts leave it out.
+    #[serde(default)]
+    pub(crate) tool_result_meta: Vec<ResultMeta>,
+}
+
+/// Why one tool call did not run, as the CLI says beside its result.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResultMeta {
+    pub(crate) id: Option<String>,
+    /// `user-rejected` for a call cut off by an interrupt, `permission-rule`
+    /// for one refused over the control channel, as recorded from 2.1.278 and
+    /// 2.1.285.
+    pub(crate) non_execution_kind: Option<String>,
 }
 
 impl Envelope {
+    /// Whether the call `id` did not run to its end because the operator
+    /// stopped the turn it was in.
+    pub(crate) fn interrupted(&self, id: &str) -> bool {
+        self.tool_result_meta.iter().any(|meta| {
+            meta.id.as_deref() == Some(id)
+                && meta.non_execution_kind.as_deref() == Some("user-rejected")
+        })
+    }
+
     /// Whether the tool this line answers started work that carries on after
     /// the call returned: a sub-agent the CLI ran in the background, whose
     /// end the CLI reports later as a `system`/`task_notification`.
@@ -576,6 +600,20 @@ pub(crate) struct Outcome {
     /// budget it stopped on says it here and leaves `result` out.
     #[serde(default)]
     pub(crate) errors: Vec<String>,
+    /// How the turn came to an end: `completed`, or `aborted_tools` and
+    /// `aborted_streaming` for a turn an interrupt stopped while a call ran
+    /// and while a reply was being written, as recorded from 2.1.285.
+    pub(crate) terminal_reason: Option<String>,
+}
+
+impl Outcome {
+    /// Whether the turn ended because it was interrupted, which is how the
+    /// operator stops one.
+    pub(crate) fn interrupted(&self) -> bool {
+        self.terminal_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("aborted"))
+    }
 }
 
 /// What one model has cost the session so far.

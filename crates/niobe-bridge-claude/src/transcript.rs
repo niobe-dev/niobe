@@ -824,6 +824,7 @@ impl Fold {
             },
             parent_tool_use_id: parent.clone(),
             tool_use_result: None,
+            tool_result_meta: Vec::new(),
         }));
 
         // Counted here only where the session was never priced. A message
@@ -918,6 +919,9 @@ impl Fold {
             },
             parent_tool_use_id: agent.map(str::to_owned),
             tool_use_result: record.tool_use_result,
+            // The CLI keeps no note of why a call did not run in its own
+            // transcripts; an interrupted call reads as a failed one there.
+            tool_result_meta: Vec::new(),
         }));
     }
 
@@ -977,6 +981,7 @@ impl Fold {
             permission_denials: Vec::new(),
             result: None,
             errors: Vec::new(),
+            terminal_reason: None,
         }));
     }
 

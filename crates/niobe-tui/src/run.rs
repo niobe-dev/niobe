@@ -444,6 +444,15 @@ fn send_produced(
         }
     }
 
+    // After the turn it is about has been sent, and before anything is
+    // drawn, so a stop is on its way while the bar says it is.
+    if app.take_interrupt()
+        && app.is_attached()
+        && let Err(error) = backend.interrupt()
+    {
+        app.not_stopped(&error.to_string());
+    }
+
     // After the answers, because a rule is made by answering: a rule that
     // could not be kept is reported under the decision it came from.
     for rule in app.take_rules() {
@@ -557,6 +566,7 @@ mod tests {
         said: Vec<Option<String>>,
         modes: Vec<Mode>,
         models: Vec<String>,
+        interrupts: usize,
         produces: Vec<SessionEvent>,
         refuse: bool,
     }
@@ -597,6 +607,14 @@ mod tests {
                 return Err("the subprocess has gone".into());
             }
             self.models.push(model.to_owned());
+            Ok(())
+        }
+
+        fn interrupt(&mut self) -> Result<(), BridgeError> {
+            if self.refuse {
+                return Err("the subprocess has gone".into());
+            }
+            self.interrupts += 1;
             Ok(())
         }
 
@@ -1182,6 +1200,38 @@ mod tests {
             [SessionEvent::ModeSelected { mode: Mode::Auto }],
             "a resumed session would start the backend in the mode it was moved off"
         );
+    }
+
+    #[test]
+    fn esc_during_a_running_turn_reaches_the_backend_as_one_stop() {
+        let mut app = app_with_a_sent_prompt();
+        let mut backend = Attached::default();
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        assert_eq!(backend.interrupts, 1);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_stop_the_backend_would_not_take_says_the_turn_runs_on() {
+        let mut app = app_with_a_sent_prompt();
+        let mut backend = Attached::default();
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+        backend.refuse = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        let entry = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "not stopped")
+            .expect("the failure is on screen");
+        assert!(entry.body.ends_with("the subprocess has gone"), "{entry:?}");
     }
 
     #[test]

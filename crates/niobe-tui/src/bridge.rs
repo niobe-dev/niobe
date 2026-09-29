@@ -67,6 +67,17 @@ pub trait Bridge: std::fmt::Debug {
         Err("this backend cannot be asked to change model".into())
     }
 
+    /// Asks the backend to stop the turn it is running, keeping the session
+    /// and everything said so far.
+    ///
+    /// Returns once the backend has the request; the turn's end arrives
+    /// through [`Bridge::drain`] like any other. The default refuses, for the
+    /// reason [`Bridge::answer`] does: a stop nobody took must be reported, or
+    /// the operator would wait on a turn that is not stopping.
+    fn interrupt(&mut self) -> Result<(), BridgeError> {
+        Err("this backend cannot be asked to stop a turn".into())
+    }
+
     /// Everything the backend has produced since the last call, oldest first.
     /// Never blocks; an empty answer means nothing has arrived yet, never that
     /// the session is over.

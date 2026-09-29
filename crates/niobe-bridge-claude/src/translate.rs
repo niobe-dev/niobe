@@ -109,6 +109,12 @@ const AGENT_TOOLS: [&str; 2] = ["Agent", "Task"];
 /// cent is below anything a screen shows and far above that error.
 const COST_TOLERANCE_USD: f64 = 0.000_05;
 
+/// Why a call an interrupt cut off did not run to its end.
+const STOPPED: &str = "stopped by the operator";
+
+/// What the transcript says of a turn an interrupt ended.
+const STOPPED_TURN: &str = "The turn was stopped by the operator.";
+
 /// Whether a sub-agent this session spawned is still working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Running {
@@ -1017,6 +1023,12 @@ impl Translator {
 
     fn user(&mut self, envelope: wire::Envelope, out: &mut Vec<Event>) {
         let background = envelope.launched_in_background();
+        let interrupted: Vec<String> = envelope
+            .tool_result_meta
+            .iter()
+            .filter_map(|meta| meta.id.clone())
+            .filter(|id| envelope.interrupted(id))
+            .collect();
         let reported = envelope.tool_use_result;
         let Some(wire::Content::Blocks(blocks)) = envelope.message.content else {
             // A `user` message with plain text is the turn Niobe itself wrote,
@@ -1057,13 +1069,18 @@ impl Translator {
             // run. What says which came first: the `permission_denied` the CLI
             // sends for a refusal of its own, or the driver's word for one
             // made over the control channel.
+            // An interrupt reaches the model as a rejection, which says
+            // nothing the operator does not know; the CLI's note beside the
+            // result is what says it was their stop.
             let outcome = match (
                 is_error.unwrap_or(false),
                 self.denied.contains_key(&tool_use_id),
+                interrupted.contains(&tool_use_id),
             ) {
-                (_, true) => ToolOutcome::Denied,
-                (true, false) => ToolOutcome::Failed,
-                (false, false) => ToolOutcome::Ok,
+                (_, true, _) => ToolOutcome::Denied,
+                (_, false, true) => ToolOutcome::Interrupted,
+                (true, false, false) => ToolOutcome::Failed,
+                (false, false, false) => ToolOutcome::Ok,
             };
 
             // A sub-agent the CLI ran in the background is still working when
@@ -1077,6 +1094,7 @@ impl Translator {
                     match outcome {
                         ToolOutcome::Ok => AgentOutcome::Completed,
                         ToolOutcome::Failed | ToolOutcome::Denied => AgentOutcome::Failed,
+                        ToolOutcome::Interrupted => AgentOutcome::Cancelled,
                     },
                     out,
                 );
@@ -1087,12 +1105,13 @@ impl Translator {
             // diff.
             let change = match outcome {
                 ToolOutcome::Ok => self.file_change(&name, &arguments, &output, reported.as_ref()),
-                ToolOutcome::Failed | ToolOutcome::Denied => None,
+                ToolOutcome::Failed | ToolOutcome::Denied | ToolOutcome::Interrupted => None,
             };
             let exit_code = exit_code(&name, outcome, &output, reported.as_ref());
             let error = match outcome {
                 ToolOutcome::Ok => None,
                 ToolOutcome::Failed | ToolOutcome::Denied => failure_reason(&output, exit_code),
+                ToolOutcome::Interrupted => Some(STOPPED.to_owned()),
             };
 
             let tested = test_run(
@@ -1418,6 +1437,7 @@ impl Translator {
     }
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
+        let interrupted = outcome.interrupted();
         self.reconcile_turn(outcome.usage.as_ref(), out);
         self.report_billing(Some(&outcome.model_usage), out);
         self.attribute_held(&outcome.model_usage, out);
@@ -1453,7 +1473,14 @@ impl Translator {
         }
         self.ended_agents.clear();
 
-        if outcome.is_error || outcome.subtype.as_deref() != Some("success") {
+        if interrupted {
+            // The CLI reports an interrupt as an error with a diagnostic for
+            // its own developers; to the operator it is the stop they asked
+            // for, and the session goes on.
+            out.push(Event::Notice {
+                message: STOPPED_TURN.to_owned(),
+            });
+        } else if outcome.is_error || outcome.subtype.as_deref() != Some("success") {
             // `result` carries the reason for most failures and `errors` for
             // the rest — a budget the CLI stopped on says why only there — so
             // both are reported rather than whichever one was looked at first.
@@ -2015,7 +2042,7 @@ fn exit_code(
                 && report.return_code_interpretation.is_none();
             finished.then_some(0)
         }
-        ToolOutcome::Denied => None,
+        ToolOutcome::Denied | ToolOutcome::Interrupted => None,
     }
 }
 
@@ -2043,7 +2070,7 @@ fn test_run(
 ) -> Option<TestRunRecord> {
     let ran = match outcome {
         ToolOutcome::Ok | ToolOutcome::Failed => name == SHELL_TOOL,
-        ToolOutcome::Denied => false,
+        ToolOutcome::Denied | ToolOutcome::Interrupted => false,
     };
     let command = string_at(arguments, "command")?;
     if !ran || !test_run::is_test_run(command) {

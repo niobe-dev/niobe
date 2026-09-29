@@ -593,6 +593,65 @@ one-hour cache write, per million tokens — that is 0.000008 + 0.00008 +
 0.0020468 + 0.098024 = **$0.1001588**, the CLI's figure to the last digit. At
 the fast price it would be twice that.
 
+## `interrupted.jsonl`
+
+Three turns, two of them stopped with the CLI's `interrupt` control request,
+recorded from Claude Code 2.1.285 on 30 September 2026 with the flags the
+driver passes, `--permission-prompt-tool stdio`, `--setting-sources project`,
+`--model sonnet` and `--allowedTools Bash`, in an empty directory. It opened
+with the `initialize` request the driver sends, then:
+
+1. "Run this exact shell command with the Bash tool, in the foreground:
+   `python3 -c 'import time; time.sleep(40); print(1)'`" — and, five seconds
+   after the call was announced, `{"subtype":"interrupt"}`.
+2. "Write a 600-word essay about lighthouses. No tools." — and the same request
+   once fifteen `text_delta`s had arrived.
+3. "Reply with exactly the word: pineapple".
+
+The lines are the CLI's own, in the order it printed them. The only edits: the
+answer to `initialize` cut to an empty `commands` list and the keys that say
+what state the session is in; `commands_changed` cut to an empty list;
+`system`/`init` cut down to the keys that say what ran, its `cwd` rewritten to
+`/repo`.
+
+What it settles, and what `tests/stream.rs` expects of it:
+
+- **The CLI answers the request and ends the turn.** The answer is a
+  `control_response` with `{"still_queued": []}`. The turn closes with a
+  `result` of `subtype` `error_during_execution`, `is_error: true`, and an
+  `errors` entry that is a diagnostic for the CLI's own developers
+  (`[ede_diagnostic] result_type=user …`). What says it was an interrupt is
+  `terminal_reason`: `aborted_tools` for the turn stopped while its call ran,
+  `aborted_streaming` for the one stopped while the reply was written, and
+  `completed` for the third. The test expects no error entry, a notice that the
+  turn was stopped for each of the two, and three turn ends.
+- **The call that was running is cut off and says so beside its result.** Its
+  `tool_result` is an error whose text tells the model the user rejected it,
+  with `tool_use_result` `"User rejected tool use"` and
+  `tool_result_meta: [{"id": …, "non_execution_kind": "user-rejected"}]` — the
+  same key that says `permission-rule` for a call refused over the control
+  channel. It is followed by a `user` text `[Request interrupted by user for
+  tool use]`. The test expects the call to end `Interrupted`.
+- **A reply stopped as it was written costs nothing the CLI reports.** Its
+  `assistant` message arrives whole, with the text written so far, and no
+  `message_delta` follows; the turn's `result` has `usage` all zeros and
+  `modelUsage` and `total_cost_usd` unchanged from the turn before. Its
+  `message_start` carried 2 input, 17,631 cache read and 6,505 cache write
+  tokens, which the CLI never counts again. Whether the API billed them is not
+  something the stream says.
+
+### The arithmetic the tests assert
+
+| turn | in | out | cache read | cache write | `total_cost_usd` after it |
+| ---- | -- | --- | ---------- | ----------- | ------------------------- |
+| 1    | 2  | 123 | 13,537     | 4,094       | $0.0203174 |
+| 2    | 0  | 0   | 0          | 0           | $0.0203174 |
+| 3    | 2  | 6   | 17,631     | 7,255       | $0.0529276 |
+
+The session's `modelUsage` for `claude-sonnet-5-5` after the third turn is 4
+in, 129 out, 31,168 cache read and 11,349 cache write: the sums of the
+column, which is what the fold is expected to total.
+
 ## `sub-agents.jsonl`
 
 The last two turns of a real session and the two turns the CLI started on its

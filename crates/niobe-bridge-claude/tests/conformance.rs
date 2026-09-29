@@ -54,6 +54,9 @@ const SHAPES: &[&str] = &[
     "control_request/can_use_tool",
     "rate_limit_event",
     "result/success",
+    // A turn an interrupt stopped: its `terminal_reason` says it was aborted,
+    // and it ends as the operator's stop rather than as a failure.
+    "result/error_during_execution",
     // The two below are in `hand-written.jsonl` rather than a recording: a
     // prompt the CLI withdraws, which becomes a withdrawal of the question,
     // and a turn stopped by the budget, which ends the turn as a failure.

@@ -1552,6 +1552,70 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
     assert_handed_back(&drawn, cooked, "a quit after a paste");
 }
 
+/// A `claude` that starts writing a reply to its first turn and does not
+/// finish it until it is asked to stop, writing down every request to stop it
+/// gets; then closes that turn as the CLI closes one an interrupt cut off,
+/// and answers the next turn whole.
+const STOPPABLE_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"started-a-long-turn\"}]}}'\n\
+    while read -r line; do\n\
+    case \"$line\" in *'\"interrupt\"'*) printf '%s\\n' \"$line\" >> interrupts.jsonl; break;; esac\n\
+    done\n\
+    printf '%s\\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user]\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"terminal_reason\":\"aborted_streaming\",\"errors\":[\"[ede_diagnostic] result_type=user\"]}'\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-after-the-stop\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    while read -r line; do :; done\n";
+
+/// Stops a running turn with `key` and asserts it reached the CLI as one
+/// `interrupt` request, and that the session was still there for the next
+/// prompt.
+fn stops_a_running_turn_with(key: &[u8], path: &str) {
+    let repo = repo();
+    let home = stand_in(repo.path(), STOPPABLE_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"go\r");
+    terminal.shows("started-a-long-turn");
+    terminal.typed(key);
+    // The notice's words are drawn one cursor move apart, as a redraw sends
+    // only the cells that changed, so its last word is what is waited on.
+    terminal.shows("operator.");
+    terminal.typed(b"again\r");
+    terminal.shows("answered-after-the-stop");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let asked = std::fs::read_to_string(repo.path().join("interrupts.jsonl"))
+        .expect("the stand-in was asked to stop the turn");
+    let asked: Vec<&str> = asked.lines().collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        asked[0].contains(r#""type":"control_request""#),
+        "{asked:?}"
+    );
+    assert_handed_back(&drawn, cooked, path);
+}
+
+#[test]
+fn esc_during_a_running_turn_stops_it_and_the_session_takes_the_next_prompt() {
+    stops_a_running_turn_with(b"\x1b", "a quit after Esc stopped a turn");
+}
+
+#[test]
+fn ctrl_c_during_a_running_turn_stops_it_and_leaves_the_session_open() {
+    stops_a_running_turn_with(b"\x03", "a quit after Ctrl+C stopped a turn");
+}
+
 /// With nothing to read keys from — standard input from `/dev/null` and no
 /// controlling terminal to fall back on — the shell says so before it starts
 /// the backend or takes the screen.
