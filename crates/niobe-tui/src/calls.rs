@@ -384,7 +384,9 @@ fn reason(call: &Call, room: usize, theme: &Theme) -> Line<'static> {
         None => (
             match call.outcome {
                 Some(ToolOutcome::Denied) => "not allowed to run; no reason was given",
-                _ => "the call failed and the backend said nothing about why",
+                Some(ToolOutcome::Failed | ToolOutcome::Ok) | None => {
+                    "the call failed and the backend said nothing about why"
+                }
             }
             .to_owned(),
             Style::new().fg(theme.dim).italic(),
