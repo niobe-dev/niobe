@@ -714,9 +714,10 @@ It carries what the transcript does differently from the live stream:
   operator said nor what the session list names it by;
 - **one API response written out over two records** — `msg_1`, once for its
   thinking and once for its text and its call — with the *same* `usage` stamped
-  on both. Unlike the live stream's per-record snapshots these repeated figures
-  are final, so a session counted from its messages counts one per `message.id`:
-  counting both would bill the message twice;
+  on both. Here the two agree; elsewhere a later record of a response can carry
+  more `output_tokens` than an earlier one, so a session counted from its
+  messages counts one per `message.id`, from its last record: counting both
+  would bill the message twice;
 - **no `result` line, and the bill under another name.** What the session cost
   is the closing `cost-state` record, whose `modelUsage` is the same running
   total per model that closes a live turn — but keyed by the id the session was
@@ -775,7 +776,7 @@ way the fold does:
 
 ```sh
 jq -R -s 'split("\n") | map(fromjson? // empty)
-          | map(select(.type=="assistant").message) | unique_by(.id) | map(.usage)
+          | map(select(.type=="assistant").message) | group_by(.id) | map(.[-1].usage)
           | {in: (map(.input_tokens)|add), out: (map(.output_tokens)|add),
              cache_read: (map(.cache_read_input_tokens)|add),
              cache_write: (map(.cache_creation_input_tokens)|add),

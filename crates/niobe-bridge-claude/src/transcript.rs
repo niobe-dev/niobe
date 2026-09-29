@@ -17,17 +17,18 @@
 //!
 //! The file carries the same messages as the live protocol in envelopes of its
 //! own, so the folding is [`Translator`]'s and only the envelopes are read
-//! here. Four differences are the reason this module exists:
+//! here. Five differences are the reason this module exists:
 //!
 //! * **The operator's turns are in it.** A live session's prompts are ones
 //!   Niobe sent, so the translator drops the CLI's echo of them; a transcript
 //!   is the only record of what was said, so its user turns become
 //!   [`Event::UserMessage`].
 //! * **Usage is on the message, and repeated.** One API response is written
-//!   out as several records — one per run of content blocks — with the same
-//!   `usage` stamped on each. Unlike the live stream's per-record snapshots
-//!   the repeated figures are identical and final, so counting one per
-//!   `message.id` is both necessary and enough.
+//!   out as several records — one per run of content blocks — each with the
+//!   `usage` the CLI had when it wrote it. Mostly the figures repeat; where
+//!   they move it is `output_tokens` growing, and the last record carries the
+//!   largest, so one per `message.id` is counted, from its last record; see
+//!   [`last_usage`].
 //! * **There is no `result` line, and the bill is under other names.** What the
 //!   session cost is in a `cost-state` record the CLI writes when it leaves,
 //!   whose `modelUsage` is the same running total per model that closes a live
