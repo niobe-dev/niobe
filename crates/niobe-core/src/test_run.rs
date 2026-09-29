@@ -143,7 +143,10 @@ pub fn is_test_run(command: &str) -> bool {
 /// escaped with `\`, is part of a word: `git commit -m "fix; cargo test
 /// passes"` is one command, `git`'s. What a command substitution runs is not
 /// split out either, since what it prints is captured and its status is not
-/// the command's; its text is kept in the word as it was written.
+/// the command's; its text is kept in the word as it was written. Nor is the
+/// body of a here-document, which is the input of the command that opened it,
+/// nor a comment, from an unquoted `#` that starts a word to the end of its
+/// line: writing a script that runs `cargo test` is not running it.
 fn simple_commands(command: &str) -> Vec<Vec<String>> {
     let chars: Vec<char> = command.chars().collect();
     let mut split = Split::default();
@@ -216,6 +219,21 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
             (Some(Quoted::Substitution | Quoted::Parenthesis | Quoted::Backticks), _) => {
                 split.push(c);
             }
+            (None, '#') if split.between_words() => {
+                // A comment runs to the end of the line, which still ends
+                // the command.
+                while chars.get(at + 1).is_some_and(|&c| c != '\n') {
+                    at += 1;
+                }
+            }
+            (None, '<') if heredoc_at(&chars, at) => {
+                split.end_word();
+                at = split.heredoc(&chars, at);
+            }
+            (None, '\n') => {
+                split.end_command();
+                at = split.skip_heredoc_bodies(&chars, at);
+            }
             (None, _) if separates(&chars, at) => split.end_command(),
             (None, ' ' | '\t') => split.end_word(),
             (None, _) => split.push(c),
@@ -235,6 +253,10 @@ struct Split {
     /// Whether the word being read has been quoted, so that `''` is a word
     /// though nothing is in it.
     quoted: bool,
+    /// The delimiters of the here-documents the current line opened, and
+    /// whether each strips leading tabs (`<<-`). Their bodies start on the
+    /// next line and are not commands.
+    heredocs: Vec<(String, bool)>,
 }
 
 impl Split {
@@ -257,6 +279,79 @@ impl Split {
         self.end_word();
         self.commands.push(std::mem::take(&mut self.words));
     }
+
+    /// Whether nothing of a word has been read yet, where a `#` starts a
+    /// comment rather than being part of the word.
+    fn between_words(&self) -> bool {
+        !self.quoted && self.word.is_empty()
+    }
+
+    /// Reads the `<<WORD` or `<<-WORD` starting at `at` as two words of the
+    /// command it redirects, and keeps the delimiter for the body the next
+    /// line starts; returns where it ended.
+    fn heredoc(&mut self, chars: &[char], at: usize) -> usize {
+        let mut at = at + 1;
+        let strip_tabs = chars.get(at + 1) == Some(&'-');
+        if strip_tabs {
+            at += 1;
+        }
+        self.words
+            .push(if strip_tabs { "<<-" } else { "<<" }.to_owned());
+        while chars.get(at + 1).is_some_and(|&c| c == ' ' || c == '\t') {
+            at += 1;
+        }
+        let mut delimiter = String::new();
+        while let Some(&c) = chars.get(at + 1) {
+            if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') {
+                break;
+            }
+            if !matches!(c, '\'' | '"' | '\\') {
+                delimiter.push(c);
+            }
+            at += 1;
+        }
+        if !delimiter.is_empty() {
+            self.words.push(delimiter.clone());
+            self.heredocs.push((delimiter, strip_tabs));
+        }
+        at
+    }
+
+    /// Passes over the bodies of the here-documents the line ending at `at`
+    /// opened, each up to the line that is its delimiter; returns where the
+    /// last one ended.
+    fn skip_heredoc_bodies(&mut self, chars: &[char], mut at: usize) -> usize {
+        for (delimiter, strip_tabs) in std::mem::take(&mut self.heredocs) {
+            loop {
+                let start = at + 1;
+                if start >= chars.len() {
+                    return chars.len();
+                }
+                let end = chars[start..]
+                    .iter()
+                    .position(|&c| c == '\n')
+                    .map_or(chars.len(), |len| start + len);
+                let line: String = chars[start..end].iter().collect();
+                let line = match strip_tabs {
+                    true => line.trim_start_matches('\t'),
+                    false => line.as_str(),
+                };
+                at = end;
+                if line == delimiter {
+                    break;
+                }
+            }
+        }
+        at
+    }
+}
+
+/// Whether the `<` at `at` opens a here-document: `<<` or `<<-`, and not the
+/// here-string `<<<`.
+fn heredoc_at(chars: &[char], at: usize) -> bool {
+    chars.get(at + 1) == Some(&'<')
+        && chars.get(at + 2) != Some(&'<')
+        && at.checked_sub(1).and_then(|i| chars.get(i)) != Some(&'<')
 }
 
 /// What a byte of a command is inside of, where a separator is not one.
@@ -1083,6 +1178,9 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "command cargo test",
             "~/.cargo/bin/cargo test",
             "cargo 'test'",
+            "cargo test <<EOF\ninput\nEOF",
+            "cat <<EOF\nnotes\nEOF\ncargo test",
+            "echo a#b; cargo test",
         ] {
             assert!(is_test_run(command), "{command:?} runs the tests");
         }
@@ -1126,6 +1224,11 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "cargo --list test",
             "cargo -h test",
             "command -v cargo test",
+            "cat > run.sh <<'EOF'\n#!/bin/sh\ncargo test\nEOF",
+            "cat <<EOF\ncargo test\nEOF",
+            "cat <<-\"EOF\"\n\tcargo test\n\tEOF\necho done",
+            "echo hi # ; cargo test",
+            "# cargo test",
         ] {
             assert!(!is_test_run(command), "{command:?} runs no tests");
         }

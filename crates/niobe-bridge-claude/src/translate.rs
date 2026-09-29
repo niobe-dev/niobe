@@ -4946,6 +4946,29 @@ error: could not compile `demo` (lib test) due to 1 previous error";
         assert_eq!(test_runs(&events), []);
     }
 
+    /// Writing a script that runs the tests is not running them, so the
+    /// session's last run stays the one that ran.
+    #[test]
+    fn a_here_document_that_names_cargo_test_leaves_the_last_real_run_standing() {
+        let mut translator = translator();
+        shell_call(&mut translator);
+        let mut events =
+            translator.line(&result("t1", &format!("Exit code 101\n{TEST_RUN}"), true));
+        translator.line(&call(
+            "t2",
+            "Bash",
+            r#"{"command":"cat > run.sh <<'EOF'\n#!/bin/sh\ncargo test\nEOF"}"#,
+        ));
+        events.extend(translator.line(&result_with("t2", "", &shell_report(""))));
+
+        let state = niobe_core::SessionState::replay(&events);
+        let counts = state
+            .test_run()
+            .and_then(|run| run.counts)
+            .expect("the real run's counts stand");
+        assert_eq!((counts.passed, counts.failed), (1, 1));
+    }
+
     #[test]
     fn a_shell_command_that_failed_carries_the_status_it_exited_with_and_its_reason() {
         let mut translator = translator();
