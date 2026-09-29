@@ -933,3 +933,16 @@ expects that turn, translated by a translator that starts from the
 transcript's last `cost-state`, to cost $0.0085642 and carry those tokens; and
 the same stream translated from nothing to cost $0.064619, which is the whole
 earlier session billed a second time.
+
+## `hand-written.jsonl`
+
+**Written by hand, not recorded**, for two shapes of the protocol no
+recording here holds: the CLI withdrawing a permission prompt with
+`control_cancel_request` — which it does when the turn waiting on the answer
+is interrupted — and a turn ended by the budget, `result` with subtype
+`error_max_budget_usd`. Each line follows the shape the recordings above and
+the CLI's own schema give it; the budget line's all-zero `usage` beside a real
+`modelUsage` is how the CLI was seen to write one (18 September 2026). They are
+here so that the shape inventory in `tests/conformance.rs` names them, and so
+that `tests/stream.rs` folds them: the withdrawn prompt is withdrawn from the
+session, and the budget's end is a failure that says what stopped the turn.

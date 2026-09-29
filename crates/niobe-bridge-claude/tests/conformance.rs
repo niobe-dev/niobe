@@ -48,9 +48,17 @@ const SHAPES: &[&str] = &[
     "teleport",
     // The live stream.
     "assistant",
+    // A tool's result given back as blocks rather than a string; its text is
+    // what the call's output is read from.
+    "block/tool_result/text",
     "control_request/can_use_tool",
     "rate_limit_event",
     "result/success",
+    // The two below are in `hand-written.jsonl` rather than a recording: a
+    // prompt the CLI withdraws, which becomes a withdrawal of the question,
+    // and a turn stopped by the budget, which ends the turn as a failure.
+    "control_cancel_request",
+    "result/error_max_budget_usd",
     "stream_event/content_block_delta",
     "stream_event/message_delta",
     "stream_event/message_start",
@@ -173,11 +181,23 @@ fn shapes_of(line: &str) -> Vec<String> {
         .and_then(serde_json::Value::as_array)
     {
         for block in blocks {
-            let block = block
+            let kind = block
                 .get("type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("(untyped)");
-            shapes.push(format!("block/{block}"));
+            shapes.push(format!("block/{kind}"));
+            // What a tool gave back is blocks of its own where it is not a
+            // plain string, and a kind the bridge does not read there is one
+            // it passes over as surely as one at the top.
+            if let Some(nested) = block.get("content").and_then(serde_json::Value::as_array) {
+                for inner in nested {
+                    let inner = inner
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("(untyped)");
+                    shapes.push(format!("block/{kind}/{inner}"));
+                }
+            }
         }
     }
     shapes

@@ -1561,3 +1561,29 @@ fn a_transcript_with_no_cost_state_restores_nothing() {
             .is_empty()
     );
 }
+
+/// The hand-written shapes: a prompt the CLI withdrew, and a turn the budget
+/// ended. See `tests/fixtures/README.md`.
+const HAND_WRITTEN: &str = include_str!("fixtures/hand-written.jsonl");
+
+#[test]
+fn a_withdrawn_prompt_and_a_budgets_end_fold_as_the_fixtures_readme_says() {
+    let events = translate(HAND_WRITTEN);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::PermissionWithdrawn { id } if id.as_str() == "toolu_touch"
+        )),
+        "{events:#?}"
+    );
+    let state = SessionState::replay(&events);
+    assert!(state.pending_permissions().is_empty());
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Error { message, .. } if message.contains("budget")
+        )),
+        "the budget's end did not say what stopped the turn: {events:#?}"
+    );
+}
