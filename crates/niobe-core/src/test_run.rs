@@ -112,11 +112,14 @@ where
 /// that `&&`, `||`, `&`, `;`, `|`, a newline or a subshell's parentheses
 /// separate. A redirection — `2>&1`, `&> log`, `>| log` — is part of the
 /// command it redirects, not a separator.
-/// One of them has to be `cargo test`, or its alias `cargo t`, after any
-/// `NAME=value` assignments and the wrappers `env`, `time`, `nice`, `timeout`
-/// and `sudo` with their own options, which change nothing about what is
-/// printed; cargo may be given a `+<toolchain>` and its own options before
-/// the subcommand (`cargo -q --locked test`). A `cargo test` that builds the
+/// One of them has to be `cargo test`, or its alias `cargo t`, after any of
+/// the shell's own words that can lead a command (`then`, `do`, `!`, `{`),
+/// any `NAME=value` assignments — quoted or not — and the wrappers `env`,
+/// `time`, `nice`, `timeout`, `sudo`, `exec` and `command` with their own
+/// options, which change nothing about what is printed; cargo may be named by
+/// a path, and given a `+<toolchain>` and its own options before the
+/// subcommand (`cargo -q --locked test`), except those that make it do
+/// something else (`cargo --list`). A `cargo test` that builds the
 /// tests and runs none — `--no-run`, `--help`, `-- --list` — is not a test
 /// run.
 ///
@@ -126,61 +129,134 @@ where
 /// output may not be what `cargo test` printed.
 pub fn is_test_run(command: &str) -> bool {
     simple_commands(command)
-        .into_iter()
-        .any(|simple| runs_cargo_test(simple.split_whitespace()))
+        .iter()
+        .any(|simple| runs_cargo_test(simple))
 }
 
-/// The simple commands in `command`, in order, split where a shell would run
-/// the next one, and empty where two separators meet (`&&`, `||`).
+/// The simple commands in `command`, in order, each as the words a shell would
+/// hand the program it runs, split where a shell would run the next one, and
+/// empty where two separators meet (`&&`, `||`).
 ///
-/// A separator inside quotes, a `$(…)` or backticks, or escaped with `\`, is
-/// part of a word: `git commit -m "fix; cargo test passes"` is one command,
-/// `git`'s. What a command substitution runs is not split out either, since
-/// what it prints is captured and its status is not the command's.
-fn simple_commands(command: &str) -> Vec<&str> {
-    let bytes = command.as_bytes();
-    let mut commands = Vec::new();
-    let mut start = 0;
+/// A word is read with its quoting taken off — `RUSTFLAGS="-D warnings"` is
+/// one word, and `cargo 'test'` names `test` — and a line ended with `\` goes
+/// on to the next. A separator inside quotes, a `$(…)` or backticks, or
+/// escaped with `\`, is part of a word: `git commit -m "fix; cargo test
+/// passes"` is one command, `git`'s. What a command substitution runs is not
+/// split out either, since what it prints is captured and its status is not
+/// the command's; its text is kept in the word as it was written.
+fn simple_commands(command: &str) -> Vec<Vec<String>> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut split = Split::default();
     let mut open: Vec<Quoted> = Vec::new();
     let mut at = 0;
-    while let Some(&byte) = bytes.get(at) {
+    while let Some(&c) = chars.get(at) {
         let inner = open.last().copied();
-        let substitution = byte == b'$' && bytes.get(at + 1) == Some(&b'(');
-        match (inner, byte) {
-            (Some(Quoted::Single), b'\'') => {
+        let next = chars.get(at + 1).copied();
+        match (inner, c) {
+            (Some(Quoted::Single), '\'') => {
                 open.pop();
             }
-            (Some(Quoted::Single), _) => {}
-            (_, b'\\') => at += 1,
-            (_, b'$') if substitution => {
-                open.push(Quoted::Substitution);
+            (Some(Quoted::Single), _) => split.push(c),
+            (Some(Quoted::Double) | None, '\\') => {
+                match next {
+                    // A line that goes on: the two characters are not there.
+                    Some('\n') => {}
+                    Some(next) => {
+                        let kept = inner.is_none() || matches!(next, '"' | '\\' | '$' | '`');
+                        if !kept {
+                            split.push('\\');
+                        }
+                        split.push(next);
+                    }
+                    None => split.push(c),
+                }
                 at += 1;
             }
-            (Some(Quoted::Double), b'"') | (Some(Quoted::Backticks), b'`') => {
-                open.pop();
-            }
-            (_, b'`') => open.push(Quoted::Backticks),
-            (Some(Quoted::Double), _) => {}
-            (_, b'\'') => open.push(Quoted::Single),
-            (_, b'"') => open.push(Quoted::Double),
-            (Some(Quoted::Substitution | Quoted::Parenthesis), b'(') => {
-                open.push(Quoted::Parenthesis);
-            }
-            (Some(Quoted::Substitution | Quoted::Parenthesis), b')') => {
-                open.pop();
-            }
-            (Some(Quoted::Substitution | Quoted::Parenthesis | Quoted::Backticks), _) => {}
-            (None, _) => {
-                if separates(bytes, at) {
-                    commands.extend(command.get(start..at));
-                    start = at + 1;
+            (Some(_), '\\') => {
+                split.push(c);
+                if let Some(next) = next {
+                    split.push(next);
+                    at += 1;
                 }
             }
+            (_, '$') if next == Some('(') => {
+                open.push(Quoted::Substitution);
+                split.push(c);
+                split.push('(');
+                at += 1;
+            }
+            (Some(Quoted::Double), '"') => {
+                open.pop();
+            }
+            (Some(Quoted::Backticks), '`') => {
+                open.pop();
+                split.push(c);
+            }
+            (_, '`') => {
+                open.push(Quoted::Backticks);
+                split.push(c);
+            }
+            (Some(Quoted::Double), _) => split.push(c),
+            (None, '\'') => {
+                open.push(Quoted::Single);
+                split.quoted();
+            }
+            (None, '"') => {
+                open.push(Quoted::Double);
+                split.quoted();
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis), '(') => {
+                open.push(Quoted::Parenthesis);
+                split.push(c);
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis), ')') => {
+                open.pop();
+                split.push(c);
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis | Quoted::Backticks), _) => {
+                split.push(c);
+            }
+            (None, _) if separates(&chars, at) => split.end_command(),
+            (None, ' ' | '\t') => split.end_word(),
+            (None, _) => split.push(c),
         }
         at += 1;
     }
-    commands.extend(command.get(start..));
-    commands
+    split.end_command();
+    split.commands
+}
+
+/// The words and commands [`simple_commands`] has read so far.
+#[derive(Debug, Default)]
+struct Split {
+    commands: Vec<Vec<String>>,
+    words: Vec<String>,
+    word: String,
+    /// Whether the word being read has been quoted, so that `''` is a word
+    /// though nothing is in it.
+    quoted: bool,
+}
+
+impl Split {
+    fn push(&mut self, c: char) {
+        self.word.push(c);
+    }
+
+    fn quoted(&mut self) {
+        self.quoted = true;
+    }
+
+    fn end_word(&mut self) {
+        if self.quoted || !self.word.is_empty() {
+            self.words.push(std::mem::take(&mut self.word));
+            self.quoted = false;
+        }
+    }
+
+    fn end_command(&mut self) {
+        self.end_word();
+        self.commands.push(std::mem::take(&mut self.words));
+    }
 }
 
 /// What a byte of a command is inside of, where a separator is not one.
@@ -201,19 +277,23 @@ enum Quoted {
 /// Whether the byte at `at` ends a simple command. An `&` that follows `>` or
 /// `<` or precedes `>`, and a `|` that follows `>`, belong to a redirection:
 /// `cargo test 2>&1` is one command, whose status is `cargo test`'s.
-fn separates(bytes: &[u8], at: usize) -> bool {
-    let before = at.checked_sub(1).and_then(|i| bytes.get(i)).copied();
-    let after = bytes.get(at + 1).copied();
-    match bytes.get(at) {
-        Some(b'&') => !matches!(before, Some(b'>' | b'<')) && after != Some(b'>'),
-        Some(b'|') => before != Some(b'>'),
-        Some(b';' | b'\n' | b'(' | b')') => true,
+fn separates(chars: &[char], at: usize) -> bool {
+    let before = at.checked_sub(1).and_then(|i| chars.get(i)).copied();
+    let after = chars.get(at + 1).copied();
+    match chars.get(at) {
+        Some('&') => !matches!(before, Some('>' | '<')) && after != Some('>'),
+        Some('|') => before != Some('>'),
+        Some(';' | '\n' | '(' | ')') => true,
         _ => false,
     }
 }
 
-fn runs_cargo_test<'a>(words: impl Iterator<Item = &'a str>) -> bool {
-    let mut words = words.peekable();
+fn runs_cargo_test(words: &[String]) -> bool {
+    let mut words = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|word| RESERVED.contains(word))
+        .peekable();
     loop {
         match words.next() {
             Some(word) if is_assignment(word) => {}
@@ -223,19 +303,35 @@ fn runs_cargo_test<'a>(words: impl Iterator<Item = &'a str>) -> bool {
                         return false;
                     }
                 }
-                None if word == "cargo" => break,
+                None if is_cargo(word) => break,
                 None => return false,
             },
             None => return false,
         }
     }
     let _toolchain = words.next_if(|word| word.starts_with('+'));
-    if !skip_options(&mut words, CARGO_TAKES_A_VALUE) {
+    if !skip_options(&mut words, CARGO_TAKES_A_VALUE, CARGO_RUNS_NOTHING) {
         return false;
     }
     matches!(words.next(), Some("test" | "t"))
         && words.all(|w| !matches!(w, "--no-run" | "--help" | "-h" | "--list"))
 }
+
+/// The words a shell reads as part of its own grammar at the head of a
+/// command, before the command itself: `then cargo test`, `! cargo test`,
+/// `{ cargo test; }`.
+const RESERVED: &[&str] = &[
+    "!", "{", "if", "then", "elif", "else", "while", "until", "do",
+];
+
+/// Whether `word` names cargo, as a bare name or by a path to it.
+fn is_cargo(word: &str) -> bool {
+    word.rsplit('/').next() == Some("cargo")
+}
+
+/// The options cargo takes before a subcommand that make it do something of
+/// its own instead: `cargo --list test` lists the commands and runs none.
+const CARGO_RUNS_NOTHING: &[&str] = &["--list", "-h", "--help", "-V", "--version", "--explain"];
 
 /// The options cargo takes before its subcommand that are followed by a
 /// value: `--color always`, `--config net.offline=true`, `-Z <flag>`,
@@ -248,6 +344,8 @@ const CARGO_TAKES_A_VALUE: &[&str] = &["--color", "--config", "-Z", "-C"];
 struct Wrapper {
     /// Its options that are followed by a value.
     takes_a_value: &'static [&'static str],
+    /// Its options that make it run nothing after them.
+    runs_nothing: &'static [&'static str],
     /// The words it takes after its options and before the command, as
     /// `timeout` takes its duration.
     operands: usize,
@@ -255,27 +353,35 @@ struct Wrapper {
 
 impl Wrapper {
     fn named(word: &str) -> Option<Wrapper> {
-        let (takes_a_value, operands): (&'static [&'static str], usize) = match word {
-            "env" => (&["-u", "--unset", "-C", "--chdir"], 0),
-            "time" => (&["-f", "--format", "-o", "--output"], 0),
-            "nice" => (&["-n", "--adjustment"], 0),
-            "timeout" => (&["-s", "--signal", "-k", "--kill-after"], 1),
-            "sudo" => (&["-u", "--user", "-g", "--group"], 0),
+        let (takes_a_value, runs_nothing, operands): (
+            &'static [&'static str],
+            &'static [&'static str],
+            usize,
+        ) = match word {
+            "env" => (&["-u", "--unset", "-C", "--chdir"], &[], 0),
+            "time" => (&["-f", "--format", "-o", "--output"], &[], 0),
+            "nice" => (&["-n", "--adjustment"], &[], 0),
+            "timeout" => (&["-s", "--signal", "-k", "--kill-after"], &[], 1),
+            "sudo" => (&["-u", "--user", "-g", "--group"], &[], 0),
+            "exec" => (&["-a"], &[], 0),
+            // `command -v cargo test` says where cargo is and runs nothing.
+            "command" => (&[], &["-v", "-V"], 0),
             _ => return None,
         };
         Some(Wrapper {
             takes_a_value,
+            runs_nothing,
             operands,
         })
     }
 
     /// Moves `words` past this wrapper's options and operands, or says there
-    /// was nothing after them.
+    /// was nothing after them, or that an option made it run nothing.
     fn skip_its_own<'a>(
         self,
         words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
     ) -> bool {
-        if !skip_options(words, self.takes_a_value) {
+        if !skip_options(words, self.takes_a_value, self.runs_nothing) {
             return false;
         }
         (0..self.operands).all(|_| words.next().is_some()) && words.peek().is_some()
@@ -284,12 +390,16 @@ impl Wrapper {
 
 /// Moves `words` past the options at their head — each a word that starts
 /// with `-`, and the value after one of `takes_a_value` — or says a value
-/// was missing.
+/// was missing, or that one of `runs_nothing` was given.
 fn skip_options<'a>(
     words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
     takes_a_value: &[&str],
+    runs_nothing: &[&str],
 ) -> bool {
     while let Some(option) = words.next_if(|word| word.starts_with('-')) {
+        if runs_nothing.contains(&option) {
+            return false;
+        }
         if takes_a_value.contains(&option) && words.next().is_none() {
             return false;
         }
@@ -428,9 +538,9 @@ const FAILED_STATUS: i32 = 101;
 /// status the whole command exited with is the run's.
 fn ends_in_cargo_test(command: &str) -> bool {
     simple_commands(command)
-        .into_iter()
-        .rfind(|simple| !simple.trim().is_empty())
-        .is_some_and(|simple| runs_cargo_test(simple.split_whitespace()))
+        .iter()
+        .rfind(|simple| !simple.is_empty())
+        .is_some_and(|simple| runs_cargo_test(simple))
 }
 
 /// Whether an output shows a build finishing and a test binary starting to
@@ -961,6 +1071,18 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "sudo -u ci cargo test",
             "nice -n 10 cargo test",
             "time -p cargo test",
+            "RUSTFLAGS=\"-D warnings\" cargo test",
+            "RUSTFLAGS='-D warnings' cargo test",
+            "A=`b c` cargo test",
+            "cargo test \\\n  --workspace",
+            "if true; then cargo test; fi",
+            "for i in 1 2; do cargo test; done",
+            "{ cargo test; }",
+            "! cargo test",
+            "exec cargo test",
+            "command cargo test",
+            "~/.cargo/bin/cargo test",
+            "cargo 'test'",
         ] {
             assert!(is_test_run(command), "{command:?} runs the tests");
         }
@@ -1001,6 +1123,9 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "env -u cargo test",
             "sudo -u cargo test",
             "nice -n cargo test",
+            "cargo --list test",
+            "cargo -h test",
+            "command -v cargo test",
         ] {
             assert!(!is_test_run(command), "{command:?} runs no tests");
         }
@@ -1180,6 +1305,15 @@ error: test failed, to rerun pass `--lib`
         assert!(is_test_run(command));
         assert_eq!(counts(REFUSED_FLAG, Some(101)), None);
         assert!(!failed(command, REFUSED_FLAG, Some(101)));
+    }
+
+    #[test]
+    fn a_failing_run_led_by_a_quoted_assignment_is_known_to_have_failed() {
+        assert!(failed(
+            "RUSTFLAGS=\"-D warnings\" cargo test",
+            FAILED,
+            Some(101)
+        ));
     }
 
     #[test]
