@@ -69,7 +69,19 @@ pub fn lines_changed(before: &str, after: &str) -> Option<(u64, u64)> {
 /// mid-line and the new text adds a line, the rest of the file's line moves
 /// onto the new last line, which is a change these two strings cannot show;
 /// a diff of the file's whole lines, where there is one, is the better count.
+///
+/// An empty `old` replaced nothing: `new` went in where there was no text,
+/// and removed no line. No transcript on the machine this was written on
+/// held an `Edit` with an empty `old_string`, and the CLI once created files
+/// that way; counted as a blank line replaced, it would read as a line
+/// removed that never existed.
 pub fn replacement_changed(old: &str, new: &str) -> Option<(u64, u64)> {
+    if old.is_empty() {
+        return match new.is_empty() {
+            true => Some((0, 0)),
+            false => lines_changed("", &format!("{new}\n")),
+        };
+    }
     lines_changed(&format!("{old}\n"), &format!("{new}\n"))
 }
 
@@ -527,5 +539,12 @@ mod tests {
         let before: String = (0..5_000).map(|i| format!("line {i}\n")).collect();
         let after = before.replace("line 2500\n", "line 2500\nline 2500b\n");
         assert_eq!(lines_changed(&before, &after), Some((1, 0)));
+    }
+
+    #[test]
+    fn replacing_nothing_is_a_pure_insertion() {
+        assert_eq!(replacement_changed("", "line1\nline2"), Some((2, 0)));
+        assert_eq!(replacement_changed("", "x"), Some((1, 0)));
+        assert_eq!(replacement_changed("", ""), Some((0, 0)));
     }
 }
