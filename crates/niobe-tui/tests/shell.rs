@@ -573,6 +573,87 @@ fn a_recorded_prompt_puts_the_question_in_the_transcript_at_both_sizes() {
     );
 }
 
+/// A session waiting on a `Bash` call whose command is sixty-two lines long,
+/// more than any pane these tests draw has rows for.
+fn session_waiting_on_a_long_command() -> App {
+    let mut app = running_session();
+    let mut command = String::from("set -e\ncd /tmp\n");
+    for step in 1..=59 {
+        command.push_str(&format!("echo step {step} && \\\n"));
+    }
+    command.push_str("rm -rf ~/important");
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_long_command".into(),
+        tool: "Bash".to_owned(),
+        input: format!(
+            r#"{{"command":"{}"}}"#,
+            command.replace('\\', "\\\\").replace('\n', "\\n")
+        ),
+        target: Some(command),
+        agent: None,
+    });
+    app
+}
+
+/// What is asked, where the call starts and every answer are on screen for a
+/// prompt taller than the pane, and the rows cut from it say so.
+fn assert_a_tall_question_fits(frame: &str) {
+    let rows = question_rows(frame);
+    assert!(frame.contains("? claude asks"), "{frame}");
+    assert!(rows.iter().any(|row| row == "to run Bash"), "{frame}");
+    assert!(rows.iter().any(|row| row == "set -e"), "{frame}");
+    for option in [
+        "▶ 1. Allow once",
+        "2. Always allow Bash",
+        "3. Always allow this target",
+        "4. Deny",
+    ] {
+        assert!(
+            rows.iter().any(|row| row.starts_with(option)),
+            "`{option}` is not on screen:\n{frame}"
+        );
+    }
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("more lines") && row.contains("Ctrl+T")),
+        "nothing says the call was cut, or how to read it whole:\n{frame}"
+    );
+}
+
+#[test]
+fn a_question_taller_than_the_pane_keeps_what_is_asked_and_its_answers_on_screen() {
+    let small = screen(&mut session_waiting_on_a_long_command(), 80, 24);
+    assert_a_tall_question_fits(&small);
+    assert_snapshot("asking-long-80x24", &small);
+
+    let large = screen(&mut session_waiting_on_a_long_command(), 120, 40);
+    assert_a_tall_question_fits(&large);
+    assert_snapshot("asking-long-120x40", &large);
+}
+
+#[test]
+fn enter_answers_nothing_while_the_top_of_the_question_is_not_drawn() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_waiting_on_a_long_command();
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        !frame.contains("to run Bash"),
+        "the whole call fits:\n{frame}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(
+        !app.take_produced()
+            .iter()
+            .any(|event| matches!(event, Event::PermissionResponse { .. })),
+        "a call was answered with the question it asks off screen"
+    );
+    assert!(app.asking().is_some());
+}
+
 /// The rows of the question box, with its borders and the pane's taken off.
 fn question_rows(frame: &str) -> Vec<String> {
     frame

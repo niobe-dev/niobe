@@ -863,6 +863,9 @@ pub struct App {
     /// Where the way back down to the newest line was drawn last frame, while
     /// the transcript is scrolled back.
     jump: Option<ratatui::layout::Rect>,
+    /// Whether the last frame drew the top row of the question waiting, which
+    /// says who asks and what is asked. `true` until a frame says otherwise.
+    question_top_drawn: bool,
     profile: Option<SelectedProfile>,
     theme: Theme,
     /// How many colours the terminal draws, which every theme is drawn at.
@@ -1112,6 +1115,10 @@ const BUDGET_WARNING: f64 = 0.8;
 /// the question before answering it.
 pub const ASK_QUIET: Duration = Duration::from_millis(500);
 
+/// What the bar says when a key reached a prompt whose top is off screen.
+const TOP_OFF_SCREEN_HINT: &str =
+    "Not taken as an answer: the top of the question is off screen. Ctrl+T cuts it to fit";
+
 /// What the bar says when keys reached a prompt too soon to answer it.
 const TOO_SOON_HINT: &str =
     "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
@@ -1152,6 +1159,7 @@ impl App {
             focus: Focus::Session,
             session_area: None,
             jump: None,
+            question_top_drawn: true,
             profile: None,
             theme,
             depth: Depth::default(),
@@ -2687,6 +2695,11 @@ impl App {
         self.jump = at;
     }
 
+    /// Whether the last frame drew the top row of the question waiting.
+    pub fn drew_question_top(&mut self, drawn: bool) {
+        self.question_top_drawn = drawn;
+    }
+
     /// The pane under a point on the screen, if the point is on one that
     /// scrolls.
     fn pane_at(&self, column: u16, row: u16) -> Option<Focus> {
@@ -3873,6 +3886,13 @@ impl App {
         if !self.follow {
             self.scroll_to_tail();
             self.ask_quiet_since = self.latest_instant();
+            return;
+        }
+        // Drawn whole and taller than the pane, the question's top is above
+        // it while the view follows its end: Enter would confirm a call whose
+        // name, and whose first answer, are not on screen.
+        if !self.question_top_drawn {
+            self.hint = Some(TOP_OFF_SCREEN_HINT.to_owned());
             return;
         }
         if self.too_soon_to_answer() {

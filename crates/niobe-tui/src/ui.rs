@@ -1232,7 +1232,7 @@ fn draw_transcript(
     // at it, and it is never more than a screenful.
     let question = app
         .asking()
-        .map(|ask| question_lines(app, ask, width, theme))
+        .map(|ask| question_lines(app, ask, (width, height), theme))
         .unwrap_or_default();
 
     if app.entries().is_empty() && question.is_empty() {
@@ -1261,6 +1261,7 @@ fn draw_transcript(
         mark_found(&mut visible, start, found, current, theme);
     }
     let room = height.saturating_sub(visible.len());
+    app.drew_question_top(question.is_empty() || (start..start + height).contains(&above));
     visible.extend(
         question
             .into_iter()
@@ -1586,65 +1587,136 @@ fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
 ///
 /// The whole of the arguments is shown, wrapped rather than truncated:
 /// approving a call whose arguments were cut off at the edge is approving
-/// something the operator did not read.
-fn question_lines(app: &App, ask: &Ask, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// something the operator did not read. Except where the whole question is
+/// taller than the `height` rows the transcript has: the transcript follows
+/// its end, so the top of the question — what is asked, and the first
+/// answer, which Enter confirms — would be above the pane. There the
+/// arguments are cut instead, with a row saying how many lines are not shown
+/// and that Ctrl+T shows them, which draws the question whole again.
+fn question_lines(
+    app: &App,
+    ask: &Ask,
+    (width, height): (usize, usize),
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let outer = width.saturating_sub(GUTTER).min(ASK_COLUMNS);
     let inner = outer.saturating_sub(ASK_INSET);
     let border = Style::new().fg(theme.hot);
     let indent = " ".repeat(GUTTER);
 
+    let body = question_body(app, ask, inner, theme);
+    // The frame's top and bottom rows and the blank row under it.
+    let framing = 3;
+    let fits = app.diffs_open() || body.len() + framing <= height;
+    let body = match fits {
+        true => body.whole(),
+        false => body.cut(height.saturating_sub(framing - 1), inner, theme),
+    };
+
     let mut lines = vec![question_top(app, ask, outer, theme)];
-    lines.extend(
-        question_body(app, ask, inner, theme)
-            .into_iter()
-            .map(|line| {
-                let used = line.width();
-                let mut spans = vec![Span::raw(indent.clone()), Span::styled("│ ", border)];
-                spans.extend(
-                    line.spans
-                        .into_iter()
-                        .map(|span| span.patch_style(line.style)),
-                );
-                spans.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
-                spans.push(Span::styled(" │", border));
-                Line::from(spans)
-            }),
-    );
+    lines.extend(body.into_iter().map(|line| {
+        let used = line.width();
+        let mut spans = vec![Span::raw(indent.clone()), Span::styled("│ ", border)];
+        spans.extend(
+            line.spans
+                .into_iter()
+                .map(|span| span.patch_style(line.style)),
+        );
+        spans.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
+        spans.push(Span::styled(" │", border));
+        Line::from(spans)
+    }));
     lines.push(Line::from(vec![
         Span::raw(indent),
         Span::styled(format!("└{}┘", "─".repeat(outer.saturating_sub(2))), border),
     ]));
-    lines.push(Line::from(""));
+    if fits {
+        lines.push(Line::from(""));
+    }
     lines
+}
+
+/// What is inside a question's frame, in the parts a question too tall for
+/// its pane is cut by.
+struct QuestionBody {
+    /// `to run <tool>`.
+    head: Line<'static>,
+    /// What would run: the target, and the arguments whole under it.
+    call: Vec<Line<'static>>,
+    /// The numbered answers, after a blank row.
+    answers: Vec<Line<'static>>,
+    /// Any consequence too long for its column, said whole.
+    consequences: Vec<Line<'static>>,
+    /// The answer being written, and the keys.
+    rest: Vec<Line<'static>>,
+}
+
+impl QuestionBody {
+    fn len(&self) -> usize {
+        1 + self.call.len() + self.answers.len() + self.consequences.len() + self.rest.len()
+    }
+
+    fn whole(self) -> Vec<Line<'static>> {
+        let mut lines = vec![self.head];
+        lines.extend(self.call);
+        lines.extend(self.answers);
+        lines.extend(self.consequences);
+        lines.extend(self.rest);
+        lines
+    }
+
+    /// The body in `rows` rows where it can be: the consequences said again
+    /// go first, as each is a copy of something above it, then the call's
+    /// last lines, down to its first, which is kept with what is asked and
+    /// every answer.
+    fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let fixed = 1 + self.answers.len() + self.rest.len() + 1;
+        let room = rows.saturating_sub(fixed);
+        let hidden_consequences = std::mem::take(&mut self.consequences).len();
+        let kept = room.clamp(1, self.call.len().max(1));
+        let hidden = self.call.len().saturating_sub(kept) + hidden_consequences;
+        self.call.truncate(kept);
+        let said = match hidden {
+            1 => "… 1 more line · Ctrl+T shows the whole call".to_owned(),
+            n => format!("… {n} more lines · Ctrl+T shows the whole call"),
+        };
+        self.call.extend(
+            text::wrap(&said, inner)
+                .into_iter()
+                .map(|line| Line::from(line).style(Style::new().fg(theme.hot))),
+        );
+        self.whole()
+    }
 }
 
 /// What is inside a question's frame, `inner` columns wide: what would run,
 /// the numbered answers, any consequence too long for its column said whole,
 /// the answer being written, and the keys.
-fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionBody {
     let plain = Style::new().fg(theme.fg);
 
-    let mut body: Vec<Line<'static>> = vec![Line::from(vec![
+    let head = Line::from(vec![
         Span::styled("to run ", plain),
         Span::styled(tool_label(&ask.tool), plain.bold()),
-    ])];
+    ]);
+    let mut call = Vec::new();
     for wrapped in text::wrap(ask.target.as_deref().unwrap_or(&ask.input), inner) {
-        body.push(Line::from(wrapped).style(plain.bold()));
+        call.push(Line::from(wrapped).style(plain.bold()));
     }
     if ask.target.is_some() {
-        body.push(Line::from(""));
+        call.push(Line::from(""));
         for wrapped in text::wrap(&ask.input, inner) {
-            body.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
+            call.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
         }
     }
-    body.push(Line::from(""));
+    let mut answers = vec![Line::from("")];
     let focus = app.ask_focus();
     let selected = app.ask_selected();
     let mut cut = Vec::new();
     for (at, answer) in app.ask_options().into_iter().enumerate() {
         let lit = focus == AskFocus::Choosing && answer == selected;
         let (row, whole) = option_row(at + 1, answer, ask, lit, inner, theme);
-        body.push(row);
+        answers.push(row);
         if !whole {
             cut.push((at + 1, option_words(answer, ask).1));
         }
@@ -1652,25 +1724,33 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<
     // A consequence cut off at the edge of its column is said again whole: a
     // standing answer is a rule the operator keeps, and keeping one nobody
     // could read to its end is agreeing to something unread.
+    let mut consequences = Vec::new();
     if !cut.is_empty() {
-        body.push(Line::from(""));
+        consequences.push(Line::from(""));
         for (number, hint) in cut {
             for wrapped in text::wrap(&format!("{number}. {hint}"), inner) {
-                body.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
+                consequences.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
             }
         }
     }
+    let mut rest = Vec::new();
     if focus == AskFocus::Writing {
-        body.push(Line::from(""));
-        body.extend(written_answer(app.ask_draft(), inner, theme));
+        rest.push(Line::from(""));
+        rest.extend(written_answer(app.ask_draft(), inner, theme));
     }
-    body.push(Line::from(""));
-    body.extend(key_rows(
+    rest.push(Line::from(""));
+    rest.extend(key_rows(
         &ask_keys(focus, app.ask_options().len()),
         inner,
         theme,
     ));
-    body
+    QuestionBody {
+        head,
+        call,
+        answers,
+        consequences,
+        rest,
+    }
 }
 
 /// `┌ ? claude asks ──── blocks turn 3 ┐`: who is asking at the left, in the
