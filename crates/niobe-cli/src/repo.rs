@@ -77,12 +77,111 @@ pub fn open_or_create_store(root: &Path) -> Result<Store, String> {
     };
 
     store_stays_inside(root)?;
-    std::fs::create_dir_all(&dir).map_err(|e| failed(&e))?;
+    private_dir(&dir).map_err(|e| failed(&e))?;
     let ignore = dir.join(".gitignore");
     if !ignore.exists() {
         std::fs::write(&ignore, GITIGNORE).map_err(|e| failed(&e))?;
     }
-    Store::open(&path).map_err(|e| failed(&e))
+    private_file(&path).map_err(|e| failed(&e))?;
+    let store = Store::open(&path).map_err(|e| failed(&e))?;
+    keep_side_files_private(root);
+    Ok(store)
+}
+
+/// The mode the session store and its side files are kept in: every prompt
+/// and every tool output of every session is in them, including whatever a
+/// tool read — an `.env`, a key — so they are the operator's alone, as the
+/// CLI keeps its own transcripts.
+#[cfg(unix)]
+const PRIVATE_FILE: u32 = 0o600;
+
+/// The mode of the directory the store is in, for the same reason.
+#[cfg(unix)]
+const PRIVATE_DIR: u32 = 0o700;
+
+/// Makes `dir` if it is not there, readable by the operator alone, and takes
+/// the other users' access away from one that is, where the mount lets it.
+///
+/// The config and the ignore file in it keep the mode any file would have:
+/// they are meant to be committed, and a directory's own mode is not.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(PRIVATE_DIR)
+            .create(dir)?;
+        let _ = tighten(dir, PRIVATE_DIR);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
+/// Creates the store's file with a private mode before SQLite opens it, since
+/// SQLite gives the side files it makes the mode of the store, and takes the
+/// other users' access away from a store made before this was.
+fn private_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Created only where there is none: opening a store that is there to
+        // write it would turn SQLite's own report of a read-only store into
+        // a bare refusal.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(PRIVATE_FILE)
+            .open(path)
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // On a mount that refuses the change the store is still
+                // opened, as it is read, and SQLite says what it can do.
+                let _ = tighten(path, PRIVATE_FILE);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// Takes away from `path` every permission `private` does not grant, leaving
+/// the rest of its mode as it was.
+#[cfg(unix)]
+fn tighten(path: &Path, private: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    if mode & 0o777 & !private == 0 {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & private))
+}
+
+/// Side files a store made before its mode was tightened keep the mode they
+/// were made with until SQLite next deletes them; they are tightened here.
+///
+/// A side file that cannot be tightened — one another account owns, say —
+/// does not stop the session: the store itself already is private, and the
+/// session is not the place to settle who owns what beside it.
+fn keep_side_files_private(root: &Path) {
+    #[cfg(unix)]
+    for suffix in STORE_SIDE_FILES {
+        let mut name = store_path(root).into_os_string();
+        name.push(suffix);
+        let path = PathBuf::from(name);
+        if path.exists() {
+            let _ = tighten(&path, PRIVATE_FILE);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = root;
 }
 
 /// Opens the session store of `root` if one has been created, and never
@@ -93,9 +192,17 @@ pub fn open_existing_store(root: &Path) -> Result<Option<Store>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    Store::open(&path)
-        .map(Some)
-        .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))
+    // A store made before its mode was kept private is made so here too; one
+    // that cannot be — on a mount that refuses the change — is still opened.
+    #[cfg(unix)]
+    {
+        let _ = tighten(&root.join(DIR), PRIVATE_DIR);
+        let _ = tighten(&path, PRIVATE_FILE);
+    }
+    let store = Store::open(&path)
+        .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))?;
+    keep_side_files_private(root);
+    Ok(Some(store))
 }
 
 /// The files beside the store that SQLite creates and writes at the store's
@@ -1289,5 +1396,85 @@ mod tests {
                 .is_none()
         );
         assert!(!dir.path().join(".niobe").exists());
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .expect("the file is there")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    /// The side files of the store at `root` that SQLite has made so far.
+    fn side_files(root: &Path) -> Vec<PathBuf> {
+        STORE_SIDE_FILES
+            .iter()
+            .map(|suffix| {
+                let mut name = store_path(root).into_os_string();
+                name.push(suffix);
+                PathBuf::from(name)
+            })
+            .filter(|path| path.exists())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_store_and_its_directory_are_the_operators_alone() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+
+        let store = open_or_create_store(dir.path()).expect("the store is created");
+
+        assert_eq!(mode(&dir.path().join(DIR)), 0o700);
+        assert_eq!(mode(&store_path(dir.path())), 0o600);
+        let side = side_files(dir.path());
+        assert!(!side.is_empty(), "SQLite made no side files to check");
+        for path in side {
+            assert_eq!(mode(&path), 0o600, "{}", path.display());
+        }
+        drop(store);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_any_user_could_read_is_the_operators_alone_once_opened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let store = open_or_create_store(dir.path()).expect("the store is created");
+        let open = std::fs::Permissions::from_mode(0o644);
+        std::fs::set_permissions(store_path(dir.path()), open.clone()).expect("loosened");
+        std::fs::set_permissions(dir.path().join(DIR), std::fs::Permissions::from_mode(0o755))
+            .expect("loosened");
+        for path in side_files(dir.path()) {
+            std::fs::set_permissions(&path, open.clone()).expect("loosened");
+        }
+        drop(store);
+
+        let _store = open_or_create_store(dir.path()).expect("the store opens");
+
+        assert_eq!(mode(&store_path(dir.path())), 0o600);
+        assert_eq!(mode(&dir.path().join(DIR)), 0o700);
+        for path in side_files(dir.path()) {
+            assert_eq!(mode(&path), 0o600, "{}", path.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_files_meant_to_be_committed_keep_the_mode_any_file_would_have() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let probe = dir.path().join("probe");
+        std::fs::write(&probe, "").expect("a file can be written");
+        let ordinary = mode(&probe);
+        std::fs::create_dir(dir.path().join(DIR)).expect("the directory can be made");
+        std::fs::write(config_path(dir.path()), "").expect("the config is written");
+
+        let _store = open_or_create_store(dir.path()).expect("the store is created");
+
+        assert_eq!(mode(&config_path(dir.path())), ordinary);
+        assert_eq!(mode(&dir.path().join(DIR).join(".gitignore")), ordinary);
     }
 }
