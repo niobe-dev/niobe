@@ -197,13 +197,12 @@ fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String>
 /// read first either way, so a config that cannot be used is reported rather
 /// than hidden behind the help.
 fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
-    let cwd = cwd()?;
-    let root = repo::root(&cwd);
+    let root = repo::root(&cwd()?);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
     let app = say_untrusted(
         say_prices(
-            App::new(repo::describe(&cwd))
+            App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
                 .with_theme(chosen_theme(asked, &loaded)?)
@@ -257,8 +256,8 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let mut rules = ConfigRules::at(&root);
     // Started with the shell and stopped with it: the thread behind it reads
     // the repository while the session runs, and a piped run never gets here.
-    let mut watching = repo::watch(&cwd);
-    let mut commands = commands_for(&cwd, &backend);
+    let mut watching = repo::watch(&root);
+    let mut commands = commands_for(&root, &backend);
     let ended = niobe_tui::run(
         app,
         &mut journal,
@@ -285,13 +284,14 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     Ok(())
 }
 
-/// The operator's `!` commands, in `cwd`, with a reaper told of their groups
-/// and of the backend's.
+/// The operator's `!` commands, run at `root` — where the agent runs, so a
+/// path means the same thing to both — with a reaper told of their groups and
+/// of the backend's.
 ///
 /// A session whose reaper cannot be started still stops what it started on
 /// every way out it is given; only SIGKILL gives it none.
-fn commands_for(cwd: &Path, backend: &backend::Attachment) -> commands::Commands {
-    let commands = commands::Commands::at(cwd);
+fn commands_for(root: &Path, backend: &backend::Attachment) -> commands::Commands {
+    let commands = commands::Commands::at(root);
     let Ok(reaper) = reaper::Reaper::start() else {
         return commands;
     };
@@ -304,13 +304,12 @@ fn commands_for(cwd: &Path, backend: &backend::Attachment) -> commands::Commands
 /// Opens the shell on a recorded session and keeps recording into it. Without
 /// a terminal, prints what the session folds to.
 fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
-    let cwd = cwd()?;
-    let root = repo::root(&cwd);
+    let root = repo::root(&cwd()?);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
     let mut app = say_untrusted(
         say_prices(
-            App::new(repo::describe(&cwd))
+            App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
                 .with_theme(chosen_theme(asked, &loaded)?)
@@ -396,8 +395,8 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
 
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
-    let mut watching = repo::watch(&cwd);
-    let mut commands = commands_for(&cwd, &backend);
+    let mut watching = repo::watch(&root);
+    let mut commands = commands_for(&root, &backend);
     niobe_tui::run(
         app,
         &mut journal,
@@ -418,8 +417,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
 /// Niobe session like any other, so from here on `niobe --resume <number>`
 /// continues it and every total on screen is a fold over the same events.
 fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
-    let cwd = cwd()?;
-    let root = repo::root(&cwd);
+    let root = repo::root(&cwd()?);
     let loaded = config::load(&root)?;
     let selected = loaded.select(profile)?;
     let theme = chosen_theme(asked, &loaded)?;
@@ -434,7 +432,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
     )?;
     let mut app = say_untrusted(
         say_prices(
-            App::new(repo::describe(&cwd))
+            App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
                 .with_theme(theme)
@@ -497,8 +495,8 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
 
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
-    let mut watching = repo::watch(&cwd);
-    let mut commands = commands_for(&cwd, &backend);
+    let mut watching = repo::watch(&root);
+    let mut commands = commands_for(&root, &backend);
     let ended = niobe_tui::run(
         app,
         &mut journal,
@@ -1017,11 +1015,13 @@ IN THE SHELL:
                            below, Esc puts the view back where it was, and a
                            second / types a prompt that starts with one
     @                      At the start of a word, offer the files git lists
-                           under the session's directory: Up / Down choose,
+                           in the repository, by their paths from its root,
+                           where the agent runs: Up / Down choose,
                            Tab or Enter put the path in the prompt, Esc leaves
                            the word as typed
-    !                      On an empty composer, run a command in the
-                           session's directory instead of sending a prompt:
+    !                      On an empty composer, run a command at the
+                           repository's root, where the agent runs, instead
+                           of sending a prompt:
                            Enter runs it, Esc goes back, and a second ! types
                            a prompt that starts with one
     Ctrl+G                 Stop the newest ! command still running, with

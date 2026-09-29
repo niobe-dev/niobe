@@ -1469,6 +1469,86 @@ fn a_command_typed_after_a_bang_runs_here_and_is_kept_as_a_call() {
     );
 }
 
+/// A `claude` that writes down the directory it was started in, then every
+/// turn it is sent, and answers each with the same reply.
+const WRITES_DOWN_WHERE_IT_RUNS_CLAUDE: &str = "#!/bin/sh\n\
+    pwd -P > claude.cwd\n\
+    read -r first\n\
+    while read -r turn; do\n\
+    printf '%s\\n' \"$turn\" >> turns.jsonl\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    done\n";
+
+/// Waits until `path` holds something, and gives back what.
+fn written(path: &Path) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && !text.is_empty()
+        {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("nothing was written to {}", path.display());
+}
+
+/// Opened in a subdirectory, the session has one directory: the agent runs
+/// at the repository's root, a `!` command runs there too, and a path an `@`
+/// completion puts in the prompt is one the agent can open from there.
+#[test]
+fn a_session_opened_in_a_subdirectory_runs_everything_at_the_repositorys_root() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let root = std::fs::canonicalize(dir.path()).expect("the directory resolves");
+    let git = |args: &[&str]| {
+        let ran = Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(ran.status.success(), "git {args:?}: {ran:?}");
+    };
+    git(&["init", "-q"]);
+    let below = root.join("sub").join("dir");
+    std::fs::create_dir_all(&below).expect("the subdirectory can be made");
+    std::fs::write(below.join("inner.txt"), "in here\n").expect("the file is written");
+    let home = stand_in(&root, WRITES_DOWN_WHERE_IT_RUNS_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, &below)
+        .env("XDG_CONFIG_HOME", home.path())
+        .env(
+            "PATH",
+            format!("{}:/bin:/usr/bin", root.join("bin").display()),
+        )
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(b"pwd -P > bang.cwd\r");
+    let bang = written(&root.join("bang.cwd"));
+    terminal.typed(b"look at @inn");
+    terminal.shows("inner.txt");
+    terminal.typed(b"\t\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let at_root = format!("{}\n", root.display());
+    assert_eq!(written(&root.join("claude.cwd")), at_root, "the agent");
+    assert_eq!(bang, at_root, "the operator's command");
+    let turns = written(&root.join("turns.jsonl"));
+    assert!(
+        turns.contains("look at @sub/dir/inner.txt"),
+        "the completed path is not the one the agent names the file by: {turns}"
+    );
+    assert_handed_back(&drawn, cooked, "a quit from a subdirectory");
+}
+
 /// A `claude` that reads the request a session opens with and one turn,
 /// replies around a line that is not UTF-8, ends the turn, and then reads
 /// whatever it is sent until its standard input closes — so a session that
