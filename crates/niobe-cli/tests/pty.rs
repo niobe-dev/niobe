@@ -17,6 +17,10 @@
 //! proves the last two — the hook writes to the process's own standard output,
 //! and the signal disposition belongs to the process.
 //!
+//! A clean quit is also driven on terminals with no room to draw on — one
+//! cell, and no size at all — and on one whose `TERM` says `dumb`: each still
+//! ends with status 0 and gives the terminal back.
+//!
 //! A stop is not a way out, but it hands the terminal over all the same: a
 //! SIGTSTP, or Ctrl+Z read as a key, hands it back before the process stops,
 //! and a SIGCONT takes it again and draws the whole frame.
@@ -908,6 +912,67 @@ fn a_clean_quit_hands_the_terminal_back() {
 
     assert!(status.success(), "a clean quit ended with {status}");
     assert_handed_back(&drawn, cooked, "a clean quit");
+}
+
+/// Quits a shell started on a terminal of `size` rows and columns, and
+/// asserts that it ended cleanly and handed the terminal back.
+///
+/// Such a terminal has no room for the opening frame, so what the test waits
+/// for is the alternate screen: raw mode is on before it is entered, so the
+/// quit that follows is read as a key rather than eaten by the line
+/// discipline.
+fn quits_cleanly_at(rows: u16, cols: u16) {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let size = Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ..SIZE
+    };
+    rustix::termios::tcsetwinsize(&slave, size).expect("the pty can be resized");
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(ENTER_ALTERNATE_SCREEN);
+
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+
+    let path = format!("a quit on a {rows}×{cols} terminal");
+    assert!(status.success(), "{path} ended with {status}");
+    assert_handed_back(&drawn, cooked, &path);
+}
+
+#[test]
+fn a_one_by_one_terminal_quits_cleanly_and_is_handed_back() {
+    quits_cleanly_at(1, 1);
+}
+
+#[test]
+fn a_terminal_with_no_size_quits_cleanly_and_is_handed_back() {
+    quits_cleanly_at(0, 0);
+}
+
+#[test]
+fn a_dumb_terminal_quits_cleanly_and_is_handed_back() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("TERM", "dumb")
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+
+    assert!(
+        status.success(),
+        "a quit with TERM=dumb ended with {status}"
+    );
+    assert_handed_back(&drawn, cooked, "a quit with TERM=dumb");
 }
 
 #[test]
