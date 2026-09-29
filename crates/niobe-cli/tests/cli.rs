@@ -776,6 +776,31 @@ fn the_help_says_a_claude_session_from_a_subdirectory_is_not_listed() {
     assert!(out.contains("one started in a subdirectory is"), "{out}");
 }
 
+/// The help's TRUST section names everything trusting puts in force, not
+/// only what a backend is started with.
+#[test]
+fn the_help_names_everything_trust_gates() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    for gated in [
+        "billing",
+        "default_profile",
+        "named like one of yours",
+        "[permissions] rules",
+    ] {
+        let trust = out
+            .split("TRUST:")
+            .nth(1)
+            .and_then(|rest| rest.split("\n\n").next())
+            .expect("the help has a TRUST section");
+        assert!(
+            trust.contains(gated),
+            "TRUST does not name {gated}: {trust}"
+        );
+    }
+}
+
 /// A profile's `auth_refresh` is read and listed and not run; the help says
 /// so rather than let an operator think a login will happen on its own.
 #[test]

@@ -285,8 +285,6 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     Ok(())
 }
 
-/// Opens the shell on a recorded session and keeps recording into it. Without
-/// a terminal, prints what the session folds to.
 /// The operator's `!` commands, in `cwd`, with a reaper told of their groups
 /// and of the backend's.
 ///
@@ -303,6 +301,8 @@ fn commands_for(cwd: &Path, backend: &backend::Attachment) -> commands::Commands
     commands.reaped_by(reaper)
 }
 
+/// Opens the shell on a recorded session and keeps recording into it. Without
+/// a terminal, prints what the session folds to.
 fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let cwd = cwd()?;
     let root = repo::root(&cwd);
@@ -598,7 +598,6 @@ something else, or let run what nobody here approved, so they are not in force \
 until you have read the file. `niobe profiles` shows what it sets; `niobe trust` puts it in force \
 as it now stands, and editing it afterwards asks again.";
 
-/// The shell, saying so when this repository's config has not been trusted.
 /// The shell with a price sheet, so that a turn the backend has not priced yet
 /// shows what it is costing rather than nothing.
 ///
@@ -626,6 +625,7 @@ fn say_prices(app: App) -> App {
     }
 }
 
+/// The shell, saying so when this repository's config has not been trusted.
 fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
     match &loaded.untrusted {
         None => app,
@@ -945,8 +945,11 @@ TRUST:
     A repository's config arrives with the clone, and env, args, settings and
     auth_refresh are what a backend is started with — enough to point the
     official CLI at a host the repository chose, to sign it in as something
-    else, or to name a command of its own to sign in with. So those four do
-    nothing until you have read the file and said so:
+    else, or to name a command of its own to sign in with. So those four, and
+    the rest that choose the account or its bill or let calls run unasked — a
+    profile's billing, the default_profile, a profile named like one of yours,
+    and [permissions] rules — do nothing until you have read the file and said
+    so:
 
         niobe trust        this repository's config, as it now stands
         niobe untrust      take it back
