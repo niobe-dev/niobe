@@ -116,7 +116,22 @@ fn ci() -> Result<(), String> {
 /// Checks every workspace crate's dependency tree against
 /// [`ALLOWED_WORKSPACE_DEPS`].
 fn layering() -> Result<(), String> {
-    let mut violations = Vec::new();
+    let members = cargo_output(&[
+        "tree",
+        "--workspace",
+        "--depth",
+        "0",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+    ])?;
+    let mut violations: Vec<String> = unlisted(&names_in(&members))
+        .into_iter()
+        .map(|member| {
+            format!("{member} is a workspace member ALLOWED_WORKSPACE_DEPS does not list")
+        })
+        .collect();
 
     for (package, allowed) in ALLOWED_WORKSPACE_DEPS {
         for dependency in workspace_dependencies_of(package)? {
@@ -261,15 +276,39 @@ fn workspace_dependencies_of(package: &str) -> Result<Vec<String>, String> {
         "{p}",
     ])?;
 
-    let mut found: Vec<String> = output
+    Ok(names_in(&output)
+        .into_iter()
+        .filter(|name| name.starts_with("niobe-"))
+        .collect())
+}
+
+/// The package names in `tree`, the output of `cargo tree --prefix none
+/// --format {p}`: one package per line, its name first. Sorted, once each.
+fn names_in(tree: &str) -> Vec<String> {
+    let mut found: Vec<String> = tree
         .lines()
         .filter_map(|line| line.split_whitespace().next())
-        .filter(|name| name.starts_with("niobe-"))
         .map(str::to_owned)
         .collect();
     found.sort_unstable();
     found.dedup();
-    Ok(found)
+    found
+}
+
+/// The workspace members the layering table says nothing about, which would
+/// otherwise never have their own edges checked. `xtask` is the tooling that
+/// does the checking, and depends on no crate of the product.
+fn unlisted(members: &[String]) -> Vec<String> {
+    members
+        .iter()
+        .filter(|member| member.as_str() != "xtask")
+        .filter(|member| {
+            !ALLOWED_WORKSPACE_DEPS
+                .iter()
+                .any(|(listed, _)| listed == member)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Builds the release binary and returns its size in bytes, failing if it is
@@ -405,6 +444,29 @@ fn cargo(args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `cargo tree --prefix none --format {p}` prints, cut down.
+    const TREE: &str = "\
+niobe-tui v0.12.0 (/repo/crates/niobe-tui)
+niobe-core v0.12.0 (/repo/crates/niobe-core)
+ratatui v0.30.2
+niobe-core v0.12.0 (/repo/crates/niobe-core)
+";
+
+    #[test]
+    fn the_workspace_crates_a_tree_reaches_are_named_once() {
+        let names = names_in(TREE);
+        assert_eq!(names, ["niobe-core", "niobe-tui", "ratatui"]);
+        let niobe: Vec<&String> = names.iter().filter(|n| n.starts_with("niobe-")).collect();
+        assert_eq!(niobe, ["niobe-core", "niobe-tui"]);
+    }
+
+    #[test]
+    fn a_member_the_layering_table_does_not_list_is_named() {
+        let members = names_in("niobe-core v0.12.0\nniobe-new v0.12.0\nxtask v0.1.0\n");
+        assert_eq!(unlisted(&members), ["niobe-new"]);
+        assert!(unlisted(&names_in("niobe-cli v0.12.0\nxtask v0.1.0\n")).is_empty());
+    }
 
     #[test]
     fn the_workspace_release_profile_unwinds() {

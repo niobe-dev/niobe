@@ -156,27 +156,28 @@ fn bump_of_commit(commit: &str) -> Bump {
         return Bump::None;
     };
 
+    // A trailer only breaks the API when it is the whole start of its own
+    // line; prose that merely quotes the words is not a declaration. Read
+    // before the subject, so that the trailer means the same whatever the
+    // subject looks like.
+    if lines
+        .any(|line| line.starts_with("BREAKING CHANGE:") || line.starts_with("BREAKING-CHANGE:"))
+    {
+        return Bump::Major;
+    }
+
     let Some((prefix, _)) = subject.split_once(':') else {
         // Not a conventional commit: it says nothing about the version, and
         // guessing from prose is how a breaking change ships as a patch.
         return Bump::None;
     };
-
-    // A trailer only breaks the API when it is the whole start of its own
-    // line; prose that merely quotes the words is not a declaration.
-    let breaking = prefix.ends_with('!')
-        || lines.any(|line| {
-            line.starts_with("BREAKING CHANGE:") || line.starts_with("BREAKING-CHANGE:")
-        });
-    if breaking {
+    if prefix.ends_with('!') {
         return Bump::Major;
     }
 
-    let kind = prefix
-        .trim_end_matches('!')
-        .split_once('(')
-        .map_or(prefix, |(kind, _)| kind);
-    match kind.trim() {
+    let kind = prefix.split_once('(').map_or(prefix, |(kind, _)| kind);
+    // Conventional Commits types are not case-sensitive: `Fix:` is a fix.
+    match kind.trim().to_ascii_lowercase().as_str() {
         "feat" => Bump::Minor,
         "fix" | "perf" => Bump::Patch,
         _ => Bump::None,
@@ -208,9 +209,12 @@ pub fn version_sites(manifest: &str) -> Result<Vec<Site>, String> {
     let mut offset = 0;
     let mut package_seen = false;
 
-    for (number, line) in manifest.lines().enumerate() {
+    // Split keeping each line's own ending, so that the offsets are right
+    // whether the file ends its lines with `\n` or with `\r\n`.
+    for (number, whole) in manifest.split_inclusive('\n').enumerate() {
         let start = offset;
-        offset += line.len() + 1;
+        offset += whole.len();
+        let line = whole.trim_end_matches(['\n', '\r']);
 
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
@@ -442,10 +446,19 @@ fn apply(target: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The newest `v*` tag by version order, if the repository has one.
+/// The nearest `v*` tag the current commit is reached from, if there is one:
+/// the release this branch's commits come after, which on a branch cut from
+/// an older release is not the highest tag in the repository.
 fn last_tag() -> Result<Option<String>, String> {
-    let tags = git(&["tag", "--list", "v*", "--sort=-v:refname"])?;
-    Ok(tags.lines().next().map(str::to_owned))
+    let tags = git(&["tag", "--list", "v*"])?;
+    if tags.trim().is_empty() {
+        return Ok(None);
+    }
+    // A repository whose tags are all on other branches has none reachable,
+    // which `git describe` reports as a failure.
+    Ok(git(&["describe", "--tags", "--match", "v*", "--abbrev=0"])
+        .ok()
+        .map(|tag| tag.trim().to_owned()))
 }
 
 fn git(args: &[&str]) -> Result<String, String> {
@@ -455,6 +468,36 @@ fn git(args: &[&str]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_commit_type_is_read_whatever_its_case() {
+        assert_eq!(bump_of_commit("Feat: a thing"), Bump::Minor);
+        assert_eq!(bump_of_commit("FIX(cli): a thing"), Bump::Patch);
+    }
+
+    #[test]
+    fn a_breaking_trailer_breaks_whatever_the_subject_is() {
+        let trailer = "\n\nBREAKING CHANGE: the key is renamed.";
+        assert_eq!(
+            bump_of_commit(&format!("Update docs: x{trailer}")),
+            Bump::Major
+        );
+        assert_eq!(
+            bump_of_commit(&format!("Rename the key{trailer}")),
+            Bump::Major
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_crlf_endings_has_its_sites_where_they_are() {
+        let crlf = MANIFEST.replace('\n', "\r\n");
+        let sites = version_sites(&crlf).expect("the sites are found");
+
+        for site in &sites {
+            assert_eq!(&crlf[site.span.clone()], site.value, "{}", site.what);
+            assert_eq!(site.value, "0.4.0");
+        }
+    }
 
     const MANIFEST: &str = r#"[workspace]
 resolver = "3"
