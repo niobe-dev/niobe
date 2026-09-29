@@ -483,6 +483,7 @@ const PASTE_BUDGET: Duration = Duration::from_millis(50);
 /// A line pasted whole reaches the composer without a pause the operator
 /// would notice, however long.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a paste is timed in an optimised build")]
 fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
     let _alone = ALONE
         .lock()

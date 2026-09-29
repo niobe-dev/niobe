@@ -776,6 +776,7 @@ mod tests {
         run(&work, &["init", "--initial-branch=main", "."]);
         run(&work, &["config", "user.email", "test@example.invalid"]);
         run(&work, &["config", "user.name", "A Test"]);
+        pin_the_config(&work);
         std::fs::write(work.join("kept.txt"), "a\nb\nc\n").expect("the file is written");
         run(&work, &["add", "kept.txt"]);
         run(&work, &["commit", "-m", "first"]);
@@ -787,9 +788,39 @@ mod tests {
         dir
     }
 
+    /// Sets, in the repository at `work`, the settings a developer's global
+    /// git configuration would otherwise change the reads of: the repository
+    /// is read the way niobe reads the operator's, with their configuration,
+    /// and the repository's own file is what wins over it.
+    fn pin_the_config(work: &Path) {
+        for (key, value) in [
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+            ("status.showUntrackedFiles", "normal"),
+            ("diff.renames", "true"),
+        ] {
+            run(work, &["config", key, value]);
+        }
+    }
+
+    /// Runs `git` to set a test's repository up, with no configuration but
+    /// the repository's own: a developer's `commit.gpgsign`, hooks or
+    /// defaults would otherwise decide whether a commit here works.
     fn run(at: &Path, args: &[&str]) {
-        let done = git(at, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
-        let _ = done;
+        let output = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(args)
+            .current_dir(at)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} did not run: {e}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -887,6 +918,7 @@ mod tests {
         run(&work, &["init", "--initial-branch=main", "."]);
         run(&work, &["config", "user.email", "test@example.invalid"]);
         run(&work, &["config", "user.name", "A Test"]);
+        pin_the_config(&work);
         std::fs::write(work.join("a.txt"), "a\n").expect("the file is written");
         run(&work, &["add", "a.txt"]);
         run(&work, &["commit", "-m", "only"]);
@@ -1027,14 +1059,17 @@ mod tests {
     /// is ten seconds of an idle session, and several seconds of a busy one.
     const TICKS: usize = 100;
 
-    /// One frame at 60 Hz, which is what [`niobe_tui`]'s own budget test holds
-    /// a redraw to.
-    const FRAME: Duration = Duration::from_millis(16);
+    /// A quarter of a second. Asking without waiting costs microseconds a
+    /// time, and a look that waited for a read would cost tens of
+    /// milliseconds each — seconds over [`TICKS`] — so this bound still tells
+    /// the two apart, with room for a debug build sharing its cores with the
+    /// tests around it, where one frame's worth did not.
+    const FRAME: Duration = Duration::from_millis(250);
 
     /// A read of this workspace takes tens of milliseconds — several frames —
     /// so the loop can never be the thing doing it. A hundred ticks' worth of
-    /// asking has to come in under a single frame, while a read of a real
-    /// repository is going on behind them.
+    /// asking has to come in far under what a single read costs, while a read
+    /// of a real repository is going on behind them.
     #[test]
     fn asking_what_the_repository_looks_like_never_waits_for_the_answer() {
         let mut watching = watch(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -1047,7 +1082,7 @@ mod tests {
 
         assert!(
             spent < FRAME,
-            "{TICKS} ticks spent {spent:?} asking, over the {FRAME:?} a whole frame gets"
+            "{TICKS} ticks spent {spent:?} asking, over the {FRAME:?} they may"
         );
     }
 
