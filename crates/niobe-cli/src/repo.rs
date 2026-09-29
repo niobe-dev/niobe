@@ -179,6 +179,34 @@ pub fn inside(root: &Path, path: &Path) -> Result<(), String> {
     }
 }
 
+/// Refuses to write the file `path` of the repository rooted at `root` where
+/// the write would land outside it: the file is a link to one outside, or
+/// the directory it would be created in is.
+///
+/// [`inside`] is checked when a session starts; this is checked at each
+/// write, because a link can be planted while the session runs — by a shell
+/// command the operator allowed, or a checkout — and a rule written through
+/// it would land in a file of the operator's own, where it holds in every
+/// repository and no trust gates it. The deepest part of `path` that exists
+/// is what is resolved, since a file not there yet is created in it.
+pub fn writes_inside(root: &Path, path: &Path) -> Result<(), String> {
+    let Some(existing) = path.ancestors().find(|part| part.exists()) else {
+        return Ok(());
+    };
+    let target = std::fs::canonicalize(existing)
+        .map_err(|e| format!("cannot resolve {}: {e}", existing.display()))?;
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    match target.starts_with(&root) {
+        true => Ok(()),
+        false => Err(format!(
+            "{} leads to {}, outside the repository; niobe writes a repository's config \
+             only inside it",
+            path.display(),
+            target.display()
+        )),
+    }
+}
+
 /// Opens the session store of `root` to read it, if one has been created:
 /// one that cannot be written, as on a read-only mount, is read as it is. See
 /// [`Store::open_to_read`].

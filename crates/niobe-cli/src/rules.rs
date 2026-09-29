@@ -20,6 +20,9 @@ use niobe_tui::rules::{Rules, RulesError};
 /// Writes rules into the config of the repository rooted at a path.
 #[derive(Debug, Clone)]
 pub struct ConfigRules {
+    /// The repository the rules are about, which the file written must stay
+    /// inside.
+    root: PathBuf,
     path: PathBuf,
     /// Where this machine records the config files it has trusted, so that a
     /// file Niobe itself edits does not lose the operator's decision about it.
@@ -31,6 +34,7 @@ impl ConfigRules {
     /// not that file exists yet.
     pub fn at(root: &Path) -> Self {
         Self {
+            root: root.to_path_buf(),
             path: crate::repo::config_path(root),
             trust: crate::config::trust_path(),
         }
@@ -87,7 +91,11 @@ impl Rules for ConfigRules {
     /// next session. A file that was there and not trusted stays that way —
     /// trusting it here would put in force whatever else a clone wrote in it —
     /// so the rule holds for this session and waits on `niobe trust` after.
+    ///
+    /// A file that leads outside the repository is not written: see
+    /// [`crate::repo::writes_inside`].
     fn remember(&mut self, rule: &Rule) -> Result<(), RulesError> {
+        crate::repo::writes_inside(&self.root, &self.path)?;
         let remembered =
             niobe_config::remember(&self.path, rule).map_err(|error| error.to_string())?;
         self.keep_trust(&remembered)
@@ -116,6 +124,7 @@ mod tests {
 
         fn rules(&self) -> ConfigRules {
             ConfigRules {
+                root: self.dir.path().to_path_buf(),
                 path: crate::repo::config_path(self.dir.path()),
                 trust: Some(self.record.clone()),
             }
@@ -142,6 +151,7 @@ mod tests {
     fn a_rule_is_written_into_the_repositorys_own_config() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let mut rules = ConfigRules {
+            root: dir.path().to_path_buf(),
             path: crate::repo::config_path(dir.path()),
             trust: Some(dir.path().join("trusted.list")),
         };
@@ -244,5 +254,77 @@ mod tests {
             .expect("the config is written");
 
         assert!(!repo.is_trusted());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rule_is_not_written_through_a_link_planted_to_a_file_outside_the_repository() {
+        let repo = Repo::with_config("");
+        let rules = repo.rules();
+        let outside = tempfile::tempdir().expect("a temporary directory");
+        let victim = outside.path().join("config.toml");
+        let text = "[profiles.me]\nbackend = \"claude\"\n";
+        std::fs::write(&victim, text).expect("the outside file is written");
+        let path = crate::repo::config_path(repo.dir.path());
+        std::fs::remove_file(&path).expect("removed");
+        std::os::unix::fs::symlink(&victim, &path).expect("the link is planted");
+
+        let said = rules
+            .clone()
+            .remember(&Rule::tool("Bash"))
+            .expect_err("a file outside the repository is not the repository's config")
+            .to_string();
+
+        assert!(said.contains(&path.display().to_string()), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("the outside file reads"),
+            text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rule_is_not_written_into_a_directory_linked_from_outside_the_repository() {
+        let repo = Repo::with_config("");
+        let rules = repo.rules();
+        let outside = tempfile::tempdir().expect("a temporary directory");
+        let path = crate::repo::config_path(repo.dir.path());
+        let dir = path.parent().expect("the config is in a directory");
+        std::fs::remove_dir_all(dir).expect("removed");
+        std::os::unix::fs::symlink(outside.path(), dir).expect("the link is planted");
+
+        rules
+            .clone()
+            .remember(&Rule::tool("Bash"))
+            .expect_err("a directory outside the repository is not the repository's");
+
+        assert!(!outside.path().join("config.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_file_inside_the_repository_is_still_written_through() {
+        let repo = Repo::with_config("");
+        let path = crate::repo::config_path(repo.dir.path());
+        let real = repo.dir.path().join("niobe.toml");
+        std::fs::write(&real, "").expect("the real file is written");
+        std::fs::remove_file(&path).expect("removed");
+        std::os::unix::fs::symlink(&real, &path).expect("the link is made");
+
+        repo.rules()
+            .remember(&Rule::tool("Read"))
+            .expect("a file inside the repository is written");
+
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("the link is there")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::read_to_string(&real)
+                .expect("the real file reads")
+                .contains("\"Read\"")
+        );
     }
 }
