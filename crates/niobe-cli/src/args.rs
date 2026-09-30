@@ -100,9 +100,10 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
             "`--budget` applies to the shell and `--resume`, and to nothing else".to_owned(),
         );
     }
-    if theme.is_some() && !runs_a_session {
+    if theme.is_some() && !runs_a_session && !matches!(command, Command::Replay(_)) {
         return Err(
-            "`--theme` applies to the shell and `--resume`, and to nothing else".to_owned(),
+            "`--theme` applies to the shell, `--resume` and `replay`, and to nothing else"
+                .to_owned(),
         );
     }
 
@@ -163,7 +164,12 @@ fn take_flag<'a>(
             continue;
         };
 
-        if value.is_empty() || value.starts_with('-') {
+        // A negative number is a value, and is refused by what reads it
+        // for what it is rather than taken for the next flag.
+        let negative_number = value.strip_prefix('-').is_some_and(|rest| {
+            rest.starts_with(|c: char| c.is_ascii_digit()) && value.parse::<f64>().is_ok()
+        });
+        if value.is_empty() || (value.starts_with('-') && !negative_number) {
             return Err(missing.to_owned());
         }
         if found.replace(value).is_some() {
@@ -174,6 +180,11 @@ fn take_flag<'a>(
 }
 
 fn command(args: &[&str]) -> Result<Command, String> {
+    // Asked for anywhere on the line, as after a subcommand, it is still the
+    // help that was asked for.
+    if args.iter().any(|arg| matches!(*arg, "-h" | "--help")) {
+        return Ok(Command::Help);
+    }
     let command = match args {
         [] => Command::Shell,
         ["-h" | "--help", ..] => Command::Help,
@@ -231,10 +242,23 @@ fn resume(id: &str) -> Result<Resume, String> {
     if id.trim().is_empty() {
         return Err("`--resume` needs a session id; `niobe sessions` lists them".to_owned());
     }
-    Ok(match id.parse::<SessionId>() {
-        Ok(recorded) => Resume::Recorded(recorded),
-        Err(_) => Resume::Imported(id.to_owned()),
-    })
+    // A number, signed or too large for one of Niobe's, is still a number:
+    // the CLI names its sessions otherwise, and looking one up among them
+    // would say there is no such claude session, which is not the mistake.
+    let numeric = id
+        .strip_prefix(['+', '-'])
+        .unwrap_or(id)
+        .chars()
+        .all(|c| c.is_ascii_digit());
+    match (id.parse::<SessionId>(), numeric) {
+        (Ok(recorded), _) if id.chars().all(|c| c.is_ascii_digit()) => {
+            Ok(Resume::Recorded(recorded))
+        }
+        (_, true) => Err(format!(
+            "`{id}` is not a session number; `niobe sessions` lists them"
+        )),
+        _ => Ok(Resume::Imported(id.to_owned())),
+    }
 }
 
 fn no_more(rest: &[&str]) -> Result<(), String> {
@@ -511,5 +535,36 @@ mod tests {
             parsed(&["--frobnicate"]),
             Err("unknown argument `--frobnicate`".to_owned())
         );
+    }
+
+    #[test]
+    fn help_after_a_subcommand_is_the_help() {
+        for args in [
+            &["sessions", "--help"][..],
+            &["replay", "log.jsonl", "-h"],
+            &["prices", "--help"],
+        ] {
+            assert_eq!(parsed(args), Ok(Command::Help), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_negative_budget_is_refused_by_its_value_not_read_as_a_missing_one() {
+        let said = invocation(&["--budget", "-1"]).expect_err("a negative budget");
+        assert!(said.contains("positive") && said.contains("`-1`"), "{said}");
+    }
+
+    #[test]
+    fn a_theme_applies_to_a_replay_too() {
+        let asked = invocation(&["replay", "log.jsonl", "--theme", "neo"]).expect("parses");
+        assert!(asked.theme.is_some());
+    }
+
+    #[test]
+    fn an_id_of_digits_is_never_looked_up_as_a_claude_session() {
+        for id in ["99999999999999999999999", "+3", "-5"] {
+            let said = parsed(&["--resume", id]).expect_err("not a session number");
+            assert!(said.contains(id) && said.contains("session"), "{said}");
+        }
     }
 }

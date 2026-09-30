@@ -136,7 +136,7 @@ fn run(
         Command::Trust => trust(),
         Command::Untrust => untrust(),
         Command::Prices(model) => list_prices(model.as_deref()),
-        Command::Replay(log) => replay(&log),
+        Command::Replay(log) => replay(&log, &asked),
         Command::Help => {
             print_help();
             Ok(())
@@ -775,7 +775,7 @@ fn list_prices(model: Option<&str>) -> Result<(), String> {
 
 /// Folds a JSON Lines event log into the shell, for development. Nothing typed
 /// into a replayed log is recorded. Without a terminal, prints the fold.
-fn replay(log: &Path) -> Result<(), String> {
+fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
     let text = log_text(log)?;
 
     let started = Instant::now();
@@ -783,7 +783,11 @@ fn replay(log: &Path) -> Result<(), String> {
     // The same price sheet the shell and `--resume` get: a replayed log and a
     // resumed session that fold to the same totals must print the same cost,
     // or one of the two figures is teaching the operator to distrust both.
-    let mut app = say_prices(App::new(repo::describe(&cwd()?)));
+    let app = say_prices(App::new(repo::describe(&cwd()?)).with_depth(asked.depth));
+    let mut app = match asked.theme {
+        Some(theme) => app.with_theme(theme),
+        None => app,
+    };
     app.extend(&events);
     let elapsed = started.elapsed();
 
