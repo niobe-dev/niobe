@@ -1410,26 +1410,21 @@ mod tests {
     }
 
     #[test]
-    fn the_branch_is_read_from_the_repository_this_test_runs_in() {
-        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let branch = git_branch(here).expect("the workspace is a git repository");
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .args(args)
-                .current_dir(here)
-                .output()
-                .expect("git runs");
-            String::from_utf8(out.stdout)
-                .expect("git prints UTF-8")
-                .trim()
-                .to_owned()
-        };
-        let expected = match git(&["rev-parse", "--abbrev-ref", "HEAD"]).as_str() {
-            // Detached: the commit, shortened as git shortens it.
-            "HEAD" => git(&["rev-parse", "--short=7", "HEAD"]),
-            name => name.to_owned(),
-        };
-        assert_eq!(branch, expected);
+    fn the_branch_is_read_from_the_repository_git_reports() {
+        let dir = repository();
+        let here = dir.path().join("work");
+        run(&here, &["checkout", "-q", "-b", "feature/read-me"]);
+        assert_eq!(git_branch(&here).as_deref(), Some("feature/read-me"));
+
+        // Detached: the commit, shortened as git shortens it.
+        run(&here, &["checkout", "-q", "--detach"]);
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--short=7", "HEAD"])
+            .current_dir(&here)
+            .output()
+            .expect("git runs");
+        let short = String::from_utf8(out.stdout).expect("git prints UTF-8");
+        assert_eq!(git_branch(&here).as_deref(), Some(short.trim()));
     }
 
     #[test]

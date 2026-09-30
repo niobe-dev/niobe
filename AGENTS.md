@@ -337,6 +337,11 @@ Where tests live:
     process's own standard output and the signal disposition belongs to the process. Watch it
     after touching `terminal.rs` or `run.rs`.
 
+  - `niobe-bridge-claude/tests/conformance.rs` holds one test that asks the `claude` installed on
+    this machine whether its release is one the recordings cover. It is ignored by `cargo test`,
+    since the CLI updates itself; after it does, run
+    `cargo test -p niobe-bridge-claude --test conformance -- --ignored`.
+
 ### 6.1 The gate
 
 Run all of it, in this order, and report exact pass/fail counts — never infer success:

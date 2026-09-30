@@ -568,7 +568,12 @@ fn every_recording_says_which_cli_version_it_was_recorded_from() {
     }
 }
 
+/// Asks the `claude` installed on this machine, which updates itself: the day
+/// it moves to a series nobody recorded, this fails for a commit that changed
+/// nothing. So it is run by hand, as AGENTS.md says, rather than by every
+/// `cargo test`.
 #[test]
+#[ignore = "reads the machine's own claude; run with --ignored after it updates"]
 fn the_installed_cli_is_a_release_these_recordings_cover() {
     let Ok(output) = Command::new(niobe_bridge_claude::BINARY)
         .arg("--version")

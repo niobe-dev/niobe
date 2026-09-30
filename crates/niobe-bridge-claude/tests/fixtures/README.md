@@ -27,8 +27,10 @@ Two things are checked against that, in `tests/conformance.rs`:
 - **The installed CLI is a release these recordings cover**, by `major.minor`.
   A patch bump is not held against the operator: the twenty-eight 2.1.x
   releases whose transcripts were on the machine this was written on carry the
-  same record types and the same message shapes. The check is skipped, out
-  loud, where no `claude` is installed — which is every CI runner.
+  same record types and the same message shapes. The check asks the `claude`
+  on the machine it runs on, which updates itself, so it is an ignored test
+  run by hand — `cargo test -p niobe-bridge-claude --test conformance --
+  --ignored` — and skipped, out loud, where no `claude` is installed.
 
 A session driving a release outside that set says so once, in the timeline,
 and goes on. So does an imported transcript written by one.
