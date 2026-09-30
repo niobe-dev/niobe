@@ -599,6 +599,16 @@ pub enum Event {
     /// one is called with a fresh [`Event::SessionMeta`].
     Cleared,
 
+    /// The process the session ran in stopped while a turn was running — the
+    /// operator quit, or it was killed and this is recorded when the session
+    /// is taken up again.
+    ///
+    /// The turn ends here, cut: the next prompt opens a turn of its own rather
+    /// than joining one a process that is gone was running, and nothing the
+    /// turn had running reports an end after this. What the turn is timed to
+    /// is the event before this one, since nothing happened in it after that.
+    SessionLeft,
+
     /// A tool call is waiting on the operator.
     PermissionRequest {
         /// The call being gated.

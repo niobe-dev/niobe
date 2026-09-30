@@ -361,6 +361,10 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
     }
     keys_can_be_read()?;
     let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
+    // A record that stops in the middle of a turn is one whose process was
+    // killed under it; the turn is closed where it stops, and the prompt the
+    // operator is about to type opens a turn of its own.
+    app.leave();
 
     // The recorded session says what the backend called it, which is the only
     // id that can hand its transcript back: Niobe's session id names the
@@ -484,6 +488,9 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
     for event in &events {
         recorder.record(event).map_err(|e| e.to_string())?;
     }
+    // A transcript can stop in the middle of a turn — the CLI was quit or
+    // killed under it — and the turn is closed there, as a resumed one is.
+    app.leave();
     let app = if backend.attached() {
         app.attached()
     } else {

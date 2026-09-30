@@ -453,6 +453,9 @@ pub struct TurnRule {
     pub five_hour_points: Option<u64>,
     /// How long it ran, from the prompt that opened it to its end.
     pub took: Option<Duration>,
+    /// Whether it was cut off rather than ended by the backend: the session
+    /// failed under it, or the process running it stopped.
+    pub cut: bool,
 }
 
 impl EntryKind {
@@ -1256,22 +1259,40 @@ impl App {
             self.turn_began_at = self.at;
         }
         self.session.apply(event);
-        self.last_folded_at = self.at;
+        // A session left is recorded when the process stopped, or when the
+        // session is taken up again after one was killed: the turn it cuts
+        // ended with the last thing that happened in it, and the time between
+        // is time nothing ran.
+        let ended_at = match event {
+            Event::SessionLeft => self.last_folded_at,
+            _ => self.at,
+        };
+        self.last_folded_at = ended_at;
         let ended = self.just_ended.take();
         self.fold_into_transcript(event, ended);
         if self.session.turns().len() > turns {
-            self.rule_turn();
+            self.rule_turn(ended_at);
+        }
+    }
+
+    /// Records that the process this session runs in is leaving it with a
+    /// turn still running, or that one before it did: a record that ends in
+    /// the middle of a turn, taken up again. The turn ends there, cut, so the
+    /// next prompt opens a turn of its own.
+    pub fn leave(&mut self) {
+        if self.session.turn_running() {
+            self.produce(Event::SessionLeft);
         }
     }
 
     /// Draws the rule under the turn the fold has just ended, below whatever
-    /// the event that ended it put in the transcript.
-    fn rule_turn(&mut self) {
+    /// the event that ended it put in the transcript, as ended `at`.
+    fn rule_turn(&mut self, at: Option<Stamp>) {
         let began = self.turn_began_at.take();
         let Some(turn) = self.session.turns().last() else {
             return;
         };
-        let measured = match (began, self.at) {
+        let measured = match (began, at) {
             (Some(began), Some(ended)) => ended.since(began),
             _ => None,
         };
@@ -1282,7 +1303,8 @@ impl App {
         let took = measured.filter(|took| *took >= TIMED);
         let rule = TurnRule {
             number: turn.number,
-            ended: self.at.and_then(Stamp::local),
+            cut: turn.cut,
+            ended: at.and_then(Stamp::local),
             tokens: turn.tokens,
             five_hour_points: turn.five_hour_share.map(percent),
             took,
@@ -1498,6 +1520,18 @@ impl App {
             }
 
             Event::PermissionWithdrawn { id } => self.withdraw_ask(id),
+
+            // Nothing the stopped process was doing will say any more of
+            // itself: a reply it was writing reads as cut off where it
+            // stopped, rather than as finished.
+            Event::SessionLeft => {
+                self.forget_asks();
+                self.interrupt_what_the_fold_stopped();
+                if let Some(entry) = self.streaming_agent_entry() {
+                    entry.streaming = false;
+                    entry.meta = CUT_OFF.to_owned();
+                }
+            }
 
             Event::Error { message, fatal } => {
                 // A session that ended cannot take an answer, so a prompt it
@@ -4437,6 +4471,10 @@ fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
     composer.set_cursor_style(Style::new().fg(theme.pane_bg).bg(theme.hot));
 }
 
+/// What a reply the session was writing when its process stopped says of
+/// itself.
+const CUT_OFF: &str = "cut off: the session stopped here";
+
 /// What the bar says once a stop of the running turn has been asked for.
 const STOPPING_HINT: &str = "Stopping the turn · Ctrl+C again quits";
 
@@ -6852,6 +6890,7 @@ mod tests {
                 tokens: Some(4_100),
                 five_hour_points: None,
                 took: Some(Duration::from_secs(38)),
+                cut: false,
             }
         );
     }
@@ -7494,6 +7533,76 @@ mod tests {
         app.tick(Instant::now(), Some(millis(259_200_000)));
 
         assert_eq!(app.worked(), Some(Duration::from_secs(20)));
+    }
+
+    /// A record that stops in the middle of a turn — the session was quit
+    /// while it ran — taken up again forty-seven minutes later.
+    fn resumed_after_leaving_mid_turn() -> App {
+        let mut app = app();
+        app.apply_at(&said("slow"), millis(1_000));
+        app.apply_at(
+            &Event::AssistantDelta {
+                text: "tick 0 tick 1".to_owned(),
+            },
+            millis(6_000),
+        );
+        app.apply_at(&Event::SessionLeft, millis(2_826_000));
+        app.apply_at(&said("again"), millis(2_826_000));
+        app.apply_at(&Event::TurnEnded, millis(2_826_100));
+        app
+    }
+
+    #[test]
+    fn a_turn_a_quit_left_open_is_closed_where_its_record_stops() {
+        let app = resumed_after_leaving_mid_turn();
+
+        let rules: Vec<(bool, Option<Duration>)> = app
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Turn(rule) => Some((rule.cut, rule.took)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                (true, Some(Duration::from_secs(5))),
+                (false, Some(Duration::from_millis(100)))
+            ],
+            "the first turn is timed to its last recorded event, and cut"
+        );
+        assert_eq!(
+            app.worked(),
+            Some(Duration::from_millis(5_100)),
+            "the time niobe was not running was counted as work"
+        );
+    }
+
+    #[test]
+    fn a_reply_the_session_left_half_written_says_it_was_cut_off() {
+        let app = resumed_after_leaving_mid_turn();
+
+        let reply = app
+            .entries()
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Agent)
+            .expect("the reply is drawn");
+        assert!(!reply.streaming);
+        assert!(reply.meta.contains("cut off"), "{reply:?}");
+    }
+
+    #[test]
+    fn leaving_records_the_turn_it_cuts_and_nothing_when_none_runs() {
+        let mut idle = app();
+        idle.leave();
+        assert!(idle.take_produced().is_empty());
+
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.leave();
+        assert_eq!(app.take_produced(), [Event::SessionLeft]);
+        assert!(!app.session().turn_running());
     }
 
     #[test]

@@ -422,6 +422,9 @@ pub struct TurnRecord {
     /// The window is the account's, not the session's: anything else the
     /// account ran during the turn moved it too.
     pub five_hour_share: Option<f64>,
+    /// Whether the turn was cut off rather than ended by the backend: the
+    /// session failed under it, or the process running it stopped.
+    pub cut: bool,
 }
 
 /// Where a turn began: what the session had spent, and the window as last
@@ -543,7 +546,10 @@ impl SessionState {
     /// the end it repeats.
     pub fn apply(&mut self, event: &Event) {
         self.fold(event);
-        self.ended_last = matches!(event, Event::TurnEnded | Event::Error { fatal: true, .. });
+        self.ended_last = matches!(
+            event,
+            Event::TurnEnded | Event::Error { fatal: true, .. } | Event::SessionLeft
+        );
     }
 
     fn fold(&mut self, event: &Event) {
@@ -584,7 +590,7 @@ impl SessionState {
             // With nothing between, it is the last turn's end said again,
             // and a turn recorded for it would be one nobody ran.
             Event::TurnEnded if self.ended_last => {}
-            Event::TurnEnded => self.end_turn(),
+            Event::TurnEnded => self.end_turn(false),
 
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
 
@@ -660,6 +666,17 @@ impl SessionState {
             // last figure is of one the model no longer has: no figure is
             // what is true until the next request reports one.
             Event::Cleared => self.context = None,
+
+            // As a fatal error does, without being one: the process stopped,
+            // and whatever it was running will report nothing more.
+            Event::SessionLeft => {
+                self.pending_permissions.clear();
+                self.pending_assistant.clear();
+                self.interrupt_backend_work();
+                if self.turn_running {
+                    self.end_turn(true);
+                }
+            }
 
             Event::PermissionRequest { id, .. } => {
                 bump(&mut self.permission_requests);
@@ -754,7 +771,7 @@ impl SessionState {
                     // recorded with it; with no turn running there is none
                     // to end.
                     if self.turn_running {
-                        self.end_turn();
+                        self.end_turn(true);
                     }
                 }
             }
@@ -798,7 +815,9 @@ impl SessionState {
     }
 
     /// Ends the running turn, and records what it spent.
-    fn end_turn(&mut self) {
+    /// Records the running turn as ended, and whether it was `cut` off rather
+    /// than ended by the backend.
+    fn end_turn(&mut self, cut: bool) {
         // Nothing more comes until the next prompt, so a question the turn
         // left open waits on nobody: an answer to it would reach nothing. A
         // reply it left half-streamed is not the start of the next one.
@@ -816,6 +835,7 @@ impl SessionState {
                 .usage_reported
                 .then(|| ended.tokens.saturating_sub(began.tokens)),
             five_hour_share,
+            cut,
         });
         self.turn_last_ended = ended;
         self.window_reported = false;
@@ -2702,5 +2722,38 @@ mod tests {
         let names: Vec<&str> = state.commands().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["review_changes (MCP)"]);
         assert!(SessionState::new().commands().is_empty());
+    }
+
+    #[test]
+    fn a_turn_the_session_left_running_is_cut_and_the_next_prompt_opens_its_own() {
+        let said = |text: &str| Event::UserMessage {
+            text: text.to_owned(),
+        };
+        let state = SessionState::replay(&[
+            said("slow"),
+            Event::AssistantDelta {
+                text: "tick 0".to_owned(),
+            },
+            Event::SessionLeft,
+            said("again"),
+            Event::TurnEnded,
+        ]);
+
+        let cut: Vec<bool> = state.turns().iter().map(|turn| turn.cut).collect();
+        assert_eq!(cut, [true, false]);
+        assert!(!state.turn_running());
+    }
+
+    #[test]
+    fn a_session_left_with_no_turn_running_ends_no_turn() {
+        let state = SessionState::replay(&[
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            Event::TurnEnded,
+            Event::SessionLeft,
+        ]);
+
+        assert_eq!(state.turns().len(), 1);
     }
 }

@@ -35,7 +35,12 @@ pub(crate) fn lines(rule: &TurnRule, width: usize, theme: &Theme) -> Vec<Line<'s
 
 fn line(rule: &TurnRule, width: usize, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
-    let head = format!("{OPENING}{}", rule.number);
+    // A turn that was cut off says so beside its number, where it is never
+    // given up for room: its figures stop where it was cut.
+    let head = match rule.cut {
+        true => format!("{OPENING}{} (cut)", rule.number),
+        false => format!("{OPENING}{}", rule.number),
+    };
     let mut figures = figures(rule);
     while text::width(&head) + figures_width(&figures) + 2 > width {
         match dropped_first(&figures) {
@@ -160,6 +165,7 @@ mod tests {
             tokens: Some(6_400),
             five_hour_points: Some(1),
             took: Some(Duration::from_secs(38)),
+            cut: false,
         }
     }
 
@@ -179,6 +185,26 @@ mod tests {
             "{said}"
         );
         assert_eq!(text::width(&said), 80, "{said:?}");
+    }
+
+    #[test]
+    fn a_turn_that_was_cut_off_says_so_beside_its_number() {
+        let said = drawn(
+            &TurnRule {
+                cut: true,
+                ..rule()
+            },
+            80,
+        );
+        assert!(said.starts_with("── turn 46 (cut) 14:05 ·"), "{said}");
+        let narrow = drawn(
+            &TurnRule {
+                cut: true,
+                ..rule()
+            },
+            24,
+        );
+        assert!(narrow.starts_with("── turn 46 (cut)"), "{narrow}");
     }
 
     #[test]

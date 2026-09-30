@@ -331,6 +331,11 @@ fn event_loop<B: Backend<Error = io::Error>>(
     // not show it running for ever.
     fold_commands(app, shell);
     app.abandon_commands();
+    // A turn still running ends with the session, and the record says so,
+    // rather than leaving the next session to join it.
+    if app.is_attached() {
+        app.leave();
+    }
     send_produced(app, journal, backend, rules);
 
     Ok(ended)
