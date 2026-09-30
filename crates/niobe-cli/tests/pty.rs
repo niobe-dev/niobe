@@ -1584,8 +1584,11 @@ fn a_bang_command_cannot_write_on_the_terminal_the_shell_draws_on() {
 
     terminal.typed(b"!");
     terminal.shows("what it prints");
-    terminal.typed(b"printf 'GARBAGE-ON-%s' TTY > /dev/tty; echo after-$((6*7))\r");
-    terminal.shows("after-42");
+    // The shell redraws only the cells that changed, so a marker made of
+    // letters can come out in pieces where the welcome text it covers
+    // already held some of them; nothing on screen before holds a `#`.
+    terminal.typed(b"printf 'GARBAGE-ON-%s' TTY > /dev/tty; echo \"#$((6*7))#\"\r");
+    terminal.shows("#42#");
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
