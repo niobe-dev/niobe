@@ -336,7 +336,10 @@ fn git_dir(dot_git: &Path) -> Option<PathBuf> {
     if dot_git.is_dir() {
         return Some(dot_git.to_path_buf());
     }
-    let pointer = std::fs::read_to_string(dot_git).ok()?;
+    // Read as config files are — no waiting on a FIFO, a regular file only,
+    // and only so much of it — since a tree that did not come from a clone
+    // can hold a `.git` that is anything.
+    let pointer = niobe_config::read::text(dot_git).ok()?;
     let target = Path::new(pointer.trim().strip_prefix("gitdir:")?.trim());
     if target.is_absolute() {
         return Some(target.to_path_buf());
@@ -352,7 +355,7 @@ fn git_dir(dot_git: &Path) -> Option<PathBuf> {
 fn git_branch(from: &Path) -> Option<String> {
     from.ancestors().find_map(|dir| {
         let head = git_dir(&dir.join(".git"))?.join("HEAD");
-        let contents = std::fs::read_to_string(head).ok()?;
+        let contents = niobe_config::read::text(&head).ok()?;
         let head = contents.trim();
         Some(match head.strip_prefix("ref: refs/heads/") {
             Some(branch) => branch.to_owned(),
@@ -1407,6 +1410,21 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         None
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_git_that_is_a_pipe_leaves_the_branch_unknown_without_waiting() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join(".git"))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+
+        let started = Instant::now();
+        assert_eq!(git_branch(dir.path()), None);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

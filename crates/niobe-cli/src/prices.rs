@@ -4,9 +4,9 @@
 //! The price table `niobe prices` prints: the bundled one with the user's
 //! price file laid over it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use niobe_ledger::{Date, FILE_NAME, Price, PriceTable, Rate, Rates, Schedule};
+use niobe_ledger::{Date, FILE_NAME, Origin, Price, PriceTable, Rate, Rates, Schedule};
 
 use crate::config;
 
@@ -78,11 +78,32 @@ pub fn load() -> Result<Loaded, String> {
     );
     let mut table = PriceTable::bundled().map_err(|e| e.to_string())?;
     if let Some(path) = &user_file {
-        if let Some(user) = PriceTable::read(path).map_err(|e| e.to_string())? {
+        if let Some(user) = user_table(path)? {
             table = table.overlay(user);
         }
     }
     Ok(Loaded { table, user_file })
+}
+
+/// The operator's price file at `path`, where there is one.
+///
+/// Read the way every config file is — without waiting on a FIFO, only a
+/// regular file, and only up to a limit — so that a price file that is a
+/// pipe or a link to a device is refused and named rather than read for ever.
+fn user_table(path: &Path) -> Result<Option<PriceTable>, String> {
+    let text = match niobe_config::read::text(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot read the price file {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    PriceTable::parse(&text, Origin::File(path.to_path_buf()))
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 /// One row per model id, at the price in force on `today`, with the date that
@@ -182,7 +203,6 @@ fn long_label(above: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use niobe_ledger::Origin;
 
     use super::*;
 
@@ -239,5 +259,30 @@ cache_write = 1.25
             loaded.unpriced("m"),
             "`m` is unpriced: the bundled price table does not list it"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_price_file_that_is_a_pipe_or_a_device_is_refused_at_once_and_named() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let fifo = dir.path().join("fifo.toml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+        let zero = dir.path().join("zero.toml");
+        std::os::unix::fs::symlink("/dev/zero", &zero).expect("the link is made");
+
+        for path in [fifo, zero] {
+            let started = std::time::Instant::now();
+            let said = user_table(&path).expect_err("not a file to read");
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            assert!(said.contains(&path.display().to_string()), "{said}");
+        }
+        assert!(matches!(
+            user_table(&dir.path().join("none.toml")),
+            Ok(None)
+        ));
     }
 }
