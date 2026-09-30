@@ -33,7 +33,8 @@
 //! Ctrl+C, which stops the agent's turn while one runs and quits otherwise:
 //! a key that stopped a command in one moment and ended the session in the
 //! next would end a session the operator only meant to interrupt. The command is stopped with everything it started —
-//! asked first, and killed if it has not ended a moment later — and its call
+//! its shell at once, so nothing more of its line runs, and the rest asked
+//! first and killed if it has not ended a moment later — and its call
 //! ends as stopped by the operator, with what it printed up to then.
 //!
 //! # What it leaves behind

@@ -141,6 +141,11 @@ impl Shell for Commands {
         let Some(leader) = still_running(&self.groups, id) else {
             return;
         };
+        // The line's own shell is ended outright, and first: one that has a
+        // trap on the signal, or defers it while it waits on a step, would
+        // otherwise go on to the next step of the line once the one it
+        // stopped has ended. What it started is asked and given the grace.
+        end_the_shell(leader);
         stop(leader);
         let groups = Arc::clone(&self.groups);
         let reaper = self.reaper.clone();
@@ -363,6 +368,19 @@ fn stop(pid: u32) {
     signal_group(pid, rustix::process::Signal::TERM);
 }
 
+/// Ends the process `pid` itself, whether it listens or not, and nothing
+/// else in its group.
+#[cfg(unix)]
+fn end_the_shell(pid: u32) {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw);
+    if let Some(pid) = pid {
+        // A shell that has already gone is what was wanted.
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+}
+
 /// Ends the process group `pid` leads, whether it listens or not.
 #[cfg(unix)]
 fn kill(pid: u32) {
@@ -396,6 +414,9 @@ fn occupied(_leader: u32) -> bool {
 
 #[cfg(not(unix))]
 fn stop(_pid: u32) {}
+
+#[cfg(not(unix))]
+fn end_the_shell(_pid: u32) {}
 
 #[cfg(not(unix))]
 fn kill(_pid: u32) {}
@@ -697,38 +718,72 @@ mod tests {
         assert_eq!(again.output, "still here\n", "the shell runs on");
     }
 
+    /// Stopping a step stops the line: the rest of it does not run once the
+    /// step it was waiting on has been ended.
+    #[test]
+    fn a_stopped_command_runs_none_of_the_rest_of_its_line() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let started = dir.path().join("started");
+        let after = dir.path().join("marker");
+        let mut commands = Commands::at(dir.path());
+        let id = ToolCallId::new("t");
+        commands
+            .run(
+                &id,
+                // A shell with a trap on the signal acts on it only once the
+                // step it waits on has ended, and then goes on to the next.
+                &format!(
+                    "trap 'echo stopping' TERM; echo $$ > {}; sleep 30; echo done > {}",
+                    started.display(),
+                    after.display()
+                ),
+            )
+            .expect("sh starts");
+        pid_in(&started);
+
+        commands.stop(&id);
+
+        ended(&mut commands, PATIENCE).expect("the command ends");
+        assert!(!after.exists(), "the line ran on after its stop");
+    }
+
     #[test]
     fn a_command_that_will_not_end_when_asked_is_killed() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let mut commands = Commands::at(dir.path());
         let id = ToolCallId::new("t");
         let marker = dir.path().join("ignoring");
-        // An ignored signal stays ignored across exec, so `sleep` ignores it
-        // too, and so does `sh`.
+        // An ignored signal stays ignored across exec, so `sleep` ignores it.
         commands
             .run(
                 &id,
-                &format!("trap '' TERM; echo $$ > {}; sleep 300", marker.display()),
+                &format!(
+                    "trap '' TERM; sleep 300 & echo $! > {}; wait",
+                    marker.display()
+                ),
             )
             .expect("sh starts");
-        pid_in(&marker);
+        let child = pid_in(&marker);
         let asked = Instant::now();
 
         commands.stop(&id);
 
+        // The line's own shell is ended at once, whatever it does with the
+        // signal, so nothing more of the line runs.
         let ran = ended(&mut commands, PATIENCE).expect("the command ends");
-        assert!(
-            asked.elapsed() >= GRACE,
-            "it was killed before it was asked"
-        );
-        // The group is signalled one process at a time, so `sh` can see
-        // `sleep` killed and exit with 128 + 9 before its own turn comes.
         assert!(
             matches!(
                 (ran.exit_code, ran.error.as_deref()),
-                (None, Some("ended by signal 9")) | (Some(137), None)
+                (None, Some("ended by signal 9"))
             ),
-            "it was not killed: {ran:?}"
+            "the shell was not ended outright: {ran:?}"
+        );
+        // What it started, which will not end when asked, is killed once the
+        // grace has run out.
+        gone(child, "what ignored the stop was never killed");
+        assert!(
+            asked.elapsed() >= GRACE,
+            "it was killed before it was asked"
         );
     }
 

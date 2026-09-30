@@ -1062,8 +1062,9 @@ IN THE SHELL:
     as in any other terminal. It has no terminal of its own and nothing to
     read, runs until it ends, Ctrl+G stops it or niobe quits, and is kept in
     the session as a call, with the end of what it printed shown under it. A
-    stopped command is asked to end, killed if it has not two seconds later,
-    and its call ends as stopped by the operator. Ctrl+C does not stop one.
+    stopped command's shell is ended at once, so nothing more of its line
+    runs; what it started is asked to end, and killed if it has not two
+    seconds later. Its call ends as stopped by the operator. Ctrl+C does not stop one.
     The agent is not told it ran and does not see what it printed.
     Esc, Ctrl+C            While a turn runs, stop it: the call it is running
                            or the reply it is writing is cut off, and the

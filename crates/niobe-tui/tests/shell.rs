@@ -4160,7 +4160,7 @@ fn a_command_the_operator_stopped_ends_as_stopped_with_what_it_printed_up_to_the
 }
 
 #[test]
-fn a_stopped_command_whose_sh_exited_0_is_still_stopped_and_keeps_the_status() {
+fn a_stopped_command_whose_sh_exited_0_reads_as_stopped_and_not_as_exit_0() {
     use niobe_core::event::ToolOutcome;
 
     let mut app = session_that_runs_commands();
@@ -4182,11 +4182,14 @@ fn a_stopped_command_whose_sh_exited_0_is_still_stopped_and_keeps_the_status() {
     assert!(
         matches!(
             produced.as_slice(),
-            [Event::ToolCallEnd { outcome: ToolOutcome::Failed, exit_code: Some(0), error: Some(error), .. }]
+            [Event::ToolCallEnd { outcome: ToolOutcome::Failed, exit_code: None, error: Some(error), .. }]
                 if error == "stopped by the operator"
         ),
         "a stopped command read as one that succeeded: {produced:?}"
     );
+    let frame = screen(&mut app, 120, 30);
+    assert!(!frame.contains("exit 0"), "{frame}");
+    assert!(frame.contains("stopped by the operator"), "{frame}");
 }
 
 #[test]

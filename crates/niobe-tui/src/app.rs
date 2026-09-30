@@ -3276,9 +3276,10 @@ impl App {
     ///
     /// A command the operator stopped ends as [`crate::shell::STOPPED`] and
     /// as a call that did not succeed, rather than with the signal that
-    /// stopped it — the signal is how, the operator is why — and keeps any
-    /// status it was reported with: `sh` can outlive the signal that ends
-    /// what it runs and exit 0, which is not the command succeeding.
+    /// stopped it — the signal is how, the operator is why — and with no
+    /// status: whatever `sh` exited with after the stop is how the shell
+    /// ended, not how the command did, and an `exit 0` beside "stopped"
+    /// would read as a command that succeeded.
     pub fn ran(&mut self, mut ran: crate::shell::Ran) {
         let command = match self
             .running_commands
@@ -3294,6 +3295,7 @@ impl App {
         let stopped = self.stopping.remove(&ran.id);
         if stopped {
             ran.error = Some(crate::shell::STOPPED.to_owned());
+            ran.exit_code = None;
         }
         let outcome = match ran.exit_code {
             Some(0) if !stopped => ToolOutcome::Ok,
