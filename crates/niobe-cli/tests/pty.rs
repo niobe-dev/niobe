@@ -1471,6 +1471,93 @@ fn a_command_typed_after_a_bang_runs_here_and_is_kept_as_a_call() {
     );
 }
 
+/// A `claude` that writes down the arguments it was started with, names its
+/// conversation `conv-1`, says it is gating calls in plan mode, and answers
+/// every turn.
+const WRITES_DOWN_ITS_ARGUMENTS_CLAUDE: &str = "#!/bin/sh\n\
+    printf '%s\\n' \"$*\" >> args.log\n\
+    read -r first\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"conv-1\",\"model\":\"claude-opus-5\",\"permissionMode\":\"plan\"}'\n\
+    while read -r turn; do\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    done\n";
+
+/// Continuing a session hands the CLI the conversation it recorded and the
+/// mode it was left in: without either, the operator reads the old session
+/// and talks to a new one, asked about everything they had stopped it asking.
+#[test]
+fn a_resumed_session_starts_its_cli_on_the_same_conversation_and_in_the_same_mode() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    for args in [&[][..], &["--resume", "1"][..]] {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .args(args)
+            .spawn()
+            .expect("the niobe binary runs");
+        if args.is_empty() {
+            terminal.shows(OPENING_FRAME);
+            terminal.typed(b"go\r");
+        }
+        terminal.shows("answered-the-turn");
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(status.success(), "{args:?} ended with {status}: {drawn}");
+    }
+
+    let started = std::fs::read_to_string(repo.path().join("args.log"))
+        .expect("the stand-in wrote down how it was started");
+    let started: Vec<&str> = started.lines().collect();
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert!(!started[0].contains("--resume"), "{started:?}");
+    assert!(started[1].contains("--resume conv-1"), "{started:?}");
+    assert!(started[1].contains("--permission-mode plan"), "{started:?}");
+}
+
+/// A session read in from the CLI's own transcript carries on in the CLI
+/// under the transcript's own id, and in the mode the transcript left it in.
+#[test]
+fn an_imported_session_starts_its_cli_on_its_transcript_and_in_its_mode() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let claude = claude_config_with_the_transcript(repo.path());
+    let transcript = std::fs::read_dir(claude.path().join("projects"))
+        .expect("the projects directory lists")
+        .next()
+        .expect("one project")
+        .expect("it reads")
+        .path()
+        .join(format!("{TRANSCRIPT_SESSION}.jsonl"));
+    let mut text = std::fs::read_to_string(&transcript).expect("the transcript reads");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("{\"type\":\"permission-mode\",\"permissionMode\":\"plan\"}\n");
+    std::fs::write(&transcript, text).expect("the transcript is written");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("Done: the catalog response carries an etag.");
+    // Waited for before the quit, which ends the CLI's group at once.
+    let started = written(&repo.path().join("args.log"));
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+
+    assert!(
+        started.contains(&format!("--resume {TRANSCRIPT_SESSION}")),
+        "{started}"
+    );
+    assert!(started.contains("--permission-mode plan"), "{started}");
+}
+
 /// A `claude` that writes down the directory it was started in, then every
 /// turn it is sent, and answers each with the same reply.
 const WRITES_DOWN_WHERE_IT_RUNS_CLAUDE: &str = "#!/bin/sh\n\

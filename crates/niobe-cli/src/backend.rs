@@ -88,10 +88,7 @@ pub fn attach(
 
     match selected.profile.backend() {
         Backend::Claude => {
-            let mut options = claude_options(root, selected, with, home.clone())?;
-            if let Some(id) = &with.resume {
-                options.spent = spent(selected, root, id, config_dir, home);
-            }
+            let options = resumed_options(root, selected, with, config_dir, home)?;
             let session = Session::spawn(&options).map_err(describe)?;
             Ok(Attachment {
                 process_group: Some(session.process_group()),
@@ -264,6 +261,24 @@ fn spent(
         .unwrap_or_default()
 }
 
+/// [`claude_options`], starting from what the CLI's own transcript last
+/// recorded the session spending where it resumes one: the CLI restores its
+/// running totals on `--resume`, and a translator that started from nothing
+/// would bill the first turn the whole earlier session again.
+fn resumed_options(
+    root: &Path,
+    profile: &Selected<'_>,
+    with: &Attach,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<Options, String> {
+    let mut options = claude_options(root, profile, with, home.clone())?;
+    if let Some(id) = &with.resume {
+        options.spent = spent(profile, root, id, config_dir, home);
+    }
+    Ok(options)
+}
+
 /// What the `claude` bridge is spawned with under `profile`.
 ///
 /// Written apart from the spawn so that what a profile turns into can be
@@ -390,6 +405,21 @@ mod tests {
             NO_HOME,
         );
         assert_eq!(found.cost_usd("opus-5"), Some(0.25));
+        let options = resumed_options(
+            root,
+            &selected,
+            &Attach {
+                resume: Some("s-1".to_owned()),
+                mode: Some(niobe_core::event::Mode::Plan),
+                budget_usd: None,
+            },
+            Some(claude.path().as_os_str().to_owned()),
+            NO_HOME,
+        )
+        .expect("the options are made");
+        assert_eq!(options.spent.cost_usd("opus-5"), Some(0.25));
+        assert_eq!(options.resume.as_deref(), Some("s-1"));
+        assert_eq!(options.mode, niobe_core::event::Mode::Plan);
 
         let missing = spent(
             &selected,
