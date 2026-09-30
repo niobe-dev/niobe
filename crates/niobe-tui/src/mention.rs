@@ -38,6 +38,24 @@ pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Ment
     })
 }
 
+/// A listed path as it goes in after the `@`, in the form Claude Code reads
+/// it: the CLI takes a mention up to the first blank, so a path that holds a
+/// space goes in quoted, `@"dir with space/file.txt"`, as the CLI's own
+/// completion writes it, and every other path goes in as it is.
+pub(crate) fn written(path: &str) -> String {
+    match path.contains(' ') {
+        true => format!("\"{path}\""),
+        false => path.to_owned(),
+    }
+}
+
+/// Whether a listed path can be named at all. A line break ends a mention in
+/// every form the CLI reads, and in the prompt it would start a new line of
+/// the message, so a file whose name holds one is not offered.
+fn nameable(path: &str) -> bool {
+    !path.contains(['\n', '\r'])
+}
+
 /// Where in `line` the character at `column` starts, or its end where
 /// `column` is just past its last character; `None` further out.
 ///
@@ -122,6 +140,7 @@ impl Files {
             .iter()
             .zip(files)
             .enumerate()
+            .filter(|(_, (_, path))| nameable(path))
             .filter_map(|(at, ((lower, name), path))| {
                 let rank = match_rank(&lower[*name..], lower, &typed)?;
                 let depth = path.matches('/').count();
@@ -151,7 +170,8 @@ fn match_rank(name: &str, path: &str, typed: &str) -> Option<u8> {
 /// ranked from scratch: the plain statement of the ranking, which [`Files`]
 /// is held to agree with.
 ///
-/// A file matches when its path holds what was typed, ignoring case. A file
+/// A file matches when its path holds what was typed, ignoring case, and
+/// can be named at all ([`nameable`]). A file
 /// whose name starts with it comes first, then one whose name holds it, then
 /// one whose directories do; within each, the shallower file and then the
 /// shorter path first, since the operator reaching for a deep file keeps
@@ -161,6 +181,7 @@ pub(crate) fn candidates<'a>(files: &'a [String], typed: &str, limit: usize) -> 
     let typed = typed.to_lowercase();
     let mut ranked: Vec<(u8, usize, usize, &str)> = files
         .iter()
+        .filter(|path| nameable(path))
         .filter_map(|path| {
             let lower = path.to_lowercase();
             let name = lower.rsplit('/').next().unwrap_or(&lower);
@@ -256,6 +277,30 @@ mod tests {
         );
         assert_eq!(candidates(&files, "build", 1), ["build.rs"]);
         assert_eq!(candidates(&files, "nothing", 10), Vec::<&str>::new());
+    }
+
+    /// Claude Code reads a mention up to the first blank unless it is
+    /// quoted, and its own completion (2.1.285) quotes a path that holds a
+    /// space as `@"…"` and leaves every other path bare.
+    #[test]
+    fn a_path_with_a_space_is_written_quoted_as_the_cli_writes_it() {
+        assert_eq!(
+            written("dir with space/file name.txt"),
+            r#""dir with space/file name.txt""#
+        );
+        assert_eq!(written("src/main.rs"), "src/main.rs");
+    }
+
+    /// No form of mention carries a line break: the CLI's reads stop at one,
+    /// and in the prompt it would start a new line of the message.
+    #[test]
+    fn a_file_whose_name_holds_a_line_break_is_not_offered() {
+        let files: Vec<String> = ["new\nline.txt", "newer.txt", "cr\rname.txt"]
+            .map(str::to_owned)
+            .to_vec();
+
+        assert_eq!(candidates(&files, "", 10), ["newer.txt"]);
+        assert_eq!(Files::new(&files).candidates(&files, "", 10), ["newer.txt"]);
     }
 
     #[test]

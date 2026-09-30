@@ -3165,8 +3165,9 @@ impl App {
         true
     }
 
-    /// Replaces what was typed after the `@` with `file`, and a space after
-    /// it so the next word is not taken for more of the path.
+    /// Replaces what was typed after the `@` with `file`, written as the
+    /// backend reads a mention ([`crate::mention::written`]), and a space
+    /// after it so the next word is not taken for more of the path.
     fn name_file(&mut self, file: &str) {
         let Some(mention) = self.mention() else {
             return;
@@ -3174,7 +3175,8 @@ impl App {
         for _ in mention.typed.chars() {
             self.composer.delete_char();
         }
-        self.composer.insert_str(format!("{file} "));
+        self.composer
+            .insert_str(format!("{} ", crate::mention::written(file)));
         self.offer_selected = 0;
     }
 
@@ -7910,6 +7912,25 @@ mod tests {
         assert!(
             app.asking().is_some(),
             "an Enter in a burst sent the answer"
+        );
+    }
+
+    #[test]
+    fn a_completed_path_with_a_space_goes_in_quoted() {
+        let mut app = App::new(Repo {
+            name: "niobe".to_owned(),
+            files: vec!["dir with space/file name.txt".to_owned()],
+            ..Default::default()
+        });
+        for c in "see @file".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+
+        app.on_key(key(KeyCode::Tab));
+
+        assert_eq!(
+            app.composer().lines(),
+            [r#"see @"dir with space/file name.txt" "#]
         );
     }
 
