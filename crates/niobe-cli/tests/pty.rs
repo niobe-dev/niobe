@@ -467,11 +467,66 @@ fn shell_command(slave: &File, cwd: &Path) -> Command {
     command
 }
 
-/// Opens the shell on `slave`.
-fn shell_on(slave: &File, cwd: &Path) -> Child {
-    shell_command(slave, cwd)
+/// Opens the shell on `slave`, held so that a test that fails with it still
+/// running — or stopped — does not leave it behind.
+fn shell_on(slave: &File, cwd: &Path) -> Reaped {
+    Reaped(
+        shell_command(slave, cwd)
+            .spawn()
+            .expect("the niobe binary runs"),
+    )
+}
+
+/// A child process that is killed and reaped when it is dropped, whatever
+/// state it is in.
+///
+/// `Child` does neither on drop, and a stopped process does not end when its
+/// parent does: a stop test that fails between the stop and the continue
+/// would otherwise leave a stopped niobe on the machine for good. SIGKILL
+/// ends a stopped process as it does a running one.
+struct Reaped(Child);
+
+impl std::ops::Deref for Reaped {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Reaped {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+#[test]
+fn a_stopped_child_is_gone_once_what_holds_it_is_dropped() {
+    let child = Command::new("sleep")
+        .arg("600")
         .spawn()
-        .expect("the niobe binary runs")
+        .expect("sleep runs");
+    let pid = rustix::process::Pid::from_child(&child);
+    let held = Reaped(child);
+    signal(&held, Signal::STOP);
+    stopped(&held);
+
+    drop(held);
+
+    assert_eq!(
+        rustix::process::test_kill_process(pid),
+        Err(rustix::io::Errno::SRCH),
+        "the stopped child outlived what held it"
+    );
 }
 
 /// Opens the shell reading from one terminal and drawing on another.
