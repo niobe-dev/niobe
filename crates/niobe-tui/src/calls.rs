@@ -15,7 +15,9 @@
 //! status a command exited with, and otherwise the bytes it returned — which
 //! every finished call has. Each carries how long it ran where this shell's
 //! clock saw both ends. A call that did not succeed says so instead, and draws
-//! the backend's reason for it under the row, or that it gave none.
+//! the backend's reason for it under the row, or that it gave none. A call a
+//! standing rule let through says `rule` after its cost, where it has no diff
+//! to say it under.
 //!
 //! A call that ran the tests says under its row what the run reported: its
 //! counts where its output held the whole run, and otherwise that the result
@@ -30,7 +32,7 @@ use std::time::Duration;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::app::{Call, Entry, human_bytes};
+use crate::app::{Call, Entry, Gate, human_bytes};
 use crate::clock;
 use crate::text;
 use crate::theme::Theme;
@@ -532,8 +534,17 @@ fn result(call: &Call, theme: &Theme) -> Vec<Span<'static>> {
     if let Some(took) = call.took {
         spans.push(Span::styled(format!(" · {}", clock::took(took)), dim));
     }
+    if call.gate == Some(Gate::Rule) && call.change.is_none() {
+        spans.push(Span::styled(format!(" · {RULE_MARK}"), dim));
+    }
     spans
 }
+
+/// What a call a standing rule let through says after its cost. A call with
+/// a diff says who let it through under the diff instead; one without has
+/// only its row, and a command run by a rule reads the same there as one the
+/// operator allowed by hand.
+const RULE_MARK: &str = "rule";
 
 /// What a run of calls cost, summed: the lines its changes added and removed
 /// where every call that succeeded changed a file, and otherwise the bytes
@@ -692,6 +703,38 @@ mod tests {
 
     fn app() -> App {
         App::new(Repo::default())
+    }
+
+    /// A command a standing rule let through says so on its row, which is
+    /// the only place a call with no diff can: the operator did not see it
+    /// asked. One the operator allowed carries no mark.
+    #[test]
+    fn a_command_a_standing_rule_let_through_is_marked_on_its_row() {
+        for (decision, marked) in [
+            (niobe_core::event::PermissionDecision::AllowByRule, true),
+            (niobe_core::event::PermissionDecision::Allow, false),
+        ] {
+            let mut app = app();
+            app.apply(&start("t1", "Bash"));
+            app.apply(&Event::PermissionResponse {
+                id: "t1".into(),
+                decision,
+                message: None,
+            });
+            let mut ended = end("t1", "Bash", ToolOutcome::Ok, None);
+            if let Event::ToolCallEnd { exit_code, .. } = &mut ended {
+                *exit_code = Some(0);
+            }
+            app.apply(&ended);
+
+            let rows = drawn(&app, false);
+            assert_eq!(
+                rows[0].ends_with("exit 0 · rule"),
+                marked,
+                "{decision:?}: {rows:?}"
+            );
+            assert!(rows[0].contains("exit 0"), "{rows:?}");
+        }
     }
 
     #[test]

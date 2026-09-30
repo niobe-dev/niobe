@@ -573,6 +573,9 @@ pub struct Call {
     /// will arrive for it. It is not running, and it did not fail: the
     /// backend that was running it is gone.
     pub interrupted: bool,
+    /// Who let it through, where this shell can say; `None` while it runs
+    /// and where it cannot.
+    pub gate: Option<Gate>,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -594,6 +597,7 @@ impl Call {
             printed: None,
             tested: None,
             interrupted: false,
+            gate: None,
             started: at,
         }
     }
@@ -1523,6 +1527,13 @@ impl App {
                 {
                     call.printed = Some(Printed::of(output));
                 }
+                if let Some(call) = ended.and_then(|(at, index)| {
+                    self.entries
+                        .get_mut(at)
+                        .and_then(|entry| entry.calls.get_mut(index))
+                }) {
+                    call.gate = gate;
+                }
                 // A failed call is kept too: a test run that failed ended
                 // its call with a failing status.
                 if let Some((at, index)) = ended {
@@ -2221,6 +2232,26 @@ impl App {
                 "The rule holds for this session and was not written to the config, so \
                  the prompt comes back next time: {error}"
             ),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
+    /// Says in the transcript that a rule the operator just made was kept
+    /// where the next session reads it, and will not be used there: the file
+    /// it went into is one nobody trusted, and an untrusted config answers no
+    /// prompt.
+    pub fn kept_until_trusted(&mut self, rule: &Rule) {
+        self.push(Entry {
+            kind: EntryKind::Notice,
+            head: "not kept".to_owned(),
+            meta: rule.to_string(),
+            body: "The rule holds for this session. The repository's config it is kept in is \
+                   not trusted, so the next session does not use it until you run \
+                   `niobe trust`."
+                .to_owned(),
             streaming: false,
             at: self.at,
             calls: Vec::new(),

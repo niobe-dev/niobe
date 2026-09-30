@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use niobe_config::Remembered;
 use niobe_config::trust::Trusted;
 use niobe_core::permission::Rule;
-use niobe_tui::rules::{Rules, RulesError};
+use niobe_tui::rules::{Reach, Rules, RulesError};
 
 /// Writes rules into the config of the repository rooted at a path.
 #[derive(Debug, Clone)]
@@ -63,15 +63,22 @@ impl ConfigRules {
     /// left, never from a read made afterwards: by then another writer — a
     /// pull, an editor — could have changed the file, and what it wrote would
     /// be trusted unread.
-    fn keep_trust(&self, remembered: &Remembered) -> Result<(), RulesError> {
-        let keep = match &remembered.before {
-            Some(before) => before != &remembered.after && self.trusted(before),
-            None => true,
+    ///
+    /// Says how far the rule reaches: a file nobody trusted is withheld from
+    /// the next session whether or not this write changed it, so a rule in it
+    /// waits on `niobe trust`.
+    fn keep_trust(&self, remembered: &Remembered) -> Result<Reach, RulesError> {
+        let Some(before) = &remembered.before else {
+            self.retrust(&remembered.after)?;
+            return Ok(Reach::NextSession);
         };
-        match keep {
-            true => self.retrust(&remembered.after),
-            false => Ok(()),
+        if !self.trusted(before) {
+            return Ok(Reach::UntilTrusted);
         }
+        if before != &remembered.after {
+            self.retrust(&remembered.after)?;
+        }
+        Ok(Reach::NextSession)
     }
 }
 
@@ -94,7 +101,7 @@ impl Rules for ConfigRules {
     ///
     /// A file that leads outside the repository is not written: see
     /// [`crate::repo::writes_inside`].
-    fn remember(&mut self, rule: &Rule) -> Result<(), RulesError> {
+    fn remember(&mut self, rule: &Rule) -> Result<Reach, RulesError> {
         crate::repo::writes_inside(&self.root, &self.path)?;
         let remembered =
             niobe_config::remember(&self.path, rule).map_err(|error| error.to_string())?;
@@ -243,6 +250,43 @@ mod tests {
             "a change nobody read was trusted with the rule"
         );
         assert!(!repo.is_trusted());
+    }
+
+    /// Written or already listed, a rule in a config nobody trusted is
+    /// withheld from the next session, and the answer says so.
+    #[test]
+    fn an_always_into_a_config_nobody_trusted_reaches_only_until_it_is_trusted() {
+        for text in [
+            "[profiles.p]\nbackend = \"claude\"\n",
+            "[permissions]\nallow = [\"Bash\"]\n",
+        ] {
+            let repo = Repo::with_config(text);
+
+            let reach = repo
+                .rules()
+                .remember(&Rule::tool("Bash"))
+                .expect("the config is written");
+
+            assert_eq!(reach, Reach::UntilTrusted, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_always_into_a_trusted_or_a_new_config_reaches_the_next_session() {
+        let repo = Repo::with_config("[profiles.p]\nbackend = \"claude\"\n");
+        repo.trust();
+        let trusted = repo.rules().remember(&Rule::tool("Read")).expect("written");
+        assert_eq!(trusted, Reach::NextSession);
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let created = ConfigRules {
+            root: dir.path().to_path_buf(),
+            path: crate::repo::config_path(dir.path()),
+            trust: Some(dir.path().join("trusted.list")),
+        }
+        .remember(&Rule::tool("Read"))
+        .expect("written");
+        assert_eq!(created, Reach::NextSession);
     }
 
     #[test]

@@ -21,7 +21,7 @@ use crate::app::{App, Arrival};
 use crate::bridge::Bridge;
 use crate::input::{Input, Wait};
 use crate::journal::Journal;
-use crate::rules::Rules;
+use crate::rules::{Reach, Rules};
 use crate::shell::Shell;
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued};
 use crate::ui;
@@ -466,8 +466,10 @@ fn send_produced(
     // After the answers, because a rule is made by answering: a rule that
     // could not be kept is reported under the decision it came from.
     for rule in app.take_rules() {
-        if let Err(error) = rules.remember(&rule) {
-            app.not_remembered(&rule, &error.to_string());
+        match rules.remember(&rule) {
+            Ok(Reach::NextSession) => {}
+            Ok(Reach::UntilTrusted) => app.kept_until_trusted(&rule),
+            Err(error) => app.not_remembered(&rule, &error.to_string()),
         }
     }
 }
@@ -633,20 +635,25 @@ mod tests {
         }
     }
 
-    /// Keeps every rule, or refuses every rule.
+    /// Keeps every rule, keeps every rule only until the config is trusted,
+    /// or refuses every rule.
     #[derive(Debug, Default)]
     struct Remembered {
         rules: Vec<Rule>,
         refuse: bool,
+        until_trusted: bool,
     }
 
     impl Rules for Remembered {
-        fn remember(&mut self, rule: &Rule) -> Result<(), RulesError> {
+        fn remember(&mut self, rule: &Rule) -> Result<Reach, RulesError> {
             if self.refuse {
                 return Err("the config is read-only".into());
             }
             self.rules.push(rule.clone());
-            Ok(())
+            Ok(match self.until_trusted {
+                true => Reach::UntilTrusted,
+                false => Reach::NextSession,
+            })
         }
     }
 
@@ -1115,6 +1122,31 @@ mod tests {
 
         assert_eq!(remembered.rules, [Rule::targeted("Bash", "cargo test")]);
         assert!(app.allowed().allows("Bash", Some("cargo test")));
+    }
+
+    #[test]
+    fn a_rule_kept_in_a_config_nobody_trusted_says_it_waits_on_niobe_trust() {
+        let mut app = app_with_a_prompt(None);
+        let mut remembered = Remembered {
+            until_trusted: true,
+            ..Remembered::default()
+        };
+
+        app.answer(Answer::AlwaysTool);
+        send_produced(
+            &mut app,
+            &mut Kept::default(),
+            &mut Attached::default(),
+            &mut remembered,
+        );
+
+        let entry = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "not kept" && entry.meta == "Bash")
+            .expect("the notice names the rule that waits");
+        assert!(entry.body.contains("niobe trust"), "{entry:?}");
+        assert!(app.allowed().allows("Bash", Some("anything")));
     }
 
     #[test]

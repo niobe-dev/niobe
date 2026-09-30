@@ -17,11 +17,22 @@ use niobe_core::permission::Rule;
 /// Why a rule could not be kept. Shown to the operator as it reads.
 pub type RulesError = Box<dyn std::error::Error + Send + Sync>;
 
+/// How far a rule that was kept reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// It answers the same prompt in the next session too.
+    NextSession,
+    /// It is kept where the next session reads it, but that session will not
+    /// use it until the operator has trusted the file it is kept in.
+    UntilTrusted,
+}
+
 /// Keeps the standing answers the operator gives, so that the same prompt does
 /// not come back in the next session.
 pub trait Rules {
-    /// Keeps one rule. Called once, when the operator makes it.
-    fn remember(&mut self, rule: &Rule) -> Result<(), RulesError>;
+    /// Keeps one rule, and says how far it reaches. Called once, when the
+    /// operator makes it.
+    fn remember(&mut self, rule: &Rule) -> Result<Reach, RulesError>;
 }
 
 /// Rules that are kept nowhere: a recorded log being looked at rather than
@@ -30,7 +41,9 @@ pub trait Rules {
 pub struct Forgotten;
 
 impl Rules for Forgotten {
-    fn remember(&mut self, _rule: &Rule) -> Result<(), RulesError> {
-        Ok(())
+    /// Says nothing about the rule: a session with nowhere to keep one has
+    /// no next session to tell the operator about.
+    fn remember(&mut self, _rule: &Rule) -> Result<Reach, RulesError> {
+        Ok(Reach::NextSession)
     }
 }
