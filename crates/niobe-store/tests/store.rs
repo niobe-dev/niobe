@@ -462,6 +462,40 @@ fn a_resumed_recorder_appends_to_the_session_it_resumed() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_session_one_recorder_holds_cannot_be_taken_up_by_another_until_it_lets_go() {
+    let (_dir, path) = scratch();
+    let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
+    first
+        .record(&user("from the first window"))
+        .expect("record");
+    let session = first.session().expect("a session was opened");
+
+    let second = Recorder::resume(Store::open(&path).expect("the store opens again"), session);
+    let said = second
+        .expect_err("the session is open in the first recorder")
+        .to_string();
+    assert!(said.contains(&format!("session {session}")), "{said}");
+    assert!(said.contains("open"), "{said}");
+
+    drop(first);
+    Recorder::resume(Store::open(&path).expect("opens"), session)
+        .expect("a session nobody holds is taken up");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_can_still_be_read_while_a_recorder_holds_it() {
+    let (_dir, path) = scratch();
+    let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
+    first.record(&user("held")).expect("record");
+    let session = first.session().expect("a session was opened");
+
+    let reader = Store::open_to_read(&path).expect("the store opens to read");
+    assert_eq!(reader.events(session).expect("load").len(), 1);
+}
+
 #[test]
 fn a_session_that_opens_with_a_slash_command_is_listed_by_the_prompt_after_it() {
     let store = Store::open_in_memory().expect("an in-memory store opens");

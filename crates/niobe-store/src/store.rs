@@ -154,6 +154,11 @@ pub enum StoreError {
     },
     /// No session has this id.
     NoSuchSession(SessionId),
+    /// Another niobe is recording this session: two recording it at once
+    /// would interleave two conversations in one record.
+    SessionOpen(SessionId),
+    /// The file that marks a session as being recorded could not be opened.
+    Hold(std::io::Error),
 }
 
 impl std::fmt::Display for StoreError {
@@ -175,6 +180,12 @@ impl std::fmt::Display for StoreError {
                  version {supported}; it was written by a different niobe"
             ),
             Self::NoSuchSession(id) => write!(f, "no session {id} in this store"),
+            Self::SessionOpen(id) => write!(
+                f,
+                "session {id} is open in another niobe; `niobe --resume {id} | cat` prints \
+                 it without taking it over"
+            ),
+            Self::Hold(e) => write!(f, "cannot mark the session as open: {e}"),
         }
     }
 }
@@ -184,7 +195,8 @@ impl std::error::Error for StoreError {
         match self {
             Self::Sqlite(e) => Some(e),
             Self::Encode(e) | Self::Decode { source: e, .. } => Some(e),
-            Self::UnsupportedSchema { .. } | Self::NoSuchSession(_) => None,
+            Self::Hold(e) => Some(e),
+            Self::UnsupportedSchema { .. } | Self::NoSuchSession(_) | Self::SessionOpen(_) => None,
         }
     }
 }
@@ -206,6 +218,14 @@ impl Store {
     /// exists. The parent directory must exist.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Self::prepare(Connection::open(path)?)
+    }
+
+    /// The file the store is kept in, or `None` for one kept in memory.
+    pub(crate) fn path(&self) -> Option<std::path::PathBuf> {
+        self.conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
     }
 
     /// Opens the store at `path` to read it, as [`Store::open`] does where the
