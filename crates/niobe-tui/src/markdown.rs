@@ -46,6 +46,7 @@ pub fn render(source: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_FOOTNOTES);
 
     let mut renderer = Renderer::new(width.max(1), theme);
     for event in Parser::new_ext(source, options) {
@@ -93,6 +94,9 @@ struct Renderer<'t> {
     /// A fenced or indented code block being gathered.
     code: Option<String>,
     table: Option<Table>,
+    /// For each link or image open, where it leads and how much text had
+    /// been gathered when it opened, so its own text can be told apart.
+    destinations: Vec<(String, usize)>,
 }
 
 impl<'t> Renderer<'t> {
@@ -107,6 +111,7 @@ impl<'t> Renderer<'t> {
             lists: Vec::new(),
             code: None,
             table: None,
+            destinations: Vec::new(),
         }
     }
 
@@ -186,15 +191,25 @@ impl<'t> Renderer<'t> {
             Tag::Strikethrough => {
                 self.push_style(|style| style.add_modifier(Modifier::CROSSED_OUT));
             }
-            Tag::Link { .. } => {
+            Tag::Link { dest_url, .. } => {
+                self.open_destination(&dest_url);
                 let link = self.theme.agent;
                 self.push_style(|style| style.fg(link).add_modifier(Modifier::UNDERLINED));
             }
             // An image cannot be drawn; its alt text, which arrives as text
             // inside it, is what stands in for it.
-            Tag::Image { .. } => self.text("🖼 ", self.style()),
+            Tag::Image { dest_url, .. } => {
+                self.text("🖼 ", self.style());
+                self.open_destination(&dest_url);
+            }
+            // Drawn where it is written, which is the end of a reply as a
+            // rule, marked with the name its reference in the text has.
+            Tag::FootnoteDefinition(name) => {
+                self.gap();
+                let dim = self.theme.dim;
+                self.text(&format!("[^{name}] "), Style::new().fg(dim));
+            }
             Tag::HtmlBlock
-            | Tag::FootnoteDefinition(_)
             | Tag::DefinitionList
             | Tag::DefinitionListTitle
             | Tag::DefinitionListDefinition
@@ -316,11 +331,13 @@ impl<'t> Renderer<'t> {
                     self.table_lines(&table);
                 }
             }
-            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => self.pop_style(),
+            TagEnd::Link => {
                 self.pop_style();
+                self.close_destination();
             }
-            TagEnd::Image
-            | TagEnd::FootnoteDefinition
+            TagEnd::Image => self.close_destination(),
+            TagEnd::FootnoteDefinition
             | TagEnd::DefinitionList
             | TagEnd::DefinitionListTitle
             | TagEnd::DefinitionListDefinition
@@ -328,6 +345,32 @@ impl<'t> Renderer<'t> {
             | TagEnd::Superscript
             | TagEnd::Subscript => {}
         }
+    }
+
+    /// How much text has been gathered for the block being drawn.
+    fn gathered(&self) -> usize {
+        self.runs.iter().map(|(text, _)| text.len()).sum()
+    }
+
+    fn open_destination(&mut self, destination: &str) {
+        let at = self.gathered();
+        self.destinations.push((destination.to_owned(), at));
+    }
+
+    /// Says where a link or an image leads, after its text, where that is not
+    /// what its text already says: the text is the agent's words, and the
+    /// address is where following it would go.
+    fn close_destination(&mut self) {
+        let Some((destination, at)) = self.destinations.pop() else {
+            return;
+        };
+        let said: String = self.runs.iter().map(|(text, _)| text.as_str()).collect();
+        let own = said.get(at..).unwrap_or_default().trim_start_matches("🖼 ");
+        if destination.is_empty() || own == destination {
+            return;
+        }
+        let dim = self.theme.dim;
+        self.text(&format!(" ({destination})"), Style::new().fg(dim));
     }
 
     fn text(&mut self, text: &str, style: Style) {
@@ -774,9 +817,25 @@ mod tests {
     }
 
     #[test]
+    fn a_link_and_an_image_say_where_they_lead_and_a_footnote_is_drawn_once() {
+        let lines = render(
+            "[link](https://example.com) and ![img](x.png) and a footnote[^1]\n\n[^1]: said below",
+            80,
+            &CLASSIC,
+        );
+        let text = plain(&lines).join("\n");
+        assert!(text.contains("link (https://example.com)"), "{text}");
+        assert!(text.contains("🖼 img (x.png)"), "{text}");
+        assert_eq!(text.matches("said below").count(), 1, "{text}");
+
+        let bare = plain(&render("<https://example.com>", 80, &CLASSIC)).join("\n");
+        assert_eq!(bare, "https://example.com", "an address is not said twice");
+    }
+
+    #[test]
     fn a_link_reads_as_its_text_underlined() {
         let lines = render("see [the docs](https://example.com) now", 80, &CLASSIC);
-        assert_eq!(plain(&lines), ["see the docs now"]);
+        assert_eq!(plain(&lines), ["see the docs (https://example.com) now"]);
         assert!(
             span(&lines, "docs")
                 .style
