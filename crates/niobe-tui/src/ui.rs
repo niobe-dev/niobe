@@ -2456,11 +2456,23 @@ fn money_rows(app: &App) -> usize {
 /// prices — is what the work would have cost on the API: kept on screen so a
 /// plan user sees what they consume, but dim and named for what it is, never
 /// as the session's cost. Where nothing has said which it is, it is neither,
-/// and the row says so rather than showing a figure it cannot vouch for.
+/// and the row says so rather than showing a figure it cannot vouch for. A
+/// session billed both ways — resumed under a profile billed differently —
+/// says that, rather than calling all of it one or the other.
 fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
     let cost = || session_cost(app.session(), app.prices());
-    let mut lines = vec![match app.session().billing() {
+    let billing = match app.session().billing_changed() {
+        true => None,
+        false => app.session().billing(),
+    };
+    let mut lines = vec![match billing {
+        // Part of it list-price work on a plan and part money spent: neither
+        // label is true of the whole, so the figure says it is both.
+        None if app.session().billing_changed() => Line::from(vec![
+            Span::styled("plan and metered ", dim),
+            Span::styled(cost(), Style::new().fg(theme.fg)),
+        ]),
         Some(Billing::Metered) => {
             let cost = cost();
             let mut spans = vec![
@@ -5683,6 +5695,21 @@ mod tests {
         app.apply_at(&priced(Some(cost)), at(0));
         app.apply_at(&Event::TurnEnded, at(seconds));
         app
+    }
+
+    #[test]
+    fn a_session_billed_both_ways_is_not_drawn_as_money_spent() {
+        use niobe_core::event::Event;
+        let mut app = metered_for(1_800, 0.5);
+        for billing in [Billing::Plan, Billing::Metered] {
+            app.apply(&Event::Billing { billing });
+        }
+
+        let said: Vec<String> = money_lines(&app, 40, &crate::theme::CLASSIC)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(said[0], "plan and metered $0.50");
     }
 
     #[test]

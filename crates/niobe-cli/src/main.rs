@@ -361,6 +361,11 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
     }
     keys_can_be_read()?;
     let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
+    let recorded = app.session().meta().map(|meta| meta.profile.clone());
+    let selected_name = selected.as_ref().map(|selected| selected.name);
+    if let Some(said) = profile_changed(recorded.as_deref(), selected_name) {
+        app = app.with_notice("another profile", "", &said);
+    }
     // A record that stops in the middle of a turn is one whose process was
     // killed under it; the turn is closed where it stops, and the prompt the
     // operator is about to type opens a turn of its own.
@@ -636,6 +641,21 @@ fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
         None => app,
         Some(path) => app.with_notice("config not trusted", &path.display().to_string(), UNTRUSTED),
     }
+}
+
+/// What the transcript says when a session recorded under one profile is
+/// resumed under another: the account behind it may be billed another way,
+/// and what was spent before is not what is spent from here on. Nothing where
+/// the profile is the one it was recorded under, or either is not known.
+fn profile_changed(recorded: Option<&str>, selected: Option<&str>) -> Option<String> {
+    let (recorded, selected) = (recorded?, selected?);
+    (recorded != selected).then(|| {
+        format!(
+            "This session was recorded under the profile `{recorded}` and goes on under \
+             `{selected}`. Where the two are billed differently, its cost is drawn as both \
+             from here on, since part of it was spent each way."
+        )
+    })
 }
 
 /// Records this repository's config as one the operator has read, so that the
@@ -1146,6 +1166,23 @@ BACKENDS:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_session_resumed_under_another_profile_says_both() {
+        let said =
+            super::profile_changed(Some("max"), Some("company")).expect("the change is said");
+        assert!(
+            said.contains("`max`") && said.contains("`company`"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_session_resumed_under_its_own_profile_says_nothing() {
+        assert_eq!(super::profile_changed(Some("max"), Some("max")), None);
+        assert_eq!(super::profile_changed(None, Some("max")), None);
+        assert_eq!(super::profile_changed(Some("max"), None), None);
+    }
+
     use super::*;
 
     /// A standard error that cannot be written to, the way the terminal a

@@ -454,6 +454,9 @@ pub struct SessionState {
     /// How the session is billed, as last reported. `None` until something
     /// has said — never assumed from the backend's name.
     billing: Option<Billing>,
+    /// Whether the session has been billed more than one way: resumed under
+    /// a profile billed differently from the one it was recorded under.
+    billing_changed: bool,
     /// The main agent's last request. `None` until one has been reported.
     context: Option<Context>,
     tools: ToolTotals,
@@ -655,7 +658,14 @@ impl SessionState {
                 self.window_reported = true;
             }
 
-            Event::Billing { billing } => self.billing = Some(*billing),
+            // The last report stands for what the session is billed from here
+            // on; what was spent before a change was spent the other way.
+            Event::Billing { billing } => {
+                if self.billing.is_some_and(|before| before != *billing) {
+                    self.billing_changed = true;
+                }
+                self.billing = Some(*billing);
+            }
 
             // A level again, and the last one stands — including after a
             // compaction, when it drops: a high-water mark would keep showing
@@ -939,6 +949,13 @@ impl SessionState {
     /// than as either mode.
     pub fn billing(&self) -> Option<Billing> {
         self.billing
+    }
+
+    /// Whether the session has been billed more than one way, so that its
+    /// cost is part list-price work on a plan and part money spent, and
+    /// labelling it as either would mislabel the rest.
+    pub fn billing_changed(&self) -> bool {
+        self.billing_changed
     }
 
     /// The prompt the main agent's last request sent, and the window it went
@@ -2755,5 +2772,16 @@ mod tests {
         ]);
 
         assert_eq!(state.turns().len(), 1);
+    }
+
+    #[test]
+    fn a_session_billed_one_way_and_then_the_other_says_so() {
+        let billed = |billing| Event::Billing { billing };
+        let once = SessionState::replay(&[billed(Billing::Plan), billed(Billing::Plan)]);
+        assert!(!once.billing_changed());
+
+        let twice = SessionState::replay(&[billed(Billing::Plan), billed(Billing::Metered)]);
+        assert!(twice.billing_changed());
+        assert_eq!(twice.billing(), Some(Billing::Metered));
     }
 }

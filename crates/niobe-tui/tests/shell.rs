@@ -1151,13 +1151,17 @@ fn a_metered_session_that_worked_a_measured_time_shows_its_spend_rate() {
 
 /// A metered session and the moments it ran at.
 fn metered_turn(worked_seconds: u64, cost_usd: Option<f64>) -> App {
+    billed_turn(niobe_core::Billing::Metered, worked_seconds, cost_usd)
+}
+
+/// One turn of `worked_seconds` that cost `cost_usd`, on a session billed as
+/// `billing` from its start.
+fn billed_turn(billing: niobe_core::Billing, worked_seconds: u64, cost_usd: Option<f64>) -> App {
     let clock = niobe_tui::clock::Clock::fixed(0).expect("UTC is an offset");
     let at = |seconds| clock.at(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
     let mut app = App::new(Repo::default()).with_clock(clock.clone());
     app.tick(std::time::Instant::now(), Some(at(0)));
-    let billing = Event::Billing {
-        billing: niobe_core::Billing::Metered,
-    };
+    let billing = Event::Billing { billing };
     let prompt = Event::UserMessage {
         text: "go".to_owned(),
     };
@@ -1231,10 +1235,7 @@ fn a_session_with_no_measured_time_shows_no_rate() {
 /// On a plan no money moves with the work, so there is no rate of spending it.
 #[test]
 fn a_plan_shows_no_spend_rate() {
-    let mut app = metered_turn(1_800, Some(0.50));
-    app.apply(&Event::Billing {
-        billing: niobe_core::Billing::Plan,
-    });
+    let mut app = billed_turn(niobe_core::Billing::Plan, 1_800, Some(0.50));
     let frame = screen(&mut app, 120, 30);
     assert!(frame.contains("API-equivalent $0.50"), "{frame}");
     assert!(!frame.contains("/h"), "{frame}");
