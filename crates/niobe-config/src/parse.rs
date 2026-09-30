@@ -63,12 +63,8 @@ impl File<'_> {
         Ok(config)
     }
 
-    /// The standing answers to permission prompts, as the shell will match
-    /// them.
-    ///
-    /// A rule that is not one is reported at its line: a config that silently
-    /// dropped one would leave the operator expecting a prompt not to come
-    /// back when it will.
+    /// The profile a session runs under when none is named, which must be
+    /// a name and not an empty one.
     fn default_profile(
         &self,
         value: &Spanned<DeValue<'_>>,
@@ -107,6 +103,12 @@ impl File<'_> {
         Ok(profiles)
     }
 
+    /// The standing answers to permission prompts, as the shell will match
+    /// them.
+    ///
+    /// A rule that is not one is reported at its line: a config that silently
+    /// dropped one would leave the operator expecting a prompt not to come
+    /// back when it will.
     fn permissions(
         &self,
         value: &Spanned<DeValue<'_>>,

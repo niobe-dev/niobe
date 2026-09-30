@@ -1040,11 +1040,6 @@ impl Fold {
     }
 }
 
-/// The text of the first `<name>` element in a turn the CLI wrote in its own
-/// markup, such as a task notification.
-/// The command line the operator typed, where `text` is the markup the CLI
-/// writes for one it expanded: `<command-name>/clear</command-name>` with its
-/// `<command-args>`, which a live session sees as the `/clear` typed.
 /// What a local command printed, where `text` is the CLI's record of that
 /// rather than something typed: the inside of its `<local-command-stdout>` or
 /// `<local-command-stderr>`.
@@ -1055,6 +1050,9 @@ fn local_output(text: &str) -> Option<&str> {
         .map(|name| tag(text, name).unwrap_or_default())
 }
 
+/// The command line the operator typed, where `text` is the markup the CLI
+/// writes for one it expanded: `<command-name>/clear</command-name>` with its
+/// `<command-args>`, which a live session sees as the `/clear` typed.
 fn typed_command(text: &str) -> Option<String> {
     if !text.starts_with("<command-name>") {
         return None;
@@ -1066,6 +1064,8 @@ fn typed_command(text: &str) -> Option<String> {
     })
 }
 
+/// The text of the first `<name>` element in a turn the CLI wrote in its own
+/// markup, such as a task notification.
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");

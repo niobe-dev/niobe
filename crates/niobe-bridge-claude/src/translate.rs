@@ -900,9 +900,6 @@ impl Translator {
         });
     }
 
-    /// Records the model the session is on, producing a fresh [`SessionMeta`]
-    /// whenever it changes — which is how a routing decision reaches the
-    /// menu row.
     /// The list the CLI sent, less what it has said it will not run here.
     ///
     /// A command the CLI lists and then refuses in every session this bridge
@@ -929,8 +926,9 @@ impl Translator {
         out.push(Event::Cleared);
     }
 
-    /// Says what is running, where the model or the conversation has changed
-    /// since it was last said.
+    /// Records the model the session is on, producing a fresh [`SessionMeta`]
+    /// where the model or the conversation has changed since it was last said
+    /// — which is how a routing decision reaches the menu row.
     fn set_model(&mut self, model: String, out: &mut Vec<Event>) {
         if self.model.as_deref() == Some(model.as_str())
             && self.announced_session == self.backend_session

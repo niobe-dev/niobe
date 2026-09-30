@@ -1951,11 +1951,6 @@ impl App {
         std::mem::take(&mut self.produced)
     }
 
-    /// Drops a prompt from the queue, and gives it back.
-    ///
-    /// The next prompt starts afresh — on its first option, with the keyboard
-    /// on it — whatever the operator was doing with the one before, so a
-    /// question put off is not mistaken for the one behind it.
     /// How the call `id` came to run, as far as this shell saw.
     ///
     /// An answer it folded says who gave it. With no answer, the call ran
@@ -1973,6 +1968,11 @@ impl App {
         }
     }
 
+    /// Drops a prompt from the queue, and gives it back.
+    ///
+    /// The next prompt starts afresh — on its first option, with the keyboard
+    /// on it — whatever the operator was doing with the one before, so a
+    /// question put off is not mistaken for the one behind it.
     fn forget_ask(&mut self, id: &ToolCallId) -> Option<Ask> {
         let at = self.asks.iter().position(|ask| &ask.id == id)?;
         if at == 0 {
