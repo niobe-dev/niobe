@@ -691,7 +691,7 @@ fn prompt(record: &Line) -> Option<String> {
     let Line::User(user) = record else {
         return None;
     };
-    if user.is_meta || user.is_compact_summary || user.transcript_only {
+    if user.is_meta || user.is_compact_summary || user.transcript_only || user.notifies() {
         return None;
     }
     let said = user.message.content.as_ref().and_then(said)?;
@@ -722,6 +722,9 @@ struct Fold {
     mode: Option<String>,
     /// The title the CLI last gave the session, for the same reason.
     title: Option<String>,
+    /// Whether the main agent has answered since the operator last spoke,
+    /// so that the operator speaking again ends the turn.
+    answered: bool,
 }
 
 impl Fold {
@@ -744,6 +747,7 @@ impl Fold {
             last_usage: BTreeMap::new(),
             mode: None,
             title: None,
+            answered: false,
         }
     }
 
@@ -786,6 +790,9 @@ impl Fold {
     fn assistant(&mut self, record: Assistant, agent: Option<&str>) {
         let Assistant { message } = record;
         let parent = agent.map(str::to_owned);
+        if agent.is_none() {
+            self.answered = true;
+        }
 
         // The model is named on the message itself, which is where the live
         // stream reads it from too — off the head of the message rather than
@@ -891,12 +898,7 @@ impl Fold {
         // Background work stopping is written as a user turn too, and it is
         // the CLI speaking. What it says is how a sub-agent launched in the
         // background ended, which the call's own result never does.
-        let kind = record
-            .origin
-            .as_ref()
-            .and_then(|origin| origin.get("kind"))
-            .and_then(serde_json::Value::as_str);
-        if kind == Some(TASK_NOTIFICATION) {
+        if record.notifies() {
             if let Some(text) = record.message.content.as_ref().and_then(said) {
                 self.notified(&text);
             }
@@ -907,8 +909,23 @@ impl Fold {
         if agent.is_none()
             && let Some(text) = record.message.content.as_ref().and_then(said)
         {
-            let text = typed_command(&text).unwrap_or(text);
-            self.out.push(Event::UserMessage { text });
+            // What a local command printed is the CLI's answer to it, not
+            // something the operator said.
+            if let Some(printed) = local_output(&text) {
+                if !printed.is_empty() {
+                    self.out.push(Event::Notice {
+                        message: printed.to_owned(),
+                    });
+                }
+            } else {
+                // A transcript has no `result` to end a turn with, so a turn
+                // ends where the operator speaks again after an answer.
+                if std::mem::take(&mut self.answered) {
+                    self.out.push(Event::TurnEnded);
+                }
+                let text = typed_command(&text).unwrap_or(text);
+                self.out.push(Event::UserMessage { text });
+            }
         }
         // The same record carries the results of the calls the turn before it
         // made, which the translator reads and this does not.
@@ -1028,6 +1045,16 @@ impl Fold {
 /// The command line the operator typed, where `text` is the markup the CLI
 /// writes for one it expanded: `<command-name>/clear</command-name>` with its
 /// `<command-args>`, which a live session sees as the `/clear` typed.
+/// What a local command printed, where `text` is the CLI's record of that
+/// rather than something typed: the inside of its `<local-command-stdout>` or
+/// `<local-command-stderr>`.
+fn local_output(text: &str) -> Option<&str> {
+    ["local-command-stdout", "local-command-stderr"]
+        .into_iter()
+        .find(|name| text.starts_with(&format!("<{name}>")))
+        .map(|name| tag(text, name).unwrap_or_default())
+}
+
 fn typed_command(text: &str) -> Option<String> {
     if !text.starts_with("<command-name>") {
         return None;
@@ -1168,6 +1195,18 @@ struct User {
     /// the live stream's `tool_use_result`, under the transcript's spelling.
     #[serde(rename = "toolUseResult", default)]
     tool_use_result: Option<serde_json::Value>,
+}
+
+impl User {
+    /// Whether this is the turn the CLI writes when background work stops,
+    /// which is the CLI speaking and not the operator.
+    fn notifies(&self) -> bool {
+        self.origin
+            .as_ref()
+            .and_then(|origin| origin.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some(TASK_NOTIFICATION)
+    }
 }
 
 /// The turn itself.
@@ -1355,6 +1394,89 @@ mod tests {
     /// The record the CLI continues a compacted session from, as it writes
     /// it: a user turn, marked, holding the CLI's own words.
     const COMPACT_SUMMARY: &str = r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}"#;
+
+    /// A session that opened with background work ending, a local command
+    /// and its output, and then two prompts the operator typed, each
+    /// answered.
+    const CLI_TURNS_FIRST: &str = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>beal33jrc</task-id>\n<status>completed</status>\n</task-notification>"},"origin":{"kind":"task-notification"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-args>opus</command-args>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to Opus 5.5</local-command-stdout>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"first real prompt"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"one"}]}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"second prompt"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_2","model":"claude-opus-5","content":[{"type":"text","text":"two"}]}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn what_the_cli_wrote_is_neither_the_operators_words_nor_the_title_and_turns_end_at_prompts() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        transcript(
+            dir.path(),
+            "cli-first",
+            Duration::from_secs(60),
+            CLI_TURNS_FIRST,
+        );
+
+        let listed = list(dir.path()).expect("the directory lists");
+        assert_eq!(listed[0].first_prompt.as_deref(), Some("first real prompt"));
+
+        let events = events(
+            &dir.path().join("cli-first.jsonl"),
+            "max",
+            Path::new("/repo"),
+        )
+        .expect("the transcript folds");
+        let titles: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Titled { title } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["first real prompt"]);
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["/model opus", "first real prompt", "second prompt"]);
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::Notice { message } if message == "Set model to Opus 5.5")
+            ),
+            "{events:?}"
+        );
+        let state = niobe_core::SessionState::replay(&events);
+        assert_eq!(state.turns().len(), 1, "the first answered turn ended");
+        assert!(
+            state.turn_running(),
+            "the second is the one the record stops in"
+        );
+    }
+
+    #[test]
+    fn a_transcript_the_operator_typed_nothing_in_has_no_first_prompt() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let text = CLI_TURNS_FIRST
+            .lines()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        transcript(dir.path(), "nothing-typed", Duration::from_secs(60), &text);
+
+        let listed = list(dir.path()).expect("the directory lists");
+        assert_eq!(listed[0].first_prompt, None);
+    }
 
     #[test]
     fn a_compaction_summary_is_neither_the_first_prompt_nor_the_title() {
