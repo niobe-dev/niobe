@@ -194,6 +194,34 @@ fn answer(heard: &[u8]) -> Answer {
     Answer::Waiting
 }
 
+/// What was typed around the replies in `heard`: every byte but those of an
+/// `ESC [ ? … u` or `ESC [ ? … c` reply, in the order it came.
+fn typed_around(heard: &[u8]) -> Vec<u8> {
+    const INTRODUCER: &[u8] = b"\x1b[?";
+    let mut typed = Vec::new();
+    let mut rest = heard;
+    while let Some(start) = rest
+        .windows(INTRODUCER.len())
+        .position(|window| window == INTRODUCER)
+    {
+        typed.extend_from_slice(&rest[..start]);
+        let body = &rest[start + INTRODUCER.len()..];
+        match body
+            .iter()
+            .position(|byte| !(byte.is_ascii_digit() || *byte == b';'))
+        {
+            Some(end) if matches!(body[end], b'u' | b'c') => rest = &body[end + 1..],
+            // Not a reply: what looked like one was typed.
+            _ => {
+                typed.extend_from_slice(&rest[start..start + INTRODUCER.len()]);
+                rest = body;
+            }
+        }
+    }
+    typed.extend_from_slice(rest);
+    typed
+}
+
 /// Asks the terminal whether it can report Shift+Enter, and waits for the
 /// answer on standard input. [`Answer::Waiting`] is none having come.
 ///
@@ -203,59 +231,61 @@ fn answer(heard: &[u8]) -> Answer {
 /// question goes where the screen is drawn and the answer is read where the
 /// keys are, which is the terminal the shell is actually on.
 ///
-/// The answer is read before crossterm reads anything, so whatever the
-/// operator types in the moment it takes is not a key the shell sees. Only
+/// The answer is read before the shell reads any key, so whatever the
+/// operator types in the moment it takes is read with it; it is given back
+/// beside the answer, for the shell to take as the first keys it reads. Only
 /// standard input is asked: when it is not a terminal the keys come from
 /// `/dev/tty`, which `poll(2)` cannot wait on everywhere, and the legacy keys
 /// are what the shell falls back on.
 #[cfg(unix)]
-fn reports_keys(out: &mut impl Write) -> Answer {
+fn reports_keys(out: &mut impl Write) -> (Answer, Vec<u8>) {
     use std::io::IsTerminal;
     use std::os::fd::AsFd;
 
     let stdin = io::stdin();
     if !stdin.is_terminal() {
-        return Answer::Waiting;
+        return (Answer::Waiting, Vec::new());
     }
     if out
         .write_all(KEYBOARD_QUERY)
         .and_then(|()| out.flush())
         .is_err()
     {
-        return Answer::Waiting;
+        return (Answer::Waiting, Vec::new());
     }
 
     let deadline = std::time::Instant::now() + KEYBOARD_PATIENCE;
     let mut heard = Vec::new();
     let mut buffer = [0u8; 256];
-    loop {
+    let answered = loop {
         match answer(&heard) {
             Answer::Waiting => {}
-            known => return known,
+            known => break known,
         }
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            return Answer::Waiting;
+            break Answer::Waiting;
         }
         // Idle is a wait a signal cut short as well as one that ran out, so
         // the deadline rather than the wait decides when to stop.
         match crate::input::poll_input(stdin.as_fd(), left) {
             Ok(crate::input::Input::Ready) => {}
             Ok(crate::input::Input::Idle) => continue,
-            Ok(crate::input::Input::HungUp) | Err(_) => return Answer::Waiting,
+            Ok(crate::input::Input::HungUp) | Err(_) => break Answer::Waiting,
         }
         match rustix::io::read(stdin.as_fd(), &mut buffer) {
-            Ok(0) | Err(_) => return Answer::Waiting,
+            Ok(0) | Err(_) => break Answer::Waiting,
             Ok(read) => heard.extend_from_slice(&buffer[..read]),
         }
-    }
+    };
+    (answered, typed_around(&heard))
 }
 
 /// Asks the terminal whether it can report Shift+Enter. Only the POSIX side
 /// asks; elsewhere the legacy keys are what the shell uses.
 #[cfg(not(unix))]
-fn reports_keys(_out: &mut impl Write) -> Answer {
-    Answer::Waiting
+fn reports_keys(_out: &mut impl Write) -> (Answer, Vec<u8>) {
+    (Answer::Waiting, Vec::new())
 }
 
 /// Writes the sequences that put a terminal into the drawing mode.
@@ -303,6 +333,9 @@ pub struct TerminalGuard<W: Write> {
     /// taken again rather than handed back a second time.
     suspended: bool,
     restored: bool,
+    /// What the operator typed while the shell waited for the terminal's
+    /// answer about its keyboard, not yet read as keys.
+    typed: Vec<u8>,
 }
 
 impl<W: Write> TerminalGuard<W> {
@@ -323,6 +356,7 @@ impl<W: Write> TerminalGuard<W> {
             keyboard: Asked::Nothing,
             suspended: false,
             restored: false,
+            typed: Vec::new(),
         };
         // Set before the screen is entered, not after: it is what
         // `restore` checks, and a failure on the next line has to undo raw
@@ -334,7 +368,9 @@ impl<W: Write> TerminalGuard<W> {
         // answer came, which is where standard input is a terminal `poll(2)`
         // sees — the one whose keys the shell reads itself, and so the one
         // where the form it arrives in is read rather than dropped.
-        match reports_keys(&mut guard.out) {
+        let (answered, typed) = reports_keys(&mut guard.out);
+        guard.typed = typed;
+        match answered {
             Answer::Reports => guard.ask_keyboard(Asked::Enhancement)?,
             Answer::DoesNot => guard.ask_keyboard(Asked::OtherKeys)?,
             Answer::Waiting => {}
@@ -370,6 +406,12 @@ impl<W: Write> TerminalGuard<W> {
         self.keyboard == Asked::Enhancement
     }
 
+    /// What the operator typed while the terminal was being asked about its
+    /// keyboard, for the shell to read before anything it reads after.
+    pub fn take_typed(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.typed)
+    }
+
     /// Enters the alternate screen without touching raw mode.
     ///
     /// Raw mode is a property of the process's controlling terminal, not of the
@@ -384,6 +426,7 @@ impl<W: Write> TerminalGuard<W> {
             keyboard: Asked::Nothing,
             suspended: false,
             restored: false,
+            typed: Vec::new(),
         })
     }
 
@@ -939,6 +982,14 @@ mod tests {
             !out.contains("\x1b[>4m"),
             "took back modifyOtherKeys it never asked for: {out:?}"
         );
+    }
+
+    #[test]
+    fn keys_typed_before_between_and_after_the_replies_are_kept_in_order() {
+        assert_eq!(typed_around(b"a\x1b[?1uB\x1b[?62;22cC"), b"aBC".to_vec());
+        assert_eq!(typed_around(b"\x1b[?62;22c"), Vec::<u8>::new());
+        assert_eq!(typed_around(b"\x11"), b"\x11".to_vec(), "a Ctrl+Q alone");
+        assert_eq!(typed_around(b"\x1b[?x"), b"\x1b[?x".to_vec(), "not a reply");
     }
 
     #[test]

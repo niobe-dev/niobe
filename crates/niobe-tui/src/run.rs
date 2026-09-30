@@ -142,6 +142,11 @@ pub fn run(
     } else {
         app
     };
+    // Keys typed while the terminal was asked about its keyboard were read
+    // with its answer; they are the session's first keys, not lost ones.
+    let mut typed = Vec::new();
+    wait.prime(&guard.take_typed(), &mut typed);
+    hand_over(&mut app, typed);
     // No `Terminal::clear` here: the alternate screen starts blank and the
     // first draw covers it. `clear` also asks the terminal where its cursor is
     // and waits for the reply, which never comes when stdin is a pipe.

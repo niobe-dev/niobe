@@ -103,6 +103,17 @@ impl Wait {
         crossterm_read(events)
     }
 
+    /// Reads `typed` as the first keys of the session: what the operator
+    /// typed while the terminal was being asked about its keyboard.
+    pub(crate) fn prime(&mut self, typed: &[u8], events: &mut Vec<Event>) {
+        #[cfg(unix)]
+        if self.polls_the_terminal && !typed.is_empty() {
+            self.decoder.feed(typed, false, events);
+        }
+        #[cfg(not(unix))]
+        let _ = (typed, events);
+    }
+
     /// Hands over what the terminal has left the shell waiting on, where
     /// nothing has come to finish it: a paste whose closing marker never
     /// arrived. Called when a wait found nothing to read.

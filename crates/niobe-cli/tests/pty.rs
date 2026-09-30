@@ -945,6 +945,27 @@ fn quits_cleanly_at(rows: u16, cols: u16) {
     assert_handed_back(&drawn, cooked, &path);
 }
 
+/// A key typed the moment the screen is taken — while the shell is still
+/// waiting on the terminal's answer about its keyboard — is read, not lost:
+/// the `!` it types here is what puts the composer into a command.
+#[test]
+fn a_key_typed_as_the_shell_opens_is_read_and_not_lost() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(ENTER_ALTERNATE_SCREEN);
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(b"echo typed-ahead-$((6*7))\r");
+    terminal.shows("typed-ahead-42");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+    assert_handed_back(&drawn, cooked, "a quit after a key typed ahead");
+}
+
 #[test]
 fn a_one_by_one_terminal_quits_cleanly_and_is_handed_back() {
     quits_cleanly_at(1, 1);
