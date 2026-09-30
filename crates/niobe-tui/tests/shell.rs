@@ -326,6 +326,33 @@ fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
     assert_snapshot("agents-asking-120x30", &frame);
 }
 
+/// A refused command of several lines, drawn on its one row, keeps its
+/// lines apart: `set -e` and `cd /tmp` joined would read as another command.
+#[test]
+fn a_denied_command_of_several_lines_keeps_its_lines_apart_on_its_row() {
+    let mut app = running_session();
+    let command = "set -e\ncd /tmp\necho step 0";
+    app.apply(&Event::PermissionRequest {
+        id: "multi".into(),
+        tool: "Bash".to_owned(),
+        input: r#"{"command":"set -e\ncd /tmp\necho step 0"}"#.to_owned(),
+        target: Some(command.to_owned()),
+        agent: None,
+    });
+    app.apply(&Event::PermissionResponse {
+        id: "multi".into(),
+        decision: PermissionDecision::Deny,
+        message: None,
+    });
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("! denied  Bash · set -e ↵ cd /tmp ↵ echo step 0"),
+        "{frame}"
+    );
+    assert_snapshot("denied-multiline-120x30", &frame);
+}
+
 #[test]
 fn a_diff_cut_at_twenty_rows_opens_in_place_and_cuts_again() {
     let mut app = session_with_a_long_write();

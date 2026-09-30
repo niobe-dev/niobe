@@ -186,18 +186,28 @@ pub fn truncate(text: &str, columns: usize) -> String {
     out
 }
 
-/// `text` with each tab a space, for a row drawn on one line.
+/// `text` with each tab a space and each line break a `↵`, for a row drawn
+/// on one line.
 ///
 /// A terminal cell cannot hold a tab, and a width that counted one as no
 /// cells would cut the row in the wrong place; a single row has no column
 /// for a tab stop to line up either, so it is the space it separates words
-/// with.
+/// with. A line break is dropped by the terminal the same way, which would
+/// join the words either side of it — `set -e` and `cd /tmp` would read as
+/// `set -ecd /tmp` — so it is drawn as the mark that says one was there.
 fn one_line(text: &str) -> std::borrow::Cow<'_, str> {
-    match text.contains('\t') {
-        true => std::borrow::Cow::Owned(text.replace('\t', " ")),
-        false => std::borrow::Cow::Borrowed(text),
+    if !text.contains(['\t', '\n', '\r']) {
+        return std::borrow::Cow::Borrowed(text);
     }
+    std::borrow::Cow::Owned(
+        text.replace("\r\n", "\n")
+            .replace(['\n', '\r'], LINE_BREAK)
+            .replace('\t', " "),
+    )
 }
+
+/// What a line break reads as on a row drawn on one line.
+const LINE_BREAK: &str = " ↵ ";
 
 /// Shortens `text` to `columns` cells at a word boundary, ending in `…` when
 /// anything was cut.
@@ -259,6 +269,15 @@ pub fn truncate_start(text: &str, columns: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_break_on_a_one_line_row_keeps_the_lines_apart() {
+        assert_eq!(
+            truncate("set -e\ncd /tmp\r\necho done", 80),
+            "set -e ↵ cd /tmp ↵ echo done"
+        );
+        assert_eq!(truncate("a\tb", 80), "a b");
+    }
 
     #[test]
     fn an_emoji_with_a_presentation_selector_is_as_wide_as_ratatui_draws_it() {

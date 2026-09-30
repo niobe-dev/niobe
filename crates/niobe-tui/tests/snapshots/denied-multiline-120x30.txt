@@ -1,0 +1,30 @@
+ Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
+ ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃                                                                          ┃ │                                       │
+ ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
+ ┃    48     return res;                                                    ┃ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
+ ┃       …                                                                  ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {                                               ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃   116 +     etag: res.headers.get("ETag"),                               ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃   117       body,                                                        ┃ │ API-equivalent ≥$0.04                 │
+ ┃   └ allowed by you                                                       ┃ │ ───────────────────────────────────── │
+ ┃                                                                          ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
+ ┃ ◆ claude                                                                 ┃ └───────────────────────────────────────┘
+ ┃   Rewriting the 304 test around the cached body.                         ┃ ┌─────────────── Changes ───────────────┐
+ ┃                                                                          ┃ │                                       │
+ ┃ ◆ claude                                                                 ┃ │ ⎇ main ↑3                             █
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.   ┃ │ ▾ Working tree  23 files  +≥977 −≥259 │
+ ┃                                                                          █ │   .                                   │
+ ┃ ✗ Bash                       npm test -- fetch             exit 1 · 0.4s █ │     CHANGELOG.md                +0 −0 │
+ ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │   catalog/                            │
+ ┃                                                                          █ │     fetch.ts                 +149 −12 │
+ ┃ ◆ claude                                                                 █ │     etag.ts                   +88 −41 │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ └───────────────────────────────────────┘
+ ┃   304 path asserts a body that is no longer sent.                        █ ┌────────────── Activity ───────────────┐
+ ┃                                                                          █ │                                       │
+ ┃ ! denied  Bash · set -e ↵ cd /tmp ↵ echo step 0                          █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃                                                                          █ │ ◆ test-writer → tests… running 1m 42s │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   └ Reading tests/stream.rs           │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │ ◇ reviewer → catalog/c… done 4100 ctx │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit

@@ -28,7 +28,7 @@
  ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
  ┃   │ ▶ 1. Allow once                                     this call only │ █ │                                       │
  ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │ ▾ Sub-agents  1 running · 1 failed    █
- ┃   │   3. Always allow this target  niobe saves Bash(set -ecd /tmpecho… │ █ │ ◆ test-writer → tests… running 1m 42s █
+ ┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp … │ █ │ ◆ test-writer → tests… running 1m 42s █
  ┃   │   4. Deny                                    the call does not run │ █ │   └ Reading tests/stream.rs           █
  ┃   │                                                                    │ █ │ ◇ reviewer → catalog/c… done 4100 ctx █
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │ ✗ doc-writer → docs/etags.md   failed │

@@ -12,7 +12,7 @@
 ┃   │                                                                      │   ┃
 ┃   │ ▶ 1. Allow once                                       this call only │   ┃
 ┃   │   2. Always allow Bash                              niobe saves Bash │   ┃
-┃   │   3. Always allow this target  niobe saves Bash(set -ecd /tmpecho s… │   ┃
+┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp ↵ … │   ┃
 ┃   │   4. Deny                                      the call does not run │   ┃
 ┃   │                                                                      │   █
 ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │   █
