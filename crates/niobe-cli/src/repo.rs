@@ -740,11 +740,19 @@ fn working_tree(numstat: &str) -> Vec<WorkingFile> {
 /// its hash and subject and loses only the age: a commit dated from the moment
 /// it was read would be a figure about this read rather than about the commit.
 fn commits(log: &str) -> Vec<Commit> {
-    let mut fields = log.split('\0').filter(|field| !field.is_empty());
+    // Empty fields are kept: a commit made with `--allow-empty-message` has
+    // an empty subject, and dropping it would move every field after it up
+    // by one. Only what follows the last terminator is not a field.
+    let mut fields: Vec<&str> = log.split('\0').collect();
+    if fields.last().is_some_and(|last| last.trim().is_empty()) {
+        fields.pop();
+    }
     let mut commits = Vec::new();
 
-    while let (Some(hash), Some(subject), Some(at)) = (fields.next(), fields.next(), fields.next())
-    {
+    for record in fields.chunks_exact(3) {
+        let &[hash, subject, at] = record else {
+            continue;
+        };
         commits.push(Commit {
             hash: hash.to_owned(),
             subject: subject.to_owned(),
@@ -910,6 +918,26 @@ mod tests {
                     at: Some(UNIX_EPOCH + Duration::from_secs(1_789_939_158)),
                     pushed: None,
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_commit_with_an_empty_subject_moves_no_other_commit() {
+        let made = commits(
+            "93e5a2c\x00fourth\x001790713534\x004053221\x00\x001790713534\x00ba0ea9b\x00first\x001790713533\x00",
+        );
+
+        let read: Vec<(&str, &str, bool)> = made
+            .iter()
+            .map(|c| (c.hash.as_str(), c.subject.as_str(), c.at.is_some()))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                ("93e5a2c", "fourth", true),
+                ("4053221", "", true),
+                ("ba0ea9b", "first", true)
             ]
         );
     }
@@ -1259,6 +1287,45 @@ mod tests {
             read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
 
         assert!(read.repo.commits.is_empty(), "{:?}", read.repo.commits);
+    }
+
+    #[test]
+    fn a_commit_with_no_message_is_listed_with_the_others_in_place() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let started = session_started();
+        let started_on = read(&work, "work", Since::Nothing)
+            .expect("the repository reads")
+            .head
+            .expect("the repository has a commit");
+        for (text, message) in [
+            ("a\n", Some("second")),
+            ("b\n", None),
+            ("c\n", Some("fourth")),
+        ] {
+            std::fs::write(work.join("kept.txt"), text).expect("the file is written");
+            match message {
+                Some(message) => run(&work, &["commit", "-qam", message]),
+                None => run(&work, &["commit", "-qa", "--allow-empty-message", "-m", ""]),
+            }
+        }
+
+        let read =
+            read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
+
+        let subjects: Vec<&str> = read
+            .repo
+            .commits
+            .iter()
+            .map(|c| c.subject.as_str())
+            .collect();
+        assert_eq!(subjects, ["fourth", "", "second"]);
+        assert!(
+            read.repo
+                .commits
+                .iter()
+                .all(|c| c.hash.len() >= 7 && c.at.is_some())
+        );
     }
 
     /// A commit made while the session runs is its own whatever its author
