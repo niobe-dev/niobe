@@ -2306,12 +2306,16 @@ impl App {
     /// A conversion, not a reading of the clock: the draw calls it to say when
     /// a window the backend timed comes back, and what it gets back does not
     /// depend on when it was called.
-    pub fn moment(&self, seconds: u64) -> Stamp {
-        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-        match &self.clock {
+    ///
+    /// `None` for a time past what the clock can hold, which a backend, a
+    /// stored session or a replayed log can name: it is a moment nothing can
+    /// say anything about.
+    pub fn moment(&self, seconds: u64) -> Option<Stamp> {
+        let at = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(seconds))?;
+        Some(match &self.clock {
             Some(clock) => clock.at(at),
             None => Stamp::new(at, None),
-        }
+        })
     }
 
     /// The same shell, able to value the tokens a backend reported no cost
@@ -6488,7 +6492,7 @@ mod tests {
         // UTC, is half past midnight on the second.
         let moment = app
             .moment(23 * 3_600 + 30 * 60)
-            .moment()
+            .and_then(|stamp| stamp.moment())
             .expect("a fixed clock always names a zone");
 
         assert_eq!(moment.day(), 1);
@@ -6498,7 +6502,16 @@ mod tests {
     #[test]
     fn a_moment_read_without_a_clock_has_no_time_of_day_at_all() {
         let app = App::new(Repo::default());
-        assert_eq!(app.moment(23 * 3_600).moment(), None);
+        assert_eq!(
+            app.moment(23 * 3_600).and_then(|stamp| stamp.moment()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_time_past_what_the_clock_holds_is_no_moment() {
+        let app = App::new(Repo::default());
+        assert_eq!(app.moment(u64::MAX), None);
     }
 
     #[test]

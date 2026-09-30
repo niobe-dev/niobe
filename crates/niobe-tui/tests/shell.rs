@@ -545,6 +545,30 @@ fn a_theme_moves_no_character_on_screen_but_the_focus_line() {
     }
 }
 
+/// A reset the backend timed past what the clock can hold is a window with
+/// no reset to name, not a shell that panics drawing it.
+#[test]
+fn a_window_resetting_past_what_the_clock_holds_is_drawn_without_its_reset() {
+    let mut app = running_session();
+    app.apply(&Event::UsageWindows(UsageWindows {
+        five_hour: Some(UsageWindow {
+            utilization: 0.5,
+            resets_at: Some(u64::MAX),
+        }),
+        seven_day: None,
+        using_overage: false,
+    }));
+
+    let frame = screen(&mut app, 200, 60);
+
+    let row = frame
+        .lines()
+        .find(|row| row.contains("5h "))
+        .expect("the five-hour window is drawn");
+    assert!(row.contains("50%"), "{row}");
+    assert!(!row.contains("resets"), "{row}");
+}
+
 #[test]
 fn the_shell_renders_at_eighty_by_twentyfour() {
     assert_snapshot("running-80x24", &screen(&mut running_session(), 80, 24));

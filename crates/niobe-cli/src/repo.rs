@@ -752,7 +752,9 @@ fn commits(log: &str) -> Vec<Commit> {
                 .trim()
                 .parse()
                 .ok()
-                .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds)),
+                // A date past what the clock holds is no date: the commit
+                // keeps its hash and subject and loses its age.
+                .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds))),
             // Filled in for all of them by `pushed`: it can take one more read
             // of the repository to know, and this one has none.
             pushed: None,
@@ -922,6 +924,18 @@ mod tests {
             "an age counted from the moment it was read would be about the read"
         );
         assert_eq!(made[0].subject, "chore: release 0.7.0");
+    }
+
+    #[test]
+    fn a_commit_dated_past_what_the_clock_holds_keeps_everything_but_its_age() {
+        let made = commits("f92f375\x00far off\x0018446744073709551615\x00");
+
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].at, None);
+        assert_eq!(
+            (made[0].hash.as_str(), made[0].subject.as_str()),
+            ("f92f375", "far off")
+        );
     }
 
     /// A repository with one commit and an origin it has been pushed to, so

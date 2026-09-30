@@ -2069,12 +2069,12 @@ fn window_rows(app: &App) -> usize {
 /// and ` · resets Tue 09:00` on another day.
 ///
 /// `None` where there is no reset to name — the backend reported the share
-/// without one, the machine named no timezone, or the reset has already come
-/// around, which is what a recorded session read back a day later has. The row
+/// without one or with one past what the clock holds, the machine named no
+/// timezone, or the reset has already come around, which is what a recorded session read back a day later has. The row
 /// then carries the share alone rather than a time that is no longer true.
 fn reset_clause(app: &App, window: &UsageWindow) -> Option<String> {
     let at = window.resets_at?;
-    let when = clock::upcoming(app.stamp()?, app.moment(at))?;
+    let when = clock::upcoming(app.stamp()?, app.moment(at)?)?;
     Some(format!(" · resets {when}"))
 }
 
