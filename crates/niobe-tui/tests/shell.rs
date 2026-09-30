@@ -4230,6 +4230,39 @@ fn a_reply_of_emoji_is_wrapped_as_wide_as_it_is_drawn() {
     );
 }
 
+/// A file the repository does not track yet is in the working tree, marked
+/// new: counted where its lines were read, an em dash where they were not,
+/// and in the header either way.
+#[test]
+fn new_files_are_in_the_working_tree_marked_new_and_counted_where_read() {
+    let working = |path: &str, added: Option<u64>, new: bool| niobe_tui::app::WorkingFile {
+        path: path.to_owned(),
+        added,
+        removed: Some(0),
+        new,
+    };
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        working: vec![
+            working("kept.txt", Some(1), false),
+            working("large.txt", None, true),
+            working("sub/dir/inner.txt", Some(3), true),
+        ],
+        ..Repo::default()
+    });
+
+    let frame = screen(&mut app, 120, 30);
+
+    assert_snapshot("working-new-120x30", &frame);
+    let header = frame
+        .lines()
+        .find(|line| line.contains("Working tree"))
+        .expect("the working tree is drawn");
+    assert!(header.contains("3 files  +≥4 −0"), "{header}");
+}
+
 /// Git counts no lines in a binary file, so a working tree whose only change
 /// is one has no figure to add up: its header says so rather than `+0 −0`.
 #[test]
@@ -4242,6 +4275,7 @@ fn a_working_tree_of_nothing_but_a_binary_file_has_no_line_counts() {
             path: "docs/diagram.png".to_owned(),
             added: None,
             removed: None,
+            new: false,
         }],
         ..Repo::default()
     });

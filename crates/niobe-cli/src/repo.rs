@@ -523,9 +523,9 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
         ],
     )?);
 
-    let working = match &status.head {
-        // A repository with no commits has nothing to have changed against:
-        // every file in it is untracked, and git counts no lines in those.
+    let mut working = match &status.head {
+        // A repository with no commits has nothing to have changed against,
+        // and git counts no lines in a file it has only staged.
         None => Vec::new(),
         Some(_) => working_tree(&git(root, &["diff", "--numstat", "-z", "HEAD"])?),
     };
@@ -562,17 +562,27 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
 
     let commits = pushed(root, listed, &status)?;
     // Listed from the root, which is where the agent runs and the operator's
-    // commands do, so each path is the one both would name the file by.
-    let files = files(&git(
+    // commands do, so each path is the one both would name the file by. `-t`
+    // tags each with what git holds of it, which is what says a file is new:
+    // this is the one scan of the tree for untracked files, and it serves both.
+    let tree = tagged(&git(
         root,
         &[
             "ls-files",
             "-z",
+            "-t",
             "--cached",
             "--others",
             "--exclude-standard",
         ],
     )?);
+    working.extend(
+        tree.iter()
+            .filter(|(untracked, _)| *untracked)
+            .map(|(_, path)| new_file(root, path)),
+    );
+    working.sort_by(|one, other| one.path.cmp(&other.path));
+    let files = files(tree.into_iter().map(|(_, path)| path));
     Ok(Read {
         repo: Repo {
             name: name.to_owned(),
@@ -588,16 +598,57 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
     })
 }
 
-/// The paths `git ls-files -z` printed, in the order it printed them, each
-/// once: a file with a merge conflict is listed once per side.
-fn files(listed: &str) -> Vec<String> {
+/// The paths `git ls-files -z -t` printed, in the order it printed them,
+/// each with whether git tracks it: the tag `?` is a file it does not.
+fn tagged(printed: &str) -> Vec<(bool, String)> {
+    printed
+        .split('\0')
+        .filter_map(|record| record.split_once(' '))
+        .map(|(tag, path)| (tag == "?", path.to_owned()))
+        .collect()
+}
+
+/// The paths listed, each once: a file with a merge conflict is listed once
+/// per side.
+fn files(listed: impl Iterator<Item = String>) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
-    for path in listed.split('\0').filter(|path| !path.is_empty()) {
-        if files.last().map(String::as_str) != Some(path) {
-            files.push(path.to_owned());
+    for path in listed {
+        if files.last() != Some(&path) {
+            files.push(path);
         }
     }
     files
+}
+
+/// A file git does not track yet, at `path` under `root`, counted as the
+/// lines it holds where it can be read — the count `git diff --numstat`
+/// gives it once it is added — and not counted where it cannot: a link, not a
+/// regular file, or past [`niobe_config::read::LIMIT`], which is read no
+/// further than that rather than whole on every look at the tree.
+fn new_file(root: &Path, path: &str) -> WorkingFile {
+    let added = std::fs::symlink_metadata(root.join(path))
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .and_then(|_| niobe_config::read::bytes(&root.join(path)).ok())
+        .and_then(|bytes| lines_in(&bytes));
+    WorkingFile {
+        path: path.to_owned(),
+        added,
+        removed: Some(0),
+        new: true,
+    }
+}
+
+/// The lines in `bytes` as git counts them: a last line with no line break
+/// after it is a line, and a file git would call binary — one with a NUL in
+/// its first 8000 bytes, which is git's test — has no count.
+fn lines_in(bytes: &[u8]) -> Option<u64> {
+    if bytes.iter().take(8000).any(|&byte| byte == 0) {
+        return None;
+    }
+    let breaks = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    let unended = usize::from(bytes.last().is_some_and(|&byte| byte != b'\n'));
+    u64::try_from(breaks + unended).ok()
 }
 
 /// Says, for each of `listed`, whether the branch's upstream already has it.
@@ -729,6 +780,7 @@ fn working_tree(numstat: &str) -> Vec<WorkingFile> {
             path,
             added: added.parse().ok(),
             removed: removed.parse().ok(),
+            new: false,
         });
     }
     files
@@ -884,6 +936,7 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 added: Some(12),
                 removed: Some(3),
+                new: false,
             }]
         );
     }
@@ -1055,12 +1108,69 @@ mod tests {
                 path: "kept.txt".to_owned(),
                 added: Some(2),
                 removed: Some(0),
+                new: false,
             }]
         );
         assert!(
             read.repo.commits.is_empty(),
             "the session has committed nothing"
         );
+    }
+
+    /// A file git does not track yet is in the working tree too: new, and
+    /// counted as the lines it holds, which is what `git diff --numstat` says
+    /// of it once it is added. One too large to read is new and not counted,
+    /// and one the repository ignores is not listed.
+    #[test]
+    fn a_new_file_is_in_the_working_tree_counted_and_an_ignored_one_is_not() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        std::fs::write(work.join(".gitignore"), "*.log\n").expect("the file is written");
+        run(&work, &["add", ".gitignore"]);
+        run(&work, &["commit", "-m", "ignore logs"]);
+        std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
+        std::fs::create_dir_all(work.join("sub/dir")).expect("the directory can be made");
+        std::fs::write(work.join("sub/dir/inner.txt"), "one\ntwo\nthree").expect("written");
+        std::fs::write(
+            work.join("large.txt"),
+            "x\n".repeat(niobe_config::read::LIMIT as usize),
+        )
+        .expect("written");
+        std::fs::write(work.join("noise.log"), "ignored\n").expect("the file is written");
+
+        let read = read(&work, "work", Since::Nothing).expect("the repository reads");
+
+        assert_eq!(
+            read.repo.working,
+            [
+                WorkingFile {
+                    path: "kept.txt".to_owned(),
+                    added: Some(1),
+                    removed: Some(0),
+                    new: false,
+                },
+                WorkingFile {
+                    path: "large.txt".to_owned(),
+                    added: None,
+                    removed: Some(0),
+                    new: true,
+                },
+                WorkingFile {
+                    path: "sub/dir/inner.txt".to_owned(),
+                    added: Some(3),
+                    removed: Some(0),
+                    new: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_file_git_would_call_binary_is_new_and_not_counted() {
+        assert_eq!(lines_in(b"a\nb\n"), Some(2));
+        assert_eq!(lines_in(b"a\nb"), Some(2));
+        assert_eq!(lines_in(b""), Some(0));
+        assert_eq!(lines_in(b"PNG\0\x01\x02\n"), None);
     }
 
     #[test]
@@ -1152,7 +1262,16 @@ mod tests {
 
         assert_eq!(read.head, None);
         assert_eq!(read.repo.branch.as_deref(), Some("main"));
-        assert!(read.repo.working.is_empty());
+        assert_eq!(
+            read.repo.working,
+            [WorkingFile {
+                path: "new.txt".to_owned(),
+                added: Some(1),
+                removed: Some(0),
+                new: true,
+            }],
+            "with nothing committed, every file in the tree is new"
+        );
         assert!(read.repo.commits.is_empty());
     }
 

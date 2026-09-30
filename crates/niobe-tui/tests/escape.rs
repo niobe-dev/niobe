@@ -268,6 +268,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 path: format!("wf{p}.rs"),
                 added: Some(1),
                 removed: Some(1),
+                new: false,
             }],
             commits: vec![Commit {
                 hash: "abc1234".into(),

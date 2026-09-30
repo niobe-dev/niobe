@@ -127,6 +127,7 @@ mod tests {
             path: path.to_owned(),
             added: Some(1),
             removed: Some(0),
+            new: false,
         }
     }
 

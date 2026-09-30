@@ -3129,9 +3129,10 @@ fn section_header(
 /// What the repository measured the working tree to have changed.
 ///
 /// These are git's figures, exact, about every file in the tree — including
-/// files this session never touched. They are never mixed with the session's
-/// own counts, which are a different claim by a different party and have their
-/// own section below.
+/// files this session never touched — and for a file git does not track yet,
+/// its lines counted as git counts them once it is added, with the file marked
+/// new. They are never mixed with the session's own counts, which are a
+/// different claim by a different party and have their own section below.
 fn working_tree_rows(
     app: &App,
     repo: &crate::app::Repo,
@@ -3195,6 +3196,7 @@ fn working_tree_rows(
             tree::Row::File { file, .. } => counted_row(
                 FILE_INDENT,
                 row.name(),
+                Tag::new(file.new),
                 &measured('+', file.added),
                 &measured('−', file.removed),
                 width,
@@ -3249,6 +3251,7 @@ fn session_file_rows(
         rows.push(counted_row(
             ROW_INDENT,
             &file.path,
+            Tag::None,
             &count('+', file.added, file.added_stated()),
             &count('−', file.removed, file.removed_stated()),
             width,
@@ -3765,8 +3768,9 @@ fn files_said(files: usize) -> String {
 ///
 /// Exact, because git counts every line it reports: `+0` is a file that
 /// changed by no lines and is still a changed file. The em dash is kept for
-/// the one case git declines to count — a binary file, where no number exists
-/// rather than a number nobody read.
+/// what nobody counted — a binary file, which git declines to count, and a new
+/// file too large to read — where no number exists rather than a number
+/// nobody read.
 fn measured(sign: char, lines: Option<u64>) -> String {
     match lines {
         Some(lines) => format!("{sign}{lines}"),
@@ -3779,19 +3783,47 @@ fn measured(sign: char, lines: Option<u64>) -> String {
 const ROW_INDENT: &str = "  ";
 const FILE_INDENT: &str = "    ";
 
+/// What a counted row says of its file between the name and the counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tag {
+    /// Nothing: a file the repository already tracks, or the session's own.
+    None,
+    /// `new`: a file the repository does not track yet.
+    New,
+}
+
+impl Tag {
+    fn new(new: bool) -> Self {
+        match new {
+            true => Tag::New,
+            false => Tag::None,
+        }
+    }
+
+    /// The tag as drawn, with the space before the counts.
+    fn text(self) -> &'static str {
+        match self {
+            Tag::None => "",
+            Tag::New => "new ",
+        }
+    }
+}
+
 /// A row whose counts keep their columns and whose name gives way.
 ///
 /// The name loses its front rather than its tail: a path cut at the front
-/// still names the file, and a count cut anywhere is a different number.
+/// still names the file, and a count cut anywhere is a different number. The
+/// tag keeps its place beside the counts for the same reason.
 fn counted_row(
     indent: &'static str,
     name: &str,
+    tag: Tag,
     added: &str,
     removed: &str,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let counts = text::width(added) + 1 + text::width(removed);
+    let counts = text::width(tag.text()) + text::width(added) + 1 + text::width(removed);
     let room = width.saturating_sub(text::width(indent) + counts + 1);
     let name = text::truncate_start(name, room);
     let gap = width
@@ -3802,6 +3834,7 @@ fn counted_row(
         Span::raw(indent),
         Span::styled(name, Style::new().fg(theme.fg)),
         Span::raw(" ".repeat(gap)),
+        Span::styled(tag.text(), Style::new().fg(theme.dim)),
         Span::styled(added.to_owned(), Style::new().fg(theme.add)),
         Span::raw(" "),
         Span::styled(removed.to_owned(), Style::new().fg(theme.del)),
@@ -4709,6 +4742,7 @@ mod tests {
         counted_row(
             ROW_INDENT,
             &file.path,
+            Tag::None,
             &count('+', file.added, file.added_stated()),
             &count('−', file.removed, file.removed_stated()),
             width,

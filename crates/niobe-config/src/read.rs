@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! Reading a config file that arrived with a clone.
+//! Reading a config file that arrived with a clone, or any other file a
+//! repository holds.
 //!
 //! A repository's `.niobe/config.toml` is whatever the repository committed,
 //! and git commits a symlink as readily as a file: one to `/dev/zero` reads
@@ -28,6 +29,20 @@ pub const LIMIT: u64 = 1024 * 1024;
 /// device, a FIFO, a directory, a file past the limit — is an error that says
 /// which, returned without waiting on the file or reading past the limit.
 pub fn text(path: &Path) -> io::Result<String> {
+    let bytes = bounded(path, ", which no config is")?;
+    String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// The bytes of the file at `path`, on the terms [`text`] reads it: only
+/// where it is a regular file no larger than [`LIMIT`], and without waiting
+/// on it. For a file the repository holds that need not be text.
+pub fn bytes(path: &Path) -> io::Result<Vec<u8>> {
+    bounded(path, "")
+}
+
+/// The file's bytes, or an error that says why not; `too_large` ends the
+/// message for a file past [`LIMIT`].
+fn bounded(path: &Path, too_large: &str) -> io::Result<Vec<u8>> {
     let file = open(path)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
@@ -40,13 +55,10 @@ pub fn text(path: &Path) -> io::Result<String> {
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LIMIT {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "larger than {} MiB, which no config is",
-                LIMIT / (1024 * 1024)
-            ),
+            format!("larger than {} MiB{too_large}", LIMIT / (1024 * 1024)),
         ));
     }
-    String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    Ok(bytes)
 }
 
 /// Opens `path` for reading without waiting for a writer, which opening a FIFO

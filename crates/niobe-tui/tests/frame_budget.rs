@@ -362,6 +362,7 @@ fn a_large_working_tree_redraws_inside_a_frame_budget() {
             path: format!("crates/niobe-{}/src/module_{n:03}.rs", n % 7),
             added: Some(n as u64),
             removed: Some(n as u64 / 3),
+            new: false,
         })
         .collect();
     app.set_repo(repo);

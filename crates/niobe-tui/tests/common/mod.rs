@@ -394,12 +394,14 @@ fn working_tree() -> Vec<WorkingFile> {
         path: path.to_owned(),
         added: Some(added),
         removed: Some(removed),
+        new: false,
     };
     vec![
         WorkingFile {
             path: "CHANGELOG.md".to_owned(),
             added: Some(0),
             removed: Some(0),
+            new: false,
         },
         counted("catalog/fetch.ts", 149, 12),
         counted("catalog/etag.ts", 88, 41),
@@ -411,6 +413,7 @@ fn working_tree() -> Vec<WorkingFile> {
             path: "docs/diagrams/cache.png".to_owned(),
             added: None,
             removed: None,
+            new: false,
         },
         counted("server/handlers/manifest.ts", 97, 4),
         counted("server/handlers/health.ts", 3, 19),

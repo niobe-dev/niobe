@@ -89,6 +89,10 @@ pub struct WorkingFile {
     pub added: Option<u64>,
     /// Lines removed, on the same terms as [`WorkingFile::added`].
     pub removed: Option<u64>,
+    /// Whether it is a file the repository does not track yet. Its lines are
+    /// counted the way git counts a file once it is added, or not at all
+    /// where it was too large to read; it removed none.
+    pub new: bool,
 }
 
 /// A commit made while the session has been running.
