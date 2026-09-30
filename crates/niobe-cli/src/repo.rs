@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use niobe_store::Store;
 use niobe_tui::app::{Commit, Repo, WorkingFile};
@@ -382,11 +382,26 @@ enum Since<'a> {
     /// The session has made no commits yet, so none are listed. The first read
     /// of a session, which is what the rest are measured against.
     Nothing,
-    /// The commit the session started on: everything after it is its own.
-    Commit(&'a str),
+    /// The commit the session started on, and when it started: what `HEAD`
+    /// has gained since that commit is the session's own where it was
+    /// committed after that moment. A checkout or a pull moves `HEAD` onto
+    /// commits made before it, which nobody in this session made.
+    Commit(&'a str, SystemTime),
     /// The repository had no commits when the session started, so every commit
-    /// in it is one the session made.
-    Everything,
+    /// in it made after that moment is one the session made.
+    Everything(SystemTime),
+}
+
+/// The moment a session starts, to the second: a commit's date is whole
+/// seconds, and one made in the second the session started is its own.
+fn session_started() -> SystemTime {
+    let now = SystemTime::now();
+    let seconds = now
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(seconds))
+        .unwrap_or(now)
 }
 
 /// One read of the repository: what the shell shows, and the commit `HEAD` was
@@ -457,13 +472,14 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver
     // The commit the session started on, taken from the first read that
     // worked. `Some(None)` is a repository that had no commits then.
     let mut started_on: Option<Option<String>> = None;
+    let started = session_started();
     let mut last: Option<Repo> = None;
 
     loop {
         let since = match &started_on {
             None => Since::Nothing,
-            Some(None) => Since::Everything,
-            Some(Some(oid)) => Since::Commit(oid),
+            Some(None) => Since::Everything(started),
+            Some(Some(oid)) => Since::Commit(oid, started),
         };
 
         let began = Instant::now();
@@ -511,23 +527,35 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
         Some(_) => working_tree(&git(root, &["diff", "--numstat", "-z", "HEAD"])?),
     };
 
-    let listed = match since {
-        Since::Nothing => Vec::new(),
-        Since::Everything if status.head.is_none() => Vec::new(),
-        Since::Everything => commits(&git(
-            root,
-            &["log", "-z", "--format=%h%x00%s%x00%ct", "HEAD"],
-        )?),
-        Since::Commit(oid) => commits(&git(
-            root,
-            &[
-                "log",
-                "-z",
-                "--format=%h%x00%s%x00%ct",
-                &format!("{oid}..HEAD"),
-            ],
-        )?),
+    let (listed, from) = match since {
+        Since::Nothing => (Vec::new(), UNIX_EPOCH),
+        Since::Everything(_) if status.head.is_none() => (Vec::new(), UNIX_EPOCH),
+        Since::Everything(from) => (
+            commits(&git(
+                root,
+                &["log", "-z", "--format=%h%x00%s%x00%ct", "HEAD"],
+            )?),
+            from,
+        ),
+        Since::Commit(oid, from) => (
+            commits(&git(
+                root,
+                &[
+                    "log",
+                    "-z",
+                    "--format=%h%x00%s%x00%ct",
+                    &format!("{oid}..HEAD"),
+                ],
+            )?),
+            from,
+        ),
     };
+    // A commit with no date cannot be placed after the session started, so
+    // it is not claimed as the session's.
+    let listed = listed
+        .into_iter()
+        .filter(|commit| commit.at.is_some_and(|at| at >= from))
+        .collect();
 
     let commits = pushed(root, listed, &status)?;
     // Listed from the root, which is where the agent runs and the operator's
@@ -1004,6 +1032,7 @@ mod tests {
     fn the_commits_a_session_made_are_listed_and_say_whether_they_are_pushed() {
         let dir = repository();
         let work = dir.path().join("work");
+        let started = session_started();
         let started_on = read(&work, "work", Since::Nothing)
             .expect("the repository reads")
             .head
@@ -1017,7 +1046,8 @@ mod tests {
         std::fs::write(work.join("kept.txt"), "a\n").expect("the file is written");
         run(&work, &["commit", "-am", "fourth"]);
 
-        let read = read(&work, "work", Since::Commit(&started_on)).expect("the repository reads");
+        let read =
+            read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
 
         let subjects: Vec<(&str, Option<bool>)> = read
             .repo
@@ -1049,7 +1079,8 @@ mod tests {
         run(&work, &["add", "a.txt"]);
         run(&work, &["commit", "-m", "only"]);
 
-        let read = read(&work, "work", Since::Everything).expect("the repository reads");
+        let read =
+            read(&work, "work", Since::Everything(UNIX_EPOCH)).expect("the repository reads");
 
         assert_eq!(read.repo.ahead, None);
         assert_eq!(read.repo.commits.len(), 1);
@@ -1062,7 +1093,8 @@ mod tests {
         run(dir.path(), &["init", "--initial-branch=main", "."]);
         std::fs::write(dir.path().join("new.txt"), "a\n").expect("the file is written");
 
-        let read = read(dir.path(), "work", Since::Everything).expect("the repository reads");
+        let read =
+            read(dir.path(), "work", Since::Everything(UNIX_EPOCH)).expect("the repository reads");
 
         assert_eq!(read.head, None);
         assert_eq!(read.repo.branch.as_deref(), Some("main"));
@@ -1158,6 +1190,7 @@ mod tests {
     fn an_upstream_the_repository_cannot_find_leaves_pushed_unknown() {
         let dir = repository();
         let work = dir.path().join("work");
+        let started = session_started();
         let started_on = read(&work, "work", Since::Nothing)
             .expect("the repository reads")
             .head
@@ -1168,7 +1201,7 @@ mod tests {
         // git names it and refuses to say how far apart the two are.
         run(&work, &["update-ref", "-d", "refs/remotes/origin/main"]);
 
-        let read = read(&work, "work", Since::Commit(&started_on))
+        let read = read(&work, "work", Since::Commit(&started_on, started))
             .expect("a missing upstream is not a failed read");
 
         assert_eq!(read.repo.ahead, None);
@@ -1176,6 +1209,78 @@ mod tests {
             read.repo.commits[0].pushed, None,
             "git would not say, so neither does the shell"
         );
+    }
+
+    /// A commit made on another branch before the session started, dated
+    /// then, as a checkout during the session brings it in.
+    fn commit_dated(at: &Path, subject: &str, date: &str) {
+        let output = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_COMMITTER_DATE", date)
+            .args(["commit", "-am", subject, "--date", date])
+            .current_dir(at)
+            .stdin(Stdio::null())
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    #[test]
+    fn commits_a_checkout_brought_in_are_not_the_sessions_own() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        run(&work, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(work.join("kept.txt"), "someone else\n").expect("the file is written");
+        commit_dated(&work, "someone elses work on other", "2020-01-01T00:00:00Z");
+        run(&work, &["checkout", "-q", "main"]);
+        let started = session_started();
+        let started_on = read(&work, "work", Since::Nothing)
+            .expect("the repository reads")
+            .head
+            .expect("the repository has a commit");
+
+        run(&work, &["checkout", "-q", "other"]);
+        let read =
+            read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
+
+        assert!(read.repo.commits.is_empty(), "{:?}", read.repo.commits);
+    }
+
+    /// A commit made while the session runs is its own whatever its author
+    /// date says: `--date` sets that, and the commit date it is listed by is
+    /// when it was made.
+    #[test]
+    fn a_commit_made_during_the_session_is_its_own_whatever_its_author_date() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let started = session_started();
+        let started_on = read(&work, "work", Since::Nothing)
+            .expect("the repository reads")
+            .head
+            .expect("the repository has a commit");
+        std::fs::write(work.join("kept.txt"), "a\n").expect("the file is written");
+        run(
+            &work,
+            &[
+                "commit",
+                "-am",
+                "backdated",
+                "--date",
+                "2020-01-01T00:00:00Z",
+            ],
+        );
+
+        let read =
+            read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
+
+        let subjects: Vec<(&str, Option<bool>)> = read
+            .repo
+            .commits
+            .iter()
+            .map(|c| (c.subject.as_str(), c.pushed))
+            .collect();
+        assert_eq!(subjects, [("backdated", Some(false))]);
     }
 
     /// How many ticks of the event loop are timed against one frame's budget.
