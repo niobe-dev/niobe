@@ -876,6 +876,8 @@ fn a_session_store_linked_out_of_the_repository_stops_the_session_and_writes_not
         ("sessions.db", true),
         (".gitignore", false),
         ("sessions.db-wal", false),
+        ("sessions.db-shm", false),
+        ("sessions.db-journal", false),
     ] {
         let repo = repo();
         let outside = tempfile::tempdir().expect("a temporary directory can be created");

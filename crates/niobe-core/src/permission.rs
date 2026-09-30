@@ -419,6 +419,7 @@ mod tests {
         assert!(!rule.covers("Bash", Some("cargo test > ~/.bashrc")));
         assert!(!rule.covers("Bash", Some("cargo test < /etc/passwd")));
         assert!(!rule.covers("Bash", Some("cargo test\nrm -rf ~")));
+        assert!(!rule.covers("Bash", Some("cargo test\rrm -rf ~")));
         assert!(!rule.covers("Bash", Some("cargo test `rm -rf ~`")));
 
         let rule = Rule::parse("Bash(echo *)").expect("the rule is valid");
@@ -451,6 +452,9 @@ mod tests {
         assert!(!rule.covers("Edit", Some("/repo/src/../../etc/passwd")));
         assert!(!rule.covers("Edit", Some("/repo/src/a/../../../etc/passwd")));
         assert!(!rule.covers("Edit", Some("/repo/src/..")));
+        // `.` is no directory to climb out of: the `..` after it still climbs.
+        assert!(!rule.covers("Edit", Some("/repo/src/./../x")));
+        assert!(!rule.covers("Edit", Some("/repo/src/a/./../../x")));
         assert!(rule.covers("Edit", Some("/repo/src/a/../b.rs")));
         assert!(rule.covers("Edit", Some("/repo/src/./lib.rs")));
         assert!(rule.covers("Edit", Some("/repo/src/a..b/lib.rs")));

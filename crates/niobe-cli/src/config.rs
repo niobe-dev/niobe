@@ -127,6 +127,11 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
     );
+    load_from(user, root)
+}
+
+/// [`load`], with the user's config file handed in rather than found.
+fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
     let repo = repo::config_path(root);
     let searched: Vec<PathBuf> = user.iter().cloned().chain([repo.clone()]).collect();
 
@@ -392,5 +397,23 @@ mod tests {
         );
         assert_eq!(user_path(os(""), None), None);
         assert_eq!(user_path(None, os("not/absolute")), None);
+    }
+
+    /// A repository file that defines nothing but a profile under a name the
+    /// user's config uses would, trusted, replace the user's profile; so it is
+    /// named as untrusted though it sets nothing an untrusted file may not.
+    #[test]
+    fn a_repository_file_that_only_redefines_a_users_profile_is_untrusted() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let user = dir.path().join("user.toml");
+        std::fs::write(&user, "[profiles.max]\nbackend = \"claude\"\n").expect("written");
+        let root = dir.path().join("repo");
+        let config = repo::config_path(&root);
+        std::fs::create_dir_all(config.parent().expect("a directory")).expect("made");
+        std::fs::write(&config, "[profiles.max]\nbackend = \"claude\"\n").expect("written");
+
+        let loaded = load_from(Some(user), &root).expect("both configs load");
+
+        assert_eq!(loaded.untrusted, Some(config));
     }
 }

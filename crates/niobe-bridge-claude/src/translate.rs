@@ -3353,6 +3353,17 @@ mod tests {
             target(r#"{"path":"/repo","command":"cargo test"}"#).as_deref(),
             Some("cargo test")
         );
+        // A search is about where it looks, so "always this target" on a
+        // `Grep` is a rule about its directory, not about what it looked
+        // for; a pattern alone, as a `Glob` may carry, is its target.
+        assert_eq!(
+            target(r#"{"pattern":"TODO","path":"/repo/src"}"#).as_deref(),
+            Some("/repo/src")
+        );
+        assert_eq!(
+            target(r#"{"pattern":"**/*.rs"}"#).as_deref(),
+            Some("**/*.rs")
+        );
         // Nothing here names a thing the call acts on, and inventing one
         // would put a target in front of the operator that they never saw.
         assert_eq!(target(r#"{"todos":[]}"#), None);
