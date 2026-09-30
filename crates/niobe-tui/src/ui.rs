@@ -2058,12 +2058,7 @@ const WINDOW_SHARE: usize = 5;
 /// beside it room in a pane forty columns wide.
 const METER_CELLS: usize = 12;
 
-/// How many rows the plan's windows take: one per window a backend reported,
-/// and one more where the plan has started spending beyond its flat fee.
-///
-/// The pane is sized from this before it is drawn, so it has to agree with
-/// [`window_lines`] exactly; a test holds the two together.
-/// A window's share as its column draws it: a percent, no wider than the
+/// A share of a window as its column draws it: a percent, no wider than the
 /// column holds, and an em dash for a level that is not one — below nothing,
 /// or not a number — rather than a `0%` nobody measured.
 fn window_share(utilization: f64) -> String {
@@ -2073,6 +2068,11 @@ fn window_share(utilization: f64) -> String {
     format!(" {:>3}%", crate::app::percent(utilization).min(999))
 }
 
+/// How many rows the plan's windows take: one per window a backend reported,
+/// and one more where the plan has started spending beyond its flat fee.
+///
+/// The pane is sized from this before it is drawn, so it has to agree with
+/// [`window_lines`] exactly; a test holds the two together.
 fn window_rows(app: &App) -> usize {
     app.session().usage_windows().map_or(0, |windows| {
         usize::from(windows.five_hour.is_some())
@@ -2369,8 +2369,8 @@ fn context_window(app: &App, context: &Context) -> Option<u64> {
 /// calls it made, and nothing reports that until it goes.
 ///
 /// A model whose window nobody knows gets the size alone — no bar, and no
-/// share of a window assumed for it. The share is never clamped: a context
-/// past its window fills the bar, and the figure says by how much.
+/// share of a window assumed for it. A context past its window fills the bar,
+/// and the figure says by how much, up to the most its column holds.
 fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let Some(context) = app.session().context() else {
         return Vec::new();
@@ -2398,7 +2398,7 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         label,
         Span::styled(filled, style),
         Span::styled(track, dim),
-        Span::styled(format!(" {:>3}%", crate::app::percent(share)), style.bold()),
+        Span::styled(window_share(share), style.bold()),
         Span::styled(figures, dim),
     ])]
 }
@@ -4131,12 +4131,28 @@ fn value_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Valued {
 
 /// Token counts, short enough for a column of them: thousands above ten
 /// thousand, millions from the count that would round to a thousand
-/// thousands — `1000k` is a million drawn in the wrong unit.
+/// thousands — `1000k` is a million drawn in the wrong unit — and each larger
+/// unit from the count that would round to a thousand of the one below, so
+/// no count a `u64` holds takes more than six columns.
 pub(crate) fn compact(n: u64) -> String {
+    const LARGE: [(f64, &str); 5] = [
+        (1e6, "M"),
+        (1e9, "G"),
+        (1e12, "T"),
+        (1e15, "P"),
+        (1e18, "E"),
+    ];
     match n {
         0..=9_999 => n.to_string(),
         10_000..=999_499 => format!("{:.0}k", n as f64 / 1_000.0),
-        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+        _ => {
+            let (scaled, unit) = LARGE
+                .iter()
+                .map(|&(size, unit)| (n as f64 / size, unit))
+                .find(|&(scaled, _)| scaled < 999.95)
+                .unwrap_or((n as f64 / 1e18, "E"));
+            format!("{scaled:.1}{unit}")
+        }
     }
 }
 
@@ -4811,6 +4827,19 @@ mod tests {
         assert_eq!(compact(1_000_000), "1.0M");
     }
 
+    /// Past a thousand millions the figure moves up a unit rather than
+    /// growing digits, so any count a backend can report fits the column.
+    #[test]
+    fn a_count_past_any_real_size_still_fits_in_six_columns() {
+        assert_eq!(compact(999_949_999), "999.9M");
+        assert_eq!(compact(999_950_000), "1.0G");
+        assert_eq!(compact(1_500_000_000_000), "1.5T");
+        assert_eq!(compact(u64::MAX), "18.4E");
+        for n in [999_999_999, 999_999_999_999, 999_999_999_999_999, u64::MAX] {
+            assert!(compact(n).len() <= 6, "{n}: {}", compact(n));
+        }
+    }
+
     #[test]
     fn a_share_that_rounds_to_nothing_or_to_everything_says_it_does_not() {
         assert_eq!(share_label(0, true, true), " <1%");
@@ -5383,6 +5412,18 @@ mod tests {
         assert_eq!(
             context_of(&app, 39),
             ["context ▓▓▓▓▓▓▓▓▓▓▓▓ 105%  210k / 200k"]
+        );
+    }
+
+    /// A context no window could hold draws the most the column shows rather
+    /// than twenty digits of percent.
+    #[test]
+    fn a_context_far_past_its_window_draws_at_most_999_percent() {
+        let mut app = bare();
+        sent(&mut app, u64::MAX, "opus-5", Some(1));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context ▓▓▓▓▓▓▓▓▓▓▓▓ 999%  18.4E / 1"]
         );
     }
 

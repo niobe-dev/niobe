@@ -265,10 +265,10 @@ pub struct UsageWindow {
 pub struct UsageWindows {
     /// The rolling five-hour window. `None` where the backend reported none,
     /// never a zero: a zero would claim the window is untouched.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "measured_window")]
     pub five_hour: Option<UsageWindow>,
     /// The rolling seven-day window, read the same way.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "measured_window")]
     pub seven_day: Option<UsageWindow>,
     /// Whether the plan has started spending beyond its flat fee.
     ///
@@ -285,6 +285,27 @@ impl UsageWindows {
     pub fn is_empty(&self) -> bool {
         self.five_hour.is_none() && self.seven_day.is_none()
     }
+}
+
+/// A window as a record holds it, read back as no window where its level is
+/// not a finite number. JSON has no NaN, so a level that was not a number was
+/// written as `null`; refusing it would refuse the whole session it is in.
+fn measured_window<'de, D>(deserializer: D) -> Result<Option<UsageWindow>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Stored {
+        utilization: Option<f64>,
+        resets_at: Option<u64>,
+    }
+    let stored = Option::<Stored>::deserialize(deserializer)?;
+    Ok(stored.and_then(|stored| {
+        Some(UsageWindow {
+            utilization: stored.utilization.filter(|level| level.is_finite())?,
+            resets_at: stored.resets_at,
+        })
+    }))
 }
 
 /// The prompt the main agent's last request sent, and the window it was sent
@@ -845,6 +866,48 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_window_stored_with_a_level_that_was_not_a_number_reads_back_as_none() {
+        let stored = r#"{"five_hour":{"utilization":null,"resets_at":1},"seven_day":{"utilization":0.2,"resets_at":null},"using_overage":false}"#;
+
+        let windows: UsageWindows =
+            serde_json::from_str(stored).expect("a stored record reads back");
+
+        assert_eq!(windows.five_hour, None);
+        assert_eq!(
+            windows.seven_day,
+            Some(UsageWindow {
+                utilization: 0.2,
+                resets_at: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_window_whose_level_is_not_a_number_survives_the_store() {
+        let windows = UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: f64::NAN,
+                resets_at: Some(1),
+            }),
+            seven_day: None,
+            using_overage: true,
+        };
+
+        let stored =
+            serde_json::to_string(&Event::UsageWindows(windows)).expect("an event is written");
+        let read: Event = serde_json::from_str(&stored).expect("and read back");
+
+        assert_eq!(
+            read,
+            Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: true,
+            })
+        );
+    }
     use super::*;
 
     #[test]

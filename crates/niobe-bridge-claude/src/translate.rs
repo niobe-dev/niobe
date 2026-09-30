@@ -2380,11 +2380,12 @@ fn rate_limit(event: wire::RateLimit, out: &mut Vec<Event>) {
     out.push(Event::UsageWindows(windows));
 }
 
-/// One window, kept only where the CLI measured it.
+/// One window, kept only where the CLI measured it: a level that is not a
+/// finite number is not a measurement, and could not be stored as one.
 fn read_window(window: Option<wire::Window>) -> Option<UsageWindow> {
     let window = window?;
     Some(UsageWindow {
-        utilization: window.utilization?,
+        utilization: window.utilization.filter(|level| level.is_finite())?,
         resets_at: window.resets_at,
     })
 }
@@ -3083,6 +3084,17 @@ mod tests {
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":3},"modelUsage":{"opus-5":{"inputTokens":2,"outputTokens":3,"costUSD":0.01},"haiku-4-5":{"inputTokens":9,"costUSD":0.001,"contextWindow":200000}},"total_cost_usd":0.011}"#,
         );
         assert_eq!(contexts(&events), []);
+    }
+
+    #[test]
+    fn a_level_that_is_not_a_number_is_no_window() {
+        for level in [f64::NAN, f64::INFINITY] {
+            let window = wire::Window {
+                utilization: Some(level),
+                resets_at: Some(1_789_779_600),
+            };
+            assert_eq!(read_window(Some(window)), None, "{level}");
+        }
     }
 
     #[test]
