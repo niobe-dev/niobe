@@ -288,15 +288,20 @@ fn an_unreadable_row_names_the_session_and_the_sequence_number() {
         )
         .expect("a row can be appended directly");
 
-    let error = Store::open(&path)
+    let events = Store::open(&path)
         .expect("the store opens")
         .events(session)
-        .expect_err("an unknown event type does not load");
-    assert!(
-        matches!(error, StoreError::Decode { seq: 2, .. }),
-        "{error}"
-    );
-    assert!(error.to_string().contains("event 2"), "{error}");
+        .expect("one row this build cannot read does not keep the session shut");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event, user("fine"));
+    match &events[1].event {
+        Event::Error { message, fatal } => {
+            assert!(!fatal);
+            assert!(message.contains("event 2"), "{message}");
+            assert!(message.contains(&format!("session {session}")), "{message}");
+        }
+        other => panic!("the unreadable row is not a warning: {other:?}"),
+    }
 }
 
 /// A call, a message and a permission prompt written before any of them said

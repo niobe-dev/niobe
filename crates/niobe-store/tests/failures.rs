@@ -281,8 +281,11 @@ fn a_row_that_is_not_json_fails_only_its_own_session() {
     assert_eq!(listed.first_prompt, None);
 
     assert!(matches!(
-        store.events(broken),
-        Err(StoreError::Decode { seq: 1, .. })
+        store.events(broken).expect("the session opens").as_slice(),
+        [niobe_store::StoredEvent {
+            event: niobe_core::event::Event::Error { fatal: false, .. },
+            ..
+        }]
     ));
     assert_eq!(
         store.events(fine).expect("the other session loads").len(),

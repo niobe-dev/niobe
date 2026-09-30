@@ -616,8 +616,14 @@ impl SessionState {
             Event::ToolCallStart {
                 id, name, agent, ..
             } => {
-                bump(&mut self.tools.started);
-                self.in_flight_tools.insert(id.clone(), name.clone());
+                // A start said again for a call already running is one call.
+                if self
+                    .in_flight_tools
+                    .insert(id.clone(), name.clone())
+                    .is_none()
+                {
+                    bump(&mut self.tools.started);
+                }
                 if let Some(agent) = agent {
                     self.agent_calls.insert(id.clone(), agent.clone());
                 }
@@ -745,9 +751,12 @@ impl SessionState {
                 ));
             }
 
+            // A spawn said again for an agent already running is the same
+            // agent, as an exit said twice is one exit.
             Event::AgentSpawn { id, .. } => {
-                bump(&mut self.agents_spawned);
-                self.running_agents.insert(id.clone());
+                if self.running_agents.insert(id.clone()) {
+                    bump(&mut self.agents_spawned);
+                }
                 let running = self.running_agents.len() as u64;
                 self.peak_running_agents = self.peak_running_agents.max(running);
             }
@@ -1710,6 +1719,22 @@ mod tests {
             summary: None,
             agent: agent.map(Into::into),
         }
+    }
+
+    #[test]
+    fn a_spawn_or_a_start_said_twice_is_one_agent_and_one_call() {
+        let mut state = SessionState::new();
+        for _ in 0..2 {
+            state.apply(&Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                label: "test-writer".to_owned(),
+            });
+            state.apply(&start("t1", "Bash", None));
+        }
+
+        assert_eq!(state.agents_spawned(), 1);
+        assert_eq!(state.tools().started, 1);
     }
 
     #[test]

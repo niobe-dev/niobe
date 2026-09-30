@@ -140,9 +140,17 @@ impl Trusted {
     ///
     /// A path with a newline in it cannot be written down, because a line of
     /// the record is one entry; it is refused rather than written as two
-    /// entries that mean nothing.
+    /// entries that mean nothing. Nor can one that is not UTF-8, which would
+    /// read back as a different path.
     pub fn trust(&mut self, file: &Path, text: &str) -> Result<(), ConfigError> {
-        let name = file.to_string_lossy();
+        // Written down as text, a path that is not UTF-8 would read back as
+        // another path, and the file would be untrusted again next session.
+        let Some(name) = file.to_str() else {
+            return Err(ConfigError::Untrustable {
+                path: file.to_path_buf(),
+                message: "its path is not UTF-8, and the record is written as text".to_owned(),
+            });
+        };
         if name.contains('\n') || name.contains('\r') {
             return Err(ConfigError::Untrustable {
                 path: file.to_path_buf(),
@@ -330,6 +338,20 @@ mod tests {
                 .starts_with("# Written by niobe."),
             "a file in a config directory says what it is"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_rather_than_written_as_another() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/re\xffpo/.niobe/config.toml"));
+
+        let said = Trusted::default()
+            .trust(path, "a")
+            .expect_err("it would read back as another path")
+            .to_string();
+
+        assert!(said.contains("not UTF-8"), "{said}");
     }
 
     #[test]

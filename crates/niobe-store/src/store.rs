@@ -207,6 +207,14 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
+/// What stands in a session's events for a row that could not be read.
+fn unreadable(error: &StoreError) -> Event {
+    Event::Error {
+        message: format!("{error}; it is left out of what this session shows"),
+        fatal: false,
+    }
+}
+
 /// An open session store.
 #[derive(Debug)]
 pub struct Store {
@@ -337,7 +345,8 @@ impl Store {
         }
     }
 
-    /// Every event of a session, in the order it was appended.
+    /// Every event of a session, in the order it was appended. A row this
+    /// build cannot read is a non-fatal [`Event::Error`] in its place.
     pub fn events(&self, session: SessionId) -> Result<Vec<StoredEvent>, StoreError> {
         if !self.has_session(session)? {
             return Err(StoreError::NoSuchSession(session));
@@ -357,11 +366,16 @@ impl Store {
         rows.map(|row| {
             let (seq, at, json) = row?;
             let seq = seq.unsigned_abs();
-            let event = serde_json::from_str(&json).map_err(|source| StoreError::Decode {
-                session,
-                seq,
-                source,
-            })?;
+            // One row this build cannot read — written by a newer niobe, or
+            // torn — stands as a warning in its place rather than keeping the
+            // rest of the session from being opened.
+            let event = serde_json::from_str(&json).unwrap_or_else(|source| {
+                unreadable(&StoreError::Decode {
+                    session,
+                    seq,
+                    source,
+                })
+            });
             Ok(StoredEvent {
                 seq,
                 at: from_unix_millis(at),
