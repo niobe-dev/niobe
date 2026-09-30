@@ -784,6 +784,15 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
         // seconds beside an operator who is using the same tree: refreshing
         // the index under them would take the lock their own `git` wants.
         .env("GIT_OPTIONAL_LOCKS", "0")
+        // A tree that did not come from a clone can carry a `.git/config` of
+        // its own choosing, and some of its settings run commands on a read:
+        // a filesystem monitor on every status. None is wanted for a read.
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
         .args(args)
         .current_dir(root)
         // Nothing here may stop for a prompt or a pager: there is no terminal
@@ -1410,6 +1419,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         None
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_runs_no_command_the_repositorys_own_config_names() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = repository();
+        let work = dir.path().join("work");
+        let marker = dir.path().join("ran");
+        let hook = dir.path().join("monitor.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display()))
+            .expect("the hook is written");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("the hook is made executable");
+        run(
+            &work,
+            &["config", "core.fsmonitor", &hook.display().to_string()],
+        );
+
+        read(&work, "work", Since::Nothing).expect("the repository reads");
+
+        assert!(!marker.exists(), "a read ran the repository's monitor");
     }
 
     #[cfg(unix)]
