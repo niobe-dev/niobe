@@ -3091,6 +3091,7 @@ mod tests {
         assert!(!is_window_of("claude-opus-5", "claude-opus-5"));
         assert!(!is_window_of("claude-opus-5-1", "claude-opus-5"));
         assert!(!is_window_of("claude-opus-5[1m]", "claude-opus"));
+        assert!(!is_window_of("claude-opus-5[1m", "claude-opus-5"));
     }
 
     #[test]
@@ -4375,6 +4376,23 @@ mod tests {
                 }
             )),
             "the launch itself is a call that ran: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_background_sub_agent_whose_call_failed_ended_with_it() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+        let failed = launched("toolu_a").replace(
+            r#""tool_use_id":"toolu_a","#,
+            r#""tool_use_id":"toolu_a","is_error":true,"#,
+        );
+
+        let events = translator.line(&failed);
+
+        assert_eq!(
+            exits(&events),
+            [("toolu_a".to_owned(), AgentOutcome::Failed)]
         );
     }
 

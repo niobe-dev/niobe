@@ -875,6 +875,15 @@ impl Summary {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_measured_benchmark_is_one_of_the_tests_a_binary_ran() {
+        let summary = Summary::of(
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 1 measured; 0 filtered out; finished in 0.10s",
+        )
+        .expect("a libtest summary line");
+        assert_eq!(summary.total(), Some(2));
+    }
+
     // Recorded from `cargo test` 1.91 on a crate with five unit tests (one
     // ignored), one integration test and one doc-test, with its standard
     // error in the output as a shell tool captures it.
@@ -1166,6 +1175,8 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "sudo -u ci cargo test",
             "nice -n 10 cargo test",
             "time -p cargo test",
+            "time -o times.txt cargo test",
+            "time --output times.txt cargo test",
             "RUSTFLAGS=\"-D warnings\" cargo test",
             "RUSTFLAGS='-D warnings' cargo test",
             "A=`b c` cargo test",

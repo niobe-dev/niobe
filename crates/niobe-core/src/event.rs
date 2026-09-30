@@ -1137,7 +1137,13 @@ mod tests {
             settles_model: false,
             fast: false,
         };
-        assert!(usage.cost_usd.is_none());
+        // Written and read back, as the store does: an unreported cost must
+        // not come back as a zero, which would read as measured.
+        let line = serde_json::to_string(&Event::Usage(usage)).expect("it serializes");
+        let Event::Usage(read) = serde_json::from_str(&line).expect("it reads back") else {
+            panic!("a usage record read back as something else: {line}");
+        };
+        assert_eq!(read.cost_usd, None, "{line}");
     }
 
     #[test]

@@ -262,6 +262,11 @@ fn line(text: &str, at: usize) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_control_character_in_a_rule_is_written_escaped_delete_included() {
+        assert_eq!(quoted("a\u{7f}b\u{1}c"), "\"a\\u007Fb\\u0001c\"");
+    }
+
     use std::path::PathBuf;
 
     fn path() -> PathBuf {

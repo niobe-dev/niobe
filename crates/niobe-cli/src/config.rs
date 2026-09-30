@@ -323,6 +323,19 @@ mod tests {
         );
     }
 
+    /// `~other` is another account's home in a shell, not this one's, so it
+    /// is left as written rather than expanded against this home.
+    #[test]
+    fn a_tilde_naming_another_user_is_left_as_written() {
+        let config = with_settings("~other/settings.json");
+
+        let said = settings_path(&max(&config), os("/home/me"))
+            .expect_err("no such file is there as written");
+
+        assert!(said.contains("~other/settings.json"), "{said}");
+        assert!(!said.contains("/home/me"), "{said}");
+    }
+
     #[test]
     fn a_profile_that_names_no_settings_file_runs_its_backend_under_none() {
         let config = niobe_config::Config::parse(

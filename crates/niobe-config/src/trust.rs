@@ -363,6 +363,12 @@ mod tests {
 
         assert!(said.starts_with("cannot record trust for "), "{said}");
         assert!(said.contains("line break"), "{said}");
+
+        let said = Trusted::default()
+            .trust(Path::new("/re\rpo/.niobe/config.toml"), "a")
+            .expect_err("a carriage return ends a line too")
+            .to_string();
+        assert!(said.contains("line break"), "{said}");
     }
 
     #[test]

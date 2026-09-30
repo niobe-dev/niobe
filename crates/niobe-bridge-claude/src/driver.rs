@@ -1646,6 +1646,49 @@ mod tests {
         );
     }
 
+    /// What reaches the CLI's output after its end was reported was written
+    /// by something that left its group, and is not the CLI's to say.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_written_after_the_end_was_reported_is_not_passed_on() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let at = |name: &str| dir.path().join(name).display().to_string();
+        let late = r#"{"type":"assistant","message":{"model":"claude-opus-5","id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"said late"}]}}"#;
+        let script = at("late.pl");
+        std::fs::write(
+            &script,
+            format!(
+                "setpgrp(0, 0);\n$| = 1;\nopen(my $f, '>', '{pid}'); print $f $$; close($f);\nselect(undef, undef, undef, 0.01) until -e '{go}';\nprint '{late}' . \"\\n\";\nopen(my $g, '>', '{done}'); close($g);\n",
+                pid = at("detached.pid"),
+                go = at("go"),
+                done = at("done"),
+            ),
+        )
+        .expect("the detached writer is written");
+        let (mut session, _) = stand_in(&format!(
+            "perl '{script}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nexit 1\n",
+            pid = at("detached.pid"),
+        ));
+
+        std::fs::write(at("go"), "").expect("the writer is told to write");
+        let started = Instant::now();
+        while !dir.path().join("done").exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the detached writer never wrote"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut after = Vec::new();
+        for _ in 0..40 {
+            after.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(session);
+
+        assert!(after.is_empty(), "{after:#?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_cli_that_dies_with_a_prompt_open_leaves_nothing_waiting_on_an_answer() {

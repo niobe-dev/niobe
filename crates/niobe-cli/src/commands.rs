@@ -477,6 +477,16 @@ mod tests {
         assert_eq!(ran.error, None, "an exit of its own needs no reason");
     }
 
+    /// A pager would wait for a key there is no terminal to give it.
+    #[test]
+    fn a_command_is_told_to_page_through_cat() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+
+        let ran = ran(dir.path(), "echo \"$PAGER $GIT_PAGER\"");
+
+        assert_eq!(ran.output, "cat cat\n");
+    }
+
     #[test]
     fn a_command_runs_in_the_sessions_directory_with_nothing_to_read() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
@@ -499,7 +509,7 @@ mod tests {
 
         assert!(!ran.whole);
         assert_eq!(ran.bytes, 3_000_000 + 1 + 8);
-        assert_eq!(ran.output.len(), KEPT);
+        assert_eq!(ran.output.len(), 1024 * 1024, "a mebibyte is kept");
         assert!(
             ran.output.ends_with("x\nthe end\n"),
             "the end is what is kept"

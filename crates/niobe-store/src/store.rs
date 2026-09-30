@@ -519,6 +519,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_database_itself_refuses_an_event_for_a_session_it_does_not_hold() {
+        let store = Store::open_in_memory().expect("an in-memory store opens");
+
+        let refused = store.conn.execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (999, 0, 0, '{}')",
+            [],
+        );
+
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("FOREIGN KEY")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
     fn a_session_id_is_the_number_the_list_prints() {
         let id: SessionId = " 12 ".parse().expect("a number parses");
         assert_eq!(id.to_string(), "12");

@@ -31,13 +31,3 @@ pub const APP_NAME: &str = "niobe";
 
 /// Version of the workspace, as compiled.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn app_name_is_the_binary_name() {
-        assert_eq!(APP_NAME, "niobe");
-    }
-}
