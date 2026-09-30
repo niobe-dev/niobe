@@ -644,6 +644,7 @@ impl Printed {
 
     /// The end of `output`.
     fn of(output: &str) -> Self {
+        let output = without_sequences(output);
         let lines: Vec<&str> = output.lines().collect();
         let above = lines.len().saturating_sub(Self::LINES);
         let tail = lines
@@ -653,6 +654,45 @@ impl Printed {
             .collect();
         Self { above, tail }
     }
+}
+
+/// `output` with its terminal sequences taken out whole: colours and cursor
+/// moves (`ESC [ … <final>`) and titles and links (`ESC ] … BEL` or `ESC ]
+/// … ESC \\`). Dropping only the escape byte, as a filter of control
+/// characters does, would leave the rest of each sequence drawn as text.
+fn without_sequences(output: &str) -> std::borrow::Cow<'_, str> {
+    if !output.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(output);
+    }
+    let mut plain = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            plain.push(c);
+            continue;
+        }
+        match chars.next() {
+            // Parameters and intermediates run up to the final byte.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // A string, ended by BEL or by ESC and a backslash.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            // Any other escape is two characters long.
+            Some(_) | None => {}
+        }
+    }
+    std::borrow::Cow::Owned(plain)
 }
 
 /// A line of output as a terminal would have left it: each carriage return
@@ -6366,6 +6406,15 @@ mod tests {
         assert_eq!(terminal_line("[#####     ] 50%\r"), "[#####     ] 50%");
         assert_eq!(terminal_line("10%\r20%\r100%"), "100%");
         assert_eq!(terminal_line("plain"), "plain");
+    }
+
+    #[test]
+    fn a_commands_colours_and_title_are_taken_out_whole_and_not_drawn_as_text() {
+        let printed = Printed::of("\x1b[31mred\x1b[0m \x1b]0;TITLE\x07 x\ty\n");
+        assert_eq!(printed.tail, ["red  x  y"]);
+
+        let linked = Printed::of("\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\ done\n");
+        assert_eq!(linked.tail, ["link done"]);
     }
 
     #[test]
