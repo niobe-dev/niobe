@@ -246,8 +246,11 @@ fn still_running(groups: &Mutex<Vec<Group>>, id: &ToolCallId) -> Option<u32> {
 ///
 /// Standard error is sent where standard output goes by the shell itself, so
 /// the two arrive in one stream in the order they were written. There is no
-/// terminal to give it — the shell has it — so standard input is closed and
-/// a pager is told to print straight through rather than wait for a key.
+/// terminal to give it — the shell has it — so standard input is closed, a
+/// pager is told to print straight through rather than wait for a key, and
+/// the command runs in a session of its own ([`detached`]), where `/dev/tty`
+/// names no terminal: a program that opens it, as `sudo` or `ssh` asks for a
+/// password, would otherwise write over the frame the shell is drawing.
 fn spawn(cwd: &Path, command: &str) -> Result<Child, ShellError> {
     let mut sh = Command::new("sh");
     sh.arg("-c")
@@ -259,9 +262,30 @@ fn spawn(cwd: &Path, command: &str) -> Result<Child, ShellError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut sh, 0);
+    detached(&mut sh);
     sh.spawn()
         .map_err(|error| format!("cannot start sh: {error}").into())
+}
+
+/// Starts `sh` in a session of its own, which takes it away from the
+/// terminal the shell draws on and makes it the leader of a process group of
+/// its own, numbered as its pid: the group every stop and the reaper end.
+///
+/// `unsafe` is denied workspace-wide and allowed here: `setsid` has to be
+/// called in the child between fork and exec, `pre_exec` is the only hook
+/// there, and the safe `CommandExt::setsid` is not stable yet.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn detached(sh: &mut Command) {
+    // SAFETY: between fork and exec the child may make only async-signal-safe
+    // calls. `setsid` is a single system call that allocates nothing and takes
+    // no lock, and the closure touches nothing of the parent's.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(sh, || {
+            rustix::process::setsid()?;
+            Ok(())
+        });
+    }
 }
 
 /// Reads what the command prints while it runs, and ends once `sh` has:

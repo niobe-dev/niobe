@@ -65,8 +65,9 @@ unicode-segmentation = "1.13"
 signal-hook = "0.4"
 
 # Safe wrappers for the POSIX calls the workspace needs — `unsafe` is denied,
-# so the raw ones are not an option. The event loop waits with `poll(2)`, and
-# the CLI's tests drive the binary through a pty.
+# so the raw ones are not an option. The event loop waits with `poll(2)`, the
+# CLI's tests drive the binary through a pty, and a `!` command is given a
+# session of its own with `setsid` (the one call made from `pre_exec`).
 rustix = "1.1"
 
 # The wall clock the shell shows, and the local offset it needs to be a wall

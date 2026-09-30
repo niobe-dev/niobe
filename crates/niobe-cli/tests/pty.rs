@@ -477,6 +477,31 @@ fn shell_on(slave: &File, cwd: &Path) -> Reaped {
     )
 }
 
+/// Opens the shell on `slave` as its controlling terminal, the way a login
+/// gives an operator's shell one: in a session of its own, where `/dev/tty`
+/// names `slave`. [`shell_on`] leaves the shell whatever controlling terminal
+/// the test runner has, which under CI is none.
+///
+/// `unsafe` is allowed here for the reason the binary's own `!` commands
+/// allow it: `pre_exec` is the only hook between fork and exec,
+/// and nothing safe gives a child a session and a terminal.
+#[allow(unsafe_code)]
+fn shell_owning(slave: &File, cwd: &Path) -> Reaped {
+    let mut command = shell_command(slave, cwd);
+    // SAFETY: between fork and exec the child may make only async-signal-safe
+    // calls. `setsid` and the `TIOCSCTTY` ioctl are single system calls that
+    // allocate nothing and take no lock, and fd 0 is `slave` by then: the
+    // standard streams are set before the closure runs.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+            rustix::process::setsid()?;
+            rustix::process::ioctl_tiocsctty(rustix::stdio::stdin())?;
+            Ok(())
+        });
+    }
+    Reaped(command.spawn().expect("the niobe binary runs"))
+}
+
 /// A child process that is killed and reaped when it is dropped, whatever
 /// state it is in.
 ///
@@ -1544,6 +1569,32 @@ fn a_command_typed_after_a_bang_runs_here_and_is_kept_as_a_call() {
         ended,
         Some(("! shell".to_owned(), "printed-42\n".to_owned(), Some(0))),
         "{events:?}"
+    );
+}
+
+/// A command typed after `!` has no terminal of its own to write on: the
+/// shell is drawing on the one the session holds, and whatever a program
+/// wrote there by opening `/dev/tty` would stay drawn over the frame.
+#[test]
+fn a_bang_command_cannot_write_on_the_terminal_the_shell_draws_on() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_owning(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(b"printf 'GARBAGE-ON-%s' TTY > /dev/tty; echo after-$((6*7))\r");
+    terminal.shows("after-42");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "the shell ended with {status}");
+    assert!(
+        !drawn.contains("GARBAGE-ON-TTY"),
+        "a command wrote on the shell's terminal"
     );
 }
 

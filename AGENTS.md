@@ -148,7 +148,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the shell under the selected profile, with the session store as its journal and the
   repository's config as the place a standing answer is kept, and where `niobe trust` records
   that a repository's config may start a backend with what it names. `commands.rs` runs the
-  operator's `!` commands, off the draw path, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `backend.rs` is the only module
+  operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
   `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission
@@ -235,7 +235,12 @@ These hold for every change. Breaking one is a bug even when the feature ships g
 - **Matching**: exhaustive `match` on domain enums (`Event`, `ToolOutcome`, `Backend`, …). Never
   `_` for a domain enum: a new variant must fail to compile everywhere it needs handling.
   A wildcard is acceptable only on foreign enums the code deliberately ignores most of.
-- **No `unsafe`.** `unsafe_code` is denied workspace-wide.
+- **No `unsafe`.** `unsafe_code` is denied workspace-wide. The exception is a call that must run
+  in a child between fork and exec, where `CommandExt::pre_exec` is the only hook and nothing safe
+  does it: `setsid` for a `!` command (`niobe-cli/src/commands.rs`), and `setsid` plus
+  `TIOCSCTTY` for the pty test that gives the binary a controlling terminal. Each is one
+  `#[allow(unsafe_code)]` function with a `SAFETY:` comment saying why the closure is
+  async-signal-safe; add no other.
 - **No stray output.** `println!`/`eprintln!` are linted; only `niobe-cli` and `xtask` write to
   the terminal directly. No `dbg!`, no `todo!` in committed code.
 - **Arithmetic on counters** saturates (`saturating_add`); a token total must never wrap.
