@@ -1049,6 +1049,15 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
         frame.contains("applied from the next turn"),
         "the list did not say when a choice takes effect:\n{frame}"
     );
+    // Its keys whole, though the box is sized for the model names.
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(
+            frame.contains("Esc keep") && frame.contains("this one"),
+            "{frame}"
+        );
+        assert_snapshot(&format!("model-list-{width}x{height}"), &frame);
+    }
 }
 
 #[test]

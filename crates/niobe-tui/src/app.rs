@@ -581,7 +581,7 @@ pub struct Call {
 
 impl Call {
     /// A call that has just started, at `at`.
-    fn started(what: String, at: Option<Stamp>) -> Self {
+    pub(crate) fn started(what: String, at: Option<Stamp>) -> Self {
         Self {
             what,
             outcome: None,
@@ -4036,6 +4036,13 @@ impl App {
         // name, and whose first answer, are not on screen.
         if !self.question_top_drawn {
             self.hint = Some(TOP_OFF_SCREEN_HINT.to_owned());
+            return;
+        }
+        // The answer field takes words, and words may arrive together —
+        // pasted, expanded, dictated. Only what would send the answer is
+        // held to the guard against keys that were not meant for it.
+        if self.ask_focus == AskFocus::Writing && key.code != KeyCode::Enter {
+            self.on_writing_key(key.code);
             return;
         }
         if self.too_soon_to_answer() {
@@ -7885,6 +7892,25 @@ mod tests {
             .collect();
         let alone = keys.len() == 1;
         app.on_keys_read(&keys, Arrival { at, alone });
+    }
+
+    /// The answer field is for words, so words that arrive in one read — a
+    /// text expander, dictation — go into it; an Enter among them still does
+    /// not send.
+    #[test]
+    fn keys_read_together_go_into_the_answer_being_written() {
+        let mut app = asked(Some("ls"));
+        let at = Instant::now();
+        read(&mut app, b"\t", at + ASK_QUIET * 2);
+        assert_eq!(app.ask_focus(), AskFocus::Writing);
+
+        read(&mut app, b"use rg instead\r", at + ASK_QUIET * 4);
+
+        assert_eq!(app.ask_draft(), "use rg instead");
+        assert!(
+            app.asking().is_some(),
+            "an Enter in a burst sent the answer"
+        );
     }
 
     /// What typing `text` a key at a time leaves in the composer.

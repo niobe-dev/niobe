@@ -194,6 +194,9 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// The keys the model list answers to, under the models.
+const PICK_KEYS: &str = "↑↓ choose · Enter switch · Esc keep this one";
+
 /// The model list: what the profile offers, which one the session is on, and
 /// the three keys that work.
 ///
@@ -228,9 +231,12 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
         });
     }
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("↑↓ choose · Enter switch · Esc keep this one")
-            .style(Style::new().fg(theme.dialog_fg)),
+    // Wrapped to the box, which is sized for the model names: cut at its edge
+    // the last key would read as a different one.
+    lines.extend(
+        text::wrap(PICK_KEYS, text_width)
+            .into_iter()
+            .map(|line| Line::from(line).style(Style::new().fg(theme.dialog_fg))),
     );
 
     let inner = dialog(
@@ -2279,6 +2285,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let totals = app.session().totals();
     let session_tokens = totals.tokens().max(1);
     let percents = usage::shares(&spent.iter().map(|(_, tokens)| *tokens).collect::<Vec<_>>());
+    let models = spent.iter().filter(|(_, tokens)| *tokens > 0).count();
     let mut lines: Vec<Line<'static>> = spent
         .iter()
         .zip(labels)
@@ -2286,7 +2293,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         .map(|(((model, tokens), label), percent)| {
             row(
                 &label,
-                format!("{percent:>3}%"),
+                share_label(percent, *tokens > 0, *tokens > 0 && models > 1),
                 *tokens as f64 / session_tokens as f64,
                 compact(*tokens),
                 costed.then(|| model_cost(totals, model, app.prices())),
@@ -2302,7 +2309,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     lines.push(row(
         CACHE_LABEL,
         match hit {
-            Some(hit) => format!("{:>3}%", crate::app::percent(hit)),
+            Some(hit) => share_label(crate::app::percent(hit), hit > 0.0, hit < 1.0),
             None => format!("{:>4}", "—"),
         },
         hit.unwrap_or(0.0),
@@ -2314,6 +2321,18 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         Style::new().fg(theme.add),
     ));
     lines
+}
+
+/// A share as its column draws it, four cells wide. One that rounds to
+/// nothing but is not nothing reads `<1%`, and one that rounds to the whole
+/// but is not all of it reads `>99%`: a `0%` beside tokens, or a `100%`
+/// beside a second model, says something that is not so.
+fn share_label(percent: u64, some: bool, not_all: bool) -> String {
+    match percent {
+        0 if some => " <1%".to_owned(),
+        100.. if not_all => ">99%".to_owned(),
+        _ => format!("{percent:>3}%"),
+    }
 }
 
 /// The widest label the context row carries, `context`, and a column of gap.
@@ -4790,6 +4809,15 @@ mod tests {
         assert_eq!(compact(999_500), "1.0M");
         assert_eq!(compact(999_999), "1.0M");
         assert_eq!(compact(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn a_share_that_rounds_to_nothing_or_to_everything_says_it_does_not() {
+        assert_eq!(share_label(0, true, true), " <1%");
+        assert_eq!(share_label(100, true, true), ">99%");
+        assert_eq!(share_label(100, true, false), "100%");
+        assert_eq!(share_label(0, false, false), "  0%");
+        assert_eq!(share_label(42, true, true), " 42%");
     }
 
     #[test]

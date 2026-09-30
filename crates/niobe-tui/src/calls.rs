@@ -252,11 +252,18 @@ fn printed_lines(
             dim.italic(),
         )));
     }
-    lines.extend(printed.tail.iter().map(|line| {
-        Line::from(Span::styled(
-            text::truncate(line, room),
-            Style::new().fg(theme.fg),
-        ))
+    // Wrapped rather than cut at the edge: what a command printed is read
+    // here and nowhere else in the shell, and a path cut at the pane's edge
+    // has nothing that opens it.
+    lines.extend(printed.tail.iter().flat_map(|line| {
+        let mut parts = text::wrap(line, room.max(1));
+        if parts.is_empty() {
+            // A blank line is a line of what was printed too.
+            parts.push(String::new());
+        }
+        parts
+            .into_iter()
+            .map(|part| Line::from(Span::styled(part, Style::new().fg(theme.fg))))
     }));
     if lines.is_empty() && !call.running() {
         lines.push(Line::from(Span::styled("printed nothing", dim.italic())));
@@ -1097,5 +1104,41 @@ mod tests {
             .find(|span| span.content.starts_with("tests::wrong"))
             .expect("the name is a span of its own");
         assert_eq!(name.style.fg, Some(theme.del));
+    }
+
+    #[test]
+    fn a_line_a_command_printed_wider_than_the_pane_is_drawn_whole() {
+        let long = format!("/private/tmp/{}/deep", "segment".repeat(12));
+        let mut call = Call::started("pwd".to_owned(), None);
+        call.outcome = Some(ToolOutcome::Ok);
+        call.printed = Some(crate::app::Printed {
+            above: 0,
+            tail: vec![long.clone(), String::new(), "after".to_owned()],
+        });
+
+        let drawn: Vec<String> = printed_lines(
+            &call,
+            call.printed.as_ref().expect("set"),
+            30,
+            &Theme::default(),
+        )
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+
+        assert_eq!(drawn.concat().replace("after", ""), long, "{drawn:?}");
+        assert!(
+            drawn.iter().all(|line| text::width(line) <= 30),
+            "{drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(String::is_empty),
+            "the blank line was lost"
+        );
     }
 }
