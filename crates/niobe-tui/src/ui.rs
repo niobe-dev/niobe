@@ -40,11 +40,10 @@ use crate::app::{
 };
 use crate::calls::Detail;
 use crate::clock::{self, Stamp};
-use crate::fx;
 use crate::meter::meter;
 use crate::prices::Prices;
 use crate::text;
-use crate::theme::{Motion, Theme};
+use crate::theme::Theme;
 use crate::tree;
 use crate::usage;
 
@@ -296,18 +295,29 @@ fn dialog(
 }
 
 /// Darkens the two columns right of `area` and the row under it, offset by
-/// one, the way a dialog in Turbo Vision stands off the screen. What is under
-/// the shadow keeps its characters, so the transcript still reads through it.
+/// one, the way a dialog in Turbo Vision stands off the screen, within
+/// `bounds`. What is under the shadow keeps its characters, so the transcript
+/// still reads through it; a blank cell is shaded, because in a theme whose
+/// panes are already black a shadow drawn in colour alone is not there.
 fn cast_shadow(frame: &mut Frame, area: Rect, bounds: Rect, theme: &Theme) {
     let style = Style::new().bg(theme.shadow).fg(theme.dim);
-    let right = Rect::new(area.right(), area.y + 1, 2, area.height);
-    let below = Rect::new(area.x + 2, area.bottom(), area.width, 1);
+    let right = Rect::new(area.right(), area.y.saturating_add(1), 2, area.height);
+    let below = Rect::new(area.x.saturating_add(2), area.bottom(), area.width, 1);
+    let buffer = frame.buffer_mut();
     for strip in [right, below] {
-        frame
-            .buffer_mut()
-            .set_style(strip.intersection(bounds), style);
+        for at in strip.intersection(bounds).positions() {
+            if let Some(cell) = buffer.cell_mut(at) {
+                if cell.symbol() == " " {
+                    cell.set_char(SHADE);
+                }
+                cell.set_style(style);
+            }
+        }
     }
 }
+
+/// What a blank cell under a shadow is drawn as.
+const SHADE: char = '░';
 
 /// What the shell says when it has fewer than eighty by twenty-four to draw in.
 ///
@@ -529,8 +539,8 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         .spacing(DESKTOP_MARGIN)
         .areas(area);
 
-    // And a column of desktop at each edge of the screen, so the motion
-    // behind the panes shows in three places rather than one seam. Both come
+    // And a column of desktop at each edge of the screen, so the panes stand
+    // off the screen's edges as they stand off each other. Both come
     // out of the session pane: its prose rewraps a column narrower, where the
     // right stack's rows are as wide as their figures need and a column less
     // would cost the context meter a cell. Narrow, the columns are worth more
@@ -555,44 +565,6 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_usage(frame, usage, app, theme);
     draw_changes(frame, changes, app, theme);
     draw_activity(frame, activity, app, theme);
-    draw_desktop(frame, area, &[left, usage, changes, activity], app, theme);
-}
-
-/// The desktop the panes leave uncovered in `body`, animated while a turn is
-/// running.
-///
-/// The motion is a picture of the whole screen and the panes are opaque, so
-/// it is worked out only for the cells no pane owns: a pane's cell is never
-/// written here, whatever the motion is. It is the one part of the screen
-/// that says the session is alive without the operator reading anything, and
-/// it is drawn from the same clock as the spinner under the transcript, so
-/// the two cannot disagree about whether a turn is going. A theme that does
-/// not animate, effects turned off, and a session with no turn running leave
-/// the desktop empty and work nothing out.
-fn draw_desktop(frame: &mut Frame, body: Rect, panes: &[Rect], app: &App, theme: &Theme) {
-    if !app.effects() || theme.motion == Motion::Still {
-        return;
-    }
-    let Some(activity) = app.activity() else {
-        return;
-    };
-    let screen = frame.area();
-    let field = fx::Field::new(
-        theme,
-        screen.width,
-        screen.height,
-        fx::frame_at(theme.motion, activity.elapsed),
-    );
-    let buffer = frame.buffer_mut();
-    for at in body.positions() {
-        if panes.iter().any(|pane| pane.contains(at)) {
-            continue;
-        }
-        let glyph = field.at(at.x.saturating_sub(screen.x), at.y.saturating_sub(screen.y));
-        if let (Some(glyph), Some(cell)) = (glyph, buffer.cell_mut(at)) {
-            cell.set_char(glyph.symbol).set_fg(glyph.colour);
-        }
-    }
 }
 
 /// Rows of content a pane keeps before it will spare a blank row under its
@@ -1240,6 +1212,8 @@ fn draw_transcript(
         .asking()
         .map(|ask| question_lines(app, ask, (width, height), theme))
         .unwrap_or_default();
+    let framed = question.framed;
+    let question = question.lines;
 
     if app.entries().is_empty() && question.is_empty() {
         let lines = empty_transcript(app.is_attached(), theme);
@@ -1278,11 +1252,39 @@ fn draw_transcript(
         Paragraph::new(visible).style(Style::new().bg(theme.pane_bg)),
         area,
     );
+    if let Some(framed) = framed {
+        shadow_question(frame, area, framed, (above, start), theme);
+    }
     draw_scrollbar(frame, area, border, (start, total, height), theme);
     if !app.follows_tail() {
         let at = draw_jump(frame, area, app.asking().is_some(), theme);
         app.drew_jump(at);
     }
+}
+
+/// The question's shadow, on the transcript `area` its frame of `columns` by
+/// `rows` is drawn in: the question starts after the transcript's first
+/// `above` lines, and the view after its first `start`.
+fn shadow_question(
+    frame: &mut Frame,
+    area: Rect,
+    (columns, rows): (u16, usize),
+    (above, start): (usize, usize),
+    theme: &Theme,
+) {
+    let clamp = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    let (top, rows) = match above.checked_sub(start) {
+        Some(offset) => (area.y.saturating_add(clamp(offset)), rows),
+        // Scrolled into the question, its top is above the pane. The shadow
+        // starts a row under the frame's top, so the frame is taken to start
+        // on the row above the pane, with the rows scrolled past taken off.
+        None => (
+            area.y.saturating_sub(1),
+            (rows + 1).saturating_sub(start - above),
+        ),
+    };
+    let x = area.x.saturating_add(clamp(GUTTER));
+    cast_shadow(frame, Rect::new(x, top, columns, clamp(rows)), area, theme);
 }
 
 /// The way back down to the newest line, as a button at the bottom right of
@@ -1604,7 +1606,7 @@ fn question_lines(
     ask: &Ask,
     (width, height): (usize, usize),
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> Question {
     let outer = width.saturating_sub(GUTTER).min(ASK_COLUMNS);
     let inner = outer.saturating_sub(ASK_INSET);
     let border = Style::new().fg(theme.hot);
@@ -1636,10 +1638,21 @@ fn question_lines(
         Span::raw(indent),
         Span::styled(format!("└{}┘", "─".repeat(outer.saturating_sub(2))), border),
     ]));
+    let framed = Some((u16::try_from(outer).unwrap_or(u16::MAX), lines.len()));
+    // The row under the frame is where its shadow falls.
     if fits {
         lines.push(Line::from(""));
     }
-    lines
+    Question { lines, framed }
+}
+
+/// A permission prompt drawn as the transcript's last lines.
+#[derive(Default)]
+struct Question {
+    lines: Vec<Line<'static>>,
+    /// The frame's width and its rows from the top border to the bottom one,
+    /// which is what casts the shadow; `None` when nothing is asked.
+    framed: Option<(u16, usize)>,
 }
 
 /// What is inside a question's frame, in the parts a question too tall for

@@ -921,8 +921,6 @@ pub struct App {
     theme: Theme,
     /// How many colours the terminal draws, which every theme is drawn at.
     depth: Depth,
-    /// Whether the desktop moves while a turn is running.
-    effects: bool,
     session: SessionState,
     entries: Vec<Entry>,
     /// Where each running call is drawn: its entry, and its place among the
@@ -1221,7 +1219,6 @@ impl App {
             profile: None,
             theme,
             depth: Depth::default(),
-            effects: true,
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
@@ -2572,17 +2569,6 @@ impl App {
         self
     }
 
-    /// The same shell with the desktop's motion on or off.
-    ///
-    /// Off, the desktop is left empty while a turn runs and no frame of the
-    /// motion is worked out at all; the spinner under the transcript still
-    /// says the turn is going.
-    #[must_use]
-    pub fn with_effects(mut self, on: bool) -> Self {
-        self.effects = on;
-        self
-    }
-
     /// Moves to the next theme, which is what `F9` does.
     fn cycle_theme(&mut self) {
         self.set_theme(self.theme.next());
@@ -2940,11 +2926,6 @@ impl App {
     /// The palette the shell draws in.
     pub fn theme(&self) -> &Theme {
         &self.theme
-    }
-
-    /// Whether the desktop moves while a turn is running.
-    pub fn effects(&self) -> bool {
-        self.effects
     }
 
     /// The fold every pane reads its numbers from.

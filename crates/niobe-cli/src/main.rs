@@ -205,8 +205,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
-                .with_theme(chosen_theme(asked, &loaded)?)
-                .with_effects(loaded.config.effects()),
+                .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
     );
@@ -312,8 +311,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
-                .with_theme(chosen_theme(asked, &loaded)?)
-                .with_effects(loaded.config.effects()),
+                .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
     );
@@ -444,8 +442,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_depth(asked.depth)
-                .with_theme(theme)
-                .with_effects(loaded.config.effects()),
+                .with_theme(theme),
         ),
         &loaded,
     );
@@ -1123,11 +1120,6 @@ THEME:
     own 24-bit colours where COLORTERM is truecolor or 24bit, and in the
     sixteen everywhere else, so a session stays legible over SSH and in
     screen. NO_COLOR set to anything draws every theme in the sixteen.
-
-    While a turn runs, the desktop behind the panes moves: rain in neo,
-    drifting words in cyber, a radar in modern; classic stays still. You see
-    it between the panes and at the screen's edges. effects = false at the top
-    of a config keeps it still in every theme.
 
 BUDGET:
     --budget <amount> caps what a session may spend, in dollars, and niobe says

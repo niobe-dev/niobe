@@ -31,7 +31,6 @@
 
 use ratatui::style::Color;
 use ratatui::widgets::BorderType;
-use std::time::Duration;
 
 /// How many colours the terminal can draw, which decides whether a designed
 /// theme is drawn in its own 24-bit values or in its sixteen-colour table.
@@ -77,41 +76,6 @@ impl Depth {
                 Depth::TrueColour
             }
             _ => Depth::Sixteen,
-        }
-    }
-}
-
-/// What the desktop does behind the panes while a turn is running.
-///
-/// The motion is a picture of the whole screen behind the panes, which are
-/// opaque: what the operator sees of it is the desktop they leave uncovered. It is there to answer "is it still going?" from
-/// across the room without the operator having to read anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Motion {
-    /// Nothing moves. A DOS screen did not animate, and the spinner under the
-    /// transcript already says the session is at work.
-    Still,
-    /// Glyphs fall down every column in a trail, brightest at the head.
-    Rain,
-    /// Words drift up and down the columns while a rule sweeps down the
-    /// screen through them.
-    Drift,
-    /// A radar turns in the corner while a scanline travels down the screen.
-    Sweep,
-}
-
-impl Motion {
-    /// How long one frame of this motion lasts.
-    ///
-    /// Each motion has its own pace: rain that falls at the speed words drift
-    /// reads as sluggish, and words that drift at the speed rain falls cannot
-    /// be read at all.
-    pub const fn frame(self) -> Duration {
-        match self {
-            Motion::Still => Duration::from_millis(100),
-            Motion::Rain => Duration::from_millis(90),
-            Motion::Drift => Duration::from_millis(120),
-            Motion::Sweep => Duration::from_millis(110),
         }
     }
 }
@@ -201,15 +165,6 @@ pub struct Theme {
     pub cursor_fg: Color,
     /// What a dialog casts on what is under it.
     pub shadow: Color,
-
-    /// The four tones the desktop's motion is drawn in, brightest first:
-    /// the head of the rain and the three greens that fade behind it; the
-    /// sweeping rule, the words in two colours and the wake the rule leaves;
-    /// the radar's centre, its rays, its ring and the scanline. A theme whose
-    /// motion is [`Motion::Still`] never draws in them.
-    pub fx: [Color; 4],
-    /// What the desktop does behind the panes while a turn is running.
-    pub motion: Motion,
 }
 
 /// The DOS-blue theme: Turbo Vision as it shipped.
@@ -259,9 +214,6 @@ pub const CLASSIC: Theme = Theme {
     cursor_bg: Color::LightGreen,
     cursor_fg: Color::Black,
     shadow: Color::Black,
-
-    fx: [Color::White, Color::LightCyan, Color::Cyan, Color::Gray],
-    motion: Motion::Still,
 };
 
 /// Green on black: the terminal every film puts in front of a hacker.
@@ -320,14 +272,6 @@ pub const NEO: Theme = Theme {
     cursor_bg: Color::LightGreen,
     cursor_fg: Color::Black,
     shadow: Color::DarkGray,
-
-    fx: [
-        Color::White,
-        Color::LightGreen,
-        Color::Green,
-        Color::DarkGray,
-    ],
-    motion: Motion::Rain,
 };
 
 /// Green and magenta on near-black: the default.
@@ -341,9 +285,7 @@ pub const NEO: Theme = Theme {
 /// is the design's third colour, a pale lavender for tool calls: there is no
 /// lavender in sixteen colours, so a tool call takes the bright blue, which is
 /// the only other hue on screen. Pane background and desk are one near-black
-/// apart in the
-/// design and are both black here, which is what makes the gutter between the
-/// panes a place the desktop's motion can be seen in at all.
+/// apart in the design and are both black here.
 ///
 /// The design draws the frames in a dark green and the focused pane's in the
 /// bright one, so the frames take the plain green of the sixteen and the
@@ -389,15 +331,6 @@ pub const CYBER: Theme = Theme {
     cursor_bg: Color::LightGreen,
     cursor_fg: Color::Black,
     shadow: Color::Black,
-
-    // The rule, the magenta words, the rule's wake and the green words.
-    fx: [
-        Color::LightMagenta,
-        Color::Magenta,
-        Color::Magenta,
-        Color::Green,
-    ],
-    motion: Motion::Drift,
 };
 
 /// The palette of a modern editor: grey chrome, a blue accent, and syntax
@@ -453,9 +386,6 @@ pub const MODERN: Theme = Theme {
     cursor_bg: Color::LightBlue,
     cursor_fg: Color::Black,
     shadow: Color::Black,
-
-    fx: [Color::White, Color::LightBlue, Color::Blue, Color::DarkGray],
-    motion: Motion::Sweep,
 };
 
 /// A colour written as the design writes it, `0xRRGGBB`.
@@ -526,7 +456,6 @@ pub const NEO_TRUE: Theme = Theme {
     cursor_fg: hex(0x000000),
     shadow: hex(0x000000),
 
-    fx: [hex(0xd8ffe0), hex(0x00ff41), hex(0x007a1f), hex(0x0a4a17)],
     ..NEO
 };
 
@@ -569,7 +498,6 @@ pub const CYBER_TRUE: Theme = Theme {
     cursor_fg: hex(0x07060d),
     shadow: hex(0x000000),
 
-    fx: [hex(0xff2bd6), hex(0xa3168a), hex(0x7a1266), hex(0x1f8a45)],
     ..CYBER
 };
 
@@ -609,7 +537,6 @@ pub const MODERN_TRUE: Theme = Theme {
     cursor_fg: hex(0xffffff),
     shadow: hex(0x000000),
 
-    fx: [hex(0x9cdcfe), hex(0x4fc1ff), hex(0x3c6e8f), hex(0x2e5a78)],
     ..MODERN
 };
 
@@ -684,7 +611,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 30] {
+    fn colours(t: &Theme) -> [Color; 26] {
         [
             t.pane_bg,
             t.frame,
@@ -712,10 +639,6 @@ mod tests {
             t.cursor_bg,
             t.cursor_fg,
             t.shadow,
-            t.fx[0],
-            t.fx[1],
-            t.fx[2],
-            t.fx[3],
         ]
     }
 
@@ -810,49 +733,6 @@ mod tests {
     fn every_theme_draws_the_focused_pane_in_a_frame_of_its_own() {
         for t in every_palette() {
             assert_ne!(t.frame_focus, t.frame, "{}", t.name);
-        }
-    }
-
-    /// The motion is drawn on the desktop, which is the pane background, so
-    /// a tone the same colour as it is a part of the motion nobody can see.
-    #[test]
-    fn every_tone_of_a_motion_shows_on_the_desktop_it_is_drawn_on() {
-        for t in every_palette() {
-            if t.motion == Motion::Still {
-                continue;
-            }
-            for tone in t.fx {
-                assert_ne!(
-                    tone, t.pane_bg,
-                    "{}: a tone of the motion is invisible",
-                    t.name
-                );
-            }
-        }
-    }
-
-    /// The head of the rain and the rule of the sweep are what the eye
-    /// follows, so the brightest tone has to differ from the faintest: a
-    /// head the same colour as its own trail is a trail with no head.
-    #[test]
-    fn every_theme_that_moves_has_a_head_its_trail_is_not() {
-        for t in every_palette() {
-            if t.motion == Motion::Still {
-                continue;
-            }
-            assert_ne!(t.fx[0], t.fx[3], "{}", t.name);
-        }
-    }
-
-    /// Each motion keeps its own pace, and none is so fast that the loop's
-    /// redraw, every tenth of a second when it is idle, skips most of it.
-    #[test]
-    fn every_motion_moves_at_its_own_pace_and_none_outruns_the_redraw() {
-        assert_eq!(Motion::Rain.frame(), Duration::from_millis(90));
-        assert_eq!(Motion::Drift.frame(), Duration::from_millis(120));
-        assert_eq!(Motion::Sweep.frame(), Duration::from_millis(110));
-        for motion in [Motion::Still, Motion::Rain, Motion::Drift, Motion::Sweep] {
-            assert!(motion.frame() >= Duration::from_millis(80), "{motion:?}");
         }
     }
 

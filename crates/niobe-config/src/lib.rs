@@ -49,13 +49,6 @@
 //! theme = "neo"
 //! ```
 //!
-//! The desktop behind the panes moves while a turn is running; a config
-//! turns that off with
-//!
-//! ```toml
-//! effects = false
-//! ```
-//!
 //! Which palettes there are is the shell's business, not this crate's, so the
 //! name is carried as written and the caller resolves it; [`ThemeName`] keeps
 //! the line so that a name nothing answers to is reported where it was
@@ -331,7 +324,6 @@ pub struct Config {
     profiles: BTreeMap<String, Profile>,
     default_profile: Option<DefaultProfile>,
     theme: Option<ThemeName>,
-    effects: Option<bool>,
     allowed: Allowlist,
     /// The `default_profile` of a file that has not been trusted, which is not
     /// in force.
@@ -448,9 +440,6 @@ impl Config {
         if over.theme.is_some() {
             self.theme = over.theme;
         }
-        if over.effects.is_some() {
-            self.effects = over.effects;
-        }
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
         // where one is taken back. An untrusted file has none left to add.
@@ -547,15 +536,6 @@ impl Config {
     /// colours and no more.
     pub fn theme(&self) -> Option<&ThemeName> {
         self.theme.as_ref()
-    }
-
-    /// Whether the desktop behind the panes moves while a turn is running:
-    /// on unless a config turns it off with `effects = false`.
-    ///
-    /// Not gated on trust, for the reason [`Config::theme`] is not: it
-    /// changes what the shell draws and nothing a backend is started with.
-    pub fn effects(&self) -> bool {
-        self.effects.unwrap_or(true)
     }
 
     /// The profile a session runs under: the one `requested` names, or else
@@ -1142,26 +1122,13 @@ backend = "codex"
         assert_eq!(parsed("[profiles.p]\nbackend = \"claude\"\n").theme(), None);
     }
 
+    /// The shell had a switch for an animation it no longer draws; a file
+    /// that still sets it loads as though it did not.
     #[test]
-    fn the_desktop_moves_unless_a_config_turns_it_off_and_the_last_file_to_say_wins() {
-        assert!(parsed("[profiles.p]\nbackend = \"claude\"\n").effects());
-        let off = parsed("effects = false\n").untrusted();
-        assert!(!off.effects());
-        assert!(!off.needs_trust());
-
-        let on = Config::parse("effects = true\n", &path("repo")).expect("valid");
-        assert!(off.clone().overlay(on).effects());
-        let quiet = Config::parse("theme = \"neo\"\n", &path("repo")).expect("valid");
-        assert!(!off.overlay(quiet).effects());
-    }
-
-    #[test]
-    fn an_effects_switch_that_is_not_a_boolean_is_reported_at_its_line() {
-        let error = Config::parse("\neffects = \"off\"\n", &path("user"))
-            .expect_err("a string is not a switch");
-        let message = error.to_string();
-        assert!(message.contains(":2: effects:"), "{message}");
-        assert!(message.contains("a boolean"), "{message}");
+    fn a_config_that_still_sets_the_retired_effects_switch_loads() {
+        let config = parsed("theme = \"neo\"\neffects = false\n");
+        assert_eq!(config, parsed("theme = \"neo\"\n"));
+        assert!(!config.needs_trust());
     }
 
     #[test]
@@ -1264,7 +1231,7 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `effects`, `profiles` or `permissions`"
+             expected `default_profile`, `theme`, `profiles` or `permissions`"
         );
     }
 

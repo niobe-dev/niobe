@@ -28,7 +28,6 @@ pub mod bridge;
 mod calls;
 pub mod clock;
 mod find;
-mod fx;
 mod hunks;
 mod input;
 pub mod journal;

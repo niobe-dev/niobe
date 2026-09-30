@@ -47,15 +47,17 @@ impl File<'_> {
                     config.default_profile = Some(self.default_profile(value, &at)?)
                 }
                 "theme" => config.theme = Some(self.theme(value, &at)?),
-                "effects" => config.effects = Some(self.boolean(value, &at)?),
+                // The switch for the desktop's animation, which the shell no
+                // longer has. A file written to turn it off still loads.
+                "effects" => {}
                 "permissions" => config.allowed = self.permissions(value, &at)?,
                 "profiles" => config.profiles.extend(self.profiles(value, &at)?),
                 _ => {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        "unknown key; expected `default_profile`, `theme`, `effects`, \
-                         `profiles` or `permissions`",
+                        "unknown key; expected `default_profile`, `theme`, `profiles` \
+                         or `permissions`",
                     ));
                 }
             }
@@ -316,13 +318,6 @@ impl File<'_> {
         match value.get_ref() {
             DeValue::String(text) => Ok(text),
             _ => Err(self.wrong_type(value, at, "a string")),
-        }
-    }
-
-    fn boolean(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<bool, ConfigError> {
-        match value.get_ref() {
-            DeValue::Boolean(on) => Ok(*on),
-            _ => Err(self.wrong_type(value, at, "a boolean")),
         }
     }
 

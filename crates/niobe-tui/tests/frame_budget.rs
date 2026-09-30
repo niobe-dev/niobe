@@ -209,10 +209,7 @@ fn edit_hunk(start: u64) -> niobe_core::diff::Hunk {
 }
 
 /// The redraw every tick makes while a turn is running, in every theme: the
-/// long session of markdown replies with the desktop moving behind it. The
-/// motion is worked out for the cells the panes leave uncovered and no more,
-/// so it costs the frame next to nothing; if it ever costs more, it is the
-/// motion that gives way, not this budget.
+/// long session of markdown replies, with the spinner under it moving.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
 fn a_running_turn_redraws_inside_a_frame_budget_in_every_theme() {

@@ -11,13 +11,13 @@
  ┃   117       body,                                                        ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
  ┃   └ allowed by you                 ┏━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━┓────────────────────────────────────┘
  ┃                                    ┃                                          ┃──────────── Changes ───────────────┐
- ┃ ◆ claude                           ┃  › opus-5                                ┃                                    │
+ ┃ ◆ claude                           ┃  › opus-5                                ┃░░                                  │
  ┃   Rewriting the 304 test around the┃    sonnet-5                              ┃main ↑3                             █
  ┃                                    ┃                                          ┃Working tree  23 files  +≥977 −≥259 │
- ┃ ◆ claude                           ┃  ↑↓ choose · Enter switch · Esc keep     ┃.                                   │
- ┃   The notebook that demonstrates th┃  this one                                ┃  CHANGELOG.md                +0 −0 │
+ ┃ ◆ claude                           ┃  ↑↓ choose · Enter switch · Esc keep     ┃.░                                  │
+ ┃   The notebook that demonstrates th┃  this one                                ┃░░CHANGELOG.md                +0 −0 │
  ┃                                    ┗━━━━━━━ applied from the next turn ━━━━━━━┛catalog/                            │
- ┃ ✗ Bash                       npm test -- fetch             exit 1 · 0.4s █ │     fetch.ts                 +149 −12 │
+ ┃ ✗ Bash                       npm test░--░fetch░░░░░░░░░░░░░exit░1░·░0.4s░█░│░░░░░fetch.ts                 +149 −12 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │     etag.ts                   +88 −41 │
  ┃                                                                          █ └───────────────────────────────────────┘
  ┃ ◆ claude                                                                 █ ┌────────────── Activity ───────────────┐

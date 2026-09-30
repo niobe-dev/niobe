@@ -39,7 +39,6 @@ use niobe_core::event::{
 use niobe_core::{FailedTests, TestCounts, TestRunRecord};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
-use niobe_tui::ui;
 use ratatui::style::{Color, Style};
 
 /// The same session, stopped on a permission prompt it is waiting on.
@@ -622,6 +621,52 @@ fn a_recorded_prompt_puts_the_question_in_the_transcript_at_both_sizes() {
         "asking-200x60",
         &screen(&mut session_waiting_on_a_prompt(), 200, 60),
     );
+}
+
+/// The question stands off the transcript the way a dialog stands off the
+/// panes: the two columns right of its frame, from its second row down, and
+/// the row under it, from its third column on, are its shadow, in every
+/// theme. A blank cell in the shadow is shaded, so the shadow still reads
+/// where its colour is as dark as the pane it falls on.
+#[test]
+fn the_question_casts_a_shadow_on_the_transcript() {
+    for theme in THEMES {
+        let mut app = session_waiting_on_a_prompt()
+            .with_depth(Depth::Sixteen)
+            .with_theme(theme);
+        let (width, height) = (80, 24);
+        let frame = screen(&mut app, width, height);
+        let cells = styles(&mut app, width, height);
+        let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+        let find = |corner: char| {
+            rows.iter()
+                .enumerate()
+                .find_map(|(y, row)| row.iter().position(|&c| c == corner).map(|x| (x, y)))
+        };
+        let (left, top) = find('┌').expect("the question's top-left corner is on screen");
+        let (right, bottom) = find('┘').expect("the question's bottom-right corner is on screen");
+
+        let mut shadow = Vec::new();
+        for y in top + 1..=bottom + 1 {
+            shadow.extend([(right + 1, y), (right + 2, y)]);
+        }
+        shadow.extend((left + 2..=right).map(|x| (x, bottom + 1)));
+        for (x, y) in shadow {
+            let style = cells[y * usize::from(width) + x];
+            assert_eq!(
+                style.bg,
+                Some(theme.shadow),
+                "{}: no shadow at column {x}, row {y}:\n{frame}",
+                theme.name
+            );
+            assert_eq!(
+                rows[y].get(x),
+                Some(&'░'),
+                "{}: a blank cell in the shadow is not shaded at column {x}, row {y}:\n{frame}",
+                theme.name
+            );
+        }
+    }
 }
 
 /// A session waiting on a `Bash` call whose command is sixty-two lines long,
@@ -1795,172 +1840,22 @@ fn gutter(frame: &str) -> String {
         .collect()
 }
 
-/// Nothing fills the gutter until a turn is running, and what fills it then
-/// moves. A shell that looked the same whether or not it was working is the
-/// complaint this answers.
+/// The gutter between the panes stays empty while a turn runs, in every
+/// theme: the spinner under the transcript is what says a turn is going.
 #[test]
-fn the_desktop_moves_between_the_panes_while_a_turn_runs() {
-    use std::time::Duration;
-
-    let idle = gutter(&screen(&mut running_session(), 120, 30));
-    assert!(
-        idle.chars().all(char::is_whitespace),
-        "an idle session animated the desktop: {idle:?}"
-    );
-
-    let mut app = session_at_work();
-    let first = gutter(&screen(&mut app, 120, 30));
-    assert!(
-        !first.chars().all(char::is_whitespace),
-        "a running turn left the desktop blank"
-    );
-
-    // Two hundred seconds later the strip has moved on.
-    app.tick(std::time::Instant::now() + Duration::from_secs(200), None);
-    let later = gutter(&screen(&mut app, 120, 30));
-    assert_ne!(first, later, "the desktop drew the same frame twice");
-
-    // And it stops with the turn, rather than running on over a finished one.
-    app.apply(&Event::TurnEnded);
-    let stopped = gutter(&screen(&mut app, 120, 30));
-    assert!(
-        stopped.chars().all(char::is_whitespace),
-        "the desktop kept moving after the turn ended: {stopped:?}"
-    );
-}
-
-/// The cells of the body that are desktop in a `width`-column `frame`: in a
-/// column no pane draws anything in, from the first row of the body to the
-/// last. A pane always draws its border at its top, so no column a pane is in
-/// qualifies. A frame's rows are trimmed of trailing blanks, so a cell past
-/// the end of its row is blank.
-fn desktop_columns(frame: &str, width: u16) -> Vec<usize> {
-    let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
-    let body = &rows[1..rows.len() - 1];
-    (0..usize::from(width))
-        .filter(|&x| body.iter().all(|row| row.get(x).is_none_or(|&c| c == ' ')))
-        .collect()
-}
-
-/// The motion is drawn behind the panes, so a pane's cell is never touched
-/// by it: in every theme, at both depths, at every size and on many frames,
-/// the only cells that differ from the same moment with effects off are in
-/// columns of desktop no pane is in.
-#[test]
-fn the_motion_never_touches_a_cell_a_pane_owns() {
-    use std::time::Duration;
-
-    let mut moved = std::collections::BTreeSet::new();
-    for theme in THEMES {
-        for depth in [Depth::Sixteen, Depth::TrueColour] {
-            for (width, height) in [(80, 24), (120, 30), (200, 60)] {
-                for tenths in [0, 7, 33, 120, 751] {
-                    let elapsed = Duration::from_millis(tenths * 100);
-                    let dressed = |on: bool| {
-                        at_work(
-                            running_session()
-                                .with_depth(depth)
-                                .with_theme(theme)
-                                .with_effects(on),
-                            elapsed,
-                        )
-                    };
-                    let (mut on, mut off) = (dressed(true), dressed(false));
-                    let still = screen(&mut off, width, height);
-                    let desktop = desktop_columns(&still, width);
-                    // Wide, a column at each edge of the screen and one
-                    // between the session pane and the right stack; narrow,
-                    // the session pane takes the whole body.
-                    let wide = width >= ui::WIDE_COLUMNS;
-                    assert_eq!(desktop.len(), 3 * usize::from(wide), "{width}x{height}");
-                    if wide {
-                        let edges = (desktop.first(), desktop.last());
-                        let last = usize::from(width) - 1;
-                        assert_eq!(edges, (Some(&0), Some(&last)), "{width}x{height}");
-                    }
-                    let (moving, moving_styles) = (
-                        screen(&mut on, width, height),
-                        styles(&mut on, width, height),
-                    );
-                    let still_styles = styles(&mut off, width, height);
-
-                    let columns = usize::from(width);
-                    let mut touched = 0;
-                    let texts = moving.lines().zip(still.lines()).enumerate();
-                    for (y, (a, b)) in texts {
-                        for (x, (a, b)) in a.chars().zip(b.chars()).enumerate() {
-                            let cell = y * columns + x;
-                            let differs = a != b || moving_styles[cell] != still_styles[cell];
-                            touched += usize::from(differs);
-                            assert!(
-                                !differs || desktop.contains(&x),
-                                "{} {width}x{height} at {elapsed:?}: the motion drew {a:?} \
-                                 over a pane's {b:?} at column {x}, row {y}",
-                                theme.name
-                            );
-                        }
-                    }
-                    // A test that only ever compared two blank desktops would
-                    // pass whatever the motion drew.
-                    if touched > 0 {
-                        moved.insert(theme.name);
-                    }
-                }
-            }
-        }
-    }
-    // Each of the three themes that move drew on the desktop at some moment,
-    // and the one that stays still never did.
-    assert_eq!(moved.len(), 3, "{moved:?}");
-    assert!(!moved.contains(CLASSIC.name), "{moved:?}");
-}
-
-/// Turned off, the desktop stays empty while a turn runs, in every theme,
-/// and the turn still says it is running under the transcript.
-#[test]
-fn with_effects_off_the_desktop_is_empty_while_a_turn_runs() {
+fn the_desktop_stays_empty_while_a_turn_runs() {
     use std::time::Duration;
 
     for theme in THEMES {
-        let mut app = at_work(
-            running_session().with_theme(theme).with_effects(false),
-            Duration::from_secs(3),
-        );
+        let mut app = at_work(running_session().with_theme(theme), Duration::from_secs(5));
         let frame = screen(&mut app, 120, 30);
         let desk = gutter(&frame);
-        assert_eq!(
-            desktop_columns(&frame, 120).len(),
-            3,
-            "{}: {frame}",
-            theme.name
-        );
         assert!(
             desk.chars().all(char::is_whitespace),
             "{}: {desk:?}",
             theme.name
         );
         assert!(frame.contains("working"), "{frame}");
-    }
-}
-
-/// A frame of each motion, where the operator sees it: the desktop between
-/// the panes, five seconds into a turn.
-#[test]
-fn a_frame_of_each_motion_is_drawn_on_the_desktop_between_the_panes() {
-    use std::time::Duration;
-
-    for theme in [NEO, CYBER, MODERN] {
-        let mut app = at_work(running_session().with_theme(theme), Duration::from_secs(5));
-        let frame = screen(&mut app, 120, 30);
-        assert!(
-            !gutter(&frame).chars().all(char::is_whitespace),
-            "{}: the motion drew nothing between the panes",
-            theme.name
-        );
-        assert_snapshot(
-            &format!("motion-{}-120x30", theme.name.to_lowercase()),
-            &frame,
-        );
     }
 }
 
