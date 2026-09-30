@@ -12,7 +12,7 @@
 //!   two of them read as one.
 //! * **What did the cache save?** [`cache_hit_rate`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use niobe_core::session::Totals;
 
@@ -93,6 +93,45 @@ pub fn labels<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
+/// What each model id is called where only a word fits, in the order they
+/// were given: its family — `opus`, `sonnet` — where no other id in the list
+/// is of the same family, and its [`labels`] name where one is.
+///
+/// Every id that is the same id is one model and takes one name: two agents
+/// answered by `claude-opus-5-5` are both `opus`.
+pub fn families<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let ids: Vec<&str> = ids.into_iter().collect();
+    let family = |id: &str| -> String {
+        let short = shorten(id);
+        match short.split_once('-') {
+            Some((family, _)) if !family.is_empty() => family.to_owned(),
+            _ => short,
+        }
+    };
+    let labels = labels(ids.iter().copied().collect::<BTreeSet<_>>());
+    let distinct: Vec<&str> = ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    ids.iter()
+        .map(|id| {
+            let shared = distinct
+                .iter()
+                .any(|other| other != id && family(other) == family(id));
+            match shared {
+                false => family(id),
+                true => distinct
+                    .iter()
+                    .position(|other| other == id)
+                    .and_then(|at| labels.get(at).cloned())
+                    .unwrap_or_else(|| (*id).to_owned()),
+            }
+        })
+        .collect()
+}
+
 /// One id with its vendor prefix and release date taken off.
 fn shorten(id: &str) -> String {
     let trimmed = id.strip_prefix("claude-").unwrap_or(id);
@@ -133,6 +172,24 @@ mod tests {
     use super::*;
     use niobe_core::event::{Event, Usage};
     use niobe_core::session::SessionState;
+
+    #[test]
+    fn a_model_is_named_by_its_family_unless_another_model_is_of_it_too() {
+        assert_eq!(
+            families([
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-opus-5-5",
+                "claude-haiku-4-5-20251001",
+            ]),
+            ["opus", "sonnet", "opus", "haiku"]
+        );
+        assert_eq!(
+            families(["claude-opus-5-5", "claude-opus-4-1", "claude-sonnet-5-5"]),
+            ["opus-5-5", "opus-4-1", "sonnet"]
+        );
+        assert_eq!(families(["gpt5"]), ["gpt5"]);
+    }
 
     #[test]
     fn counts_past_a_hundredth_of_what_64_bits_hold_are_shared_without_overflow() {

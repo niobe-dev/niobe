@@ -1,40 +1,40 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
  ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃                                                                          ┃ │                                       │
- ┃   ┌─ ? claude asks ───────────────────────────────────── blocks turn 1 ┐ ┃ │ 5h    ▓▓▓▓░░░  62% · resets 16:40     │
- ┃   │ to run Bash                                                        │ ┃ │ 7d    ▓░░░░░░  18% · resets Tue 15:00 │
+ ┃   ┌─ ? claude asks ───────────────────────────────────── blocks turn 1 ┐ ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃   │ to run Bash                                                        │ ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
  ┃   │ set -e                                                             │ ┃ │ ───────────────────────────────────── │
- ┃   │ cd /tmp                                                            │ ┃ │ opus-5    100%  ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
- ┃   │ echo step 1 && \                                                   │ ┃ │ cache hit  86%  ▓▓▓▓▓▓▓▓▓▓░░   40k    │
- ┃   │ echo step 2 && \                                                   │ ┃ │ API-equivalent ≥$0.04                 │
+ ┃   │ cd /tmp                                                            │ ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃   │ echo step 1 && \                                                   │ ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃   │ echo step 2 && \                                                   │ ┃ │ API-equiv ≥$0.04                      │
  ┃   │ echo step 3 && \                                                   │ ┃ │ ───────────────────────────────────── │
- ┃   │ echo step 4 && \                                                   │ ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
+ ┃   │ echo step 4 && \                                                   │ ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
  ┃   │ echo step 5 && \                                                   │ ┃ └───────────────────────────────────────┘
  ┃   │ echo step 6 && \                                                   │ ┃ ┌─────────────── Changes ───────────────┐
- ┃   │ echo step 7 && \                                                   │ ┃ │                                       │
- ┃   │ echo step 8 && \                                                   │ ┃ │ ⎇ main ↑3                             █
- ┃   │ echo step 9 && \                                                   │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   │ echo step 10 && \                                                  │ ┃ │   .                                   █
- ┃   │ echo step 11 && \                                                  │ ┃ │     CHANGELOG.md                +0 −0 █
- ┃   │ echo step 12 && \                                                  │ ┃ │   catalog/                            │
- ┃   │ echo step 13 && \                                                  │ ┃ │     fetch.ts                 +149 −12 │
- ┃   │ echo step 14 && \                                                  │ ┃ │     etag.ts                   +88 −41 │
- ┃   │ echo step 15 && \                                                  │ ┃ │     cache/lru.ts               +31 −9 │
- ┃   │ echo step 16 && \                                                  │ ┃ │     cache/index.ts             +12 −0 │
- ┃   │ echo step 17 && \                                                  │ █ │   docs/                               │
- ┃   │ echo step 18 && \                                                  │ █ │     caching.md                +64 −22 │
- ┃   │ echo step 19 && \                                                  │ █ │     adr/0004-etags.md          +34 −1 │
- ┃   │ … 125 more lines · Ctrl+T shows the whole call                     │ █ └───────────────────────────────────────┘
+ ┃   │ echo step 7 && \                                                   │ ┃ │ ⎇ main ↑3                             █
+ ┃   │ echo step 8 && \                                                   │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃   │ echo step 9 && \                                                   │ ┃ │   .                                   █
+ ┃   │ echo step 10 && \                                                  │ ┃ │     CHANGELOG.md                +0 −0 █
+ ┃   │ echo step 11 && \                                                  │ ┃ │   catalog/                            █
+ ┃   │ echo step 12 && \                                                  │ ┃ │     fetch.ts                 +149 −12 │
+ ┃   │ echo step 13 && \                                                  │ ┃ │     etag.ts                   +88 −41 │
+ ┃   │ echo step 14 && \                                                  │ ┃ │     cache/lru.ts               +31 −9 │
+ ┃   │ echo step 15 && \                                                  │ ┃ │     cache/index.ts             +12 −0 │
+ ┃   │ echo step 16 && \                                                  │ ┃ │   docs/                               │
+ ┃   │ echo step 17 && \                                                  │ █ │     caching.md                +64 −22 │
+ ┃   │ echo step 18 && \                                                  │ █ │     adr/0004-etags.md          +34 −1 │
+ ┃   │ echo step 19 && \                                                  │ █ │     diagrams/cache.png            — — │
+ ┃   │ echo step 20 && \                                                  │ █ │   server/                             │
+ ┃   │ … 124 more lines · Ctrl+T shows the whole call                     │ █ └───────────────────────────────────────┘
  ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
- ┃   │ ▶ 1. Allow once                                     this call only │ █ │                                       │
- ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │ ▾ Sub-agents  1 running · 1 failed    █
- ┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp … │ █ │ ◆ test-writer → tests… running 1m 42s █
- ┃   │   4. Deny                                    the call does not run │ █ │   └ Reading tests/stream.rs           █
- ┃   │                                                                    │ █ │ ◇ reviewer → catalog/c… done 4100 ctx █
- ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │ ✗ doc-writer → docs/etags.md   failed │
- ┃   │ Esc decide later                                                   │ █ │   └ Notion 404, gave up after 2 retr… │
- ┃   └────────────────────────────────────────────────────────────────────┘ █ │ ▾ Decisions  2                        │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   13:39 Key the cache on the request  │
- ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │         URL, not the manifest id —    │
+ ┃   │ ▶ 1. Allow once                                     this call only │ █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │ ◆ test     Cover tests… sonnet 1m 42s █
+ ┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp … │ █ │   └ Reading tests/stream.rs           █
+ ┃   │   4. Deny                                    the call does not run │ █ │ ◇ reviewer Review cata… done 4100 ctx █
+ ┃   │                                                                    │ █ │ ✗ doc      Write docs/etags.md failed █
+ ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │   └ Notion 404, gave up after 2 retr… │
+ ┃   │ Esc decide later                                                   │ █ │ ▾ Decisions  2                        │
+ ┃   └────────────────────────────────────────────────────────────────────┘ █ │   13:39 Key the cache on the request  │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │         URL, not the manifest id —    │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │         two manifests can share an    │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit

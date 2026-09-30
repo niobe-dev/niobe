@@ -1,6 +1,5 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
 ┏━━━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━━━┓
-┃                                                                              ┃
 ┃   ┌─ ? claude asks ─────────────────────────────────────── blocks turn 1 ┐   ┃
 ┃   │ to run Bash                                                          │░░ ┃
 ┃   │ set -e                                                               │░░ ┃
@@ -8,12 +7,13 @@
 ┃   │ echo step 1 && \                                                     │░░ ┃
 ┃   │ echo step 2 && \                                                     │░░ ┃
 ┃   │ echo step 3 && \                                                     │░░ ┃
-┃   │ … 140 more lines · Ctrl+T shows the whole call                       │░░ ┃
+┃   │ echo step 4 && \                                                     │░░ ┃
+┃   │ … 139 more lines · Ctrl+T shows the whole call                       │░░ ┃
 ┃   │                                                                      │░░ ┃
 ┃   │ ▶ 1. Allow once                                       this call only │░░ ┃
 ┃   │   2. Always allow Bash                              niobe saves Bash │░░ ┃
 ┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp ↵ … │░░ ┃
-┃   │   4. Deny                                      the call does not run │░░ ┃
+┃   │   4. Deny                                      the call does not run │░░ █
 ┃   │                                                                      │░░ █
 ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │░░ █
 ┃   │ Esc decide later                                                     │░░ █

@@ -1,6 +1,5 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
 ┏━━━━━━━━━━━━━━━━━━━━ what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                              ┃
 ┃ > you                                                                        ┃
 ┃   what does the fetcher do with a 304?                                       ┃
 ┃                                                                              ┃
@@ -16,6 +15,7 @@
 ┃   Done: a 304 now returns the cached manifest.                               ┃
 ┃                                                                              ┃
 ┃ ── turn 2 13:37 · 22k tok · 1% of 5h · 38s ───────────────────────────────── ┃
+┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃ ──────────────────────────────────────────────────────────────────────────── ┃

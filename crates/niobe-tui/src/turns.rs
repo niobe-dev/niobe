@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! The rule the transcript draws where a turn ended, with what that turn
-//! spent written on it: `── turn 46 14:05 · 6400 tok · 1% of 5h · 38s ───`.
+//! The rule the transcript draws where a turn ended, with what that turn did
+//! and spent written on it:
+//! `── turn 46 14:05 · 2 sub-agents · 31 tool calls · 6400 tok · 1% of 5h · 38s ───`.
 //!
 //! It is the finest-grained cost the shell shows without a pane being opened,
-//! so every figure on it is one the session fold or the shell's clock
-//! measured, and a figure neither measured is left off rather than drawn as a
-//! zero. Where the pane is too narrow for all of them, whole figures give way
-//! — the time first, then the duration, then the window's share — and the
-//! tokens last, because they are what the turn cost. A figure is never cut
-//! short.
+//! so every figure on it is one the session fold, the transcript or the
+//! shell's clock measured, and a figure none measured is left off rather than
+//! drawn as a zero. Where the pane is too narrow for all of them, whole
+//! figures give way — the time first, then the counts of agents and calls,
+//! the duration, the window's share — and the tokens last, because they are
+//! what the turn cost. A figure is never cut short.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -60,7 +61,7 @@ fn line(rule: &TurnRule, width: usize, theme: &Theme) -> Line<'static> {
         spans.push(Span::styled(before, dim));
         let style = match figure.kind {
             Kind::Share => Style::new().fg(theme.fg),
-            Kind::Ended | Kind::Tokens | Kind::Took => dim,
+            Kind::Ended | Kind::Agents | Kind::Calls | Kind::Tokens | Kind::Took => dim,
         };
         spans.push(Span::styled(figure.text.clone(), style));
     }
@@ -77,14 +78,24 @@ fn line(rule: &TurnRule, width: usize, theme: &Theme) -> Line<'static> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Ended,
+    Agents,
+    Calls,
     Tokens,
     Share,
     Took,
 }
 
 /// The order figures are dropped in when the rule does not fit: the time the
-/// turn ended is on the clock in the menu row, and what it cost goes last.
-const GIVES_WAY: [Kind; 4] = [Kind::Ended, Kind::Took, Kind::Share, Kind::Tokens];
+/// turn ended is on the clock in the menu row, what the turn did is in the
+/// rows above the rule, and what it cost goes last.
+const GIVES_WAY: [Kind; 6] = [
+    Kind::Ended,
+    Kind::Agents,
+    Kind::Calls,
+    Kind::Took,
+    Kind::Share,
+    Kind::Tokens,
+];
 
 struct Figure {
     kind: Kind,
@@ -99,6 +110,22 @@ fn figures(rule: &TurnRule) -> Vec<Figure> {
             kind: Kind::Ended,
             text: ended.to_string(),
         });
+    }
+    // A count of nothing is left off: `0 sub-agents` is most turns, and the
+    // rule would spend its room saying so.
+    for (count, one, many, kind) in [
+        (rule.agents, "sub-agent", "sub-agents", Kind::Agents),
+        (rule.calls, "tool call", "tool calls", Kind::Calls),
+    ] {
+        if count > 0 {
+            figures.push(Figure {
+                kind,
+                text: match count {
+                    1 => format!("1 {one}"),
+                    count => format!("{count} {many}"),
+                },
+            });
+        }
     }
     if let Some(tokens) = rule.tokens {
         figures.push(Figure {
@@ -165,6 +192,8 @@ mod tests {
             tokens: Some(6_400),
             five_hour_points: Some(1),
             took: Some(Duration::from_secs(38)),
+            agents: 0,
+            calls: 0,
             cut: false,
         }
     }
@@ -185,6 +214,36 @@ mod tests {
             "{said}"
         );
         assert_eq!(text::width(&said), 80, "{said:?}");
+    }
+
+    #[test]
+    fn a_rule_says_how_many_agents_and_calls_the_turn_had_and_they_give_way_early() {
+        let busy = TurnRule {
+            agents: 9,
+            calls: 83,
+            ..rule()
+        };
+        let said = drawn(&busy, 80);
+        assert!(
+            said.starts_with(
+                "── turn 46 14:05 · 9 sub-agents · 83 tool calls · 6400 tok · 1% of 5h · 38s ─"
+            ),
+            "{said}"
+        );
+        let one = drawn(
+            &TurnRule {
+                agents: 1,
+                calls: 1,
+                ..rule()
+            },
+            80,
+        );
+        assert!(one.contains("· 1 sub-agent · 1 tool call ·"), "{one}");
+        let narrow = drawn(&busy, 50);
+        assert!(
+            narrow.starts_with("── turn 46 6400 tok · 1% of 5h · 38s"),
+            "{narrow}"
+        );
     }
 
     #[test]

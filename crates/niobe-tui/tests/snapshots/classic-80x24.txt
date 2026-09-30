@@ -3,11 +3,11 @@
   c  Black on Gray, bold
   d  White on Blue
   e  LightYellow on Blue, bold | reversed
-  f  LightGreen on Black
-  g  LightGreen on Black, bold
+  f  Gray on Black
+  g  Gray on Black, bold
   h  White on Black
-  i  Gray on Black
-  j  Gray on Black, bold
+  i  LightGreen on Black
+  j  LightGreen on Black, bold
   k  Gray on Blue
   l  LightCyan on Blue, bold
   m  LightRed on Blue, bold
@@ -23,9 +23,9 @@
 
 abaaaaaabaaaaaaaabaaaaaabaaaaaabaaaaaabaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaccccccaa
 ddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeedddddd
-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-ddddffffghffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffdd
-ddddiiiijhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhdd
+ddddffffghhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhdd
+ddddiiiijhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiidd
+ddddffffghhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhdd
 ddddkkkkkkkkkkkkkkkkdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 ddlllllllldddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
@@ -34,7 +34,7 @@ dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 ddlllllllldddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-ddmmmmmmmmmmmmmmmmmmmmmmmmmmmmdkkkkkkkkkkkkkkkkkdddddddddddddddddnnnnnnkkkkkkkdd
+ddmmnnnnnnnnnnnnnndddddddddddddddddddddddddddddddddddddddddddddddnnnnnnkkkkkkkdo
 ddddkkdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo
 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo
 ddlllllllldddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddo

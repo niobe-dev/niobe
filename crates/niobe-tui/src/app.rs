@@ -457,6 +457,11 @@ pub struct TurnRule {
     pub five_hour_points: Option<u64>,
     /// How long it ran, from the prompt that opened it to its end.
     pub took: Option<Duration>,
+    /// How many sub-agents it spawned.
+    pub agents: u64,
+    /// How many tool calls the transcript shows it making, its sub-agents'
+    /// included.
+    pub calls: u64,
     /// Whether it was cut off rather than ended by the backend: the session
     /// failed under it, or the process running it stopped.
     pub cut: bool,
@@ -522,13 +527,10 @@ pub struct Entry {
     /// `None` for the session's own and for everything that is not the
     /// agents'.
     ///
-    /// Named by the shortest part of the name the Activity pane lists it by
-    /// that tells it apart from every other agent the session spawned: two
-    /// reviewers spawned as `deep-reasoner: Review catalog/fetch.py` and
-    /// `deep-reasoner: Review catalog/cache.py` are `…fetch.py` and
-    /// `…cache.py`, which a row cut short still tells apart. It is worked out
-    /// again whenever an agent is spawned, because a new one can make an
-    /// older one's name ambiguous.
+    /// Named by its tag: a word of the kind of agent it was asked to be that
+    /// no other kind shares, numbered where two agents would read alike —
+    /// see [`crate::tags`]. It is worked out again whenever an agent is
+    /// spawned, because a new one can take an older one's word.
     pub agent: Option<String>,
 }
 
@@ -849,6 +851,8 @@ pub enum Gate {
 pub struct SubAgent {
     /// The agent, as the backend named it.
     pub id: AgentId,
+    /// The kind of agent it was asked to be, where the backend said.
+    pub kind: Option<String>,
     /// What it was spawned to do.
     pub label: String,
     /// When it was spawned, where the shell had a clock at the time.
@@ -866,6 +870,21 @@ pub struct SubAgent {
     pub context_tokens: Option<u64>,
     /// The last thing it was observed doing, in its backend's words.
     pub latest: Option<String>,
+}
+
+impl SubAgent {
+    /// What it was spawned to do, without the kind of agent it was asked to
+    /// be where its label opens with that.
+    pub fn task(&self) -> &str {
+        crate::tags::task(self.named())
+    }
+
+    fn named(&self) -> crate::tags::Named<'_> {
+        crate::tags::Named {
+            kind: self.kind.as_deref(),
+            label: &self.label,
+        }
+    }
 }
 
 /// What a running turn is doing, for the line that shows the session is at
@@ -1074,6 +1093,10 @@ pub struct App {
     /// was stamped with: what a turn's duration is counted from. `None`
     /// between turns, and for a turn whose prompt came with no time.
     turn_began_at: Option<Stamp>,
+    /// How many sub-agents had been spawned, and how many entries the
+    /// transcript held, when the running turn's first prompt was folded in:
+    /// what the turn's rule counts its agents and calls from.
+    turn_began_with: (usize, usize),
     /// The failure entry that stands for the run of events the journal has
     /// refused since it last kept one, while it keeps refusing.
     unsaved: Option<Unsaved>,
@@ -1271,6 +1294,7 @@ impl App {
             at: None,
             unsaved: None,
             turn_began_at: None,
+            turn_began_with: (0, 0),
             turns_took: Some(Duration::ZERO),
             last_folded_at: None,
             working_since: None,
@@ -1302,6 +1326,7 @@ impl App {
         let turns = self.session.turns().len();
         if matches!(event, Event::UserMessage { .. }) && !self.session.turn_running() {
             self.turn_began_at = self.at;
+            self.turn_began_with = (self.agents.len(), self.entries.len());
         }
         self.session.apply(event);
         // A session left is recorded when the process stopped, or when the
@@ -1346,8 +1371,18 @@ impl App {
             .zip(measured)
             .map(|(sum, took)| sum.saturating_add(took));
         let took = measured.filter(|took| *took >= TIMED);
+        let (agents_before, entries_before) = std::mem::take(&mut self.turn_began_with);
+        let calls = self
+            .entries
+            .get(entries_before..)
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| entry.calls.len())
+            .sum::<usize>();
         let rule = TurnRule {
             number: turn.number,
+            agents: count(self.agents.len().saturating_sub(agents_before)),
+            calls: count(calls),
             cut: turn.cut,
             ended: at.and_then(Stamp::local),
             tokens: turn.tokens,
@@ -1739,9 +1774,12 @@ impl App {
                 }
             }
 
-            Event::AgentSpawn { id, label, .. } => {
+            Event::AgentSpawn {
+                id, kind, label, ..
+            } => {
                 let spawned = SubAgent {
                     id: id.clone(),
+                    kind: kind.clone(),
                     label: label.clone(),
                     at: self.at,
                     outcome: None,
@@ -1853,24 +1891,46 @@ impl App {
     /// What sub-agent `id` is called on a row it shares with what it did:
     /// see [`Entry::agent`].
     fn sub_agent_tag(&self, id: &AgentId) -> String {
-        let labels: Vec<&str> = self
-            .agents
-            .iter()
-            .map(|agent| agent.label.as_str())
-            .collect();
         match self.agents.iter().position(|agent| &agent.id == id) {
-            Some(at) => distinct_tail(&labels, at),
+            Some(at) => self.agent_tags().swap_remove(at),
             None => id.to_string(),
         }
+    }
+
+    /// The call sub-agent `id` has open, as its row in the transcript names
+    /// it — `Bash cargo test` — or `None` where it has none running.
+    pub fn agent_doing(&self, id: &AgentId) -> Option<String> {
+        self.agent_entries
+            .iter()
+            .rev()
+            .filter(|(_, agent)| *agent == id)
+            .find_map(|(&at, _)| {
+                let entry = self.entries.get(at)?;
+                let call = entry.calls.iter().rev().find(|call| call.running())?;
+                Some(format!("{} {}", entry.head, call.what))
+            })
+    }
+
+    /// Every sub-agent's tag, in the order [`App::agents`] lists them: the
+    /// word the transcript's rows and the Activity pane name it by.
+    pub fn agent_tags(&self) -> Vec<String> {
+        let named: Vec<crate::tags::Named<'_>> = self.agents.iter().map(SubAgent::named).collect();
+        crate::tags::tags(&named)
     }
 
     /// Names every sub-agent's entry again, now that the agents are not the
     /// ones its name was worked out among.
     fn rename_agents_entries(&mut self) {
+        let tags: BTreeMap<&AgentId, String> = self
+            .agents
+            .iter()
+            .map(|agent| &agent.id)
+            .zip(self.agent_tags())
+            .collect();
         let named: Vec<(usize, String)> = self
             .agent_entries
             .iter()
-            .map(|(&at, id)| (at, self.sub_agent_tag(id)))
+            .map(|(&at, id)| (at, tags.get(id).cloned().unwrap_or_else(|| id.to_string())))
             .collect();
         for (at, tag) in named {
             if let Some(entry) = self.entries.get_mut(at) {
@@ -4597,6 +4657,11 @@ fn fkey_hint(n: u8) -> &'static str {
     }
 }
 
+/// A count of things in the transcript, as a figure.
+fn count(things: usize) -> u64 {
+    u64::try_from(things).unwrap_or(u64::MAX)
+}
+
 /// A tool's name as a person reads it.
 ///
 /// An MCP tool arrives as `mcp__<server>__<tool>`, and the server as the
@@ -4617,45 +4682,6 @@ pub fn tool_label(name: &str) -> String {
         false => tool,
     };
     format!("{server}·{tool}")
-}
-
-/// The part of `labels[at]` that tells it apart from every other label:
-/// whatever follows the longest start it shares with another, from the word
-/// that start ends in, behind an ellipsis that says something was left off.
-///
-/// A label that shares no start with another is whole, and so is one that
-/// nothing is left of — another label is it with more on the end — because
-/// an ellipsis alone names nothing. A label the same as another's is told
-/// apart from the rest as that one is: nothing tells the two apart.
-pub(crate) fn distinct_tail(labels: &[&str], at: usize) -> String {
-    let Some(label) = labels.get(at) else {
-        return String::new();
-    };
-    let shared = labels
-        .iter()
-        .enumerate()
-        .filter(|&(other, text)| other != at && text != label)
-        .map(|(_, other)| shared_start(label, other))
-        .max()
-        .unwrap_or(0);
-    // Back to the start of the word the shared part ends in, so the name
-    // begins at a word rather than inside one.
-    let from = label
-        .get(..shared)
-        .and_then(|start| start.rfind([' ', '/']))
-        .map_or(0, |space| space + 1);
-    match label.get(from..) {
-        Some(tail) if from > 0 && !tail.is_empty() => format!("…{tail}"),
-        _ => (*label).to_owned(),
-    }
-}
-
-/// How many bytes `a` and `b` start with in common, on a character boundary.
-fn shared_start(a: &str, b: &str) -> usize {
-    a.char_indices()
-        .zip(b.chars())
-        .find(|((_, x), y)| x != y)
-        .map_or(a.len().min(b.len()), |((at, _), _)| at)
 }
 
 /// The backend's one-line reading of a call, or its arguments where it had
@@ -5033,6 +5059,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: AgentId::new("toolu_a"),
             parent: None,
+            kind: None,
             label: "deep-reasoner: Review cache".to_owned(),
         });
         app.apply(&Event::AssistantDelta {
@@ -5081,40 +5108,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_agent_is_named_by_what_tells_it_apart_from_the_others() {
-        let labels = [
-            "quick-lookup: Summarize catalog/cache.py",
-            "deep-reasoner: Review catalog/fetch.py for bugs",
-            "deep-reasoner: Review catalog/cache.py for bugs",
-            "deep-reasoner: Review",
-            "deep-reasoner: Review catalog/fetch.py for bugs",
-        ];
-        let named: Vec<String> = (0..labels.len())
-            .map(|at| distinct_tail(&labels, at))
-            .collect();
-        assert_eq!(
-            named,
-            [
-                "quick-lookup: Summarize catalog/cache.py",
-                "…fetch.py for bugs",
-                "…cache.py for bugs",
-                "…Review",
-                // Two agents spawned alike are named alike: nothing in what
-                // the backend said tells them apart.
-                "…fetch.py for bugs",
-            ]
-        );
-    }
-
-    /// An agent named whole while it was the only one is renamed on the rows
-    /// it has already made once a second agent shares the start of its name.
+    /// An agent tagged by its first word while it was the only one is
+    /// renamed on the rows it has already made once a second agent shares
+    /// that word.
     #[test]
     fn a_second_agent_renames_the_first_agents_rows() {
         let mut app = app();
         let spawn = |id: &str, label: &str| Event::AgentSpawn {
             id: AgentId::new(id),
             parent: None,
+            kind: None,
             label: label.to_owned(),
         };
         app.apply(&spawn("toolu_a", "Review catalog/fetch.py"));
@@ -5125,13 +5128,10 @@ mod tests {
             summary: None,
             agent: Some(AgentId::new("toolu_a")),
         });
-        assert_eq!(
-            app.entries()[0].agent.as_deref(),
-            Some("Review catalog/fetch.py")
-        );
+        assert_eq!(app.entries()[0].agent.as_deref(), Some("review"));
 
         app.apply(&spawn("toolu_b", "Review catalog/cache.py"));
-        assert_eq!(app.entries()[0].agent.as_deref(), Some("…fetch.py"));
+        assert_eq!(app.entries()[0].agent.as_deref(), Some("fetch"));
     }
 
     #[test]
@@ -5227,6 +5227,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
+            kind: None,
             label: "test-writer".to_owned(),
         });
 
@@ -5668,6 +5669,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
+            kind: None,
             label: "Review fetch".to_owned(),
         });
         app.apply(&start("t1", "Bash", "cargo test", None));
@@ -6147,12 +6149,13 @@ mod tests {
             app.apply(&Event::AgentSpawn {
                 id: AgentId::new("toolu_a"),
                 parent: None,
+                kind: None,
                 label: "deep-reasoner: Review fetch.py".to_owned(),
             });
             app.apply(&asked_by("t1", Some("toolu_a")));
             assert_eq!(
                 app.asking().map(|ask| app.asker(ask)),
-                Some("deep-reasoner: Review fetch.py".to_owned())
+                Some("deep".to_owned())
             );
             app.on_key(key(KeyCode::Char(answer)));
             app.on_key(key(KeyCode::Enter));
@@ -6177,6 +6180,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: AgentId::new("toolu_a"),
             parent: None,
+            kind: None,
             label: "deep-reasoner: Review fetch.py".to_owned(),
         });
         app.apply(&asked_by("t1", Some("toolu_a")));
@@ -6198,10 +6202,7 @@ mod tests {
         assert_eq!(
             refused,
             [
-                (
-                    "Bash · rm -rf build",
-                    Some("deep-reasoner: Review fetch.py")
-                ),
+                ("Bash · rm -rf build", Some("deep")),
                 ("Bash · rm -rf build", None),
             ]
         );
@@ -6979,9 +6980,48 @@ mod tests {
                 tokens: Some(4_100),
                 five_hour_points: None,
                 took: Some(Duration::from_secs(38)),
+                agents: 0,
+                calls: 0,
                 cut: false,
             }
         );
+    }
+
+    #[test]
+    fn a_turns_rule_counts_the_agents_it_spawned_and_the_calls_it_made() {
+        let mut app = app();
+        let start = |id: &str, agent: Option<&str>| Event::ToolCallStart {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: String::new(),
+            summary: None,
+            agent: agent.map(AgentId::new),
+        };
+        app.apply(&Event::UserMessage {
+            text: "first".to_owned(),
+        });
+        app.apply(&start("t0", None));
+        app.apply(&Event::TurnEnded);
+
+        app.apply(&Event::UserMessage {
+            text: "second".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "Find the loop".to_owned(),
+        });
+        app.apply(&start("t1", Some("toolu_a")));
+        app.apply(&start("t2", Some("toolu_a")));
+        app.apply(&start("t3", None));
+        app.apply(&Event::TurnEnded);
+
+        let counted: Vec<(u64, u64)> = rules(&app)
+            .into_iter()
+            .map(|(_, rule)| (rule.agents, rule.calls))
+            .collect();
+        assert_eq!(counted, [(0, 1), (1, 3)]);
     }
 
     #[test]
@@ -7212,6 +7252,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: AgentId::new("a1"),
             parent: None,
+            kind: None,
             label: "review the diff".to_owned(),
         });
 
@@ -7236,6 +7277,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: id.clone(),
             parent: None,
+            kind: None,
             label: "review the diff".to_owned(),
         });
         app.apply(&Event::AgentProgress {

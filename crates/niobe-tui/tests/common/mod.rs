@@ -155,12 +155,14 @@ fn session_events() -> Vec<Event> {
         Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
-            label: "test-writer → tests/fetch.test.ts".to_owned(),
+            kind: Some("test-writer".to_owned()),
+            label: "test-writer: Cover tests/fetch.test.ts".to_owned(),
         },
         Event::AgentSpawn {
             id: "a2".into(),
             parent: None,
-            label: "reviewer → catalog/cache.ts".to_owned(),
+            kind: Some("reviewer".to_owned()),
+            label: "reviewer: Review catalog/cache.ts".to_owned(),
         },
         // What each agent reported about itself, each leaving something out,
         // so the pictures carry an agent with no step and one with no model
@@ -186,7 +188,8 @@ fn session_events() -> Vec<Event> {
         Event::AgentSpawn {
             id: "a3".into(),
             parent: None,
-            label: "doc-writer → docs/etags.md".to_owned(),
+            kind: Some("doc-writer".to_owned()),
+            label: "doc-writer: Write docs/etags.md".to_owned(),
         },
         Event::AgentProgress {
             id: "a3".into(),
@@ -787,6 +790,7 @@ pub fn session_with_two_agents_at_work() -> App {
         events.push(Event::AgentSpawn {
             id: AgentId::new(id),
             parent: None,
+            kind: Some("deep-reasoner".to_owned()),
             label: label.to_owned(),
         });
         events.push(call(id, "Agent", label, None));

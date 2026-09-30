@@ -276,17 +276,18 @@ fn a_finished_turn_is_ruled_off_with_what_it_spent() {
     assert_snapshot("turns-80x24", &frame);
 }
 
-/// Two sub-agents at work at once: each of their calls is named for the
-/// agent that made it, two agents' calls to one tool stay two rows, and what
-/// an agent says is drawn under its own name rather than as the session's.
+/// Two sub-agents of one kind at work at once: each of their calls is named
+/// by the agent's tag, numbered because the two are of one kind, two agents'
+/// calls to one tool stay two rows, and what an agent says is drawn under its
+/// own tag rather than as the session's.
 #[test]
 fn whose_each_row_is_shows_where_two_agents_calls_interleave() {
     let frame = screen(&mut session_with_two_agents_at_work(), 120, 30);
     for row in [
-        "…fetch.py › catalog/fetch.py",
-        "…cache.py › catalog/cache.py",
-        "…fetch.py › catalog/etag.py",
-        "↳ deep-reasoner: Review cache.py  sub-agent",
+        "deep1 catalog/fetch.py",
+        "deep2 catalog/cache.py",
+        "deep1 catalog/etag.py",
+        "↳ deep2",
     ] {
         assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
     }
@@ -294,7 +295,7 @@ fn whose_each_row_is_shows_where_two_agents_calls_interleave() {
 }
 
 /// A reviewer's call refused and the other reviewer's waiting: the refusal
-/// and the question each say which agent asked, by the name its calls' rows
+/// and the question each say which agent asked, by the tag its calls' rows
 /// give it, rather than reading as the session's own.
 #[test]
 fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
@@ -316,8 +317,8 @@ fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
 
     let frame = screen(&mut app, 120, 30);
     for row in [
-        "! denied  …fetch.py › Bash · curl -sI localhost:8080",
-        "? …cache.py asks",
+        "! denied  deep1 › Bash · curl -sI localhost:8080",
+        "? deep2 asks",
     ] {
         assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
     }
@@ -387,7 +388,7 @@ fn first_row_with(frame: &str, marker: &str) -> Option<(usize, String)> {
 }
 
 /// The screen row the transcript's first line is drawn on at 120×40.
-const TRANSCRIPT_TOP: usize = 3;
+const TRANSCRIPT_TOP: usize = 2;
 
 /// The long write, opened, with a reply under it long enough to scroll back
 /// through without the diff coming into view.
@@ -1342,7 +1343,7 @@ fn a_session_with_no_measured_time_shows_no_rate() {
 fn a_plan_shows_no_spend_rate() {
     let mut app = billed_turn(niobe_core::Billing::Plan, 1_800, Some(0.50));
     let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("API-equivalent $0.50"), "{frame}");
+    assert!(frame.contains("API-equiv $0.50"), "{frame}");
     assert!(!frame.contains("/h"), "{frame}");
 }
 
@@ -1364,7 +1365,7 @@ fn a_metered_profiles_budget_stands_under_its_cost() {
 fn a_plan_shows_what_the_work_would_have_cost_as_api_equivalent_and_dim() {
     let mut app = running_session();
     let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("API-equivalent ≥$0.04"), "{frame}");
+    assert!(frame.contains("API-equiv ≥$0.04"), "{frame}");
     assert!(!frame.contains("session "), "{frame}");
     let dim = app.theme().dim;
     assert_eq!(
@@ -1423,7 +1424,7 @@ fn a_plan_spending_beyond_its_flat_fee_is_marked_in_the_usage_pane() {
     assert!(frame.contains("100%"), "{frame}");
     assert!(frame.contains(" 91%"), "{frame}");
     assert!(
-        frame.contains("extra — · on"),
+        frame.contains("extra     — · on"),
         "the plan is spending real money and the pane did not say so:\n{frame}"
     );
     assert!(
@@ -1871,8 +1872,9 @@ fn borders(row: &str) -> Vec<usize> {
 }
 
 /// No pane puts its text against its border. A column either side of the
-/// content and a blank row under the title is what the panes are drawn to,
-/// and text touching a double border is what they are drawn that way to avoid.
+/// content is what the panes are drawn to, and text touching a double border
+/// is what they are drawn that way to avoid. What a pane holds starts on the
+/// row under its title: the title stands apart on the border already.
 #[test]
 fn no_pane_draws_its_text_against_its_border() {
     for (width, height) in [(80, 24), (120, 30), (200, 60)] {
@@ -1895,16 +1897,6 @@ fn no_pane_draws_its_text_against_its_border() {
                 );
             }
         }
-
-        // The row under the body's top border belongs to the Session pane and
-        // to the Usage pane at once, and both keep it blank.
-        let under = frame.lines().nth(2).unwrap_or_default();
-        assert!(
-            under
-                .chars()
-                .all(|c| c == FOCUS_SIDE || matches!(c, '│' | ' ')),
-            "the row under the pane titles at {width}x{height} is not blank: {under:?}"
-        );
     }
 }
 
@@ -2280,6 +2272,12 @@ fn the_activity_pane_holds_the_sub_agents_the_decisions_and_the_tools() {
     );
 }
 
+/// What the running session's three agents were spawned to do, which is
+/// what their rows in the Activity pane are found by.
+const TESTS_TASK: &str = "Cover tests/fetch.test.ts";
+const REVIEW_TASK: &str = "Review catalog/cache.ts";
+const DOCS_TASK: &str = "Write docs/etags.md";
+
 /// A sixteen-colour terminal in a palette the operator chose is not somewhere
 /// a colour can be the only difference between an agent that finished and one
 /// that failed, so the glyph carries the state on its own.
@@ -2287,9 +2285,9 @@ fn the_activity_pane_holds_the_sub_agents_the_decisions_and_the_tools() {
 fn a_sub_agents_state_is_legible_without_its_colour() {
     let frame = screen(&mut running_session(), 200, 60);
 
-    assert!(frame.contains("◆ test-writer"), "running:\n{frame}");
-    assert!(frame.contains("◇ reviewer"), "done:\n{frame}");
-    assert!(frame.contains("✗ doc-writer"), "failed:\n{frame}");
+    assert!(frame.contains("◆ test "), "running:\n{frame}");
+    assert!(frame.contains("◇ reviewer "), "done:\n{frame}");
+    assert!(frame.contains("✗ doc "), "failed:\n{frame}");
 }
 
 /// A session whose backend died runs nothing: the agent it was running and
@@ -2305,7 +2303,7 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
         summary: Some("cargo build".to_owned()),
         agent: None,
     });
-    assert!(screen(&mut app, 200, 60).contains("◆ test-writer"));
+    assert!(screen(&mut app, 200, 60).contains("◆ test "));
 
     app.apply(&Event::Error {
         message: "the `claude` session ended: exit status 1".to_owned(),
@@ -2315,9 +2313,9 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
 
     let agent = frame
         .lines()
-        .find(|line| line.contains("test-writer"))
+        .find(|line| line.contains(TESTS_TASK))
         .unwrap_or_default();
-    assert!(agent.contains("⊘ test-writer"), "{agent:?}");
+    assert!(agent.contains("⊘ test "), "{agent:?}");
     assert!(
         agent.trim_end_matches(['│', ' ']).ends_with("cut short"),
         "{agent:?}"
@@ -2345,13 +2343,13 @@ fn an_agent_that_finished_stays_in_the_list_with_its_outcome() {
 
     let row = frame
         .lines()
-        .find(|line| line.contains("doc-writer"))
+        .find(|line| line.contains(DOCS_TASK))
         .unwrap_or_default();
     assert!(row.contains("failed"), "{row:?}");
 
     let done = frame
         .lines()
-        .find(|line| line.contains("reviewer"))
+        .find(|line| line.contains(REVIEW_TASK))
         .unwrap_or_default();
     assert!(done.contains("done"), "{done:?}");
 }
@@ -2366,16 +2364,16 @@ fn a_running_agent_is_timed_and_a_finished_one_shows_its_context() {
 
     let running = frame
         .lines()
-        .find(|line| line.contains("test-writer"))
+        .find(|line| line.contains(TESTS_TASK))
         .unwrap_or_default();
     assert!(
-        running.contains("running 1m 42s"),
+        running.trim_end_matches(['│', ' ']).ends_with(" 1m 42s"),
         "the session ran for 102 seconds before it was read:\n{running:?}"
     );
 
     assert!(!running.contains("ctx"), "{running:?}");
 
-    for (finished, word) in [("reviewer", "done 4100 ctx"), ("doc-writer", "failed")] {
+    for (finished, word) in [(REVIEW_TASK, "done 4100 ctx"), (DOCS_TASK, "failed")] {
         let row = frame
             .lines()
             .find(|line| line.contains(finished))
@@ -2402,16 +2400,10 @@ fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
             .to_owned()
     };
 
-    assert!(
-        row("test-writer").contains("tests/fetch.test.ts sonnet-5"),
-        "{frame}"
-    );
-    assert!(
-        row("reviewer").contains("catalog/cache.ts haiku-4-5"),
-        "{frame}"
-    );
+    assert!(row(TESTS_TASK).contains(" sonnet "), "{frame}");
+    assert!(row(REVIEW_TASK).contains(" haiku "), "{frame}");
     for model in ["sonnet", "haiku", "opus"] {
-        assert!(!row("doc-writer").contains(model), "{frame}");
+        assert!(!row(DOCS_TASK).contains(model), "{frame}");
     }
 }
 
@@ -2430,14 +2422,14 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
     };
 
     assert!(
-        under("test-writer").contains("└ Reading tests/stream.rs"),
+        under(TESTS_TASK).contains("└ Reading tests/stream.rs"),
         "{frame}"
     );
     assert!(
-        under("doc-writer").contains("└ Notion 404, gave up after 2 retries"),
+        under(DOCS_TASK).contains("└ Notion 404, gave up after 2 retries"),
         "{frame}"
     );
-    assert!(under("reviewer").contains("✗ doc-writer"), "{frame}");
+    assert!(under(REVIEW_TASK).contains("✗ doc "), "{frame}");
     // The transcript hangs rows of its own from a `└`; in the column to its
     // right, every one is under an agent.
     let under_agents: usize = frame
@@ -2576,7 +2568,7 @@ fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
         "the tools section is what the pane was scrolled to:\n{frame}"
     );
     assert!(
-        !frame.contains("◆ test-writer"),
+        !frame.contains("◆ test "),
         "and the agents above it are what it scrolled past:\n{frame}"
     );
 }
@@ -2594,7 +2586,7 @@ fn the_activity_pane_folds_a_section_away() {
         "a folded section still has to say that it is folded:\n{frame}"
     );
     assert!(
-        !frame.contains("test-writer"),
+        !frame.contains(TESTS_TASK),
         "the agents are folded away, not merely scrolled past:\n{frame}"
     );
     assert!(frame.contains("▾ Decisions"), "{frame}");

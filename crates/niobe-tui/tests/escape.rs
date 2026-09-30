@@ -231,6 +231,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             Event::AgentSpawn {
                 id: AgentId::from("qa"),
                 parent: None,
+                kind: None,
                 label: format!("agent {p}"),
             },
             Event::AgentProgress {

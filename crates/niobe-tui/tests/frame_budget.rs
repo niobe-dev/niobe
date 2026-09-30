@@ -396,6 +396,7 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
         app.apply(&Event::AgentSpawn {
             id: format!("busy-{n}").into(),
             parent: None,
+            kind: None,
             label: format!("explorer-{n} → crates/niobe-core/src/session.rs"),
         });
     }

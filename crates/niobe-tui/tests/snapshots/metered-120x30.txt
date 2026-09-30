@@ -1,30 +1,30 @@
  Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
  ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃                                                                          ┃ │                                       │
- ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ session ≥~$0.07 · ≥~$2.37/h worked    │
- ┃    48     return res;                                                    ┃ │ ───────────────────────────────────── │
- ┃       …                                                                  ┃ │ opus-5     94%  ▓▓▓▓▓▓   49k   ~$0.07 │
- ┃   115     cache.set(url, {                                               ┃ │ haiku-4-5   6%  ▓░░░░░  3200        — │
- ┃   116 +     etag: res.headers.get("ETag"),                               ┃ │ cache hit  81%  ▓▓▓▓▓░   40k          │
- ┃   117       body,                                                        ┃ │ ───────────────────────────────────── │
- ┃   └ allowed by you                                                       ┃ │ context ▓▓░░░░░░░░░░  13%  25k / 200k │
- ┃                                                                          ┃ └───────────────────────────────────────┘
- ┃ ◆ claude                                                                 ┃ ┌─────────────── Changes ───────────────┐
- ┃   Rewriting the 304 test around the cached body.                         ┃ │                                       │
- ┃                                                                          ┃ │ ⎇ main ↑3                             █
- ┃ ◆ claude                                                                 ┃ │ ▾ Working tree  23 files  +≥977 −≥259 │
- ┃   The notebook that demonstrates the fetcher needs the new call shape.   ┃ │   .                                   │
- ┃                                                                          █ │     CHANGELOG.md                +0 −0 │
- ┃ ✗ Bash                       npm test -- fetch             exit 1 · 0.4s █ │   catalog/                            │
- ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │     fetch.ts                 +149 −12 │
- ┃                                                                          █ │     etag.ts                   +88 −41 │
+ ┃    46 +   const res = await fetch(url, { ...init, headers });            ┃ │ session ≥~$0.07 · ≥~$2.37/h worked    │
+ ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ ───────────────────────────────────── │
+ ┃    48     return res;                                                    ┃ │ opus-5     94% ▓▓▓▓▓▓▓   49k   ~$0.07 │
+ ┃       …                                                                  ┃ │ haiku-4-5   6% ▓░░░░░░  3200        — │
+ ┃   115     cache.set(url, {                                               ┃ │ cache hit  81% ▓▓▓▓▓▓░   40k          │
+ ┃   116 +     etag: res.headers.get("ETag"),                               ┃ │ ───────────────────────────────────── │
+ ┃   117       body,                                                        ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   └ allowed by you                                                       ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌─────────────── Changes ───────────────┐
+ ┃ ◆ claude                                                                 ┃ │ ⎇ main ↑3                             █
+ ┃   Rewriting the 304 test around the cached body.                         ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃                                                                          ┃ │   .                                   │
+ ┃ ◆ claude                                                                 ┃ │     CHANGELOG.md                +0 −0 │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │   catalog/                            │
+ ┃                                                                          █ │     fetch.ts                 +149 −12 │
+ ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │     etag.ts                   +88 −41 │
+ ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │     cache/lru.ts               +31 −9 │
+ ┃                                                                          █ │     cache/index.ts             +12 −0 │
  ┃ ◆ claude                                                                 █ └───────────────────────────────────────┘
  ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ ┌────────────── Activity ───────────────┐
- ┃   304 path asserts a body that is no longer sent.                        █ │                                       │
- ┃                                                                          █ │ ▾ Sub-agents  1 running · 1 failed    █
- ┃ ── turn 1 13:41 · 52k tok · 1m 42s ───────────────────────────────────── █ │ ◆ test-writer → tests… running 1m 42s │
- ┃                                                                          █ │   └ Reading tests/stream.rs           │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ◇ reviewer → catalog/c… done 4100 ctx │
- ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │ ✗ doc-writer → docs/etags.md   failed │
+ ┃   304 path asserts a body that is no longer sent.                        █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃                                                                          █ │ ◆ test     Cover tests… sonnet 1m 42s █
+ ┃ ── turn 1 13:41 · 3 sub-agents · 8 tool calls · 52k tok · 1m 42s ─────── █ │   └ Reading tests/stream.rs           │
+ ┃                                                                          █ │ ◇ reviewer Review cata… done 4100 ctx │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ✗ doc      Write docs/etags.md failed │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │   └ Notion 404, gave up after 2 retr… │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit

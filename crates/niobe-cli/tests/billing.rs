@@ -150,7 +150,7 @@ fn a_recorded_max_session_shows_windows_and_tokens_and_no_dollar_total() {
     assert!(pane.contains("5h "), "{pane}");
     assert!(pane.contains("7d "), "{pane}");
     // What the CLI priced the work at is on screen, and named for what it is.
-    assert!(pane.contains("API-equivalent $"), "{pane}");
+    assert!(pane.contains("API-equiv $"), "{pane}");
     assert!(!pane.contains("session "), "{pane}");
     assert_snapshot("usage-max-120x30", &pane);
 }

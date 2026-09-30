@@ -1736,6 +1736,7 @@ mod tests {
             state.apply(&Event::AgentSpawn {
                 id: "a1".into(),
                 parent: None,
+                kind: None,
                 label: "test-writer".to_owned(),
             });
             state.apply(&start("t1", "Bash", None));
@@ -1751,6 +1752,7 @@ mod tests {
         state.apply(&Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
+            kind: None,
             label: "test-writer".to_owned(),
         });
         state.apply(&start("t1", "Bash", None));
@@ -1816,6 +1818,7 @@ mod tests {
             state.apply(&Event::AgentSpawn {
                 id: id.into(),
                 parent: None,
+                kind: None,
                 label: "test-writer".to_owned(),
             });
         }
@@ -1844,6 +1847,7 @@ mod tests {
             state.apply(&Event::AgentSpawn {
                 id: id.into(),
                 parent: None,
+                kind: None,
                 label: "test-writer".to_owned(),
             });
         }
@@ -2550,6 +2554,7 @@ mod tests {
             Event::AgentSpawn {
                 id: "a1".into(),
                 parent: None,
+                kind: None,
                 label: "review".to_owned(),
             },
             Event::Error {

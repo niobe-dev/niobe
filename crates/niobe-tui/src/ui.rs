@@ -567,10 +567,6 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_activity(frame, activity, app, theme);
 }
 
-/// Rows of content a pane keeps before it will spare a blank row under its
-/// title.
-const PANE_ROOM: u16 = 2;
-
 /// How a pane's border is drawn: the pane with the keyboard in the theme's
 /// focus line and colour, every other pane in its plain line and the frame
 /// colour.
@@ -606,16 +602,13 @@ impl Border {
 }
 
 /// The pane frame every pane shares: the border [`Border`] says, the title
-/// centred on the top edge, and room between the border and what is written
-/// inside it.
+/// centred on the top edge, and a column either side between the border and
+/// what is written inside it.
 ///
-/// A column either side always, and a blank row under the title where the
-/// pane is tall enough to spare one. The blank row is the first thing a short
-/// pane gives up: at the smallest terminal the shell draws in, a row of the
-/// changed files is worth more than the room above them.
-fn pane(title: impl Into<String>, area: Rect, border: Border, theme: &Theme) -> Block<'static> {
-    // Two rows of border, the blank row itself, and PANE_ROOM left over.
-    let top = u16::from(area.height > 2 + PANE_ROOM);
+/// What a pane holds starts on the row under its title, with no blank row
+/// between: the title already stands apart on the border, and a row of the
+/// changed files or of the agents at work is worth more than the room.
+fn pane(title: impl Into<String>, border: Border, theme: &Theme) -> Block<'static> {
     // Reversed rather than painted, so that a terminal with no colour still
     // draws the focused title as a solid bar.
     let title_style = match border.focused {
@@ -630,7 +623,7 @@ fn pane(title: impl Into<String>, area: Rect, border: Border, theme: &Theme) -> 
         .border_type(border.kind)
         .border_style(border.style)
         .style(Style::new().bg(theme.pane_bg).fg(theme.fg))
-        .padding(Padding::new(1, 1, top, 0))
+        .padding(Padding::horizontal(1))
         .title_top(
             Line::from(format!(" {} ", title.into()))
                 .style(title_style)
@@ -647,7 +640,7 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     app.measured_session(area);
     app.drew_jump(None);
     let border = Border::of(app.focus() == Focus::Session, theme);
-    let block = pane(title, area, border, theme);
+    let block = pane(title, border, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -1373,16 +1366,30 @@ pub struct DrawnEntries {
 
 impl DrawnEntries {
     /// Brings every entry's lines up to date.
+    ///
+    /// The columns are worked out here, from every entry, because a row is
+    /// drawn in the columns the widest row needs; and so is whether an entry
+    /// keeps the blank line after it, which depends on what comes next.
     fn update(&mut self, entries: &[Entry], width: usize, detail: Detail, theme: &Theme) {
+        let detail = Detail {
+            columns: crate::calls::Columns::of(entries),
+            ..detail
+        };
         self.drawn.truncate(entries.len());
         for (at, entry) in entries.iter().enumerate() {
-            let key = drawn_from(entry, width, detail, theme);
+            let packed = is_row(entry) && entries.get(at + 1).is_some_and(is_row);
+            let key = drawn_from(entry, width, detail, theme) ^ u64::from(packed);
+            let draw = || {
+                let mut lines = entry_lines(entry, width, detail, theme);
+                if packed && lines.last().is_some_and(|line| line.width() == 0) {
+                    lines.pop();
+                }
+                lines
+            };
             match self.drawn.get_mut(at) {
                 Some((drawn_key, _)) if *drawn_key == key => {}
-                Some(slot) => *slot = (key, entry_lines(entry, width, detail, theme)),
-                None => self
-                    .drawn
-                    .push((key, entry_lines(entry, width, detail, theme))),
+                Some(slot) => *slot = (key, draw()),
+                None => self.drawn.push((key, draw())),
             }
         }
     }
@@ -1478,6 +1485,30 @@ pub(crate) struct Anchor {
     lines: Vec<Line<'static>>,
 }
 
+/// Whether `entry` is drawn as rows of the calls table — a call, a run of
+/// calls, a sub-agent's words — with nothing under it that needs room to be
+/// read. Two such entries in a row are drawn on consecutive lines, so a
+/// session's calls read as one table rather than a list with a gap after
+/// every line; a diff or what a command printed keeps the blank line after
+/// it, and so does everything else the transcript shows.
+fn is_row(entry: &Entry) -> bool {
+    match entry.kind {
+        EntryKind::SubAgent => true,
+        EntryKind::User
+        | EntryKind::Agent
+        | EntryKind::Tool
+        | EntryKind::Failure
+        | EntryKind::Notice
+        | EntryKind::Turn(_) => {
+            !entry.calls.is_empty()
+                && entry
+                    .calls
+                    .iter()
+                    .all(|call| call.change.is_none() && call.printed.is_none())
+        }
+    }
+}
+
 /// What an entry's lines are drawn from, as one number.
 ///
 /// Whether the diffs are open goes in only for an entry that holds a diff it
@@ -1488,6 +1519,7 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64
     entry.hash(&mut hasher);
     width.hash(&mut hasher);
     detail.folded.hash(&mut hasher);
+    detail.columns.hash(&mut hasher);
     if holds_a_cut_diff(entry) {
         detail.diffs_open.hash(&mut hasher);
     }
@@ -1508,6 +1540,8 @@ fn transcript_detail(app: &App) -> Detail {
     Detail {
         folded: app.calls_folded(),
         diffs_open: app.diffs_open(),
+        // Worked out from the entries where they are drawn.
+        columns: crate::calls::Columns::default(),
     }
 }
 
@@ -1947,8 +1981,14 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
     if !entry.calls.is_empty() {
         return crate::calls::lines(entry, width, detail, theme);
     }
-    if let EntryKind::Turn(rule) = &entry.kind {
-        return crate::turns::lines(rule, width, theme);
+    match &entry.kind {
+        EntryKind::Turn(rule) => return crate::turns::lines(rule, width, theme),
+        EntryKind::SubAgent => return crate::calls::said(entry, width, detail, theme),
+        EntryKind::User
+        | EntryKind::Agent
+        | EntryKind::Tool
+        | EntryKind::Failure
+        | EntryKind::Notice => {}
     }
     let colour = entry.kind.colour(theme);
     let body_width = width.saturating_sub(GUTTER);
@@ -1961,14 +2001,13 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
         Span::styled(entry.head.clone(), Style::new().fg(colour).bold()),
     ];
     let room = body_width.saturating_sub(text::width(&entry.head) + 2);
-    // A sub-agent's own words are headed with its whole name already; on
-    // anything else of an agent's — a refusal of its call — the name is said
-    // the way its calls' rows say it.
-    let agent = match (&entry.kind, &entry.agent) {
-        (EntryKind::SubAgent, _) | (_, None) => None,
-        (_, Some(agent)) => Some(crate::calls::agent_tag(agent, &entry.meta, room)),
-    }
-    .filter(|tag| !tag.is_empty());
+    // Anything else of an agent's — a refusal of its call — says the agent's
+    // tag the way its calls' rows do.
+    let agent = entry
+        .agent
+        .as_ref()
+        .map(|agent| crate::calls::agent_tag(agent, &entry.meta, room))
+        .filter(|tag| !tag.is_empty());
     if agent.is_some() || !entry.meta.is_empty() {
         head.push(Span::raw("  "));
     }
@@ -2035,7 +2074,7 @@ fn usage_height(app: &App) -> u16 {
     let windows = window_rows(app);
     let spend = spend_rows(app);
     let context = context_rows(app);
-    // Two rows of border and the blank row under the title; the windows, the
+    // Two rows of border; the windows, the
     // models and the money in the order the shape puts them, with a rule
     // between the windows and the models on a plan wherever both have rows,
     // and always under the money on a metered account; then the context,
@@ -2044,7 +2083,7 @@ fn usage_height(app: &App) -> u16 {
         true => money + windows + 1 + spend,
         false => windows + usize::from(windows > 0 && spend > 0) + spend + money,
     };
-    let rows = 3 + blocks + usize::from(context > 0) + context;
+    let rows = 2 + blocks + usize::from(context > 0) + context;
     u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
@@ -2058,13 +2097,61 @@ fn metered(app: &App) -> bool {
     app.session().billing() == Some(Billing::Metered)
 }
 
-/// The widest label a window row carries — `extra` — and a column of gap.
-const WINDOW_LABEL: usize = 6;
+/// The label a plan's money row carries in the pane's grid: what the work
+/// would have cost at API prices, which is not what the plan cost.
+const PLAN_LABEL: &str = "API-equiv";
 
-/// What a window's share is drawn in: a space, and three columns for the
-/// figure, which is one more than a full window needs so that a window
-/// reported past its end still lines up with the ones that are not.
-const WINDOW_SHARE: usize = 5;
+/// How wide the Usage pane's label column is: the widest label any of its
+/// rows carries, and a column of gap.
+///
+/// Every block of the pane — the windows, the models and the cache, the
+/// money on a plan, the context — draws its rows in one grid of a label, a
+/// share, a meter and what follows it, so the shares stand in one column and
+/// the meters start in one. The column is as wide as the widest label the
+/// pane is drawing, so a session on one short-named model is not drawn as if
+/// it ran on the longest.
+fn usage_label_column(app: &App) -> usize {
+    let windows = app.session().usage_windows().map_or(0, |windows| {
+        [
+            (windows.five_hour.is_some(), "5h"),
+            (windows.seven_day.is_some(), "7d"),
+            (windows.using_overage, "extra"),
+        ]
+        .into_iter()
+        .filter(|(shown, _)| *shown)
+        .map(|(_, label)| text::width(label))
+        .max()
+        .unwrap_or(0)
+    });
+    // With no model to list, the block is one line saying so, not a row.
+    let spent = models(app);
+    let models = match spent.is_empty() {
+        true => 0,
+        false => usage::labels(spent.iter().map(|(model, _)| model.as_str()))
+            .iter()
+            .map(|label| text::width(label))
+            .chain([text::width(CACHE_LABEL)])
+            .max()
+            .unwrap_or(0),
+    };
+    let money = match app.session().billing() {
+        Some(Billing::Plan) if !app.session().billing_changed() => text::width(PLAN_LABEL),
+        Some(Billing::Plan | Billing::Metered) | None => 0,
+    };
+    let context = match app.session().context() {
+        Some(_) => text::width(CONTEXT_LABEL),
+        None => 0,
+    };
+    windows.max(models).max(money).max(context) + 1
+}
+
+/// What a share is drawn in: three columns for the figure and the sign, one
+/// more than a full window needs so that a window reported past its end
+/// still lines up with the ones that are not.
+const SHARE_COLUMNS: usize = 4;
+
+/// What stands between a share and its meter.
+const SHARE_GAP: &str = " ";
 
 /// The longest a meter is drawn. Twelve cells read a share to within a tenth,
 /// which is as fine as a window is worth reading, and it leaves the reset time
@@ -2076,9 +2163,9 @@ const METER_CELLS: usize = 12;
 /// or not a number — rather than a `0%` nobody measured.
 fn window_share(utilization: f64) -> String {
     if !utilization.is_finite() || utilization < 0.0 {
-        return format!(" {:>3} ", "—");
+        return format!("{:>3} ", "—");
     }
-    format!(" {:>3}%", crate::app::percent(utilization).min(999))
+    format!("{:>3}%", crate::app::percent(utilization).min(999))
 }
 
 /// How many rows the plan's windows take: one per window a backend reported,
@@ -2094,8 +2181,8 @@ fn window_rows(app: &App) -> usize {
     })
 }
 
-/// When a window comes back, as the row says it: ` · resets 16:40` later today
-/// and ` · resets Tue 09:00` on another day.
+/// When a window comes back, as the row says it: ` resets 16:40` later today
+/// and ` resets Tue 09:00` on another day.
 ///
 /// `None` where there is no reset to name — the backend reported the share
 /// without one or with one past what the clock holds, the machine named no
@@ -2104,7 +2191,7 @@ fn window_rows(app: &App) -> usize {
 fn reset_clause(app: &App, window: &UsageWindow) -> Option<String> {
     let at = window.resets_at?;
     let when = clock::upcoming(app.stamp()?, app.moment(at)?)?;
-    Some(format!(" · resets {when}"))
+    Some(format!(" resets {when}"))
 }
 
 /// The plan's windows, which on a flat-rate plan are what a budget is: a
@@ -2135,8 +2222,9 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         .filter_map(|(_, _, clause)| clause.as_deref().map(text::width))
         .max()
         .unwrap_or(0);
+    let labels = usage_label_column(app);
     let cells = width
-        .saturating_sub(WINDOW_LABEL + WINDOW_SHARE + clause_columns)
+        .saturating_sub(labels + SHARE_COLUMNS + SHARE_GAP.len() + clause_columns)
         .min(METER_CELLS);
 
     let dim = Style::new().fg(theme.dim);
@@ -2146,10 +2234,11 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             let (filled, track) = meter(window.utilization, cells);
             let style = window_style(&window, theme);
             Line::from(vec![
-                Span::styled(format!("{label:<WINDOW_LABEL$}"), dim),
+                Span::styled(format!("{label:<labels$}"), dim),
+                Span::styled(window_share(window.utilization), style.bold()),
+                Span::raw(SHARE_GAP),
                 Span::styled(filled, style),
                 Span::styled(track, dim),
-                Span::styled(window_share(window.utilization), style.bold()),
                 Span::styled(clause.unwrap_or_default(), dim),
             ])
         })
@@ -2165,7 +2254,7 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     // promise something nothing reported.
     if windows.using_overage {
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<WINDOW_LABEL$}", "extra"), dim),
+            Span::styled(format!("{:<labels$}", "extra"), dim),
             Span::styled("—", dim),
             Span::styled(" · on", Style::new().fg(theme.hot).bold()),
         ]));
@@ -2178,10 +2267,6 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
 /// session under a hundred million tokens (`999k`, `12.3M`) and a column of
 /// gap before it, which is drawn whatever the figure's width.
 const MODEL_TOKENS: usize = 6;
-
-/// What a model's share is drawn in: three columns and the sign, with a space
-/// either side of them.
-const MODEL_SHARE: usize = 6;
 
 /// What a model's cost is drawn in on a metered account: the widest figure
 /// the pane prints for one (`≥~$12.34`) and a column of gap before it. A wider
@@ -2248,13 +2333,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     }
 
     let labels = usage::labels(spent.iter().map(|(model, _)| model.as_str()));
-    let columns = labels
-        .iter()
-        .map(|label| text::width(label))
-        .chain(std::iter::once(text::width(CACHE_LABEL)))
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let columns = usage_label_column(app);
     // The meter gives up cells until the row fits, the way a window row's
     // does: how much of a bar is drawn is worth less than the figure beside it.
     let costed = metered(app);
@@ -2263,7 +2342,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         false => 0,
     };
     let cells = width
-        .saturating_sub(columns + MODEL_SHARE + MODEL_TOKENS + cost_columns)
+        .saturating_sub(columns + SHARE_COLUMNS + SHARE_GAP.len() + MODEL_TOKENS + cost_columns)
         .min(METER_CELLS);
 
     // A label, a figure, a meter of the share that figure rounds, a count, and
@@ -2281,7 +2360,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         let mut spans = vec![
             Span::styled(format!("{label:<columns$}"), dim),
             Span::styled(figure, style.bold()),
-            Span::styled("  ", dim),
+            Span::raw(SHARE_GAP),
             Span::styled(filled, style),
             Span::styled(track, dim),
             Span::styled(format!(" {count:>width$}", width = MODEL_TOKENS - 1), dim),
@@ -2348,8 +2427,8 @@ fn share_label(percent: u64, some: bool, not_all: bool) -> String {
     }
 }
 
-/// The widest label the context row carries, `context`, and a column of gap.
-const CONTEXT_LABEL: usize = 8;
+/// The label the context row carries.
+const CONTEXT_LABEL: &str = "context";
 
 /// How many rows the context takes: one once the main agent has sent a
 /// request, and none before — nothing has been measured, and a row at `0%`
@@ -2389,7 +2468,8 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         return Vec::new();
     };
     let dim = Style::new().fg(theme.dim);
-    let label = Span::styled(format!("{:<CONTEXT_LABEL$}", "context"), dim);
+    let labels = usage_label_column(app);
+    let label = Span::styled(format!("{CONTEXT_LABEL:<labels$}"), dim);
     let Some(window) = context_window(app, context) else {
         return vec![Line::from(vec![
             label,
@@ -2398,9 +2478,9 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     };
 
     let share = context.tokens as f64 / window.max(1) as f64;
-    let figures = format!("  {} / {}", compact(context.tokens), compact(window));
+    let figures = format!(" {} / {}", compact(context.tokens), compact(window));
     let cells = width
-        .saturating_sub(CONTEXT_LABEL + WINDOW_SHARE + text::width(&figures))
+        .saturating_sub(labels + SHARE_COLUMNS + SHARE_GAP.len() + text::width(&figures))
         .min(METER_CELLS);
     let (filled, track) = meter(share, cells);
     let style = match share >= BUDGET_SHOWN_HOT {
@@ -2409,9 +2489,10 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     };
     vec![Line::from(vec![
         label,
+        Span::styled(window_share(share), style.bold()),
+        Span::raw(SHARE_GAP),
         Span::styled(filled, style),
         Span::styled(track, dim),
-        Span::styled(window_share(share), style.bold()),
         Span::styled(figures, dim),
     ])]
 }
@@ -2426,7 +2507,7 @@ fn divider(width: usize, theme: &Theme) -> Line<'static> {
 fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // Usage has nothing to scroll and nothing to fold, so it never has the
     // keyboard.
-    let block = pane("Usage", area, Border::of(false, theme), theme);
+    let block = pane("Usage", Border::of(false, theme), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -2526,7 +2607,13 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             }
             Line::from(spans)
         }
-        Some(Billing::Plan) => Line::from(format!("API-equivalent {}", cost())).style(dim),
+        Some(Billing::Plan) => Line::from(vec![
+            Span::styled(
+                format!("{PLAN_LABEL:<width$}", width = usage_label_column(app)),
+                dim,
+            ),
+            Span::styled(cost(), dim),
+        ]),
         None => Line::from(vec![
             Span::styled("session ", dim),
             Span::styled("—", Style::new().fg(theme.fg)),
@@ -2565,8 +2652,9 @@ fn budget_line(app: &App, budget: f64, width: usize, theme: &Theme) -> Line<'sta
     })
 }
 
-/// Columns a tool's name gets in the Usage pane's mix.
-const BAR_NAME: usize = 18;
+/// The most columns a tool's name gets in the mix; the column is as wide as
+/// the widest family it lists, up to this.
+const BAR_NAME: usize = 16;
 
 /// Columns a tool's count gets, right-aligned.
 const BAR_COUNT: usize = 4;
@@ -2579,16 +2667,20 @@ const BAR_FAILED: usize = 4;
 /// pane is a block of colour the count beside it gets lost in.
 const BAR_CELLS: usize = 12;
 
-/// One `Notion·*            16 ━━ ✗ 3` row: the family, its calls, a thin bar
-/// in the tool colour for how it compares with the busiest family, and its own
+/// One `Notion·*  16 ▓▓ ✗ 3` row: the family in a column `name` wide, its
+/// calls, a bar for how it compares with the busiest family, and its own
 /// failures where it has any.
+///
+/// The busiest family's bar is drawn in the hot colour and the rest dim: the
+/// bars are read for which tool the session leans on, and one bright bar
+/// answers that before any is measured against another.
 ///
 /// The failures are on the family's own row because the header's count says
 /// only that the session failed three calls, not which tool it kept failing
 /// at. A family with no failures carries no column at all — `✗ 0` is a
 /// reassurance dressed as a measurement.
 fn bar_line(
-    family: &str,
+    (family, name): (&str, usize),
     count: u64,
     failed: u64,
     busiest: u64,
@@ -2604,22 +2696,20 @@ fn bar_line(
         0 => String::new(),
         failed => format!(" ✗ {failed}"),
     };
+    let bar = match count == busiest {
+        true => theme.hot,
+        false => theme.dim,
+    };
 
     Line::from(vec![
         Span::styled(
-            format!(
-                "{ROW_INDENT}{:<BAR_NAME$}",
-                text::truncate(family, BAR_NAME - 1)
-            ),
+            format!("{ROW_INDENT}{:<name$}", text::truncate(family, name)),
             Style::new().fg(theme.dim),
         ),
+        Span::styled(format!("{count:>BAR_COUNT$} "), Style::new().fg(theme.fg)),
         Span::styled(
-            format!("{count:>BAR_COUNT$} "),
-            Style::new().fg(theme.hot).bold(),
-        ),
-        Span::styled(
-            format!("{:<width$}", "━".repeat(filled.min(width))),
-            Style::new().fg(theme.tool),
+            format!("{:<width$}", "▓".repeat(filled.min(width))),
+            Style::new().fg(bar),
         ),
         Span::styled(failures, Style::new().fg(theme.del)),
     ])
@@ -2724,14 +2814,20 @@ fn agent_figures(
     figures
 }
 
-/// A sub-agent per row: the state glyph, what it was spawned to do, the model
-/// it answers with, and the status column — then, on a row of its own, the
-/// last thing it was seen doing.
+/// A sub-agent per row: the state glyph, its tag — the word the transcript's
+/// rows name it by — what it was spawned to do, the model it answers with,
+/// and its status on the right; then, on a row of its own, what it is doing.
 ///
-/// The model is drawn only where the agent's own messages named one, and
-/// shortened the way the Usage pane shortens the session's. The sub-line is
-/// drawn only where the backend reported a step or an answer: an empty `└` on
-/// every agent that said nothing would be half the pane's rows saying nothing.
+/// The tag and the model each have a column as wide as the widest in the
+/// list, so the tasks start in one column and the statuses end in another.
+/// The model is drawn only where the agent's own messages named one, by its
+/// family where no other agent's model shares it.
+///
+/// The sub-line is the call a running agent has open, as its row in the
+/// transcript names it, and otherwise the last thing its backend reported
+/// it doing or its answer. It is drawn only where there is one: an empty `└`
+/// on every agent that said nothing would be half the pane's rows saying
+/// nothing.
 fn agent_rows(
     app: &App,
     session: &SessionState,
@@ -2754,40 +2850,41 @@ fn agent_rows(
         return rows;
     }
 
+    let tags = app.agent_tags();
     let models = agent_models(app.agents());
-    for (agent, model) in app.agents().iter().zip(models) {
+    let tag_column = tags.iter().map(|tag| text::width(tag)).max().unwrap_or(0);
+    let model_column = models
+        .iter()
+        .flatten()
+        .map(|model| text::width(model))
+        .max()
+        .unwrap_or(0);
+
+    for ((agent, tag), model) in app.agents().iter().zip(tags).zip(models) {
         let (glyph, colour, word) = agent_state(agent, theme);
         let status = agent_status(agent, word, app.stamp());
+        // The status is right-aligned at the pane's edge, so it needs no
+        // column of its own: one as wide as `done 4100 ctx` on every row
+        // would take the room of a running agent's task.
+        let columns = AgentColumns {
+            tag: tag_column,
+            model: model.as_ref().map_or(0, |_| model_column),
+            status: text::width(&status),
+            task: 0,
+        };
+        rows.push(agent_row(
+            (glyph, colour),
+            &tag,
+            agent.task(),
+            (model, &status),
+            columns.fitted(width),
+            theme,
+        ));
 
-        let room = width
-            .saturating_sub(AGENT_GLYPH + text::width(&status) + AGENT_GAP)
-            .max(1);
-        let (label, model) = agent_name(&agent.label, model, room);
-        let named = text::width(&label) + model.as_ref().map_or(0, |m| 1 + text::width(m));
-        // What is left between the two goes between them, so the status keeps
-        // the pane's right edge and the labels do not have to be one length.
-        let pad = width
-            .saturating_sub(AGENT_GLYPH + named + text::width(&status))
-            .max(AGENT_GAP);
-
-        let mut row = vec![
-            Span::styled(format!("{glyph} "), Style::new().fg(colour).bold()),
-            Span::styled(label, Style::new().fg(theme.fg)),
-        ];
-        if let Some(model) = model {
-            row.push(Span::styled(
-                format!(" {model}"),
-                Style::new().fg(theme.dim),
-            ));
-        }
-        row.push(Span::raw(" ".repeat(pad)));
-        row.push(Span::styled(status, Style::new().fg(colour)));
-        rows.push(Line::from(row));
-
-        if let Some(latest) = &agent.latest {
+        if let Some(doing) = app.agent_doing(&agent.id).or_else(|| agent.latest.clone()) {
             let room = width.saturating_sub(AGENT_SUBLINE).max(1);
             rows.push(
-                Line::from(format!("  └ {}", text::truncate(latest, room)))
+                Line::from(format!("  └ {}", text::truncate(&doing, room)))
                     .style(Style::new().fg(theme.dim)),
             );
         }
@@ -2795,43 +2892,108 @@ fn agent_rows(
     rows
 }
 
-/// What each agent's model is called on its row, in the pane's order: the
-/// Usage pane's short names, which keep an id whole where two would read
-/// alike.
+/// The columns an agent's row is drawn in. The task takes what the others
+/// leave of the row.
+#[derive(Debug, Clone, Copy)]
+struct AgentColumns {
+    tag: usize,
+    model: usize,
+    status: usize,
+    task: usize,
+}
+
+impl AgentColumns {
+    /// The columns in a row `width` wide, with the model given up where it
+    /// would leave the task less than [`AGENT_LABEL_LEAST`]: a row that names
+    /// the model and not what the agent is for says nothing about which
+    /// agent it is.
+    fn fitted(self, width: usize) -> Self {
+        let task = |model: usize| {
+            width.saturating_sub(
+                AGENT_GLYPH + self.tag + AGENT_GAP + gapped(model) + AGENT_GAP + self.status,
+            )
+        };
+        match task(self.model) >= AGENT_LABEL_LEAST {
+            true => Self {
+                task: task(self.model),
+                ..self
+            },
+            false => Self {
+                model: 0,
+                task: task(0),
+                ..self
+            },
+        }
+    }
+}
+
+/// A column and the gap before it, or nothing for a column not drawn.
+fn gapped(column: usize) -> usize {
+    match column {
+        0 => 0,
+        column => AGENT_GAP + column,
+    }
+}
+
+/// One agent's row, in `columns`.
+fn agent_row(
+    (glyph, colour): (&str, Color),
+    tag: &str,
+    task: &str,
+    (model, status): (Option<String>, &str),
+    columns: AgentColumns,
+    theme: &Theme,
+) -> Line<'static> {
+    let room = columns.task;
+    let task = text::truncate(task, room);
+    let pad = room.saturating_sub(text::width(&task));
+    let mut row = vec![
+        Span::styled(format!("{glyph} "), Style::new().fg(colour).bold()),
+        Span::styled(
+            format!("{tag:<width$}", width = columns.tag),
+            Style::new().fg(colour),
+        ),
+        Span::raw(AGENT_SPACE),
+        Span::styled(task, Style::new().fg(theme.fg)),
+        Span::raw(" ".repeat(pad)),
+    ];
+    if columns.model > 0 {
+        let model = text::truncate(&model.unwrap_or_default(), columns.model);
+        row.push(Span::styled(
+            format!(" {model:<width$}", width = columns.model),
+            Style::new().fg(theme.dim),
+        ));
+    }
+    row.push(Span::styled(
+        format!(" {status:>width$}", width = columns.status),
+        Style::new().fg(colour),
+    ));
+    Line::from(row)
+}
+
+/// What each agent's model is called on its row, in the pane's order: its
+/// family — `opus`, `sonnet` — where no other agent's model is of the same
+/// family, and the Usage pane's short name where one is.
 fn agent_models(agents: &[SubAgent]) -> Vec<Option<String>> {
     let named: Vec<&str> = agents
         .iter()
         .filter_map(|agent| agent.model.as_deref())
         .collect();
-    let mut labels = usage::labels(named).into_iter();
+    let mut labels = usage::families(named).into_iter();
     agents
         .iter()
         .map(|agent| agent.model.as_ref().and_then(|_| labels.next()))
         .collect()
 }
 
-/// An agent's label and model fitted into `room` cells.
-///
-/// The label is what the operator reads the row for, so it keeps the room:
-/// the model is dropped whole where the two do not fit with enough of the
-/// label left to say which agent this is, rather than both being cut.
-fn agent_name(label: &str, model: Option<String>, room: usize) -> (String, Option<String>) {
-    let Some(model) = model else {
-        return (text::truncate(label, room), None);
-    };
-    let left = room.saturating_sub(1 + text::width(&model));
-    match left >= AGENT_LABEL_LEAST.min(text::width(label)) && left > 0 {
-        true => (text::truncate(label, left), Some(model)),
-        false => (text::truncate(label, room), None),
-    }
-}
-
-/// A sub-agent's status column: `running 1m 42s`, `done 4100 ctx`, `failed`.
+/// A sub-agent's status column: how long a running agent has run,
+/// `done 4100 ctx`, `failed`.
 ///
 /// The elapsed time is there only while the agent runs, and only where the
 /// shell has both the moment it started and the moment it is drawing at — a
 /// session read back from a log that kept no times has neither, and the state
-/// alone is what there is to say.
+/// alone is what there is to say. A running agent's time stands alone: the
+/// glyph beside its tag already says it is running.
 ///
 /// An agent that finished its task carries the size its conversation reached,
 /// where its backend counted one, marked `ctx` because that is what it is: the
@@ -2851,7 +3013,7 @@ fn agent_status(agent: &SubAgent, word: &str, now: Option<Stamp>) -> String {
         };
     }
     match agent.at.zip(now).and_then(|(at, now)| now.since(at)) {
-        Some(ran) => format!("{word} {}", clock::spent(ran)),
+        Some(ran) => clock::spent(ran),
         None => word.to_owned(),
     }
 }
@@ -2859,13 +3021,14 @@ fn agent_status(agent: &SubAgent, word: &str, now: Option<Stamp>) -> String {
 /// The glyph a sub-agent row opens with, and the space after it.
 const AGENT_GLYPH: usize = 2;
 
-/// The least that stands between what an agent is doing and its status, so
-/// the two never run together on a row whose label fills the pane.
-const AGENT_GAP: usize = 1;
+/// What stands between one column of an agent's row and the next.
+const AGENT_SPACE: &str = " ";
 
-/// The least of an agent's label its model is drawn beside: fewer cells than
-/// this and the model is left off, because a row that names the model and not
-/// the agent says nothing about which agent it is.
+/// How wide [`AGENT_SPACE`] is.
+const AGENT_GAP: usize = AGENT_SPACE.len();
+
+/// The least of an agent's task its model is drawn beside: fewer cells than
+/// this and the model is left off.
 const AGENT_LABEL_LEAST: usize = 12;
 
 /// The indent and the `└ ` an agent's sub-line opens with.
@@ -2900,7 +3063,7 @@ fn draw_scrolling_pane(
     rows: fn(&App, usize, &Theme) -> PaneRows,
 ) {
     let border = Border::of(app.focus() == Focus::Pane(which), theme);
-    let block = pane(title, area, border, theme);
+    let block = pane(title, border, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -3706,11 +3869,24 @@ fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> 
     // The cap the Usage pane drew them under was the price of a pane sized to
     // its content; here the rows below the fold are scrolled to.
     let busiest = mix.first().map(|(_, n)| n.0).unwrap_or(1).max(1);
+    let name = mix
+        .iter()
+        .map(|(family, _)| text::width(family))
+        .max()
+        .unwrap_or(0)
+        .min(BAR_NAME);
     let bar_width = width
-        .saturating_sub(text::width(ROW_INDENT) + BAR_NAME + BAR_COUNT + 2 + BAR_FAILED)
+        .saturating_sub(text::width(ROW_INDENT) + name + BAR_COUNT + 2 + BAR_FAILED)
         .min(BAR_CELLS);
     for (family, (count, failed)) in mix {
-        rows.push(bar_line(family, *count, *failed, busiest, bar_width, theme));
+        rows.push(bar_line(
+            (family, name),
+            *count,
+            *failed,
+            busiest,
+            bar_width,
+            theme,
+        ));
     }
     rows
 }
@@ -4898,10 +5074,10 @@ mod tests {
 
     #[test]
     fn a_level_that_is_not_a_level_draws_a_dash_and_a_huge_one_fits_its_column() {
-        assert_eq!(window_share(-5.0), "   — ");
-        assert_eq!(window_share(f64::NAN), "   — ");
-        assert_eq!(window_share(1e300), " 999%");
-        assert_eq!(window_share(0.5), "  50%");
+        assert_eq!(window_share(-5.0), "  — ");
+        assert_eq!(window_share(f64::NAN), "  — ");
+        assert_eq!(window_share(1e300), "999%");
+        assert_eq!(window_share(0.5), " 50%");
     }
 
     fn window(utilization: f64, resets_at: Option<u64>) -> UsageWindow {
@@ -5152,7 +5328,7 @@ mod tests {
                     }
                     assert_eq!(
                         usize::from(usage_height(&app)),
-                        usage_lines(&app, 40, &crate::theme::CLASSIC).len() + 3,
+                        usage_lines(&app, 40, &crate::theme::CLASSIC).len() + 2,
                         "{billing:?} {events:?} {budget:?}"
                     );
                 }
@@ -5179,8 +5355,8 @@ mod tests {
         assert_eq!(
             rows_of(&app, 66),
             vec![
-                "5h    ▓▓▓▓▓▓░░░░░░  51% · resets 16:40".to_owned(),
-                "7d    ▓▓▓▓▓▓▓▓▓░░░  71% · resets Tue 09:00".to_owned(),
+                "5h  51% ▓▓▓▓▓▓░░░░░░ resets 16:40".to_owned(),
+                "7d  71% ▓▓▓▓▓▓▓▓▓░░░ resets Tue 09:00".to_owned(),
             ]
         );
     }
@@ -5195,7 +5371,7 @@ mod tests {
 
         assert_eq!(
             rows_of(&app, 66),
-            vec!["5h    ▓▓▓▓▓▓░░░░░░  51%".to_owned()],
+            vec!["5h  51% ▓▓▓▓▓▓░░░░░░".to_owned()],
             "a window nobody timed was given a reset, or the window nobody \
              reported was given a row"
         );
@@ -5209,10 +5385,7 @@ mod tests {
             using_overage: false,
         });
 
-        assert_eq!(
-            rows_of(&app, 66),
-            vec!["5h    ▓▓▓▓▓▓░░░░░░  51%".to_owned()]
-        );
+        assert_eq!(rows_of(&app, 66), vec!["5h  51% ▓▓▓▓▓▓░░░░░░".to_owned()]);
     }
 
     #[test]
@@ -5387,7 +5560,7 @@ mod tests {
         sent(&mut app, 76_000, "opus-5", Some(200_000));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓▓▓▓░░░░░░░  38%  76k / 200k"]
+            ["context  38% ▓▓▓▓▓░░░░░░░ 76k / 200k"]
         );
     }
 
@@ -5408,7 +5581,7 @@ mod tests {
         sent(&mut app, 50_000, "opus-5", None);
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓▓░░░░░░░░░  25%  50k / 200k"]
+            ["context  25% ▓▓▓░░░░░░░░░ 50k / 200k"]
         );
     }
 
@@ -5420,7 +5593,7 @@ mod tests {
         sent(&mut app, 50_000, "opus-5", Some(1_000_000));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓░░░░░░░░░░░   5%  50k / 1.0M"]
+            ["context   5% ▓░░░░░░░░░░░ 50k / 1.0M"]
         );
     }
 
@@ -5447,7 +5620,7 @@ mod tests {
         sent(&mut app, 30_000, "opus-5", Some(200_000));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓░░░░░░░░░░  15%  30k / 200k"]
+            ["context  15% ▓▓░░░░░░░░░░ 30k / 200k"]
         );
     }
 
@@ -5458,7 +5631,7 @@ mod tests {
         sent(&mut app, 210_000, "opus-5", Some(200_000));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓▓▓▓▓▓▓▓▓▓▓ 105%  210k / 200k"]
+            ["context 105% ▓▓▓▓▓▓▓▓▓▓▓▓ 210k / 200k"]
         );
     }
 
@@ -5470,7 +5643,7 @@ mod tests {
         sent(&mut app, u64::MAX, "opus-5", Some(1));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓▓▓▓▓▓▓▓▓▓▓ 999%  18.4E / 1"]
+            ["context 999% ▓▓▓▓▓▓▓▓▓▓▓▓ 18.4E / 1"]
         );
     }
 
@@ -5479,7 +5652,7 @@ mod tests {
     fn a_narrow_pane_shortens_the_meter_and_keeps_the_figures() {
         let mut app = bare();
         sent(&mut app, 76_000, "opus-5", Some(200_000));
-        assert_eq!(context_of(&app, 30), ["context ▓▓░░░  38%  76k / 200k"]);
+        assert_eq!(context_of(&app, 30), ["context  38% ▓▓░░░░ 76k / 200k"]);
     }
 
     #[test]
@@ -5772,6 +5945,65 @@ mod tests {
             text: format!("wrote {id}"),
             agent: None,
         });
+    }
+
+    /// Calls with nothing under them are rows of one table: no blank line
+    /// between them, and one after the last before the assistant speaks. A
+    /// call with a diff under it keeps its blank line.
+    #[test]
+    fn calls_with_nothing_under_them_are_drawn_on_consecutive_lines() {
+        use niobe_core::event::{Event, ToolOutcome};
+        let mut app = App::new(crate::app::Repo::default());
+        for (id, name) in [("t1", "Read"), ("t2", "Bash"), ("t3", "Read")] {
+            app.apply(&Event::ToolCallStart {
+                id: id.into(),
+                name: name.to_owned(),
+                input: String::new(),
+                summary: Some(format!("{id} does")),
+                agent: None,
+            });
+            app.apply(&Event::ToolCallEnd {
+                id: id.into(),
+                name: name.to_owned(),
+                input: String::new(),
+                output: String::new(),
+                bytes: 64,
+                outcome: ToolOutcome::Ok,
+                summary: Some(format!("{id} does")),
+                exit_code: None,
+                error: None,
+            });
+        }
+        edited(&mut app, "after", 2);
+
+        let theme = Theme::default();
+        let (entries, drawn) = app.entries_to_draw();
+        drawn.update(entries, 60, Detail::default(), &theme);
+        let rows: Vec<String> = drawn
+            .lines(0, 12)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        // The name column is as wide as `Write`, the widest name drawn.
+        assert!(rows[0].starts_with("⚙ Read  t1 does"), "{rows:?}");
+        assert!(rows[1].starts_with("⚙ Bash  t2 does"), "{rows:?}");
+        assert!(rows[2].starts_with("⚙ Read  t3 does"), "{rows:?}");
+        assert_eq!(rows[3], "", "a call with a diff stands apart: {rows:?}");
+        assert!(rows[4].starts_with("⚙ Write after.rs"), "{rows:?}");
+        let diff_ends = rows
+            .iter()
+            .position(|row| row.contains("wrote after"))
+            .expect("the reply is drawn");
+        assert_eq!(
+            rows[diff_ends - 2],
+            "",
+            "a diff keeps its blank line: {rows:?}"
+        );
     }
 
     #[test]

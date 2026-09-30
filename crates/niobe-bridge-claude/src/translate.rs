@@ -993,6 +993,7 @@ impl Translator {
                         calls.push(Event::AgentSpawn {
                             id: AgentId::new(id.clone()),
                             parent: agent.clone(),
+                            kind: agent_kind(&input),
                             label: label_of(&input).unwrap_or_else(|| rendered.clone()),
                         });
                     }
@@ -2363,6 +2364,15 @@ fn label_of(input: &serde_json::Value) -> Option<String> {
         (None, Some(description)) => Some(description.to_owned()),
         (None, None) => None,
     }
+}
+
+/// The kind of agent a sub-agent call asked for, where it named one.
+fn agent_kind(input: &serde_json::Value) -> Option<String> {
+    input
+        .get("subagent_type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|kind| !kind.trim().is_empty())
+        .map(str::to_owned)
 }
 
 /// The CLI's slash commands, as the event that replaces the list before them.
@@ -4425,16 +4435,22 @@ mod tests {
 
         let events = translator.line(&agent_call("toolu_a", "Agent"));
 
-        let spawned: Vec<(&str, &str)> = events
+        let spawned: Vec<(&str, Option<&str>, &str)> = events
             .iter()
             .filter_map(|event| match event {
-                Event::AgentSpawn { id, label, .. } => Some((id.as_str(), label.as_str())),
+                Event::AgentSpawn {
+                    id, kind, label, ..
+                } => Some((id.as_str(), kind.as_deref(), label.as_str())),
                 _ => None,
             })
             .collect();
         assert_eq!(
             spawned,
-            [("toolu_a", "quick-lookup: Summarize catalog/cache.py")]
+            [(
+                "toolu_a",
+                Some("quick-lookup"),
+                "quick-lookup: Summarize catalog/cache.py"
+            )]
         );
         assert!(
             events

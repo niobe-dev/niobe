@@ -794,6 +794,13 @@ pub enum Event {
         id: AgentId,
         /// The agent that spawned it, if it was not the session itself.
         parent: Option<AgentId>,
+        /// The kind of agent it was asked to be — `Explore`,
+        /// `general-purpose`, an agent the operator defined — where the call
+        /// that spawned it named one. The shell names the agent's rows by it.
+        /// `None` where the call named none, and in a record written before
+        /// the kind was kept apart, whose label still carries it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
         /// What it was spawned to do, for the Activity pane.
         label: String,
     },

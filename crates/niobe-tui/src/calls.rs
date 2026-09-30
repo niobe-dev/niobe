@@ -2,13 +2,15 @@
 // Copyright (c) Viacheslav Shynkarenko
 
 //! A tool call in the transcript, drawn as a row of a table: its glyph, the
-//! tool's name in a column of fixed width, what it does, and on the right what
-//! it cost.
+//! tool's name, the tag of the sub-agent that made it, what it does, and on
+//! the right what it cost. A sub-agent's words are a row of the same table.
 //!
-//! The name column is fixed so that the rows line up and the eye can run down
-//! the costs; what the call does is the column that gives way first, because
-//! it is the one the operator can find again in the diff or the Changes pane.
-//! The cost is never cut short of its figure.
+//! The name and tag columns are as wide as the transcript's widest, so the
+//! rows line up and the eye can run down what each call does and what it
+//! cost; rows with nothing under them are drawn on consecutive lines. What
+//! the call does is the column that gives way first, because it is the one
+//! the operator can find again in the diff or the Changes pane. The cost is
+//! never cut short of its figure.
 //!
 //! What the cost column says depends on what the backend reported about the
 //! call, not on which tool it was: the lines a change added and removed, the
@@ -32,7 +34,7 @@ use std::time::Duration;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::app::{Call, Entry, Gate, human_bytes};
+use crate::app::{Call, Entry, EntryKind, Gate, human_bytes};
 use crate::clock;
 use crate::text;
 use crate::theme::Theme;
@@ -41,8 +43,8 @@ use niobe_core::event::ToolOutcome;
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run::FailedTests;
 
-/// How much of a tool-call entry the operator has asked to see: the two
-/// switches that hold for the whole transcript.
+/// How much of a tool-call entry the operator has asked to see, and the
+/// columns every row is drawn in: what holds for the whole transcript.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Detail {
     /// Every run of calls is drawn as its group row alone.
@@ -50,16 +52,57 @@ pub(crate) struct Detail {
     /// Every diff is drawn whole rather than cut at
     /// [`crate::hunks::MAX_ROWS`].
     pub(crate) diffs_open: bool,
+    /// How wide the name and agent columns are drawn.
+    pub(crate) columns: Columns,
+}
+
+/// How wide the tool's name and the sub-agent's tag are drawn, so that what
+/// the calls do starts in one column down the whole transcript.
+///
+/// Each is as wide as the widest it holds, rather than as wide as the widest
+/// it could: a session that only reads and runs commands draws its names in
+/// four cells, and one no sub-agent worked in has no agent column at all.
+/// A new, wider name lays the transcript out again, which is rare — the set
+/// of tools a session calls settles early.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Columns {
+    pub(crate) name: usize,
+    pub(crate) agent: usize,
+}
+
+impl Columns {
+    /// The columns `entries` need.
+    pub(crate) fn of(entries: &[Entry]) -> Self {
+        let name = entries
+            .iter()
+            .filter(|entry| !entry.calls.is_empty())
+            .map(|entry| text::width(&head(entry)))
+            .max()
+            .unwrap_or(0)
+            .clamp(NAME_LEAST, NAME_MOST);
+        let agent = entries
+            .iter()
+            .filter(|entry| !entry.calls.is_empty() || entry.kind == EntryKind::SubAgent)
+            .filter_map(|entry| entry.agent.as_deref())
+            .map(text::width)
+            .max()
+            .unwrap_or(0)
+            .min(crate::tags::TAG_MAX);
+        Columns { name, agent }
+    }
 }
 
 /// The glyph and the space after it, which every row of the transcript starts
 /// with.
 const GUTTER: usize = 2;
 
-/// How wide the tool's name is drawn, so that the columns after it line up
-/// down the transcript: wide enough for `Notion·query-data-sources`, the
-/// longest name a common MCP server gives a tool.
-const NAME_COLUMN: usize = 26;
+/// The narrowest the name column is drawn: `Bash`, `Read` and `Edit` fit.
+const NAME_LEAST: usize = 4;
+
+/// The widest the name column is drawn. A longer name — an MCP tool's, with
+/// its server in front — is cut rather than pushing what every other row
+/// does out of sight.
+const NAME_MOST: usize = 14;
 
 /// The space between one column and the next.
 const GAP: usize = 2;
@@ -96,12 +139,13 @@ fn single(
     colour: Color,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let glyph = match call.failed() {
-        true => "✗",
-        false => "⚙",
+    let (glyph, glyph_colour) = match (call.failed(), call.running()) {
+        (true, _) => ("✗", colour),
+        (false, true) => (RUNNING, theme.hot),
+        (false, false) => ("⚙", colour),
     };
     let mut lines = vec![row(
-        glyph,
+        (glyph, glyph_colour),
         entry.head.clone(),
         Doing {
             agent: entry.agent.as_deref(),
@@ -109,6 +153,7 @@ fn single(
         },
         result(call, theme),
         width,
+        detail.columns,
         colour,
         theme,
     )];
@@ -135,16 +180,16 @@ fn group(
         .map(|call| call.what.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let name = format!("{} ×{}", entry.head, calls.len());
     let mut lines = vec![row(
-        glyph,
-        name,
+        (glyph, colour),
+        head(entry),
         Doing {
             agent: entry.agent.as_deref(),
             what: &what,
         },
         group_result(calls, theme),
         width,
+        detail.columns,
         colour,
         theme,
     )];
@@ -413,33 +458,37 @@ fn first_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
-/// The row itself: the glyph, the name in its column, what the call does in
-/// whatever is left, and the cost on the right.
+/// The row itself: the glyph, the name in its column, the sub-agent's tag in
+/// its own, what the call does in whatever is left, and the cost on the
+/// right.
 ///
-/// What the call does gives way first. Only on a pane too narrow for the name
-/// column and the cost together does the name give way, and the cost never
-/// does.
+/// What the call does gives way first. On a pane too narrow for the columns
+/// and the cost together the agent column goes, then the name gives way, and
+/// the cost never does. A row the session's own agent made leaves the agent
+/// column blank, so what every call does still starts in one column.
+#[allow(clippy::too_many_arguments)] // Each is one column of the row; a struct would only name them again.
 fn row(
-    glyph: &str,
+    (glyph, glyph_colour): (&str, Color),
     name: String,
     doing: Doing<'_>,
     result: Vec<Span<'static>>,
     width: usize,
+    columns: Columns,
     colour: Color,
     theme: &Theme,
 ) -> Line<'static> {
     let cost = spans_width(&result);
     let room = width.saturating_sub(GUTTER + cost + GAP);
-    let name_column = NAME_COLUMN.min(room);
+    let name_column = columns.name.max(NAME_LEAST).min(room);
     let name = text::truncate(&name, name_column);
-    let what_room = room.saturating_sub(name_column + 1);
-    let (agent, what_room) = match doing.agent {
-        Some(agent) => {
-            let tag = agent_tag(agent, doing.what, what_room);
-            let left = what_room.saturating_sub(text::width(&tag));
-            (Some(tag), left)
-        }
-        None => (None, what_room),
+    let left = room.saturating_sub(name_column + 1);
+    let agent_column = match columns.agent > 0 && left >= columns.agent + 1 + WHAT_LEAST {
+        true => columns.agent,
+        false => 0,
+    };
+    let what_room = match agent_column {
+        0 => left,
+        _ => left.saturating_sub(agent_column + 1),
     };
     let what = text::truncate(doing.what, what_room);
     let gap = what_room
@@ -447,21 +496,85 @@ fn row(
         .saturating_add(GAP);
 
     let mut spans = vec![
-        Span::styled(format!("{glyph} "), Style::new().fg(colour).bold()),
-        Span::styled(
-            format!("{name:<name_column$}"),
-            Style::new().fg(colour).bold(),
-        ),
+        Span::styled(format!("{glyph} "), Style::new().fg(glyph_colour).bold()),
+        Span::styled(format!("{name:<name_column$}"), Style::new().fg(colour)),
         Span::raw(" "),
     ];
-    if let Some(tag) = agent {
-        spans.push(Span::styled(tag, Style::new().fg(theme.agent)));
+    if agent_column > 0 {
+        let tag = text::truncate(doing.agent.unwrap_or_default(), agent_column);
+        spans.push(Span::styled(
+            format!("{tag:<agent_column$} "),
+            Style::new().fg(theme.dim),
+        ));
     }
-    spans.push(Span::styled(what, Style::new().fg(theme.dim)));
+    spans.push(Span::styled(what, Style::new().fg(theme.fg)));
     spans.push(Span::raw(" ".repeat(gap)));
     spans.extend(result);
     Line::from(spans)
 }
+
+/// The least of what a call does the agent column is kept beside: fewer
+/// cells than this and the column goes, because a row that names who made
+/// the call and not what it was says nothing about the call.
+const WHAT_LEAST: usize = 8;
+
+/// The glyph a call still running is drawn with.
+const RUNNING: &str = "⠋";
+
+/// What a tool-call entry is called in the name column: the tool, and how
+/// many calls a run of them holds.
+fn head(entry: &Entry) -> String {
+    match entry.calls.len() {
+        0 | 1 => entry.head.clone(),
+        calls => format!("{} ×{calls}", entry.head),
+    }
+}
+
+/// A sub-agent's words, as a row among its calls: `↳`, its tag across the
+/// name and agent columns, what it said where what a call does is drawn, and
+/// `says` where a call's cost is. What it said wraps under itself, so a long
+/// answer keeps the column its first line started in.
+pub(crate) fn said(
+    entry: &Entry,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let columns = detail.columns;
+    let tag = entry.agent.as_deref().unwrap_or(&entry.head);
+    let span = columns.name.max(NAME_LEAST) + 1 + columns.agent;
+    let lead = (span.max(text::width(tag)) + 1).min(width / 2);
+    let room = width.saturating_sub(GUTTER + lead + GAP + text::width(SAYS));
+    let body = crate::markdown::render(entry.body.trim_end(), room.max(1), theme);
+    let tag = text::truncate(tag, lead.saturating_sub(1));
+    let indent = " ".repeat(GUTTER + lead);
+
+    let mut lines = Vec::new();
+    for (at, line) in body.into_iter().enumerate() {
+        let mut spans = match at {
+            0 => vec![
+                Span::styled(
+                    format!("{} ", EntryKind::SubAgent.glyph()),
+                    Style::new().fg(theme.agent).bold(),
+                ),
+                Span::styled(format!("{tag:<lead$}"), Style::new().fg(theme.agent).bold()),
+            ],
+            _ => vec![Span::raw(indent.clone())],
+        };
+        let drawn = spans_width(&line.spans);
+        spans.extend(line.spans);
+        if at == 0 {
+            spans.push(Span::raw(" ".repeat(room.saturating_sub(drawn) + GAP)));
+            spans.push(Span::styled(SAYS, Style::new().fg(theme.dim)));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+    lines
+}
+
+/// What stands where a call's cost would, on a sub-agent's words.
+const SAYS: &str = "says";
 
 /// What a row says the call does, and which sub-agent made it, where one did.
 #[derive(Clone, Copy)]
@@ -506,13 +619,10 @@ const CUT_SHORT: &str = "cut short";
 fn result(call: &Call, theme: &Theme) -> Vec<Span<'static>> {
     let dim = Style::new().fg(theme.dim);
     let Some(outcome) = call.outcome else {
-        return vec![Span::styled(
-            match call.interrupted {
-                true => CUT_SHORT,
-                false => "running",
-            },
-            dim,
-        )];
+        return vec![match call.interrupted {
+            true => Span::styled(CUT_SHORT, dim),
+            false => Span::styled("running", Style::new().fg(theme.hot)),
+        }];
     };
     let mut spans = match (outcome, call.exit_code, call.lines) {
         (ToolOutcome::Denied, _, _) => return vec![Span::styled("denied", theme_del(theme))],
@@ -557,7 +667,7 @@ const RULE_MARK: &str = "rule";
 fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
     let dim = Style::new().fg(theme.dim);
     if calls.iter().any(Call::running) {
-        return vec![Span::styled("running", dim)];
+        return vec![Span::styled("running", Style::new().fg(theme.hot))];
     }
     let succeeded: Vec<&Call> = calls
         .iter()
@@ -689,6 +799,7 @@ mod tests {
         let detail = Detail {
             folded,
             diffs_open: false,
+            columns: Columns::of(app.entries()),
         };
         lines(&app.entries()[0], 80, detail, &Theme::default())
             .into_iter()
@@ -812,6 +923,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: niobe_core::event::AgentId::new(id),
             parent: None,
+            kind: None,
             label: label.to_owned(),
         });
     }
@@ -827,19 +939,82 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_agents_call_names_the_agent_before_what_it_does() {
+    fn a_sub_agents_call_names_the_agent_by_its_tag_in_a_column_of_its_own() {
         let mut app = app();
         spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
         app.apply(&start_by("t1", "Read", "toolu_a"));
 
         let rows = drawn(&app, false);
         assert!(
-            rows[0].contains("Read ")
-                && rows[0].contains("quick-lookup: Summarize › catalog/t1.py"),
+            rows[0].starts_with("⠋ Read quick catalog/t1.py "),
             "{rows:?}"
         );
         assert!(rows[0].ends_with("running"), "{rows:?}");
         assert_eq!(rows[0].chars().count(), 80, "{rows:?}");
+    }
+
+    #[test]
+    fn the_columns_are_as_wide_as_the_widest_name_and_tag_the_transcript_holds() {
+        let mut app = app();
+        app.apply(&start("t1", "Read"));
+        assert_eq!(
+            Columns::of(app.entries()),
+            Columns {
+                name: NAME_LEAST,
+                agent: 0
+            },
+            "no agent made a call, so there is no agent column"
+        );
+
+        spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
+        app.apply(&start_by("t2", "TodoWrite", "toolu_a"));
+        app.apply(&start(
+            "t3",
+            "mcp__claude_ai_Notion__notion-query-data-sources",
+        ));
+        assert_eq!(
+            Columns::of(app.entries()),
+            Columns {
+                name: NAME_MOST,
+                agent: text::width("quick")
+            }
+        );
+    }
+
+    #[test]
+    fn a_sub_agents_words_are_a_row_under_its_tag_that_wraps_in_its_own_column() {
+        let mut app = app();
+        spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
+        app.apply(&start_by("t1", "Read", "toolu_a"));
+        app.apply(&Event::AssistantMessage {
+            text: "The stub is in down mode still, and the probe reads it as an outage.".into(),
+            agent: Some(niobe_core::event::AgentId::new("toolu_a")),
+        });
+
+        let detail = Detail {
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        let rows: Vec<String> = said(&app.entries()[1], 60, detail, &Theme::default())
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert!(
+            rows[0].starts_with("↳ quick      The stub is in"),
+            "{rows:?}"
+        );
+        assert!(rows[0].ends_with("says"), "{rows:?}");
+        assert_eq!(text::width(&rows[0]), 60, "{rows:?}");
+        let column = "↳ quick      ".chars().count();
+        assert!(
+            rows[1].starts_with(&" ".repeat(column)) && !rows[1][column..].starts_with(' '),
+            "the words wrap under their own first line: {rows:?}"
+        );
     }
 
     #[test]
@@ -864,7 +1039,7 @@ mod tests {
             .collect();
         assert_eq!(
             heads,
-            [("Read", Some("…fetch"), 1), ("Read", Some("…cache"), 2),]
+            [("Read", Some("fetch"), 1), ("Read", Some("cache"), 2)]
         );
     }
 

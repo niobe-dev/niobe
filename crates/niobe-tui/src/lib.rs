@@ -41,6 +41,7 @@ pub mod run;
 pub mod shell;
 mod slash;
 pub mod snapshots;
+mod tags;
 pub mod terminal;
 mod text;
 pub mod theme;

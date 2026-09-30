@@ -1,10 +1,10 @@
  Niobe  Session  Files  Tools  Usage  Options  Help           ● working 1m 15s
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ fix the etag test ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                              ┃
 ┃ > you                                                                        ┃
 ┃   fix the etag test                                                          ┃
 ┃                                                                              ┃
-┃ ⚙ Bash                       npm test -- fetch                       running ┃
+┃ ⠋ Bash npm test -- fetch                                             running ┃
+┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
