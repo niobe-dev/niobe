@@ -1646,6 +1646,59 @@ mod tests {
         );
     }
 
+    /// Two prompts the CLI sent without a call id are two questions, and an
+    /// answer to each reaches the request it was asked by.
+    #[cfg(unix)]
+    #[test]
+    fn two_prompts_with_no_call_id_are_both_answered() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let answers = dir.path().join("answers");
+        let ask = |request: &str| {
+            format!(
+                r#"{{"type":"control_request","request_id":"{request}","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"ls"}}}}}}"#
+            )
+        };
+        let (mut session, _script) = started(&format!(
+            "read -r first\nread -r turn\nprintf '%s\\n' '{c1}' '{c2}'\nread -r one\nread -r two\nprintf '%s\\n%s\\n' \"$one\" \"$two\" > '{answers}'\n",
+            c1 = ask("c1"),
+            c2 = ask("c2"),
+            answers = answers.display(),
+        ));
+        let _ = session.send("list the files");
+
+        let started = Instant::now();
+        let mut asked = Vec::new();
+        while asked.len() < 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the stand-in never asked twice: {asked:?}"
+            );
+            asked.extend(session.drain().into_iter().filter_map(|event| match event {
+                Event::PermissionRequest { id, .. } => Some(id),
+                _ => None,
+            }));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for id in &asked {
+            session
+                .answer(id, PermissionDecision::Allow, None)
+                .expect("each prompt is waiting on its own answer");
+        }
+        while !session.reported {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the stand-in never took both answers"
+            );
+            session.drain();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let written =
+            std::fs::read_to_string(&answers).expect("the stand-in kept what it was sent");
+        assert!(written.contains(r#""request_id":"c1""#), "{written}");
+        assert!(written.contains(r#""request_id":"c2""#), "{written}");
+    }
+
     /// What reaches the CLI's output after its end was reported was written
     /// by something that left its group, and is not the CLI's to say.
     #[cfg(unix)]

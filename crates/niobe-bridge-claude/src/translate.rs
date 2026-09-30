@@ -1408,7 +1408,14 @@ impl Translator {
         if body.subtype.as_deref() != Some("can_use_tool") {
             return;
         }
-        let call_id = body.tool_use_id.unwrap_or_default();
+        // A prompt is waited on, and answered, by the id of the call it gates.
+        // One that names no call is keyed by its request instead, which is
+        // unique to it: keyed by an empty id, a second such prompt would take
+        // the first one's place, and the first would never be answered.
+        let call_id = body
+            .tool_use_id
+            .or_else(|| request.request_id.clone())
+            .unwrap_or_default();
         // The request names the agent too, but by the CLI's own id for it,
         // which nothing else on the stream uses; the call it gates names the
         // agent the way its calls and messages do.
@@ -1429,7 +1436,7 @@ impl Translator {
             id,
             tool: body.tool_name.unwrap_or_default(),
             input: body.input.as_ref().map(render).unwrap_or_default(),
-            target: body.input.as_ref().and_then(target_of),
+            target: body.input.as_ref().and_then(rule_target),
             agent,
         });
     }
@@ -1460,7 +1467,7 @@ impl Translator {
                 id: id.clone(),
                 tool: denial.tool_name.unwrap_or_default(),
                 input: denial.tool_input.as_ref().map(render).unwrap_or_default(),
-                target: denial.tool_input.as_ref().and_then(target_of),
+                target: denial.tool_input.as_ref().and_then(rule_target),
                 agent,
             });
             out.push(Event::PermissionResponse {
@@ -2260,6 +2267,25 @@ fn target_of(input: &serde_json::Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The target a standing answer to a prompt is written about and matched
+/// against, which is the call's target unless the call also asks for
+/// something a rule about that target does not say.
+///
+/// A rule names a tool and one target; the call's other arguments are not in
+/// it. Most of them change how a command runs rather than what it may reach,
+/// but a shell command that asks to leave the CLI's sandbox reaches what the
+/// same command inside it cannot, and `Bash(cargo test)` was not written
+/// about that. Such a call has no target, so only a rule for the whole tool
+/// answers it and the operator is asked otherwise.
+fn rule_target(input: &serde_json::Value) -> Option<String> {
+    let unsandboxed =
+        input.get("dangerouslyDisableSandbox") == Some(&serde_json::Value::Bool(true));
+    match unsandboxed {
+        true => None,
+        false => target_of(input),
+    }
+}
+
 /// The first line of a shell command, marked as cut where there is more.
 fn first_line(command: &str) -> String {
     let mut lines = command.trim().lines();
@@ -2360,7 +2386,8 @@ fn listed_as_offered(commands: Vec<wire::Command>, unavailable: &[String]) -> Ev
 /// plan, which is a level the CLI measured and not something the translator
 /// accumulates, so there is no state for it to touch. A message with no window
 /// in it produces nothing — a window reported as zero would claim an untouched
-/// plan, which is a different thing from a CLI that said nothing.
+/// plan, which is a different thing from a CLI that said nothing — unless it
+/// says the plan is spending beyond its fee, which is reported on its own.
 fn rate_limit(event: wire::RateLimit, out: &mut Vec<Event>) {
     let Some(info) = event.rate_limit_info else {
         return;
@@ -2374,7 +2401,7 @@ fn rate_limit(event: wire::RateLimit, out: &mut Vec<Event>) {
         seven_day: read_window(windows.seven_day),
         using_overage: info.is_using_overage,
     };
-    if windows.is_empty() {
+    if windows.is_empty() && !windows.using_overage {
         return;
     }
     out.push(Event::UsageWindows(windows));
@@ -3399,6 +3426,60 @@ mod tests {
         );
     }
 
+    /// A prompt with no call id is still a prompt of its own: two of them
+    /// are two questions, each answered by its own request.
+    #[test]
+    fn prompts_with_no_call_id_are_told_apart_by_their_requests() {
+        let mut translator = translator();
+
+        let mut ids = Vec::new();
+        for request in ["c1", "c2"] {
+            let events = translator.line(&format!(
+                r#"{{"type":"control_request","request_id":"{request}","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"ls"}}}}}}"#
+            ));
+            let [Event::PermissionRequest { id, .. }] = events.as_slice() else {
+                panic!("one prompt: {events:?}");
+            };
+            ids.push(id.clone());
+        }
+
+        assert_ne!(ids[0], ids[1]);
+        let asked: Vec<_> = translator
+            .take_asked()
+            .into_iter()
+            .map(|ask| (ask.id, ask.request_id))
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                (ids[0].clone(), "c1".to_owned()),
+                (ids[1].clone(), "c2".to_owned())
+            ]
+        );
+    }
+
+    /// A standing rule is written about a command, and a call that also asks
+    /// to run outside the CLI's sandbox is a different thing to allow. It has
+    /// no target, so only a rule for the whole tool answers it.
+    #[test]
+    fn a_command_asking_to_leave_the_sandbox_is_not_answered_by_a_rule_for_the_command() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cargo test","dangerouslyDisableSandbox":true},"tool_use_id":"toolu_1"}}"#,
+        );
+
+        let [Event::PermissionRequest { target, .. }] = events.as_slice() else {
+            panic!("one prompt: {events:?}");
+        };
+        assert_eq!(target, &None);
+        let mut rules = niobe_core::permission::Allowlist::new();
+        rules.insert(niobe_core::permission::Rule::targeted("Bash", "cargo test"));
+        assert!(!rules.allows("Bash", target.as_deref()));
+        rules.insert(niobe_core::permission::Rule::tool("Bash"));
+        assert!(rules.allows("Bash", target.as_deref()));
+    }
+
     #[test]
     fn a_prompt_the_cli_withdraws_is_withdrawn_from_the_session() {
         let mut translator = translator();
@@ -3757,6 +3838,26 @@ mod tests {
     /// The windows are the only part of the message Niobe reads. A version
     /// that reports a rate limit without them has nothing to show, and showing
     /// nothing is not the same as reporting a window at zero.
+    /// The overage flag is read on its own: a message that names no window
+    /// still says the plan is spending beyond its fee.
+    #[test]
+    fn overage_with_no_window_is_still_reported() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","isUsingOverage":true}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: true,
+            })]
+        );
+    }
+
     #[test]
     fn a_rate_limit_with_no_windows_in_it_reports_nothing() {
         let mut translator = translator();

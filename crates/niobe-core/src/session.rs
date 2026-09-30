@@ -663,9 +663,17 @@ impl SessionState {
 
             // The last report replaces the one before it: a window is a level,
             // not a quantity, so summing two reports of it would be nonsense.
+            // A report that names no window says only whether the plan is
+            // spending beyond its fee; the levels before it still stand.
             Event::UsageWindows(windows) => {
-                self.usage_windows = Some(*windows);
-                self.window_reported = true;
+                self.usage_windows = match (windows.is_empty(), self.usage_windows) {
+                    (true, Some(before)) => Some(UsageWindows {
+                        using_overage: windows.using_overage,
+                        ..before
+                    }),
+                    _ => Some(*windows),
+                };
+                self.window_reported |= !windows.is_empty();
             }
 
             // The last report stands for what the session is billed from here
@@ -2226,6 +2234,38 @@ mod tests {
         assert_eq!(state.files()[0].why, None);
     }
 
+    /// A report that names no window says only whether the plan is spending
+    /// beyond its fee; the levels last reported still stand.
+    #[test]
+    fn a_report_of_overage_alone_keeps_the_levels_before_it() {
+        use crate::event::{UsageWindow, UsageWindows};
+        let level = Some(UsageWindow {
+            utilization: 0.97,
+            resets_at: Some(1_789_779_600),
+        });
+        let mut state = SessionState::new();
+        state.apply(&Event::UsageWindows(UsageWindows {
+            five_hour: level,
+            seven_day: None,
+            using_overage: false,
+        }));
+
+        state.apply(&Event::UsageWindows(UsageWindows {
+            five_hour: None,
+            seven_day: None,
+            using_overage: true,
+        }));
+
+        assert_eq!(
+            state.usage_windows().copied(),
+            Some(UsageWindows {
+                five_hour: level,
+                seven_day: None,
+                using_overage: true,
+            })
+        );
+    }
+
     #[test]
     fn the_usage_windows_a_session_shows_are_the_last_ones_reported() {
         use crate::event::{UsageWindow, UsageWindows};
@@ -2679,6 +2719,27 @@ mod tests {
             Event::TurnEnded,
             prompt(),
             cached(100, 10, 0, 0),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(
+            state.turns()[1].five_hour_share,
+            None,
+            "a level nobody reported during the turn was read as its end"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_heard_only_of_overage_has_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            prompt(),
+            Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: true,
+            }),
             Event::TurnEnded,
         ]);
         assert_eq!(
