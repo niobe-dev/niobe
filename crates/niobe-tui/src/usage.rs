@@ -32,9 +32,13 @@ pub fn shares(counts: &[u64]) -> Vec<u64> {
         return vec![0; counts.len()];
     }
 
+    // In 128 bits: a count past a hundredth of what 64 hold would overflow
+    // when it is multiplied by a hundred.
+    let wide = |count: u64| u128::from(count) * 100;
+    let total_wide = u128::from(total.max(1));
     let mut apportioned: Vec<u64> = counts
         .iter()
-        .map(|count| count * 100 / total.max(1))
+        .map(|&count| u64::try_from(wide(count) / total_wide).unwrap_or(100))
         .collect();
     let assigned: u64 = apportioned.iter().copied().fold(0, u64::saturating_add);
 
@@ -42,7 +46,7 @@ pub fn shares(counts: &[u64]) -> Vec<u64> {
     // denominator, so the comparison is exact rather than in floating point.
     let mut by_remainder: Vec<usize> = (0..counts.len()).collect();
     by_remainder.sort_by(|&a, &b| {
-        let remainder = |at: usize| counts[at] * 100 % total.max(1);
+        let remainder = |at: usize| wide(counts[at]) % total_wide;
         remainder(b)
             .cmp(&remainder(a))
             .then_with(|| counts[b].cmp(&counts[a]))
@@ -129,6 +133,12 @@ mod tests {
     use super::*;
     use niobe_core::event::{Event, Usage};
     use niobe_core::session::SessionState;
+
+    #[test]
+    fn counts_past_a_hundredth_of_what_64_bits_hold_are_shared_without_overflow() {
+        assert_eq!(shares(&[u64::MAX, 1]), [100, 0]);
+        assert_eq!(shares(&[u64::MAX / 100 * 98, u64::MAX / 100 * 2]), [98, 2]);
+    }
 
     #[test]
     fn one_count_takes_the_whole_hundred() {

@@ -2057,6 +2057,16 @@ const METER_CELLS: usize = 12;
 ///
 /// The pane is sized from this before it is drawn, so it has to agree with
 /// [`window_lines`] exactly; a test holds the two together.
+/// A window's share as its column draws it: a percent, no wider than the
+/// column holds, and an em dash for a level that is not one — below nothing,
+/// or not a number — rather than a `0%` nobody measured.
+fn window_share(utilization: f64) -> String {
+    if !utilization.is_finite() || utilization < 0.0 {
+        return format!(" {:>3} ", "—");
+    }
+    format!(" {:>3}%", crate::app::percent(utilization).min(999))
+}
+
 fn window_rows(app: &App) -> usize {
     app.session().usage_windows().map_or(0, |windows| {
         usize::from(windows.five_hour.is_some())
@@ -2120,10 +2130,7 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
                 Span::styled(format!("{label:<WINDOW_LABEL$}"), dim),
                 Span::styled(filled, style),
                 Span::styled(track, dim),
-                Span::styled(
-                    format!(" {:>3}%", crate::app::percent(window.utilization)),
-                    style.bold(),
-                ),
+                Span::styled(window_share(window.utilization), style.bold()),
                 Span::styled(clause.unwrap_or_default(), dim),
             ])
         })
@@ -4783,6 +4790,14 @@ mod tests {
         assert_eq!(compact(999_500), "1.0M");
         assert_eq!(compact(999_999), "1.0M");
         assert_eq!(compact(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn a_level_that_is_not_a_level_draws_a_dash_and_a_huge_one_fits_its_column() {
+        assert_eq!(window_share(-5.0), "   — ");
+        assert_eq!(window_share(f64::NAN), "   — ");
+        assert_eq!(window_share(1e300), " 999%");
+        assert_eq!(window_share(0.5), "  50%");
     }
 
     fn window(utilization: f64, resets_at: Option<u64>) -> UsageWindow {

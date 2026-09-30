@@ -188,12 +188,16 @@ impl Totals {
         }
 
         match cost {
+            // Each cost is finite, and so is what they add up to: a sum of
+            // two that overflows stops at the largest there is rather than
+            // drawing as infinite money.
             Some(cost) => {
-                self.reported_cost_usd += cost;
-                *self
+                self.reported_cost_usd = finite_sum(self.reported_cost_usd, cost);
+                let by_model = self
                     .reported_cost_by_model
                     .entry(usage.model.clone())
-                    .or_default() += cost;
+                    .or_default();
+                *by_model = finite_sum(*by_model, cost);
             }
             None => self.owe(usage),
         }
@@ -1152,6 +1156,15 @@ fn first_line(text: &str) -> Option<&str> {
 /// a count that wrapped would read as a session that did almost nothing.
 fn bump(counter: &mut u64) {
     *counter = counter.saturating_add(1);
+}
+
+/// `a + b`, stopped at the largest finite value where it would overflow.
+fn finite_sum(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    match sum.is_finite() {
+        true => sum,
+        false => f64::MAX,
+    }
 }
 
 #[cfg(test)]
@@ -2783,5 +2796,27 @@ mod tests {
         let twice = SessionState::replay(&[billed(Billing::Plan), billed(Billing::Metered)]);
         assert!(twice.billing_changed());
         assert_eq!(twice.billing(), Some(Billing::Metered));
+    }
+
+    #[test]
+    fn costs_that_add_up_past_what_a_float_holds_stay_finite() {
+        let costly = || {
+            Event::Usage(Usage {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: Some(1e308),
+                cost_basis: Some(crate::event::CostBasis::Measured),
+                settles_model: false,
+                fast: false,
+            })
+        };
+        let state = SessionState::replay(&[costly(), costly()]);
+
+        assert!(state.totals().reported_cost_usd.is_finite());
     }
 }
