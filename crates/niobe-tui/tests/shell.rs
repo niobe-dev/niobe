@@ -294,6 +294,39 @@ fn whose_each_row_is_shows_where_two_agents_calls_interleave() {
     assert_snapshot("agents-120x30", &frame);
 }
 
+/// Grouped by agent from the Activity pane, each agent's rows read top to
+/// bottom under a heading with its tag and task, and the bar says the key
+/// that ungroups them.
+#[test]
+fn grouped_by_agent_each_agents_rows_stand_under_its_heading() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = session_with_two_agents_at_work();
+    screen(&mut app, 120, 30);
+    let press = |app: &mut App, code| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    // The bar has room for the pane's keys at full width.
+    let focused = screen(&mut app, 200, 60);
+    assert!(focused.contains("a groups by agent"), "{focused}");
+
+    press(&mut app, KeyCode::Char('a'));
+    assert!(screen(&mut app, 200, 60).contains("a ungroups"));
+    let frame = screen(&mut app, 120, 30);
+    for row in ["▾ deep1", "▾ deep2"] {
+        assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
+    }
+    let heading = frame
+        .lines()
+        .position(|line| line.contains("▾ deep1"))
+        .expect("the heading is drawn");
+    let rows: Vec<&str> = frame.lines().skip(heading + 1).take(2).collect();
+    assert!(
+        rows[0].contains("catalog/fetch.py") && rows[1].contains("catalog/etag.py"),
+        "the first agent's rows are not together under it:\n{frame}"
+    );
+    assert_snapshot("agents-grouped-120x30", &frame);
+}
+
 /// A reviewer's call refused and the other reviewer's waiting: the refusal
 /// and the question each say which agent asked, by the tag its calls' rows
 /// give it, rather than reading as the session's own.

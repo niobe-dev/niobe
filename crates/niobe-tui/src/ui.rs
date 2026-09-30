@@ -852,8 +852,15 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
         return;
     };
     let detail = transcript_detail(app);
+    let headings = app.grouped_by_agent().then(|| app.agent_headings());
     let (entries, drawn) = app.entries_to_draw();
-    drawn.update(entries, usize::from(width), detail, theme);
+    drawn.update(
+        entries,
+        usize::from(width),
+        detail,
+        headings.as_deref(),
+        theme,
+    );
     let found = crate::find::Query::new(&query)
         .map(|query| drawn.find(&query))
         .unwrap_or_default();
@@ -1092,9 +1099,11 @@ fn loose(segments: Vec<Segment>) -> Vec<Hint> {
 /// it does, Tab is not offered as the way between the panes.
 fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
     let question_holds = app.asking().is_some() && app.ask_focus() != AskFocus::Deferred;
+    // The grouping key is offered only where there are agents to group.
+    let grouping = (!app.agents().is_empty()).then(|| app.grouped_by_agent());
     key_hints(
         app.session().mode().is_some(),
-        app.focus(),
+        (app.focus(), grouping),
         panes && !question_holds,
         (app.newline_key(), app.sends_enter_for_shift_enter()),
         theme,
@@ -1117,7 +1126,7 @@ fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
 /// other keys are reminders, and give way first.
 fn key_hints(
     reported: bool,
-    focus: Focus,
+    (focus, grouping): (Focus, Option<bool>),
     panes: bool,
     newline: (&str, bool),
     theme: &Theme,
@@ -1143,6 +1152,11 @@ fn key_hints(
         }
         Focus::Pane(_) => {
             hints.push(key("↑↓ Enter folds", false));
+            match grouping {
+                Some(false) => hints.push(key("a groups by agent", false)),
+                Some(true) => hints.push(key("a ungroups", false)),
+                None => {}
+            }
             hints.push(key("Esc back", false));
         }
     }
@@ -1219,8 +1233,9 @@ fn draw_transcript(
     }
 
     let detail = transcript_detail(app);
+    let headings = app.grouped_by_agent().then(|| app.agent_headings());
     let (entries, drawn) = app.entries_to_draw();
-    drawn.update(entries, width, detail, theme);
+    drawn.update(entries, width, detail, headings.as_deref(), theme);
     let above = drawn.line_count();
     app.keep_view();
     let total = above + question.len();
@@ -1361,35 +1376,119 @@ fn mark_found(
 /// is everything its lines depend on.
 #[derive(Debug, Default)]
 pub struct DrawnEntries {
-    drawn: Vec<(u64, Vec<Line<'static>>)>,
+    drawn: Vec<Drawn>,
+}
+
+/// One thing the transcript draws, in the order it is drawn: an entry, or
+/// the heading a sub-agent's rows are grouped under.
+#[derive(Debug)]
+struct Drawn {
+    /// What the lines were drawn from, as one number.
+    key: u64,
+    /// The entry drawn, or for a heading the first entry under it.
+    entry: usize,
+    heading: bool,
+    lines: Vec<Line<'static>>,
+}
+
+/// What the transcript draws at one place, before it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Entry(usize),
+    /// The heading over a sub-agent's rows in a turn: the first of them, and
+    /// how many calls they hold.
+    Heading {
+        first: usize,
+        calls: usize,
+    },
 }
 
 impl DrawnEntries {
-    /// Brings every entry's lines up to date.
+    /// Brings every entry's lines up to date, in the order they are drawn.
     ///
     /// The columns are worked out here, from every entry, because a row is
     /// drawn in the columns the widest row needs; and so is whether an entry
-    /// keeps the blank line after it, which depends on what comes next.
-    fn update(&mut self, entries: &[Entry], width: usize, detail: Detail, theme: &Theme) {
+    /// keeps the blank line after it, which depends on what is drawn next.
+    /// `headings` is each sub-agent's tag and task where the rows are grouped
+    /// by agent, and `None` where they are drawn as they happened.
+    fn update(
+        &mut self,
+        entries: &[Entry],
+        width: usize,
+        detail: Detail,
+        headings: Option<&[(String, String)]>,
+        theme: &Theme,
+    ) {
         let detail = Detail {
             columns: crate::calls::Columns::of(entries),
+            grouped: headings.is_some(),
             ..detail
         };
-        self.drawn.truncate(entries.len());
-        for (at, entry) in entries.iter().enumerate() {
-            let packed = is_row(entry) && entries.get(at + 1).is_some_and(is_row);
-            let key = drawn_from(entry, width, detail, theme) ^ u64::from(packed);
-            let draw = || {
-                let mut lines = entry_lines(entry, width, detail, theme);
-                if packed && lines.last().is_some_and(|line| line.width() == 0) {
-                    lines.pop();
+        let order = order(entries, headings.is_some());
+        self.drawn.truncate(order.len());
+        for (at, slot) in order.iter().enumerate() {
+            let next_is_row = match order.get(at + 1) {
+                Some(Slot::Entry(next)) => entries.get(*next).is_some_and(is_row),
+                Some(Slot::Heading { .. }) | None => false,
+            };
+            let (key, entry, heading) = match *slot {
+                Slot::Entry(index) => {
+                    let packed = entries.get(index).is_some_and(is_row) && next_is_row;
+                    let key = entries
+                        .get(index)
+                        .map_or(0, |entry| drawn_from(entry, width, detail, theme))
+                        ^ u64::from(packed);
+                    (key, index, false)
                 }
-                lines
+                Slot::Heading { first, calls } => {
+                    let heading = heading_of(entries, first, headings);
+                    (
+                        heading_key(&heading, calls, width, detail, theme),
+                        first,
+                        true,
+                    )
+                }
+            };
+            let draw = || match *slot {
+                Slot::Entry(index) => {
+                    let Some(entry) = entries.get(index) else {
+                        return Vec::new();
+                    };
+                    let mut lines = entry_lines(entry, width, detail, theme);
+                    if is_row(entry)
+                        && next_is_row
+                        && lines.last().is_some_and(|line| line.width() == 0)
+                    {
+                        lines.pop();
+                    }
+                    lines
+                }
+                Slot::Heading { first, calls } => {
+                    let (tag, task) = heading_of(entries, first, headings);
+                    vec![crate::calls::heading(
+                        &tag, &task, calls, width, detail, theme,
+                    )]
+                }
             };
             match self.drawn.get_mut(at) {
-                Some((drawn_key, _)) if *drawn_key == key => {}
-                Some(slot) => *slot = (key, draw()),
-                None => self.drawn.push((key, draw())),
+                Some(drawn) if drawn.key == key => {
+                    drawn.entry = entry;
+                    drawn.heading = heading;
+                }
+                Some(drawn) => {
+                    *drawn = Drawn {
+                        key,
+                        entry,
+                        heading,
+                        lines: draw(),
+                    }
+                }
+                None => self.drawn.push(Drawn {
+                    key,
+                    entry,
+                    heading,
+                    lines: draw(),
+                }),
             }
         }
     }
@@ -1398,15 +1497,15 @@ impl DrawnEntries {
     fn find(&self, query: &crate::find::Query) -> Vec<crate::find::Found> {
         let mut first = 0;
         let mut found = Vec::new();
-        for (_, lines) in &self.drawn {
-            found.extend(query.in_lines(lines, first));
-            first += lines.len();
+        for drawn in &self.drawn {
+            found.extend(query.in_lines(&drawn.lines, first));
+            first += drawn.lines.len();
         }
         found
     }
 
     fn line_count(&self) -> usize {
-        self.drawn.iter().map(|(_, lines)| lines.len()).sum()
+        self.drawn.iter().map(|drawn| drawn.lines.len()).sum()
     }
 
     /// Line `line` of the whole transcript as last drawn, named by what it
@@ -1414,16 +1513,17 @@ impl DrawnEntries {
     /// is drawn there.
     pub(crate) fn anchor(&self, line: usize) -> Option<Anchor> {
         let mut first = 0usize;
-        for (entry, (_, lines)) in self.drawn.iter().enumerate() {
+        for drawn in &self.drawn {
             let offset = line.checked_sub(first)?;
-            if offset < lines.len() {
+            if offset < drawn.lines.len() {
                 return Some(Anchor {
-                    entry,
+                    entry: drawn.entry,
+                    heading: drawn.heading,
                     offset,
-                    lines: lines.clone(),
+                    lines: drawn.lines.clone(),
                 });
             }
-            first = first.saturating_add(lines.len());
+            first = first.saturating_add(drawn.lines.len());
         }
         None
     }
@@ -1431,15 +1531,26 @@ impl DrawnEntries {
     /// Where `anchor` is in the transcript as drawn now: the same line of the
     /// same entry, and where that line is gone — a diff cut again, a run of
     /// calls folded — the nearest line above it that is still drawn, so the
-    /// view stops on what led up to the line rather than past it.
+    /// view stops on what led up to the line rather than past it. A heading
+    /// no longer drawn — the rows were ungrouped — is found as the first row
+    /// that was under it.
     pub(crate) fn line_of(&self, anchor: &Anchor) -> Option<usize> {
-        let (_, lines) = self.drawn.get(anchor.entry)?;
+        let at = self
+            .drawn
+            .iter()
+            .position(|drawn| drawn.entry == anchor.entry && drawn.heading == anchor.heading)
+            .or_else(|| {
+                self.drawn
+                    .iter()
+                    .position(|drawn| drawn.entry == anchor.entry)
+            })?;
+        let lines = &self.drawn.get(at)?.lines;
         let last = lines.len().checked_sub(1)?;
         let first: usize = self
             .drawn
             .iter()
-            .take(anchor.entry)
-            .map(|(_, lines)| lines.len())
+            .take(at)
+            .map(|drawn| drawn.lines.len())
             .sum();
         let above = (0..=anchor.offset).rev();
         let below = anchor.offset.saturating_add(1)..anchor.lines.len();
@@ -1462,12 +1573,120 @@ impl DrawnEntries {
     fn lines(&self, start: usize, count: usize) -> Vec<Line<'static>> {
         self.drawn
             .iter()
-            .flat_map(|(_, lines)| lines)
+            .flat_map(|drawn| &drawn.lines)
             .skip(start)
             .take(count)
             .cloned()
             .collect()
     }
+}
+
+/// The order the transcript draws `entries` in.
+///
+/// As they happened, unless `grouped`: then within each turn — between one
+/// prompt or turn's rule and the next — every sub-agent's rows are drawn
+/// together under a heading, at the place that agent first did something.
+/// The session's own entries, anything an agent did that is not a row of
+/// the calls table, and the turn's boundaries stay where they were.
+fn order(entries: &[Entry], grouped: bool) -> Vec<Slot> {
+    if !grouped {
+        return (0..entries.len()).map(Slot::Entry).collect();
+    }
+    let mut order = Vec::with_capacity(entries.len());
+    let mut start = 0;
+    while start < entries.len() {
+        let end = (start + 1..entries.len())
+            .find(|&at| matches!(entries[at].kind, EntryKind::User | EntryKind::Turn(_)))
+            .unwrap_or(entries.len());
+        order.extend(grouped_turn(entries, start..end));
+        start = end;
+    }
+    order
+}
+
+/// One turn's entries, each sub-agent's rows drawn together.
+fn grouped_turn(entries: &[Entry], turn: std::ops::Range<usize>) -> Vec<Slot> {
+    enum Place {
+        One(usize),
+        Group(usize),
+    }
+    let mut places = Vec::new();
+    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+    for at in turn {
+        let Some(entry) = entries.get(at) else {
+            continue;
+        };
+        match entry.agent.as_deref().filter(|_| is_row(entry)) {
+            Some(tag) => match groups.iter_mut().find(|(group, _)| *group == tag) {
+                Some((_, rows)) => rows.push(at),
+                None => {
+                    groups.push((tag, vec![at]));
+                    places.push(Place::Group(groups.len() - 1));
+                }
+            },
+            None => places.push(Place::One(at)),
+        }
+    }
+    let mut slots = Vec::new();
+    for place in places {
+        match place {
+            Place::One(at) => slots.push(Slot::Entry(at)),
+            Place::Group(group) => {
+                let Some((_, rows)) = groups.get(group) else {
+                    continue;
+                };
+                let calls = rows
+                    .iter()
+                    .filter_map(|&at| entries.get(at))
+                    .map(|entry| entry.calls.len())
+                    .sum();
+                slots.push(Slot::Heading {
+                    first: rows.first().copied().unwrap_or_default(),
+                    calls,
+                });
+                slots.extend(rows.iter().copied().map(Slot::Entry));
+            }
+        }
+    }
+    slots
+}
+
+/// The tag and task a heading over entry `first`'s agent's rows names.
+fn heading_of(
+    entries: &[Entry],
+    first: usize,
+    headings: Option<&[(String, String)]>,
+) -> (String, String) {
+    let tag = entries
+        .get(first)
+        .and_then(|entry| entry.agent.clone())
+        .unwrap_or_default();
+    let task = headings
+        .unwrap_or_default()
+        .iter()
+        .find(|(named, _)| *named == tag)
+        .map(|(_, task)| task.clone())
+        .unwrap_or_default();
+    (tag, task)
+}
+
+/// What a heading's line is drawn from, as one number.
+fn heading_key(
+    heading: &(String, String),
+    calls: usize,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "heading".hash(&mut hasher);
+    heading.hash(&mut hasher);
+    calls.hash(&mut hasher);
+    width.hash(&mut hasher);
+    detail.columns.hash(&mut hasher);
+    theme.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A transcript line as the entry it belongs to and its place among that
@@ -1477,10 +1696,12 @@ impl DrawnEntries {
 /// The lines are kept as well as the place because a switch moves lines
 /// within their own entry — opening a cut diff puts rows above the ones kept
 /// at its end — and takes some away, and what is still drawn of the entry is
-/// found by what it reads.
+/// found by what it reads. The entry is named by its place in the transcript
+/// rather than where it is drawn, which grouping the rows by agent changes.
 #[derive(Debug)]
 pub(crate) struct Anchor {
     entry: usize,
+    heading: bool,
     offset: usize,
     lines: Vec<Line<'static>>,
 }
@@ -1520,6 +1741,7 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64
     width.hash(&mut hasher);
     detail.folded.hash(&mut hasher);
     detail.columns.hash(&mut hasher);
+    detail.grouped.hash(&mut hasher);
     if holds_a_cut_diff(entry) {
         detail.diffs_open.hash(&mut hasher);
     }
@@ -1542,6 +1764,7 @@ fn transcript_detail(app: &App) -> Detail {
         diffs_open: app.diffs_open(),
         // Worked out from the entries where they are drawn.
         columns: crate::calls::Columns::default(),
+        grouped: false,
     }
 }
 
@@ -5978,7 +6201,7 @@ mod tests {
 
         let theme = Theme::default();
         let (entries, drawn) = app.entries_to_draw();
-        drawn.update(entries, 60, Detail::default(), &theme);
+        drawn.update(entries, 60, Detail::default(), None, &theme);
         let rows: Vec<String> = drawn
             .lines(0, 12)
             .iter()
@@ -6003,6 +6226,87 @@ mod tests {
             rows[diff_ends - 2],
             "",
             "a diff keeps its blank line: {rows:?}"
+        );
+    }
+
+    /// Grouped by agent, each agent's rows in a turn are drawn together
+    /// under a heading where it first did something; the session's own row
+    /// stays where it was, and so does the next turn's prompt.
+    #[test]
+    fn grouped_by_agent_each_agents_rows_are_drawn_under_its_heading() {
+        use niobe_core::event::{AgentId, Event};
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        for (id, kind) in [("toolu_a", "Explore"), ("toolu_b", "general-purpose")] {
+            app.apply(&Event::AgentSpawn {
+                id: AgentId::new(id),
+                parent: None,
+                kind: Some(kind.to_owned()),
+                label: format!("{kind}: look at {id}"),
+            });
+        }
+        let start = |id: &str, agent: Option<&str>| Event::ToolCallStart {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: String::new(),
+            summary: Some(format!("{id}.rs")),
+            agent: agent.map(AgentId::new),
+        };
+        app.apply(&start("a1", Some("toolu_a")));
+        app.apply(&start("b1", Some("toolu_b")));
+        app.apply(&start("m1", None));
+        app.apply(&start("a2", Some("toolu_a")));
+        app.apply(&start("b2", Some("toolu_b")));
+
+        let theme = Theme::default();
+        let drawn_as = |app: &mut App| -> Vec<String> {
+            let headings = app.grouped_by_agent().then(|| app.agent_headings());
+            let (entries, drawn) = app.entries_to_draw();
+            drawn.update(entries, 60, Detail::default(), headings.as_deref(), &theme);
+            drawn
+                .lines(0, 20)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect()
+                })
+                .map(|row: String| row.trim_end().to_owned())
+                .filter(|row| !row.is_empty())
+                .collect()
+        };
+
+        let interleaved = drawn_as(&mut app);
+        assert!(interleaved[2].contains("explore a1.rs"), "{interleaved:?}");
+        assert!(interleaved[3].contains("general b1.rs"), "{interleaved:?}");
+
+        app.group_by_agent();
+        let grouped = drawn_as(&mut app);
+        let rows: Vec<&str> = grouped.iter().skip(2).map(String::as_str).collect();
+        assert!(
+            rows[0].starts_with("▾ explore") && rows[0].contains("look at toolu_a"),
+            "{grouped:?}"
+        );
+        assert!(rows[0].ends_with("2 calls"), "{grouped:?}");
+        assert!(
+            rows[1].contains("a1.rs") && rows[2].contains("a2.rs"),
+            "{grouped:?}"
+        );
+        assert!(
+            !rows[1].contains("explore"),
+            "the heading names the agent: {grouped:?}"
+        );
+        assert!(rows[3].starts_with("▾ general"), "{grouped:?}");
+        assert!(
+            rows[4].contains("b1.rs") && rows[5].contains("b2.rs"),
+            "{grouped:?}"
+        );
+        assert!(
+            rows[6].contains("m1.rs"),
+            "the session's own row stays: {grouped:?}"
         );
     }
 

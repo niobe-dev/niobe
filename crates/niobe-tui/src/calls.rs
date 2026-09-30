@@ -54,6 +54,9 @@ pub(crate) struct Detail {
     pub(crate) diffs_open: bool,
     /// How wide the name and agent columns are drawn.
     pub(crate) columns: Columns,
+    /// Whether the sub-agents' rows are drawn under a heading per agent,
+    /// which names the agent in place of every row's tag.
+    pub(crate) grouped: bool,
 }
 
 /// How wide the tool's name and the sub-agent's tag are drawn, so that what
@@ -148,7 +151,7 @@ fn single(
         (glyph, glyph_colour),
         entry.head.clone(),
         Doing {
-            agent: entry.agent.as_deref(),
+            agent: entry.agent.as_deref().filter(|_| !detail.grouped),
             what: &call.what,
         },
         result(call, theme),
@@ -184,7 +187,7 @@ fn group(
         (glyph, colour),
         head(entry),
         Doing {
-            agent: entry.agent.as_deref(),
+            agent: entry.agent.as_deref().filter(|_| !detail.grouped),
             what: &what,
         },
         group_result(calls, theme),
@@ -573,6 +576,37 @@ pub(crate) fn said(
     lines
 }
 
+/// The heading a sub-agent's rows are grouped under: `▾`, its tag across
+/// the name and agent columns, its task where what a call does is drawn, and
+/// how many calls the rows under it hold where a call's cost is.
+pub(crate) fn heading(
+    tag: &str,
+    task: &str,
+    calls: usize,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> Line<'static> {
+    let columns = detail.columns;
+    let span = columns.name.max(NAME_LEAST) + 1 + columns.agent;
+    let lead = (span.max(text::width(tag)) + 1).min(width / 2);
+    let count = match calls {
+        1 => "1 call".to_owned(),
+        calls => format!("{calls} calls"),
+    };
+    let room = width.saturating_sub(GUTTER + lead + GAP + text::width(&count));
+    let task = text::truncate(task, room);
+    let gap = room.saturating_sub(text::width(&task)) + GAP;
+    let tag = text::truncate(tag, lead.saturating_sub(1));
+    Line::from(vec![
+        Span::styled("▾ ", Style::new().fg(theme.title).bold()),
+        Span::styled(format!("{tag:<lead$}"), Style::new().fg(theme.title).bold()),
+        Span::styled(task, Style::new().fg(theme.dim)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(count, Style::new().fg(theme.dim)),
+    ])
+}
+
 /// What stands where a call's cost would, on a sub-agent's words.
 const SAYS: &str = "says";
 
@@ -800,6 +834,7 @@ mod tests {
             folded,
             diffs_open: false,
             columns: Columns::of(app.entries()),
+            grouped: false,
         };
         lines(&app.entries()[0], 80, detail, &Theme::default())
             .into_iter()

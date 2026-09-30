@@ -956,6 +956,9 @@ pub struct App {
     /// Whether a run of calls is drawn as its group row alone, rather than
     /// with a row for each call under it.
     calls_folded: bool,
+    /// Whether the sub-agents' rows are drawn together under each agent
+    /// rather than interleaved as they happened.
+    by_agent: bool,
     diffs_open: bool,
     /// How each call the operator or a rule let through was allowed, until
     /// the call ends and its entry takes the answer.
@@ -1248,6 +1251,7 @@ impl App {
             agent_entries: BTreeMap::new(),
             run: None,
             calls_folded: false,
+            by_agent: false,
             diffs_open: false,
             answered: BTreeMap::new(),
             just_ended: None,
@@ -2010,6 +2014,35 @@ impl App {
     pub fn fold_calls(&mut self) {
         self.hold_view();
         self.calls_folded = !self.calls_folded;
+    }
+
+    /// Whether the sub-agents' rows are drawn under each agent: see
+    /// [`App::group_by_agent`].
+    pub fn grouped_by_agent(&self) -> bool {
+        self.by_agent
+    }
+
+    /// Draws each turn's sub-agent rows together under a header per agent,
+    /// where that agent first did something in the turn, or interleaved as
+    /// they happened again.
+    ///
+    /// Nine agents working at once interleave their calls row by row, which
+    /// is when it happened but not what any one agent did; grouped, each
+    /// agent's work reads top to bottom. The session's own rows, what anyone
+    /// said and every turn's boundary stay where they were.
+    pub fn group_by_agent(&mut self) {
+        self.hold_view();
+        self.by_agent = !self.by_agent;
+    }
+
+    /// Each sub-agent's tag and task, for the header its rows are grouped
+    /// under.
+    pub(crate) fn agent_headings(&self) -> Vec<(String, String)> {
+        self.agents
+            .iter()
+            .zip(self.agent_tags())
+            .map(|(agent, tag)| (tag, agent.task().to_owned()))
+            .collect()
     }
 
     /// Whether every diff longer than [`crate::hunks::MAX_ROWS`] is drawn
@@ -2942,6 +2975,7 @@ impl App {
             KeyCode::Up => self.scroller_mut(pane).move_cursor(false),
             KeyCode::Down => self.scroller_mut(pane).move_cursor(true),
             KeyCode::Enter => self.fold_under_cursor(pane),
+            KeyCode::Char('a') => self.group_by_agent(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
         }
@@ -4839,6 +4873,23 @@ mod tests {
         assert_eq!(app.focus(), Focus::Pane(Pane::Activity));
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.focus(), Focus::Session, "the cycle wraps");
+    }
+
+    /// `a` groups the transcript by agent where a pane beside it has the
+    /// keyboard; in the composer it is a letter of the prompt.
+    #[test]
+    fn a_groups_by_agent_from_a_pane_and_is_typed_in_the_composer() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(!app.grouped_by_agent());
+        assert_eq!(app.composed(), "a");
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(app.grouped_by_agent());
+        assert_eq!(app.composed(), "a", "nothing was typed");
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(!app.grouped_by_agent(), "the key groups and ungroups");
     }
 
     #[test]
