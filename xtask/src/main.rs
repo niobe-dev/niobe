@@ -197,6 +197,9 @@ fn off_the_network() -> Result<(), String> {
     let tree = cargo_output(&[
         "tree",
         "--workspace",
+        // Every target, so the check says the same on macOS and on Linux.
+        "--target",
+        "all",
         "--edges",
         "normal,build",
         "--prefix",
@@ -210,6 +213,15 @@ fn off_the_network() -> Result<(), String> {
             "network crates in the dependency tree: {}\nniobe makes no network calls of its \
              own; the official CLIs are what talk to the providers (AGENTS.md §2)",
             crates.join(", ")
+        ));
+    }
+
+    let unlisted = network::unlisted_crates_in(&tree);
+    if !unlisted.is_empty() {
+        return Err(format!(
+            "crates in the dependency tree that are not on the allowed list: {}
+add each to              ALLOWED_CRATES in xtask/src/network.rs once you have read what it does, and say              why in the commit",
+            unlisted.join(", ")
         ));
     }
 
@@ -232,11 +244,13 @@ fn off_the_network() -> Result<(), String> {
             Err(e) => return Err(format!("cannot read {path}: {e}")),
         };
         marks.extend(network::credential_marks_in(path, &source));
+        marks.extend(network::network_marks_in(path, &source));
     }
     if !marks.is_empty() {
         return Err(format!(
-            "code that reads a CLI's credentials or sets a user agent:\n  {}\nonly the official \
-             binaries touch their credentials (AGENTS.md §2)",
+            "code that reads a CLI's credentials, sets a user agent or opens a connection:\n  \
+             {}\nonly the official binaries touch their credentials or the network \
+             (AGENTS.md §2)",
             marks.join("\n  ")
         ));
     }

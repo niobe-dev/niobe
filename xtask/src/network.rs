@@ -39,6 +39,171 @@ pub(crate) const NETWORK_CRATES: &[&str] = &[
     "ureq",
 ];
 
+/// Every crate the dependency tree may hold, on any target, outside the
+/// workspace's own. A crate not on it fails the check whatever it is: a
+/// list of what is known to talk over the network misses every client
+/// nobody thought to write down, and a new dependency is a decision to be
+/// made on purpose, here, where it can be read.
+pub(crate) const ALLOWED_CRATES: &[&str] = &[
+    "allocator-api2",
+    "bitflags",
+    "block-buffer",
+    "castaway",
+    "cc",
+    "cfg-if",
+    "compact_str",
+    "convert_case",
+    "cpufeatures",
+    "critical-section",
+    "crossterm",
+    "crossterm_winapi",
+    "crypto-common",
+    "darling",
+    "darling_core",
+    "darling_macro",
+    "deranged",
+    "derive_more",
+    "derive_more-impl",
+    "digest",
+    "document-features",
+    "either",
+    "equivalent",
+    "errno",
+    "fallible-iterator",
+    "fallible-streaming-iterator",
+    "find-msvc-tools",
+    "fnv",
+    "foldhash",
+    "generic-array",
+    "hashbrown",
+    "heck",
+    "ident_case",
+    "indoc",
+    "instability",
+    "itertools",
+    "itoa",
+    "jiff",
+    "jiff-core",
+    "jiff-static",
+    "kasuari",
+    "libc",
+    "libsqlite3-sys",
+    "line-clipping",
+    "linux-raw-sys",
+    "litrs",
+    "lock_api",
+    "log",
+    "lru",
+    "memchr",
+    "mio",
+    "num_threads",
+    "num-conv",
+    "parking_lot",
+    "parking_lot_core",
+    "pkg-config",
+    "portable-atomic",
+    "portable-atomic-util",
+    "powerfmt",
+    "proc-macro2",
+    "pulldown-cmark",
+    "quote",
+    "ratatui",
+    "ratatui-core",
+    "ratatui-crossterm",
+    "ratatui-macros",
+    "ratatui-textarea",
+    "ratatui-widgets",
+    "redox_syscall",
+    "rusqlite",
+    "rustc_version",
+    "rustix",
+    "rustversion",
+    "ryu",
+    "scopeguard",
+    "semver",
+    "serde",
+    "serde_core",
+    "serde_derive",
+    "serde_json",
+    "serde_spanned",
+    "sha2",
+    "shlex",
+    "signal-hook",
+    "signal-hook-mio",
+    "signal-hook-registry",
+    "smallvec",
+    "static_assertions",
+    "strsim",
+    "strum",
+    "strum_macros",
+    "syn",
+    "thiserror",
+    "thiserror-impl",
+    "time",
+    "time-core",
+    "toml",
+    "toml_datetime",
+    "toml_parser",
+    "typenum",
+    "unicase",
+    "unicode-ident",
+    "unicode-segmentation",
+    "unicode-truncate",
+    "unicode-width",
+    "vcpkg",
+    "version_check",
+    "wasi",
+    "winapi",
+    "winapi-i686-pc-windows-gnu",
+    "winapi-x86_64-pc-windows-gnu",
+    "windows-link",
+    "windows-sys",
+    "winnow",
+    "zmij",
+];
+
+/// The crates in `tree`, the output of `cargo tree --prefix none --format
+/// {p}`, that are neither the workspace's own nor on [`ALLOWED_CRATES`].
+pub(crate) fn unlisted_crates_in(tree: &str) -> Vec<String> {
+    let mut found: Vec<String> = tree
+        .lines()
+        .filter(|line| !line.contains(" (/"))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| !ALLOWED_CRATES.contains(name))
+        .map(str::to_owned)
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+/// Text in the workspace's own source that opens a connection without any
+/// crate — the standard library has one — or reads the macOS keychain, which
+/// is where the CLI keeps its login there. Looked for in `src/` only: a test
+/// may use a socket to drive a pty.
+pub(crate) const NETWORK_MARKS: &[&str] = &[
+    "std::net",
+    "TcpStream",
+    "UdpSocket",
+    "find-generic-password",
+    "Keychain",
+];
+
+/// Each code line of `source`, a file at `path` under a crate's `src/`,
+/// that holds one of the [`NETWORK_MARKS`], as `path:line: text`.
+pub(crate) fn network_marks_in(path: &str, source: &str) -> Vec<String> {
+    if !path.contains("/src/") {
+        return Vec::new();
+    }
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with("//"))
+        .filter(|(_, line)| NETWORK_MARKS.iter().any(|mark| line.contains(mark)))
+        .map(|(at, line)| format!("{path}:{}: {}", at + 1, line.trim()))
+        .collect()
+}
+
 /// Text in source that reads a CLI's credentials or names the header a user
 /// agent is set by. Comments are passed over: saying that Niobe never does
 /// either is how the code documents it.
@@ -90,6 +255,27 @@ niobe-core v0.12.0 (/repo/crates/niobe-core)
     #[test]
     fn a_network_crate_anywhere_in_the_tree_is_named_once() {
         assert_eq!(network_crates_in(TREE), ["rustls", "ureq"]);
+    }
+
+    #[test]
+    fn a_crate_nobody_allowed_is_named_and_the_workspaces_own_are_not() {
+        let tree = "niobe-cli v0.12.0 (/repo/crates/niobe-cli)
+serde v1.0.228
+minreq v2.12.0
+";
+        assert_eq!(unlisted_crates_in(tree), ["minreq"]);
+    }
+
+    #[test]
+    fn a_socket_in_the_workspaces_source_is_named_and_one_in_a_test_is_not() {
+        let source = "use std::net::TcpStream;
+// std::net is never used
+";
+        assert_eq!(
+            network_marks_in("crates/x/src/lib.rs", source),
+            ["crates/x/src/lib.rs:1: use std::net::TcpStream;"]
+        );
+        assert!(network_marks_in("crates/x/tests/pty.rs", source).is_empty());
     }
 
     #[test]
