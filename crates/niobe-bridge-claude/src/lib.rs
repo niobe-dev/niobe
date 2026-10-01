@@ -33,7 +33,7 @@
 //! use niobe_bridge_claude::{Options, Session};
 //!
 //! let mut session = Session::spawn(&Options::new(".", "max"))?;
-//! session.send("what changed in the last commit?")?;
+//! session.send("what changed in the last commit?", &[])?;
 //! for event in session.drain() {
 //!     println!("{event:?}");
 //! }
@@ -42,6 +42,7 @@
 //!
 //! [`Event`]: niobe_core::event::Event
 
+mod base64;
 mod driver;
 mod spilled;
 mod translate;

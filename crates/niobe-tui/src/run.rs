@@ -19,6 +19,7 @@ use niobe_core::event::Event as SessionEvent;
 
 use crate::app::{App, Arrival};
 use crate::bridge::Bridge;
+use crate::images::Images;
 use crate::input::{Input, Wait};
 use crate::journal::Journal;
 use crate::rules::{Reach, Rules};
@@ -78,6 +79,7 @@ struct Around<'a> {
     rules: &'a mut dyn Rules,
     watch: &'a mut dyn Watch,
     shell: &'a mut dyn Shell,
+    images: &'a mut dyn Images,
 }
 
 /// How a session ended.
@@ -102,7 +104,8 @@ pub enum Ended {
 /// tick and never waited on, so a read that is slow, that failed, or that has
 /// nothing new to say costs the frame nothing and leaves the last one on
 /// screen. `shell` runs the commands the operator types after `!`, and is
-/// asked how they ended the same way.
+/// asked how they ended the same way; `images` fetches the images the
+/// operator attaches, and is asked for them the same way too.
 ///
 /// `app` may already hold a session: a resumed one is folded in by the caller
 /// before the shell opens.
@@ -117,6 +120,7 @@ pub fn run(
     rules: &mut dyn Rules,
     watch: &mut dyn Watch,
     shell: &mut dyn Shell,
+    images: &mut dyn Images,
 ) -> io::Result<Ended> {
     install_panic_hook();
     // Declared before the terminal guard so it is dropped after it: dropping
@@ -174,6 +178,7 @@ pub fn run(
             rules,
             watch,
             shell,
+            images,
         },
         &mut Machine {
             shutdown: &shutdown,
@@ -243,6 +248,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         rules,
         watch,
         shell,
+        images,
     } = around;
     let mut ended = Ended::Quit;
 
@@ -253,6 +259,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         app.tick(std::time::Instant::now(), Some(machine.clock.now()));
         let producing = fold_backend(app, journal, backend, watch);
         fold_commands(app, shell);
+        fold_images(app, images);
         // Whatever a read of the repository has finished with since the last
         // tick. Nothing is waited on here: an unfinished or failed read says
         // nothing and the pane keeps what it had.
@@ -267,14 +274,22 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // what a recording being read back spent under one it knew nothing of.
         app.settle_budget();
         run_commands(app, shell);
+        fetch_images(app, images);
         send_produced(app, journal, backend, rules);
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        let tick = if producing { BUSY_TICK } else { TICK };
+        // An image asked for is looked for again soon, as a reply is: the
+        // operator is waiting to see it land in the prompt.
+        let tick = if producing || app.fetching_image() {
+            BUSY_TICK
+        } else {
+            TICK
+        };
         match machine.wait.input(tick)? {
             Input::Ready => {
                 read_input(app, machine.wait)?;
                 run_commands(app, shell);
+                fetch_images(app, images);
                 send_produced(app, journal, backend, rules);
             }
             Input::Idle => {
@@ -283,6 +298,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                 if !events.is_empty() {
                     hand_over(app, events);
                     run_commands(app, shell);
+                    fetch_images(app, images);
                     send_produced(app, journal, backend, rules);
                 }
             }
@@ -418,6 +434,12 @@ fn send_produced(
             Ok(()) => app.kept(),
             Err(error) => app.not_kept(&error.to_string()),
         }
+        // Taken for every prompt, sent or not, so the next prompt's images
+        // are never handed out with this one.
+        let images = match &event {
+            SessionEvent::UserMessage { .. } => app.take_turn_images(),
+            _ => Vec::new(),
+        };
         if !app.is_attached() {
             continue;
         }
@@ -427,7 +449,7 @@ fn send_produced(
         // use for what it did not ask for.
         match &event {
             SessionEvent::UserMessage { text } => {
-                if let Err(error) = backend.send(text) {
+                if let Err(error) = backend.send(text, &images) {
                     app.not_sent(&error.to_string());
                 }
             }
@@ -494,6 +516,21 @@ fn run_commands(app: &mut App, shell: &mut dyn Shell) {
     }
 }
 
+/// Hands where the operator asked for an image to `images`.
+fn fetch_images(app: &mut App, images: &mut dyn Images) {
+    for source in app.take_image_requests() {
+        images.fetch(&source);
+    }
+}
+
+/// Attaches each image fetched since the last tick, or says why it could not
+/// be.
+fn fold_images(app: &mut App, images: &mut dyn Images) {
+    for fetched in images.drain() {
+        app.fetched(fetched);
+    }
+}
+
 /// Records how each command that has ended since the last tick ended. What
 /// that produces is kept with everything else the operator produced, by the
 /// next [`send_produced`].
@@ -544,10 +581,12 @@ mod tests {
     use super::*;
     use crate::app::{Answer, Repo};
     use crate::bridge::{BridgeError, Detached};
+    use crate::images::{Fetched, Source};
     use crate::journal::JournalError;
     use crate::rules::{Forgotten, RulesError};
     use crate::watch::{Unwatched, Watch};
     use niobe_core::event::{Mode, PermissionDecision, ToolCallId, ToolOutcome};
+    use niobe_core::image::Image;
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::VecDeque;
@@ -574,6 +613,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct Attached {
         sent: Vec<String>,
+        images: Vec<Vec<Image>>,
         answered: Vec<(ToolCallId, PermissionDecision)>,
         said: Vec<Option<String>>,
         modes: Vec<Mode>,
@@ -584,11 +624,12 @@ mod tests {
     }
 
     impl Bridge for Attached {
-        fn send(&mut self, prompt: &str) -> Result<(), BridgeError> {
+        fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError> {
             if self.refuse {
                 return Err("the subprocess has gone".into());
             }
             self.sent.push(prompt.to_owned());
+            self.images.push(images.to_vec());
             Ok(())
         }
 
@@ -897,6 +938,106 @@ mod tests {
             }]
         );
         assert_eq!(backend.sent, ["x"]);
+    }
+
+    /// A clipboard that holds `image`, where it holds one, and hands it back
+    /// on the tick after it was asked for.
+    #[derive(Debug, Default)]
+    struct Clipboard {
+        image: Option<Image>,
+        asked: Vec<Source>,
+        waiting: Vec<Source>,
+    }
+
+    impl Images for Clipboard {
+        fn fetch(&mut self, source: &Source) {
+            self.asked.push(source.clone());
+            self.waiting.push(source.clone());
+        }
+
+        fn drain(&mut self) -> Vec<Fetched> {
+            std::mem::take(&mut self.waiting)
+                .into_iter()
+                .map(|source| Fetched {
+                    source,
+                    image: self
+                        .image
+                        .clone()
+                        .ok_or_else(|| "there is no image on the clipboard".to_owned()),
+                })
+                .collect()
+        }
+    }
+
+    fn screenshot() -> Image {
+        Image::from_bytes(b"\x89PNG\r\n\x1a\nscreenshot".to_vec()).expect("a PNG signature")
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn an_image_pasted_with_ctrl_v_goes_to_the_backend_with_the_prompt_that_names_it() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut clipboard = Clipboard {
+            image: Some(screenshot()),
+            ..Clipboard::default()
+        };
+        let mut backend = Attached::default();
+
+        app.on_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        fetch_images(&mut app, &mut clipboard);
+        fold_images(&mut app, &mut clipboard);
+        for c in "look".chars() {
+            app.on_key(key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        assert_eq!(clipboard.asked, [Source::Clipboard]);
+        assert_eq!(backend.sent, ["[Image #1] look"]);
+        assert_eq!(backend.images, [vec![screenshot()]]);
+    }
+
+    #[test]
+    fn a_clipboard_with_no_image_attaches_nothing_and_says_why() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut clipboard = Clipboard::default();
+
+        app.on_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        fetch_images(&mut app, &mut clipboard);
+        assert!(app.fetching_image());
+        fold_images(&mut app, &mut clipboard);
+
+        assert!(!app.fetching_image());
+        assert_eq!(app.composed(), "");
+        assert_eq!(
+            app.hint(),
+            Some("No image attached: there is no image on the clipboard")
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_went_nowhere_does_not_hand_its_images_to_the_next() {
+        let mut app = App::new(Repo::default());
+        let mut clipboard = Clipboard {
+            image: Some(screenshot()),
+            ..Clipboard::default()
+        };
+
+        app.on_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        fetch_images(&mut app, &mut clipboard);
+        fold_images(&mut app, &mut clipboard);
+        app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        send_produced(
+            &mut app,
+            &mut Kept::default(),
+            &mut Detached,
+            &mut Forgotten,
+        );
+
+        assert_eq!(app.take_turn_images(), Vec::new());
     }
 
     #[test]

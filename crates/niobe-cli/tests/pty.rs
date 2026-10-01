@@ -1851,6 +1851,51 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
     assert_handed_back(&drawn, cooked, "a quit after a paste");
 }
 
+/// An image file dropped on the terminal — which types its path as a paste —
+/// is attached rather than typed, and goes to the CLI as an image block after
+/// the prompt's text, which keeps the placeholder standing where it went.
+#[test]
+fn a_dropped_image_file_goes_to_the_cli_with_the_prompt() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    std::fs::write(repo.path().join("shot one.png"), b"\x89PNG\r\n\x1a\nfoo")
+        .expect("the image is written");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[200~'shot one.png'\x1b[201~");
+    terminal.shows("[Image #1]");
+    terminal.typed(b"look\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let turns = std::fs::read_to_string(repo.path().join("turns.jsonl"))
+        .expect("the stand-in wrote down the turn it was sent");
+    let turns: Vec<&str> = turns.lines().collect();
+    let [turn] = turns.as_slice() else {
+        panic!("one turn was not sent: {turns:?}");
+    };
+    let turn: serde_json::Value = serde_json::from_str(turn).expect("the turn is JSON");
+    assert_eq!(
+        turn["message"]["content"],
+        serde_json::json!([
+            { "type": "text", "text": "[Image #1] look" },
+            { "type": "image", "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "iVBORw0KGgpmb28=",
+            } },
+        ]),
+        "{turn}"
+    );
+}
+
 /// A `claude` that starts writing a reply to its first turn and does not
 /// finish it until it is asked to stop, writing down every request to stop it
 /// gets; then closes that turn as the CLI closes one an interrupt cut off,

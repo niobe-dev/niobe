@@ -18,6 +18,7 @@ mod args;
 mod backend;
 mod commands;
 mod config;
+mod images;
 mod journal;
 mod prices;
 mod printable;
@@ -38,7 +39,7 @@ use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::App;
 use niobe_tui::journal::Unrecorded;
 use niobe_tui::theme::{self, Depth};
-use niobe_tui::{Detached, Ended, Forgotten, NoShell, Theme, Unwatched};
+use niobe_tui::{Detached, Ended, Forgotten, NoImages, NoShell, Theme, Unwatched};
 
 /// Prints a line the way `println!` does, with anything in it that would act
 /// on the terminal shown as text instead; see [`printable`]. Every line this
@@ -264,6 +265,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
         &mut rules,
         &mut watching,
         &mut commands,
+        &mut images_for(&root),
     )
     .map_err(|e| e.to_string())?;
 
@@ -281,6 +283,12 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// The images the operator attaches, where a relative path is `root`'s, as it
+/// is the agent's.
+fn images_for(root: &Path) -> images::Clipboard {
+    images::Clipboard::at(root, std::env::var_os("HOME").map(PathBuf::from))
 }
 
 /// The operator's `!` commands, run at `root` — where the agent runs, so a
@@ -411,6 +419,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
         &mut rules,
         &mut watching,
         &mut commands,
+        &mut images_for(&root),
     )
     .map_err(|e| e.to_string())
     .map(|_| ())
@@ -513,6 +522,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
         &mut rules,
         &mut watching,
         &mut commands,
+        &mut images_for(&root),
     )
     .map_err(|e| e.to_string())?;
 
@@ -811,6 +821,7 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
         &mut Forgotten,
         &mut Unwatched,
         &mut NoShell,
+        &mut NoImages::default(),
     )
     .map_err(|e| e.to_string())
     .map(|_| ())

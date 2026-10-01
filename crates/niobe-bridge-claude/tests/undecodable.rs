@@ -91,7 +91,9 @@ fn turn(body: &str, done: impl Fn(&[Event]) -> bool) -> (Vec<Event>, Duration) {
     let mut options = Options::new(dir.path(), "max");
     options.binary = stand_in(dir.path(), body);
     let mut session = spawn_written(&options);
-    session.send("say something").expect("the turn is sent");
+    session
+        .send("say something", &[])
+        .expect("the turn is sent");
 
     let started = Instant::now();
     let mut events = Vec::new();

@@ -41,7 +41,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use niobe_core::event::{Billing, Event, Mode, PermissionDecision, ToolCallId};
+use niobe_core::image::Image;
 
+use crate::base64;
 use crate::spilled;
 use crate::translate::{Spent, Translator};
 
@@ -529,18 +531,14 @@ impl Session {
         ))
     }
 
-    /// Sends one turn.
+    /// Sends one turn, with the images the operator attached to it.
     ///
     /// The CLI reads turns as JSON lines on its standard input for as long as
     /// the session lasts, so this queues one line and nothing else: it never
     /// waits on the CLI, and the reply — or word that the turn could not be
     /// sent — arrives through [`Session::drain`].
-    pub fn send(&mut self, prompt: &str) -> std::io::Result<()> {
-        let line = serde_json::json!({
-            "type": "user",
-            "message": { "role": "user", "content": prompt },
-        });
-        self.queue(line.to_string(), "turn")
+    pub fn send(&mut self, prompt: &str, images: &[Image]) -> std::io::Result<()> {
+        self.queue(turn_line(prompt, images).to_string(), "turn")
     }
 
     /// Answers a permission prompt the CLI is waiting on.
@@ -1031,6 +1029,36 @@ fn kept_running(said: &str) -> String {
     message
 }
 
+/// The line that sends one turn.
+///
+/// A turn with no image is the prompt as a plain string, which is what every
+/// recorded session was sent. One with images is the prompt's text block and
+/// then an image block per image, in the order they were attached: the order
+/// Claude Code's own transcripts hold a pasted screenshot in, beside the
+/// `[Image #N]` its text keeps where the image went.
+fn turn_line(prompt: &str, images: &[Image]) -> serde_json::Value {
+    let content = if images.is_empty() {
+        serde_json::Value::from(prompt)
+    } else {
+        std::iter::once(serde_json::json!({ "type": "text", "text": prompt }))
+            .chain(images.iter().map(|image| {
+                serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.media_type().as_str(),
+                        "data": base64::encode(image.data()),
+                    },
+                })
+            }))
+            .collect()
+    };
+    serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": content },
+    })
+}
+
 /// The line that asks the CLI to change something about the running session.
 ///
 /// Written as its own function for the same reason as [`control_response`]:
@@ -1351,6 +1379,45 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_without_images_is_sent_as_the_prompt_string() {
+        assert_eq!(
+            turn_line("what changed?", &[]),
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": "what changed?" },
+            })
+        );
+    }
+
+    #[test]
+    fn a_turn_with_images_is_its_text_then_each_image_in_the_order_attached() {
+        let png = Image::from_bytes(b"\x89PNG\r\n\x1a\nfoo".to_vec()).expect("a PNG signature");
+        let jpeg = Image::from_bytes(b"\xff\xd8\xffbar".to_vec()).expect("a JPEG signature");
+
+        let line = turn_line("look: [Image #1] [Image #2]", &[png, jpeg]);
+
+        assert_eq!(
+            line,
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [
+                    { "type": "text", "text": "look: [Image #1] [Image #2]" },
+                    { "type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "iVBORw0KGgpmb28=",
+                    } },
+                    { "type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": "/9j/YmFy",
+                    } },
+                ] },
+            })
+        );
+    }
+
+    #[test]
     fn an_approval_sends_back_the_arguments_that_were_shown() {
         let input = serde_json::json!({ "file_path": "/repo/notes.txt" });
 
@@ -1508,7 +1575,7 @@ mod tests {
         let (mut session, _dir) = started(body);
         // A stand-in that has already left cannot take the turn, and that is
         // reported by the drain rather than here.
-        let _ = session.send("list the files");
+        let _ = session.send("list the files", &[]);
 
         // Generous for the reason `tests/answers.rs` gives: a freshly written
         // script can be held at its first instruction for seconds.
@@ -1664,7 +1731,7 @@ mod tests {
             c2 = ask("c2"),
             answers = answers.display(),
         ));
-        let _ = session.send("list the files");
+        let _ = session.send("list the files", &[]);
 
         let started = Instant::now();
         let mut asked = Vec::new();
@@ -1820,7 +1887,9 @@ mod tests {
         let (mut session, _dir) = started("exec sleep 300\n");
 
         let started = Instant::now();
-        session.send(&a_long_paste()).expect("the turn is queued");
+        session
+            .send(&a_long_paste(), &[])
+            .expect("the turn is queued");
         session.set_mode(Mode::Plan).expect("the request is queued");
         session.set_model("haiku").expect("the request is queued");
         let took = started.elapsed();
@@ -1837,7 +1906,9 @@ mod tests {
         let (mut session, _dir) = started("exec sleep 30\n");
         session.stalled_after = Duration::from_millis(200);
 
-        session.send(&a_long_paste()).expect("the turn is queued");
+        session
+            .send(&a_long_paste(), &[])
+            .expect("the turn is queued");
         let events = drained_until(&mut session, |event| {
             matches!(event, Event::Error { fatal: false, .. })
         });
@@ -1865,7 +1936,9 @@ mod tests {
     fn a_turn_the_cli_leaves_without_reading_is_reported_as_not_sent() {
         let (mut session, _dir) = started("exec sleep 1\n");
 
-        session.send(&a_long_paste()).expect("the turn is queued");
+        session
+            .send(&a_long_paste(), &[])
+            .expect("the turn is queued");
         let events = drained_until(
             &mut session,
             |event| matches!(event, Event::Error { message, .. } if message.contains("could not be sent")),

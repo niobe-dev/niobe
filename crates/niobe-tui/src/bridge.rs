@@ -14,6 +14,7 @@
 //! backend waiting for a reply.
 
 use niobe_core::event::{Event, Mode, PermissionDecision, ToolCallId};
+use niobe_core::image::Image;
 
 /// Why a turn could not be sent. Shown to the operator as it reads.
 pub type BridgeError = Box<dyn std::error::Error + Send + Sync>;
@@ -24,9 +25,10 @@ pub type BridgeError = Box<dyn std::error::Error + Send + Sync>;
 /// asks every public type to be printable, and a backend handle is one of the
 /// few things a bug report wants named.
 pub trait Bridge: std::fmt::Debug {
-    /// Sends one turn. Returns once the backend has it, not once it has
-    /// answered: the answer arrives through [`Bridge::drain`].
-    fn send(&mut self, prompt: &str) -> Result<(), BridgeError>;
+    /// Sends one turn, with the images the operator attached to it in the
+    /// order they were attached. Returns once the backend has it, not once it
+    /// has answered: the answer arrives through [`Bridge::drain`].
+    fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError>;
 
     /// Answers a permission prompt the backend raised, by the id of the call
     /// it gated. Returns once the backend has the answer.
@@ -90,7 +92,7 @@ pub trait Bridge: std::fmt::Debug {
 pub struct Detached;
 
 impl Bridge for Detached {
-    fn send(&mut self, _prompt: &str) -> Result<(), BridgeError> {
+    fn send(&mut self, _prompt: &str, _images: &[Image]) -> Result<(), BridgeError> {
         Err("this session is not attached to a backend".into())
     }
 

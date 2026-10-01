@@ -30,6 +30,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use ratatui::style::Style;
 
 use crate::clock::{Clock, LocalTime, Stamp};
+use crate::images::{Attachments, Fetched, Source, image_path};
 use crate::prices::Prices;
 use crate::theme::{Depth, Theme};
 
@@ -1055,6 +1056,8 @@ pub struct App {
     learned: Vec<Rule>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
+    /// The images attached to prompts, and the ones asked for.
+    images: Attachments,
     /// The model list the operator opened, while it is open.
     picking: Option<Picker>,
     /// The most this session may spend, where the operator set a budget.
@@ -1285,6 +1288,7 @@ impl App {
             allowed: Allowlist::new(),
             learned: Vec::new(),
             produced: Vec::new(),
+            images: Attachments::default(),
             picking: None,
             budget_usd: None,
             prices: None,
@@ -1410,16 +1414,19 @@ impl App {
     /// change is drawn under.
     fn fold_into_transcript(&mut self, event: &Event, ended: Option<(usize, usize, Option<Gate>)>) {
         match event {
-            Event::UserMessage { text } => self.push(Entry {
-                kind: EntryKind::User,
-                head: "you".to_owned(),
-                meta: String::new(),
-                body: text.clone(),
-                streaming: false,
-                at: self.at,
-                calls: Vec::new(),
-                agent: None,
-            }),
+            Event::UserMessage { text } => {
+                self.images.seen(text);
+                self.push(Entry {
+                    kind: EntryKind::User,
+                    head: "you".to_owned(),
+                    meta: String::new(),
+                    body: text.clone(),
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: None,
+                });
+            }
 
             Event::AssistantDelta { text } => match self.streaming_agent_entry() {
                 Some(entry) => entry.body.push_str(text),
@@ -3352,6 +3359,66 @@ impl App {
         self.scroll_to_tail();
     }
 
+    /// Where the operator asked for an image since the last call, oldest
+    /// first, for the event loop to hand to a [`crate::images::Images`].
+    pub fn take_image_requests(&mut self) -> Vec<Source> {
+        self.images.take_asked()
+    }
+
+    /// Folds in how a fetch ended: an image is attached where the cursor is,
+    /// as the placeholder that stands for it; a failure says why on the bar.
+    ///
+    /// A path that was pasted and is not an image to attach goes into the
+    /// prompt as the path it named, since a paste of it would have put it
+    /// there — without the quoting a terminal dropping it added.
+    pub fn fetched(&mut self, fetched: Fetched) {
+        self.images.fetched();
+        match (fetched.image, fetched.source) {
+            (Ok(image), _) => {
+                let placeholder = self.images.attach(image);
+                self.hint = None;
+                self.insert_into_composer(&format!("{placeholder} "));
+            }
+            (Err(reason), Source::Clipboard) => {
+                self.hint = Some(format!("No image attached: {reason}"));
+            }
+            (Err(reason), Source::File(path)) => {
+                self.hint = Some(format!("{path} is not attached: {reason}"));
+                self.insert_into_composer(&path);
+            }
+        }
+    }
+
+    /// The images of the oldest prompt sent and not yet handed to the
+    /// backend, for the event loop to send with it. Taken once for every
+    /// prompt sent, whether or not anything is attached to hear it.
+    pub fn take_turn_images(&mut self) -> Vec<niobe_core::image::Image> {
+        self.images.take_turn()
+    }
+
+    /// Whether an image the operator asked for has not come back yet.
+    pub fn fetching_image(&self) -> bool {
+        self.images.fetching()
+    }
+
+    /// Asks for the image at `source`, and says so until it arrives.
+    fn attach_image(&mut self, source: Source) {
+        self.hint = Some(match &source {
+            Source::Clipboard => "Reading the image on the clipboard…".to_owned(),
+            Source::File(path) => format!("Reading {path}…"),
+        });
+        self.images.ask(source);
+    }
+
+    /// Puts `text` in the composer where the cursor is, as typing would.
+    fn insert_into_composer(&mut self, text: &str) {
+        self.focus = Focus::Session;
+        if self.composer.insert_str(text) {
+            self.offer_selected = 0;
+            self.reopen_offers();
+        }
+    }
+
     /// The commands the operator ran since the last call, oldest first, for
     /// the event loop to hand to a [`crate::shell::Shell`].
     pub fn take_commands(&mut self) -> Vec<(ToolCallId, String)> {
@@ -3866,10 +3933,10 @@ impl App {
     /// would go, but it presses nothing: no Enter, no `/` or `!` opening the
     /// search or a command, and no answer to a question — a paste is exactly
     /// what a prompt must not take as one (see [`ASK_QUIET`]).
-    pub fn on_paste(&mut self, text: &str) {
+    pub fn on_paste(&mut self, pasted: &str) {
         self.hint = None;
         self.escaped = false;
-        let text = pasted_lines(text);
+        let text = pasted_lines(pasted);
         if self.asking().is_some() {
             match self.ask_focus {
                 AskFocus::Writing => {
@@ -3890,6 +3957,18 @@ impl App {
             if find.query.insert_str(joined_lines(&text)) {
                 find.current = None;
             }
+            return;
+        }
+        // A terminal that pastes an image it cannot give as text pastes
+        // nothing, and a dropped image file arrives as its path.
+        if text.trim().is_empty() {
+            self.focus = Focus::Session;
+            self.attach_image(Source::Clipboard);
+            return;
+        }
+        if let Some(path) = image_path(pasted) {
+            self.focus = Focus::Session;
+            self.attach_image(Source::File(path));
             return;
         }
         self.focus = Focus::Session;
@@ -4049,6 +4128,12 @@ impl App {
             (KeyCode::Enter, _) => self.submit(),
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.fold_calls(),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.open_diffs(),
+            // A terminal's own paste hands over text, and an image on the
+            // clipboard is none: this is the one way to reach it.
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                self.focus = Focus::Session;
+                self.attach_image(Source::Clipboard);
+            }
 
             // Shift+Tab reaches crossterm as its own code rather than as Tab
             // with a modifier, which is why it is matched on the code alone.
@@ -4340,10 +4425,12 @@ impl App {
         self.composer.clear();
         self.offer_closed = None;
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
+            self.images.discard();
             self.produce(Event::ModelSelected { model });
             self.scroll_to_tail();
             return;
         }
+        self.images.send(&text);
         self.produce(Event::UserMessage { text });
         self.sent_here = self.attached;
         if !self.attached {
@@ -4676,8 +4763,8 @@ fn fkey_hint(n: u8) -> &'static str {
             "F1 Help — the help browser is not implemented yet. Tab or a click moves the \
              keyboard between the panes; the wheel and PgUp/PgDn scroll the one that has it, \
              and in the right-hand panes ↑↓ and Enter fold a section; Ctrl+End returns to the \
-             newest line; Ctrl+O folds runs of tool calls; Ctrl+T shows the rows of a diff cut \
-             short; Shift- or Option-drag selects text"
+             newest line; Ctrl+O folds runs of tool calls; Ctrl+T opens a cut diff; Ctrl+V \
+             attaches an image; Shift- or Option-drag selects text"
         }
         2 => {
             "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \
@@ -5285,6 +5372,77 @@ mod tests {
         assert!(app.entries().is_empty());
         assert_eq!(app.session().decisions().len(), 1);
         assert_eq!(app.session().agents_spawned(), 1);
+    }
+
+    fn png(tag: &[u8]) -> niobe_core::image::Image {
+        let mut data = b"\x89PNG\r\n\x1a\n".to_vec();
+        data.extend_from_slice(tag);
+        niobe_core::image::Image::from_bytes(data).expect("a PNG signature")
+    }
+
+    #[test]
+    fn a_pasted_image_path_asks_for_the_file_rather_than_typing_the_path() {
+        let mut app = app();
+        app.on_paste("'/Users/me/Desktop/Screen Shot.png'");
+
+        assert_eq!(
+            app.take_image_requests(),
+            [Source::File("/Users/me/Desktop/Screen Shot.png".to_owned())]
+        );
+        assert_eq!(app.composed(), "");
+    }
+
+    #[test]
+    fn an_empty_paste_asks_for_the_image_on_the_clipboard() {
+        let mut app = app();
+        app.on_paste("");
+        assert_eq!(app.take_image_requests(), [Source::Clipboard]);
+        assert_eq!(app.hint(), Some("Reading the image on the clipboard…"));
+    }
+
+    #[test]
+    fn a_pasted_path_that_is_no_image_goes_into_the_prompt_as_it_would_have() {
+        let mut app = app();
+        app.on_paste("/tmp/notes.png");
+        app.fetched(Fetched {
+            source: Source::File("/tmp/notes.png".to_owned()),
+            image: Err("it is not a PNG, JPEG, GIF or WebP image".to_owned()),
+        });
+
+        assert_eq!(app.composed(), "/tmp/notes.png");
+        assert_eq!(
+            app.hint(),
+            Some("/tmp/notes.png is not attached: it is not a PNG, JPEG, GIF or WebP image")
+        );
+    }
+
+    #[test]
+    fn an_image_lands_where_the_cursor_is() {
+        let mut app = app();
+        app.on_paste("before  after");
+        for _ in 0.."after".len() + 1 {
+            app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+
+        assert_eq!(app.composed(), "before [Image #1]  after");
+    }
+
+    #[test]
+    fn images_attached_after_a_resume_are_numbered_past_the_ones_it_holds() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "earlier: [Image #2]".to_owned(),
+        });
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+
+        assert_eq!(app.composed(), "[Image #3] ");
     }
 
     #[test]

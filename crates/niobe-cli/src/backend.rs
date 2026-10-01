@@ -15,6 +15,7 @@ use niobe_bridge_claude::transcript;
 use niobe_bridge_claude::{Options, Session, SpawnError};
 use niobe_config::Selected;
 use niobe_core::event::{Backend, Event, Mode, PermissionDecision, ToolCallId};
+use niobe_core::image::Image;
 use niobe_tui::bridge::{Bridge, BridgeError, Detached};
 
 /// What a session is attached with, beyond the profile that names the backend.
@@ -332,8 +333,8 @@ fn describe(error: SpawnError) -> String {
 struct Claude(Session);
 
 impl Bridge for Claude {
-    fn send(&mut self, prompt: &str) -> Result<(), BridgeError> {
-        self.0.send(prompt).map_err(BridgeError::from)
+    fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError> {
+        self.0.send(prompt, images).map_err(BridgeError::from)
     }
 
     fn answer(

@@ -29,6 +29,7 @@ mod calls;
 pub mod clock;
 mod find;
 mod hunks;
+pub mod images;
 mod input;
 pub mod journal;
 mod keys;
@@ -56,6 +57,7 @@ pub use app::{
     SelectedProfile, WorkingFile,
 };
 pub use bridge::{Bridge, BridgeError, Detached};
+pub use images::{Fetched, Images, NoImages, Source};
 pub use journal::{Journal, JournalError, Unrecorded};
 pub use prices::Prices;
 pub use rules::{Forgotten, Rules, RulesError};

@@ -46,7 +46,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
-  every backend reads a test run the same way. Depends on no other workspace crate and on no wire format.
+  every backend reads a test run the same way; `image.rs` is an image the operator attached to a
+  prompt — its bytes and the kind they were read as, from their signature, never from a name —
+  refused past the 5 MB a model takes, and the `[Image #N]` placeholder a prompt holds where it
+  went. Depends on no other workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
@@ -93,7 +96,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   backend's own commands where a prompt opens with `/` — typed `//`, since one `/` on an empty
   composer searches — from the list the backend sent, `shell.rs` is the trait the loop
   hands the operator's `!` commands to, and where who allows them and what they reach is written
-  down, `markdown.rs` draws the assistant's replies
+  down, `images.rs` the one it asks for an image from — the clipboard on Ctrl+V or an empty paste,
+  or the file a pasted or dropped path names — and what numbers each and sends it with the prompt
+  that still holds its placeholder, `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   cut at twenty rows until Ctrl+T opens every cut diff in place,
@@ -114,7 +119,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
   `translate.rs` turns one message of it into events and owns no process, `driver.rs` spawns the
-  binary, asks it with `initialize` what it offers — the answer is where the slash commands a
+  binary, writes a turn with its attached images as base64 image blocks after the text, as the
+  CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), asks it with
+  `initialize` what it offers — the answer is where the slash commands a
   session starts with are listed, `commands_changed` only reports a change to them — keeps its
   standard input open for the life of the session and writes it from a queue on a thread of its
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
@@ -148,7 +155,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the shell under the selected profile, with the session store as its journal and the
   repository's config as the place a standing answer is kept, and where `niobe trust` records
   that a repository's config may start a backend with what it names. `commands.rs` runs the
-  operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `backend.rs` is the only module
+  operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `images.rs` fetches the images the operator attaches, off the draw path: the clipboard through `osascript` on macOS and `wl-paste` or `xclip` on Linux, each with no terminal and a deadline, a pasted path relative to the session's directory, and an image too large to send shrunk with `sips` on macOS before it is refused. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
   `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission

@@ -10,6 +10,7 @@
 
 pub mod diff;
 pub mod event;
+pub mod image;
 pub mod permission;
 pub mod session;
 pub mod test_run;
@@ -18,6 +19,7 @@ pub use event::{
     AgentId, AgentOutcome, Backend, Billing, CheckpointId, Event, Mode, OPERATOR_SHELL,
     PermissionDecision, SessionMeta, ToolCallId, ToolOutcome, Usage,
 };
+pub use image::{Image, ImageError, MediaType};
 pub use permission::{Allowlist, Rule, RuleError};
 pub use session::{
     CheckpointRecord, DecisionRecord, FileChanges, Owed, SessionState, TestRunRecord, ToolTotals,

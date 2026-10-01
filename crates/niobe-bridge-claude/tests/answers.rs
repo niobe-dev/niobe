@@ -160,7 +160,9 @@ fn exchange(decide: impl Fn(&str) -> PermissionDecision) -> Exchanged {
         .insert("ANSWERS_DIR".to_owned(), dir.path().display().to_string());
     options.ask_over_stdio = true;
     let mut session = spawn_written(&options);
-    session.send("edit the notes").expect("the turn is sent");
+    session
+        .send("edit the notes", &[])
+        .expect("the turn is sent");
 
     let started = Instant::now();
     while progress(dir.path()).is_empty() {
