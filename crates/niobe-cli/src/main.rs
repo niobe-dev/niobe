@@ -18,6 +18,7 @@ mod args;
 mod backend;
 mod commands;
 mod config;
+mod consent;
 mod desktop;
 mod images;
 mod journal;
@@ -200,7 +201,9 @@ fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String>
 /// than hidden behind the help.
 fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let root = repo::root(&cwd()?);
-    let loaded = config::load(&root)?;
+    let Some(loaded) = consented(&root, asked)? else {
+        return Ok(());
+    };
     let selected = loaded.select(profile)?;
     let app = say_untrusted(
         say_prices(
@@ -316,7 +319,9 @@ fn commands_for(root: &Path, backend: &backend::Attachment) -> commands::Command
 /// a terminal, prints what the session folds to.
 fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let root = repo::root(&cwd()?);
-    let loaded = config::load(&root)?;
+    let Some(loaded) = consented(&root, asked)? else {
+        return Ok(());
+    };
     let selected = loaded.select(profile)?;
     let mut app = say_untrusted(
         say_prices(
@@ -441,7 +446,9 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
 /// continues it and every total on screen is a fold over the same events.
 fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let root = repo::root(&cwd()?);
-    let loaded = config::load(&root)?;
+    let Some(loaded) = consented(&root, asked)? else {
+        return Ok(());
+    };
     let selected = loaded.select(profile)?;
     let theme = chosen_theme(asked, &loaded)?;
 
@@ -607,7 +614,8 @@ fn list_sessions() -> Result<(), String> {
     Ok(())
 }
 
-/// What the shell opens on when this repository's config has not been trusted.
+/// What the shell opens on when the operator chose to open it without
+/// trusting this repository's config.
 ///
 /// Said in the transcript rather than printed: the shell draws on the
 /// alternate screen, and a line printed before it takes the terminal is gone
@@ -615,15 +623,8 @@ fn list_sessions() -> Result<(), String> {
 /// environment its profile names is a session whose behaviour has no other
 /// explanation on screen.
 const UNTRUSTED: &str = "\
-This repository's config sets what a backend is started with — a profile's \
-`env`, `args`, `settings` or `auth_refresh` — which account a session runs \
-on and how it is billed — a `billing`, a `default_profile`, or a profile named \
-like one of yours — or which tool calls run without asking: `[permissions]` \
-rules. A config arrives with a clone, and those are how the official CLI would \
-be pointed at somewhere other than where it is signed in, signed in as \
-something else, or let run what nobody here approved, so they are not in force \
-until you have read the file. `niobe profiles` shows what it sets; `niobe trust` puts it in force \
-as it now stands, and editing it afterwards asks again.";
+Opened without what it sets that needs your trust. The next session asks \
+again; `niobe trust` trusts it from the command line.";
 
 /// The shell with a price sheet, so that a turn the backend has not priced yet
 /// shows what it is costing rather than nothing.
@@ -656,7 +657,11 @@ fn say_prices(app: App) -> App {
 fn say_untrusted(app: App, loaded: &config::Loaded) -> App {
     match &loaded.untrusted {
         None => app,
-        Some(path) => app.with_notice("config not trusted", &path.display().to_string(), UNTRUSTED),
+        Some(untrusted) => app.with_notice(
+            "config not trusted",
+            &untrusted.path.display().to_string(),
+            UNTRUSTED,
+        ),
     }
 }
 
@@ -675,6 +680,41 @@ fn profile_changed(recorded: Option<&str>, selected: Option<&str>) -> Option<Str
     })
 }
 
+/// The config a session opens under, once the operator has been asked whether
+/// to trust a repository config nobody has trusted; `None` where they quit
+/// from the question.
+///
+/// Asked before anything is started, because the answer decides what the
+/// backend is started with. Asked only where there is a terminal to ask on
+/// and keys to answer with: a piped run says nothing and asks nothing, and
+/// opens under the config with the file withheld, as before.
+///
+/// Asked again where the file changed between being read and being trusted:
+/// what is recorded is the text the question showed, so a file changed since
+/// is one nobody has read.
+fn consented(root: &Path, asked: &Asked) -> Result<Option<config::Loaded>, String> {
+    let mut loaded = config::load(root)?;
+    if !std::io::stdout().is_terminal() || keys_can_be_read().is_err() {
+        return Ok(Some(loaded));
+    }
+    while let Some(untrusted) = &loaded.untrusted {
+        let behind = App::new(repo::describe(root))
+            .with_depth(asked.depth)
+            .with_theme(chosen_theme(asked, &loaded)?);
+        let answer = niobe_tui::ask_trust(behind, consent::question(untrusted))
+            .map_err(|e| e.to_string())?;
+        match answer {
+            None => return Ok(None),
+            Some(niobe_tui::trust::Answer::NotNow) => break,
+            Some(niobe_tui::trust::Answer::Trust) => {
+                consent::record(&untrusted.path, &untrusted.text)?;
+                loaded = config::load(root)?;
+            }
+        }
+    }
+    Ok(Some(loaded))
+}
+
 /// Records this repository's config as one the operator has read, so that the
 /// `env`, `args`, `settings`, `auth_refresh` and `billing` of the profiles it
 /// defines take effect, along with its `default_profile`, its `[permissions]`
@@ -682,13 +722,7 @@ fn profile_changed(recorded: Option<&str>, selected: Option<&str>) -> Option<Str
 /// uses.
 fn trust() -> Result<(), String> {
     let (path, text) = repo_config()?;
-    // What is trusted is what the operator could read and agree to: a file
-    // that is not a config says nothing of the kind.
-    niobe_config::Config::parse(&text, &path)
-        .map_err(|error| format!("{} is not trusted: {error}", path.display()))?;
-    let record = trust_record()?;
-    niobe_config::trust::Trusted::update(&record, |trusted| trusted.trust(&path, &text))
-        .map_err(|e| e.to_string())?;
+    consent::record(&path, &text)?;
 
     say!("trusted {}", path.display());
     say!(
@@ -703,7 +737,7 @@ fn trust() -> Result<(), String> {
 /// with is what goes.
 fn untrust() -> Result<(), String> {
     let path = repo::config_path(&repo::root(&cwd()?));
-    let record = trust_record()?;
+    let record = consent::record_path()?;
     let forgotten =
         niobe_config::trust::Trusted::update(&record, |trusted| Ok(trusted.forget(&path)))
             .map_err(|e| e.to_string())?;
@@ -735,15 +769,6 @@ fn repo_config() -> Result<(PathBuf, String), String> {
         )),
         Err(error) => Err(format!("cannot read {}: {error}", path.display())),
     }
-}
-
-/// Where the record of what this machine has trusted is kept.
-fn trust_record() -> Result<PathBuf, String> {
-    config::trust_path().ok_or_else(|| {
-        "nowhere to keep the record: neither XDG_CONFIG_HOME nor HOME names a directory of \
-         your own"
-            .to_owned()
-    })
 }
 
 /// Prints the profiles the config defines for this repository, the selected one
@@ -1007,9 +1032,12 @@ TRUST:
     The user's own config is never gated; it is the file you write. What was
     trusted is recorded as the config's SHA-256 in
     ~/.config/niobe/trusted.list, so editing the file — a pull, a rebase, your
-    own edit — asks again. Until then the profiles it defines keep their
-    backend and their models and lose the rest, the shell says so in the
-    transcript, and niobe profiles names what trusting would put in force.
+    own edit — asks again. The shell asks as it opens, before the backend
+    starts: it shows the file and what trusting it would put in force, values
+    included, and Enter on \"Yes\" trusts it as niobe trust would. Answered
+    \"No\", or until it is trusted, the profiles it defines keep their
+    backend and their models and lose the rest, the transcript says so, and
+    niobe profiles names what trusting would put in force.
     Answering \"always\" in the shell adds a rule to the repository's config.
     That write is niobe's own and can add no env, no args, no settings and no
     auth_refresh, so a file you had trusted stays trusted across it.
@@ -1245,12 +1273,17 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_opens_saying_why_an_untrusted_config_is_not_in_force_and_how_to_trust_it() {
+    fn a_shell_opened_without_trusting_the_config_says_so_in_a_line_and_how_to_trust_it() {
         let path = PathBuf::from("/r/.niobe/config.toml");
         let loaded = config::Loaded {
             config: niobe_config::Config::default(),
             searched: vec![path.clone()],
-            untrusted: Some(path.clone()),
+            untrusted: Some(config::Untrusted {
+                path: path.clone(),
+                text: String::new(),
+                config: niobe_config::Config::default(),
+                replaces: Vec::new(),
+            }),
         };
 
         let app = say_untrusted(App::new(niobe_tui::app::Repo::default()), &loaded);
@@ -1262,11 +1295,10 @@ mod tests {
         assert_eq!(entry.kind, niobe_tui::app::EntryKind::Notice);
         assert_eq!(entry.meta, path.display().to_string());
         assert!(entry.body.contains("niobe trust"), "{}", entry.body);
-        assert!(
-            entry.body.contains("arrives with a clone"),
-            "{}",
-            entry.body
-        );
+        assert!(entry.body.contains("asks again"), "{}", entry.body);
+        // Short enough to read at a glance: the question that came before it
+        // already said what the file sets.
+        assert!(entry.body.len() < 160, "{}", entry.body);
     }
 
     #[test]

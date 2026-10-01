@@ -45,6 +45,7 @@ use crate::prices::Prices;
 use crate::text;
 use crate::theme::Theme;
 use crate::tree;
+use crate::trust;
 use crate::usage;
 
 /// Smallest terminal the shell draws in, as (columns, rows).
@@ -191,6 +192,9 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
     if let Some(picker) = app.picking() {
         draw_pick(frame, body, picker, app.session().model(), &theme);
     }
+    if let Some(asking) = app.trusting() {
+        draw_trust(frame, body, asking, app.hint(), &theme);
+    }
 }
 
 /// The keys the model list answers to, under the models.
@@ -246,6 +250,166 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
         theme,
     );
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Widest the trust question is drawn, in columns: room for a permission
+/// rule or an environment variable and its value on one line.
+const TRUST_COLUMNS: u16 = 84;
+
+/// What the trust question says above the rows of what the file sets.
+const TRUST_SAYS: &str = "It sets what only a config you trust may:";
+
+/// What it says under them: what each answer leaves in force.
+const TRUST_UNTIL: &str =
+    "Trusted, it stays in force until the file changes. Without it, none of the above is.";
+
+/// The keys the trust question answers to, on its bottom edge.
+const TRUST_KEYS: &str = " ↑↓ choose · Enter answer · Esc no · Ctrl+C quit ";
+
+/// Columns between what a row of the trust question names and what it is set
+/// to, and the most the name may take.
+const TRUST_GAP: usize = 2;
+const TRUST_NAME_COLUMNS: usize = 16;
+
+/// The question whether to trust the repository's config: the file, what
+/// trusting it puts in force, and the two answers.
+///
+/// The answers are always drawn. A file that sets more than fits keeps the
+/// rows that do and says how many it left out — cutting the answers instead
+/// would ask a question nobody can answer. `hint` is what the shell has to say
+/// about a key it held back, said where the operator is looking.
+fn draw_trust(
+    frame: &mut Frame,
+    body: Rect,
+    asking: &trust::Asking,
+    hint: Option<&str>,
+    theme: &Theme,
+) {
+    let width = TRUST_COLUMNS.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
+    let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
+    let plain = Style::new().fg(theme.dialog_fg);
+    let wrapped = |text: &str, style: Style| -> Vec<Line<'static>> {
+        text::wrap(text, text_width)
+            .into_iter()
+            .map(|line| Line::from(line).style(style))
+            .collect()
+    };
+
+    let mut head = vec![Line::from("")];
+    head.extend(wrapped(&asking.question.path, plain.bold()));
+    head.push(Line::from(""));
+    head.extend(wrapped(TRUST_SAYS, plain));
+    head.push(Line::from(""));
+
+    let mut tail = vec![Line::from("")];
+    match hint {
+        Some(hint) => tail.extend(wrapped(hint, Style::new().fg(theme.hot).bold())),
+        None => tail.extend(wrapped(TRUST_UNTIL, plain)),
+    }
+    tail.push(Line::from(""));
+    for (i, answer) in trust::Answer::OFFERED.into_iter().enumerate() {
+        let on_it = i == asking.at;
+        let marker = if on_it { PICK_CURSOR } else { "  " };
+        let row = format!(
+            "{marker}{:<room$}",
+            format!("{}. {}", i + 1, answer.label()),
+            room = text_width.saturating_sub(2)
+        );
+        tail.push(match on_it {
+            true => {
+                Line::from(row).style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold())
+            }
+            false => Line::from(row).style(plain),
+        });
+    }
+    tail.push(Line::from(""));
+
+    // A border above and below, and the row the shadow falls on.
+    let room = usize::from(body.height)
+        .saturating_sub(3)
+        .saturating_sub(head.len() + tail.len());
+    let grants = trust_grants(&asking.question.grants, text_width, room, theme);
+
+    let mut lines = head;
+    lines.extend(grants);
+    lines.extend(tail);
+    let inner = dialog(
+        frame,
+        body,
+        (width, lines.len()),
+        ("Trust this repository's config?", TRUST_KEYS),
+        theme,
+    );
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The rows of what a config sets, in `columns`, the name of each in a column
+/// of its own and its value wrapped beside it, in no more than `room` lines.
+///
+/// Rows are kept whole: half a permission rule reads as a different rule.
+/// What is left out is counted on the last line.
+fn trust_grants(
+    grants: &[(String, String)],
+    columns: usize,
+    room: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let name_width = grants
+        .iter()
+        .map(|(name, _)| text::width(name))
+        .max()
+        .unwrap_or(0)
+        .min(TRUST_NAME_COLUMNS);
+    let value_width = columns.saturating_sub(name_width + TRUST_GAP).max(1);
+    let name_style = Style::new().fg(theme.dialog_fg).bold();
+    let value_style = Style::new().fg(theme.dialog_fg);
+
+    let rows: Vec<Vec<Line<'static>>> = grants
+        .iter()
+        .map(|(name, value)| {
+            text::wrap(value, value_width)
+                .into_iter()
+                .enumerate()
+                .map(|(i, part)| {
+                    let name = match i {
+                        0 => text::truncate(name, name_width),
+                        _ => String::new(),
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{name:<width$}", width = name_width + TRUST_GAP),
+                            name_style,
+                        ),
+                        Span::styled(part, value_style),
+                    ])
+                })
+                .collect()
+        })
+        .collect();
+    if rows.iter().map(Vec::len).sum::<usize>() <= room {
+        return rows.into_iter().flatten().collect();
+    }
+
+    // The last line the room has goes to the count of what is left out.
+    let mut lines = Vec::new();
+    let mut kept = 0;
+    for row in &rows {
+        if lines.len() + row.len() >= room {
+            break;
+        }
+        lines.extend(row.iter().cloned());
+        kept += 1;
+    }
+    if room > 0 {
+        lines.push(
+            Line::from(format!(
+                "… and {} more; the file has them all",
+                rows.len() - kept
+            ))
+            .style(value_style.italic()),
+        );
+    }
+    lines
 }
 
 /// Columns a dialog's frame and padding take from its width: a border and two

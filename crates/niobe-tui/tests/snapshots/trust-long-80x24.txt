@@ -1,0 +1,24 @@
+ Niobe  Session  Files  Tools  Usage  Options  Help             ○ not attached
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃   ┏━━━━━━━━━━━━━━━━━━ Trust this repository's config? ━━━━━━━━━━━━━━━━━━━┓   ┃
+┃   ┃                                                                      ┃░░ ┃
+┃   ┃  /home/me/src/niobe/.niobe/config.toml                               ┃░░ ┃
+┃   ┃                                                                      ┃░░ ┃
+┃   ┃  It sets what only a config you trust may:                           ┃░░ ┃
+┃   ┃                                                                      ┃░░ ┃
+┃   ┃  permissions  allow Bash(script-1.sh)                                ┃░░ ┃
+┃   ┃  permissions  allow Bash(script-2.sh)                                ┃░░ ┃
+┃   ┃  permissions  allow Bash(script-3.sh)                                ┃░░ ┃
+┃   ┃  permissions  allow Bash(script-4.sh)                                ┃░░ ┃
+┃   ┃  permissions  allow Bash(script-5.sh)                                ┃░░ ┃
+┃   ┃  permissions  allow Bash(script-6.sh)                                ┃░░ ┃
+┃   ┃  … and 34 more; the file has them all                                ┃░░ ┃
+┃   ┃                                                                      ┃░░ ┃
+┃   ┃  Trusted, it stays in force until the file changes. Without it,      ┃░░ ┃
+┃   ┃  none of the above is.                                               ┃░░ ┃
+┃   ┃                                                                      ┃░░ ┃
+┃   ┃  › 1. Yes, trust this config                                         ┃░░ ┃
+┃ ──┃    2. No, open without it                                            ┃── ┃
+┃  —┃                                                                      ┃ne ┃
+┗━━━┗━━━━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C quit ━━━━━━━━━━━┛━━━┛
+Esc 1Help  2Plan  3Diff  4Undo  5Usage 6Files 7Tools 8Model 9Theme 0Quit

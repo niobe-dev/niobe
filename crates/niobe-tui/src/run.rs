@@ -18,16 +18,17 @@ use ratatui::prelude::CrosstermBackend;
 use niobe_core::event::Event as SessionEvent;
 
 use crate::app::{App, Arrival};
-use crate::bridge::Bridge;
-use crate::desktop::{Desktop, Handoff};
-use crate::images::Images;
+use crate::bridge::{Bridge, Detached};
+use crate::desktop::{Desktop, Handoff, NoDesktop};
+use crate::images::{Images, NoImages};
 use crate::input::{Input, Wait};
-use crate::journal::Journal;
-use crate::rules::{Reach, Rules};
-use crate::shell::Shell;
+use crate::journal::{Journal, Unrecorded};
+use crate::rules::{Forgotten, Reach, Rules};
+use crate::shell::{NoShell, Shell};
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued};
+use crate::trust;
 use crate::ui;
-use crate::watch::Watch;
+use crate::watch::{Unwatched, Watch};
 
 /// How long the loop waits for a key before looking at the shutdown flag.
 ///
@@ -131,6 +132,39 @@ pub enum Ended {
 /// of the function — including the ways that do not return from it — puts the
 /// terminal back.
 pub fn run(app: App, around: Around<'_>) -> io::Result<Ended> {
+    open(app, around).map(|(ended, _)| ended)
+}
+
+/// Asks whether to trust the repository's config, on `app` drawn behind the
+/// question, and returns the answer; `None` where the operator quit instead,
+/// the process was asked to stop or the terminal went away.
+///
+/// The same loop as [`run`], with nothing attached and nothing recorded, so
+/// that the question hands the terminal back on every way out that a session
+/// does. It is a run of its own rather than a dialog inside the session's
+/// because the answer decides what the backend is started with, and the
+/// backend is started before the session's shell opens.
+pub fn ask_trust(app: App, question: trust::Question) -> io::Result<Option<trust::Answer>> {
+    let (ended, app) = open(
+        app.asking_trust(question),
+        Around {
+            journal: &mut Unrecorded,
+            backend: &mut Detached,
+            rules: &mut Forgotten,
+            watch: &mut Unwatched,
+            shell: &mut NoShell,
+            images: &mut NoImages::default(),
+            desktop: &mut NoDesktop,
+        },
+    )?;
+    Ok(match ended {
+        Ended::Quit => app.trust_answer(),
+        Ended::TerminalGone => None,
+    })
+}
+
+/// [`run`], handing back the app as the loop left it.
+fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
     install_panic_hook();
     // Declared before the terminal guard so it is dropped after it: dropping
     // it hands the stopping signals back their own behaviour, which is safe
@@ -205,7 +239,7 @@ pub fn run(app: App, around: Around<'_>) -> io::Result<Ended> {
 
     // Explicit, so that a restore failure is reported rather than swallowed by
     // `Drop`. Dropping the guard afterwards is a no-op.
-    outcome(ended, guard.restore())
+    outcome(ended, guard.restore()).map(|ended| (ended, app))
 }
 
 /// What the session ended as, from how the loop ended and whether the terminal

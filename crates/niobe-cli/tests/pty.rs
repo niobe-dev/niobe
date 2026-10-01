@@ -405,11 +405,12 @@ impl Terminal {
 }
 
 /// Reads everything the shell draws until the test stops, or until the shell
-/// closes its end, answering the keyboard query the first time it is asked, as
-/// a terminal emulator would.
+/// closes its end, answering the keyboard query each time it is asked, as a
+/// terminal emulator would: a session opened after the trust question takes
+/// the terminal, and asks, a second time.
 fn read_until_stopped(master: &OwnedFd, drawn: &Mutex<String>, stop: &AtomicBool, keys: Keys) {
     let mut buffer = [0u8; 4096];
-    let mut answered = false;
+    let mut answered = 0;
     while !stop.load(Ordering::SeqCst) {
         let mut fds = [PollFd::new(master, PollFlags::IN)];
         let ready = rustix::event::poll(&mut fds, Some(&POLL)).unwrap_or(0);
@@ -427,8 +428,9 @@ fn read_until_stopped(master: &OwnedFd, drawn: &Mutex<String>, stop: &AtomicBool
             Ok(0) | Err(_) => return,
             Ok(read) => {
                 drawn.push_str(&String::from_utf8_lossy(&buffer[..read]));
-                if !answered && drawn.contains(KEYBOARD_QUERY) {
-                    answered = true;
+                let asked = drawn.matches(KEYBOARD_QUERY).count();
+                if asked > answered {
+                    answered = asked;
                     // A terminal that has gone takes no answer, and a test
                     // that closes it is not failed by that.
                     let _ = rustix::io::write(master, keys.answer());
@@ -601,6 +603,13 @@ fn released(terminal: Terminal, slave: File) -> (String, bool) {
 /// Asserts that the shell handed back exactly once, on `path`, a terminal that
 /// answered the keyboard query as `keys` says.
 fn assert_handed_back_as(drawn: &str, cooked: bool, path: &str, keys: Keys) {
+    assert_handed_back_times(drawn, cooked, path, keys, 1);
+}
+
+/// Asserts that the shell handed back a terminal that answered the keyboard
+/// query as `keys` says exactly `times` times on `path`: once for each time it
+/// took it, which is twice where it asked whether to trust a config first.
+fn assert_handed_back_times(drawn: &str, cooked: bool, path: &str, keys: Keys, times: usize) {
     assert!(
         cooked,
         "on {path} the shell left the terminal in raw mode: no line editing, no echo, no Ctrl+C"
@@ -611,8 +620,8 @@ fn assert_handed_back_as(drawn: &str, cooked: bool, path: &str, keys: Keys) {
     );
     let left = drawn.matches(LEAVE_ALTERNATE_SCREEN).count();
     assert_eq!(
-        left, 1,
-        "on {path} the shell left the alternate screen {left} time(s), not once"
+        left, times,
+        "on {path} the shell left the alternate screen {left} time(s), not {times}"
     );
     assert!(
         drawn.contains(keys.restored()),
@@ -621,8 +630,9 @@ fn assert_handed_back_as(drawn: &str, cooked: bool, path: &str, keys: Keys) {
     );
     assert_eq!(
         drawn.matches(keys.taken_back()).count(),
-        1,
-        "on {path} what the keyboard was asked for was not taken back exactly once: {drawn:?}"
+        times,
+        "on {path} what the keyboard was asked for was not taken back exactly {times} \
+         time(s): {drawn:?}"
     );
 }
 
@@ -2007,6 +2017,125 @@ fn a_shell_with_no_keys_to_read_stops_before_it_starts_anything() {
         !repo.path().join("started").exists(),
         "the backend was started for a shell that could not read a key"
     );
+}
+
+/// A `claude` that writes down that it was started, and reads until it is
+/// closed.
+const MARKS_ITS_START_CLAUDE: &str =
+    "#!/bin/sh\necho started > started\nwhile read -r line; do :; done\n";
+
+/// What the shell asks as it opens on a repository config nobody trusted.
+const TRUST_QUESTION: &str = "Trust this repository's config?";
+
+/// Longer than the shell waits on a quiet keyboard before a key answers a
+/// question, so that the key the test presses next is taken as an answer.
+const PAST_THE_QUIET: Duration = Duration::from_millis(800);
+
+/// A repository whose config allows a command without asking, which only a
+/// trusted file may, and a `claude` that marks its start; with the user config
+/// that runs that `claude`.
+fn repo_with_an_untrusted_config() -> (tempfile::TempDir, tempfile::TempDir) {
+    let repo = repo();
+    let home = stand_in(repo.path(), MARKS_ITS_START_CLAUDE);
+    let config = repo.path().join(".niobe");
+    std::fs::create_dir(&config).expect("the config directory can be made");
+    std::fs::write(
+        config.join("config.toml"),
+        "[permissions]\nallow = [\"Bash(cargo test)\"]\n",
+    )
+    .expect("the repository config is written");
+    (repo, home)
+}
+
+/// Opens the shell on a repository config nobody trusted, waits for the
+/// question, checks the backend has not been started under it, and answers
+/// with `keys` once the keyboard has been quiet long enough to answer.
+fn answering_the_trust_question(
+    keys: &[u8],
+) -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, home) = repo_with_an_untrusted_config();
+    let (terminal, slave) = Terminal::open();
+    let shell = Reaped(
+        shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .spawn()
+            .expect("the niobe binary runs"),
+    );
+    terminal.shows(TRUST_QUESTION);
+    terminal.shows("allow Bash(cargo test)");
+    std::thread::sleep(PAST_THE_QUIET);
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started before the question was answered"
+    );
+    terminal.typed(keys);
+    (repo, home, terminal, slave, shell)
+}
+
+/// Trusting the file from the question records it as `niobe trust` would,
+/// and the session it opens is one the file is in force for.
+#[test]
+fn an_untrusted_repository_config_is_asked_about_before_the_backend_starts() {
+    let (repo, home, terminal, slave, mut shell) = answering_the_trust_question(b"\r");
+    terminal.shows(OPENING_FRAME);
+    written(&repo.path().join("started"));
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back_times(
+        &drawn,
+        cooked,
+        "a quit after trusting the config",
+        Keys::Reported,
+        2,
+    );
+    let record = written(&home.path().join("niobe").join("trusted.list"));
+    assert!(record.contains(".niobe/config.toml"), "{record}");
+    // The session the answer opened is one the file was in force for: had it
+    // loaded the config still withheld, it would have said so.
+    assert!(!drawn.contains("config not trusted"), "{drawn}");
+}
+
+/// Answering no opens the session as an untrusted file always has, says so
+/// in a line, and records nothing.
+#[test]
+fn answering_no_to_the_trust_question_opens_the_session_without_the_file() {
+    let (repo, home, terminal, slave, mut shell) = answering_the_trust_question(b"\x1b");
+    terminal.shows("config not trusted");
+    written(&repo.path().join("started"));
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back_times(
+        &drawn,
+        cooked,
+        "a quit after declining to trust the config",
+        Keys::Reported,
+        2,
+    );
+    assert!(
+        !home.path().join("niobe").join("trusted.list").exists(),
+        "declining recorded the file as trusted"
+    );
+}
+
+/// Quitting from the question starts nothing and hands the terminal back.
+#[test]
+fn quitting_from_the_trust_question_starts_nothing() {
+    let (repo, home, terminal, slave, mut shell) = answering_the_trust_question(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back(&drawn, cooked, "a quit from the trust question");
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started though the operator quit from the question"
+    );
+    assert!(!home.path().join("niobe").join("trusted.list").exists());
 }
 
 /// Puts `script` in `cwd` as the `claude` a session runs, and gives back a

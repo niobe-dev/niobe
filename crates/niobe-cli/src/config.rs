@@ -31,7 +31,25 @@ pub struct Loaded {
     /// The repository's config, where it sets something that takes effect only
     /// once it has been trusted and has not been trusted. What it set is not
     /// in `config`.
-    pub untrusted: Option<PathBuf>,
+    pub untrusted: Option<Untrusted>,
+}
+
+/// A repository's config that sets what only a trusted file may, as it was
+/// read.
+#[derive(Debug)]
+pub struct Untrusted {
+    /// Where it is.
+    pub path: PathBuf,
+    /// What it held when it was read. Trusting it records this text, so that
+    /// what is put in force is what the operator was shown, even where the
+    /// file changed in between.
+    pub text: String,
+    /// What it sets, whole: before what an untrusted file may not set was
+    /// taken out of it.
+    pub config: Config,
+    /// The profiles the user's config defines that it defines too, which it
+    /// replaces once trusted.
+    pub replaces: Vec<String>,
 }
 
 impl Loaded {
@@ -148,7 +166,18 @@ fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
         // even where it sets nothing else: until it is trusted, its profile of
         // that name is not the one in force.
         if layer.gated && (layer.needs_trust || config.replaces(&layer.config)) {
-            untrusted = Some(repo.clone());
+            untrusted = Some(Untrusted {
+                path: repo.clone(),
+                replaces: layer
+                    .whole
+                    .profiles()
+                    .keys()
+                    .filter(|name| config.profiles().contains_key(*name))
+                    .cloned()
+                    .collect(),
+                text: layer.text,
+                config: layer.whole,
+            });
         }
         config = config.overlay(layer.config);
     }
@@ -163,6 +192,10 @@ fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
 /// One config file, as it applies.
 struct Layer {
     config: Config,
+    /// The file as it was written, before anything was withheld from it.
+    whole: Config,
+    /// The text `whole` was parsed from.
+    text: String,
     /// Whether the file has not been trusted as it stands, so that `config` is
     /// what [`Config::untrusted`] leaves of it.
     gated: bool,
@@ -185,13 +218,17 @@ fn repository(path: &Path) -> Result<Option<Layer>, String> {
     let needs_trust = config.needs_trust();
     if trusted(path, &text)? {
         return Ok(Some(Layer {
+            whole: config.clone(),
             config,
+            text,
             gated: false,
             needs_trust,
         }));
     }
     Ok(Some(Layer {
+        whole: config.clone(),
         config: config.untrusted(),
+        text,
         gated: true,
         needs_trust,
     }))
@@ -427,6 +464,8 @@ mod tests {
 
         let loaded = load_from(Some(user), &root).expect("both configs load");
 
-        assert_eq!(loaded.untrusted, Some(config));
+        let untrusted = loaded.untrusted.expect("the file is named as untrusted");
+        assert_eq!(untrusted.path, config);
+        assert_eq!(untrusted.replaces, ["max"]);
     }
 }

@@ -1139,6 +1139,66 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
     }
 }
 
+/// A shell asking whether to trust a repository's config that sets
+/// `grants` rows of what only a trusted file may.
+fn asking_trust(grants: Vec<(String, String)>) -> App {
+    empty_session().asking_trust(niobe_tui::trust::Question {
+        path: "/home/me/src/niobe/.niobe/config.toml".to_owned(),
+        grants,
+    })
+}
+
+fn row(what: &str, value: &str) -> (String, String) {
+    (what.to_owned(), value.to_owned())
+}
+
+#[test]
+fn the_trust_question_names_the_file_what_trusting_it_puts_in_force_and_the_answers() {
+    let mut app = asking_trust(vec![
+        row(
+            "permissions",
+            "allow Edit, Bash, mcp__claude_ai_Notion__notion-search, Bash(cargo test)",
+        ),
+        row(
+            "work",
+            "env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1",
+        ),
+        row("work", "auth_refresh aws sso login --profile work-sso"),
+        row("default_profile", "work"),
+    ]);
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("Trust this repository's config?"), "{frame}");
+        assert!(
+            frame.contains("/home/me/src/niobe/.niobe/config.toml"),
+            "{frame}"
+        );
+        assert!(frame.contains("AWS_PROFILE=work-sso"), "{frame}");
+        assert!(frame.contains("1. Yes, trust this config"), "{frame}");
+        assert!(frame.contains("2. No, open without it"), "{frame}");
+        assert_snapshot(&format!("trust-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn a_config_that_sets_more_than_fits_keeps_the_answers_on_screen() {
+    let grants = (1..=40)
+        .map(|n| row("permissions", &format!("allow Bash(script-{n}.sh)")))
+        .collect();
+    let mut app = asking_trust(grants);
+
+    let frame = screen(&mut app, 80, 24);
+
+    assert!(frame.contains("1. Yes, trust this config"), "{frame}");
+    assert!(frame.contains("2. No, open without it"), "{frame}");
+    assert!(
+        frame.contains("more"),
+        "the rows left out were not counted:\n{frame}"
+    );
+    assert_snapshot("trust-long-80x24", &frame);
+}
+
 #[test]
 fn a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it() {
     let mut app = running_session().with_budget(0.50);

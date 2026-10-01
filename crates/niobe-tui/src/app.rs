@@ -33,6 +33,7 @@ use crate::clock::{Clock, LocalTime, Stamp};
 use crate::images::{Attachments, Fetched, Source, image_path};
 use crate::prices::Prices;
 use crate::theme::{Depth, Theme};
+use crate::trust;
 
 /// Where the session is running, for the pane title and the Changes pane.
 ///
@@ -1085,6 +1086,11 @@ pub struct App {
     images: Attachments,
     /// The model list the operator opened, while it is open.
     picking: Option<Picker>,
+    /// The question whether to trust the repository's config, while it is
+    /// up. A shell asking it has no session behind it: it ends on the answer.
+    trusting: Option<trust::Asking>,
+    /// How that question was answered, once it has been.
+    trusted: Option<trust::Answer>,
     /// The most this session may spend, where the operator set a budget.
     budget_usd: Option<f64>,
     /// What values the tokens a backend reported no cost for. Supplied by
@@ -1319,6 +1325,8 @@ impl App {
             produced: Vec::new(),
             images: Attachments::default(),
             picking: None,
+            trusting: None,
+            trusted: None,
             budget_usd: None,
             prices: None,
             budget_warned: false,
@@ -2585,6 +2593,51 @@ impl App {
     /// The model list the operator opened, while it is open.
     pub fn picking(&self) -> Option<&Picker> {
         self.picking.as_ref()
+    }
+
+    /// The same shell, asking whether to trust the repository's config and
+    /// quitting on the answer, which [`App::trust_answer`] then holds.
+    #[must_use]
+    pub fn asking_trust(mut self, question: trust::Question) -> Self {
+        self.trusting = Some(trust::Asking::new(question));
+        self
+    }
+
+    /// The question whether to trust the repository's config, while it is up.
+    pub fn trusting(&self) -> Option<&trust::Asking> {
+        self.trusting.as_ref()
+    }
+
+    /// How the question whether to trust the repository's config was
+    /// answered; `None` until it has been, and where the operator quit
+    /// instead.
+    pub fn trust_answer(&self) -> Option<trust::Answer> {
+        self.trusted
+    }
+
+    /// One key, while the trust question is up.
+    ///
+    /// Held to the same guard as a permission question, and for a sharper
+    /// reason: a session is often started and typed into straight away, and
+    /// an Enter meant for the first prompt must not put a file in force that
+    /// nobody has read. A key read before the question was first drawn was
+    /// typed at a shell that was not asking anything.
+    fn on_trust_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        if self.now.is_none() {
+            self.hint = Some(TOO_SOON_HINT.to_owned());
+            return;
+        }
+        if self.too_soon_to_answer() {
+            return;
+        }
+        let Some(asking) = self.trusting.as_mut() else {
+            return;
+        };
+        if let Some(answer) = asking.on_key(key.code) {
+            self.trusting = None;
+            self.trusted = Some(answer);
+            self.quit();
+        }
     }
 
     /// Opens the model list, or says why there is none to open.
@@ -4087,6 +4140,12 @@ impl App {
         self.hint = None;
         self.escaped = false;
         let text = pasted_lines(pasted);
+        // Nothing pasted answers the trust question, and there is no prompt
+        // behind it to take the text.
+        if self.trusting.is_some() {
+            self.hint = Some(TOO_SOON_HINT.to_owned());
+            return;
+        }
         if self.asking().is_some() {
             match self.ask_focus {
                 AskFocus::Writing => {
@@ -4211,6 +4270,12 @@ impl App {
             && self.runs_commands
         {
             self.stop_command();
+            return;
+        }
+        // The trust question takes the keyboard whole: there is no session
+        // behind it to type into, and nothing else to do until it is answered.
+        if self.trusting.is_some() {
+            self.on_trust_key(key);
             return;
         }
         // A prompt takes the keyboard whole until it is put off. Typing into
@@ -4458,6 +4523,11 @@ impl App {
     pub fn tick(&mut self, now: Instant, at: Option<Stamp>) {
         self.now = Some(now);
         self.at = at;
+        // The trust question is up from the first tick, which draws it, and
+        // waits from there for a quiet keyboard as a permission question does.
+        if self.trusting.is_some() && self.ask_quiet_since.is_none() {
+            self.ask_quiet_since = Some(now);
+        }
         match self.working() {
             true => {
                 self.working_since = self.working_since.or(Some(now));
@@ -8703,5 +8773,82 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
+    }
+
+    /// A shell asking whether to trust the repository's config, drawn first
+    /// by the tick at `shown`.
+    fn trusting_at(shown: Instant) -> App {
+        let mut app = app().asking_trust(crate::trust::Question {
+            path: "/r/.niobe/config.toml".to_owned(),
+            grants: vec![("permissions".to_owned(), "allow Bash".to_owned())],
+        });
+        app.tick(shown, None);
+        app
+    }
+
+    #[test]
+    fn answering_the_trust_question_ends_the_shell_with_the_answer() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+        assert!(app.trusting().is_some());
+
+        read(&mut app, b"\r", shown + ASK_QUIET * 2);
+
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
+        assert!(app.trusting().is_none());
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn an_enter_typed_as_the_trust_question_came_up_trusts_nothing() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"\r", shown + ASK_QUIET / 5);
+        assert_eq!(app.trust_answer(), None);
+        assert_eq!(app.hint(), Some(TOO_SOON_HINT));
+        // Each key held back starts the wait again.
+        read(&mut app, b"\r", shown + ASK_QUIET);
+        assert_eq!(app.trust_answer(), None);
+
+        read(&mut app, b"\r", shown + ASK_QUIET * 3);
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
+    }
+
+    #[test]
+    fn a_key_read_before_the_trust_question_was_drawn_trusts_nothing() {
+        let mut app = app().asking_trust(crate::trust::Question {
+            path: "/r/.niobe/config.toml".to_owned(),
+            grants: Vec::new(),
+        });
+
+        read(&mut app, b"\r", Instant::now());
+
+        assert_eq!(app.trust_answer(), None);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn neither_a_paste_nor_typing_reaches_a_prompt_behind_the_trust_question() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        app.on_paste("fix the build");
+        read(&mut app, b"x", shown + ASK_QUIET * 2);
+
+        assert_eq!(app.composer().lines(), [""]);
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
+    }
+
+    #[test]
+    fn quitting_from_the_trust_question_leaves_it_unanswered() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(app.should_quit());
+        assert_eq!(app.trust_answer(), None);
     }
 }

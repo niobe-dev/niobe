@@ -1291,6 +1291,28 @@ fn trusting_a_repository_config_puts_its_environment_in_force() {
     );
 }
 
+/// The question whether to trust a repository's config is asked on a
+/// terminal only: a piped run has no one to answer it, and trusts nothing.
+#[test]
+fn a_piped_run_asks_nothing_about_an_untrusted_config_and_trusts_nothing() {
+    let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
+
+    let output = setup.run(&[]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("USAGE:"), "{}", stdout(&output));
+    assert!(
+        !setup
+            .user
+            .path()
+            .join("niobe")
+            .join("trusted.list")
+            .exists(),
+        "a piped run recorded the file as trusted"
+    );
+    assert!(stdout(&setup.run(&["profiles"])).contains("not trusted"));
+}
+
 #[test]
 fn editing_a_trusted_repository_config_makes_it_untrusted_again() {
     let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
