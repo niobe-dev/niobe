@@ -27,14 +27,14 @@
  ┃   23 + export const etag23 = "W/\"0023\"";                               █ └───────────────────────────────────────┘
  ┃   24 + export const etag24 = "W/\"0024\"";                               █ ┌────────────── Activity ───────────────┐
  ┃   25 + export const etag25 = "W/\"0025\"";                               █ │ ▾ Sub-agents  1 running · 1 failed    █
- ┃   26 + export const etag26 = "W/\"0026\"";                               █ │ ◆ test     Cover tests… sonnet 1m 42s █
+ ┃   26 + export const etag26 = "W/\"0026\"";                               █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
  ┃   27 + export const etag27 = "W/\"0027\"";                               █ │   └ Reading tests/stream.rs           █
- ┃   28 + export const etag28 = "W/\"0028\"";                               █ │ ◇ reviewer Review cata… done 4100 ctx █
- ┃   29 + export const etag29 = "W/\"0029\"";                               █ │ ✗ doc      Write docs/etags.md failed █
- ┃   30 + export const etag30 = "W/\"0030\"";                               █ │   └ Notion 404, gave up after 2 retr… │
- ┃   ▴ the last 10 rows are shown · Ctrl+T hides them                       █ │ ▾ Decisions  2                        │
- ┃                                                                          █ │   13:39 Key the cache on the request  │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │         URL, not the manifest id —    │
- ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │         two manifests can share an    │
+ ┃   28 + export const etag28 = "W/\"0028\"";                               █ │ ▾ Decisions  2                        █
+ ┃   29 + export const etag29 = "W/\"0029\"";                               █ │   13:39 Key the cache on the request  █
+ ┃   30 + export const etag30 = "W/\"0030\"";                               █ │         URL, not the manifest id —    █
+ ┃   ▴ the last 10 rows are shown · Ctrl+T hides them                       █ │         two manifests can share an    │
+ ┃                                                                          █ │         id across catalogs.           │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   13:39 Reuse the existing LRU        │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │         instead of a new Map —        │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit

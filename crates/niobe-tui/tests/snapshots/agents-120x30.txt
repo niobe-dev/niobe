@@ -21,10 +21,10 @@
  ┃ ⚙ Read           deep2 catalog/cache.py                           2.8 kB █ └───────────────────────────────────────┘
  ┃ ⚙ Read           deep1 catalog/etag.py                            1.3 kB █ ┌────────────── Activity ───────────────┐
  ┃                                                                          █ │ ▾ Sub-agents  3 running · 1 failed    █
- ┃ ◆ claude                                                                 █ │ ◆ test     Cover tests… sonnet 1m 42s █
+ ┃ ◆ claude                                                                 █ │ ◆ test  Cover tests/fe… sonnet 1m 42s █
  ┃   Both reviewers are working.                                            █ │   └ Reading tests/stream.rs           │
- ┃                                                                          █ │ ◇ reviewer Review cata… done 4100 ctx │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ✗ doc      Write docs/etags.md failed │
- ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │   └ Notion 404, gave up after 2 retr… │
+ ┃                                                                          █ │ ◆ deep1 Review fetch.py            0s │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ◆ deep2 Review cache.py            0s │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │ ▾ Decisions  2                        │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit

@@ -23,12 +23,11 @@
   w  Rgb(79, 193, 255) on Rgb(37, 37, 38), bold
   x  Rgb(241, 76, 76) on Rgb(37, 37, 38)
   y  Rgb(241, 76, 76) on Rgb(37, 37, 38), bold
-  z  Rgb(133, 133, 133) on Rgb(37, 37, 38), bold
-  A  Rgb(37, 37, 38) on Rgb(79, 193, 255), bold
-  B  Rgb(37, 37, 38) on Rgb(79, 193, 255)
-  C  Rgb(79, 193, 255) on Rgb(50, 50, 51), bold
-  D  Rgb(255, 255, 255) on Rgb(14, 99, 156)
-  E  Rgb(212, 212, 212) on Rgb(50, 50, 51)
+  z  Rgb(37, 37, 38) on Rgb(79, 193, 255), bold
+  A  Rgb(37, 37, 38) on Rgb(79, 193, 255)
+  B  Rgb(79, 193, 255) on Rgb(50, 50, 51), bold
+  C  Rgb(255, 255, 255) on Rgb(14, 99, 156)
+  D  Rgb(212, 212, 212) on Rgb(50, 50, 51)
 
 abaaaaaabaaaaaaaabaaaaaabaaaaaabaaaaaabaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
 fgggghhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhggggfiiiiiiiiiiiiiiiiijjjjjjjiiiiiiiiiiiiiiiiif
@@ -53,10 +52,10 @@ fgfyyxxxxxxxxxxxxxxfffffffffffffffffffffffffffffffffffffffffffxxxxxxnnnnnnnfvfif
 fgfffnnfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
 fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfiiiiiiiiiiiiiiijjjjjjjjjjiiiiiiiiiiiiiiiif
 fgfwwwwwwwwfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfifjjjjjjjjjjjjfffffffffffnnnnnnnnnnnffffvf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfifwwvvvvvvvvfffffffffffffnnnnnnnvvvvvvvfvf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfifwwvvvvfffffffffffffffffnnnnnnnvvvvvvvfvf
 fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfifnnnnnnnnnnnnnnnnnnnnnnnnnnnfffffffffffif
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfifzznnnnnnnnfffffffffffffnnnnnnnnnnnnnnfif
-fgfiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiifgfifyyxxxxxxxxffffffffffffffffffffxxxxxxxfif
-fgfAAAAAwwwBnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnffnnnnnnnnnnnnnnfgfifnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnfif
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfifjjjjjjjjjjjfffffffffffffffffffffffffffif
+fgfiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiifgfifnnnnnnnnffffffffffffffffffffffffffffffif
+fgfzzzzzwwwAnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnffnnnnnnnnnnnnnnfgfifnnnnnnnnffffffffffffffffffffffffffffffif
 fggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggfiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
-CCCCCDDDDDDDDDECDDDDDDDDDECDDDDDDDDDECDDDDDDDDDECDDDDDDDDDECDDDDDDDDDECDDDDDDDDDECDDDDDDDDDECDDDDDDDDDECDDDDDDDDDEEEEEEE
+BBBBBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDDDDDDD

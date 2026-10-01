@@ -848,9 +848,9 @@ pub enum Gate {
 /// started, what its backend reported about it since, and how it ended if it
 /// has.
 ///
-/// A finished agent is kept rather than dropped. What a session spawned and
-/// how it went is the record the operator reads the pane for; a list of only
-/// what is running now would erase the failure the moment it mattered most.
+/// A finished agent is kept rather than dropped: the transcript's rows name it
+/// by a tag worked out among every agent the session spawned, and the
+/// Activity pane lists the ones still running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubAgent {
     /// The agent, as the backend named it.
@@ -877,6 +877,12 @@ pub struct SubAgent {
 }
 
 impl SubAgent {
+    /// Whether it is still running: it has not finished, and the session did
+    /// not end under it.
+    pub fn is_running(&self) -> bool {
+        self.outcome.is_none() && !self.interrupted
+    }
+
     /// What it was spawned to do, without the kind of agent it was asked to
     /// be where its label opens with that.
     pub fn task(&self) -> &str {

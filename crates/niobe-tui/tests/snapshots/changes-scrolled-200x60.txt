@@ -38,21 +38,21 @@
  ┃   116 +     etag: res.headers.get("ETag"),                                                                                   ┃ └───────────────────────────────────────────────────────────────────┘
  ┃   117       body,                                                                                                            ┃ ┌──────────────────────────── Activity ─────────────────────────────┐
  ┃   └ allowed by you                                                                                                           ┃ │ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    │
- ┃                                                                                                                              ┃ │ ◆ test     Cover tests/fetch.test.ts                sonnet 1m 42s │
+ ┃                                                                                                                              ┃ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
  ┃ ◆ claude                                                                                                                     ┃ │   └ Reading tests/stream.rs                                       │
- ┃   Rewriting the 304 test around the cached body.                                                                             ┃ │ ◇ reviewer Review catalog/cache.ts           haiku  done 4100 ctx │
- ┃                                                                                                                              ┃ │ ✗ doc      Write docs/etags.md                             failed │
- ┃ ◆ claude                                                                                                                     ┃ │   └ Notion 404, gave up after 2 retries                           │
- ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ │ ▾ Decisions  2                                                    │
+ ┃   Rewriting the 304 test around the cached body.                                                                             ┃ │ ▾ Decisions  2                                                    │
  ┃                                                                                                                              ┃ │   13:39 Key the cache on the request URL, not the manifest id —   │
- ┃ ✗ Bash           npm test -- fetch                                                                             exit 1 · 0.4s ┃ │         two manifests can share an id across catalogs.            │
- ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │   13:39 Reuse the existing LRU instead of a new Map — avoids a    │
+ ┃ ◆ claude                                                                                                                     ┃ │         two manifests can share an id across catalogs.            │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ │   13:39 Reuse the existing LRU instead of a new Map — avoids a    │
  ┃                                                                                                                              ┃ │         second eviction policy.                                   │
- ┃ ◆ claude                                                                                                                     ┃ │ ▾ Tools  10 calls ✗ 2 · 0 denied · 21.6 kB out                    │
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ┃ │   Bash       3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
+ ┃ ✗ Bash           npm test -- fetch                                                                             exit 1 · 0.4s ┃ │ ▾ Tools  10 calls ✗ 2 · 0 denied · 21.6 kB out                    │
+ ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │   Bash       3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
  ┃                                                                                                                              ┃ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
- ┃                                                                                                                              ┃ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
- ┃                                                                                                                              ┃ │   Edit       1 ▓▓▓▓                                               │
+ ┃ ◆ claude                                                                                                                     ┃ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ┃ │   Edit       1 ▓▓▓▓                                               │
+ ┃                                                                                                                              ┃ │                                                                   │
+ ┃                                                                                                                              ┃ │                                                                   │
+ ┃                                                                                                                              ┃ │                                                                   │
  ┃                                                                                                                              ┃ │                                                                   │
  ┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃ │                                                                   │
  ┃  ask  >  Ask for a change · / search transcript · @ file                       Shift+Tab cycles · Ctrl+J newline · Tab panes ┃ │                                                                   │

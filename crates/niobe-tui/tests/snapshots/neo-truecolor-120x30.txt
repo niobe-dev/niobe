@@ -18,11 +18,10 @@
   r  Rgb(124, 255, 158) on Rgb(2, 8, 3)
   s  Rgb(255, 59, 59) on Rgb(2, 8, 3)
   t  Rgb(255, 59, 59) on Rgb(2, 8, 3), bold
-  u  Rgb(46, 139, 68) on Rgb(2, 8, 3), bold
-  v  Rgb(2, 8, 3) on Rgb(0, 255, 65), bold
-  w  Rgb(2, 8, 3) on Rgb(0, 255, 65)
-  x  Rgb(0, 255, 65) on Rgb(0, 59, 18)
-  y  Rgb(155, 255, 176) on Rgb(0, 26, 8)
+  u  Rgb(2, 8, 3) on Rgb(0, 255, 65), bold
+  v  Rgb(2, 8, 3) on Rgb(0, 255, 65)
+  w  Rgb(0, 255, 65) on Rgb(0, 59, 18)
+  x  Rgb(155, 255, 176) on Rgb(0, 26, 8)
 
 abaaaaaabaaaaaaaabaaaaaabaaaaaabaaaaaabaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaaaaaaaaaaaaaaaaadddddaa
 effffggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggffffehhhhhhhhhhhhhhhhhiiiiiiihhhhhhhhhhhhhhhhhe
@@ -47,10 +46,10 @@ efettsssssssssssssseeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeessssssmmmmmmmefehe
 efeeemmeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
 efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefehhhhhhhhhhhhhhhiiiiiiiiiihhhhhhhhhhhhhhhhe
 efeiiiiiiiieeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeheiiiiiiiiiiiieeeeeeeeeeemmmmmmmmmmmeeeefe
-efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeheiiffffffffeeeeeeeeeeeeemmmmmmmfffffffefe
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeheiiffffeeeeeeeeeeeeeeeeemmmmmmmfffffffefe
 efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefehemmmmmmmmmmmmmmmmmmmmmmmmmmmeeeeeeeeeeehe
-efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeheuummmmmmmmeeeeeeeeeeeeemmmmmmmmmmmmmmehe
-efehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhefehettsssssssseeeeeeeeeeeeeeeeeeeesssssssehe
-efevvvvviiiwmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmeemmmmmmmmmmmmmmefehemmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmehe
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeheiiiiiiiiiiieeeeeeeeeeeeeeeeeeeeeeeeeeehe
+efehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhefehemmmmmmmmeeeeeeeeeeeeeeeeeeeeeeeeeeeeeehe
+efeuuuuuiiivmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmeemmmmmmmmmmmmmmefehemmmmmmmmeeeeeeeeeeeeeeeeeeeeeeeeeeeeeehe
 effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-cccccxxxxxxxxxycxxxxxxxxxycxxxxxxxxxycxxxxxxxxxycxxxxxxxxxycxxxxxxxxxycxxxxxxxxxycxxxxxxxxxycxxxxxxxxxycxxxxxxxxxyyyyyyy
+cccccwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxxxxxxx

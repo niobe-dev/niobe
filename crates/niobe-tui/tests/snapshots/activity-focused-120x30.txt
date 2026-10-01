@@ -21,10 +21,10 @@
  │   └ 1 failing: fetch returns the cached body on a 304                    █ └───────────────────────────────────────┘
  │                                                                          █ ┏━━━━━━━━━━━━━━ Activity ━━━━━━━━━━━━━━━┓
  │ ◆ claude                                                                 █ ┃ ▾ Sub-agents  1 running · 1 failed    █
- │   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ ┃ ◆ test     Cover tests… sonnet 1m 42s █
+ │   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ ┃ ◆ test Cover tests/fet… sonnet 1m 42s █
  │   304 path asserts a body that is no longer sent.                        █ ┃   └ Reading tests/stream.rs           ┃
- │                                                                          █ ┃ ◇ reviewer Review cata… done 4100 ctx ┃
- │ ──────────────────────────────────────────────────────────────────────── │ ┃ ✗ doc      Write docs/etags.md failed ┃
- │  ask  >  Ask for a change · / search transcript · @ file                 │ ┃   └ Notion 404, gave up after 2 retr… ┃
+ │                                                                          █ ┃ ▾ Decisions  2                        ┃
+ │ ──────────────────────────────────────────────────────────────────────── │ ┃   13:39 Key the cache on the request  ┃
+ │  ask  >  Ask for a change · / search transcript · @ file                 │ ┃         URL, not the manifest id —    ┃
  └──────────────────────────────────────────────────────────────────────────┘ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit

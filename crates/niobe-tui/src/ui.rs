@@ -23,14 +23,14 @@ use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
     Widget,
 };
 
-use niobe_core::event::{AgentOutcome, Billing, Context, UsageWindow};
+use niobe_core::event::{Billing, Context, UsageWindow};
 use niobe_core::session::{FileChanges, SessionState, TestRunRecord, ToolTotals, Totals};
 use niobe_core::test_run::FailedTests;
 
@@ -3015,23 +3015,6 @@ fn activity_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     rows
 }
 
-/// The glyph, the colour and the word a sub-agent's state is drawn with.
-///
-/// The glyph carries the state on its own: a sixteen-colour terminal in a
-/// theme the operator chose is not somewhere a colour can be the only
-/// difference between an agent that finished and one that failed. One the
-/// session ended under is neither running nor failed: nobody will say how it
-/// went.
-fn agent_state(agent: &SubAgent, theme: &Theme) -> (&'static str, Color, &'static str) {
-    match agent.outcome {
-        None if agent.interrupted => ("⊘", theme.dim, "cut short"),
-        None => ("◆", theme.agent, "running"),
-        Some(AgentOutcome::Completed) => ("◇", theme.dim, "done"),
-        Some(AgentOutcome::Failed) => ("✗", theme.del, "failed"),
-        Some(AgentOutcome::Cancelled) => ("⊘", theme.dim, "cancelled"),
-    }
-}
-
 /// What the sub-agents section says about itself: how many are running, how
 /// many were spawned in all, and how many failed.
 ///
@@ -3083,20 +3066,25 @@ fn agent_figures(
     figures
 }
 
-/// A sub-agent per row: the state glyph, its tag — the word the transcript's
-/// rows name it by — what it was spawned to do, the model it answers with,
-/// and its status on the right; then, on a row of its own, what it is doing.
+/// A running sub-agent per row: the glyph, its tag — the word the
+/// transcript's rows name it by — what it was spawned to do, the model it
+/// answers with, and how long it has run on the right; then, on a row of its
+/// own, what it is doing.
+///
+/// Only what is running is listed. An agent that finished, failed or was
+/// cancelled, or that the session ended under, leaves the list, and the
+/// header's counts are where it went: in a long session a list of every
+/// agent spawned buries the ones at work under the ones that stopped.
 ///
 /// The tag and the model each have a column as wide as the widest in the
-/// list, so the tasks start in one column and the statuses end in another.
-/// The model is drawn only where the agent's own messages named one, by its
-/// family where no other agent's model shares it.
+/// list, so the tasks start in one column and the times end in another. The
+/// model is drawn only where the agent's own messages named one, by its
+/// family where no other listed agent's model shares it.
 ///
-/// The sub-line is the call a running agent has open, as its row in the
-/// transcript names it, and otherwise the last thing its backend reported
-/// it doing or its answer. It is drawn only where there is one: an empty `└`
-/// on every agent that said nothing would be half the pane's rows saying
-/// nothing.
+/// The sub-line is the call the agent has open, as its row in the transcript
+/// names it, and otherwise the last thing its backend reported it doing. It
+/// is drawn only where there is one: an empty `└` on every agent that said
+/// nothing would be half the pane's rows saying nothing.
 fn agent_rows(
     app: &App,
     session: &SessionState,
@@ -3119,8 +3107,15 @@ fn agent_rows(
         return rows;
     }
 
-    let tags = app.agent_tags();
-    let models = agent_models(app.agents());
+    // Tagged among every agent the session spawned, so that an agent keeps
+    // the tag the transcript names it by when another one stops.
+    let (running, tags): (Vec<&SubAgent>, Vec<String>) = app
+        .agents()
+        .iter()
+        .zip(app.agent_tags())
+        .filter(|(agent, _)| agent.is_running())
+        .unzip();
+    let models = agent_models(&running);
     let tag_column = tags.iter().map(|tag| text::width(tag)).max().unwrap_or(0);
     let model_column = models
         .iter()
@@ -3129,12 +3124,11 @@ fn agent_rows(
         .max()
         .unwrap_or(0);
 
-    for ((agent, tag), model) in app.agents().iter().zip(tags).zip(models) {
-        let (glyph, colour, word) = agent_state(agent, theme);
-        let status = agent_status(agent, word, app.stamp());
+    for ((agent, tag), model) in running.into_iter().zip(tags).zip(models) {
+        let status = agent_status(agent, app.stamp());
         // The status is right-aligned at the pane's edge, so it needs no
-        // column of its own: one as wide as `done 4100 ctx` on every row
-        // would take the room of a running agent's task.
+        // column of its own: one as wide as `12m 40s` on every row would take
+        // the room of another agent's task.
         let columns = AgentColumns {
             tag: tag_column,
             model: model.as_ref().map_or(0, |_| model_column),
@@ -3142,7 +3136,6 @@ fn agent_rows(
             task: 0,
         };
         rows.push(agent_row(
-            (glyph, colour),
             &tag,
             agent.task(),
             (model, &status),
@@ -3206,7 +3199,6 @@ fn gapped(column: usize) -> usize {
 
 /// One agent's row, in `columns`.
 fn agent_row(
-    (glyph, colour): (&str, Color),
     tag: &str,
     task: &str,
     (model, status): (Option<String>, &str),
@@ -3216,8 +3208,9 @@ fn agent_row(
     let room = columns.task;
     let task = text::truncate(task, room);
     let pad = room.saturating_sub(text::width(&task));
+    let colour = theme.agent;
     let mut row = vec![
-        Span::styled(format!("{glyph} "), Style::new().fg(colour).bold()),
+        Span::styled("◆ ", Style::new().fg(colour).bold()),
         Span::styled(
             format!("{tag:<width$}", width = columns.tag),
             Style::new().fg(colour),
@@ -3243,7 +3236,7 @@ fn agent_row(
 /// What each agent's model is called on its row, in the pane's order: its
 /// family — `opus`, `sonnet` — where no other agent's model is of the same
 /// family, and the Usage pane's short name where one is.
-fn agent_models(agents: &[SubAgent]) -> Vec<Option<String>> {
+fn agent_models(agents: &[&SubAgent]) -> Vec<Option<String>> {
     let named: Vec<&str> = agents
         .iter()
         .filter_map(|agent| agent.model.as_deref())
@@ -3255,35 +3248,14 @@ fn agent_models(agents: &[SubAgent]) -> Vec<Option<String>> {
         .collect()
 }
 
-/// A sub-agent's status column: how long a running agent has run,
-/// `done 4100 ctx`, `failed`.
-///
-/// The elapsed time is there only while the agent runs, and only where the
+/// A running sub-agent's status column: how long it has run, where the
 /// shell has both the moment it started and the moment it is drawing at — a
-/// session read back from a log that kept no times has neither, and the state
-/// alone is what there is to say. A running agent's time stands alone: the
-/// glyph beside its tag already says it is running.
-///
-/// An agent that finished its task carries the size its conversation reached,
-/// where its backend counted one, marked `ctx` because that is what it is: the
-/// tokens the agent's latest message was answered over, not what the agent
-/// was billed. A failed or cancelled agent carries its state alone; why it
-/// stopped is on the row beneath it. So does one the session ended under: its
-/// clock stopped with the session, at a moment nobody recorded.
-fn agent_status(agent: &SubAgent, word: &str, now: Option<Stamp>) -> String {
-    if agent.interrupted {
-        return word.to_owned();
-    }
-    if let Some(outcome) = agent.outcome {
-        return match (outcome, agent.context_tokens) {
-            (AgentOutcome::Completed, Some(tokens)) => format!("{word} {} ctx", compact(tokens)),
-            (AgentOutcome::Completed, None)
-            | (AgentOutcome::Failed | AgentOutcome::Cancelled, _) => word.to_owned(),
-        };
-    }
+/// session read back from a log that kept no times has neither, and
+/// `running` is what there is to say.
+fn agent_status(agent: &SubAgent, now: Option<Stamp>) -> String {
     match agent.at.zip(now).and_then(|(at, now)| now.since(at)) {
         Some(ran) => clock::spent(ran),
-        None => word.to_owned(),
+        None => "running".to_owned(),
     }
 }
 

@@ -2343,21 +2343,9 @@ const TESTS_TASK: &str = "Cover tests/fetch.test.ts";
 const REVIEW_TASK: &str = "Review catalog/cache.ts";
 const DOCS_TASK: &str = "Write docs/etags.md";
 
-/// A sixteen-colour terminal in a palette the operator chose is not somewhere
-/// a colour can be the only difference between an agent that finished and one
-/// that failed, so the glyph carries the state on its own.
-#[test]
-fn a_sub_agents_state_is_legible_without_its_colour() {
-    let frame = screen(&mut running_session(), 200, 60);
-
-    assert!(frame.contains("◆ test "), "running:\n{frame}");
-    assert!(frame.contains("◇ reviewer "), "done:\n{frame}");
-    assert!(frame.contains("✗ doc "), "failed:\n{frame}");
-}
-
-/// A session whose backend died runs nothing: the agent it was running and
-/// the call it was making are drawn as cut short, not as still running, and
-/// neither is counted as a failure.
+/// A session whose backend died runs nothing: the agent it was running leaves
+/// the list, counted as cut short rather than failed, and the call it was
+/// making is drawn as cut short, not as still running.
 #[test]
 fn a_session_that_ended_draws_nothing_as_still_running() {
     let mut app = running_session();
@@ -2376,14 +2364,9 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
     });
     let frame = screen(&mut app, 200, 60);
 
-    let agent = frame
-        .lines()
-        .find(|line| line.contains(TESTS_TASK))
-        .unwrap_or_default();
-    assert!(agent.contains("⊘ test "), "{agent:?}");
     assert!(
-        agent.trim_end_matches(['│', ' ']).ends_with("cut short"),
-        "{agent:?}"
+        !frame.lines().any(|line| line.contains(TESTS_TASK)),
+        "{frame}"
     );
     let call = frame
         .lines()
@@ -2392,6 +2375,7 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
     assert!(call.contains("cut short"), "{call:?}");
     assert!(frame.contains("0 running"), "{frame}");
     assert!(frame.contains("1 cut short"), "{frame}");
+    assert!(frame.contains("1 failed"), "{frame}");
     assert!(
         !frame
             .lines()
@@ -2400,31 +2384,31 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
     );
 }
 
-/// A list of only what is running now would erase the failure at the moment
-/// it matters most.
+/// The pane lists what is running now. An agent that finished, failed or was
+/// cancelled leaves the list, and the header's counts are where it went: a
+/// list of every agent a long session spawned buries the one at work under
+/// the ones that stopped.
 #[test]
-fn an_agent_that_finished_stays_in_the_list_with_its_outcome() {
+fn only_a_running_agent_is_listed_and_a_finished_one_is_counted() {
     let frame = screen(&mut running_session(), 200, 60);
 
-    let row = frame
-        .lines()
-        .find(|line| line.contains(DOCS_TASK))
-        .unwrap_or_default();
-    assert!(row.contains("failed"), "{row:?}");
-
-    let done = frame
-        .lines()
-        .find(|line| line.contains(REVIEW_TASK))
-        .unwrap_or_default();
-    assert!(done.contains("done"), "{done:?}");
+    assert!(frame.contains("◆ test "), "running:\n{frame}");
+    for finished in [REVIEW_TASK, DOCS_TASK] {
+        assert!(
+            !frame.lines().any(|line| line.contains(finished)),
+            "{finished} has stopped and is still listed:\n{frame}"
+        );
+    }
+    assert!(
+        frame.contains("1 running · 3 spawned · 1 failed"),
+        "{frame}"
+    );
 }
 
 /// A running agent's status column is an elapsed time, measured from the
-/// moment it was spawned against the moment the shell is drawing at. A
-/// finished one carries the size its conversation reached where its backend
-/// reported one, and a failed one carries its state alone.
+/// moment it was spawned against the moment the shell is drawing at.
 #[test]
-fn a_running_agent_is_timed_and_a_finished_one_shows_its_context() {
+fn a_running_agent_is_timed() {
     let frame = screen(&mut running_session(), 200, 60);
 
     let running = frame
@@ -2435,28 +2419,31 @@ fn a_running_agent_is_timed_and_a_finished_one_shows_its_context() {
         running.trim_end_matches(['│', ' ']).ends_with(" 1m 42s"),
         "the session ran for 102 seconds before it was read:\n{running:?}"
     );
-
     assert!(!running.contains("ctx"), "{running:?}");
-
-    for (finished, word) in [(REVIEW_TASK, "done 4100 ctx"), (DOCS_TASK, "failed")] {
-        let row = frame
-            .lines()
-            .find(|line| line.contains(finished))
-            .unwrap_or_default();
-        // Nothing follows the status column but the pane's own border.
-        assert!(
-            row.trim_end_matches(['│', ' ']).ends_with(word),
-            "{finished} reads other than {word:?}: {row:?}"
-        );
-    }
 }
+
+/// The running session with a second agent running, one its backend has
+/// reported nothing about yet: no model, no step.
+fn session_with_a_silent_agent() -> App {
+    let mut app = running_session();
+    app.apply(&Event::AgentSpawn {
+        id: "a4".into(),
+        parent: None,
+        kind: Some("planner".to_owned()),
+        label: format!("planner: {PLAN_TASK}"),
+    });
+    app
+}
+
+/// What the agent the backend has said nothing about was spawned to do.
+const PLAN_TASK: &str = "Plan the etag rollout";
 
 /// The model a sub-agent's own messages named is drawn beside what it was
 /// spawned to do, shortened the way the Usage pane shortens it; an agent whose
 /// backend named none is drawn with none.
 #[test]
 fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = screen(&mut session_with_a_silent_agent(), 200, 60);
     let row = |label: &str| {
         frame
             .lines()
@@ -2466,17 +2453,17 @@ fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
     };
 
     assert!(row(TESTS_TASK).contains(" sonnet "), "{frame}");
-    assert!(row(REVIEW_TASK).contains(" haiku "), "{frame}");
+    assert!(row(PLAN_TASK).contains("◆ plan"), "{frame}");
     for model in ["sonnet", "haiku", "opus"] {
-        assert!(!row(DOCS_TASK).contains(model), "{frame}");
+        assert!(!row(PLAN_TASK).contains(model), "{frame}");
     }
 }
 
-/// Under an agent is the last thing it was observed doing, and under an agent
-/// that reported nothing there is nothing — not an empty `└`.
+/// Under an agent is what it is doing now, and under an agent that reported
+/// nothing there is nothing — not an empty `└`.
 #[test]
 fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = screen(&mut session_with_a_silent_agent(), 200, 60);
     let lines: Vec<&str> = frame.lines().collect();
     let under = |label: &str| {
         let at = lines
@@ -2490,11 +2477,6 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
         under(TESTS_TASK).contains("└ Reading tests/stream.rs"),
         "{frame}"
     );
-    assert!(
-        under(DOCS_TASK).contains("└ Notion 404, gave up after 2 retries"),
-        "{frame}"
-    );
-    assert!(under(REVIEW_TASK).contains("✗ doc "), "{frame}");
     // The transcript hangs rows of its own from a `└`; in the column to its
     // right, every one is under an agent.
     let under_agents: usize = frame
@@ -2505,7 +2487,7 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
         })
         .map(|right| right.matches('└').count())
         .sum();
-    assert_eq!(under_agents, 2, "{frame}");
+    assert_eq!(under_agents, 1, "{frame}");
 }
 
 /// A decision carries the time it was recorded, in a column of its own, and

@@ -21,10 +21,10 @@
  ┃   │   4. Deny                                    the call does not run │ █ └───────────────────────────────────────┘
  ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │ ▾ Sub-agents  3 running · 1 failed    █
- ┃   │ Esc decide later                                                   │ █ │ ◆ test     Cover tests… sonnet 1m 42s █
+ ┃   │ Esc decide later                                                   │ █ │ ◆ test  Cover tests/fe… sonnet 1m 42s █
  ┃   └────────────────────────────────────────────────────────────────────┘ █ │   └ Reading tests/stream.rs           │
- ┃     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ █ │ ◇ reviewer Review cata… done 4100 ctx │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ✗ doc      Write docs/etags.md failed │
- ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │   └ Notion 404, gave up after 2 retr… │
+ ┃     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ █ │ ◆ deep1 Review fetch.py            0s │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ◆ deep2 Review cache.py            0s │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │ ▾ Decisions  2                        │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit
