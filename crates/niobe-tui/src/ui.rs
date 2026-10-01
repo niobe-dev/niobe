@@ -35,8 +35,8 @@ use niobe_core::session::{FileChanges, SessionState, TestRunRecord, ToolTotals, 
 use niobe_core::test_run::FailedTests;
 
 use crate::app::{
-    Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker, Section,
-    SelectedProfile, SubAgent, tool_label,
+    Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker, Purpose,
+    Section, SelectedProfile, SubAgent, tool_label,
 };
 use crate::calls::Detail;
 use crate::clock::{self, Stamp};
@@ -92,36 +92,6 @@ const PICK_CURRENT: &str = "· ";
 /// flat-rate plan the window is the budget: what runs out is the hours, not
 /// the money.
 const BUDGET_SHOWN_HOT: f64 = 0.8;
-
-/// What the F-key bar starts with: the key that makes each digit after it the
-/// F-key of that number.
-///
-/// The bar names Esc and a digit rather than F1 to F10 because on a Mac the
-/// top row is media keys unless Fn is held or the system is set to send
-/// function keys, so an F-key the bar named would not reach the shell on a
-/// default setup. Esc and a digit reach every terminal as two plain bytes, and
-/// the F-keys still work where they arrive.
-const FKEYS_LEAD: &str = "Esc ";
-
-/// The F-key bar, which is also the list of what the shell can be asked to do:
-/// the digit that follows Esc for each, `0` being F10.
-const FKEYS: [(&str, &str); 10] = [
-    ("1", "Help"),
-    ("2", "Plan"),
-    ("3", "Diff"),
-    ("4", "Undo"),
-    ("5", "Usage"),
-    ("6", "Files"),
-    ("7", "Tools"),
-    ("8", "Model"),
-    ("9", "Theme"),
-    ("0", "Quit"),
-];
-
-/// The menu bar's items. The first letter is the hot key.
-const MENUS: [&str; 7] = [
-    "Niobe", "Session", "Files", "Tools", "Usage", "Options", "Help",
-];
 
 /// Columns between the menus and the session's identity, and between one
 /// segment of that identity and the next.
@@ -184,46 +154,76 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
 
     draw_menu(frame, menu, app, &theme);
     draw_body(frame, body, app, &theme);
-    draw_fkeys(frame, fkeys, &theme);
+    draw_fkeys(frame, fkeys, app, &theme);
+    app.drew_bars(menu, fkeys);
 
     // Last, and over the body: the list is something the operator opened, and
     // nothing drawn afterwards may cover it. A permission prompt is not drawn
     // here — it is in the transcript, under the work that led to it.
     if let Some(picker) = app.picking() {
-        draw_pick(frame, body, picker, app.session().model(), &theme);
+        draw_pick(frame, body, picker, app.picked(), &theme);
     }
+    if app.sheet().is_some() {
+        draw_sheet(frame, body, app, &theme);
+    }
+    // The open menu hangs from the bar over everything, a list included: it
+    // was opened last.
+    let list = app
+        .menu()
+        .map(|open| draw_menu_list(frame, area, open, app, &theme));
+    app.drew_menu_list(list);
     if let Some(asking) = app.trusting() {
         draw_trust(frame, body, asking, app.hint(), &theme);
     }
 }
 
-/// The keys the model list answers to, under the models.
-const PICK_KEYS: &str = "↑↓ choose · Enter switch · Esc keep this one";
-
-/// The model list: what the profile offers, which one the session is on, and
-/// the three keys that work.
+/// What a list says on its top edge, its bottom edge and under its rows:
+/// what it is for, and the three keys that work.
 ///
-/// The footer says when a choice takes effect. A switch applies from the next
-/// turn, and a list that did not say so would read as though the reply being
-/// written were already coming from the new model.
+/// The model list says when a choice takes effect. A switch applies from the
+/// next turn, and a list that did not say so would read as though the reply
+/// being written were already coming from the new model.
+fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
+    match purpose {
+        Purpose::Model => (
+            "Model",
+            " applied from the next turn ",
+            "↑↓ choose · Enter switch · Esc keep this one",
+        ),
+        Purpose::Effort => (
+            "Effort",
+            " sent to the backend as /effort ",
+            "↑↓ choose · Enter set · Esc leave it",
+        ),
+        Purpose::Theme => ("Theme", "", "↑↓ choose · Enter switch · Esc keep this one"),
+    }
+}
+
+/// A list the operator opened: what it offers, which one is in force where
+/// that is known, and the keys that work.
 fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&str>, theme: &Theme) {
     let width = PICK_COLUMNS.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
     if width < 20 {
         return;
     }
 
+    let (title, footer, keys) = pick_words(picker.purpose);
     let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
     let mut lines: Vec<Line> = vec![Line::from("")];
-    for (i, model) in picker.models.iter().enumerate() {
+    for (i, option) in picker.options.iter().enumerate() {
         let on_it = i == picker.at;
-        let marker = match (on_it, current == Some(model.as_str())) {
+        let marker = match (on_it, current == Some(option.as_str())) {
             (true, _) => PICK_CURSOR,
             (false, true) => PICK_CURRENT,
             (false, false) => "  ",
         };
+        let shown = match picker.purpose {
+            Purpose::Theme => option.to_lowercase(),
+            Purpose::Model | Purpose::Effort => option.clone(),
+        };
         let row = format!(
             "{marker}{:<room$}",
-            text::truncate(model, text_width.saturating_sub(2)),
+            text::truncate(&shown, text_width.saturating_sub(2)),
             room = text_width.saturating_sub(2)
         );
         lines.push(match on_it {
@@ -234,23 +234,168 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
         });
     }
     lines.push(Line::from(""));
-    // Wrapped to the box, which is sized for the model names: cut at its edge
+    // Wrapped to the box, which is sized for what it offers: cut at its edge
     // the last key would read as a different one.
     lines.extend(
-        text::wrap(PICK_KEYS, text_width)
+        text::wrap(keys, text_width)
             .into_iter()
             .map(|line| Line::from(line).style(Style::new().fg(theme.dialog_fg))),
     );
 
-    let inner = dialog(
-        frame,
-        body,
-        (width, lines.len()),
-        ("Model", " applied from the next turn "),
-        theme,
-    );
+    let inner = dialog(frame, body, (width, lines.len()), (title, footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
 }
+
+/// Widest a sheet is drawn, in columns: a paragraph's measure, with room
+/// for a config file's path on one line.
+const SHEET_COLUMNS: u16 = 80;
+
+/// The open sheet: its rows wrapped to its width, scrolled to where the
+/// operator put it, and the keys that work on its bottom edge.
+fn draw_sheet(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) {
+    let Some(sheet) = app.sheet() else {
+        return;
+    };
+    let width = SHEET_COLUMNS.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
+    let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
+    let wrapped: Vec<String> = sheet
+        .rows
+        .iter()
+        // A row that fits is drawn as written, so the columns its spaces
+        // line up are kept; only a longer one is wrapped.
+        .flat_map(|row| match text::width(row) <= text_width {
+            true => vec![row.clone()],
+            false => text::wrap(row, text_width),
+        })
+        .collect();
+    // A row of room above and below, and one each for the border and the
+    // shadow, which the dialog keeps inside the body.
+    let room = usize::from(body.height).saturating_sub(5);
+    let max_scroll = wrapped.len().saturating_sub(room);
+    let scroll = sheet.scroll.min(max_scroll);
+    let footer = match (&sheet.link, max_scroll > 0) {
+        (Some(_), true) => " ↑↓ scroll · o open · Esc close ",
+        (Some(_), false) => " o open · Esc close ",
+        (None, true) => " ↑↓ scroll · Esc close ",
+        (None, false) => " Esc close ",
+    };
+    let title = sheet.title.clone();
+
+    let mut lines = vec![Line::from("")];
+    lines.extend(
+        wrapped
+            .into_iter()
+            .skip(scroll)
+            .take(room)
+            .map(|line| Line::from(line).style(Style::new().fg(theme.dialog_fg))),
+    );
+    lines.push(Line::from(""));
+
+    let inner = dialog(frame, body, (width, lines.len()), (&title, footer), theme);
+    frame.render_widget(Paragraph::new(lines), inner);
+    app.measured_sheet(max_scroll);
+}
+
+/// The open menu's list, hung from its name on the bar and cast on what is
+/// under it, and where it was drawn.
+///
+/// An item the session cannot do is dimmed rather than left out: the menu is
+/// the catalogue of what the shell can be asked, and choosing one says why it
+/// cannot. A pane the View menu shows and hides says which it is.
+fn draw_menu_list(
+    frame: &mut Frame,
+    screen: Rect,
+    open: crate::menu::Open,
+    app: &App,
+    theme: &Theme,
+) -> Rect {
+    let menu = open.menu();
+    let rows: Vec<(String, String)> = menu
+        .items
+        .iter()
+        .map(|item| {
+            let keys = match item.action {
+                crate::menu::Action::Pane(pane) => match app.shows(pane) {
+                    true => "shown",
+                    false => "hidden",
+                },
+                _ => item.keys,
+            };
+            (item.label.to_owned(), keys.to_owned())
+        })
+        .collect();
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let keys_width = rows
+        .iter()
+        .map(|(_, keys)| keys.chars().count())
+        .max()
+        .unwrap_or(0);
+    // A column of room either side of the text, and four between an item and
+    // its keys, inside the border.
+    let inner_width = label_width + keys_width + MENU_KEYS_GAP + 2;
+    let width = u16::try_from(inner_width + 2)
+        .unwrap_or(u16::MAX)
+        .min(screen.width);
+    let height = u16::try_from(rows.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(screen.height.saturating_sub(1));
+    let (start, _) = crate::menu::title_columns()
+        .get(open.menu)
+        .copied()
+        .unwrap_or((0, 0));
+    let x = start.min(screen.right().saturating_sub(width));
+    let area = Rect::new(x, screen.y.saturating_add(1), width, height);
+
+    cast_shadow(frame, area, screen, theme);
+    let bar = Style::new().bg(theme.menu_bg).fg(theme.menu_fg);
+    let block = Block::bordered()
+        .border_type(theme.border)
+        .border_style(bar)
+        .style(bar);
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let hot = Style::new().fg(theme.hot).bold().underlined();
+    let lines: Vec<Line> = menu
+        .items
+        .iter()
+        .zip(rows)
+        .enumerate()
+        .map(|(at, (item, (label, keys)))| {
+            let on_it = at == open.item;
+            let able = app.can(item.action);
+            let base = match (on_it, able) {
+                (true, _) => Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg),
+                (false, true) => bar,
+                (false, false) => bar.fg(theme.dim),
+            };
+            let mut spans = vec![Span::styled(" ", base)];
+            for (i, c) in label.chars().enumerate() {
+                let style = match i == item.hot && able && !on_it {
+                    true => base.patch(hot),
+                    false if i == item.hot => base.underlined(),
+                    false => base,
+                };
+                spans.push(Span::styled(c.to_string(), style));
+            }
+            let pad = inner_width.saturating_sub(label.chars().count() + keys.chars().count() + 2);
+            spans.push(Span::styled(" ".repeat(pad), base));
+            spans.push(Span::styled(keys, base.add_modifier(Modifier::DIM)));
+            spans.push(Span::styled(" ", base));
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+    area
+}
+
+/// Columns between a menu item and the keys that do the same.
+const MENU_KEYS_GAP: usize = 4;
 
 /// Widest the trust question is drawn, in columns: room for a permission
 /// rule or an environment variable and its value on one line.
@@ -505,15 +650,15 @@ fn draw_too_small(frame: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
-/// The menu row: the seven menus on the left, and on the right what the
-/// session is, what it is doing and the time of day.
+/// The menu row: the menus on the left, and on the right what the session
+/// is, what it is doing and the time of day.
 ///
-/// The theme is not named here. `9 Theme` in the F-key row is where a palette
-/// is changed, and a row that says which one is on says nothing the screen
-/// does not already show.
+/// The theme is not named here. The View menu is where a palette is changed,
+/// and a row that says which one is on says nothing the screen does not
+/// already show.
 fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let bar = Style::new().bg(theme.menu_bg).fg(theme.menu_fg);
-    let left = Line::from(menu_spans(theme));
+    let left = Line::from(menu_spans(app.menu().map(|open| open.menu), theme));
 
     let room = usize::from(area.width).saturating_sub(left.width() + MENU_GAP);
     let identity = fitted(identity_segments(app, theme), room);
@@ -529,21 +674,29 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 }
 
-/// The seven menus, each with its hot key accented and underlined.
+/// The menus, each with its hot key accented and underlined, and the one
+/// that is open, if one is, drawn as a block.
 ///
 /// A terminal with no underline drops the underline and keeps the colour, so
 /// the hot key is still marked on one that has only the sixteen attributes.
-fn menu_spans(theme: &Theme) -> Vec<Span<'static>> {
-    let hot = Style::new().fg(theme.hot).bold().underlined();
-    let plain = Style::new().fg(theme.menu_fg);
-
-    let mut spans = vec![Span::raw(" ")];
-    for name in MENUS {
-        let mut chars = name.chars();
+/// Each name has a column either side, which is where
+/// [`crate::menu::title_columns`] says it is.
+fn menu_spans(open: Option<usize>, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (at, menu) in crate::menu::MENUS.iter().enumerate() {
+        let plain = match open == Some(at) {
+            true => Style::new().fg(theme.menu_bg).bg(theme.menu_fg),
+            false => Style::new().fg(theme.menu_fg),
+        };
+        let mut chars = menu.name.chars();
         let first = chars.next().unwrap_or(' ');
-        spans.push(Span::styled(first.to_string(), hot));
+        spans.push(Span::styled(" ", plain));
+        spans.push(Span::styled(
+            first.to_string(),
+            plain.fg(theme.hot).bold().underlined(),
+        ));
         spans.push(Span::styled(chars.as_str().to_owned(), plain));
-        spans.push(Span::raw("  "));
+        spans.push(Span::styled(" ", plain));
     }
     spans
 }
@@ -689,7 +842,13 @@ fn segment_spans(segments: Vec<Segment>) -> Vec<Span<'static>> {
 }
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    if area.width < WIDE_COLUMNS {
+    use crate::menu::SidePane;
+
+    let shown: Vec<SidePane> = [SidePane::Usage, SidePane::Changes, SidePane::Activity]
+        .into_iter()
+        .filter(|pane| app.shows(*pane))
+        .collect();
+    if area.width < WIDE_COLUMNS || shown.is_empty() {
         app.right_stack_hidden();
         draw_session(frame, area, false, app, theme);
         return;
@@ -718,17 +877,38 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 
     // Usage takes the rows its figures need and no more; what is left goes to
     // the two panes that grow with the session, 1.3 : 1 in favour of the files
-    // it changed.
-    let [usage, changes, activity] = Layout::vertical([
-        Constraint::Length(usage_height(app).min(right.height)),
-        Constraint::Fill(13),
-        Constraint::Fill(10),
-    ])
-    .areas(right);
+    // it changed. A pane the operator hid gives its rows to the others, and
+    // Usage alone leaves desktop under it.
+    let usage_rows = usage_height(app).min(right.height);
+    let mut constraints: Vec<Constraint> = shown
+        .iter()
+        .map(|pane| match pane {
+            SidePane::Usage => Constraint::Length(usage_rows),
+            SidePane::Changes => Constraint::Fill(13),
+            SidePane::Activity => Constraint::Fill(10),
+        })
+        .collect();
+    if shown == [SidePane::Usage] {
+        constraints.push(Constraint::Fill(1));
+    }
+    let areas = Layout::vertical(constraints).split(right);
 
-    draw_usage(frame, usage, app, theme);
-    draw_changes(frame, changes, app, theme);
-    draw_activity(frame, activity, app, theme);
+    for pane in [Pane::Changes, Pane::Activity] {
+        let side = match pane {
+            Pane::Changes => SidePane::Changes,
+            Pane::Activity => SidePane::Activity,
+        };
+        if !shown.contains(&side) {
+            app.pane_not_drawn(pane);
+        }
+    }
+    for (pane, at) in shown.iter().zip(areas.iter()) {
+        match pane {
+            SidePane::Usage => draw_usage(frame, *at, app, theme),
+            SidePane::Changes => draw_changes(frame, *at, app, theme),
+            SidePane::Activity => draw_activity(frame, *at, app, theme),
+        }
+    }
 }
 
 /// How a pane's border is drawn: the pane with the keyboard in the theme's
@@ -4468,30 +4648,36 @@ fn window_style(window: &UsageWindow, theme: &Theme) -> Style {
     }
 }
 
-fn draw_fkeys(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let slot = usize::from(area.width).saturating_sub(FKEYS_LEAD.len()) / FKEYS.len();
-    let mut spans = vec![Span::styled(
-        FKEYS_LEAD,
-        Style::new().fg(theme.hot).bg(theme.menu_bg).bold(),
-    )];
+/// The F-key bar: Esc and what it stops, then the ten keys, each sized by
+/// [`crate::menu::fkey_widths`]. A key that cannot do anything in this
+/// session is drawn dimmed, as its menu item is.
+fn draw_fkeys(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let bar = Style::new().bg(theme.menu_bg);
+    let key_style = Style::new().fg(theme.hot).bg(theme.menu_bg).bold();
+    let label_style = Style::new().fg(theme.fkey_fg).bg(theme.fkey_bg);
+    let (stop_key, stop_label) = crate::menu::STOP;
+    let stopped = |able: bool| match able {
+        true => label_style,
+        false => label_style.add_modifier(Modifier::DIM),
+    };
+    let mut spans = vec![
+        Span::styled(stop_key, key_style),
+        Span::styled(stop_label, stopped(app.can(crate::menu::Action::Stop))),
+        Span::styled(" ", bar),
+    ];
 
-    for (number, label) in FKEYS {
-        let room = slot.saturating_sub(number.len() + 1);
-        spans.push(Span::styled(
-            number,
-            Style::new().fg(theme.hot).bg(theme.menu_bg).bold(),
-        ));
+    let widths = crate::menu::fkey_widths(area.width);
+    for ((digit, label, action), width) in crate::menu::FKEYS.iter().zip(widths) {
+        let room = usize::from(width).saturating_sub(digit.len() + 1);
+        spans.push(Span::styled(*digit, key_style));
         spans.push(Span::styled(
             format!("{:<room$}", text::truncate(label, room), room = room),
-            Style::new().fg(theme.fkey_fg).bg(theme.fkey_bg),
+            stopped(app.can(*action)),
         ));
-        spans.push(Span::styled(" ", Style::new().bg(theme.menu_bg)));
+        spans.push(Span::styled(" ", bar));
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.menu_bg)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(bar), area);
 }
 
 /// What the session is on, and what it is running under.
@@ -5296,30 +5482,42 @@ mod tests {
 
     #[test]
     fn the_pane_that_shows_what_a_session_used_is_called_usage_everywhere() {
-        assert!(MENUS.contains(&"Usage"), "{MENUS:?}");
-        assert!(FKEYS.contains(&("5", "Usage")), "{FKEYS:?}");
+        let labels: Vec<&str> = crate::menu::MENUS
+            .iter()
+            .flat_map(|menu| menu.items)
+            .map(|item| item.label)
+            .collect();
+        assert!(labels.contains(&"Usage pane"), "{labels:?}");
         assert!(
-            !MENUS.contains(&"Cost") && !FKEYS.iter().any(|(_, label)| *label == "Cost"),
+            !labels.iter().any(|label| label.starts_with("Cost pane")),
             "nothing the operator reads still calls this pane Cost"
         );
     }
 
     #[test]
-    fn the_bar_names_the_digit_after_esc_and_every_label_fits_at_the_narrowest() {
+    fn the_bar_names_the_digit_after_esc_and_every_label_is_whole_at_the_narrowest() {
         // A Mac's top row is media keys unless Fn is held, so the bar names
         // the key that reaches every terminal: Esc, then one digit.
         assert!(
-            FKEYS.iter().all(|(key, _)| key.len() == 1),
-            "one digit per action, 0 for the tenth: {FKEYS:?}"
+            crate::menu::FKEYS.iter().all(|(key, _, _)| key.len() == 1),
+            "one digit per action, 0 for the tenth"
         );
-        assert_eq!(FKEYS[9], ("0", "Quit"));
-
-        let slot = (usize::from(MIN_SIZE.0) - FKEYS_LEAD.len()) / FKEYS.len();
-        for (key, label) in FKEYS {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(MIN_SIZE.0, MIN_SIZE.1))
+                .expect("a test terminal");
+        let mut app = App::new(crate::app::Repo::default());
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("drawing never fails on a test backend");
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..MIN_SIZE.0)
+            .map(|x| buffer[(x, MIN_SIZE.1 - 1)].symbol().to_owned())
+            .collect();
+        assert!(row.starts_with("EscStop 1Help"), "{row}");
+        for (key, label, _) in crate::menu::FKEYS {
             assert!(
-                key.len() + label.len() < slot,
-                "{key}{label} is cut at {} columns",
-                MIN_SIZE.0
+                row.contains(&format!("{key}{label}")),
+                "{key}{label} is cut: {row}"
             );
         }
     }

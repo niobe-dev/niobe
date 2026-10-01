@@ -1,4 +1,4 @@
- Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
  ┃    44 +     headers.set("If-None-Match", cached.etag);                   ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃    45 +   }                                                              ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
@@ -27,4 +27,4 @@
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │         URL, not the manifest id —    │
  ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │         two manifests can share an    │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
-Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

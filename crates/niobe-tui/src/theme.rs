@@ -6,7 +6,7 @@
 //! Every colour the drawing code uses is a field of the one [`Theme`] struct,
 //! so that adding a theme is a table entry rather than a sweep through the
 //! drawing code. [`THEMES`] is that table, and the order in it is the order
-//! `F9` cycles.
+//! the View menu's theme list offers them in.
 //!
 //! Every theme has a table in the sixteen ANSI names, and it is what the shell
 //! draws in unless the terminal says it can do better. Naming the sixteen
@@ -540,8 +540,8 @@ pub const MODERN_TRUE: Theme = Theme {
     ..MODERN
 };
 
-/// Every theme there is, as its sixteen-colour table, in the order `F9`
-/// cycles them. The first is the default.
+/// Every theme there is, as its sixteen-colour table, in the order the theme
+/// list offers them. The first is the default.
 pub const THEMES: [Theme; 4] = [CYBER, CLASSIC, NEO, MODERN];
 
 impl Theme {

@@ -26,10 +26,11 @@
   z  Rgb(37, 37, 38) on Rgb(79, 193, 255), bold
   A  Rgb(37, 37, 38) on Rgb(79, 193, 255)
   B  Rgb(79, 193, 255) on Rgb(50, 50, 51), bold
-  C  Rgb(255, 255, 255) on Rgb(14, 99, 156)
+  C  Rgb(255, 255, 255) on Rgb(14, 99, 156), dim
   D  Rgb(212, 212, 212) on Rgb(50, 50, 51)
+  E  Rgb(255, 255, 255) on Rgb(14, 99, 156)
 
-abaaaaaabaaaaaaaabaaaaaabaaaaaabaaaaaabaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
+abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
 fgggghhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhggggfiiiiiiiiiiiiiiiiijjjjjjjiiiiiiiiiiiiiiiiif
 fgfffkkkklmkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkfgfifnnnnnnnnnnooooffffnnnnnnnnnnnnnnnfffffif
 fgfffkkkklmkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkfgfifnnnnnnnnnnooooffnnnnnnnnnnnnnnnnnnnnnfif
@@ -58,4 +59,4 @@ fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffvfif
 fgfiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiifgfifnnnnnnnnffffffffffffffffffffffffffffffif
 fgfzzzzzwwwAnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnffnnnnnnnnnnnnnnfgfifnnnnnnnnffffffffffffffffffffffffffffffif
 fggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggfiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
-BBBBBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDDDDDDD
+BBBCCCCDBEEEEEEEEDBCCCCCCCCCCCDBCCCCCCCCCDBCCCCCCCCCDBEEEEEEEEDBCCCCCCCCCCDBCCCCCCCDBCCCCCCCCCCDBEEEEEEEEEEEEDBEEEEEEEED

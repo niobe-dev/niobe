@@ -1,4 +1,4 @@
- Niobe  Session  Files  Tools  Usage  Options  Help                                                                                                    opus-5  claude · default  ○ not attached  13:41
+ Niobe  Session  Context  Model  View  Help                                                                                                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━━━━━━━━━━━━━━━━━ add etag support to the catalog fetcher so we stop re-downloading unchanged manifests ━━━━━━━━━━━━━━━━━━━━┓ ┌────────────────────────────── Usage ──────────────────────────────┐
  ┃ ▾ Bash ×2        git commit -m 'test: a 304 is answered from the cache', git commit -m 'feat: keep the etag bes…  0 B · 2.0s ┃ │ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40                          │
  ┃   ├ git commit -m 'test: a 304 is answered from the cache'                                                        0 B · 1.0s ┃ │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00                      │
@@ -57,4 +57,4 @@
  ┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃ │                                                                   │
  ┃  ask  >  Ask for a change · / search transcript · @ file                       Shift+Tab cycles · Ctrl+J newline · Tab panes ┃ │                                                                   │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────────────────────────────────┘
-Esc 1Help              2Plan              3Diff              4Undo              5Usage             6Files             7Tools             8Model             9Theme             0Quit
+EscStop 1Help             2Compact             3Clear             4Model             5Diff             6Rewind             7MCP             8Memory             9Settings             0Quit

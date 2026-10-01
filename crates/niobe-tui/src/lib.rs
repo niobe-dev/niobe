@@ -37,6 +37,7 @@ pub mod journal;
 mod keys;
 mod markdown;
 mod mention;
+pub mod menu;
 mod meter;
 pub mod prices;
 pub mod rules;
@@ -57,8 +58,8 @@ pub mod usage;
 pub mod watch;
 
 pub use app::{
-    Answer, App, Arrival, Ask, Call, Commit, Entry, EntryKind, Picker, Repo, Section,
-    SelectedProfile, WorkingFile,
+    Answer, App, Arrival, Ask, Call, Commit, ConfigFile, Entry, EntryKind, Picker, Places, Purpose,
+    Repo, Section, SelectedProfile, Sheet, WorkingFile,
 };
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use desktop::{Desktop, Handoff, NoDesktop};

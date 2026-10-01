@@ -1,4 +1,4 @@
- Niobe  Session  Files  Tools  Usage  Options  Help                    opus-5  claude · default  ○ not attached  13:41
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
  ┃                                                                          ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
  ┃ ⚙ Write          catalog/fixtures.ts                              +30 −0 ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
@@ -37,4 +37,4 @@
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   13:39 Reuse the existing LRU        │
  ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │         instead of a new Map —        │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
-Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

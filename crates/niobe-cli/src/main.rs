@@ -38,7 +38,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
-use niobe_tui::app::App;
+use niobe_tui::app::{App, ConfigFile, Places};
 use niobe_tui::journal::Unrecorded;
 use niobe_tui::theme::{self, Depth};
 use niobe_tui::{Detached, Ended, Forgotten, NoImages, NoShell, Theme, Unwatched};
@@ -209,6 +209,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
         say_prices(
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
+                .with_places(places(&root, &loaded))
                 .with_depth(asked.depth)
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
@@ -327,6 +328,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
         say_prices(
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
+                .with_places(places(&root, &loaded))
                 .with_depth(asked.depth)
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
@@ -464,6 +466,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
         say_prices(
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
+                .with_places(places(&root, &loaded))
                 .with_depth(asked.depth)
                 .with_theme(theme),
         ),
@@ -650,6 +653,30 @@ fn say_prices(app: App) -> App {
                  backend reports one: {error}"
             ),
         ),
+    }
+}
+
+/// The files the shell may name or hand to the desktop: the config files the
+/// session was looked for in, and the repository's `CLAUDE.md`.
+///
+/// Only a regular file that is not a link is offered to be opened: what a
+/// repository's file is, is the repository's choice, and the desktop runs
+/// some files rather than showing them.
+fn places(root: &Path, loaded: &config::Loaded) -> Places {
+    let openable =
+        |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file());
+    let memory = root.join("CLAUDE.md");
+    Places {
+        config_files: loaded
+            .searched
+            .iter()
+            .map(|path| ConfigFile {
+                path: path.display().to_string(),
+                exists: path.exists(),
+                openable: openable(path),
+            })
+            .collect(),
+        memory: openable(&memory).then(|| memory.display().to_string()),
     }
 }
 

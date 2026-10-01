@@ -1113,7 +1113,7 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
         models: vec!["opus-5".to_owned(), "sonnet-5".to_owned()],
     });
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
-        ratatui::crossterm::event::KeyCode::F(8),
+        ratatui::crossterm::event::KeyCode::F(4),
         ratatui::crossterm::event::KeyModifiers::NONE,
     ));
 
@@ -1233,7 +1233,7 @@ fn a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not() {
 }
 
 #[test]
-fn the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back() {
+fn the_plans_usage_windows_are_the_headline_and_cost_and_usage_says_when_they_come_back() {
     let mut app = running_session();
     let frame = screen(&mut app, 120, 30);
 
@@ -1246,12 +1246,9 @@ fn the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back() {
     // time on the clock rather than as a weekday.
     assert!(frame.contains("resets 16:40"), "{frame}");
 
-    app.on_key(ratatui::crossterm::event::KeyEvent::new(
-        ratatui::crossterm::event::KeyCode::F(5),
-        ratatui::crossterm::event::KeyModifiers::NONE,
-    ));
+    app.perform(niobe_tui::menu::Action::Usage);
     let pressed = screen(&mut app, 200, 60);
-    // The key reads the windows out against the same moment the pane draws
+    // The item reads the windows out against the same moment the pane draws
     // them at: one clock, or the shell says two things about one window.
     assert!(
         pressed.contains("5h window 62%, resets in 2h 59m"),
@@ -1487,12 +1484,9 @@ fn a_session_no_backend_reported_a_window_for_shows_no_window_at_all() {
     assert!(!frame.contains("/5h"), "{frame}");
     assert!(!frame.contains("/7d"), "{frame}");
 
-    // And F5 says what the key does not do yet rather than reading out a
-    // window nobody reported.
-    app.on_key(ratatui::crossterm::event::KeyEvent::new(
-        ratatui::crossterm::event::KeyCode::F(5),
-        ratatui::crossterm::event::KeyModifiers::NONE,
-    ));
+    // And Cost & usage says what it does not do yet rather than reading out
+    // a window nobody reported.
+    app.perform(niobe_tui::menu::Action::Usage);
     let pressed = screen(&mut app, 120, 30);
     assert!(pressed.contains("not implemented yet"), "{pressed}");
     assert!(!pressed.contains("window 0%"), "{pressed}");
@@ -2852,9 +2846,9 @@ fn the_badge_keeps_the_mode_while_the_right_end_is_taken() {
     let mut app = running_session();
     app.apply(&Event::ModeSelected { mode: Mode::Auto });
 
-    press(&mut app, ratatui::crossterm::event::KeyCode::F(3));
+    app.perform(niobe_tui::menu::Action::Stop);
     let row = bar_row(&screen(&mut app, 80, 24));
-    assert!(row.contains("F3 Diff"), "{row}");
+    assert!(row.contains("Nothing is running"), "{row}");
     assert!(
         row.contains(" auto  > "),
         "the shell's reply hid the mode:\n{row}"
@@ -3005,10 +2999,10 @@ fn the_shells_reply_is_said_in_the_bar_without_taking_a_row() {
     let mut app = running_session();
     let before = screen(&mut app, 120, 30);
 
-    press(&mut app, ratatui::crossterm::event::KeyCode::F(3));
+    app.perform(niobe_tui::menu::Action::Stop);
     let after = screen(&mut app, 120, 30);
     let row = bar_row(&after);
-    assert!(row.contains("F3 Diff"), "{row}");
+    assert!(row.contains("Nothing is running"), "{row}");
     assert_eq!(
         before.lines().position(|row| row.contains(" ask ")),
         after.lines().position(|row| row.contains(" ask ")),
@@ -3084,7 +3078,7 @@ fn a_line_opened_after_the_last_one_grows_the_composer_rather_than_hiding_it() {
 #[test]
 fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
     let mut app = running_session();
-    press(&mut app, ratatui::crossterm::event::KeyCode::F(1));
+    app.perform(niobe_tui::menu::Action::SignIn);
     let frame = screen(&mut app, 80, 24);
     let rows: Vec<&str> = frame.lines().collect();
     let bar = rows
@@ -3098,7 +3092,7 @@ fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        said.ends_with("drag copies, click opens a link"),
+        said.ends_with("use /login there"),
         "the reply was cut:\n{frame}"
     );
     assert!(!said.contains("Ask for a change"), "{frame}");
@@ -4283,4 +4277,82 @@ fn a_working_tree_of_nothing_but_a_binary_file_has_no_line_counts() {
     // The same dash a file's own row draws where git gave it no count.
     assert!(header.contains("1 file  — —"), "{header}");
     assert!(!header.contains("+0"), "{header}");
+}
+
+fn alt(letter: char) -> ratatui::crossterm::event::KeyEvent {
+    ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char(letter),
+        ratatui::crossterm::event::KeyModifiers::ALT,
+    )
+}
+
+#[test]
+fn an_open_menu_hangs_from_its_name_with_the_keys_that_do_each_item() {
+    let mut app = running_session();
+    app.on_key(alt('v'));
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("Group by agent"), "{frame}");
+        assert!(frame.contains("F5  Ctrl+T"), "{frame}");
+        assert!(
+            frame.contains("shown"),
+            "a pane says whether it is: {frame}"
+        );
+        assert_snapshot(&format!("menu-view-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn the_settings_name_the_files_the_session_was_read_from() {
+    let mut app = running_session().with_places(niobe_tui::Places {
+        config_files: vec![
+            niobe_tui::ConfigFile {
+                path: "/home/me/.config/niobe/config.toml".to_owned(),
+                exists: true,
+                openable: true,
+            },
+            niobe_tui::ConfigFile {
+                path: "/home/me/src/niobe/.niobe/config.toml".to_owned(),
+                exists: false,
+                openable: false,
+            },
+        ],
+        memory: None,
+    });
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::F(9),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(" Settings "), "{frame}");
+    assert!(
+        frame.contains("/home/me/.config/niobe/config.toml"),
+        "{frame}"
+    );
+    assert!(frame.contains("o open"), "{frame}");
+    assert_snapshot("settings-120x30", &frame);
+}
+
+#[test]
+fn a_pane_hidden_from_the_view_menu_gives_its_rows_to_the_others() {
+    let mut app = running_session();
+    app.perform(niobe_tui::menu::Action::Pane(
+        niobe_tui::menu::SidePane::Changes,
+    ));
+    let frame = screen(&mut app, 120, 30);
+    assert!(!frame.contains(" Changes "), "{frame}");
+    assert!(frame.contains(" Activity "), "{frame}");
+    assert_snapshot("changes-hidden-120x30", &frame);
+
+    for pane in [
+        niobe_tui::menu::SidePane::Usage,
+        niobe_tui::menu::SidePane::Activity,
+    ] {
+        app.perform(niobe_tui::menu::Action::Pane(pane));
+    }
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        !frame.contains(" Usage ") && !frame.contains(" Activity "),
+        "with every pane hidden the session takes the width: {frame}"
+    );
 }

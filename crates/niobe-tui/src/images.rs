@@ -159,6 +159,12 @@ impl Attachments {
         self.turns.push_back(images);
     }
 
+    /// Notes a turn sent with no images, so the ones attached to the prompt
+    /// still being written stay with it and later turns keep theirs.
+    pub(crate) fn send_none(&mut self) {
+        self.turns.push_back(Vec::new());
+    }
+
     /// Drops what is attached to a prompt that will not be sent.
     pub(crate) fn discard(&mut self) {
         self.waiting.clear();

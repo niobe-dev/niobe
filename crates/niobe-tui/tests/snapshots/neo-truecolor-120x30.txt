@@ -20,10 +20,11 @@
   t  Rgb(255, 59, 59) on Rgb(2, 8, 3), bold
   u  Rgb(2, 8, 3) on Rgb(0, 255, 65), bold
   v  Rgb(2, 8, 3) on Rgb(0, 255, 65)
-  w  Rgb(0, 255, 65) on Rgb(0, 59, 18)
+  w  Rgb(0, 255, 65) on Rgb(0, 59, 18), dim
   x  Rgb(155, 255, 176) on Rgb(0, 26, 8)
+  y  Rgb(0, 255, 65) on Rgb(0, 59, 18)
 
-abaaaaaabaaaaaaaabaaaaaabaaaaaabaaaaaabaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaaaaaaaaaaaaaaaaadddddaa
+abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaaaaaaaaaaaaaaaaadddddaa
 effffggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggffffehhhhhhhhhhhhhhhhhiiiiiiihhhhhhhhhhhhhhhhhe
 efeeejjjjkljjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjefehemmmmmmmmmmnnnneeeemmmmmmmmmmmmmmmeeeeehe
 efeeejjjjkljjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjefehemmmmmmmmmmnnnneemmmmmmmmmmmmmmmmmmmmmehe
@@ -52,4 +53,4 @@ efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefehe
 efehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhefehemmmmmmmmeeeeeeeeeeeeeeeeeeeeeeeeeeeeeehe
 efeuuuuuiiivmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmeemmmmmmmmmmmmmmefehemmmmmmmmeeeeeeeeeeeeeeeeeeeeeeeeeeeeeehe
 effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-cccccwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxxxxxxx
+cccwwwwxcyyyyyyyyxcwwwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcyyyyyyyyxcwwwwwwwwwwxcwwwwwwwxcwwwwwwwwwwxcyyyyyyyyyyyyxcyyyyyyyyx

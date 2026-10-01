@@ -1,4 +1,4 @@
- Niobe  Session  Files  Tools  Usage  Options  Help                     opus-5
+ Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ┏━━━━━━━━━━━━━━━━━━━━ what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━━━┓
 ┃ > you                                                                        ┃
 ┃   what does the fetcher do with a 304?                                       ┃
@@ -21,4 +21,4 @@
 ┃ ──────────────────────────────────────────────────────────────────────────── ┃
 ┃  —  >  Ask for a change                      Shift+Tab mode · Ctrl+J newline ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-Esc 1Help  2Plan  3Diff  4Undo  5Usage 6Files 7Tools 8Model 9Theme 0Quit
+EscStop 1Help 2Compact 3Clear 4Model 5Diff 6Rewind 7MCP 8Memory 9Settings 0Quit

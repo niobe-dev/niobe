@@ -408,17 +408,81 @@ pub enum AskFocus {
     Deferred,
 }
 
-/// The models the operator is choosing between.
-///
-/// The list is the profile's, in the order it names them: the shell knows no
-/// backend and so knows no models of its own, and offering an id the backend
-/// would refuse is worse than offering nothing.
+/// A list the operator is choosing one of: what it is for, what it offers and
+/// where the cursor is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picker {
-    /// The models offered.
-    pub models: Vec<String>,
+    /// What choosing does.
+    pub purpose: Purpose,
+    /// What is offered, in the order it is drawn.
+    pub options: Vec<String>,
     /// Which one the cursor is on.
     pub at: usize,
+}
+
+/// What a [`Picker`] chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// The model the session runs on. The list is the profile's, in the order
+    /// it names them: the shell knows no backend and so knows no models of its
+    /// own, and offering an id the backend would refuse is worse than offering
+    /// nothing.
+    Model,
+    /// How hard the model works on a turn, sent as the backend's `/effort`.
+    Effort,
+    /// The palette the shell is drawn in.
+    Theme,
+}
+
+/// The effort levels offered, in the order the `claude` CLI's `/effort`
+/// lists them in its argument hint (Claude Code 2.1.287). Its `auto` and
+/// `ultracode` are left out: they are switches of their own rather than a
+/// level, and a list of levels with them in would read as a scale they are
+/// not on.
+pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Something the shell has to say that takes more than a line: what it is
+/// running under, the keys it answers to. It holds the keyboard until it is
+/// closed, and changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sheet {
+    /// What it is about, on its top edge.
+    pub title: String,
+    /// What it says, a row each; a row is wrapped to the sheet's width.
+    pub rows: Vec<String>,
+    /// What `o` opens, where there is something to open.
+    pub link: Option<String>,
+    /// How many wrapped lines are scrolled off its top.
+    pub scroll: usize,
+}
+
+/// Files outside the session the shell can name or have opened, found by the
+/// binary: the shell touches no filesystem.
+///
+/// A file is handed over to be opened only where it is a regular file and not
+/// a link. A repository decides what its own files are, and a `CLAUDE.md`
+/// linked to something the desktop runs rather than shows would be run by the
+/// key that was meant to show it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Places {
+    /// The config files the session was read from, lowest precedence first,
+    /// whether or not each is there.
+    pub config_files: Vec<ConfigFile>,
+    /// The repository's instructions to the agent, where it has one that may
+    /// be opened.
+    pub memory: Option<String>,
+}
+
+/// A config file the session looked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigFile {
+    /// Where it is, or would be.
+    pub path: String,
+    /// Whether there was a file there to read.
+    pub exists: bool,
+    /// Whether it may be handed to the desktop to open: a regular file, not
+    /// a link.
+    pub openable: bool,
 }
 
 /// What a transcript entry is, which decides its glyph and its colour.
@@ -1084,8 +1148,22 @@ pub struct App {
     produced: Vec<Event>,
     /// The images attached to prompts, and the ones asked for.
     images: Attachments,
-    /// The model list the operator opened, while it is open.
+    /// The list the operator opened — of models, effort levels or themes —
+    /// while it is open.
     picking: Option<Picker>,
+    /// The menu the operator opened, while it is open.
+    menu: Option<crate::menu::Open>,
+    /// Where the last frame drew the open menu's list, border included, so a
+    /// click can tell which item it landed on.
+    menu_list: Option<ratatui::layout::Rect>,
+    /// Where the last frame drew the menu bar and the F-key bar.
+    bars: Option<(ratatui::layout::Rect, ratatui::layout::Rect)>,
+    /// What the shell is saying at more length than a hint, while it is up.
+    sheet: Option<Sheet>,
+    /// The panes of the right-hand stack the operator hid.
+    hidden: BTreeSet<crate::menu::SidePane>,
+    /// The files outside the session the shell can name or have opened.
+    places: Places,
     /// The question whether to trust the repository's config, while it is
     /// up. A shell asking it has no session behind it: it ends on the answer.
     trusting: Option<trust::Asking>,
@@ -1325,6 +1403,12 @@ impl App {
             produced: Vec::new(),
             images: Attachments::default(),
             picking: None,
+            menu: None,
+            menu_list: None,
+            bars: None,
+            sheet: None,
+            hidden: BTreeSet::new(),
+            places: Places::default(),
             trusting: None,
             trusted: None,
             budget_usd: None,
@@ -2649,7 +2733,7 @@ impl App {
             .unwrap_or_default();
         if models.is_empty() {
             self.hint = Some(
-                "F8 Model — this profile names no models; add `models = [\"…\"]` to it in \
+                "F4 Model — this profile names no models; add `models = [\"…\"]` to it in \
                  the config"
                     .to_owned(),
             );
@@ -2661,10 +2745,56 @@ impl App {
             .model()
             .and_then(|current| models.iter().position(|model| model == current))
             .unwrap_or(0);
-        self.picking = Some(Picker { models, at });
+        self.picking = Some(Picker {
+            purpose: Purpose::Model,
+            options: models,
+            at,
+        });
     }
 
-    /// One key, while the model list is up.
+    /// Opens the list of effort levels, where the backend takes `/effort`.
+    ///
+    /// The cursor starts on the first: the backend does not report the level
+    /// in force, so no row can be marked as it.
+    fn pick_effort(&mut self) {
+        if let Err(why) = self.can_send("effort") {
+            self.hint = Some(why);
+            return;
+        }
+        self.picking = Some(Picker {
+            purpose: Purpose::Effort,
+            options: EFFORTS.iter().map(|level| (*level).to_owned()).collect(),
+            at: 0,
+        });
+    }
+
+    /// Opens the list of themes, on the one in force.
+    fn pick_theme(&mut self) {
+        let options: Vec<String> = crate::theme::THEMES
+            .iter()
+            .map(|theme| theme.name.to_owned())
+            .collect();
+        let at = options
+            .iter()
+            .position(|name| *name == self.theme.name)
+            .unwrap_or(0);
+        self.picking = Some(Picker {
+            purpose: Purpose::Theme,
+            options,
+            at,
+        });
+    }
+
+    /// What the open list marks as in force, if it can know.
+    pub fn picked(&self) -> Option<&str> {
+        match self.picking.as_ref()?.purpose {
+            Purpose::Model => self.session.model(),
+            Purpose::Effort => None,
+            Purpose::Theme => Some(self.theme.name),
+        }
+    }
+
+    /// One key, while a list is up.
     ///
     /// Anything that is not a move, a choice or a way out is swallowed: the
     /// list is a question, and a key that typed into the composer behind it
@@ -2675,20 +2805,650 @@ impl App {
         let Some(picker) = self.picking.as_mut() else {
             return;
         };
-        let last = picker.models.len().saturating_sub(1);
+        let last = picker.options.len().saturating_sub(1);
         match key.code {
             KeyCode::Up => picker.at = picker.at.saturating_sub(1),
             KeyCode::Down => picker.at = picker.at.saturating_add(1).min(last),
-            KeyCode::Esc | KeyCode::F(8) => self.picking = None,
+            KeyCode::Esc | KeyCode::F(4) => self.picking = None,
             KeyCode::Enter => {
-                let model = picker.models.get(picker.at).cloned();
+                let purpose = picker.purpose;
+                let chosen = picker.options.get(picker.at).cloned();
                 self.picking = None;
-                if let Some(model) = model {
-                    self.produce(Event::ModelSelected { model });
+                if let Some(chosen) = chosen {
+                    self.choose(purpose, chosen);
                 }
             }
             _ => {}
         }
+    }
+
+    /// Does what choosing `chosen` from a list for `purpose` does.
+    fn choose(&mut self, purpose: Purpose, chosen: String) {
+        match purpose {
+            Purpose::Model => self.produce(Event::ModelSelected { model: chosen }),
+            Purpose::Effort => self.send_command("effort", Some(&chosen)),
+            Purpose::Theme => {
+                if let Some(theme) = Theme::by_name(&chosen) {
+                    self.set_theme(theme);
+                }
+            }
+        }
+    }
+
+    /// The menu that is open, and the item its cursor is on.
+    pub fn menu(&self) -> Option<crate::menu::Open> {
+        self.menu
+    }
+
+    /// What the shell is saying at length, while it is up.
+    pub fn sheet(&self) -> Option<&Sheet> {
+        self.sheet.as_ref()
+    }
+
+    /// Whether `pane` of the right-hand stack is drawn when there is room for
+    /// it: the View menu hides and shows each.
+    pub fn shows(&self, pane: crate::menu::SidePane) -> bool {
+        !self.hidden.contains(&pane)
+    }
+
+    /// The same shell, knowing where the files it can name or open are.
+    #[must_use]
+    pub fn with_places(mut self, places: Places) -> Self {
+        self.places = places;
+        self
+    }
+
+    /// Where the last frame drew the menu bar and the F-key bar, so a click
+    /// on either presses what is drawn there.
+    pub fn drew_bars(&mut self, menu: ratatui::layout::Rect, fkeys: ratatui::layout::Rect) {
+        self.bars = Some((menu, fkeys));
+    }
+
+    /// Where the last frame drew the open menu's list, border included.
+    pub fn drew_menu_list(&mut self, at: Option<ratatui::layout::Rect>) {
+        self.menu_list = at;
+    }
+
+    /// Told by the draw how far the open sheet can scroll, so a key past its
+    /// end does not leave a scroll the next key has to undo first.
+    pub(crate) fn measured_sheet(&mut self, max_scroll: usize) {
+        if let Some(sheet) = self.sheet.as_mut() {
+            sheet.scroll = sheet.scroll.min(max_scroll);
+        }
+    }
+
+    /// Told by the draw that it did not draw `pane`: nothing may scroll it
+    /// with the mouse, and the keyboard cannot stay on it.
+    pub(crate) fn pane_not_drawn(&mut self, pane: Pane) {
+        self.scroller_mut(pane).area = None;
+        if self.focus == Focus::Pane(pane) {
+            self.focus = Focus::Session;
+        }
+    }
+
+    /// Whether `action` can do what it is named for in this session, which is
+    /// what the menu draws an item dimmed by. One that cannot still says why
+    /// when it is chosen.
+    pub fn can(&self, action: crate::menu::Action) -> bool {
+        use crate::menu::Action;
+
+        match action {
+            Action::NewSession => self.listed("clear"),
+            Action::Compact => self.listed("compact"),
+            Action::Doctor => self.listed("doctor"),
+            Action::Mcp => self.listed("mcp"),
+            Action::Effort => self.listed("effort"),
+            Action::Rewind => self.listed("rewind"),
+            Action::Hooks => self.listed("hooks"),
+            Action::SignIn | Action::Resume => false,
+            Action::Memory => self.places.memory.is_some(),
+            Action::SwitchModel => self
+                .profile
+                .as_ref()
+                .is_some_and(|profile| !profile.models.is_empty()),
+            Action::Stop => self.working(),
+            Action::Commands => !self.session.commands().is_empty(),
+            Action::About
+            | Action::Settings
+            | Action::Permissions
+            | Action::Quit
+            | Action::Export
+            | Action::AddFile
+            | Action::SubAgents
+            | Action::CycleMode
+            | Action::Usage
+            | Action::Diff
+            | Action::GroupByAgent
+            | Action::Pane(_)
+            | Action::Theme
+            | Action::Shortcuts
+            | Action::ReleaseNotes
+            | Action::ReportBug => true,
+        }
+    }
+
+    /// Does what a menu item or an F-key names.
+    pub fn perform(&mut self, action: crate::menu::Action) {
+        use crate::menu::Action;
+
+        self.menu = None;
+        match action {
+            Action::About => self.sheet = Some(self.about()),
+            Action::Settings => self.sheet = Some(self.settings()),
+            Action::Permissions => self.sheet = Some(self.permissions()),
+            Action::SignIn => self.hint = Some(self.sign_in_hint()),
+            Action::Doctor => self.send_command("doctor", None),
+            Action::Quit => self.quit(),
+            Action::NewSession => self.send_command("clear", None),
+            Action::Compact => self.send_command("compact", None),
+            Action::Resume => {
+                self.hint = Some(
+                    "A session is resumed as niobe starts: quit, then `niobe sessions` lists \
+                     them and `niobe --resume <id>` carries one on"
+                        .to_owned(),
+                );
+            }
+            Action::Rewind => self.send_or_say(
+                "rewind",
+                "The backend lists no /rewind to a session niobe drives, so it has no \
+                 checkpoint to go back to",
+            ),
+            Action::Stop => match self.working() {
+                true => {
+                    self.focus = Focus::Session;
+                    self.stop_turn();
+                }
+                false => self.hint = Some("Nothing is running to stop".to_owned()),
+            },
+            Action::Export => self.export(),
+            Action::Memory => self.open_memory(),
+            Action::AddFile => self.start_mention(),
+            Action::Mcp => self.send_command("mcp", None),
+            Action::SubAgents => self.show_sub_agents(),
+            Action::Hooks => self.send_or_say(
+                "hooks",
+                "The backend lists no /hooks to a session niobe drives; its hooks are set in \
+                 its own settings files",
+            ),
+            Action::SwitchModel => self.pick_model(),
+            Action::CycleMode => self.cycle_mode(),
+            Action::Effort => self.pick_effort(),
+            Action::Usage => self.hint = Some(self.cost_hint(self.read_at())),
+            Action::Diff => self.open_diffs(),
+            Action::GroupByAgent => self.group_by_agent(),
+            Action::Pane(pane) => self.toggle_pane(pane),
+            Action::Theme => self.pick_theme(),
+            Action::Shortcuts => self.sheet = Some(self.shortcuts()),
+            Action::Commands => self.start_command(),
+            Action::ReleaseNotes => self.handoffs.push(crate::desktop::Handoff::Open(format!(
+                "{REPOSITORY}/releases"
+            ))),
+            Action::ReportBug => self.handoffs.push(crate::desktop::Handoff::Open(format!(
+                "{REPOSITORY}/issues/new"
+            ))),
+        }
+    }
+
+    /// Whether the backend listed the command `name` to this session.
+    fn listed(&self, name: &str) -> bool {
+        self.attached
+            && self
+                .session
+                .commands()
+                .iter()
+                .any(|command| command.name == name)
+    }
+
+    /// Whether the backend's command `name` can be sent now, and if not, why,
+    /// in words the operator reads.
+    ///
+    /// Not while a turn runs: the backend would hold it until the turn ends,
+    /// and a `/clear` that lands after a turn the operator then went on
+    /// steering would clear what they meant to keep.
+    fn can_send(&self, name: &str) -> Result<(), String> {
+        if !self.attached {
+            return Err(format!(
+                "/{name} goes to the backend, and this session is not attached to one"
+            ));
+        }
+        if !self.listed(name) {
+            return Err(format!(
+                "The backend does not offer /{name} to this session"
+            ));
+        }
+        if self.working() {
+            return Err(format!(
+                "/{name} waits for the running turn: let it end, or Esc to stop it"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Sends the backend's command `name`, with `argument` after it, as the
+    /// turn it runs as, or says why it cannot be sent.
+    fn send_command(&mut self, name: &str, argument: Option<&str>) {
+        if let Err(why) = self.can_send(name) {
+            self.hint = Some(why);
+            return;
+        }
+        let text = match argument {
+            Some(argument) => format!("/{name} {argument}"),
+            None => format!("/{name}"),
+        };
+        // A turn with no images of its own, so the ones attached to the prompt
+        // still being written stay with it.
+        self.images.send_none();
+        self.focus = Focus::Session;
+        self.produce(Event::UserMessage { text });
+        self.sent_here = true;
+        self.scroll_to_tail();
+    }
+
+    /// Sends the backend's command `name` where it lists one, and says
+    /// `otherwise` where it does not.
+    fn send_or_say(&mut self, name: &str, otherwise: &str) {
+        match self.listed(name) {
+            true => self.send_command(name, None),
+            false => self.hint = Some(otherwise.to_owned()),
+        }
+    }
+
+    /// Hides `pane` of the right-hand stack, or shows it again.
+    fn toggle_pane(&mut self, pane: crate::menu::SidePane) {
+        if !self.hidden.remove(&pane) {
+            self.hidden.insert(pane);
+        }
+    }
+
+    /// Gives the keyboard to the pane the sub-agents are listed in, or says
+    /// why it cannot.
+    fn show_sub_agents(&mut self) {
+        let activity = Focus::Pane(Pane::Activity);
+        if self.shows(crate::menu::SidePane::Activity) && self.on_screen(activity) {
+            self.focus = activity;
+            return;
+        }
+        self.hint = Some(
+            "The sub-agents are listed in the Activity pane, which is not on screen: View \
+             shows it, on a terminal at least 100 columns wide"
+                .to_owned(),
+        );
+    }
+
+    /// Starts naming a file at the cursor, with the list of files open.
+    fn start_mention(&mut self) {
+        let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
+        let before = self
+            .composer
+            .lines()
+            .get(row)
+            .and_then(|line| line.chars().nth(column.checked_sub(1)?));
+        let at = match before {
+            Some(c) if !c.is_whitespace() => " @",
+            _ => "@",
+        };
+        self.offer_closed = None;
+        self.insert_into_composer(at);
+    }
+
+    /// Starts a backend command in an empty prompt, with the list of them
+    /// open, or says why it cannot: a command is only read from the start of
+    /// a prompt.
+    fn start_command(&mut self) {
+        if !self.composer_is_blank() {
+            self.hint = Some(
+                "A command is named at the start of a prompt; send or clear this one first"
+                    .to_owned(),
+            );
+            return;
+        }
+        self.composer.clear();
+        self.offer_closed = None;
+        self.insert_into_composer("/");
+    }
+
+    /// Hands the repository's instructions to the agent to be opened, or says
+    /// there are none.
+    fn open_memory(&mut self) {
+        match self.places.memory.clone() {
+            Some(path) => self.handoffs.push(crate::desktop::Handoff::Open(path)),
+            None => {
+                let init = match self.listed("init") {
+                    true => "; `//init` has the backend write one",
+                    false => "",
+                };
+                self.hint = Some(format!(
+                    "This repository has no CLAUDE.md at its root{init}"
+                ));
+            }
+        }
+    }
+
+    /// Copies the transcript, as the last frame laid it out, to the
+    /// clipboard.
+    fn export(&mut self) {
+        let lines = self.transcript_drawn.map_or(0, |(_, lines)| lines);
+        if lines == 0 {
+            self.hint = Some("There is no transcript to export yet".to_owned());
+            return;
+        }
+        let text: Vec<String> = (0..lines)
+            .map(|line| self.drawn.plain_line(line).unwrap_or_default())
+            .collect();
+        self.handoffs
+            .push(crate::desktop::Handoff::Copy(text.join("\n")));
+    }
+
+    /// What the operator is told to do to sign in or out, which only the
+    /// backend's own CLI does.
+    fn sign_in_hint(&self) -> String {
+        let backend = self
+            .session
+            .meta()
+            .map(|meta| meta.backend.to_string())
+            .or_else(|| {
+                self.profile
+                    .as_ref()
+                    .map(|profile| profile.backend.to_string())
+            })
+            .unwrap_or_else(|| "claude".to_owned());
+        format!(
+            "Signing in is the {backend} CLI's own, and niobe never reads its credentials: \
+             quit, run `{backend}` in a terminal and use /login there"
+        )
+    }
+
+    /// What this program is.
+    fn about(&self) -> Sheet {
+        let (backend, model) = self.running_under();
+        Sheet {
+            title: "About".to_owned(),
+            rows: vec![
+                format!("niobe {}", env!("CARGO_PKG_VERSION")),
+                String::new(),
+                "A terminal coding agent that keeps you aware of what is being built and \
+                 how: what the agent did, what it decided, what it touched, what it is \
+                 doing now and what it cost."
+                    .to_owned(),
+                String::new(),
+                format!("{:<10}{backend}", "Backend"),
+                format!("{:<10}{model}", "Model"),
+                String::new(),
+                format!("Apache-2.0 · {REPOSITORY}"),
+            ],
+            link: Some(REPOSITORY.to_owned()),
+            scroll: 0,
+        }
+    }
+
+    /// The backend and profile, and the model, the session runs under, or an
+    /// em dash for what nothing has said.
+    fn running_under(&self) -> (String, String) {
+        let backend = match (self.session.meta(), self.profile.as_ref()) {
+            (Some(meta), _) if !meta.profile.is_empty() => {
+                format!("{} · {}", meta.backend, meta.profile)
+            }
+            (Some(meta), _) => meta.backend.to_string(),
+            (None, Some(profile)) => format!("{} · {}", profile.backend, profile.name),
+            (None, None) => "—".to_owned(),
+        };
+        let model = self
+            .session
+            .model()
+            .or_else(|| self.session.meta().map(|meta| meta.model.as_str()))
+            .unwrap_or("—")
+            .to_owned();
+        (backend, model)
+    }
+
+    /// What the session runs under, and the files that set it.
+    fn settings(&self) -> Sheet {
+        let (backend, model) = self.running_under();
+        let mode = self
+            .session
+            .mode()
+            .map_or_else(|| "—".to_owned(), |mode| mode.to_string());
+        let mut rows = vec![
+            format!("{:<10}{backend}", "Profile"),
+            format!("{:<10}{model}", "Model"),
+            format!("{:<10}{mode}", "Mode"),
+            format!("{:<10}{}", "Theme", self.theme.name.to_lowercase()),
+            String::new(),
+            "Config files, the later over the earlier:".to_owned(),
+        ];
+        rows.extend(
+            self.places
+                .config_files
+                .iter()
+                .map(|file| match file.exists {
+                    true => format!("  {}", file.path),
+                    false => format!("  {} — not there", file.path),
+                }),
+        );
+        if self.places.config_files.is_empty() {
+            rows.push("  none was looked for".to_owned());
+        }
+        rows.push(String::new());
+        rows.push(
+            "niobe reads them as a session starts, so a change takes effect in the next one."
+                .to_owned(),
+        );
+        Sheet {
+            title: "Settings".to_owned(),
+            rows,
+            link: self
+                .places
+                .config_files
+                .iter()
+                .find(|file| file.openable)
+                .map(|file| file.path.clone()),
+            scroll: 0,
+        }
+    }
+
+    /// The standing answers permission prompts are answered with.
+    fn permissions(&self) -> Sheet {
+        let mode = self
+            .session
+            .mode()
+            .map_or_else(|| "—".to_owned(), |mode| mode.to_string());
+        let mut rows = vec![
+            format!("{:<10}{mode}", "Mode"),
+            String::new(),
+            "Allowed without asking:".to_owned(),
+        ];
+        let rules = self.allowed.rules();
+        match rules.is_empty() {
+            true => rows.push(
+                "  nothing yet — “always” on a permission prompt adds a rule here".to_owned(),
+            ),
+            false => rows.extend(rules.iter().map(|rule| format!("  {rule}"))),
+        }
+        rows.push(String::new());
+        rows.push(
+            "The rules are kept in the config's [permissions] table. A repository's own \
+             table answers nothing until its file is trusted."
+                .to_owned(),
+        );
+        Sheet {
+            title: "Permissions".to_owned(),
+            rows,
+            link: None,
+            scroll: 0,
+        }
+    }
+
+    /// The keys the shell answers to.
+    fn shortcuts(&self) -> Sheet {
+        let mut keys: Vec<(&str, String)> = vec![
+            ("Esc", "stop the running turn".to_owned()),
+            (
+                "Esc, then",
+                "a digit presses its F-key (0 is F10); a menu's letter opens the menu".to_owned(),
+            ),
+            ("Alt+letter", "open a menu".to_owned()),
+            ("Enter", "send the prompt".to_owned()),
+            (self.newline_key(), "a new line in the prompt".to_owned()),
+            ("⇧Tab", "the next permission mode".to_owned()),
+            ("/", "search the transcript".to_owned()),
+            ("//", "a backend command".to_owned()),
+            ("@", "name a file".to_owned()),
+        ];
+        if self.runs_commands {
+            keys.push(("!", "a command for your own shell".to_owned()));
+            keys.push((crate::shell::STOP_KEY, "stop that command".to_owned()));
+        }
+        keys.extend([
+            ("Tab", "move the keyboard between the panes".to_owned()),
+            (
+                "PgUp PgDn",
+                "scroll the pane that has the keyboard".to_owned(),
+            ),
+            (
+                "↑↓ Enter",
+                "in a side pane, fold the section under the cursor".to_owned(),
+            ),
+            (
+                "a",
+                "in a side pane, group sub-agent rows by agent".to_owned(),
+            ),
+            ("Ctrl+End", "back to the newest line".to_owned()),
+            ("Ctrl+O", "fold runs of tool calls".to_owned()),
+            ("Ctrl+T", "open every cut diff".to_owned()),
+            ("Ctrl+V", "attach the image on the clipboard".to_owned()),
+            ("drag", "copy what it covers".to_owned()),
+            ("click", "open a link".to_owned()),
+            ("Ctrl+Z", "suspend".to_owned()),
+            ("Ctrl+C", "stop the turn; again, quit".to_owned()),
+        ]);
+        let mut rows: Vec<String> = keys
+            .into_iter()
+            .map(|(key, what)| format!("{key:<12}{what}"))
+            .collect();
+        rows.push(String::new());
+        rows.push("F-keys:".to_owned());
+        rows.push(
+            crate::menu::FKEYS
+                .iter()
+                .map(|(digit, label, _)| format!("{digit} {label}"))
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
+        Sheet {
+            title: "Shortcuts".to_owned(),
+            rows,
+            link: None,
+            scroll: 0,
+        }
+    }
+
+    /// Opens menu `at` on its first item.
+    fn open_menu(&mut self, at: usize) {
+        self.focus = Focus::Session;
+        self.menu = Some(crate::menu::Open::at(at));
+    }
+
+    /// One key, while a menu is open: the menu has the keyboard whole.
+    fn on_menu_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+
+        let Some(open) = self.menu else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.menu = None,
+            KeyCode::Left => self.menu = Some(open.left()),
+            KeyCode::Right => self.menu = Some(open.right()),
+            KeyCode::Up => self.menu = Some(open.up()),
+            KeyCode::Down => self.menu = Some(open.down()),
+            KeyCode::Enter => {
+                if let Some(item) = open.item() {
+                    self.perform(item.action);
+                }
+            }
+            KeyCode::F(n) => {
+                self.menu = None;
+                if let Some(action) = crate::menu::fkey(n) {
+                    self.perform(action);
+                }
+            }
+            KeyCode::Char(c) => self.menu = Some(open.to_letter(c)),
+            _ => {}
+        }
+    }
+
+    /// One key, while a sheet is up: it has the keyboard whole, and changes
+    /// nothing but its own scroll.
+    fn on_sheet_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+
+        let Some(sheet) = self.sheet.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.sheet = None,
+            KeyCode::Up => sheet.scroll = sheet.scroll.saturating_sub(1),
+            KeyCode::Down => sheet.scroll = sheet.scroll.saturating_add(1),
+            KeyCode::PageUp => sheet.scroll = sheet.scroll.saturating_sub(SHEET_PAGE),
+            KeyCode::PageDown => sheet.scroll = sheet.scroll.saturating_add(SHEET_PAGE),
+            KeyCode::Char('o') => {
+                if let Some(link) = sheet.link.clone() {
+                    self.handoffs.push(crate::desktop::Handoff::Open(link));
+                }
+            }
+            KeyCode::F(n) => {
+                self.sheet = None;
+                if let Some(action) = crate::menu::fkey(n) {
+                    self.perform(action);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A left click on the menus, the F-key bar or an open sheet. Returns
+    /// whether the click was theirs.
+    ///
+    /// With a menu open every click is: one on an item runs it, one on a
+    /// menu's name opens that menu or closes this one, and one anywhere else
+    /// only closes it, as a menu does on a desktop — a click that closed the
+    /// menu and also landed on what was under it would do something nobody
+    /// aimed at.
+    fn on_menu_click(&mut self, column: u16, row: u16) -> bool {
+        let point = (column, row).into();
+        let on_menu_bar = self.bars.is_some_and(|(bar, _)| bar.contains(point));
+        if let Some(open) = self.menu {
+            if let Some(list) = self.menu_list.filter(|list| list.contains(point)) {
+                let item = usize::from(row.saturating_sub(list.y.saturating_add(1)));
+                let inside = row > list.y && row + 1 < list.bottom();
+                if let Some(item) = open.menu().items.get(item).filter(|_| inside) {
+                    self.perform(item.action);
+                }
+                return true;
+            }
+            self.menu = match crate::menu::title_at(column).filter(|_| on_menu_bar) {
+                Some(at) if at != open.menu => Some(crate::menu::Open::at(at)),
+                _ => None,
+            };
+            return true;
+        }
+        if self.sheet.is_some() {
+            self.sheet = None;
+            return true;
+        }
+        if on_menu_bar {
+            if let Some(at) = crate::menu::title_at(column) {
+                self.open_menu(at);
+            }
+            return true;
+        }
+        if let Some((_, fkeys)) = self.bars.filter(|(_, fkeys)| fkeys.contains(point)) {
+            if let Some(action) = crate::menu::fkey_at(fkeys.width, column - fkeys.x) {
+                self.perform(action);
+            }
+            return true;
+        }
+        false
     }
 
     /// Moves the session to the next mode in the cycle.
@@ -2747,17 +3507,12 @@ impl App {
     }
 
     /// The same shell on a terminal that draws `depth` colours: every theme,
-    /// the one in force and each `F9` moves to, is drawn at it.
+    /// the one in force and each the theme list switches to, is drawn at it.
     #[must_use]
     pub fn with_depth(mut self, depth: Depth) -> Self {
         self.depth = depth;
         self.set_theme(self.theme);
         self
-    }
-
-    /// Moves to the next theme, which is what `F9` does.
-    fn cycle_theme(&mut self) {
-        self.set_theme(self.theme.next());
     }
 
     fn set_theme(&mut self, theme: Theme) {
@@ -3935,6 +4690,8 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollUp => wheel(self, Scroll::Up(Self::WHEEL_LINES)),
             MouseEventKind::ScrollDown => wheel(self, Scroll::Down(Self::WHEEL_LINES)),
+            MouseEventKind::Down(MouseButton::Left)
+                if self.on_menu_click(mouse.column, mouse.row) => {}
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
                 let jump = self
@@ -4104,11 +4861,13 @@ impl App {
     }
 
     /// Whether keys go to the composer — the prompt or the `!` command line —
-    /// rather than to a question, a list or the search.
+    /// rather than to a question, a list, a menu, a sheet or the search.
     fn composer_has_the_keyboard(&self) -> bool {
         self.focus() == Focus::Session
             && self.find.is_none()
             && self.picking.is_none()
+            && self.menu.is_none()
+            && self.sheet.is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -4123,6 +4882,8 @@ impl App {
             && !self.escaped
             && self.find.is_none()
             && self.picking.is_none()
+            && self.menu.is_none()
+            && self.sheet.is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -4159,7 +4920,7 @@ impl App {
                 AskFocus::Deferred => {}
             }
         }
-        if self.picking().is_some() {
+        if self.picking().is_some() || self.menu.is_some() || self.sheet.is_some() {
             return;
         }
         if let Some(find) = self.find.as_mut() {
@@ -4230,6 +4991,7 @@ impl App {
 
         self.hint = None;
         self.selection = None;
+        let escaped = self.escaped;
         let key = self.as_function_key(key);
         // A terminal that did not say it could send Shift+Enter has now sent
         // one — tmux asked for modifyOtherKeys, under a terminal that reports
@@ -4278,6 +5040,16 @@ impl App {
             self.on_trust_key(key);
             return;
         }
+        // An open menu, and a sheet, take the keyboard whole: each is
+        // something the operator opened and is reading.
+        if self.menu.is_some() {
+            self.on_menu_key(key);
+            return;
+        }
+        if self.sheet.is_some() {
+            self.on_sheet_key(key);
+            return;
+        }
         // A prompt takes the keyboard whole until it is put off. Typing into
         // the composer under a question would put the answer to it into the
         // next turn.
@@ -4310,6 +5082,16 @@ impl App {
         // list would move something the operator was not looking at.
         if self.picking().is_some() {
             self.on_pick_key(key);
+            return;
+        }
+        // A menu's letter after an Esc that did nothing else, or with Alt
+        // held, opens it: the same two bytes, as a digit is an F-key.
+        if let KeyCode::Char(letter) = key.code
+            && (escaped && key.modifiers == KeyModifiers::NONE
+                || key.modifiers == KeyModifiers::ALT)
+            && let Some(at) = crate::menu::menu_of(letter)
+        {
+            self.open_menu(at);
             return;
         }
 
@@ -4354,18 +5136,11 @@ impl App {
             // Shift+Tab reaches crossterm as its own code rather than as Tab
             // with a modifier, which is why it is matched on the code alone.
             (KeyCode::BackTab, _) => self.cycle_mode(),
-            // F5 has no cost breakdown behind it, but on a flat-rate plan the
-            // question it is pressed for is when the windows come back, and
-            // the session fold knows that.
-            (KeyCode::F(5), _) => self.hint = Some(self.cost_hint(self.read_at())),
-            // The two sections the F-key bar already names fold from anywhere;
-            // every section, these two included, also folds under the cursor
-            // of the pane that has the keyboard.
-            (KeyCode::F(6), _) => self.fold(Section::WorkingTree),
-            (KeyCode::F(7), _) => self.fold(Section::Tools),
-            (KeyCode::F(8), _) => self.pick_model(),
-            (KeyCode::F(9), _) => self.cycle_theme(),
-            (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
+            (KeyCode::F(n), _) => {
+                if let Some(action) = crate::menu::fkey(n) {
+                    self.perform(action);
+                }
+            }
             // An Esc nothing else wanted leaves the composer as it is and
             // makes the next digit an F-key, which is how the bar's actions
             // are reached where the F-keys never arrive.
@@ -4695,15 +5470,15 @@ impl App {
         self.scroll_to_tail();
     }
 
-    /// What F5 says: the plan's windows and when they come back, where a
-    /// backend has reported them, and otherwise that the breakdown behind the
-    /// key is not implemented yet.
+    /// What Cost & usage says: the plan's windows and when they come back,
+    /// where a backend has reported them, and otherwise that the breakdown
+    /// behind the item is not implemented yet.
     ///
     /// `now` is seconds since the Unix epoch, taken by the caller so that the
     /// wording can be asserted against a fixed clock.
     pub fn cost_hint(&self, now: u64) -> String {
         let Some(windows) = self.session.usage_windows() else {
-            return "F5 Usage — the usage breakdown is not implemented yet".to_owned();
+            return "Cost & usage — the usage breakdown is not implemented yet".to_owned();
         };
         let mut parts = Vec::new();
         if let Some(window) = windows.five_hour {
@@ -4715,7 +5490,7 @@ impl App {
         if windows.using_overage {
             parts.push("spending beyond the plan".to_owned());
         }
-        format!("F5 Usage — {}", parts.join(" · "))
+        format!("Cost & usage — {}", parts.join(" · "))
     }
 
     /// The moment the shell is reading the session at, in seconds since the
@@ -4805,7 +5580,7 @@ fn now_secs() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// One window, as F5 reads it out: `5h window 62%, resets in 2h 14m`.
+/// One window, as Cost & usage reads it out: `5h window 62%, resets in 2h 14m`.
 ///
 /// The reset is shown as the time left rather than as a wall clock, because
 /// what the operator is deciding is whether to wait, and a clock time would
@@ -4951,9 +5726,17 @@ const CUT_OFF: &str = "cut off: the session stopped here";
 /// What the bar says once a stop of the running turn has been asked for.
 const STOPPING_HINT: &str = "Stopping the turn · Ctrl+C again quits";
 
-/// What the shell says once Esc has made the next digit an F-key.
-const ESCAPED_HINT: &str = "Esc — a digit now presses its F-key: 1 Help · 5 Usage · 6 Files · \
-                            7 Tools · 8 Model · 9 Theme · 0 Quit";
+/// What the shell says once Esc has made the next key an F-key or a menu.
+const ESCAPED_HINT: &str = "Esc — a digit now presses its F-key (1 Help … 0 Quit), a letter \
+                            opens its menu: N Niobe · S Session · C Context · M Model · V View · \
+                            H Help";
+
+/// Where this project is published, which the About sheet names and the Help
+/// menu's links go to.
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// How many lines PgUp and PgDn move a sheet.
+const SHEET_PAGE: usize = 10;
 
 /// The F-key a digit stands for after Esc: `1` to `9` are F1 to F9 and `0`
 /// is F10, in the order the bar draws them.
@@ -4972,31 +5755,6 @@ fn function_key_of(digit: char) -> Option<u8> {
 /// with nothing to stop.
 fn stop_hint() -> String {
     format!("{} stops it", crate::shell::STOP_KEY)
-}
-
-/// What an F-key does, for the ones that do nothing yet.
-///
-/// F5, F8, F9 and F10 are handled before this is reached, so nothing here
-/// names them.
-fn fkey_hint(n: u8) -> &'static str {
-    match n {
-        1 => {
-            "F1 Help — the help browser is not implemented yet. Tab or a click moves the \
-             keyboard between the panes; the wheel and PgUp/PgDn scroll the one that has it, \
-             and in the right-hand panes ↑↓ and Enter fold a section; Ctrl+End returns to the \
-             newest line; Ctrl+O folds runs of tool calls; Ctrl+T opens a cut diff; Ctrl+V \
-             attaches an image; drag copies, click opens a link"
-        }
-        2 => {
-            "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \
-              session in plan mode"
-        }
-        3 => "F3 Diff — the diff viewer is not implemented yet",
-        4 => "F4 Undo — checkpoints and rewind are not implemented yet",
-        // F8 opens the model list and F9 changes the theme rather than saying
-        // anything, so nothing here names them.
-        _ => "F10 Quit",
-    }
 }
 
 /// A count of things in the transcript, as a figure.
@@ -5981,35 +6739,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_moves_to_the_next_theme_and_takes_the_composer_with_it() {
-        use crate::theme::{CLASSIC, CYBER, THEMES};
-        use ratatui::crossterm::event::KeyCode;
-
-        let mut app = app();
-        assert_eq!(*app.theme(), CYBER);
-
-        app.on_key(key(KeyCode::F(9)));
-
-        assert_eq!(*app.theme(), CLASSIC);
-        // The composer keeps the styles it was given rather than being handed
-        // them per frame, so a theme that did not reach it would leave the
-        // prompt drawn in the one before.
-        assert_eq!(
-            app.composer().style(),
-            Style::new().fg(CLASSIC.fg).bg(CLASSIC.pane_bg)
-        );
-        // And it says nothing: the menu bar already names the theme in force.
-        assert_eq!(app.hint(), None);
-
-        for _ in 1..THEMES.len() {
-            app.on_key(key(KeyCode::F(9)));
-        }
-        assert_eq!(*app.theme(), CYBER);
-    }
-
-    #[test]
     fn esc_then_a_digit_presses_the_function_key_of_that_number() {
-        use crate::theme::CLASSIC;
         use ratatui::crossterm::event::KeyCode;
 
         let mut app = app();
@@ -6019,14 +6749,14 @@ mod tests {
             "Esc says what the digit after it does: {:?}",
             app.hint()
         );
-        app.on_key(key(KeyCode::Char('9')));
-        assert_eq!(*app.theme(), CLASSIC);
+        app.on_key(key(KeyCode::Char('5')));
+        assert!(app.diffs_open(), "Esc then 5 is F5 Diff");
         assert_eq!(app.composer().lines(), [""]);
 
         // It is one key after Esc, not every key after it.
-        app.on_key(key(KeyCode::Char('9')));
-        assert_eq!(*app.theme(), CLASSIC);
-        assert_eq!(app.composer().lines(), ["9"]);
+        app.on_key(key(KeyCode::Char('5')));
+        assert!(app.diffs_open());
+        assert_eq!(app.composer().lines(), ["5"]);
 
         app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::Char('0')));
@@ -6035,21 +6765,20 @@ mod tests {
 
     #[test]
     fn alt_and_a_digit_is_the_same_function_key() {
-        use crate::theme::CLASSIC;
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         // Esc and a digit that reach the terminal together, or Option sent
         // as Meta, arrive as the digit with Alt held.
         let mut app = app();
-        app.on_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::ALT));
-        assert_eq!(*app.theme(), CLASSIC);
+        app.on_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        assert!(app.diffs_open());
         assert_eq!(app.composer().lines(), [""]);
         app.on_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::ALT));
         assert!(app.should_quit(), "Alt+0 is F10");
     }
 
     #[test]
-    fn a_key_after_esc_that_is_not_a_digit_is_typed_as_itself() {
+    fn a_key_after_esc_that_is_neither_a_digit_nor_a_menus_letter_is_typed() {
         use crate::theme::CYBER;
         use ratatui::crossterm::event::KeyCode;
 
@@ -6079,7 +6808,6 @@ mod tests {
     #[test]
     fn a_shell_on_a_deep_terminal_draws_every_theme_at_that_depth() {
         use crate::theme::{CLASSIC, CYBER_TRUE, Depth, MODERN_TRUE, NEO, NEO_TRUE};
-        use ratatui::crossterm::event::KeyCode;
 
         // In either order: the depth is the terminal's, the theme the
         // operator's, and neither is allowed to undo the other.
@@ -6092,12 +6820,14 @@ mod tests {
             Style::new().fg(NEO_TRUE.fg).bg(NEO_TRUE.pane_bg)
         );
 
-        app.on_key(key(KeyCode::F(9)));
-        assert_eq!(*app.theme(), MODERN_TRUE);
-        app.on_key(key(KeyCode::F(9)));
-        assert_eq!(*app.theme(), CYBER_TRUE);
-        app.on_key(key(KeyCode::F(9)));
-        assert_eq!(*app.theme(), CLASSIC);
+        for (name, drawn) in [
+            (MODERN_TRUE.name, MODERN_TRUE),
+            (CYBER_TRUE.name, CYBER_TRUE),
+            (CLASSIC.name, CLASSIC),
+        ] {
+            app.choose(Purpose::Theme, name.to_owned());
+            assert_eq!(*app.theme(), drawn);
+        }
     }
 
     #[test]
@@ -6786,13 +7516,13 @@ mod tests {
     }
 
     #[test]
-    fn f8_offers_the_models_the_profile_names_and_picking_one_asks_for_it() {
+    fn f4_offers_the_models_the_profile_names_and_picking_one_asks_for_it() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = under_a_profile(&["opus", "sonnet", "haiku"]);
 
-        app.on_key(key(KeyCode::F(8)));
+        app.on_key(key(KeyCode::F(4)));
         let picker = app.picking().expect("the model list is on screen");
-        assert_eq!(picker.models, ["opus", "sonnet", "haiku"]);
+        assert_eq!(picker.options, ["opus", "sonnet", "haiku"]);
         assert_eq!(picker.at, 0);
 
         app.on_key(key(KeyCode::Down));
@@ -6816,7 +7546,7 @@ mod tests {
     fn a_model_list_the_operator_left_asks_for_nothing() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = under_a_profile(&["opus", "sonnet"]);
-        app.on_key(key(KeyCode::F(8)));
+        app.on_key(key(KeyCode::F(4)));
 
         app.on_key(key(KeyCode::Esc));
 
@@ -6825,11 +7555,11 @@ mod tests {
     }
 
     #[test]
-    fn f8_under_a_profile_that_names_no_model_says_so_rather_than_opening_an_empty_list() {
+    fn f4_under_a_profile_that_names_no_model_says_so_rather_than_opening_an_empty_list() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = under_a_profile(&[]);
 
-        app.on_key(key(KeyCode::F(8)));
+        app.on_key(key(KeyCode::F(4)));
 
         assert!(app.picking().is_none());
         let hint = app.hint().unwrap_or_default();
@@ -6842,7 +7572,7 @@ mod tests {
         let mut app = under_a_profile(&["opus"]);
         app.apply(&prompt(Some("rm -rf build")));
 
-        app.on_key(key(KeyCode::F(8)));
+        app.on_key(key(KeyCode::F(4)));
 
         assert!(
             app.picking().is_none(),
@@ -6983,7 +7713,7 @@ mod tests {
     }
 
     #[test]
-    fn f5_reads_out_both_windows_and_when_each_comes_back() {
+    fn cost_and_usage_reads_out_both_windows_and_when_each_comes_back() {
         const NOW: u64 = 1_789_000_000;
 
         let mut app = app();
@@ -6991,21 +7721,21 @@ mod tests {
 
         assert_eq!(
             app.cost_hint(NOW),
-            "F5 Usage — 5h window 33%, resets in 1h 30m · 7d window 23%, resets in 4d 6h"
+            "Cost & usage — 5h window 33%, resets in 1h 30m · 7d window 23%, resets in 4d 6h"
         );
     }
 
     #[test]
-    fn f5_on_a_session_with_no_windows_says_what_the_key_does_not_do_yet() {
+    fn cost_and_usage_on_a_session_with_no_windows_says_what_it_does_not_do_yet() {
         let mut app = app();
         assert!(
             app.cost_hint(0)
                 .contains("the usage breakdown is not implemented yet")
         );
 
-        // Pressing it is what puts the line under the transcript.
+        // Choosing it is what puts the line under the transcript.
         app.apply(&Event::UsageWindows(windows(1_789_000_000)));
-        app.on_key(key(KeyCode::F(5)));
+        app.perform(crate::menu::Action::Usage);
         assert!(
             app.hint()
                 .is_some_and(|hint| hint.contains("5h window 33%")),
@@ -7033,7 +7763,7 @@ mod tests {
 
         assert_eq!(
             app.cost_hint(NOW),
-            "F5 Usage — 5h window 90%, already reset · 7d window 40%, no reset time \
+            "Cost & usage — 5h window 90%, already reset · 7d window 40%, no reset time \
              reported · spending beyond the plan"
         );
     }
@@ -8460,6 +9190,25 @@ mod tests {
     }
 
     #[test]
+    fn keys_read_together_go_to_an_open_menu_and_not_into_the_prompt() {
+        let mut menu = app();
+        let mut sheet = app();
+        read(&mut menu, b"\x1bv", Instant::now());
+        assert!(menu.menu().is_some());
+        read(&mut menu, b"t\r", Instant::now());
+        assert_eq!(
+            menu.picking().map(|picker| picker.purpose),
+            Some(Purpose::Theme)
+        );
+        assert_eq!(menu.composer().lines(), [""]);
+
+        sheet.on_key(key(KeyCode::F(1)));
+        read(&mut sheet, b"xy\r", Instant::now());
+        assert_eq!(sheet.composer().lines(), [""], "nor past an open sheet");
+        assert_eq!(sheet.sheet(), None, "whose Enter closes it");
+    }
+
+    #[test]
     fn a_completed_path_with_a_space_goes_in_quoted() {
         let mut app = App::new(Repo {
             name: "niobe".to_owned(),
@@ -8850,5 +9599,406 @@ mod tests {
 
         assert!(app.should_quit());
         assert_eq!(app.trust_answer(), None);
+    }
+
+    /// `app`, attached to a backend that lists `names` as its commands.
+    fn offering(names: &[&str]) -> App {
+        let mut app = app().attached();
+        app.apply(&Event::Commands {
+            commands: names
+                .iter()
+                .map(|name| SlashCommand {
+                    name: (*name).to_owned(),
+                    description: String::new(),
+                    argument_hint: None,
+                })
+                .collect(),
+        });
+        app
+    }
+
+    fn alt(c: char) -> ratatui::crossterm::event::KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    /// The action the cursor of the open menu is on.
+    fn under_cursor(app: &App) -> Option<crate::menu::Action> {
+        app.menu()
+            .and_then(|open| open.item())
+            .map(|item| item.action)
+    }
+
+    #[test]
+    fn esc_then_a_menus_letter_opens_that_menu_on_its_first_item() {
+        let mut app = app();
+        app.on_key(key(KeyCode::Esc));
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("V View")),
+            "Esc says the letters open menus: {:?}",
+            app.hint()
+        );
+        app.on_key(key(KeyCode::Char('v')));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("View"));
+        assert_eq!(under_cursor(&app), Some(crate::menu::Action::Diff));
+        assert_eq!(app.composer().lines(), [""]);
+    }
+
+    #[test]
+    fn alt_and_a_menus_letter_opens_it_too() {
+        let mut app = app();
+        app.on_key(alt('s'));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("Session"));
+    }
+
+    #[test]
+    fn a_letter_typed_without_esc_is_typed() {
+        let mut app = app();
+        app.on_key(key(KeyCode::Char('v')));
+        assert_eq!(app.menu(), None);
+        assert_eq!(app.composer().lines(), ["v"]);
+    }
+
+    #[test]
+    fn the_arrows_walk_an_open_menu_and_enter_runs_the_item() {
+        let mut app = app();
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(under_cursor(&app), Some(crate::menu::Action::GroupByAgent));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.grouped_by_agent());
+        assert_eq!(app.menu(), None, "running an item closes its menu");
+
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("Help"));
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("Model"));
+    }
+
+    #[test]
+    fn a_letter_in_an_open_menu_moves_the_cursor_and_runs_nothing() {
+        let mut app = offering(&["clear"]);
+        app.on_key(alt('s'));
+        app.on_key(key(KeyCode::Char('n')));
+        assert_eq!(under_cursor(&app), Some(crate::menu::Action::NewSession));
+        assert_eq!(app.take_produced(), [], "nothing is sent until Enter");
+        assert_eq!(app.composer().lines(), [""], "and nothing is typed");
+    }
+
+    #[test]
+    fn esc_closes_a_menu_and_leaves_the_prompt_as_it_was() {
+        let mut app = app();
+        app.on_key(key(KeyCode::Char('x')));
+        app.on_key(alt('h'));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.menu(), None);
+        assert_eq!(app.composer().lines(), ["x"]);
+        app.on_key(key(KeyCode::Char('5')));
+        assert_eq!(
+            app.composer().lines(),
+            ["x5"],
+            "the Esc that closed it arms no F-key"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_menus_name_opens_it_and_a_click_on_an_item_runs_it() {
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        let (view, _) = crate::menu::title_columns()[4];
+        app.on_mouse(click_at(view + 1, 0));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("View"));
+
+        app.drew_menu_list(Some(Rect::new(view, 1, 30, 8)));
+        app.on_mouse(click_at(view + 2, 3));
+        assert!(app.grouped_by_agent(), "the second item, under the border");
+        assert_eq!(app.menu(), None);
+
+        app.on_mouse(click_at(view + 1, 0));
+        app.on_mouse(click_at(60, 15));
+        assert_eq!(app.menu(), None, "a click anywhere else closes it");
+        assert!(app.grouped_by_agent(), "and runs nothing");
+    }
+
+    #[test]
+    fn a_click_on_the_f_key_bar_presses_that_key() {
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        let widths = crate::menu::fkey_widths(120);
+        let start = |n: usize| crate::menu::stop_columns() + widths[..n].iter().sum::<u16>();
+        app.on_mouse(click_at(start(4) + 2, 29));
+        assert!(app.diffs_open(), "5 Diff");
+        app.on_mouse(click_at(start(9) + 2, 29));
+        assert!(app.should_quit(), "0 Quit");
+    }
+
+    #[test]
+    fn f2_and_f3_send_the_backends_own_commands() {
+        let mut app = offering(&["compact", "clear"]);
+        app.on_key(key(KeyCode::F(2)));
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "/compact".to_owned()
+            }]
+        );
+        app.apply(&Event::TurnEnded);
+        app.on_key(key(KeyCode::F(3)));
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_command_the_backend_does_not_list_is_not_sent_and_says_why() {
+        let mut app = offering(&["compact"]);
+        app.on_key(key(KeyCode::F(7)));
+        assert_eq!(app.take_produced(), []);
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("/mcp")),
+            "{:?}",
+            app.hint()
+        );
+    }
+
+    #[test]
+    fn a_backend_command_waits_for_the_running_turn() {
+        let mut app = offering(&["compact", "clear"]);
+        typed_then_enter(&mut app, "go", KeyModifiers::NONE);
+        app.take_produced();
+        app.on_key(key(KeyCode::F(3)));
+        assert_eq!(app.take_produced(), [], "a /clear mid-turn is not sent");
+        assert!(app.hint().is_some_and(|hint| hint.contains("Esc")));
+    }
+
+    #[test]
+    fn a_backend_command_leaves_the_images_of_the_prompt_being_written() {
+        let mut app = offering(&["compact"]);
+        app.on_key(key(KeyCode::F(2)));
+        app.take_produced();
+        assert_eq!(app.take_turn_images(), Vec::new());
+    }
+
+    #[test]
+    fn f9_shows_the_settings_and_the_files_they_come_from() {
+        let mut app = app().with_places(Places {
+            config_files: vec![
+                ConfigFile {
+                    path: "/home/me/.config/niobe/config.toml".to_owned(),
+                    exists: true,
+                    openable: true,
+                },
+                ConfigFile {
+                    path: "/work/repo/.niobe/config.toml".to_owned(),
+                    exists: false,
+                    openable: false,
+                },
+            ],
+            memory: None,
+        });
+        app.on_key(key(KeyCode::F(9)));
+        let sheet = app.sheet().expect("F9 opens the settings");
+        assert_eq!(sheet.title, "Settings");
+        let text = sheet.rows.join("\n");
+        assert!(
+            text.contains("/home/me/.config/niobe/config.toml"),
+            "{text}"
+        );
+        assert!(text.contains("not there"), "{text}");
+        assert!(text.contains("cyber"), "the theme in force: {text}");
+
+        app.on_key(key(KeyCode::Char('o')));
+        assert_eq!(
+            app.take_handoffs(),
+            [crate::desktop::Handoff::Open(
+                "/home/me/.config/niobe/config.toml".to_owned()
+            )],
+            "o opens the file that is there"
+        );
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.sheet(), None);
+        assert_eq!(app.composer().lines(), [""]);
+    }
+
+    #[test]
+    fn the_permissions_sheet_lists_the_standing_answers() {
+        let mut allowed = Allowlist::new();
+        allowed.insert(Rule::prefixed("Bash", "cargo test"));
+        let mut app = app().with_rules(allowed);
+        app.on_key(alt('n'));
+        app.on_key(key(KeyCode::Char('p')));
+        app.on_key(key(KeyCode::Enter));
+        let sheet = app.sheet().expect("the permissions");
+        assert!(
+            sheet.rows.iter().any(|row| row.contains("Bash(cargo test")),
+            "{:?}",
+            sheet.rows
+        );
+    }
+
+    #[test]
+    fn f8_opens_the_repositorys_memory_file_or_says_there_is_none() {
+        let mut without = app();
+        let mut with = app().with_places(Places {
+            config_files: Vec::new(),
+            memory: Some("/work/repo/CLAUDE.md".to_owned()),
+        });
+        with.on_key(key(KeyCode::F(8)));
+        assert_eq!(
+            with.take_handoffs(),
+            [crate::desktop::Handoff::Open(
+                "/work/repo/CLAUDE.md".to_owned()
+            )]
+        );
+
+        without.on_key(key(KeyCode::F(8)));
+        assert_eq!(without.take_handoffs(), []);
+        assert!(
+            without
+                .hint()
+                .is_some_and(|hint| hint.contains("CLAUDE.md"))
+        );
+    }
+
+    #[test]
+    fn the_theme_list_switches_to_the_theme_chosen() {
+        use crate::theme::{CYBER, NEO};
+
+        let mut app = app();
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Char('t')));
+        app.on_key(key(KeyCode::Enter));
+        let picker = app.picking().expect("the theme list");
+        assert_eq!(picker.purpose, Purpose::Theme);
+        assert_eq!(
+            picker.options[picker.at], CYBER.name,
+            "on the theme in force"
+        );
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.theme().name, NEO.name);
+        assert_eq!(
+            app.composer().style(),
+            Style::new().fg(NEO.fg).bg(NEO.pane_bg),
+            "the composer is repainted in it"
+        );
+        assert_eq!(app.picking(), None);
+    }
+
+    #[test]
+    fn the_effort_list_sends_the_level_chosen() {
+        let mut app = offering(&["effort"]);
+        app.on_key(alt('m'));
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Enter));
+        let picker = app.picking().expect("the effort list");
+        assert_eq!(picker.purpose, Purpose::Effort);
+        assert_eq!(picker.options, EFFORTS);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "/effort medium".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_pane_hidden_from_the_view_menu_is_not_drawn_or_focused() {
+        use crate::menu::SidePane;
+
+        let mut app = app();
+        assert!(app.shows(SidePane::Changes));
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Char('c')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.shows(SidePane::Changes));
+        assert!(app.shows(SidePane::Activity));
+
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Char('c')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.shows(SidePane::Changes), "and shown again");
+    }
+
+    #[test]
+    fn f1_lists_the_keys_and_esc_closes_the_list() {
+        let mut app = app();
+        app.on_key(key(KeyCode::F(1)));
+        let sheet = app.sheet().expect("the shortcuts");
+        assert!(sheet.rows.iter().any(|row| row.contains("Ctrl+O")));
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(app.composer().lines(), [""], "the list has the keyboard");
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.sheet(), None);
+    }
+
+    #[test]
+    fn what_the_shell_cannot_do_says_why_rather_than_doing_nothing() {
+        use crate::menu::Action;
+
+        for action in [
+            Action::SignIn,
+            Action::Resume,
+            Action::Rewind,
+            Action::Hooks,
+        ] {
+            let mut app = app();
+            app.perform(action);
+            assert!(
+                app.hint().is_some_and(|hint| hint.len() > 20),
+                "{action:?}: {:?}",
+                app.hint()
+            );
+            assert_eq!(app.take_produced(), [], "{action:?}");
+        }
+    }
+
+    #[test]
+    fn add_file_starts_an_at_word_and_commands_a_slash() {
+        let mut naming = app();
+        naming.perform(crate::menu::Action::AddFile);
+        assert_eq!(naming.composer().lines(), ["@"]);
+
+        let mut commanding = app();
+        commanding.perform(crate::menu::Action::Commands);
+        assert_eq!(commanding.composer().lines(), ["/"]);
+    }
+
+    #[test]
+    fn the_links_open_this_projects_pages() {
+        let mut app = app();
+        app.perform(crate::menu::Action::ReportBug);
+        app.perform(crate::menu::Action::ReleaseNotes);
+        let opened: Vec<String> = app
+            .take_handoffs()
+            .into_iter()
+            .map(|handoff| match handoff {
+                crate::desktop::Handoff::Open(link) => link,
+                crate::desktop::Handoff::Copy(text) => panic!("copied {text}"),
+            })
+            .collect();
+        assert_eq!(opened.len(), 2);
+        assert!(
+            opened.iter().all(|link| link.starts_with("https://")),
+            "{opened:?}"
+        );
+    }
+
+    #[test]
+    fn stop_from_the_menu_stops_a_running_turn_and_says_so_when_none_is() {
+        let mut app = app().attached();
+        app.perform(crate::menu::Action::Stop);
+        assert!(app.hint().is_some_and(|hint| hint.contains("Nothing")));
+
+        typed_then_enter(&mut app, "go", KeyModifiers::NONE);
+        app.perform(crate::menu::Action::Stop);
+        assert!(app.take_interrupt());
     }
 }

@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ ┏━━━ add etag support to the ca┌──────────────────────────────┐loading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃    44 +     headers.set("If-N│ Diff              F5  Ctrl+T │░░          ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃    45 +   }                  │ Group by agent             a │░░          ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃    46 +   const res = await f│ Usage pane             shown │░░          ┃ │ ───────────────────────────────────── │
+ ┃    47 +   if (res.status === │ Changes pane           shown │y;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃    48     return res;        │ Activity pane          shown │░░          ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃       …                      │ Theme…                       │░░          ┃ │ API-equiv ≥$0.04                      │
+ ┃   115     cache.set(url, {   └──────────────────────────────┘░░          ┃ │ ───────────────────────────────────── │
+ ┃   116 +     etag: res.headers.get("ETag"),░░░░░░░░░░░░░░░░░░░░░          ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   117       body,                                                        ┃ └───────────────────────────────────────┘
+ ┃   └ allowed by you                                                       ┃ ┌─────────────── Changes ───────────────┐
+ ┃                                                                          ┃ │ ⎇ main ↑3                             █
+ ┃ ◆ claude                                                                 ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃   Rewriting the 304 test around the cached body.                         ┃ │   .                                   │
+ ┃                                                                          █ │     CHANGELOG.md                +0 −0 │
+ ┃ ◆ claude                                                                 █ │   catalog/                            │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │     fetch.ts                 +149 −12 │
+ ┃                                                                          █ │     etag.ts                   +88 −41 │
+ ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │     cache/lru.ts               +31 −9 │
+ ┃   └ 1 failing: fetch returns the cached body on a 304                    █ └───────────────────────────────────────┘
+ ┃                                                                          █ ┌────────────── Activity ───────────────┐
+ ┃ ◆ claude                                                                 █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                        █ │   └ Reading tests/stream.rs           │
+ ┃                                                                          █ │ ▾ Decisions  2                        │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   13:39 Key the cache on the request  │
+ ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │         URL, not the manifest id —    │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

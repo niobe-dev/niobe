@@ -188,10 +188,19 @@ impl Keys {
 /// Ctrl+Q, one of the two keys that quit the shell.
 const CTRL_Q: &[u8] = b"\x11";
 
-/// F9, the key that moves the shell to the next theme. A terminal sends it as
-/// this sequence, which is what proves the key reaches the shell as F9 rather
-/// than as the characters it is spelt with.
+/// F9, the key that opens the settings. A terminal sends it as this
+/// sequence, which is what proves the key reaches the shell as F9 rather than
+/// as the characters it is spelt with.
 const F9: &[u8] = b"\x1b[20~";
+
+/// Alt+V, which opens the View menu: Esc and the letter, as a terminal that
+/// sends Option as Meta writes it.
+const ALT_V: &[u8] = b"\x1bv";
+
+/// The arrow keys and Enter, as a terminal sends them.
+const UP: &[u8] = b"\x1b[A";
+const DOWN: &[u8] = b"\x1b[B";
+const ENTER: &[u8] = b"\r";
 
 /// The variable the binary reads to panic inside the event loop, which is the
 /// only way in to the one exit path nothing else can reach. The binary compiles
@@ -845,9 +854,9 @@ const MODERN_MENU: &str = "\u{1b}[38;5;15;48;5;8m";
 const CLASSIC_MENU: &str = "\u{1b}[38;5;0;48;5;7m";
 
 /// The three ways a palette is chosen, on the one screen that can show it: the
-/// flag, a config key, and F9 while the session runs.
+/// flag, a config key, and the View menu's list while the session runs.
 #[test]
-fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
+fn a_theme_is_selected_by_the_flag_by_the_config_and_from_the_view_menu() {
     let repo = repo();
     let home = user_config("theme = \"neo\"\n");
     let (terminal, slave) = Terminal::open();
@@ -858,9 +867,14 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
         .spawn()
         .expect("the niobe binary runs");
     terminal.shows(NEO_MENU);
-    terminal.typed(F9);
-    // F9 cycles the table in order, and `neo` is not the last of it.
+    // The list opens on the theme in force, and the table has `modern`
+    // after `neo`.
+    choose_theme(&terminal, DOWN);
     terminal.shows(MODERN_MENU);
+    // F9 reaches the shell as itself, and opens the settings.
+    let mark = terminal.mark();
+    terminal.typed(F9);
+    terminal.shows_since(mark, "Settings");
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
     assert!(status.success(), "the shell ended with {status}");
@@ -884,6 +898,21 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
     flagged.drained();
 }
 
+/// Opens the View menu's theme list, moves its cursor by `step` and takes
+/// the theme under it.
+fn choose_theme(terminal: &Terminal, step: &[u8]) {
+    let mark = terminal.mark();
+    terminal.typed(ALT_V);
+    // An item's hot letter is drawn in a colour of its own, so a label is
+    // never one run of text on the wire; the keys beside one are.
+    terminal.shows_since(mark, "Ctrl+T");
+    terminal.typed(b"t");
+    terminal.typed(ENTER);
+    terminal.shows_since(mark, "Esc keep");
+    terminal.typed(step);
+    terminal.typed(ENTER);
+}
+
 /// `neo`'s menu row as its design draws it, in 24-bit colour.
 const NEO_MENU_TRUECOLOR: &str = "\u{1b}[38;2;0;255;65;48;2;0;26;8m";
 
@@ -901,10 +930,8 @@ fn a_terminal_announcing_truecolor_gets_the_designed_colours_and_classic_stays_n
         .spawn()
         .expect("the niobe binary runs");
     terminal.shows(NEO_MENU_TRUECOLOR);
-    // neo → modern → cyber → classic.
-    terminal.typed(F9);
-    terminal.typed(F9);
-    terminal.typed(F9);
+    // `classic` is the theme before `neo` in the list.
+    choose_theme(&terminal, UP);
     terminal.shows(CLASSIC_MENU);
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
