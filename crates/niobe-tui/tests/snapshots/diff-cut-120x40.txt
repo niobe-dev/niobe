@@ -18,7 +18,7 @@
  ┃    4 + export const etag04 = "W/\"0004\"";                               ┃ │     fetch.ts                 +149 −12 │
  ┃    5 + export const etag05 = "W/\"0005\"";                               ┃ │     etag.ts                   +88 −41 │
  ┃    6 + export const etag06 = "W/\"0006\"";                               ┃ │     cache/lru.ts               +31 −9 │
- ┃    7 + export const etag07 = "W/\"0007\"";                               █ │     cache/index.ts             +12 −0 │
+ ┃    7 + export const etag07 = "W/\"0007\"";                               ┃ │     cache/index.ts             +12 −0 │
  ┃    8 + export const etag08 = "W/\"0008\"";                               █ │   docs/                               │
  ┃    9 + export const etag09 = "W/\"0009\"";                               █ │     caching.md                +64 −22 │
  ┃   10 + export const etag10 = "W/\"0010\"";                               █ │     adr/0004-etags.md          +34 −1 │

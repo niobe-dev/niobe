@@ -15,7 +15,7 @@
  ┃                                                                          ┃ │   .                                   │
  ┃ ▾ Agent ×2             deep-reasoner: Review fetch.py, deep-reas…  240 B ┃ │     CHANGELOG.md                +0 −0 │
  ┃   ├ deep-reasoner: Review fetch.py                                 120 B ┃ │   catalog/                            │
- ┃   └ deep-reasoner: Review cache.py                                 120 B █ │     fetch.ts                 +149 −12 │
+ ┃   └ deep-reasoner: Review cache.py                                 120 B ┃ │     fetch.ts                 +149 −12 │
  ┃ ⚙ Read           deep1 catalog/fetch.py                           4.0 kB █ │     etag.ts                   +88 −41 │
  ┃ ↳ deep2                Let me check how eviction is triggered.      says █ │     cache/lru.ts               +31 −9 │
  ┃ ⚙ Read           deep2 catalog/cache.py                           2.8 kB █ └───────────────────────────────────────┘

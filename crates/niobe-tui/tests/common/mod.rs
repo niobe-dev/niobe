@@ -22,7 +22,7 @@
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
-    ToolOutcome, Usage, UsageWindow, UsageWindows,
+    ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::{TestCounts, TestRunRecord};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -462,13 +462,13 @@ fn read_repository() -> Repo {
                 subject: "feat: keep the etag beside the body".to_owned(),
                 // Dated against the same fixed moment the session is read at,
                 // so the ages in the pictures do not move with the clock.
-                at: Some(UNIX_EPOCH + Duration::from_secs(READ_AT - 12 * 60)),
+                at: Some(UNIX_EPOCH + Duration::from_secs(COMMITTED.0)),
                 pushed: Some(false),
             },
             Commit {
                 hash: "41de07c".to_owned(),
                 subject: "test: a 304 is answered from the cache".to_owned(),
-                at: Some(UNIX_EPOCH + Duration::from_secs(READ_AT - 2 * 3_600)),
+                at: Some(UNIX_EPOCH + Duration::from_secs(COMMITTED.1)),
                 pushed: Some(true),
             },
         ],
@@ -481,6 +481,59 @@ fn read_repository() -> Repo {
             .collect(),
     }
 }
+
+/// The calls that made the commits [`read_repository`] lists, each at the
+/// second it was committed in: the shell lists as the session's only what was
+/// committed while one of its own calls to git ran. Folded ahead of the rest
+/// of the session, which they came before.
+fn committing() -> Vec<(Event, u64)> {
+    [
+        (
+            "c1",
+            "git commit -m 'test: a 304 is answered from the cache'",
+            COMMITTED.1,
+        ),
+        (
+            "c2",
+            "git commit -m 'feat: keep the etag beside the body'",
+            COMMITTED.0,
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(id, command, at)| {
+        let input = format!(r#"{{"command":"{command}"}}"#);
+        [
+            (
+                Event::ToolCallStart {
+                    id: ToolCallId::new(id),
+                    name: "Bash".to_owned(),
+                    input: input.clone(),
+                    summary: Some(command.to_owned()),
+                    agent: None,
+                },
+                at,
+            ),
+            (
+                Event::ToolCallEnd {
+                    id: ToolCallId::new(id),
+                    name: "Bash".to_owned(),
+                    input,
+                    output: String::new(),
+                    bytes: 0,
+                    outcome: ToolOutcome::Ok,
+                    summary: Some(command.to_owned()),
+                    exit_code: None,
+                    error: None,
+                },
+                at + 1,
+            ),
+        ]
+    })
+    .collect()
+}
+
+/// When the two commits [`read_repository`] lists were made, newest first.
+const COMMITTED: (u64, u64) = (READ_AT - 12 * 60, READ_AT - 2 * 3_600);
 
 /// A session part-way through a task: tool calls, usage with and without a
 /// cost, a decision and two sub-agents.
@@ -592,6 +645,9 @@ fn session_read_at_a_fixed_moment(events: &[Event]) -> App {
     let moment = |millis| clock.at(UNIX_EPOCH + Duration::from_millis(millis));
     let folded = (READ_AT - RAN_FOR) * 1_000;
     app.tick(Instant::now(), Some(moment(folded)));
+    for (event, at) in committing() {
+        app.apply_at(&event, moment(at * 1_000));
+    }
     for (step, event) in (0..).zip(events) {
         let at = match event {
             Event::ToolCallStart { .. }

@@ -379,19 +379,24 @@ const REFRESH: Duration = Duration::from_secs(2);
 /// two. A pane is not worth a core, and the operator's own build is.
 const IDLE_SHARE: u32 = 20;
 
-/// Where the session's commits are counted from.
+/// Where the commits the session may have made are counted from.
+///
+/// Every commit listed is one made since the session started, which is as
+/// far as the repository can say: it does not record which process made a
+/// commit. The shell narrows them to the ones made inside the session's own
+/// calls to git.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Since<'a> {
     /// The session has made no commits yet, so none are listed. The first read
     /// of a session, which is what the rest are measured against.
     Nothing,
     /// The commit the session started on, and when it started: what `HEAD`
-    /// has gained since that commit is the session's own where it was
-    /// committed after that moment. A checkout or a pull moves `HEAD` onto
-    /// commits made before it, which nobody in this session made.
+    /// has gained since that commit and was committed after that moment. A
+    /// checkout or a pull moves `HEAD` onto commits made before it, which
+    /// nobody in this session made.
     Commit(&'a str, SystemTime),
     /// The repository had no commits when the session started, so every commit
-    /// in it made after that moment is one the session made.
+    /// in it made after that moment is one the session may have made.
     Everything(SystemTime),
 }
 
@@ -408,7 +413,7 @@ fn session_started() -> SystemTime {
 }
 
 /// One read of the repository: what the shell shows, and the commit `HEAD` was
-/// on, which the next reads measure the session's own commits from.
+/// on, which the next reads measure the commits the session may have made from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Read {
     repo: Repo,

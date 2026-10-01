@@ -12,7 +12,7 @@
  ┃   └ allowed by you                                                       ┃ │   .                                   │
  ┃                                                                          ┃ │     CHANGELOG.md                +0 −0 │
  ┃ ◆ claude                                                                 ┃ │   catalog/                            │
- ┃   Rewriting the 304 test around the cached body.                         █ │     fetch.ts                 +149 −12 │
+ ┃   Rewriting the 304 test around the cached body.                         ┃ │     fetch.ts                 +149 −12 │
  ┃                                                                          █ │     etag.ts                   +88 −41 │
  ┃ ◆ claude                                                                 █ │     cache/lru.ts               +31 −9 │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │     cache/index.ts             +12 −0 │

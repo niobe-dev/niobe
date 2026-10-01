@@ -12,7 +12,7 @@
  ┃   └ allowed by you                                                       ┃ ┌─────────────── Changes ───────────────┐
  ┃                                                                          ┃ │ ⎇ main ↑3                             █
  ┃ ◆ claude                                                                 ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   Rewriting the 304 test around the cached body.                         █ │   .                                   │
+ ┃   Rewriting the 304 test around the cached body.                         ┃ │   .                                   │
  ┃                                                                          █ │     CHANGELOG.md                +0 −0 │
  ┃ ◆ claude                                                                 █ │   catalog/                            │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │     fetch.ts                 +149 −12 │
@@ -21,10 +21,10 @@
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ └───────────────────────────────────────┘
  ┃                                                                          █ ┌────────────── Activity ───────────────┐
  ┃ ◆ claude                                                                 █ │         policy.                       │
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
- ┃   304 path asserts a body that is no longer sent.                        █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃                                                                          █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Bash       1 ▓▓▓▓         ✗ 1       █
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ▾ Tools  10 calls ✗ 2 · 0 denied      │
+ ┃   304 path asserts a body that is no longer sent.                        █ │   Bash       3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
+ ┃                                                                          █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           █
  ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │   Edit       1 ▓▓▓▓                   █
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 Esc 1Help      2Plan      3Diff      4Undo      5Usage     6Files     7Tools     8Model     9Theme     0Quit

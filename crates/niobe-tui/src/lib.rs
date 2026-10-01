@@ -27,6 +27,7 @@ pub mod app;
 pub mod bridge;
 mod calls;
 pub mod clock;
+mod commits;
 pub mod desktop;
 mod find;
 mod hunks;

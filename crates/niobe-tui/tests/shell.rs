@@ -37,7 +37,7 @@ use niobe_core::event::{
     AgentId, Backend, Event, Mode, PermissionDecision, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::{FailedTests, TestCounts, TestRunRecord};
-use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
+use niobe_tui::app::{App, Commit, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
 use ratatui::style::{Color, Style};
 
@@ -1979,6 +1979,38 @@ fn the_changes_pane_scrolls_to_what_is_below_the_files() {
         frame.contains("9f2c1ab"),
         "a commit the session made is drawn with its short hash"
     );
+}
+
+/// A repository is shared. What another agent or the operator in a second
+/// terminal committed while the session was open is not the session's, and
+/// is not drawn as one of its commits.
+#[test]
+fn a_commit_nothing_in_this_session_made_is_not_drawn_as_its() {
+    let mut app = running_session();
+    let mut repo = app.repo().clone();
+    let theirs = repo.commits[0]
+        .at
+        .map(|at| at + std::time::Duration::from_secs(5 * 60));
+    repo.commits.insert(
+        0,
+        Commit {
+            hash: "c0ffee1".to_owned(),
+            subject: "made in another terminal".to_owned(),
+            at: theirs,
+            pushed: Some(false),
+        },
+    );
+    app.set_repo(repo);
+    let _ = screen(&mut app, 200, 60);
+    app.scroll_pane(Pane::Changes, 24);
+    let frame = screen(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("9f2c1ab"),
+        "the session's own commit is drawn"
+    );
+    assert!(!frame.contains("c0ffee1"), "{frame}");
+    assert!(frame.contains("2 this session  1 unpushed"), "{frame}");
 }
 
 const GREEN: TestCounts = TestCounts {

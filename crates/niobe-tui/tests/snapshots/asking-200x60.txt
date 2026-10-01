@@ -6,9 +6,9 @@
  ┃ ⚙ Notion·fetch   {}                                                                                                   2.5 kB ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
  ┃ ✗ Notion·update… {}                                                                                                   failed ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k                                 │
  ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ │ API-equiv ≥$0.04                                                  │
- ┃                                                                                                                              █ │ ───────────────────────────────────────────────────────────────── │
- ┃ ◆ claude                                                                                                                     █ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
- ┃   Caching the etag beside the body so a 304 can be answered from the LRU.                                                    █ └───────────────────────────────────────────────────────────────────┘
+ ┃                                                                                                                              ┃ │ ───────────────────────────────────────────────────────────────── │
+ ┃ ◆ claude                                                                                                                     ┃ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
+ ┃   Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ┃ └───────────────────────────────────────────────────────────────────┘
  ┃                                                                                                                              █ ┌───────────────────────────── Changes ─────────────────────────────┐
  ┃ ⚙ Edit           catalog/fetch.ts                                                                               +6 −2 · 0.4s █ │ ⎇ main ↑3                                                         █
  ┃    41     const cached = cache.get(url);                                                                                     █ │ ▾ Working tree  23 files  +≥977 −≥259                             █
@@ -48,10 +48,10 @@
  ┃   │ ▶ 1. Allow once                                       this call only │░░                                                 █ │         two manifests can share an id across catalogs.            │
  ┃   │   2. Always allow Read                              niobe saves Read │░░                                                 █ │   13:39 Reuse the existing LRU instead of a new Map — avoids a    │
  ┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │░░                                                 █ │         second eviction policy.                                   │
- ┃   │   4. Deny                                      the call does not run │░░                                                 █ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
- ┃   │                                                                      │░░                                                 █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
- ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │░░                                                 █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
- ┃   │ Esc decide later                                                     │░░                                                 █ │   Bash       1 ▓▓▓▓         ✗ 1                                   │
+ ┃   │   4. Deny                                      the call does not run │░░                                                 █ │ ▾ Tools  10 calls ✗ 2 · 0 denied · 21.6 kB out                    │
+ ┃   │                                                                      │░░                                                 █ │   Bash       3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
+ ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │░░                                                 █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
+ ┃   │ Esc decide later                                                     │░░                                                 █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
  ┃   └──────────────────────────────────────────────────────────────────────┘░░                                                 █ │   Edit       1 ▓▓▓▓                                               │
  ┃     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░                                                 █ │                                                                   │
  ┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃ │                                                                   │

@@ -3888,40 +3888,42 @@ fn suites_said(suites: u64) -> String {
     }
 }
 
-/// The commits the session has made, newest first.
+/// The commits the session has made, newest first: only those it made
+/// itself, never what anything else committed to the same repository while it
+/// was open.
 fn commit_rows(
     app: &App,
     repo: &crate::app::Repo,
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    let commits = app.session_commits();
     // An upstream the repository could not compare against leaves the count
     // not known, and a count would be a guess dressed as a figure.
-    let unpushed = match repo.commits.iter().any(|commit| commit.pushed.is_none()) {
+    let unpushed = match commits.iter().any(|commit| commit.pushed.is_none()) {
         true => None,
         false => Some(
-            repo.commits
+            commits
                 .iter()
                 .filter(|commit| commit.pushed == Some(false))
                 .count(),
         ),
     };
-    let summary = commit_figures(repo.read, repo.commits.len(), unpushed, theme);
+    let summary = commit_figures(repo.read, commits.len(), unpushed, theme);
 
     let folded = app.folded(Section::Commits);
     let mut rows = vec![section_header(folded, "Commits", summary, width, theme)];
     if folded {
         return rows;
     }
-    let ages: Vec<String> = repo
-        .commits
+    let ages: Vec<String> = commits
         .iter()
         .map(|commit| age_of(commit, app.stamp()))
         .collect();
     // One column for every age in the section, so they line up under each
     // other however the magnitudes differ.
     let column = ages.iter().map(|age| text::width(age)).max().unwrap_or(0);
-    for (commit, age) in repo.commits.iter().zip(ages) {
+    for (commit, age) in commits.into_iter().zip(ages) {
         rows.push(commit_row(commit, &age, column, width, theme));
     }
     rows

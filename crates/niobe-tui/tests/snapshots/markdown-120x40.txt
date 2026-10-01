@@ -17,7 +17,7 @@
  ┃ > you                                                                    ┃ │   catalog/                            █
  ┃   What changed?                                                          ┃ │     fetch.ts                 +149 −12 │
  ┃                                                                          ┃ │     etag.ts                   +88 −41 │
- ┃ ◆ claude                                                                 █ │     cache/lru.ts               +31 −9 │
+ ┃ ◆ claude                                                                 ┃ │     cache/lru.ts               +31 −9 │
  ┃   What changed                                                           █ │     cache/index.ts             +12 −0 │
  ┃                                                                          █ │   docs/                               │
  ┃   How it works: the fetcher keeps the etag beside the body, so a 304 is  █ │     caching.md                +64 −22 │

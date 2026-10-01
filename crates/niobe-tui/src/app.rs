@@ -65,7 +65,9 @@ pub struct Repo {
     /// What the working tree has changed against the last commit, one entry per
     /// file, in the order the repository reported them.
     pub working: Vec<WorkingFile>,
-    /// The commits made since the session started, newest first.
+    /// The commits made since the session started, newest first, whoever
+    /// made them: the repository cannot say. Which of them are the session's
+    /// own is [`App::session_commits`].
     pub commits: Vec<Commit>,
     /// Every file under the directory the session runs in that the repository
     /// has or would take — committed, staged, or new and not ignored — by the
@@ -96,7 +98,8 @@ pub struct WorkingFile {
     pub new: bool,
 }
 
-/// A commit made while the session has been running.
+/// A commit made while the session has been running, by it or by anything
+/// else committing to the same repository.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Commit {
     /// The hash, shortened the way the repository shortens it.
@@ -918,6 +921,9 @@ pub struct Pulse {
 #[derive(Debug)]
 pub struct App {
     repo: Repo,
+    /// When this session's own calls to git ran: what says which of the
+    /// repository's new commits it made.
+    git_calls: crate::commits::GitCalls,
     /// The repository's files, indexed for the list under an `@` word.
     mention_index: crate::mention::Files,
     /// Sections the operator has folded away, in whichever pane they belong
@@ -1317,6 +1323,7 @@ impl App {
             clock: None,
             now: None,
             at: None,
+            git_calls: crate::commits::GitCalls::default(),
             unsaved: None,
             turn_began_at: None,
             turn_began_with: (0, 0),
@@ -1508,6 +1515,7 @@ impl App {
             } => {
                 let head = tool_label(name);
                 let call = Call::started(what_it_does(summary.as_deref(), input), self.at);
+                self.git_calls.started(id, input, self.at.map(Stamp::at));
                 match self.open_run(&head, agent.as_ref()) {
                     Some(at) => {
                         if let Some(entry) = self.entries.get_mut(at) {
@@ -1557,6 +1565,7 @@ impl App {
                     error: error.clone(),
                 };
                 let gate = self.gate(id);
+                self.git_calls.ended(id, self.at.map(Stamp::at));
                 let started = self.tool_entries.remove(id);
                 let ended = match started {
                     Some((at, index)) => self.end_call(at, index, ending),
@@ -1987,6 +1996,7 @@ impl App {
     /// runs on to an end of its own.
     fn interrupt_what_the_fold_stopped(&mut self) {
         let running = self.session.in_flight_tools();
+        self.git_calls.stopped(running, self.at.map(Stamp::at));
         let cut: Vec<(usize, usize)> = self
             .tool_entries
             .iter()
@@ -2787,6 +2797,19 @@ impl App {
     /// Where the session is running.
     pub fn repo(&self) -> &Repo {
         &self.repo
+    }
+
+    /// The repository's new commits that this session made, newest first:
+    /// those committed while one of its own calls to git ran. The rest were
+    /// made by something else working in the same repository, and are not
+    /// the session's to show.
+    pub fn session_commits(&self) -> Vec<&Commit> {
+        let now = self.at.map(Stamp::at);
+        self.repo
+            .commits
+            .iter()
+            .filter(|commit| commit.at.is_some_and(|at| self.git_calls.made(at, now)))
+            .collect()
     }
 
     /// Whether `section` is folded away.
@@ -4970,7 +4993,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use ratatui_textarea::Key;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     fn app() -> App {
         App::new(Repo {
@@ -5392,6 +5415,62 @@ mod tests {
 
         app.apply(&spawn("toolu_b", "Review catalog/cache.py"));
         assert_eq!(app.entries()[0].agent.as_deref(), Some("fetch"));
+    }
+
+    /// A repository is shared: what another process committed while the
+    /// session was open is not the session's, and only a commit made inside
+    /// one of its own calls to git is listed as its.
+    #[test]
+    fn only_the_commits_made_inside_the_sessions_own_calls_to_git_are_its() {
+        let commit = |hash: &str, seconds: u64| Commit {
+            hash: hash.to_owned(),
+            subject: hash.to_owned(),
+            at: Some(UNIX_EPOCH + Duration::from_secs(seconds)),
+            pushed: Some(false),
+        };
+        let mut app = App::new(Repo {
+            read: true,
+            // Newest first, as the repository lists them.
+            commits: vec![
+                commit("theirs", 300),
+                commit("ours", 201),
+                commit("before", 50),
+            ],
+            ..Repo::default()
+        });
+        let stamp = |seconds: u64| Stamp::new(UNIX_EPOCH + Duration::from_secs(seconds), None);
+        let input = r#"{"command":"git commit -m ours"}"#;
+        app.apply_at(
+            &Event::ToolCallStart {
+                id: "t1".into(),
+                name: "Bash".to_owned(),
+                input: input.to_owned(),
+                summary: None,
+                agent: None,
+            },
+            stamp(200),
+        );
+        app.apply_at(
+            &Event::ToolCallEnd {
+                id: "t1".into(),
+                name: "Bash".to_owned(),
+                input: input.to_owned(),
+                output: "[main 1a2b3c4] ours".to_owned(),
+                bytes: 19,
+                outcome: ToolOutcome::Ok,
+                summary: None,
+                exit_code: None,
+                error: None,
+            },
+            stamp(202),
+        );
+
+        let made: Vec<&str> = app
+            .session_commits()
+            .iter()
+            .map(|commit| commit.hash.as_str())
+            .collect();
+        assert_eq!(made, ["ours"]);
     }
 
     #[test]
