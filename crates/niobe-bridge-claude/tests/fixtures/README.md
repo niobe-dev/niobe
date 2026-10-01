@@ -595,6 +595,50 @@ one-hour cache write, per million tokens — that is 0.000008 + 0.00008 +
 0.0020468 + 0.098024 = **$0.1001588**, the CLI's figure to the last digit. At
 the fast price it would be twice that.
 
+## `tool-progress.jsonl`
+
+One turn on `claude-sonnet-5-5`, recorded from Claude Code 2.1.287 on 2
+October 2026 under
+
+```sh
+claude -p --setting-sources project --model sonnet --allowedTools Bash \
+  --output-format stream-json --verbose --include-partial-messages
+```
+
+in an empty directory, asked on standard input to run
+`python3 -c "import time; time.sleep(65); print(1)"` once in the foreground.
+(A bare `sleep 65` is refused by the CLI, and run again in the background.)
+The lines are the CLI's own. The only edits: `system`/`init` cut down to the
+keys that say what ran, with its `cwd` rewritten to `/repo`; and
+`system`/`status`, `content_block_start`, `content_block_stop` and
+`message_stop` left out, because the bridge reads none of them.
+
+It exists for the two `tool_progress` lines the CLI sent while the call ran:
+
+| Line | `tool_use_id` | `parent_tool_use_id` | `elapsed_time_seconds` | `heartbeat` |
+| ---- | ------------- | -------------------- | ---------------------- | ----------- |
+| first | `toolu_01Nwh9KqTRJ2ZSUTBipaiifg-heartbeat-0` | `toolu_01Nwh9KqTRJ2ZSUTBipaiifg` | 30 | `true` |
+| second | `toolu_01Nwh9KqTRJ2ZSUTBipaiifg-heartbeat-1` | `toolu_01Nwh9KqTRJ2ZSUTBipaiifg` | 60 | `true` |
+
+Neither id is the call's own, and the parent is the call rather than a
+sub-agent. They carry no tokens, so the bridge passes them over: the turn
+folds to one `Bash` call, started and finished, no sub-agent, and nothing for
+the operator to read. The same release also reports this foreground command
+with `system`/`task_started` (`task_type` `local_bash`, `is_backgrounded`
+`false`) and `system`/`task_notification`, which the bridge passes over as it
+does for any task that is not a sub-agent.
+
+### The arithmetic the tests assert
+
+| in | out | cache read | cache write (1h) | `total_cost_usd` |
+| -- | --- | ---------- | ---------------- | ---------------- |
+| 4  | 126 | 35,214     | 11,229           | $0.0532268 |
+
+The `result`'s `usage` is the sum of the turn's two `message_delta`s — 2 + 2
+in, 123 + 3 out, 12,069 + 23,145 read and 11,076 + 153 written — and its
+`modelUsage` has the one model at the same counts, so the reported cost
+settles the turn.
+
 ## `interrupted.jsonl`
 
 Three turns, two of them stopped with the CLI's `interrupt` control request,

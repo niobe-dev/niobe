@@ -43,6 +43,8 @@ pub(crate) enum Message {
     RateLimitEvent(RateLimit),
     /// The conversation started over, as `/clear` starts it.
     ConversationReset(Reset),
+    /// A tool call still running, or a sub-agent's request being retried.
+    ToolProgress(Progress),
     /// The end of a turn, with the turn's totals.
     Result(Outcome),
     /// A `type` this bridge does not know.
@@ -579,6 +581,20 @@ pub(crate) struct ControlAnswer {
 /// off it: the `init` is what names the session.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Reset {}
+
+/// `tool_progress`: the CLI's word that something is still under way.
+///
+/// Recorded from Claude Code 2.1.287 as a heartbeat sent every thirty seconds
+/// while a tool call runs, with `elapsed_time_seconds` and `heartbeat: true`.
+/// Its `tool_use_id` is not the call's — it is the call's id with
+/// `-heartbeat-<n>` after it — and its `parent_tool_use_id` is the call
+/// itself rather than a sub-agent. The same type carries a sub-agent's request
+/// being retried (`subagent_retry`), and, on a remote or container session, a
+/// shell command's progress. None of it is read: it holds no tokens and no
+/// cost, the shell times a running call off its own clock, and the CLI's own
+/// SDK adapter drops the heartbeat and the retry too.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Progress {}
 
 /// The `result` line that closes a turn.
 ///

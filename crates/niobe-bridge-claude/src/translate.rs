@@ -565,6 +565,9 @@ impl Translator {
             wire::Message::ControlResponse(response) => self.answered(response, &mut out),
             wire::Message::RateLimitEvent(event) => rate_limit(event, &mut out),
             wire::Message::ConversationReset(_) => self.reset(&mut out),
+            // Passed over: see `wire::Progress` for what it carries and why
+            // none of it is counted or shown.
+            wire::Message::ToolProgress(_) => {}
             // Only the line a message arrived on says what type it was, so
             // whoever read that line is the one that can report it.
             wire::Message::Unknown => {}
@@ -3375,6 +3378,26 @@ mod tests {
         // guess into a total that is meant to be measured, and count those
         // tokens twice besides.
         assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// What Claude Code 2.1.287 says while a tool call runs: a heartbeat every
+    /// thirty seconds, as recorded during one `Bash` call, and the frame it
+    /// sends when a sub-agent's request is retried, in the shape the CLI's own
+    /// schema gives it.
+    const TOOL_PROGRESS: [&str; 2] = [
+        r#"{"type":"tool_progress","tool_use_id":"toolu_a-heartbeat-0","tool_name":"Bash","parent_tool_use_id":"toolu_a","elapsed_time_seconds":30,"heartbeat":true,"session_id":"s-1","uuid":"41ca27e9-61e6-4d21-a5e4-add6590835d0"}"#,
+        r#"{"type":"tool_progress","tool_use_id":"toolu_b","tool_name":"Agent","parent_tool_use_id":null,"elapsed_time_seconds":0,"session_id":"s-1","uuid":"dbba2b1b-91ff-49a5-84d7-4e48d4746725","subagent_type":"quick-lookup","subagent_retry":{"agent_id":"a1","attempt":1,"max_retries":10,"retry_delay_ms":500,"error_status":529,"error_category":"overloaded"}}"#,
+    ];
+
+    #[test]
+    fn the_clis_word_that_a_tool_call_is_still_running_is_passed_over() {
+        let mut translator = translator();
+
+        for line in TOOL_PROGRESS {
+            let events = translator.line(line);
+
+            assert!(events.is_empty(), "{line}: {events:?}");
+        }
     }
 
     #[test]

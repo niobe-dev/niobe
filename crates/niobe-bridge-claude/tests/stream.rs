@@ -981,6 +981,57 @@ mod fast_mode_refused {
     }
 }
 
+/// A turn whose one `Bash` call ran for 65 seconds, during which Claude Code
+/// 2.1.287 sent a `tool_progress` heartbeat at 30 and at 60 seconds. The
+/// numbers are the recording's own, as `tests/fixtures/README.md` sets out.
+mod tool_progress {
+    use super::*;
+
+    const TOOL_PROGRESS: &str = include_str!("fixtures/tool-progress.jsonl");
+
+    #[test]
+    fn a_heartbeat_while_a_call_runs_reaches_the_operator_as_nothing() {
+        let events = translate(TOOL_PROGRESS);
+
+        assert!(notices(&events).is_empty(), "{:?}", notices(&events));
+        assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+    }
+
+    /// The heartbeat names the running call as its parent, which is where a
+    /// sub-agent's own messages name the call that spawned them: read as one,
+    /// a shell command would become a sub-agent.
+    #[test]
+    fn a_heartbeat_neither_ends_its_call_nor_makes_it_a_sub_agent() {
+        let events = translate(TOOL_PROGRESS);
+        let state = SessionState::replay(&events);
+        let tools = state.tools();
+
+        assert_eq!((tools.started, tools.finished), (1, 1));
+        assert_eq!(tools.by_name.get("Bash"), Some(&1));
+        assert_eq!(tools.unmatched_ends, 0);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::AgentSpawn { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn the_reported_cost_settles_the_turn() {
+        let totals = SessionState::replay(&translate(TOOL_PROGRESS))
+            .totals()
+            .clone();
+
+        assert_eq!(totals.records_unsettled, 0, "{:?}", totals.unsettled);
+        assert!(
+            (totals.reported_cost_usd - 0.053_226_8).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+    }
+}
+
 fn translated_sub_agents() -> Vec<Event> {
     let mut translator = Translator::new("max").in_dir("/repo");
     SUB_AGENTS

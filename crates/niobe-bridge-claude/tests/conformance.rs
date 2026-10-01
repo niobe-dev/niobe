@@ -94,6 +94,10 @@ const SHAPES: &[&str] = &[
     // recorded from Claude Code 2.1.282. Each replaces the list before it.
     "control_response/success",
     "system/commands_changed",
+    // A tool call still running, recorded from Claude Code 2.1.287 as a
+    // heartbeat every thirty seconds. Passed over on purpose: it carries no
+    // tokens, and the shell times a running call off its own clock.
+    "tool_progress",
     // `/clear`, recorded from Claude Code 2.1.282: the conversation starts
     // over and the CLI's running totals with it, which the translator reads as
     // the point the totals are measured from again.
@@ -299,6 +303,25 @@ const SUB_AGENT_KEYS: &[(&str, &[&str], Kind)] = &[
     ("assistant", &["message", "model"], Kind::Text),
 ];
 
+/// The ids of the calls in a recording that spawn a sub-agent, under either
+/// name the CLI gives the tool.
+fn agent_calls(lines: &[String]) -> BTreeSet<String> {
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|value| value.get("message")?.get("content")?.as_array().cloned())
+        .flatten()
+        .filter(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+                && matches!(
+                    block.get("name").and_then(serde_json::Value::as_str),
+                    Some("Agent" | "Task")
+                )
+        })
+        .filter_map(|block| block.get("id")?.as_str().map(str::to_owned))
+        .collect()
+}
+
 /// What a key has to hold for the bridge to read it.
 #[derive(Debug, Clone, Copy)]
 enum Kind {
@@ -310,7 +333,9 @@ enum Kind {
 fn every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from() {
     let mut checked = BTreeSet::new();
     for path in recordings() {
-        for line in lines_of(&path) {
+        let lines = lines_of(&path);
+        let agents = agent_calls(&lines);
+        for line in lines {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
@@ -319,6 +344,18 @@ fn every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from() 
                 && value
                     .get("parent_tool_use_id")
                     .is_none_or(serde_json::Value::is_null)
+            {
+                continue;
+            }
+            // A task the CLI runs for a shell command is reported in the same
+            // shapes — Claude Code 2.1.287 sends a `task_notification` with no
+            // `usage` for one in the foreground — and the bridge reads only
+            // the ones naming a sub-agent's call.
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("system")
+                && value
+                    .get("tool_use_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| !agents.contains(id))
             {
                 continue;
             }
