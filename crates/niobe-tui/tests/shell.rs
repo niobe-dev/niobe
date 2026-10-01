@@ -3024,7 +3024,7 @@ fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        said.ends_with("Shift- or Option-drag selects text"),
+        said.ends_with("drag copies, click opens a link"),
         "the reply was cut:\n{frame}"
     );
     assert!(!said.contains("Ask for a change"), "{frame}");

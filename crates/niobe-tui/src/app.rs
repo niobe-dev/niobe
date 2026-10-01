@@ -937,6 +937,19 @@ pub struct App {
     /// Whether the last frame drew the top row of the question waiting, which
     /// says who asks and what is asked. `true` until a frame says otherwise.
     question_top_drawn: bool,
+    /// Where the last frame drew the transcript's lines, and how many of them
+    /// are the session's rather than the question waiting at their end: the
+    /// mouse selects and opens links only on those.
+    transcript_drawn: Option<(ratatui::layout::Rect, usize)>,
+    /// The cell the left button went down on over the transcript, until it
+    /// comes up again.
+    pressed: Option<crate::select::Point>,
+    /// The run of the transcript the operator dragged over, marked until the
+    /// next click or key.
+    selection: Option<crate::select::Selection>,
+    /// What the operator asked of the desktop and the loop has not handed
+    /// over yet.
+    handoffs: Vec<crate::desktop::Handoff>,
     profile: Option<SelectedProfile>,
     theme: Theme,
     /// How many colours the terminal draws, which every theme is drawn at.
@@ -1245,6 +1258,10 @@ impl App {
             session_area: None,
             jump: None,
             question_top_drawn: true,
+            transcript_drawn: None,
+            pressed: None,
+            selection: None,
+            handoffs: Vec::new(),
             profile: None,
             theme,
             depth: Depth::default(),
@@ -3812,8 +3829,13 @@ impl App {
 
     /// Handles one mouse report: a click or a wheel notch gives the keyboard
     /// to the pane under the pointer, the wheel then scrolls it, and a click on
-    /// the way back down returns the transcript to its newest line. Nothing
-    /// else the mouse does means anything to the shell yet.
+    /// the way back down returns the transcript to its newest line.
+    ///
+    /// Over the transcript, a drag selects what it covers and letting go
+    /// copies it, and a click that does not drag opens the link under it: a
+    /// terminal reporting the mouse to the shell no longer selects anything
+    /// itself, so the shell does. Nothing else the mouse does means anything
+    /// to the shell yet.
     pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 
@@ -3832,6 +3854,7 @@ impl App {
             MouseEventKind::ScrollUp => wheel(self, Scroll::Up(Self::WHEEL_LINES)),
             MouseEventKind::ScrollDown => wheel(self, Scroll::Down(Self::WHEEL_LINES)),
             MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = None;
                 let jump = self
                     .jump
                     .is_some_and(|at| at.contains((mouse.column, mouse.row).into()));
@@ -3840,10 +3863,108 @@ impl App {
                     self.scroll_to_tail();
                 } else if let Some(focus) = over {
                     self.focus = focus;
+                    self.pressed = self.transcript_point(mouse.column, mouse.row);
                 }
             }
+            MouseEventKind::Drag(MouseButton::Left) => self.drag_to(mouse.column, mouse.row),
+            MouseEventKind::Up(MouseButton::Left) => self.let_go(),
             _ => {}
         }
+    }
+
+    /// The transcript cell at a place on the screen, or `None` where the
+    /// last frame drew none of the session's lines there.
+    fn transcript_point(&self, column: u16, row: u16) -> Option<crate::select::Point> {
+        let (area, lines) = self.transcript_drawn?;
+        if !area.contains((column, row).into()) {
+            return None;
+        }
+        let line = self.scroll() + usize::from(row - area.y);
+        (line < lines).then_some(crate::select::Point {
+            line,
+            column: usize::from(column - area.x),
+        })
+    }
+
+    /// Carries a drag over the transcript on to a place on the screen. A
+    /// drag past the top or the bottom of the pane scrolls it a line, so a
+    /// selection can be taken further than one screenful.
+    fn drag_to(&mut self, column: u16, row: u16) {
+        let (Some(anchor), Some((area, lines))) = (self.pressed, self.transcript_drawn) else {
+            return;
+        };
+        let column = column.clamp(area.x, area.right().saturating_sub(1));
+        let row = if row < area.y {
+            self.scroll_up(1);
+            area.y
+        } else if row >= area.bottom() {
+            self.scroll_down(1);
+            area.bottom().saturating_sub(1)
+        } else {
+            row
+        };
+        let line = (self.scroll() + usize::from(row - area.y)).min(lines.saturating_sub(1));
+        let head = crate::select::Point {
+            line,
+            column: usize::from(column - area.x),
+        };
+        self.selection = Some(crate::select::Selection::new(anchor, head));
+    }
+
+    /// The left button came up: what a drag selected goes to the clipboard,
+    /// and a click that did not drag opens the link it was on.
+    fn let_go(&mut self) {
+        let Some(pressed) = self.pressed.take() else {
+            return;
+        };
+        let handoff = match self.selection {
+            Some(selection) => {
+                let drawn = &self.drawn;
+                let copied = selection.text(|line| drawn.plain_line(line));
+                (!copied.is_empty()).then_some(crate::desktop::Handoff::Copy(copied))
+            }
+            None => self
+                .transcript_drawn
+                .and_then(|(area, _)| self.drawn.link_at(pressed, usize::from(area.width)))
+                .map(crate::desktop::Handoff::Open),
+        };
+        self.handoffs.extend(handoff);
+    }
+
+    /// The run of the transcript the operator selected, for the draw to mark.
+    pub(crate) fn selection(&self) -> Option<crate::select::Selection> {
+        self.selection
+    }
+
+    /// Where the last frame drew the transcript's lines, and how many lines
+    /// the session's entries came to, the question waiting after them left
+    /// out.
+    pub fn drew_transcript(&mut self, area: ratatui::layout::Rect, lines: usize) {
+        self.transcript_drawn = Some((area, lines));
+    }
+
+    /// What the operator asked of the desktop since the loop last looked:
+    /// text to copy and links to open, oldest first.
+    pub fn take_handoffs(&mut self) -> Vec<crate::desktop::Handoff> {
+        std::mem::take(&mut self.handoffs)
+    }
+
+    /// Says how handing `handoff` to the desktop went.
+    pub fn handed_off(&mut self, handoff: &crate::desktop::Handoff, outcome: Result<(), String>) {
+        use crate::desktop::Handoff;
+
+        self.hint = Some(match (handoff, outcome) {
+            (Handoff::Copy(copied), Ok(())) => {
+                let lines = copied.lines().count().max(1);
+                match lines {
+                    1 => format!("Copied {} characters", copied.chars().count()),
+                    _ => format!("Copied {lines} lines"),
+                }
+            }
+            (Handoff::Copy(_), Err(reason)) => format!("Nothing copied: {reason}"),
+            (Handoff::Open(link), Ok(())) => format!("Opening {link}"),
+            (Handoff::Open(link), Err(reason)) => format!("{link} is not opened: {reason}"),
+        });
     }
 
     /// Handles one key the event loop read from the terminal, saying when
@@ -4020,6 +4141,7 @@ impl App {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         self.hint = None;
+        self.selection = None;
         let key = self.as_function_key(key);
         // A terminal that did not say it could send Shift+Enter has now sent
         // one — tmux asked for modifyOtherKeys, under a terminal that reports
@@ -4764,7 +4886,7 @@ fn fkey_hint(n: u8) -> &'static str {
              keyboard between the panes; the wheel and PgUp/PgDn scroll the one that has it, \
              and in the right-hand panes ↑↓ and Enter fold a section; Ctrl+End returns to the \
              newest line; Ctrl+O folds runs of tool calls; Ctrl+T opens a cut diff; Ctrl+V \
-             attaches an image; Shift- or Option-drag selects text"
+             attaches an image; drag copies, click opens a link"
         }
         2 => {
             "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \

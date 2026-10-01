@@ -1224,6 +1224,7 @@ fn draw_transcript(
 
     if app.entries().is_empty() && question.is_empty() {
         let lines = empty_transcript(app.is_attached(), theme);
+        app.drew_transcript(area, 0);
         app.measured(lines.len(), height);
         frame.render_widget(
             Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
@@ -1248,6 +1249,10 @@ fn draw_transcript(
     if let Some((found, current)) = app.find_marks() {
         mark_found(&mut visible, start, found, current, theme);
     }
+    if let Some(selection) = app.selection() {
+        mark_selected(&mut visible, start, selection, theme);
+    }
+    app.drew_transcript(area, above);
     let room = height.saturating_sub(visible.len());
     app.drew_question_top(question.is_empty() || (start..start + height).contains(&above));
     visible.extend(
@@ -1327,6 +1332,26 @@ fn draw_jump(frame: &mut Frame, area: Rect, waiting: bool, theme: &Theme) -> Opt
         at,
     );
     Some(at)
+}
+
+/// Marks what the operator selected on the transcript lines drawn from line
+/// `start`, in reverse, as a terminal marks a selection of its own.
+fn mark_selected(
+    lines: &mut [Line<'static>],
+    start: usize,
+    selection: crate::select::Selection,
+    theme: &Theme,
+) {
+    let style = Style::new().fg(theme.pane_bg).bg(theme.fg);
+    for (row, line) in lines.iter_mut().enumerate() {
+        let Some((from, to)) = selection.columns_on(start + row) else {
+            continue;
+        };
+        let (first, count) = crate::select::chars_in(&crate::select::plain(line), from, to);
+        if count > 0 {
+            *line = crate::find::highlight(std::mem::take(line), &[(first, count, style)]);
+        }
+    }
 }
 
 /// Marks every match of a search on the transcript lines drawn from line
@@ -1567,6 +1592,27 @@ impl DrawnEntries {
             })
             .unwrap_or(anchor.offset.min(last));
         Some(first.saturating_add(offset))
+    }
+
+    /// Line `line` of the whole transcript as drawn, without its styles.
+    pub(crate) fn plain_line(&self, line: usize) -> Option<String> {
+        self.lines(line, 1).first().map(crate::select::plain)
+    }
+
+    /// The link at `point` of the transcript as drawn `width` cells wide, if
+    /// there is one there. A link is looked for within the one entry it is
+    /// in: two entries' lines are never one run of text.
+    pub(crate) fn link_at(&self, point: crate::select::Point, width: usize) -> Option<String> {
+        let mut first = 0usize;
+        for drawn in &self.drawn {
+            let offset = point.line.checked_sub(first)?;
+            if offset < drawn.lines.len() {
+                let lines: Vec<String> = drawn.lines.iter().map(crate::select::plain).collect();
+                return crate::select::link_at(&lines, width, offset, point.column);
+            }
+            first = first.saturating_add(drawn.lines.len());
+        }
+        None
     }
 
     /// `count` lines from line `start` of the whole transcript.

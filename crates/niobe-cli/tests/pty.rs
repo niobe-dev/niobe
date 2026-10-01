@@ -124,12 +124,12 @@ const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 ///
 /// The terminals these tests open answer as one that reports keys does, so
 /// this is what every way out has to leave behind.
-const RESTORED: &str = "\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[<1u\x1b[?1049l\x1b[?25h";
+const RESTORED: &str = "\x1b[?1006l\x1b[?1002l\x1b[?2004l\x1b[<1u\x1b[?1049l\x1b[?25h";
 
 /// The same, on a terminal that cannot report keys: it was never pushed the
 /// enhancement, so it is never asked to pop it, and the modifyOtherKeys it was
 /// asked for instead goes back to what the terminal had.
-const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[>4m\x1b[?1049l\x1b[?25h";
+const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1002l\x1b[?2004l\x1b[>4m\x1b[?1049l\x1b[?25h";
 
 /// What the shell asks a terminal on the way in: which keyboard enhancements
 /// it has on, then its primary device attributes.

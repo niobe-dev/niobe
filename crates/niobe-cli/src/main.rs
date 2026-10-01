@@ -18,6 +18,7 @@ mod args;
 mod backend;
 mod commands;
 mod config;
+mod desktop;
 mod images;
 mod journal;
 mod prices;
@@ -260,12 +261,15 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     let mut commands = commands_for(&root, &backend);
     let ended = niobe_tui::run(
         app,
-        &mut journal,
-        backend.bridge(),
-        &mut rules,
-        &mut watching,
-        &mut commands,
-        &mut images_for(&root),
+        niobe_tui::Around {
+            journal: &mut journal,
+            backend: backend.bridge(),
+            rules: &mut rules,
+            watch: &mut watching,
+            shell: &mut commands,
+            images: &mut images_for(&root),
+            desktop: &mut desktop::System::new(),
+        },
     )
     .map_err(|e| e.to_string())?;
 
@@ -414,12 +418,15 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
     let mut commands = commands_for(&root, &backend);
     niobe_tui::run(
         app,
-        &mut journal,
-        backend.bridge(),
-        &mut rules,
-        &mut watching,
-        &mut commands,
-        &mut images_for(&root),
+        niobe_tui::Around {
+            journal: &mut journal,
+            backend: backend.bridge(),
+            rules: &mut rules,
+            watch: &mut watching,
+            shell: &mut commands,
+            images: &mut images_for(&root),
+            desktop: &mut desktop::System::new(),
+        },
     )
     .map_err(|e| e.to_string())
     .map(|_| ())
@@ -517,12 +524,15 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
     let mut commands = commands_for(&root, &backend);
     let ended = niobe_tui::run(
         app,
-        &mut journal,
-        backend.bridge(),
-        &mut rules,
-        &mut watching,
-        &mut commands,
-        &mut images_for(&root),
+        niobe_tui::Around {
+            journal: &mut journal,
+            backend: backend.bridge(),
+            rules: &mut rules,
+            watch: &mut watching,
+            shell: &mut commands,
+            images: &mut images_for(&root),
+            desktop: &mut desktop::System::new(),
+        },
     )
     .map_err(|e| e.to_string())?;
 
@@ -816,12 +826,15 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
     // and nothing is kept.
     niobe_tui::run(
         app,
-        &mut Unrecorded,
-        &mut Detached,
-        &mut Forgotten,
-        &mut Unwatched,
-        &mut NoShell,
-        &mut NoImages::default(),
+        niobe_tui::Around {
+            journal: &mut Unrecorded,
+            backend: &mut Detached,
+            rules: &mut Forgotten,
+            watch: &mut Unwatched,
+            shell: &mut NoShell,
+            images: &mut NoImages::default(),
+            desktop: &mut desktop::System::new(),
+        },
     )
     .map_err(|e| e.to_string())
     .map(|_| ())

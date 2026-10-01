@@ -82,7 +82,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
-  enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel and clicks, the bracketing it
+  enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel, clicks and drags, the bracketing it
   asks pastes to arrive in, and the keyboard
   enhancement it pushes where the terminal says it can tell Shift+Enter from Enter — or the
   modifyOtherKeys it asks for where the terminal answers only its attributes, as tmux does —
@@ -92,7 +92,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
   and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps, truncates and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
-  where, `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
+  where, `select.rs` is a drag's selection of the transcript as drawn, the text it copies and
+  the link under a click, `desktop.rs` the trait the loop hands what to copy and what to open to, `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
   backend's own commands where a prompt opens with `/` — typed `//`, since one `/` on an empty
   composer searches — from the list the backend sent, `shell.rs` is the trait the loop
   hands the operator's `!` commands to, and where who allows them and what they reach is written
@@ -155,7 +156,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the shell under the selected profile, with the session store as its journal and the
   repository's config as the place a standing answer is kept, and where `niobe trust` records
   that a repository's config may start a backend with what it names. `commands.rs` runs the
-  operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `images.rs` fetches the images the operator attaches, off the draw path: the clipboard through `osascript` on macOS and `wl-paste` or `xclip` on Linux, each with no terminal and a deadline, a pasted path relative to the session's directory, and an image too large to send shrunk with `sips` on macOS before it is refused. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `backend.rs` is the only module
+  operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `images.rs` fetches the images the operator attaches, off the draw path: the clipboard through `osascript` on macOS and `wl-paste` or `xclip` on Linux, each with no terminal and a deadline, a pasted path relative to the session's directory, and an image too large to send shrunk with `sips` on macOS before it is refused. `desktop.rs` copies what the operator selected with `pbcopy`, or `wl-copy`, `xclip` or `xsel`, and opens a clicked link with `open` or `xdg-open`, each with no terminal, in a process group of its own and not waited on. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
   `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission

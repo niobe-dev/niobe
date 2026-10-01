@@ -93,17 +93,18 @@ impl Asked {
     }
 }
 
-/// Asks the terminal to report mouse buttons and the wheel, in SGR encoding.
+/// Asks the terminal to report mouse buttons, the pointer while a button is
+/// held, and the wheel, in SGR encoding.
 ///
-/// Written by hand rather than with crossterm's `EnableMouseCapture`, which
-/// also asks for every movement of the pointer: the shell reads only the
-/// wheel and a click, and a report per movement would wake the event loop for
-/// nothing.
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+/// Button-event tracking (1002) rather than clicks alone (1000), because a
+/// terminal that reports the mouse no longer selects text itself, and the
+/// shell needs the drag to select it instead. Written by hand rather than with
+/// crossterm's `EnableMouseCapture`, which also asks for every movement of
+/// the pointer with no button held: the shell has nothing to do with those,
+/// and a report per movement would wake the event loop for nothing.
+const MOUSE_ON: &[u8] = b"\x1b[?1002h\x1b[?1006h";
 
-/// Takes [`MOUSE_ON`] back. Harmless on a terminal that was never asked, which
-/// is what lets the panic hook write it without knowing how far entry got.
-const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 
 /// Asks the terminal to mark the start and end of a paste, so that the lines
 /// of one are read as text rather than as a key press each, Enter included.
@@ -768,8 +769,8 @@ mod tests {
     const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
     const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h";
     const SHOW_CURSOR: &str = "\x1b[?25h";
-    const MOUSE_ON: &str = "\x1b[?1000h";
-    const MOUSE_OFF: &str = "\x1b[?1000l";
+    const MOUSE_ON: &str = "\x1b[?1002h";
+    const MOUSE_OFF: &str = "\x1b[?1002l";
     const PASTE_ON: &str = "\x1b[?2004h";
     const PASTE_OFF: &str = "\x1b[?2004l";
 

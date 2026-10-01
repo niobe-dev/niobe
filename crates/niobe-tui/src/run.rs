@@ -19,6 +19,7 @@ use niobe_core::event::Event as SessionEvent;
 
 use crate::app::{App, Arrival};
 use crate::bridge::Bridge;
+use crate::desktop::{Desktop, Handoff};
 use crate::images::Images;
 use crate::input::{Input, Wait};
 use crate::journal::Journal;
@@ -73,13 +74,35 @@ enum Hold {
 /// Everything the loop hands what the operator does to, and takes what
 /// happens elsewhere from: one value, because the loop hands every tick's work
 /// to all of them.
-struct Around<'a> {
-    journal: &'a mut dyn Journal,
-    backend: &'a mut dyn Bridge,
-    rules: &'a mut dyn Rules,
-    watch: &'a mut dyn Watch,
-    shell: &'a mut dyn Shell,
-    images: &'a mut dyn Images,
+pub struct Around<'a> {
+    /// Where every event the operator produces is recorded.
+    pub journal: &'a mut dyn Journal,
+    /// The session's backend: what the operator produces goes to it, and
+    /// what it produces is folded in.
+    pub backend: &'a mut dyn Bridge,
+    /// Where the standing answers the operator makes are kept.
+    pub rules: &'a mut dyn Rules,
+    /// Where the state of the repository comes from. Asked once a tick and
+    /// never waited on, so a read that is slow, that failed, or that has
+    /// nothing new to say costs the frame nothing and leaves the last one on
+    /// screen.
+    pub watch: &'a mut dyn Watch,
+    /// What runs the commands the operator types after `!`, asked how they
+    /// ended the same way.
+    pub shell: &'a mut dyn Shell,
+    /// What fetches the images the operator attaches, asked for them the
+    /// same way too.
+    pub images: &'a mut dyn Images,
+    /// What copies the text the operator selects and opens the links they
+    /// click.
+    pub desktop: &'a mut dyn Desktop,
+}
+
+// By hand, because not every one of them can say what it holds.
+impl std::fmt::Debug for Around<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Around").finish_non_exhaustive()
+    }
 }
 
 /// How a session ended.
@@ -97,15 +120,9 @@ pub enum Ended {
 
 /// Runs the shell on `app` until the operator quits, the process is asked to
 /// stop or the terminal goes away, handing every event the operator produces to
-/// `backend` and to `journal`, the standing answers they make to `rules`, and
-/// folding in everything `backend` produces.
-///
-/// `watch` is where the state of the repository comes from. It is asked once a
-/// tick and never waited on, so a read that is slow, that failed, or that has
-/// nothing new to say costs the frame nothing and leaves the last one on
-/// screen. `shell` runs the commands the operator types after `!`, and is
-/// asked how they ended the same way; `images` fetches the images the
-/// operator attaches, and is asked for them the same way too.
+/// the backend and to the journal `around` holds, the standing answers they
+/// make to its rules, and folding in everything the backend produces. What
+/// each of the others in `around` is for is said on [`Around`].
 ///
 /// `app` may already hold a session: a resumed one is folded in by the caller
 /// before the shell opens.
@@ -113,15 +130,7 @@ pub enum Ended {
 /// Installs the panic hook and the signal handlers first, so that every way out
 /// of the function — including the ways that do not return from it — puts the
 /// terminal back.
-pub fn run(
-    app: App,
-    journal: &mut dyn Journal,
-    backend: &mut dyn Bridge,
-    rules: &mut dyn Rules,
-    watch: &mut dyn Watch,
-    shell: &mut dyn Shell,
-    images: &mut dyn Images,
-) -> io::Result<Ended> {
+pub fn run(app: App, around: Around<'_>) -> io::Result<Ended> {
     install_panic_hook();
     // Declared before the terminal guard so it is dropped after it: dropping
     // it hands the stopping signals back their own behaviour, which is safe
@@ -172,14 +181,7 @@ pub fn run(
     let ended = event_loop(
         &mut terminal,
         &mut app,
-        Around {
-            journal,
-            backend,
-            rules,
-            watch,
-            shell,
-            images,
-        },
+        around,
         &mut Machine {
             shutdown: &shutdown,
             wait: &mut wait,
@@ -249,6 +251,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         watch,
         shell,
         images,
+        desktop,
     } = around;
     let mut ended = Ended::Quit;
 
@@ -275,6 +278,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         app.settle_budget();
         run_commands(app, shell);
         fetch_images(app, images);
+        hand_off(app, desktop);
         send_produced(app, journal, backend, rules);
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -290,6 +294,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                 read_input(app, machine.wait)?;
                 run_commands(app, shell);
                 fetch_images(app, images);
+                hand_off(app, desktop);
                 send_produced(app, journal, backend, rules);
             }
             Input::Idle => {
@@ -299,6 +304,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                     hand_over(app, events);
                     run_commands(app, shell);
                     fetch_images(app, images);
+                    hand_off(app, desktop);
                     send_produced(app, journal, backend, rules);
                 }
             }
@@ -520,6 +526,18 @@ fn run_commands(app: &mut App, shell: &mut dyn Shell) {
 fn fetch_images(app: &mut App, images: &mut dyn Images) {
     for source in app.take_image_requests() {
         images.fetch(&source);
+    }
+}
+
+/// Hands what the operator asked of the desktop to `desktop`, and says on
+/// the bar how it went.
+fn hand_off(app: &mut App, desktop: &mut dyn Desktop) {
+    for handoff in app.take_handoffs() {
+        let outcome = match &handoff {
+            Handoff::Copy(text) => desktop.copy(text),
+            Handoff::Open(link) => desktop.open(link),
+        };
+        app.handed_off(&handoff, outcome);
     }
 }
 
