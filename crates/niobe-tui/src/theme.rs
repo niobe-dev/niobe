@@ -111,6 +111,10 @@ pub struct Theme {
     pub dim: Color,
     /// The accent: hot keys, the session cost, the selected item.
     pub hot: Color,
+    /// Something running low that has not run out: a plan's usage window past
+    /// half gone. What has run out is drawn in [`Theme::del`], the theme's
+    /// colour for an error, so the two read as one scale.
+    pub warn: Color,
 
     /// The menu bar, and the F-key bar's background.
     pub menu_bg: Color,
@@ -187,6 +191,9 @@ pub const CLASSIC: Theme = Theme {
     fg: Color::White,
     dim: Color::Gray,
     hot: Color::LightYellow,
+    // The one yellow in the sixteen, so a window running low takes the
+    // accent's colour here: there is no amber to give it one of its own.
+    warn: Color::LightYellow,
 
     menu_bg: Color::Gray,
     menu_fg: Color::Black,
@@ -244,6 +251,7 @@ pub const NEO: Theme = Theme {
     fg: Color::LightGreen,
     dim: Color::Green,
     hot: Color::LightGreen,
+    warn: Color::LightYellow,
 
     menu_bg: Color::Black,
     menu_fg: Color::Green,
@@ -305,6 +313,7 @@ pub const CYBER: Theme = Theme {
     fg: Color::White,
     dim: Color::Green,
     hot: Color::LightGreen,
+    warn: Color::LightYellow,
 
     menu_bg: Color::Black,
     menu_fg: Color::White,
@@ -363,6 +372,7 @@ pub const MODERN: Theme = Theme {
     fg: Color::White,
     dim: Color::Gray,
     hot: Color::LightBlue,
+    warn: Color::LightYellow,
 
     menu_bg: Color::DarkGray,
     menu_fg: Color::White,
@@ -432,6 +442,9 @@ pub const NEO_TRUE: Theme = Theme {
     fg: hex(0x9bffb0),
     dim: hex(0x2e8b44),
     hot: hex(0x00ff41),
+    // The amber of the other phosphor terminal: the one warm colour on a
+    // green screen, short of the red that means it has run out.
+    warn: hex(0xffb000),
 
     menu_bg: hex(0x001a08),
     menu_fg: hex(0x00ff41),
@@ -474,6 +487,9 @@ pub const CYBER_TRUE: Theme = Theme {
     fg: hex(0xe6e9ff),
     dim: hex(0x6b9a7c),
     hot: hex(0x39ff7a),
+    // The design's yellow, which code is drawn in too: the two are never on
+    // the same row.
+    warn: hex(0xffd23f),
 
     menu_bg: hex(0x0d0b16),
     menu_fg: hex(0xe6e9ff),
@@ -513,6 +529,8 @@ pub const MODERN_TRUE: Theme = Theme {
     fg: hex(0xd4d4d4),
     dim: hex(0x858585),
     hot: hex(0x4fc1ff),
+    // The editor's own warning colour, as its error colour is `del`.
+    warn: hex(0xcca700),
 
     menu_bg: hex(0x323233),
     menu_fg: hex(0xcccccc),
@@ -611,7 +629,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 26] {
+    fn colours(t: &Theme) -> [Color; 27] {
         [
             t.pane_bg,
             t.frame,
@@ -620,6 +638,7 @@ mod tests {
             t.fg,
             t.dim,
             t.hot,
+            t.warn,
             t.menu_bg,
             t.menu_fg,
             t.fkey_bg,
@@ -683,6 +702,7 @@ mod tests {
                 (t.pane_bg, t.title, "the focused pane's title"),
                 (t.title, t.pane_bg, "a pane title"),
                 (t.hot, t.pane_bg, "the accent"),
+                (t.warn, t.pane_bg, "a usage window running low"),
                 (t.add, t.pane_bg, "an added line"),
                 (t.del, t.pane_bg, "a removed line"),
                 (t.fg, t.diff_bg, "a diff's unchanged line"),
@@ -797,6 +817,7 @@ mod tests {
                 (t.dim, t.pane_bg, "secondary text"),
                 (t.title, t.pane_bg, "a pane title"),
                 (t.hot, t.pane_bg, "the accent"),
+                (t.warn, t.pane_bg, "a usage window running low"),
                 (t.add, t.pane_bg, "an added line"),
                 (t.del, t.pane_bg, "a removed line"),
                 (t.user, t.pane_bg, "the operator's own message"),
@@ -857,6 +878,8 @@ mod tests {
                 (t.hot, t.dim, "unpushed and pushed commits"),
                 (t.agent, t.del, "a running agent and a failed one"),
                 (t.tool, t.del, "a tool call and a failed one"),
+                (t.fg, t.warn, "a usage window and one running low"),
+                (t.warn, t.del, "a usage window running low and one run out"),
             ] {
                 assert_ne!(one, other, "{}: {what} are one colour", t.name);
             }

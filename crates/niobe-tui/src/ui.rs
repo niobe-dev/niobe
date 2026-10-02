@@ -85,11 +85,15 @@ const PICK_CURRENT: &str = "· ";
 /// The share of a budget at which the Usage pane starts saying so in the
 /// colour it uses for anything waiting on the operator. The same fraction the
 /// transcript warning uses, so the pane and the warning agree.
-///
-/// A plan's usage window is read against the same fraction, because on a
-/// flat-rate plan the window is the budget: what runs out is the hours, not
-/// the money.
 const BUDGET_SHOWN_HOT: f64 = 0.8;
+
+/// The share of a plan's usage window from which its meter is drawn in the
+/// theme's warning colour.
+const WINDOW_RUNNING_LOW: f64 = 0.5;
+
+/// The share of a plan's usage window from which its meter is drawn in the
+/// theme's error colour: what is left may not see a long turn through.
+const WINDOW_RUN_OUT: f64 = 0.9;
 
 /// Columns between the menus and the session's identity, and between one
 /// segment of that identity and the next.
@@ -4195,20 +4199,26 @@ pub(crate) fn count(sign: char, lines: u64, stated: bool) -> String {
     }
 }
 
-/// How a window's meter and share are coloured: the same threshold and the
-/// same colour as a budget nearly spent, because on a flat-rate plan that is
-/// what a window nearly gone is.
+/// How a window's meter and share are coloured: plain, then in the theme's
+/// warning colour from [`WINDOW_RUNNING_LOW`], then in its error colour from
+/// [`WINDOW_RUN_OUT`].
 ///
-/// Two states and not the mock's three. The shell has one written-down
-/// threshold for *nearly gone* — [`BUDGET_SHOWN_HOT`] — and the budget row is
-/// already drawn by it; a middle colour would need a second threshold nobody
-/// measured, and would say that a window at one figure and a budget at the
-/// same figure are different kinds of trouble.
+/// A window gets three states where a budget gets two because the window is
+/// the one the operator can do nothing about until it comes back: half gone
+/// is when pacing the rest of it starts to matter, and nine tenths is when the
+/// next long turn may not finish inside it. A share that is not a share — a
+/// negative or a NaN, which [`window_share`] draws as a dash — is drawn plain,
+/// since nothing was reported to be low.
 fn window_style(window: &UsageWindow, theme: &Theme) -> Style {
-    match window.utilization >= BUDGET_SHOWN_HOT {
-        true => Style::new().fg(theme.hot),
-        false => Style::new().fg(theme.fg),
-    }
+    let share = window.utilization;
+    let colour = if share >= WINDOW_RUN_OUT {
+        theme.del
+    } else if share >= WINDOW_RUNNING_LOW {
+        theme.warn
+    } else {
+        theme.fg
+    };
+    Style::new().fg(colour)
 }
 
 /// The F-key bar: Esc and what it stops, then the ten keys, each sized by
@@ -5207,19 +5217,33 @@ mod tests {
         }
     }
 
-    /// Either window nearly gone is the plan nearly gone: on a flat-rate plan
+    /// Either window running low is the plan running low: on a flat-rate plan
     /// the seven-day window running out stops the session just as surely as
     /// the five-hour one, so neither may be marked at the other's expense.
     #[test]
-    fn a_window_nearly_gone_is_marked_the_way_a_budget_nearly_spent_is() {
-        let theme = crate::theme::CLASSIC;
-        let hot = Style::new().fg(theme.hot);
+    fn a_window_reads_plain_then_running_low_then_run_out() {
+        for theme in crate::theme::THEMES {
+            let plain = Style::new().fg(theme.fg);
+            let low = Style::new().fg(theme.warn);
+            let out = Style::new().fg(theme.del);
+
+            assert_eq!(window_style(&window(0.0, None), &theme), plain);
+            assert_eq!(window_style(&window(0.49, None), &theme), plain);
+            assert_eq!(window_style(&window(0.50, None), &theme), low);
+            assert_eq!(window_style(&window(0.89, None), &theme), low);
+            assert_eq!(window_style(&window(0.90, None), &theme), out);
+            assert_eq!(window_style(&window(1.04, None), &theme), out);
+        }
+    }
+
+    /// A share no backend could mean is not a window running low.
+    #[test]
+    fn a_window_whose_share_is_not_a_share_is_drawn_plain() {
+        let theme = Theme::default();
         let plain = Style::new().fg(theme.fg);
 
-        assert_eq!(window_style(&window(0.62, None), &theme), plain);
-        assert_eq!(window_style(&window(0.79, None), &theme), plain);
-        assert_eq!(window_style(&window(0.80, None), &theme), hot);
-        assert_eq!(window_style(&window(1.04, None), &theme), hot);
+        assert_eq!(window_style(&window(f64::NAN, None), &theme), plain);
+        assert_eq!(window_style(&window(-0.5, None), &theme), plain);
     }
 
     /// The first moment of a day twenty thousand days after the epoch, which
