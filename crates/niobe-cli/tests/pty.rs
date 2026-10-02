@@ -1657,7 +1657,7 @@ const WRITES_DOWN_ITS_ARGUMENTS_CLAUDE: &str = "#!/bin/sh\n\
 fn a_resumed_session_starts_its_cli_on_the_same_conversation_and_in_the_same_mode() {
     let repo = repo();
     let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
-    for args in [&[][..], &["--resume", "1"][..]] {
+    for (started, args) in [(1, &[][..]), (2, &["--resume", "1"][..])] {
         let (terminal, slave) = Terminal::open();
         let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
             .args(args)
@@ -1668,6 +1668,10 @@ fn a_resumed_session_starts_its_cli_on_the_same_conversation_and_in_the_same_mod
             terminal.typed(b"go\r");
         }
         terminal.shows("answered-the-turn");
+        // A resumed session draws the recorded answer before its CLI has
+        // started, and the quit ends the CLI's group at once: what it was
+        // started with is waited for first.
+        lines_written(&repo.path().join("args.log"), started);
         terminal.typed(CTRL_Q);
         let (_, status) = ended(&mut shell);
         let (drawn, _) = released(terminal, slave);
@@ -1735,6 +1739,21 @@ const WRITES_DOWN_WHERE_IT_RUNS_CLAUDE: &str = "#!/bin/sh\n\
     printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
     printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
     done\n";
+
+/// What is written at `path` once it holds `lines` lines, waited for as
+/// [`written`] waits.
+fn lines_written(path: &Path, lines: usize) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.lines().count() >= lines
+        {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("{} never held {lines} lines", path.display());
+}
 
 /// Waits until `path` holds something, and gives back what.
 fn written(path: &Path) -> String {
