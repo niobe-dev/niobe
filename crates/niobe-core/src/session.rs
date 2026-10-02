@@ -25,8 +25,8 @@ use crate::test_run::{self, FailedTests, TestCounts};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, Billing, CheckpointId, Context, Event, Mode, OPERATOR_SHELL,
-    SessionMeta, SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Billing, Context, Event, Mode, OPERATOR_SHELL, SessionMeta,
+    SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -261,18 +261,6 @@ pub struct ToolTotals {
     pub interrupted: u64,
 }
 
-/// A recorded `decide` event, kept in order for the changes pane and for the
-/// commit and PR bodies it is exported into.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecisionRecord {
-    /// One line.
-    pub summary: String,
-    /// The reasoning, where there was more of it.
-    pub rationale: Option<String>,
-    /// What was considered and rejected.
-    pub rejected: Vec<String>,
-}
-
 /// What a session did to one file: how much of it changed, and the model's own
 /// words about why.
 ///
@@ -319,15 +307,6 @@ impl FileChanges {
     pub fn removed_stated(&self) -> bool {
         self.removed_unstated == 0
     }
-}
-
-/// A restore point the undo list can return to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckpointRecord {
-    /// Names the point.
-    pub id: CheckpointId,
-    /// What was about to happen when it was taken.
-    pub label: String,
 }
 
 /// A test run the session made, as it reported itself.
@@ -510,8 +489,6 @@ pub struct SessionState {
     /// list that reorders itself under the operator is a list nobody can read.
     files: Vec<FileChanges>,
     files_at: BTreeMap<String, usize>,
-    decisions: Vec<DecisionRecord>,
-    checkpoints: Vec<CheckpointRecord>,
     /// The latest test run, which replaces the one before it: an earlier
     /// run's result says nothing about the code as it is now.
     test_run: Option<TestRunRecord>,
@@ -728,21 +705,6 @@ impl SessionState {
                 removed,
                 ..
             } => self.change_file(path, *added, *removed),
-
-            Event::Decision {
-                summary,
-                rationale,
-                rejected,
-            } => self.decisions.push(DecisionRecord {
-                summary: summary.clone(),
-                rationale: rationale.clone(),
-                rejected: rejected.clone(),
-            }),
-
-            Event::Checkpoint { id, label } => self.checkpoints.push(CheckpointRecord {
-                id: id.clone(),
-                label: label.clone(),
-            }),
 
             Event::TestRun {
                 counts,
@@ -1075,16 +1037,6 @@ impl SessionState {
             .as_deref()
             .and_then(words)
             .or_else(|| self.first_prompt.as_deref().and_then(words))
-    }
-
-    /// The decisions log, in order.
-    pub fn decisions(&self) -> &[DecisionRecord] {
-        &self.decisions
-    }
-
-    /// The checkpoints taken, in order.
-    pub fn checkpoints(&self) -> &[CheckpointRecord] {
-        &self.checkpoints
     }
 
     /// The latest test run the session made. `None` where it has made none,

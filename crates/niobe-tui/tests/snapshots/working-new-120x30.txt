@@ -20,10 +20,10 @@
  ┃                                                                          ┃ ┌────────────── Activity ───────────────┐
  ┃                                                                          ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
  ┃                                                                          ┃ │   none spawned                        │
- ┃                                                                          ┃ │ ▾ Decisions  0                        │
- ┃                                                                          ┃ │   none recorded                       │
  ┃                                                                          ┃ │ ▾ Tools  0 calls · 0 denied · 0 B out │
  ┃                                                                          ┃ │   none called                         │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  —  >  Ask for a change      Shift+Tab mode · Ctrl+J newline · Tab panes ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘

@@ -25,12 +25,7 @@ pub fn lines(app: &App) -> Vec<String> {
             grouped(session.assistant_messages())
         ),
         format!("files       {}", files(session)),
-        format!(
-            "record      {} decisions · {} checkpoints · {} errors",
-            session.decisions().len(),
-            session.checkpoints().len(),
-            grouped(session.errors())
-        ),
+        format!("errors      {}", grouped(session.errors())),
         format!("transcript  {} entries", app.entries().len()),
     ]
 }

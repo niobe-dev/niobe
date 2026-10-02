@@ -16,15 +16,12 @@ pub mod session;
 pub mod test_run;
 
 pub use event::{
-    AgentId, AgentOutcome, Backend, Billing, CheckpointId, Event, Mode, OPERATOR_SHELL,
-    PermissionDecision, SessionMeta, ToolCallId, ToolOutcome, Usage,
+    AgentId, AgentOutcome, Backend, Billing, Event, Mode, OPERATOR_SHELL, PermissionDecision,
+    SessionMeta, ToolCallId, ToolOutcome, Usage,
 };
 pub use image::{Image, ImageError, MediaType};
 pub use permission::{Allowlist, Rule, RuleError};
-pub use session::{
-    CheckpointRecord, DecisionRecord, FileChanges, Owed, SessionState, TestRunRecord, ToolTotals,
-    Totals, TurnRecord,
-};
+pub use session::{FileChanges, Owed, SessionState, TestRunRecord, ToolTotals, Totals, TurnRecord};
 pub use test_run::{FailedTests, TestCounts};
 
 /// The name the binary is installed as, and the directory name used under

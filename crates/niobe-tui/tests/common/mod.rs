@@ -145,13 +145,6 @@ fn session_events() -> Vec<Event> {
             }),
             using_overage: false,
         }),
-        Event::Decision {
-            summary: "Reuse the existing LRU instead of a new Map — avoids a second \
-                      eviction policy."
-                .to_owned(),
-            rationale: None,
-            rejected: vec!["A second Map keyed by URL".to_owned()],
-        },
         Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
@@ -200,13 +193,6 @@ fn session_events() -> Vec<Event> {
         Event::AgentExit {
             id: "a3".into(),
             outcome: AgentOutcome::Failed,
-        },
-        Event::Decision {
-            summary: "Key the cache on the request URL, not the manifest id — two \
-                      manifests can share an id across catalogs."
-                .to_owned(),
-            rationale: None,
-            rejected: vec![],
         },
         // Three calls to one MCP server, one of which failed: what the tools
         // section has to collapse into a single family row carrying its own
@@ -465,8 +451,6 @@ fn read_repository() -> Repo {
     }
 }
 
-/// A session part-way through a task: tool calls, usage with and without a
-/// cost, a decision and two sub-agents.
 /// A hunk written the way a unified diff prints one, each line behind its
 /// ` `, `-` or `+`.
 pub fn hunk(old_start: u64, new_start: u64, lines: &[&str]) -> Hunk {
@@ -549,8 +533,7 @@ const CALL_STEP_MS: u64 = 400;
 /// The session folded at a fixed moment and read at a fixed moment.
 ///
 /// The events land a hundred and two seconds before the shell reads them, so
-/// the figures measured between the two — the time a decision was recorded at,
-/// how long the agent still running has been running — are real durations in
+/// the figures measured between the two — how long the agent still running has been running — are real durations in
 /// the pictures rather than zeroes. A tool call's start and end, and the
 /// question between them, are the exception: each lands [`CALL_STEP_MS`]
 /// later for every event folded in before it, so how long a call ran is a

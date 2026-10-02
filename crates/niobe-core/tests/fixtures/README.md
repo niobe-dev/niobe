@@ -91,7 +91,7 @@ It carries the cases a real session has and a written one tends not to:
 
 ## `producer-gaps.jsonl`
 
-Nine events, and **synthetic on purpose**. They are what the shared event
+Seven events, and **synthetic on purpose**. They are what the shared event
 model defines and a recording of a healthy, current session cannot contain, so
 that the fold is still held to handling them:
 
@@ -101,7 +101,6 @@ that the fold is still held to handling them:
   error that ends the log arrives, which the fold records as interrupted. The
   Claude bridge reads a sub-agent the CLI stopped as cancelled, and every
   sub-agent in the recorded session completed;
-- a `Decision` and a `Checkpoint`. Nothing produces either yet;
 - an error the session **carried on past** — the one the bridge gives for a
   tool result whose call it never saw announced — and a **fatal** one. Nothing
   failed in the recorded session, so it carries neither; the driver produces
@@ -148,8 +147,6 @@ jq -s '{
   files_changed: (map(select(.type=="file_change").path) | unique | length),
   lines_added: (map(select(.type=="file_change" and .added!=null).added) | add),
   lines_removed: (map(select(.type=="file_change" and .removed!=null).removed) | add),
-  decisions: (map(select(.type=="decision")) | length),
-  checkpoints: (map(select(.type=="checkpoint")) | length),
   agents_spawned: (map(select(.type=="agent_spawn")) | length),
   agents_completed: (map(select(.type=="agent_exit" and .outcome=="completed")) | length),
   agents_cancelled: (map(select(.type=="agent_exit" and .outcome=="cancelled")) | length),

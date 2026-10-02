@@ -77,11 +77,6 @@ id_newtype! {
     AgentId
 }
 
-id_newtype! {
-    /// Identifies a checkpoint so that a rewind can name what it returns to.
-    CheckpointId
-}
-
 /// Which engine produced the event stream.
 ///
 /// A tag, not a type: the variants let the UI say what is running and let the
@@ -765,27 +760,6 @@ pub enum Event {
             deserialize_with = "crate::test_run::one_or_many"
         )]
         failures: Vec<crate::test_run::FailedTests>,
-    },
-
-    /// A structured `decide` record: why a plan, a model, a file or a declined
-    /// scope was chosen. Surfaced in the changes pane and exported into commit
-    /// and PR bodies.
-    Decision {
-        /// One line, as it appears in the pane.
-        summary: String,
-        /// The reasoning, where there is more of it than fits on one line.
-        rationale: Option<String>,
-        /// What was considered and rejected.
-        rejected: Vec<String>,
-    },
-
-    /// A restore point, taken before an edit so that a rewind has somewhere to
-    /// land.
-    Checkpoint {
-        /// Names the point a rewind returns to.
-        id: CheckpointId,
-        /// What was about to happen, for the undo list.
-        label: String,
     },
 
     /// A sub-agent started.

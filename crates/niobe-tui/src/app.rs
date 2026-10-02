@@ -23,7 +23,7 @@ use niobe_core::event::{
     ToolOutcome, UsageWindow,
 };
 use niobe_core::permission::{Allowlist, Rule};
-use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
+use niobe_core::session::{SessionState, TestRunRecord};
 use ratatui_textarea::{Input, TextArea, WrapMode};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -105,7 +105,7 @@ pub enum Pane {
     /// What the repository has not committed yet: the branch and the working
     /// tree.
     Changes,
-    /// What the session is doing: its sub-agents, decisions and tools.
+    /// What the session is doing: its sub-agents and tools.
     Activity,
 }
 
@@ -143,26 +143,19 @@ pub enum Section {
     WorkingTree,
     /// The sub-agents the session spawned, running and finished.
     SubAgents,
-    /// The decisions the session recorded.
-    Decisions,
     /// The tools it called, and how often.
     Tools,
 }
 
 impl Section {
     /// Every section, in the order the panes draw them.
-    pub const ALL: [Section; 4] = [
-        Section::WorkingTree,
-        Section::SubAgents,
-        Section::Decisions,
-        Section::Tools,
-    ];
+    pub const ALL: [Section; 3] = [Section::WorkingTree, Section::SubAgents, Section::Tools];
 
     /// The pane this section is drawn in.
     pub fn pane(self) -> Pane {
         match self {
             Section::WorkingTree => Pane::Changes,
-            Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
+            Section::SubAgents | Section::Tools => Pane::Activity,
         }
     }
 }
@@ -1043,10 +1036,6 @@ pub struct App {
     /// business, so they are kept here rather than widening the shared state —
     /// and the event model, which carries no time — for a pane.
     agents: Vec<SubAgent>,
-    /// When each decision in [`SessionState::decisions`] was recorded, in the
-    /// same order, so a pane reads the two together and cannot pair a decision
-    /// with another one's time.
-    decided_at: Vec<Option<Stamp>>,
     composer: TextArea<'static>,
     /// First transcript line drawn, in wrapped lines.
     scroll: usize,
@@ -1347,7 +1336,6 @@ impl App {
             answered: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
-            decided_at: Vec::new(),
             composer,
             scroll: 0,
             follow: true,
@@ -1851,12 +1839,7 @@ impl App {
             | Event::UsageWindows(_)
             | Event::Billing { .. }
             | Event::Context(_)
-            | Event::Commands { .. }
-            | Event::Checkpoint { .. } => {}
-
-            // The decision itself is in the session fold, which carries no
-            // times; when it was made is kept here, beside it.
-            Event::Decision { .. } => self.decided_at.push(self.at),
+            | Event::Commands { .. } => {}
 
             // Straight after its call's end, so in the same tick and at the
             // same clock: the moment the call finished.
@@ -3864,24 +3847,6 @@ impl App {
             .map(|agent| agent.label.clone())
     }
 
-    /// The transcript, oldest first.
-    /// Each decision the session recorded, with the moment it was recorded at.
-    ///
-    /// The two are handed out together because they are kept apart: the
-    /// decision is in the session fold, which has no times, and the time is
-    /// here. A pane that paired them by index could pair the wrong two.
-    pub fn decisions(&self) -> impl Iterator<Item = (&DecisionRecord, Option<Stamp>)> {
-        // Padded rather than zipped short: the two grow together in the same
-        // fold and cannot fall out of step, and if they ever did, a decision
-        // that lost its time should still be on screen without one.
-        let times = self
-            .decided_at
-            .iter()
-            .copied()
-            .chain(std::iter::repeat(None));
-        self.session.decisions().iter().zip(times)
-    }
-
     /// When a sub-agent was spawned, where the shell had a clock at the time.
     pub fn agent_spawned_at(&self, id: &AgentId) -> Option<Stamp> {
         self.agents
@@ -5798,12 +5763,12 @@ mod tests {
 
         assert!(Section::ALL.iter().all(|s| !app.folded(*s)));
 
-        app.fold(Section::Decisions);
-        assert!(app.folded(Section::Decisions));
+        app.fold(Section::SubAgents);
+        assert!(app.folded(Section::SubAgents));
         assert!(!app.folded(Section::WorkingTree), "one section, not all");
 
-        app.fold(Section::Decisions);
-        assert!(!app.folded(Section::Decisions));
+        app.fold(Section::SubAgents);
+        assert!(!app.folded(Section::SubAgents));
     }
 
     #[test]
@@ -6009,11 +5974,7 @@ mod tests {
         let mut app = laid_out();
         app.measured_sections(
             Pane::Activity,
-            vec![
-                (Section::SubAgents, 1),
-                (Section::Decisions, 6),
-                (Section::Tools, 19),
-            ],
+            vec![(Section::SubAgents, 1), (Section::Tools, 19)],
         );
         assert_eq!(app.section_cursor(Pane::Activity), None, "not focused");
 
@@ -6021,7 +5982,6 @@ mod tests {
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.section_cursor(Pane::Activity), Some(Section::SubAgents));
 
-        app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Down));
         assert_eq!(app.section_cursor(Pane::Activity), Some(Section::Tools));
         assert_eq!(
@@ -6038,10 +5998,10 @@ mod tests {
 
         app.on_key(key(KeyCode::Up));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.folded(Section::Decisions));
+        assert!(app.folded(Section::SubAgents));
         assert!(app.entries().is_empty(), "Enter folded rather than sent");
         assert!(
-            app.pane_scroll(Pane::Activity) <= 6,
+            app.pane_scroll(Pane::Activity) <= 1,
             "the folded header stays in view"
         );
     }
@@ -6289,11 +6249,6 @@ mod tests {
     #[test]
     fn numbers_go_to_the_panes_and_not_to_the_transcript() {
         let mut app = app();
-        app.apply(&Event::Decision {
-            summary: "Reuse the existing LRU".to_owned(),
-            rationale: None,
-            rejected: vec!["A second Map".to_owned()],
-        });
         app.apply(&Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
@@ -6302,7 +6257,6 @@ mod tests {
         });
 
         assert!(app.entries().is_empty());
-        assert_eq!(app.session().decisions().len(), 1);
         assert_eq!(app.session().agents_spawned(), 1);
     }
 
@@ -8287,50 +8241,6 @@ mod tests {
             app.stamp().is_none(),
             "a fold left a clock the loop never read"
         );
-    }
-
-    #[test]
-    fn a_decision_is_handed_out_with_the_time_it_was_made() {
-        let mut app = app();
-        app.tick(Instant::now(), Some(at(49_260, 13, 41)));
-        app.apply(&Event::Decision {
-            summary: "Reuse the existing cache".to_owned(),
-            rationale: None,
-            rejected: Vec::new(),
-        });
-        app.tick(Instant::now(), Some(at(50_580, 14, 3)));
-        app.apply(&Event::Decision {
-            summary: "Do not widen the layering table".to_owned(),
-            rationale: None,
-            rejected: Vec::new(),
-        });
-
-        let made: Vec<_> = app
-            .decisions()
-            .map(|(decision, at)| (decision.summary.as_str(), at.and_then(Stamp::local)))
-            .collect();
-        assert_eq!(
-            made,
-            [
-                ("Reuse the existing cache", LocalTime::new(13, 41)),
-                ("Do not widen the layering table", LocalTime::new(14, 3)),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_decision_folded_in_without_a_clock_is_still_paired_with_its_own_row() {
-        let mut app = app();
-        app.apply(&Event::Decision {
-            summary: "made before the loop ticked".to_owned(),
-            rationale: None,
-            rejected: Vec::new(),
-        });
-
-        let made: Vec<_> = app.decisions().collect();
-        assert_eq!(made.len(), 1);
-        assert_eq!(made[0].0.summary, "made before the loop ticked");
-        assert_eq!(made[0].1, None);
     }
 
     #[test]

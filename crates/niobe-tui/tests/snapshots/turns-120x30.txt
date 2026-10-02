@@ -21,10 +21,10 @@
  ┃                                                                          ┃ ┌────────────── Activity ───────────────┐
  ┃                                                                          ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
  ┃                                                                          ┃ │   none spawned                        │
- ┃                                                                          ┃ │ ▾ Decisions  0                        │
- ┃                                                                          ┃ │   none recorded                       │
  ┃                                                                          ┃ │ ▾ Tools  0 calls · 0 denied · 0 B out │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   none called                         │
+ ┃                                                                          ┃ │   none called                         │
+ ┃                                                                          ┃ │                                       │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  —  >  Ask for a change      Shift+Tab mode · Ctrl+J newline · Tab panes ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

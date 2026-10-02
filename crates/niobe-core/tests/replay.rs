@@ -135,12 +135,6 @@ fn a_recorded_log_replays_into_the_derived_totals() {
     assert_eq!(state.permissions_denied(), 1);
     assert!(state.pending_permissions().is_empty());
 
-    // Nothing produces a decision or a checkpoint yet, so an ordinary session
-    // carries none. `producer-gaps.jsonl` is where the fold's handling of them
-    // is held.
-    assert!(state.decisions().is_empty());
-    assert!(state.checkpoints().is_empty());
-
     // Messages, and no error: the CLI's background-task bookkeeping is
     // passed over, and nothing in the session failed.
     assert_eq!(state.user_messages(), 6);
@@ -240,9 +234,6 @@ fn the_gaps_log_exercises_what_no_producer_emits() {
     assert_eq!(state.tools().unmatched_ends, 1);
     assert_eq!(state.tools().finished, 1);
     assert_eq!(state.tools().started, 0);
-
-    assert_eq!(state.decisions().len(), 1);
-    assert_eq!(state.checkpoints().len(), 1);
 
     // Two agents, one killed and one still running when the fatal error
     // ended the session under it: interrupted, and running no longer.

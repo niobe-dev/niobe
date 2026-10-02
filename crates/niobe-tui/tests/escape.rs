@@ -219,13 +219,6 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             agent: None,
         }])
     }));
-    all.extend(check("decision", |p| {
-        with(vec![Event::Decision {
-            summary: format!("dec {p}"),
-            rationale: Some(format!("why {p}")),
-            rejected: vec![format!("rej {p}")],
-        }])
-    }));
     all.extend(check("agent", |p| {
         with(vec![
             Event::AgentSpawn {

@@ -20,10 +20,10 @@
  ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │     cache/lru.ts               +31 −9 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ └───────────────────────────────────────┘
  ┃                                                                          █ ┌────────────── Activity ───────────────┐
- ┃ ◆ claude                                                                 █ │         policy.                       │
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
- ┃   304 path asserts a body that is no longer sent.                        █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃                                                                          █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
+ ┃ ◆ claude                                                                 █ │   └ Reading tests/stream.rs           │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       █
+ ┃   304 path asserts a body that is no longer sent.                        █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       █
+ ┃                                                                          █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           █
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Bash       1 ▓▓▓▓         ✗ 1       █
  ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │   Edit       1 ▓▓▓▓                   █
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘

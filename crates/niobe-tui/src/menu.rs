@@ -86,7 +86,7 @@ pub enum SidePane {
     Usage,
     /// The working tree, the commits and the tests.
     Changes,
-    /// The sub-agents, the decisions and the tools.
+    /// The sub-agents and the tools.
     Activity,
 }
 

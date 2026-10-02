@@ -2112,14 +2112,14 @@ fn wheel_at(column: u16, row: u16) -> ratatui::crossterm::event::MouseEvent {
     }
 }
 
-/// The three sections the pane holds, each with the summary line the operator
+/// The two sections the pane holds, each with the summary line the operator
 /// reads it by.
 #[test]
-fn the_activity_pane_holds_the_sub_agents_the_decisions_and_the_tools() {
+fn the_activity_pane_holds_the_sub_agents_and_the_tools() {
     let frame = screen(&mut running_session(), 200, 60);
 
     assert!(frame.contains("─ Activity "), "{frame}");
-    for section in ["▾ Sub-agents", "▾ Decisions", "▾ Tools"] {
+    for section in ["▾ Sub-agents", "▾ Tools"] {
         assert!(frame.contains(section), "{section} is missing:\n{frame}");
     }
     // The recorded session spawned three: one still running, one done, one
@@ -2283,56 +2283,6 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
     assert_eq!(under_agents, 1, "{frame}");
 }
 
-/// A decision carries the time it was recorded, in a column of its own, and
-/// what wraps out of the summary hangs under the summary rather than under
-/// the time.
-#[test]
-fn a_decision_is_drawn_under_the_time_it_was_recorded_at() {
-    let frame = screen(&mut running_session(), 200, 60);
-    let rows: Vec<&str> = frame.lines().collect();
-    let at = rows
-        .iter()
-        .position(|line| line.contains("Key the cache on the request URL"))
-        .expect("the newest decision is the first one under the header");
-
-    // The recorded session is folded at 13:39 and read at 13:41: the column
-    // carries the moment the decision was recorded, not the moment it is
-    // drawn at.
-    assert!(rows[at].contains("13:39"), "{:?}", rows[at]);
-    assert!(
-        rows[at + 1].contains("manifests can share an id"),
-        "the summary wraps under itself, not under the time: {:?}",
-        rows[at + 1]
-    );
-    // Columns, not bytes: the transcript beside the pane draws characters
-    // wider than a byte, and the two rows carry different ones.
-    let column = |row: &str, text: &str| row.find(text).map(|at| row[..at].chars().count());
-    let hang = column(rows[at + 1], "two manifests").zip(column(rows[at], "Key the cache"));
-    assert!(
-        hang.map(|(a, b)| a == b).unwrap_or(false),
-        "the hanging indent is the summary's own column: {hang:?}"
-    );
-}
-
-/// Newest first: the pane does not follow its own tail, so a decision
-/// appended below the fold would never be seen. Under the header it is always
-/// one row from a heading the eye already has.
-#[test]
-fn the_newest_decision_is_the_one_under_the_header() {
-    let frame = screen(&mut running_session(), 200, 60);
-    let rows: Vec<&str> = frame.lines().collect();
-    let header = rows
-        .iter()
-        .position(|line| line.contains("▾ Decisions"))
-        .expect("the section is drawn");
-
-    assert!(
-        rows[header + 1].contains("Key the cache on the request URL"),
-        "the second decision recorded is the first one drawn: {:?}",
-        rows[header + 1]
-    );
-}
-
 /// A session reaches for one MCP server a dozen ways, and a row each says
 /// less about where its calls went than one row saying how many went to that
 /// server. A backend's own tools are already the family they belong to.
@@ -2372,7 +2322,6 @@ fn an_untouched_activity_pane_draws_no_zeroed_bar() {
     let frame = screen(&mut empty_session(), 120, 30);
 
     assert!(frame.contains("none spawned"), "{frame}");
-    assert!(frame.contains("none recorded"), "{frame}");
     assert!(frame.contains("none called"), "{frame}");
     // A bar is drawn in the same heavy line the focused pane's edges are, so
     // the rows those edges are on are not where a bar is looked for.
@@ -2387,14 +2336,14 @@ fn an_untouched_activity_pane_draws_no_zeroed_bar() {
     );
 }
 
-/// The pane scrolls rather than truncating: with three sections in it, the
-/// tools are below the sub-agents and the decisions, and they are reachable.
+/// The pane scrolls rather than truncating: the tools are below the
+/// sub-agents, and they are reachable.
 #[test]
 fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
     let mut app = running_session();
     // Draw once so the pane knows how tall it is and how much it holds. At
-    // 200x60 it holds everything it has; a terminal half that tall is where a
-    // pane with three sections in it has to scroll.
+    // 200x60 it holds everything it has; a terminal half that tall is where the
+    // pane has to scroll.
     let _ = screen(&mut app, 120, 30);
     app.scroll_pane(Pane::Activity, 40);
     let frame = screen(&mut app, 120, 30);
@@ -2429,7 +2378,7 @@ fn the_activity_pane_folds_a_section_away() {
         !frame.contains(TESTS_TASK),
         "the agents are folded away, not merely scrolled past:\n{frame}"
     );
-    assert!(frame.contains("▾ Decisions"), "{frame}");
+    assert!(frame.contains("▾ Tools"), "{frame}");
     assert!(
         frame.contains("▾ Working tree"),
         "folding a section of one pane left the other alone:\n{frame}"
@@ -2454,41 +2403,6 @@ fn a_wheel_notch_over_the_activity_pane_moves_only_that_pane() {
     assert!(
         app.pane_scroll(Pane::Activity) > 0,
         "and the pane the pointer was over did not"
-    );
-}
-
-/// A log that kept no times gives a decision no time. The column stays, so the
-/// summaries keep their edge, but it is left blank: a time of zero would be a
-/// moment nobody recorded, and the pane would be inventing one.
-#[test]
-fn a_decision_from_a_log_with_no_times_is_drawn_without_one() {
-    let mut app = empty_session();
-    app.apply(&Event::Decision {
-        summary: "Read the etag off the response, not the cache entry.".to_owned(),
-        rationale: None,
-        rejected: vec![],
-    });
-    let frame = screen(&mut app, 120, 30);
-    let row = frame
-        .lines()
-        .find(|line| line.contains("Read the etag off the response"))
-        .unwrap_or_default();
-
-    assert!(
-        !row.contains(':'),
-        "a shell with no clock drew a time anyway: {row:?}"
-    );
-    // The summary still starts where a decision with a time would: the column
-    // is what keeps the section's left edge straight.
-    let dated = screen(&mut running_session(), 120, 30);
-    let with_time = dated
-        .lines()
-        .find(|line| line.contains("13:39"))
-        .unwrap_or_default();
-    assert_eq!(
-        row.find("Read the etag"),
-        with_time.find("Reuse the existing LRU"),
-        "the summaries do not share a column:\n{row:?}\n{with_time:?}"
     );
 }
 
@@ -2953,9 +2867,9 @@ fn a_focused_pane_folds_the_section_under_its_cursor() {
     press(&mut app, KeyCode::Enter);
     let frame = screen(&mut app, 200, 60);
 
-    assert!(frame.contains("▸ Decisions"), "{frame}");
+    assert!(frame.contains("▸ Tools"), "{frame}");
     assert!(
-        !app.folded(Section::SubAgents) && !app.folded(Section::Tools),
+        !app.folded(Section::SubAgents),
         "one section, the one under the cursor"
     );
     assert_eq!(app.composed(), "", "Enter folded rather than typed");

@@ -3343,10 +3343,10 @@ fn bar_line(
     ])
 }
 
-/// The Activity pane: the sub-agents the session spawned, the decisions it
-/// recorded, and the tools it called.
+/// The Activity pane: the sub-agents the session spawned and the tools it
+/// called.
 ///
-/// One column for what the agent is doing and what it has decided. It scrolls
+/// One column for what the agent is doing. It scrolls
 /// and its sections fold on the same mechanism the Changes pane uses.
 fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_scrolling_pane(
@@ -3366,10 +3366,6 @@ fn activity_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let session = app.session();
     let mut rows = PaneRows::default();
     rows.section(Section::SubAgents, agent_rows(app, session, width, theme));
-    rows.section(
-        Section::Decisions,
-        decision_rows(app, session, width, theme),
-    );
     rows.section(Section::Tools, tool_rows(app, session, width, theme));
     rows
 }
@@ -3968,74 +3964,6 @@ fn working_tree_rows(
                 theme,
             ),
         });
-    }
-    rows
-}
-
-/// What a decision's time column is drawn in: `13:41` and a space.
-const DECISION_TIME: usize = 6;
-
-/// The decisions the session recorded, newest first.
-///
-/// **Newest first**, now that the pane scrolls and three sections share it.
-/// The alternative — appending, which is the order the mock draws and the
-/// order a transcript reads in — puts each new decision at the bottom of a
-/// section whose top is wherever the sub-agents above it happen to end. The
-/// pane does not follow its own tail, so a decision recorded while the
-/// operator was reading something else would land below the fold and never be
-/// seen. Under the header it is always one row from a heading the eye already
-/// has.
-fn decision_rows(
-    app: &App,
-    session: &SessionState,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let folded = app.folded(Section::Decisions);
-    let mut rows = vec![section_header(
-        folded,
-        "Decisions",
-        vec![Figure::lead(
-            0,
-            Span::styled(
-                session.decisions().len().to_string(),
-                Style::new().fg(theme.fg),
-            ),
-        )],
-        width,
-        theme,
-    )];
-    if folded {
-        return rows;
-    }
-    if session.decisions().is_empty() {
-        rows.push(Line::from("  none recorded").style(Style::new().fg(theme.dim)));
-        return rows;
-    }
-
-    let indent = ROW_INDENT;
-    let column = text::width(indent) + DECISION_TIME;
-    for (decision, at) in app.decisions().collect::<Vec<_>>().into_iter().rev() {
-        // A log that kept no times gives a decision no time. The column stays
-        // so the summaries keep their edge, but it is left blank rather than
-        // filled with a zero, which would be a moment nobody recorded.
-        let when = at
-            .and_then(|at| at.local())
-            .map(|time| time.to_string())
-            .unwrap_or_default();
-        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(column + 1))
-            .into_iter()
-            .enumerate()
-        {
-            let head = match i {
-                0 => format!("{indent}{when:<w$}", w = DECISION_TIME),
-                _ => " ".repeat(column),
-            };
-            rows.push(Line::from(vec![
-                Span::styled(head, Style::new().fg(theme.dim)),
-                Span::styled(wrapped, Style::new().fg(theme.fg)),
-            ]));
-        }
     }
     rows
 }
