@@ -15,7 +15,7 @@
 //! are neither queued nor shown again after a restart.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
@@ -50,7 +50,7 @@ pub struct Repo {
     pub branch: Option<String>,
     /// Whether a read of the repository has finished.
     ///
-    /// Until one has, the working tree and the commits below are empty because
+    /// Until one has, the working tree below is empty because
     /// nobody has looked, which is not the same as the repository having
     /// nothing to report — and a `+0 −0` standing in for the difference would
     /// be the pane's first invented figure. The name and the branch are read
@@ -66,10 +66,6 @@ pub struct Repo {
     /// What the working tree has changed against the last commit, one entry per
     /// file, in the order the repository reported them.
     pub working: Vec<WorkingFile>,
-    /// The commits made since the session started, newest first, whoever
-    /// made them: the repository cannot say. Which of them are the session's
-    /// own is [`App::session_commits`].
-    pub commits: Vec<Commit>,
     /// Every file under the directory the session runs in that the repository
     /// has or would take — committed, staged, or new and not ignored — by the
     /// path the agent names it by, relative to that directory. What `@`
@@ -99,25 +95,6 @@ pub struct WorkingFile {
     pub new: bool,
 }
 
-/// A commit made while the session has been running, by it or by anything
-/// else committing to the same repository.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Commit {
-    /// The hash, shortened the way the repository shortens it.
-    pub hash: String,
-    /// The first line of the message.
-    pub subject: String,
-    /// When it was committed, where the repository dated it. The pane draws
-    /// how long ago that was; a commit with no date carries no age rather than
-    /// one counted from the moment it was read.
-    pub at: Option<SystemTime>,
-    /// Whether the branch's upstream already has it. A branch with no upstream
-    /// has nowhere to have pushed it, so nothing there is pushed; `None` is a
-    /// branch that names an upstream the repository cannot find, where the
-    /// answer is not known rather than no.
-    pub pushed: Option<bool>,
-}
-
 /// A pane of the right-hand stack that scrolls and holds folding sections.
 ///
 /// Which pane a section belongs to decides which scroll offset folding it
@@ -125,7 +102,8 @@ pub struct Commit {
 /// rather than inferred at each call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
-    /// What the session changed: the working tree, the commits, the files.
+    /// What the repository has not committed yet: the branch and the working
+    /// tree.
     Changes,
     /// What the session is doing: its sub-agents, decisions and tools.
     Activity,
@@ -158,22 +136,11 @@ impl Focus {
 }
 
 /// A section of the Changes or Activity pane, which folds on its own.
-///
-/// Each names one claim about the work, and two of them are claims about the
-/// same files made by different parties — which is why they are never one
-/// section: [`Section::WorkingTree`] is what the repository measured, and
-/// [`Section::Edited`] is what this session's own edit tools reported, a floor
-/// where a tool did not say how much it changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Section {
-    /// What the repository says the working tree has changed.
+    /// What the repository says the working tree has changed: every
+    /// uncommitted change, whoever made it.
     WorkingTree,
-    /// The commits made since the session started.
-    Commits,
-    /// What this session's edit tools said they changed.
-    Edited,
-    /// What the session's latest test run reported.
-    Tests,
     /// The sub-agents the session spawned, running and finished.
     SubAgents,
     /// The decisions the session recorded.
@@ -184,11 +151,8 @@ pub enum Section {
 
 impl Section {
     /// Every section, in the order the panes draw them.
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 4] = [
         Section::WorkingTree,
-        Section::Commits,
-        Section::Edited,
-        Section::Tests,
         Section::SubAgents,
         Section::Decisions,
         Section::Tools,
@@ -197,9 +161,7 @@ impl Section {
     /// The pane this section is drawn in.
     pub fn pane(self) -> Pane {
         match self {
-            Section::WorkingTree | Section::Commits | Section::Edited | Section::Tests => {
-                Pane::Changes
-            }
+            Section::WorkingTree => Pane::Changes,
             Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
         }
     }
@@ -644,6 +606,14 @@ pub struct Call {
     /// output held the whole run, and otherwise that it ran and whether it is
     /// known to have failed. `None` for every call that was not one.
     pub tested: Option<TestRunRecord>,
+    /// Whether what the call does runs the tests, read from it as it starts
+    /// so the transcript can draw a run in progress as one.
+    pub testing: bool,
+    /// How long the last run of the same command took in this session, where
+    /// it ran to the end and its counts were read: what this run's progress
+    /// is drawn against while it runs. A run that stopped short is nothing to
+    /// measure by, and the backend reports no progress of its own.
+    pub last_run: Option<Duration>,
     /// Whether the session ended while the call was running, so that no end
     /// will arrive for it. It is not running, and it did not fail: the
     /// backend that was running it is gone.
@@ -661,6 +631,7 @@ impl Call {
     /// A call that has just started, at `at`.
     pub(crate) fn started(what: String, at: Option<Stamp>) -> Self {
         Self {
+            testing: niobe_core::test_run::is_test_run(&what),
             what,
             outcome: None,
             bytes: None,
@@ -671,6 +642,7 @@ impl Call {
             change: None,
             printed: None,
             tested: None,
+            last_run: None,
             interrupted: false,
             gate: None,
             started: at,
@@ -687,6 +659,12 @@ impl Call {
             (Some(started), Some(at)) => at.since(started).filter(|took| *took >= TIMED),
             _ => None,
         };
+    }
+
+    /// When it started running, where the shell had a clock at the time:
+    /// what a run in progress is timed from.
+    pub fn began(&self) -> Option<Stamp> {
+        self.started
     }
 
     /// Whether the call is still running.
@@ -992,9 +970,9 @@ pub struct Pulse {
 #[derive(Debug)]
 pub struct App {
     repo: Repo,
-    /// When this session's own calls to git ran: what says which of the
-    /// repository's new commits it made.
-    git_calls: crate::commits::GitCalls,
+    /// How long the last run of each test command took, by what the call
+    /// does, where it ran to the end and its counts were read.
+    test_times: BTreeMap<String, Duration>,
     /// The repository's files, indexed for the list under an `@` word.
     mention_index: crate::mention::Files,
     /// Sections the operator has folded away, in whichever pane they belong
@@ -1069,10 +1047,6 @@ pub struct App {
     /// same order, so a pane reads the two together and cannot pair a decision
     /// with another one's time.
     decided_at: Vec<Option<Stamp>>,
-    /// When the call that ran [`SessionState::test_run`] finished, which is
-    /// what the run's age is counted from. Kept beside it for the reason
-    /// [`App::decided_at`] is.
-    tested_at: Option<Stamp>,
     composer: TextArea<'static>,
     /// First transcript line drawn, in wrapped lines.
     scroll: usize,
@@ -1345,6 +1319,7 @@ impl App {
         paint_composer(&mut composer, &theme);
 
         Self {
+            test_times: BTreeMap::new(),
             mention_index: crate::mention::Files::new(&repo.files),
             repo,
             folded: std::collections::BTreeSet::new(),
@@ -1373,7 +1348,6 @@ impl App {
             just_ended: None,
             agents: Vec::new(),
             decided_at: Vec::new(),
-            tested_at: None,
             composer,
             scroll: 0,
             follow: true,
@@ -1421,7 +1395,6 @@ impl App {
             clock: None,
             now: None,
             at: None,
-            git_calls: crate::commits::GitCalls::default(),
             unsaved: None,
             turn_began_at: None,
             turn_began_with: (0, 0),
@@ -1612,8 +1585,10 @@ impl App {
                 agent,
             } => {
                 let head = tool_label(name);
-                let call = Call::started(what_it_does(summary.as_deref(), input), self.at);
-                self.git_calls.started(id, input, self.at.map(Stamp::at));
+                let mut call = Call::started(what_it_does(summary.as_deref(), input), self.at);
+                if call.testing {
+                    call.last_run = self.test_times.get(&call.what).copied();
+                }
                 match self.open_run(&head, agent.as_ref()) {
                     Some(at) => {
                         if let Some(entry) = self.entries.get_mut(at) {
@@ -1663,7 +1638,6 @@ impl App {
                     error: error.clone(),
                 };
                 let gate = self.gate(id);
-                self.git_calls.ended(id, self.at.map(Stamp::at));
                 let started = self.tool_entries.remove(id);
                 let ended = match started {
                     Some((at, index)) => self.end_call(at, index, ending),
@@ -1893,7 +1867,6 @@ impl App {
                 failures,
                 ..
             } => {
-                self.tested_at = self.at;
                 if let Some((at, index, _)) = ended
                     && let Some(call) = self
                         .entries
@@ -1906,6 +1879,9 @@ impl App {
                         *failed,
                         failures.clone(),
                     ));
+                    if let Some(took) = call.took.filter(|_| counts.is_some()) {
+                        self.test_times.insert(call.what.clone(), took);
+                    }
                 }
             }
 
@@ -2094,7 +2070,6 @@ impl App {
     /// runs on to an end of its own.
     fn interrupt_what_the_fold_stopped(&mut self) {
         let running = self.session.in_flight_tools();
-        self.git_calls.stopped(running, self.at.map(Stamp::at));
         let cut: Vec<(usize, usize)> = self
             .tool_entries
             .iter()
@@ -3613,19 +3588,6 @@ impl App {
         &self.repo
     }
 
-    /// The repository's new commits that this session made, newest first:
-    /// those committed while one of its own calls to git ran. The rest were
-    /// made by something else working in the same repository, and are not
-    /// the session's to show.
-    pub fn session_commits(&self) -> Vec<&Commit> {
-        let now = self.at.map(Stamp::at);
-        self.repo
-            .commits
-            .iter()
-            .filter(|commit| commit.at.is_some_and(|at| self.git_calls.made(at, now)))
-            .collect()
-    }
-
     /// Whether `section` is folded away.
     pub fn folded(&self, section: Section) -> bool {
         self.folded.contains(&section)
@@ -3918,13 +3880,6 @@ impl App {
             .copied()
             .chain(std::iter::repeat(None));
         self.session.decisions().iter().zip(times)
-    }
-
-    /// The session's latest test run, with the moment its call finished where
-    /// the shell had a clock at the time. `None` where the session has run no
-    /// tests.
-    pub fn test_run(&self) -> Option<(&TestRunRecord, Option<Stamp>)> {
-        self.session.test_run().map(|run| (run, self.tested_at))
     }
 
     /// When a sub-agent was spawned, where the shell had a clock at the time.
@@ -5827,7 +5782,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use ratatui_textarea::Key;
-    use std::time::{Duration, Instant, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     fn app() -> App {
         App::new(Repo {
@@ -5843,12 +5798,12 @@ mod tests {
 
         assert!(Section::ALL.iter().all(|s| !app.folded(*s)));
 
-        app.fold(Section::Commits);
-        assert!(app.folded(Section::Commits));
+        app.fold(Section::Decisions);
+        assert!(app.folded(Section::Decisions));
         assert!(!app.folded(Section::WorkingTree), "one section, not all");
 
-        app.fold(Section::Commits);
-        assert!(!app.folded(Section::Commits));
+        app.fold(Section::Decisions);
+        assert!(!app.folded(Section::Decisions));
     }
 
     #[test]
@@ -6053,42 +6008,40 @@ mod tests {
     fn the_arrows_walk_a_focused_panes_sections_and_enter_folds_the_one_under_the_cursor() {
         let mut app = laid_out();
         app.measured_sections(
-            Pane::Changes,
+            Pane::Activity,
             vec![
-                (Section::WorkingTree, 1),
-                (Section::Commits, 12),
-                (Section::Edited, 25),
+                (Section::SubAgents, 1),
+                (Section::Decisions, 6),
+                (Section::Tools, 19),
             ],
         );
-        assert_eq!(app.section_cursor(Pane::Changes), None, "not focused");
+        assert_eq!(app.section_cursor(Pane::Activity), None, "not focused");
 
         app.on_key(key(KeyCode::Tab));
-        assert_eq!(
-            app.section_cursor(Pane::Changes),
-            Some(Section::WorkingTree)
-        );
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.section_cursor(Pane::Activity), Some(Section::SubAgents));
 
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Down));
-        assert_eq!(app.section_cursor(Pane::Changes), Some(Section::Edited));
+        assert_eq!(app.section_cursor(Pane::Activity), Some(Section::Tools));
         assert_eq!(
-            app.pane_scroll(Pane::Changes),
-            16,
+            app.pane_scroll(Pane::Activity),
+            12,
             "the section under the cursor is scrolled into view"
         );
         app.on_key(key(KeyCode::Down));
         assert_eq!(
-            app.section_cursor(Pane::Changes),
-            Some(Section::Edited),
+            app.section_cursor(Pane::Activity),
+            Some(Section::Tools),
             "the last section is as far as it goes"
         );
 
         app.on_key(key(KeyCode::Up));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.folded(Section::Commits));
+        assert!(app.folded(Section::Decisions));
         assert!(app.entries().is_empty(), "Enter folded rather than sent");
         assert!(
-            app.pane_scroll(Pane::Changes) <= 12,
+            app.pane_scroll(Pane::Activity) <= 6,
             "the folded header stays in view"
         );
     }
@@ -6249,62 +6202,6 @@ mod tests {
 
         app.apply(&spawn("toolu_b", "Review catalog/cache.py"));
         assert_eq!(app.entries()[0].agent.as_deref(), Some("fetch"));
-    }
-
-    /// A repository is shared: what another process committed while the
-    /// session was open is not the session's, and only a commit made inside
-    /// one of its own calls to git is listed as its.
-    #[test]
-    fn only_the_commits_made_inside_the_sessions_own_calls_to_git_are_its() {
-        let commit = |hash: &str, seconds: u64| Commit {
-            hash: hash.to_owned(),
-            subject: hash.to_owned(),
-            at: Some(UNIX_EPOCH + Duration::from_secs(seconds)),
-            pushed: Some(false),
-        };
-        let mut app = App::new(Repo {
-            read: true,
-            // Newest first, as the repository lists them.
-            commits: vec![
-                commit("theirs", 300),
-                commit("ours", 201),
-                commit("before", 50),
-            ],
-            ..Repo::default()
-        });
-        let stamp = |seconds: u64| Stamp::new(UNIX_EPOCH + Duration::from_secs(seconds), None);
-        let input = r#"{"command":"git commit -m ours"}"#;
-        app.apply_at(
-            &Event::ToolCallStart {
-                id: "t1".into(),
-                name: "Bash".to_owned(),
-                input: input.to_owned(),
-                summary: None,
-                agent: None,
-            },
-            stamp(200),
-        );
-        app.apply_at(
-            &Event::ToolCallEnd {
-                id: "t1".into(),
-                name: "Bash".to_owned(),
-                input: input.to_owned(),
-                output: "[main 1a2b3c4] ours".to_owned(),
-                bytes: 19,
-                outcome: ToolOutcome::Ok,
-                summary: None,
-                exit_code: None,
-                error: None,
-            },
-            stamp(202),
-        );
-
-        let made: Vec<&str> = app
-            .session_commits()
-            .iter()
-            .map(|commit| commit.hash.as_str())
-            .collect();
-        assert_eq!(made, ["ours"]);
     }
 
     #[test]
@@ -8329,31 +8226,6 @@ mod tests {
     }
 
     #[test]
-    fn the_latest_test_run_is_kept_with_the_moment_its_call_finished() {
-        let run = |id: &str, passed: u64| Event::TestRun {
-            id: ToolCallId::new(id),
-            counts: Some(niobe_core::TestCounts {
-                passed,
-                failed: 0,
-                ignored: 0,
-                suites: 1,
-            }),
-            exit_code: Some(0),
-            failed: false,
-            failures: Vec::new(),
-        };
-        let mut app = app();
-        assert_eq!(app.test_run(), None, "no run is not a run of nothing");
-
-        app.apply_at(&run("t1", 3), at(1_000, 9, 30));
-        app.apply_at(&run("t2", 5), at(1_060, 9, 31));
-
-        let (latest, finished) = app.test_run().expect("the session ran its tests");
-        assert_eq!(latest.counts.map(|counts| counts.passed), Some(5));
-        assert_eq!(finished, Some(at(1_060, 9, 31)));
-    }
-
-    #[test]
     fn a_fold_with_no_clock_behind_it_leaves_no_times_rather_than_invented_ones() {
         // A JSON Lines log records no times. It is folded in before the event
         // loop has ticked, and what it produces has to say so.
@@ -8836,7 +8708,10 @@ mod tests {
     }
 
     fn millis(ms: u64) -> Stamp {
-        Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_millis(ms), None)
+        Stamp::new(
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(ms),
+            None,
+        )
     }
 
     fn said(text: &str) -> Event {
@@ -10000,5 +9875,82 @@ mod tests {
         typed_then_enter(&mut app, "go", KeyModifiers::NONE);
         app.perform(crate::menu::Action::Stop);
         assert!(app.take_interrupt());
+    }
+
+    /// A `cargo test` call `id` that starts at `from` seconds and, where
+    /// `counted`, ends at `to` with a run whose counts were read.
+    fn test_call(app: &mut App, id: &str, command: &str, from: u64, to: u64, counted: bool) {
+        let input = format!(r#"{{"command":"{command}"}}"#);
+        app.apply_at(&start(id, "Bash", &input, Some(command)), at(from, 9, 0));
+        app.apply_at(&ended(id, "Bash", ToolOutcome::Ok, 10), at(to, 9, 1));
+        app.apply_at(
+            &Event::TestRun {
+                id: id.into(),
+                counts: counted.then_some(niobe_core::TestCounts {
+                    passed: 3,
+                    failed: 0,
+                    ignored: 0,
+                    suites: 1,
+                }),
+                exit_code: Some(0),
+                failed: false,
+                failures: Vec::new(),
+            },
+            at(to, 9, 1),
+        );
+    }
+
+    fn last_call(app: &App) -> &Call {
+        app.entries()
+            .iter()
+            .rev()
+            .find_map(|entry| entry.calls.last())
+            .expect("a call was made")
+    }
+
+    #[test]
+    fn a_call_that_runs_the_tests_is_known_as_one_from_its_start() {
+        let mut app = app();
+        app.apply_at(
+            &start(
+                "t1",
+                "Bash",
+                r#"{"command":"cargo test"}"#,
+                Some("cargo test"),
+            ),
+            at(100, 9, 0),
+        );
+        assert!(last_call(&app).testing);
+        assert_eq!(last_call(&app).began(), Some(at(100, 9, 0)));
+
+        app.apply(&start("l1", "Bash", r#"{"command":"ls"}"#, Some("ls")));
+        assert!(!last_call(&app).testing, "a listing runs no tests");
+    }
+
+    #[test]
+    fn a_test_run_carries_how_long_the_last_counted_run_of_its_command_took() {
+        let mut app = app();
+        test_call(&mut app, "t1", "cargo test", 100, 142, true);
+        assert_eq!(last_call(&app).last_run, None, "nothing ran before it");
+
+        // A run whose counts were not read may have stopped anywhere, and is
+        // nothing to measure the next one against.
+        test_call(&mut app, "t2", "cargo test", 200, 205, false);
+        test_call(&mut app, "t3", "cargo test -p niobe-tui", 300, 310, true);
+        app.apply_at(
+            &start(
+                "t4",
+                "Bash",
+                r#"{"command":"cargo test"}"#,
+                Some("cargo test"),
+            ),
+            at(400, 9, 0),
+        );
+
+        assert_eq!(
+            last_call(&app).last_run,
+            Some(Duration::from_secs(42)),
+            "the last counted run of the same command, not of another one"
+        );
     }
 }

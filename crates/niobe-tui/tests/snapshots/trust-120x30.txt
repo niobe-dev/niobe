@@ -8,7 +8,7 @@
  ┃   What the agen┃                                                                                  ┃░░              │
  ┃   and what it c┃  /home/me/src/niobe/.niobe/config.toml                                           ┃░░              │
  ┃   You stay on t┃                                                                                  ┃░░              │
- ┃                ┃  It sets what only a config you trust may:                                       ┃es  +0 −0       │
+ ┃                ┃  It sets what only a config you trust may:                                       ┃░░              │
  ┃   No backend at┃                                                                                  ┃░░              │
  ┃                ┃  permissions      allow Edit, Bash, mcp__claude_ai_Notion__notion-search,        ┃░░              │
  ┃                ┃                   Bash(cargo test)                                               ┃░░              │

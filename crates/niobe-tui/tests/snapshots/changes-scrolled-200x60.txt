@@ -1,55 +1,55 @@
  Niobe  Session  Context  Model  View  Help                                                                                                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━━━━━━━━━━━━━━━━━ add etag support to the catalog fetcher so we stop re-downloading unchanged manifests ━━━━━━━━━━━━━━━━━━━━┓ ┌────────────────────────────── Usage ──────────────────────────────┐
- ┃ ▾ Bash ×2        git commit -m 'test: a 304 is answered from the cache', git commit -m 'feat: keep the etag bes…  0 B · 2.0s ┃ │ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40                          │
- ┃   ├ git commit -m 'test: a 304 is answered from the cache'                                                        0 B · 1.0s ┃ │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00                      │
- ┃   └ git commit -m 'feat: keep the etag beside the body'                                                           0 B · 1.0s ┃ │ ───────────────────────────────────────────────────────────────── │
- ┃                                                                                                                              ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
- ┃ > you                                                                                                                        ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k                                 │
- ┃   add etag support to the catalog fetcher so we stop re-downloading unchanged manifests                                      ┃ │ API-equiv ≥$0.04                                                  │
+ ┃ > you                                                                                                                        ┃ │ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40                          │
+ ┃   add etag support to the catalog fetcher so we stop re-downloading unchanged manifests                                      ┃ │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00                      │
  ┃                                                                                                                              ┃ │ ───────────────────────────────────────────────────────────────── │
- ┃ ◆ claude                                                                                                                     ┃ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
- ┃   Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                             ┃ └───────────────────────────────────────────────────────────────────┘
- ┃                                                                                                                              ┃ ┌───────────────────────────── Changes ─────────────────────────────┐
- ┃ ▾ Read ×3        catalog/fetch.ts, catalog/cache.ts, tests/fetch.test.ts                                      15.3 kB · 3.6s ┃ │     index.ts                                                +8 −6 │
- ┃   ├ catalog/fetch.ts                                                                                           7.2 kB · 1.2s ┃ │   tests/                                                          │
- ┃   ├ catalog/cache.ts                                                                                           3.1 kB · 1.2s ┃ │     etag.test.ts                                          +122 −8 │
- ┃   └ tests/fetch.test.ts                                                                                        4.9 kB · 1.2s ┃ │     fetch.test.ts                                         +76 −14 │
- ┃ ⚙ Notion·search  {}                                                                                                   1.1 kB ┃ │     helpers.ts                                              +5 −2 │
- ┃ ⚙ Notion·fetch   {}                                                                                                   2.5 kB ┃ │     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 │
- ┃ ✗ Notion·update… {}                                                                                                   failed ┃ │     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 │
- ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ │   web/                                                            │
- ┃                                                                                                                              ┃ │     components/Catalog.tsx                                +54 −31 │
- ┃ ◆ claude                                                                                                                     ┃ │     components/Manifest.tsx                                +18 −7 │
- ┃   Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ┃ │     hooks/useCatalog.ts                                   +27 −18 █
- ┃                                                                                                                              ┃ │     styles/catalog.css                                     +14 −9 █
- ┃ ⚙ Edit           catalog/fetch.ts                                                                               +6 −2 · 0.4s ┃ │   scripts/                                                        █
- ┃    41     const cached = cache.get(url);                                                                                     ┃ │     seed.ts                                                +22 −5 █
- ┃    42     const headers = new Headers(init.headers);                                                                         ┃ │     verify.ts                                              +9 −11 █
- ┃    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                             ┃ │ ▾ Commits  2 this session  1 unpushed                             █
- ┃    44 -   const res = await fetch(url, init);                                                                                ┃ │ ↑ 9f2c1ab  12m  feat: keep the etag beside the body               █
- ┃    43 +   if (cached?.etag) {                                                                                                ┃ │   41de07c   2h  test: a 304 is answered from the cache            █
- ┃    44 +     headers.set("If-None-Match", cached.etag);                                                                       ┃ │ ▾ This session  3 files  +≥30 −≥2                                 █
- ┃    45 +   }                                                                                                                  ┃ │   catalog/fetch.ts                                          +6 −2 █
- ┃    46 +   const res = await fetch(url, { ...init, headers });                                                                ┃ │     “Caching the etag beside the body so a 304 can be answered…”  █
- ┃    47 +   if (res.status === 304 && cached) return cached.body;                                                              ┃ │   catalog/etag.test.ts                                      +24 — █
- ┃    48     return res;                                                                                                        ┃ │     “Rewriting the 304 test around the cached body.”              █
- ┃       …                                                                                                                      ┃ │   docs/notebooks/catalog.ipynb                                — — █
- ┃   115     cache.set(url, {                                                                                                   ┃ │     “The notebook that demonstrates the fetcher needs the new …”  █
- ┃   116 +     etag: res.headers.get("ETag"),                                                                                   ┃ └───────────────────────────────────────────────────────────────────┘
- ┃   117       body,                                                                                                            ┃ ┌──────────────────────────── Activity ─────────────────────────────┐
- ┃   └ allowed by you                                                                                                           ┃ │ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    │
- ┃                                                                                                                              ┃ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
- ┃ ◆ claude                                                                                                                     ┃ │   └ Reading tests/stream.rs                                       │
- ┃   Rewriting the 304 test around the cached body.                                                                             ┃ │ ▾ Decisions  2                                                    │
- ┃                                                                                                                              ┃ │   13:39 Key the cache on the request URL, not the manifest id —   │
- ┃ ◆ claude                                                                                                                     ┃ │         two manifests can share an id across catalogs.            │
- ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ │   13:39 Reuse the existing LRU instead of a new Map — avoids a    │
- ┃                                                                                                                              ┃ │         second eviction policy.                                   │
- ┃ ✗ Bash           npm test -- fetch                                                                             exit 1 · 0.4s ┃ │ ▾ Tools  10 calls ✗ 2 · 0 denied · 21.6 kB out                    │
- ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │   Bash       3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
+ ┃ ◆ claude                                                                                                                     ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
+ ┃   Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                             ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k                                 │
+ ┃                                                                                                                              ┃ │ API-equiv ≥$0.04                                                  │
+ ┃ ▾ Read ×3        catalog/fetch.ts, catalog/cache.ts, tests/fetch.test.ts                                      15.3 kB · 3.6s ┃ │ ───────────────────────────────────────────────────────────────── │
+ ┃   ├ catalog/fetch.ts                                                                                           7.2 kB · 1.2s ┃ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
+ ┃   ├ catalog/cache.ts                                                                                           3.1 kB · 1.2s ┃ └───────────────────────────────────────────────────────────────────┘
+ ┃   └ tests/fetch.test.ts                                                                                        4.9 kB · 1.2s ┃ ┌───────────────────────────── Changes ─────────────────────────────┐
+ ┃ ⚙ Notion·search  {}                                                                                                   1.1 kB ┃ │     cache/lru.ts                                           +31 −9 │
+ ┃ ⚙ Notion·fetch   {}                                                                                                   2.5 kB ┃ │     cache/index.ts                                         +12 −0 │
+ ┃ ✗ Notion·update… {}                                                                                                   failed ┃ │   docs/                                                           │
+ ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ │     caching.md                                            +64 −22 │
+ ┃                                                                                                                              ┃ │     adr/0004-etags.md                                      +34 −1 │
+ ┃ ◆ claude                                                                                                                     ┃ │     diagrams/cache.png                                        — — █
+ ┃   Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ┃ │   server/                                                         █
+ ┃                                                                                                                              ┃ │     handlers/manifest.ts                                   +97 −4 █
+ ┃ ⚙ Edit           catalog/fetch.ts                                                                               +6 −2 · 0.4s ┃ │     handlers/health.ts                                     +3 −19 █
+ ┃    41     const cached = cache.get(url);                                                                                     ┃ │     middleware/etag.ts                                    +41 −37 █
+ ┃    42     const headers = new Headers(init.headers);                                                                         ┃ │     index.ts                                                +8 −6 █
+ ┃    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                             ┃ │   tests/                                                          █
+ ┃    44 -   const res = await fetch(url, init);                                                                                ┃ │     etag.test.ts                                          +122 −8 █
+ ┃    43 +   if (cached?.etag) {                                                                                                ┃ │     fetch.test.ts                                         +76 −14 █
+ ┃    44 +     headers.set("If-None-Match", cached.etag);                                                                       ┃ │     helpers.ts                                              +5 −2 █
+ ┃    45 +   }                                                                                                                  ┃ │     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 █
+ ┃    46 +   const res = await fetch(url, { ...init, headers });                                                                ┃ │     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 █
+ ┃    47 +   if (res.status === 304 && cached) return cached.body;                                                              ┃ │   web/                                                            █
+ ┃    48     return res;                                                                                                        ┃ │     components/Catalog.tsx                                +54 −31 █
+ ┃       …                                                                                                                      ┃ │     components/Manifest.tsx                                +18 −7 █
+ ┃   115     cache.set(url, {                                                                                                   ┃ │     hooks/useCatalog.ts                                   +27 −18 █
+ ┃   116 +     etag: res.headers.get("ETag"),                                                                                   ┃ │     styles/catalog.css                                     +14 −9 █
+ ┃   117       body,                                                                                                            ┃ │   scripts/                                                        █
+ ┃   └ allowed by you                                                                                                           ┃ │     seed.ts                                                +22 −5 █
+ ┃                                                                                                                              ┃ │     verify.ts                                              +9 −11 █
+ ┃ ◆ claude                                                                                                                     ┃ └───────────────────────────────────────────────────────────────────┘
+ ┃   Rewriting the 304 test around the cached body.                                                                             ┃ ┌──────────────────────────── Activity ─────────────────────────────┐
+ ┃                                                                                                                              ┃ │ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    │
+ ┃ ◆ claude                                                                                                                     ┃ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ │   └ Reading tests/stream.rs                                       │
+ ┃                                                                                                                              ┃ │ ▾ Decisions  2                                                    │
+ ┃ ✗ Bash           npm test -- fetch                                                                             exit 1 · 0.4s ┃ │   13:39 Key the cache on the request URL, not the manifest id —   │
+ ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │         two manifests can share an id across catalogs.            │
+ ┃                                                                                                                              ┃ │   13:39 Reuse the existing LRU instead of a new Map — avoids a    │
+ ┃ ◆ claude                                                                                                                     ┃ │         second eviction policy.                                   │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ┃ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
  ┃                                                                                                                              ┃ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
- ┃ ◆ claude                                                                                                                     ┃ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ┃ │   Edit       1 ▓▓▓▓                                               │
+ ┃                                                                                                                              ┃ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
+ ┃                                                                                                                              ┃ │   Bash       1 ▓▓▓▓         ✗ 1                                   │
+ ┃                                                                                                                              ┃ │   Edit       1 ▓▓▓▓                                               │
  ┃                                                                                                                              ┃ │                                                                   │
  ┃                                                                                                                              ┃ │                                                                   │
  ┃                                                                                                                              ┃ │                                                                   │

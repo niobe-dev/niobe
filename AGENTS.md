@@ -113,7 +113,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `calls.rs` draws a tool call as a row of a table — its name, the tag of the sub-agent that made
   it where one did, each in a column as wide as the transcript's widest, what it does, and on the
   right what it cost, by what the backend reported and the shell's own clock — with
-  what a test run reported under the call that ran it, a sub-agent's words as a row of the same
+  what a test run reported under the call that ran it, beside a bar of its counts — and while it
+  runs, how long it has run against the last whole run of the same command — a sub-agent's words as a row of the same
   table, rows with nothing under them on consecutive lines, a run of calls to one tool as one
   group that Ctrl+O folds, and — where `a` is pressed in a side pane — each turn's sub-agent rows
   grouped under a heading per agent, `tags.rs` names each sub-agent by one short word of the kind of agent

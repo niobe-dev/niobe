@@ -19,7 +19,6 @@
 //! shows the tool mix instead, which is measured.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
@@ -31,8 +30,7 @@ use ratatui::widgets::{
 };
 
 use niobe_core::event::{Billing, Context, UsageWindow};
-use niobe_core::session::{FileChanges, SessionState, TestRunRecord, ToolTotals, Totals};
-use niobe_core::test_run::FailedTests;
+use niobe_core::session::{SessionState, ToolTotals, Totals};
 
 use crate::app::{
     Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker, Purpose,
@@ -2123,7 +2121,8 @@ fn is_row(entry: &Entry) -> bool {
 /// What an entry's lines are drawn from, as one number.
 ///
 /// Whether the diffs are open goes in only for an entry that holds a diff it
-/// would cut, so opening them lays out again those entries and no other.
+/// would cut, so opening them lays out again those entries and no other; the
+/// clock goes in only for one holding a test run still going.
 fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2135,8 +2134,23 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64
     if holds_a_cut_diff(entry) {
         detail.diffs_open.hash(&mut hasher);
     }
+    testing_for(entry, detail.now).hash(&mut hasher);
     theme.hash(&mut hasher);
     hasher.finish()
+}
+
+/// How many whole seconds the entry's test runs still going have run at
+/// `now`, which is what their lines say: only an entry holding one is laid
+/// out again as the clock moves, and only once a second.
+fn testing_for(entry: &Entry, now: Option<crate::clock::Stamp>) -> Vec<u64> {
+    entry
+        .calls
+        .iter()
+        .filter(|call| call.testing && call.running())
+        .filter_map(|call| now.zip(call.began()))
+        .filter_map(|(now, began)| now.since(began))
+        .map(|ran| ran.as_secs())
+        .collect()
 }
 
 /// Whether any call of `entry` changed more rows than a diff draws unopened.
@@ -2155,6 +2169,7 @@ fn transcript_detail(app: &App) -> Detail {
         // Worked out from the entries where they are drawn.
         columns: crate::calls::Columns::default(),
         grouped: false,
+        now: app.stamp(),
     }
 }
 
@@ -3619,8 +3634,8 @@ const AGENT_LABEL_LEAST: usize = 12;
 /// The indent and the `└ ` an agent's sub-line opens with.
 const AGENT_SUBLINE: usize = 4;
 
-/// The Changes pane: what the repository says about the working tree, what
-/// this session says it changed, and what it has committed.
+/// The Changes pane: the branch, and what the repository says the working
+/// tree holds that is not committed — whoever changed it.
 fn draw_changes(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_scrolling_pane(
         frame,
@@ -3718,32 +3733,21 @@ fn mark_cursor(rows: &mut [Line<'static>], headers: &[(Section, usize)], cursor:
     }
 }
 
-/// Every row the pane has, folded sections included as their header alone.
+/// Every row the pane has, the working tree folded to its header alone.
+///
+/// A directory that is not a repository has no branch and no working tree,
+/// and a section drawn empty would say it had nothing changed rather than
+/// that there is no repository to have changed anything.
 fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let repo = app.repo();
-    let session = app.session();
     let mut rows = PaneRows::default();
-
-    // A directory that is not a repository has no branch and no commits, and
-    // sections drawn empty would say it had none rather than that there is no
-    // repository to have any.
-    let in_repository = repo.branch.is_some();
     if let Some(branch) = &repo.branch {
         rows.extend([branch_row(branch, repo, width, theme)]);
-    }
-
-    if in_repository {
         rows.section(
             Section::WorkingTree,
             working_tree_rows(app, repo, width, theme),
         );
-        rows.section(Section::Commits, commit_rows(app, repo, width, theme));
     }
-    rows.section(
-        Section::Edited,
-        session_file_rows(app, session, width, theme),
-    );
-    rows.section(Section::Tests, test_rows(app, width, theme));
     rows
 }
 
@@ -3966,375 +3970,6 @@ fn working_tree_rows(
         });
     }
     rows
-}
-
-/// What this session's own edit tools said they changed.
-///
-/// A floor rather than a measurement: where a call did not say how many lines
-/// it touched the figure carries `≥`, and where none of them did it is an em
-/// dash. The paths are the backend's — absolute where it could not say
-/// otherwise — which is the other reason these rows are not folded into the
-/// working tree's: the two lists do not even name their files the same way.
-fn session_file_rows(
-    app: &App,
-    session: &SessionState,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let files = session.files();
-    // Summed from the per-file fold rather than kept as a second counter, so
-    // the header and the rows under it cannot disagree. A section total is a
-    // floor as soon as any one file's is.
-    let added: u64 = files.iter().fold(0, |a, f| a.saturating_add(f.added));
-    let removed: u64 = files.iter().fold(0, |r, f| r.saturating_add(f.removed));
-    let added_stated = files.iter().all(FileChanges::added_stated);
-    let removed_stated = files.iter().all(FileChanges::removed_stated);
-    let summary = changed_figures(
-        files.len(),
-        count('+', added, added_stated),
-        count('−', removed, removed_stated),
-        theme,
-    );
-
-    let folded = app.folded(Section::Edited);
-    let mut rows = vec![section_header(
-        folded,
-        "This session",
-        summary,
-        width,
-        theme,
-    )];
-    if folded || files.is_empty() {
-        return rows;
-    }
-
-    for file in files {
-        rows.push(counted_row(
-            ROW_INDENT,
-            &file.path,
-            Tag::None,
-            &count('+', file.added, file.added_stated()),
-            &count('−', file.removed, file.removed_stated()),
-            width,
-            theme,
-        ));
-        if let Some(why) = &file.why {
-            rows.push(
-                Line::from(format!(
-                    "    “{}”",
-                    text::truncate(why, width.saturating_sub(7))
-                ))
-                .style(Style::new().fg(theme.dim).italic()),
-            );
-        }
-    }
-    rows
-}
-
-/// `▾ Tests  637 passed · 0 failed · 30 suites · 4.2s ago`: what the
-/// session's latest test run said about itself, and how long ago its call
-/// finished. No section at all where the session has run no tests, which is
-/// not a run that passed nothing.
-///
-/// A run whose output did not hold the whole run says that it ran and that
-/// its result was not read, with the status it exited with where that was a
-/// failure — never a count it did not find. One the backend still knows
-/// failed after its tests started, or that listed a failing test, says that
-/// it failed and that its counts were not read, with each list it left under
-/// the header. Where the pane is too narrow for all of it, the suites go
-/// first, then the age, then the ignored and the passed: the failures are what
-/// the section is for.
-fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let Some((run, at)) = app.test_run() else {
-        return Vec::new();
-    };
-    let age = at.zip(app.stamp()).and_then(|(at, now)| now.since(at));
-    let folded = app.folded(Section::Tests);
-    let mut rows = vec![section_header(
-        folded,
-        "Tests",
-        test_figures(run, age, theme),
-        width,
-        theme,
-    )];
-    if !folded {
-        rows.extend(failure_rows(&run.failures, width, theme));
-    }
-    rows
-}
-
-/// The most failing tests the section names one to a row, across every
-/// binary; the rest are counted, each binary's on a row of its own.
-const NAMED_FAILURES: usize = 8;
-
-/// For each binary that listed its failures, `failing in --test cli` and a
-/// row per test it listed, in the order they ran.
-///
-/// Labelled as each binary's because that is all they are: a binary whose
-/// list was cut away or filtered out may have failed too, and is not here.
-fn failure_rows(failures: &[FailedTests], width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let dim = Style::new().fg(theme.dim);
-    let room = width.saturating_sub(text::width("  ✗ "));
-    let mut left = NAMED_FAILURES;
-    let mut rows = Vec::new();
-    for list in failures {
-        rows.push(Line::from(Span::styled(
-            text::truncate(&format!("  failing in {}", list.binary), width),
-            dim,
-        )));
-        let shown = list.tests.len().min(left);
-        left = left.saturating_sub(shown);
-        rows.extend(list.tests.iter().take(shown).map(|test| {
-            Line::from(vec![
-                Span::styled("  ✗ ", Style::new().fg(theme.del)),
-                Span::styled(text::truncate(test, room), Style::new().fg(theme.del)),
-            ])
-        }));
-        let more = list.tests.len().saturating_sub(shown);
-        if more > 0 {
-            rows.push(Line::from(Span::styled(
-                format!("    … {more} more"),
-                dim.italic(),
-            )));
-        }
-    }
-    rows
-}
-
-/// Every figure a test run's header can carry, ranked for [`narrowed`].
-fn test_figures(run: &TestRunRecord, age: Option<Duration>, theme: &Theme) -> Vec<Figure> {
-    let dim = Style::new().fg(theme.dim);
-    let mut figures = match (run.counts, run.failed) {
-        (Some(counts), _) => test_counts(counts, theme),
-        (None, true) => test_failed_uncounted(run.exit_code, theme),
-        (None, false) => test_not_read(run.exit_code, theme),
-    };
-    if let Some(counts) = run.counts {
-        figures.push(Figure::after(
-            " · ",
-            4,
-            Span::styled(suites_said(counts.suites), dim),
-        ));
-    }
-    if let Some(age) = age {
-        figures.push(Figure::after(
-            " · ",
-            3,
-            Span::styled(format!("{} ago", clock::ago(age)), dim),
-        ));
-    }
-    figures
-}
-
-/// `637 passed · 0 failed`, with a failing run's failures in the failure
-/// colour and its passes no longer in the colour that says all is well.
-fn test_counts(counts: niobe_core::TestCounts, theme: &Theme) -> Vec<Figure> {
-    let dim = Style::new().fg(theme.dim);
-    let (passed, failed) = match counts.failing() {
-        true => (Style::new().fg(theme.fg), Style::new().fg(theme.del).bold()),
-        false => (Style::new().fg(theme.add), dim),
-    };
-    let mut figures = vec![
-        Figure::lead(1, Span::styled(format!("{} passed", counts.passed), passed)),
-        Figure::after(
-            " · ",
-            0,
-            Span::styled(format!("{} failed", counts.failed), failed),
-        ),
-    ];
-    if counts.ignored > 0 {
-        figures.push(Figure::after(
-            " · ",
-            2,
-            Span::styled(format!("{} ignored", counts.ignored), dim),
-        ));
-    }
-    figures
-}
-
-/// `exit 101 · result not read`: a run that happened and whose counts are not
-/// known. A zero status is not drawn, because a command whose output was
-/// filtered exits with the filter's status rather than the run's.
-fn test_not_read(exit_code: Option<i32>, theme: &Theme) -> Vec<Figure> {
-    let not_read = Span::styled("result not read", Style::new().fg(theme.dim));
-    match exit_code.filter(|code| *code != 0) {
-        Some(code) => vec![
-            Figure::lead(
-                0,
-                Span::styled(format!("exit {code}"), Style::new().fg(theme.del)),
-            ),
-            Figure::after(" · ", 1, not_read),
-        ],
-        None => vec![Figure::lead(0, not_read)],
-    }
-}
-
-/// `failed · exit 101 · counts not read`: a run known to have failed after its
-/// tests started, whose output did not hold the counts — how many failed, or
-/// how many ran, is not something the rest of it can say.
-///
-/// A status of `0` is left unsaid: that is a run known to have failed from the
-/// failures it listed, piped through a filter whose status the command's is,
-/// and `exit 0` beside `failed` would read as a contradiction.
-fn test_failed_uncounted(exit_code: Option<i32>, theme: &Theme) -> Vec<Figure> {
-    let mut figures = vec![Figure::lead(
-        0,
-        Span::styled("failed", Style::new().fg(theme.del).bold()),
-    )];
-    if let Some(code) = exit_code.filter(|code| *code != 0) {
-        figures.push(Figure::after(
-            " · ",
-            1,
-            Span::styled(format!("exit {code}"), Style::new().fg(theme.del)),
-        ));
-    }
-    figures.push(Figure::after(
-        " · ",
-        2,
-        Span::styled("counts not read", Style::new().fg(theme.dim)),
-    ));
-    figures
-}
-
-/// `1 suite`, `30 suites`.
-fn suites_said(suites: u64) -> String {
-    match suites {
-        1 => "1 suite".to_owned(),
-        n => format!("{n} suites"),
-    }
-}
-
-/// The commits the session has made, newest first: only those it made
-/// itself, never what anything else committed to the same repository while it
-/// was open.
-fn commit_rows(
-    app: &App,
-    repo: &crate::app::Repo,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let commits = app.session_commits();
-    // An upstream the repository could not compare against leaves the count
-    // not known, and a count would be a guess dressed as a figure.
-    let unpushed = match commits.iter().any(|commit| commit.pushed.is_none()) {
-        true => None,
-        false => Some(
-            commits
-                .iter()
-                .filter(|commit| commit.pushed == Some(false))
-                .count(),
-        ),
-    };
-    let summary = commit_figures(repo.read, commits.len(), unpushed, theme);
-
-    let folded = app.folded(Section::Commits);
-    let mut rows = vec![section_header(folded, "Commits", summary, width, theme)];
-    if folded {
-        return rows;
-    }
-    let ages: Vec<String> = commits
-        .iter()
-        .map(|commit| age_of(commit, app.stamp()))
-        .collect();
-    // One column for every age in the section, so they line up under each
-    // other however the magnitudes differ.
-    let column = ages.iter().map(|age| text::width(age)).max().unwrap_or(0);
-    for (commit, age) in commits.into_iter().zip(ages) {
-        rows.push(commit_row(commit, &age, column, width, theme));
-    }
-    rows
-}
-
-/// `2 this session  1 unpushed`. What has not reached the upstream is what the
-/// operator acts on, so it is kept where the count of commits gives way.
-fn commit_figures(
-    read: bool,
-    commits: usize,
-    unpushed: Option<usize>,
-    theme: &Theme,
-) -> Vec<Figure> {
-    let mut figures = vec![Figure::lead(
-        1,
-        Span::styled(
-            match (read, commits) {
-                (false, _) => "—".to_owned(),
-                (true, 0) => "none this session".to_owned(),
-                (true, n) => format!("{n} this session"),
-            },
-            Style::new().fg(match read {
-                true => theme.fg,
-                false => theme.dim,
-            }),
-        ),
-    )];
-    if commits > 0 {
-        figures.push(Figure::after(
-            "  ",
-            0,
-            Span::styled(
-                match unpushed {
-                    None => "unpushed —".to_owned(),
-                    Some(n) => format!("{n} unpushed"),
-                },
-                Style::new().fg(theme.hot),
-            ),
-        ));
-    }
-    figures
-}
-
-/// How long ago a commit was made, or an em dash where that cannot be told: a
-/// commit the repository did not date, a shell that has not read its clock
-/// yet, or a commit dated after the moment being drawn against — which is a
-/// clock that moved rather than an age.
-fn age_of(commit: &crate::app::Commit, now: Option<crate::clock::Stamp>) -> String {
-    commit
-        .at
-        .zip(now)
-        .and_then(|(at, now)| now.at().duration_since(at).ok())
-        .map(clock::ago)
-        .unwrap_or_else(|| "—".to_owned())
-}
-
-/// `↑ c4fed15  12m  the subject`: one commit, marked where its upstream has
-/// not got it.
-///
-/// The mark is what says pushed from unpushed, not the colour: the pane has to
-/// read on a terminal whose palette the operator chose, and in a theme where
-/// the warning colour is close to the body's.
-fn commit_row(
-    commit: &crate::app::Commit,
-    age: &str,
-    column: usize,
-    width: usize,
-    theme: &Theme,
-) -> Line<'static> {
-    let (mark, style) = match commit.pushed {
-        Some(false) => ("↑ ", Style::new().fg(theme.hot)),
-        Some(true) => ("  ", Style::new().fg(theme.dim)),
-        None => ("? ", Style::new().fg(theme.dim)),
-    };
-    let age = format!(
-        "{}{age}",
-        " ".repeat(column.saturating_sub(text::width(age)))
-    );
-    let used = text::width(mark) + text::width(&commit.hash) + 2 + text::width(&age) + 2;
-    let subject = text::truncate(&commit.subject, width.saturating_sub(used));
-
-    Line::from(vec![
-        Span::styled(mark, style),
-        Span::styled(commit.hash.clone(), style),
-        Span::raw("  "),
-        Span::styled(age, Style::new().fg(theme.dim)),
-        Span::raw("  "),
-        Span::styled(
-            subject,
-            match commit.pushed {
-                Some(true) => Style::new().fg(theme.dim),
-                Some(false) | None => Style::new().fg(theme.fg),
-            },
-        ),
-    ])
 }
 
 /// What a decision's time column is drawn in: `13:41` and a space.
@@ -5522,23 +5157,14 @@ mod tests {
         }
     }
 
-    fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> niobe_core::Event {
-        niobe_core::Event::FileChange {
-            path: path.to_owned(),
-            added,
-            removed,
-            hunks: Vec::new(),
-        }
-    }
-
-    /// What one row of the session's own files reads as, counts and all.
-    fn row(file: &FileChanges, width: usize) -> String {
+    /// What one row of the working tree reads as, counts and all.
+    fn row(path: &str, added: Option<u64>, removed: Option<u64>, width: usize) -> String {
         counted_row(
             ROW_INDENT,
-            &file.path,
+            path,
             Tag::None,
-            &count('+', file.added, file.added_stated()),
-            &count('−', file.removed, file.removed_stated()),
+            &measured('+', added),
+            &measured('−', removed),
             width,
             &Theme::default(),
         )
@@ -5561,22 +5187,17 @@ mod tests {
     }
 
     #[test]
-    fn a_file_row_reads_as_the_counts_the_session_can_defend() {
-        let mut state = SessionState::new();
-        state.apply(&changed("catalog/fetch.ts", Some(38), Some(9)));
-        state.apply(&changed("notes.md", Some(1), None));
-        state.apply(&changed("run.ipynb", None, None));
-
+    fn a_file_row_reads_as_the_counts_the_repository_gave() {
         assert_eq!(
-            row(&state.files()[0], 40),
+            row("catalog/fetch.ts", Some(38), Some(9), 40),
             "  catalog/fetch.ts                +38 −9"
         );
         assert_eq!(
-            row(&state.files()[1], 40),
-            "  notes.md                          +1 —"
+            row("notes.md", Some(1), Some(0), 40),
+            "  notes.md                         +1 −0"
         );
         assert_eq!(
-            row(&state.files()[2], 40),
+            row("run.ipynb", None, None, 40),
             "  run.ipynb                          — —"
         );
     }
@@ -5585,49 +5206,15 @@ mod tests {
     /// the file; a count cut anywhere is a different number.
     #[test]
     fn a_path_too_long_for_the_pane_gives_way_to_its_counts() {
-        let mut state = SessionState::new();
-        state.apply(&changed(
+        let row = row(
             "crates/niobe-bridge-claude/src/translate.rs",
             Some(120),
             Some(44),
-        ));
-
-        let row = row(&state.files()[0], 32);
+            32,
+        );
         assert!(row.ends_with(" +120 −44"), "{row:?}");
         assert!(row.contains("translate.rs"), "{row:?}");
         assert_eq!(text::width(&row), 32, "{row:?}");
-    }
-
-    /// The pane has to read on a sixteen-colour terminal and in a theme whose
-    /// warning colour is close to its body colour, so what says pushed from
-    /// unpushed cannot be the colour alone.
-    #[test]
-    fn a_commit_the_upstream_has_not_got_is_marked_and_not_only_coloured() {
-        let theme = Theme::default();
-        let commit = |pushed| crate::app::Commit {
-            hash: "c4fed15".to_owned(),
-            subject: "keep the etag beside the body".to_owned(),
-            at: None,
-            pushed,
-        };
-        let text = |pushed| -> String {
-            commit_row(&commit(pushed), "12m", 3, 60, &theme)
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
-        };
-
-        assert!(
-            text(Some(false)).starts_with("↑ "),
-            "{:?}",
-            text(Some(false))
-        );
-        assert!(text(Some(true)).starts_with("  "), "{:?}", text(Some(true)));
-        assert!(
-            text(None).starts_with("? "),
-            "an upstream git would not compare against is not a commit that is pushed"
-        );
     }
 
     /// `+0 −0` is a file the repository counted and found unchanged by any
@@ -6371,46 +5958,13 @@ mod tests {
             output_bytes: 168_000,
             ..ToolTotals::default()
         };
-        let counted = TestRunRecord {
-            counts: Some(niobe_core::TestCounts {
-                passed: 637,
-                failed: 2,
-                ignored: 4,
-                suites: 30,
-            }),
-            exit_code: Some(101),
-            failed: true,
-            failures: Vec::new(),
-        };
-        let uncounted = TestRunRecord {
-            counts: None,
-            exit_code: Some(101),
-            failed: true,
-            failures: Vec::new(),
-        };
-        let unread = TestRunRecord {
-            counts: None,
-            exit_code: Some(101),
-            failed: false,
-            failures: Vec::new(),
-        };
-        let age = Some(Duration::from_secs(95));
         vec![
             ("Sub-agents", agent_figures(2, 13, 4, (1, 0), theme)),
             (
                 "Working tree",
                 changed_figures(23, "+9770".to_owned(), "−2590".to_owned(), theme),
             ),
-            (
-                "This session",
-                changed_figures(3, "+≥3000".to_owned(), "−≥200".to_owned(), theme),
-            ),
-            ("Commits", commit_figures(true, 12, Some(11), theme)),
-            ("Commits", commit_figures(true, 12, None, theme)),
             ("Tools", tool_summary(&tools, theme)),
-            ("Tests", test_figures(&counted, age, theme)),
-            ("Tests", test_figures(&uncounted, age, theme)),
-            ("Tests", test_figures(&unread, age, theme)),
         ]
     }
 
@@ -6690,6 +6244,50 @@ mod tests {
             rows[6].contains("m1.rs"),
             "the session's own row stays: {grouped:?}"
         );
+    }
+
+    /// A test run in progress says how long it has run, so the clock moving
+    /// lays it out again — once a second, and nothing else with it.
+    #[test]
+    fn the_clock_lays_out_again_only_a_test_run_still_going_and_once_a_second() {
+        let second = |millis: u64| {
+            crate::clock::Stamp::new(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis),
+                None,
+            )
+        };
+        let start = |id: &str, command: &str| niobe_core::Event::ToolCallStart {
+            id: id.into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            summary: Some(command.to_owned()),
+            agent: None,
+        };
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply_at(&start("l1", "ls"), second(0));
+        app.apply_at(
+            &niobe_core::Event::UserMessage {
+                text: "and the tests".to_owned(),
+            },
+            second(0),
+        );
+        app.apply_at(&start("t1", "cargo test"), second(1_000));
+        let keys = |now: u64| -> Vec<u64> {
+            let detail = Detail {
+                now: Some(second(now)),
+                ..Detail::default()
+            };
+            app.entries()
+                .iter()
+                .map(|entry| drawn_from(entry, 120, detail, &Theme::default()))
+                .collect()
+        };
+
+        let at = keys(5_000);
+        assert_eq!(at, keys(5_900), "the same whole second draws the same");
+        let later = keys(6_000);
+        let changed: Vec<usize> = (0..at.len()).filter(|&i| at[i] != later[i]).collect();
+        assert_eq!(changed, vec![at.len() - 1], "only the test run moved");
     }
 
     #[test]

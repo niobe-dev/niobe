@@ -9,10 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use niobe_store::Store;
-use niobe_tui::app::{Commit, Repo, WorkingFile};
+use niobe_tui::app::{Repo, WorkingFile};
 use niobe_tui::watch::Watch;
 
 /// The directory in a repository that holds Niobe's own files.
@@ -379,47 +379,6 @@ const REFRESH: Duration = Duration::from_secs(2);
 /// two. A pane is not worth a core, and the operator's own build is.
 const IDLE_SHARE: u32 = 20;
 
-/// Where the commits the session may have made are counted from.
-///
-/// Every commit listed is one made since the session started, which is as
-/// far as the repository can say: it does not record which process made a
-/// commit. The shell narrows them to the ones made inside the session's own
-/// calls to git.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Since<'a> {
-    /// The session has made no commits yet, so none are listed. The first read
-    /// of a session, which is what the rest are measured against.
-    Nothing,
-    /// The commit the session started on, and when it started: what `HEAD`
-    /// has gained since that commit and was committed after that moment. A
-    /// checkout or a pull moves `HEAD` onto commits made before it, which
-    /// nobody in this session made.
-    Commit(&'a str, SystemTime),
-    /// The repository had no commits when the session started, so every commit
-    /// in it made after that moment is one the session may have made.
-    Everything(SystemTime),
-}
-
-/// The moment a session starts, to the second: a commit's date is whole
-/// seconds, and one made in the second the session started is its own.
-fn session_started() -> SystemTime {
-    let now = SystemTime::now();
-    let seconds = now
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
-    UNIX_EPOCH
-        .checked_add(Duration::from_secs(seconds))
-        .unwrap_or(now)
-}
-
-/// One read of the repository: what the shell shows, and the commit `HEAD` was
-/// on, which the next reads measure the commits the session may have made from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Read {
-    repo: Repo,
-    head: Option<String>,
-}
-
 /// Reads the repository a session is running in, on a thread of its own.
 ///
 /// Handed to the shell as its [`Watch`]: the event loop asks once a tick and
@@ -477,28 +436,17 @@ pub fn watch(root: &Path) -> Watcher {
 /// worked on screen: an emptied pane and a repository with nothing in it would
 /// look the same, and only one of them would be true.
 fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver<()>) {
-    // The commit the session started on, taken from the first read that
-    // worked. `Some(None)` is a repository that had no commits then.
-    let mut started_on: Option<Option<String>> = None;
-    let started = session_started();
     let mut last: Option<Repo> = None;
 
     loop {
-        let since = match &started_on {
-            None => Since::Nothing,
-            Some(None) => Since::Everything(started),
-            Some(Some(oid)) => Since::Commit(oid, started),
-        };
-
         let began = Instant::now();
-        if let Ok(read) = read(root, name, since) {
-            started_on.get_or_insert(read.head);
-            if last.as_ref() != Some(&read.repo) {
-                if reads.send(read.repo.clone()).is_err() {
-                    return;
-                }
-                last = Some(read.repo);
+        if let Ok(repo) = read(root, name)
+            && last.as_ref() != Some(&repo)
+        {
+            if reads.send(repo.clone()).is_err() {
+                return;
             }
+            last = Some(repo);
         }
         let idle = REFRESH.max(began.elapsed().saturating_mul(IDLE_SHARE));
 
@@ -513,7 +461,7 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver
 }
 
 /// Everything the shell shows about the repository at `root`, in one pass.
-fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
+fn read(root: &Path, name: &str) -> Result<Repo, String> {
     let status = branch_status(&git(
         root,
         // The per-file lines are discarded — what the tree did to each file is
@@ -535,37 +483,6 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
         Some(_) => working_tree(&git(root, &["diff", "--numstat", "-z", "HEAD"])?),
     };
 
-    let (listed, from) = match since {
-        Since::Nothing => (Vec::new(), UNIX_EPOCH),
-        Since::Everything(_) if status.head.is_none() => (Vec::new(), UNIX_EPOCH),
-        Since::Everything(from) => (
-            commits(&git(
-                root,
-                &["log", "-z", "--format=%h%x00%s%x00%ct", "HEAD"],
-            )?),
-            from,
-        ),
-        Since::Commit(oid, from) => (
-            commits(&git(
-                root,
-                &[
-                    "log",
-                    "-z",
-                    "--format=%h%x00%s%x00%ct",
-                    &format!("{oid}..HEAD"),
-                ],
-            )?),
-            from,
-        ),
-    };
-    // A commit with no date cannot be placed after the session started, so
-    // it is not claimed as the session's.
-    let listed = listed
-        .into_iter()
-        .filter(|commit| commit.at.is_some_and(|at| at >= from))
-        .collect();
-
-    let commits = pushed(root, listed, &status)?;
     // Listed from the root, which is where the agent runs and the operator's
     // commands do, so each path is the one both would name the file by. `-t`
     // tags each with what git holds of it, which is what says a file is new:
@@ -588,18 +505,14 @@ fn read(root: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
     );
     working.sort_by(|one, other| one.path.cmp(&other.path));
     let files = files(tree.into_iter().map(|(_, path)| path));
-    Ok(Read {
-        repo: Repo {
-            name: name.to_owned(),
-            branch: status.branch,
-            read: true,
-            ahead: status.ahead,
-            behind: status.behind,
-            working,
-            commits,
-            files,
-        },
-        head: status.head,
+    Ok(Repo {
+        name: name.to_owned(),
+        branch: status.branch,
+        read: true,
+        ahead: status.ahead,
+        behind: status.behind,
+        working,
+        files,
     })
 }
 
@@ -656,48 +569,6 @@ fn lines_in(bytes: &[u8]) -> Option<u64> {
     u64::try_from(breaks + unended).ok()
 }
 
-/// Says, for each of `listed`, whether the branch's upstream already has it.
-///
-/// Three of the four answers cost nothing: a branch with no upstream has
-/// nowhere to have pushed anything, a branch that is not ahead of its upstream
-/// has pushed all of it, and a branch whose upstream the repository cannot
-/// find — which git reports by naming the upstream and then refusing to say
-/// how far apart the two are — is not known either way. Only a branch that is
-/// genuinely ahead has to be asked which of its commits are the ones ahead.
-fn pushed(root: &Path, listed: Vec<Commit>, status: &Branch) -> Result<Vec<Commit>, String> {
-    if listed.is_empty() {
-        return Ok(listed);
-    }
-    if !status.upstream {
-        return Ok(said(listed, Some(false)));
-    }
-    let Some(ahead) = status.ahead else {
-        return Ok(said(listed, None));
-    };
-    if ahead == 0 {
-        return Ok(said(listed, Some(true)));
-    }
-
-    let unpushed = git(root, &["log", "--format=%h", "@{upstream}..HEAD"])?;
-    let unpushed: Vec<&str> = unpushed.lines().map(str::trim).collect();
-    Ok(listed
-        .into_iter()
-        .map(|commit| Commit {
-            pushed: Some(!unpushed.contains(&commit.hash.as_str())),
-            ..commit
-        })
-        .collect())
-}
-
-/// Says the same thing about every commit, where the repository answered for
-/// the branch as a whole.
-fn said(listed: Vec<Commit>, pushed: Option<bool>) -> Vec<Commit> {
-    listed
-        .into_iter()
-        .map(|commit| Commit { pushed, ..commit })
-        .collect()
-}
-
 /// What `git status --porcelain=v2 --branch` says in its header lines.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Branch {
@@ -705,8 +576,6 @@ struct Branch {
     branch: Option<String>,
     /// What `HEAD` is on, or `None` in a repository with no commits.
     head: Option<String>,
-    /// Whether the branch has an upstream to be ahead or behind of.
-    upstream: bool,
     ahead: Option<u32>,
     behind: Option<u32>,
 }
@@ -733,7 +602,6 @@ fn branch_status(status: &str) -> Branch {
             Some(("branch.head", head)) if head != "(detached)" => {
                 read.branch = Some(head.to_owned());
             }
-            Some(("branch.upstream", _)) => read.upstream = true,
             Some(("branch.ab", ab)) => {
                 let (ahead, behind) = ab.split_once(' ').unwrap_or((ab, ""));
                 read.ahead = ahead.strip_prefix('+').and_then(|n| n.parse().ok());
@@ -789,46 +657,6 @@ fn working_tree(numstat: &str) -> Vec<WorkingFile> {
         });
     }
     files
-}
-
-/// Reads `git log -z --format=%h%x00%s%x00%ct`, newest first: `-z` separates
-/// one commit from the next with a NUL, so a subject with a newline in it
-/// cannot be read as two commits.
-///
-/// The date is `%ct`, the commit date in seconds since the epoch, which is
-/// what the pane draws an age from. A record whose date will not parse keeps
-/// its hash and subject and loses only the age: a commit dated from the moment
-/// it was read would be a figure about this read rather than about the commit.
-fn commits(log: &str) -> Vec<Commit> {
-    // Empty fields are kept: a commit made with `--allow-empty-message` has
-    // an empty subject, and dropping it would move every field after it up
-    // by one. Only what follows the last terminator is not a field.
-    let mut fields: Vec<&str> = log.split('\0').collect();
-    if fields.last().is_some_and(|last| last.trim().is_empty()) {
-        fields.pop();
-    }
-    let mut commits = Vec::new();
-
-    for record in fields.chunks_exact(3) {
-        let &[hash, subject, at] = record else {
-            continue;
-        };
-        commits.push(Commit {
-            hash: hash.to_owned(),
-            subject: subject.to_owned(),
-            at: at
-                .trim()
-                .parse()
-                .ok()
-                // A date past what the clock holds is no date: the commit
-                // keeps its hash and subject and loses its age.
-                .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds))),
-            // Filled in for all of them by `pushed`: it can take one more read
-            // of the repository to know, and this one has none.
-            pushed: None,
-        });
-    }
-    commits
 }
 
 /// Runs one `git` command in `root` and hands back what it printed.
@@ -896,7 +724,6 @@ mod tests {
             status.head.as_deref(),
             Some("f92f3750bb407beefafde085c9001ec7a2a00a0c")
         );
-        assert!(status.upstream);
         assert_eq!(status.ahead, Some(3));
         assert_eq!(status.behind, Some(1));
     }
@@ -907,7 +734,6 @@ mod tests {
             "# branch.oid f92f375\n# branch.head local-only\n1 .M N... 100644 100644 100644 a a f\n",
         );
 
-        assert!(!status.upstream);
         assert_eq!(
             status.ahead, None,
             "a branch nobody pushes is not zero commits ahead"
@@ -965,75 +791,6 @@ mod tests {
         assert_eq!(files[0].path, "keep.txt");
         assert_eq!(files[1].path, "old.txt => new.txt");
         assert_eq!(files[1].added, Some(1));
-    }
-
-    #[test]
-    fn a_log_is_read_as_a_hash_and_the_first_line_of_its_message() {
-        let made = commits(
-            "f92f375\0chore: release 0.7.0\x001789939986\0d432ed6\0feat: split the tokens\x001789939158\0",
-        );
-
-        assert_eq!(
-            made,
-            [
-                Commit {
-                    hash: "f92f375".to_owned(),
-                    subject: "chore: release 0.7.0".to_owned(),
-                    at: Some(UNIX_EPOCH + Duration::from_secs(1_789_939_986)),
-                    pushed: None,
-                },
-                Commit {
-                    hash: "d432ed6".to_owned(),
-                    subject: "feat: split the tokens".to_owned(),
-                    at: Some(UNIX_EPOCH + Duration::from_secs(1_789_939_158)),
-                    pushed: None,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn a_commit_with_an_empty_subject_moves_no_other_commit() {
-        let made = commits(
-            "93e5a2c\x00fourth\x001790713534\x004053221\x00\x001790713534\x00ba0ea9b\x00first\x001790713533\x00",
-        );
-
-        let read: Vec<(&str, &str, bool)> = made
-            .iter()
-            .map(|c| (c.hash.as_str(), c.subject.as_str(), c.at.is_some()))
-            .collect();
-        assert_eq!(
-            read,
-            [
-                ("93e5a2c", "fourth", true),
-                ("4053221", "", true),
-                ("ba0ea9b", "first", true)
-            ]
-        );
-    }
-
-    #[test]
-    fn a_commit_whose_date_will_not_parse_keeps_everything_else() {
-        let made = commits("f92f375\0chore: release 0.7.0\0not a date\0");
-
-        assert_eq!(made.len(), 1);
-        assert_eq!(
-            made[0].at, None,
-            "an age counted from the moment it was read would be about the read"
-        );
-        assert_eq!(made[0].subject, "chore: release 0.7.0");
-    }
-
-    #[test]
-    fn a_commit_dated_past_what_the_clock_holds_keeps_everything_but_its_age() {
-        let made = commits("f92f375\x00far off\x0018446744073709551615\x00");
-
-        assert_eq!(made.len(), 1);
-        assert_eq!(made[0].at, None);
-        assert_eq!(
-            (made[0].hash.as_str(), made[0].subject.as_str()),
-            ("f92f375", "far off")
-        );
     }
 
     /// A repository with one commit and an origin it has been pushed to, so
@@ -1102,23 +859,19 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\ne\n").expect("the file is written");
 
-        let read = read(&work, "work", Since::Nothing).expect("the repository reads");
+        let read = read(&work, "work").expect("the repository reads");
 
-        assert_eq!(read.repo.branch.as_deref(), Some("main"));
-        assert_eq!(read.repo.ahead, Some(0));
-        assert_eq!(read.repo.behind, Some(0));
+        assert_eq!(read.branch.as_deref(), Some("main"));
+        assert_eq!(read.ahead, Some(0));
+        assert_eq!(read.behind, Some(0));
         assert_eq!(
-            read.repo.working,
+            read.working,
             [WorkingFile {
                 path: "kept.txt".to_owned(),
                 added: Some(2),
                 removed: Some(0),
                 new: false,
             }]
-        );
-        assert!(
-            read.repo.commits.is_empty(),
-            "the session has committed nothing"
         );
     }
 
@@ -1143,10 +896,10 @@ mod tests {
         .expect("written");
         std::fs::write(work.join("noise.log"), "ignored\n").expect("the file is written");
 
-        let read = read(&work, "work", Since::Nothing).expect("the repository reads");
+        let read = read(&work, "work").expect("the repository reads");
 
         assert_eq!(
-            read.repo.working,
+            read.working,
             [
                 WorkingFile {
                     path: "kept.txt".to_owned(),
@@ -1188,72 +941,13 @@ mod tests {
         std::fs::write(work.join("scratch.log"), "noise\n").expect("the file is written");
         std::fs::write(work.join(".gitignore"), "*.log\n").expect("the file is written");
 
-        let whole = read(&work, "work", Since::Nothing).expect("the repository reads");
+        let whole = read(&work, "work").expect("the repository reads");
 
         assert_eq!(
-            whole.repo.files,
+            whole.files,
             [".gitignore", "docs/guide.md", "kept.txt"],
             "committed and new files, and not the ignored one"
         );
-    }
-
-    #[test]
-    fn the_commits_a_session_made_are_listed_and_say_whether_they_are_pushed() {
-        let dir = repository();
-        let work = dir.path().join("work");
-        let started = session_started();
-        let started_on = read(&work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-
-        std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
-        run(&work, &["commit", "-am", "second"]);
-        std::fs::write(work.join("kept.txt"), "a\nb\n").expect("the file is written");
-        run(&work, &["commit", "-am", "third"]);
-        run(&work, &["push", "origin", "main"]);
-        std::fs::write(work.join("kept.txt"), "a\n").expect("the file is written");
-        run(&work, &["commit", "-am", "fourth"]);
-
-        let read =
-            read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
-
-        let subjects: Vec<(&str, Option<bool>)> = read
-            .repo
-            .commits
-            .iter()
-            .map(|c| (c.subject.as_str(), c.pushed))
-            .collect();
-        assert_eq!(
-            subjects,
-            [
-                ("fourth", Some(false)),
-                ("third", Some(true)),
-                ("second", Some(true))
-            ],
-            "newest first, and only the one the origin has not got is unpushed"
-        );
-        assert_eq!(read.repo.ahead, Some(1));
-    }
-
-    #[test]
-    fn a_branch_with_no_upstream_has_pushed_none_of_its_commits() {
-        let dir = tempfile::tempdir().expect("a temporary directory can be created");
-        let work = dir.path().to_path_buf();
-        run(&work, &["init", "--initial-branch=main", "."]);
-        run(&work, &["config", "user.email", "test@example.invalid"]);
-        run(&work, &["config", "user.name", "A Test"]);
-        pin_the_config(&work);
-        std::fs::write(work.join("a.txt"), "a\n").expect("the file is written");
-        run(&work, &["add", "a.txt"]);
-        run(&work, &["commit", "-m", "only"]);
-
-        let read =
-            read(&work, "work", Since::Everything(UNIX_EPOCH)).expect("the repository reads");
-
-        assert_eq!(read.repo.ahead, None);
-        assert_eq!(read.repo.commits.len(), 1);
-        assert_eq!(read.repo.commits[0].pushed, Some(false));
     }
 
     #[test]
@@ -1262,13 +956,11 @@ mod tests {
         run(dir.path(), &["init", "--initial-branch=main", "."]);
         std::fs::write(dir.path().join("new.txt"), "a\n").expect("the file is written");
 
-        let read =
-            read(dir.path(), "work", Since::Everything(UNIX_EPOCH)).expect("the repository reads");
+        let read = read(dir.path(), "work").expect("the repository reads");
 
-        assert_eq!(read.head, None);
-        assert_eq!(read.repo.branch.as_deref(), Some("main"));
+        assert_eq!(read.branch.as_deref(), Some("main"));
         assert_eq!(
-            read.repo.working,
+            read.working,
             [WorkingFile {
                 path: "new.txt".to_owned(),
                 added: Some(1),
@@ -1277,14 +969,13 @@ mod tests {
             }],
             "with nothing committed, every file in the tree is new"
         );
-        assert!(read.repo.commits.is_empty());
     }
 
     #[test]
     fn a_directory_that_is_not_a_repository_is_a_failed_read_and_not_a_panic() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
 
-        let failed = read(dir.path(), "work", Since::Nothing).expect_err("there is no repository");
+        let failed = read(dir.path(), "work").expect_err("there is no repository");
 
         assert!(failed.starts_with("git status"), "{failed}");
     }
@@ -1336,168 +1027,27 @@ mod tests {
         );
         std::fs::write(checkout.join("kept.txt"), "a\n").expect("the file is written");
 
-        let read = read(&checkout, "wt", Since::Nothing).expect("the worktree reads");
+        let read = read(&checkout, "wt").expect("the worktree reads");
 
-        assert_eq!(read.repo.branch.as_deref(), Some("side"));
-        assert_eq!(
-            read.repo.ahead, None,
-            "a branch made here has no upstream yet"
-        );
-        assert_eq!(read.repo.working.len(), 1);
-        assert_eq!(read.repo.working[0].removed, Some(2));
+        assert_eq!(read.branch.as_deref(), Some("side"));
+        assert_eq!(read.ahead, None, "a branch made here has no upstream yet");
+        assert_eq!(read.working.len(), 1);
+        assert_eq!(read.working[0].removed, Some(2));
     }
 
     #[test]
     fn a_detached_head_is_read_as_the_commit_it_is_sitting_on() {
         let dir = repository();
         let work = dir.path().join("work");
-        let head = read(&work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-        run(&work, &["checkout", "--detach", &head]);
+        let head = git(&work, &["rev-parse", "HEAD"]).expect("the repository has a commit");
+        let head = head.trim();
+        run(&work, &["checkout", "--detach", head]);
 
-        let read = read(&work, "work", Since::Nothing).expect("a detached head reads");
+        let read = read(&work, "work").expect("a detached head reads");
 
-        assert_eq!(read.repo.branch.as_deref(), Some(&head[..7]));
-        assert_eq!(read.repo.ahead, None, "a commit has no upstream");
-        assert!(read.repo.working.is_empty());
-    }
-
-    #[test]
-    fn an_upstream_the_repository_cannot_find_leaves_pushed_unknown() {
-        let dir = repository();
-        let work = dir.path().join("work");
-        let started = session_started();
-        let started_on = read(&work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-        std::fs::write(work.join("kept.txt"), "a\n").expect("the file is written");
-        run(&work, &["commit", "-am", "second"]);
-        // The upstream branch is still configured but is no longer there, so
-        // git names it and refuses to say how far apart the two are.
-        run(&work, &["update-ref", "-d", "refs/remotes/origin/main"]);
-
-        let read = read(&work, "work", Since::Commit(&started_on, started))
-            .expect("a missing upstream is not a failed read");
-
-        assert_eq!(read.repo.ahead, None);
-        assert_eq!(
-            read.repo.commits[0].pushed, None,
-            "git would not say, so neither does the shell"
-        );
-    }
-
-    /// A commit made on another branch before the session started, dated
-    /// then, as a checkout during the session brings it in.
-    fn commit_dated(at: &Path, subject: &str, date: &str) {
-        let output = std::process::Command::new("git")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_COMMITTER_DATE", date)
-            .args(["commit", "-am", subject, "--date", date])
-            .current_dir(at)
-            .stdin(Stdio::null())
-            .output()
-            .expect("git runs");
-        assert!(output.status.success(), "{output:?}");
-    }
-
-    #[test]
-    fn commits_a_checkout_brought_in_are_not_the_sessions_own() {
-        let dir = repository();
-        let work = dir.path().join("work");
-        run(&work, &["checkout", "-q", "-b", "other"]);
-        std::fs::write(work.join("kept.txt"), "someone else\n").expect("the file is written");
-        commit_dated(&work, "someone elses work on other", "2020-01-01T00:00:00Z");
-        run(&work, &["checkout", "-q", "main"]);
-        let started = session_started();
-        let started_on = read(&work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-
-        run(&work, &["checkout", "-q", "other"]);
-        let read =
-            read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
-
-        assert!(read.repo.commits.is_empty(), "{:?}", read.repo.commits);
-    }
-
-    #[test]
-    fn a_commit_with_no_message_is_listed_with_the_others_in_place() {
-        let dir = repository();
-        let work = dir.path().join("work");
-        let started = session_started();
-        let started_on = read(&work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-        for (text, message) in [
-            ("a\n", Some("second")),
-            ("b\n", None),
-            ("c\n", Some("fourth")),
-        ] {
-            std::fs::write(work.join("kept.txt"), text).expect("the file is written");
-            match message {
-                Some(message) => run(&work, &["commit", "-qam", message]),
-                None => run(&work, &["commit", "-qa", "--allow-empty-message", "-m", ""]),
-            }
-        }
-
-        let read =
-            read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
-
-        let subjects: Vec<&str> = read
-            .repo
-            .commits
-            .iter()
-            .map(|c| c.subject.as_str())
-            .collect();
-        assert_eq!(subjects, ["fourth", "", "second"]);
-        assert!(
-            read.repo
-                .commits
-                .iter()
-                .all(|c| c.hash.len() >= 7 && c.at.is_some())
-        );
-    }
-
-    /// A commit made while the session runs is its own whatever its author
-    /// date says: `--date` sets that, and the commit date it is listed by is
-    /// when it was made.
-    #[test]
-    fn a_commit_made_during_the_session_is_its_own_whatever_its_author_date() {
-        let dir = repository();
-        let work = dir.path().join("work");
-        let started = session_started();
-        let started_on = read(&work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-        std::fs::write(work.join("kept.txt"), "a\n").expect("the file is written");
-        run(
-            &work,
-            &[
-                "commit",
-                "-am",
-                "backdated",
-                "--date",
-                "2020-01-01T00:00:00Z",
-            ],
-        );
-
-        let read =
-            read(&work, "work", Since::Commit(&started_on, started)).expect("the repository reads");
-
-        let subjects: Vec<(&str, Option<bool>)> = read
-            .repo
-            .commits
-            .iter()
-            .map(|c| (c.subject.as_str(), c.pushed))
-            .collect();
-        assert_eq!(subjects, [("backdated", Some(false))]);
+        assert_eq!(read.branch.as_deref(), Some(&head[..7]));
+        assert_eq!(read.ahead, None, "a commit has no upstream");
+        assert!(read.working.is_empty());
     }
 
     /// How many ticks of the event loop are timed against one frame's budget.
@@ -1562,7 +1112,7 @@ mod tests {
             &["config", "core.fsmonitor", &hook.display().to_string()],
         );
 
-        read(&work, "work", Since::Nothing).expect("the repository reads");
+        read(&work, "work").expect("the repository reads");
 
         assert!(!marker.exists(), "a read ran the repository's monitor");
     }

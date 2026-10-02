@@ -11,8 +11,8 @@
  ┃                                                                          ┃ │     large.txt                new — −0 │
  ┃   No backend attached. `niobe profiles` shows what is defined.           ┃ │   sub/dir/                            │
  ┃                                                                          ┃ │     inner.txt               new +3 −0 │
- ┃                                                                          ┃ │ ▾ Commits  none this session          │
- ┃                                                                          ┃ │ ▾ This session  no files  +0 −0       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
  ┃                                                                          ┃ │                                       │
  ┃                                                                          ┃ │                                       │
  ┃                                                                          ┃ │                                       │

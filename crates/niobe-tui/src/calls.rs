@@ -22,8 +22,10 @@
 //! to say it under.
 //!
 //! A call that ran the tests says under its row what the run reported: its
-//! counts where its output held the whole run, and otherwise that the result
-//! was not read — never a number the output did not give.
+//! counts where its output held the whole run, beside a bar of them, and
+//! otherwise that the result was not read — never a number the output did
+//! not give. While it runs it says how long it has run, against the last
+//! whole run of the same command where there was one.
 //!
 //! A run of calls to the same tool is one group: a row with the run's summed
 //! figures, and a row for each call under it unless the operator has folded
@@ -35,7 +37,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::{Call, Entry, EntryKind, Gate, human_bytes};
-use crate::clock;
+use crate::clock::{self, Stamp};
 use crate::text;
 use crate::theme::Theme;
 use crate::ui::count;
@@ -57,6 +59,9 @@ pub(crate) struct Detail {
     /// Whether the sub-agents' rows are drawn under a heading per agent,
     /// which names the agent in place of every row's tag.
     pub(crate) grouped: bool,
+    /// The moment being drawn, which a test run in progress is timed
+    /// against. `None` where the shell has not read its clock.
+    pub(crate) now: Option<Stamp>,
 }
 
 /// How wide the tool's name and the sub-agent's tag are drawn, so that what
@@ -255,6 +260,11 @@ fn under(
         .tested
         .as_ref()
         .filter(|run| !call.failed() || run.counts.is_some() || run.failed);
+    let progress = call
+        .running()
+        .then_some(call)
+        .filter(|call| call.testing)
+        .map(|call| progress_line(call, detail.now, room, theme));
     let body = match (&call.printed, tested, call.failed(), &call.change) {
         (Some(printed), _, _, _) => {
             let mut lines: Vec<_> = tested
@@ -271,7 +281,9 @@ fn under(
         }
         (None, None, false, None) => Vec::new(),
     };
-    body.into_iter()
+    progress
+        .into_iter()
+        .chain(body)
         .map(|line| {
             let mut spans = vec![Span::raw(lead.clone())];
             spans.extend(line.spans);
@@ -358,6 +370,15 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
         None => vec![(0, Span::styled("test result not read", dim.italic()))],
     };
     let room = room.saturating_sub(text::width(LAST_BRANCH));
+    let cells = bar_cells(room, figures_width(&figures));
+    let bar = run
+        .counts
+        .filter(|_| cells > 0)
+        .map(|counts| result_bar(counts, cells, theme));
+    let room = match bar {
+        Some(_) => room.saturating_sub(cells + text::width(BAR_GAP)),
+        None => room,
+    };
     while figures.len() > 1 && figures_width(&figures) > room {
         let Some(least) = (0..figures.len()).max_by_key(|&at| figures[at].0) else {
             break;
@@ -382,12 +403,125 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
         }
     }
     let mut spans = vec![Span::styled(LAST_BRANCH, dim)];
+    if let Some(bar) = bar {
+        spans.extend(bar);
+        spans.push(Span::raw(BAR_GAP));
+    }
     for (at, (_, figure)) in figures.into_iter().enumerate() {
         if at > 0 {
             spans.push(Span::styled(" · ", dim));
         }
         spans.push(figure);
     }
+    Line::from(spans)
+}
+
+/// How many cells a test run's bar takes in `room` beside `said` columns of
+/// text: the whole bar where both fit, half of it where only that does, and
+/// none where the bar would cost the text a single column. The bar draws what
+/// the words already say, so it is the first thing a narrow line gives up.
+fn bar_cells(room: usize, said: usize) -> usize {
+    [TEST_BAR, TEST_BAR / 2]
+        .into_iter()
+        .find(|cells| cells + text::width(BAR_GAP) + said <= room)
+        .unwrap_or(0)
+}
+
+/// How wide a test run's bar is drawn where there is room for all of it.
+const TEST_BAR: usize = 20;
+
+/// What stands between a test run's bar and what is written beside it.
+const BAR_GAP: &str = "  ";
+
+/// A bar's cell, filled.
+const BAR_FILLED: &str = "━";
+
+/// A bar's cell, not filled yet.
+const BAR_EMPTY: &str = "─";
+
+/// The run's tests as `cells` cells: passed in the colour of an addition,
+/// failed in the failure colour and ignored dim, each in proportion.
+///
+/// A failure is never rounded away: however many tests passed, one that
+/// failed keeps a cell, because a bar all of one colour reads as a run that
+/// all passed. A run of no tests has no bar to draw.
+fn result_bar(counts: niobe_core::TestCounts, cells: usize, theme: &Theme) -> Vec<Span<'static>> {
+    let total = counts
+        .passed
+        .saturating_add(counts.failed)
+        .saturating_add(counts.ignored);
+    if total == 0 {
+        return Vec::new();
+    }
+    let share = |count: u64| -> usize {
+        let exact = u128::from(count) * cells as u128 / u128::from(total);
+        let at_least = usize::from(count > 0);
+        usize::try_from(exact).unwrap_or(cells).max(at_least)
+    };
+    let failed = share(counts.failed).min(cells);
+    let ignored = share(counts.ignored).min(cells - failed);
+    let passed = cells - failed - ignored;
+    [
+        (passed, theme.add),
+        (failed, theme.del),
+        (ignored, theme.dim),
+    ]
+    .into_iter()
+    .filter(|(cells, _)| *cells > 0)
+    .map(|(cells, colour)| Span::styled(BAR_FILLED.repeat(cells), Style::new().fg(colour)))
+    .collect()
+}
+
+/// `testing · 18s` under a test run still going, or, where the same command
+/// ran to the end earlier in the session, a bar of this run's time against
+/// that one's: `━━━━━━──── testing · 20s of the last run's 40s`.
+///
+/// The backend says nothing about a run until it ends, so the bar is not the
+/// run's progress and does not claim to be: it is the clock against the last
+/// run, named as such, and full where this run has gone on past it. Where the
+/// shell has not read its clock there is no time to give, and it says only
+/// that the tests are running.
+fn progress_line(call: &Call, now: Option<Stamp>, room: usize, theme: &Theme) -> Line<'static> {
+    let dim = Style::new().fg(theme.dim);
+    let mut spans = vec![Span::styled(LAST_BRANCH, dim)];
+    let Some(ran) = now
+        .zip(call.began())
+        .and_then(|(now, began)| now.since(began))
+    else {
+        spans.push(Span::styled("testing", dim));
+        return Line::from(spans);
+    };
+    let room = room.saturating_sub(text::width(LAST_BRANCH));
+    let said = match call.last_run {
+        Some(last) if ran > last => format!(
+            "testing · {}, past the last run's {}",
+            clock::spent(ran),
+            clock::took(last)
+        ),
+        Some(last) => format!(
+            "testing · {} of the last run's {}",
+            clock::spent(ran),
+            clock::took(last)
+        ),
+        None => format!("testing · {}", clock::spent(ran)),
+    };
+    let cells = bar_cells(room, text::width(&said));
+    if let Some(last) = call.last_run.filter(|_| cells > 0) {
+        let filled = match last.as_millis() {
+            0 => cells,
+            last => usize::try_from(ran.as_millis().saturating_mul(cells as u128) / last)
+                .unwrap_or(cells)
+                .min(cells),
+        };
+        spans.push(Span::styled(
+            BAR_FILLED.repeat(filled),
+            Style::new().fg(theme.hot),
+        ));
+        spans.push(Span::styled(BAR_EMPTY.repeat(cells - filled), dim));
+        spans.push(Span::raw(BAR_GAP));
+    }
+    let left = room.saturating_sub(spans_width(&spans[1..]));
+    spans.push(Span::styled(text::truncate(&said, left), dim));
     Line::from(spans)
 }
 
@@ -695,9 +829,8 @@ const RULE_MARK: &str = "rule";
 /// every call returned; how many failed, and how many the session ended
 /// under; and how long they ran.
 ///
-/// A sum is marked `≥` where one of the calls in it had no figure to add, the
-/// same way the Changes pane marks a file some call did not count — and a
-/// call that has not finished has none yet.
+/// A sum is marked `≥` where one of the calls in it had no figure to add, by
+/// [`count`]'s rule — and a call that has not finished has none yet.
 fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
     let dim = Style::new().fg(theme.dim);
     if calls.iter().any(Call::running) {
@@ -778,8 +911,8 @@ fn summed_time(calls: &[Call]) -> Option<String> {
     })
 }
 
-/// `+8 −6`, each side in its colour, with the Changes pane's marks for a side
-/// some call did not state.
+/// `+8 −6`, each side in its colour, with [`count`]'s marks for a side some
+/// call did not state.
 fn diffstat(added: (u64, bool), removed: (u64, bool), theme: &Theme) -> Vec<Span<'static>> {
     vec![
         Span::styled(count('+', added.0, added.1), Style::new().fg(theme.add)),
@@ -835,6 +968,7 @@ mod tests {
             diffs_open: false,
             columns: Columns::of(app.entries()),
             grouped: false,
+            now: None,
         };
         lines(&app.entries()[0], 80, detail, &Theme::default())
             .into_iter()
@@ -1181,7 +1315,10 @@ mod tests {
 
         let rows = drawn(&app, false);
         assert!(rows[0].starts_with("⚙ Bash"), "{rows:?}");
-        assert_eq!(rows[1].trim(), "└ 637 passed · 0 failed · 2 ignored");
+        assert_eq!(
+            rows[1].trim(),
+            "└ ━━━━━━━━━━━━━━━━━━━━  637 passed · 0 failed · 2 ignored"
+        );
     }
 
     #[test]
@@ -1193,7 +1330,10 @@ mod tests {
         let detail = Detail::default();
         let lines = lines(&app.entries()[0], 80, detail, &theme);
         let under: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(under.trim(), "└ 630 passed · 7 failed");
+        assert_eq!(
+            under.trim(),
+            "└ ━━━━━━━━━━━━━━━━━━━━  630 passed · 7 failed"
+        );
         let failed = lines[1]
             .spans
             .iter()
@@ -1310,7 +1450,7 @@ mod tests {
 
         assert_eq!(
             drawn(&app, false)[1].trim(),
-            "└ 3 passed · 1 failed · tests::wrong in --lib · 1 ignored"
+            "└ ━━━━━━━━━━  3 passed · 1 failed · tests::wrong in --lib · 1 ignored"
         );
         let line =
             lines(&app.entries()[0], 36, Detail::default(), &Theme::default()).swap_remove(1);
@@ -1327,7 +1467,7 @@ mod tests {
 
         assert_eq!(
             drawn(&app, false)[1].trim(),
-            "└ 4 passed · 3 failed · tests::wrong +2 in 2 binaries"
+            "└ ━━━━━━━━━━━━━━━━━━━━  4 passed · 3 failed · tests::wrong +2 in 2 binaries"
         );
     }
 
@@ -1392,6 +1532,167 @@ mod tests {
         assert!(
             drawn.iter().any(String::is_empty),
             "the blank line was lost"
+        );
+    }
+
+    fn second(seconds: u64) -> Stamp {
+        Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds), None)
+    }
+
+    /// `cargo test` started at `from` seconds, ending at `to` with every test
+    /// passed where it ends.
+    fn cargo_test(app: &mut App, id: &str, from: u64, to: Option<u64>) {
+        app.apply_at(
+            &Event::ToolCallStart {
+                id: id.into(),
+                name: "Bash".to_owned(),
+                input: r#"{"command":"cargo test"}"#.to_owned(),
+                summary: Some("cargo test".to_owned()),
+                agent: None,
+            },
+            second(from),
+        );
+        let Some(to) = to else {
+            return;
+        };
+        app.apply_at(
+            &Event::ToolCallEnd {
+                id: id.into(),
+                name: "Bash".to_owned(),
+                input: String::new(),
+                output: String::new(),
+                bytes: 1_024,
+                outcome: ToolOutcome::Ok,
+                summary: Some("cargo test".to_owned()),
+                exit_code: Some(0),
+                error: None,
+            },
+            second(to),
+        );
+        app.apply_at(
+            &Event::TestRun {
+                id: id.into(),
+                counts: counts(12, 0, 0),
+                exit_code: Some(0),
+                failed: false,
+                failures: Vec::new(),
+            },
+            second(to),
+        );
+    }
+
+    /// The last entry of `app` as the transcript draws it at `now`.
+    fn drawn_at(app: &App, now: u64) -> Vec<Line<'static>> {
+        let detail = Detail {
+            columns: Columns::of(app.entries()),
+            now: Some(second(now)),
+            ..Detail::default()
+        };
+        let entry = app.entries().last().expect("there is an entry");
+        lines(entry, 80, detail, &Theme::default())
+    }
+
+    fn text_of(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn a_test_run_in_progress_says_how_long_it_has_run() {
+        let mut app = app();
+        cargo_test(&mut app, "t1", 100, None);
+
+        let rows = drawn_at(&app, 118);
+        assert!(
+            text_of(&rows[0]).ends_with("running"),
+            "{:?}",
+            text_of(&rows[0])
+        );
+        assert_eq!(text_of(&rows[1]).trim(), "└ testing · 18s");
+        assert_eq!(
+            text_of(&drawn_at(&app, 119)[1]).trim(),
+            "└ testing · 19s",
+            "the time moves with the clock"
+        );
+    }
+
+    /// The backend reports no progress through a run, so the bar is this run's
+    /// time against the last whole run of the same command, and says so.
+    #[test]
+    fn a_test_run_in_progress_is_drawn_against_the_last_run_of_its_command() {
+        let mut app = app();
+        cargo_test(&mut app, "t1", 0, Some(40));
+        cargo_test(&mut app, "t2", 100, None);
+
+        // The two calls are one run of Bash calls, and the line hangs under
+        // the second.
+        let testing = |now| -> Line<'static> {
+            drawn_at(&app, now)
+                .into_iter()
+                .find(|line| text_of(line).contains("testing"))
+                .expect("the run in progress says so")
+        };
+        let half = testing(120);
+        assert_eq!(
+            text_of(&half).trim(),
+            "└ ━━━━━━━━━━──────────  testing · 20s of the last run's 40s"
+        );
+        let theme = Theme::default();
+        let filled = half
+            .spans
+            .iter()
+            .find(|span| span.content.contains('━'))
+            .expect("half the bar is filled");
+        assert_eq!(filled.style.fg, Some(theme.hot));
+
+        assert_eq!(
+            text_of(&testing(150)).trim(),
+            "└ ━━━━━━━━━━━━━━━━━━━━  testing · 50s, past the last run's 40s"
+        );
+    }
+
+    #[test]
+    fn a_finished_test_run_draws_its_counts_as_a_bar_beside_them() {
+        let mut app = app();
+        tested(&mut app, 101, counts(15, 4, 1), false);
+
+        let theme = Theme::default();
+        let rows = lines(&app.entries()[0], 80, Detail::default(), &theme);
+        assert_eq!(
+            text_of(&rows[1]).trim(),
+            "└ ━━━━━━━━━━━━━━━━━━━━  15 passed · 4 failed · 1 ignored"
+        );
+        let cells = |colour| -> usize {
+            rows[1]
+                .spans
+                .iter()
+                .filter(|span| span.content.contains('━') && span.style.fg == Some(colour))
+                .map(|span| span.content.chars().count())
+                .sum()
+        };
+        assert_eq!(
+            (cells(theme.add), cells(theme.del), cells(theme.dim)),
+            (15, 4, 1),
+            "a cell for every test of twenty"
+        );
+    }
+
+    #[test]
+    fn a_failure_keeps_a_cell_of_the_bar_however_many_passed() {
+        let mut app = app();
+        tested(&mut app, 101, counts(5_000, 1, 0), false);
+
+        let theme = Theme::default();
+        let rows = lines(&app.entries()[0], 80, Detail::default(), &theme);
+        assert!(
+            rows[1]
+                .spans
+                .iter()
+                .any(|span| span.content.contains('━') && span.style.fg == Some(theme.del)),
+            "{:?}",
+            rows[1]
         );
     }
 }

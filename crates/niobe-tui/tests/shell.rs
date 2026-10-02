@@ -30,14 +30,14 @@ use std::path::PathBuf;
 use common::{
     at_work, metered_session, paint, running_session, screen, session_with_a_long_write,
     session_with_a_markdown_reply, session_with_a_tab_indented_reply, session_with_finished_turns,
-    session_with_test_records, session_with_test_runs, session_with_two_agents_at_work, style_at,
-    styles, unmetered_session,
+    session_with_test_records, session_with_two_agents_at_work, style_at, styles,
+    unmetered_session,
 };
 use niobe_core::event::{
     AgentId, Backend, Event, Mode, PermissionDecision, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::{FailedTests, TestCounts, TestRunRecord};
-use niobe_tui::app::{App, Commit, Pane, Repo, Section, SelectedProfile};
+use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
 use ratatui::style::{Color, Style};
 
@@ -1987,8 +1987,7 @@ fn no_pane_draws_its_text_against_its_border() {
     }
 }
 
-/// A folded section is its header and nothing else, and what was under it
-/// gives its rows back to the sections below.
+/// A folded section is its header and nothing else.
 ///
 /// The marker is what says so: `▸` closed against `▾` open, which reads
 /// without colour and on a terminal that draws neither in bold.
@@ -2007,16 +2006,12 @@ fn the_changes_pane_folds_a_section_away() {
         !frame.contains("cache/lru.ts"),
         "the files are folded away, not merely scrolled past"
     );
-    assert!(
-        frame.contains("▾ Commits"),
-        "the sections below take the rows the folded one gave back"
-    );
 }
 
-/// The pane scrolls rather than truncating: the commits and what the session
-/// itself reported are below twenty-three files, and they are reachable.
+/// The pane scrolls rather than truncating: the last of twenty-three files
+/// is below the pane's foot, and it is reachable.
 #[test]
-fn the_changes_pane_scrolls_to_what_is_below_the_files() {
+fn the_changes_pane_scrolls_to_the_last_of_the_files() {
     let mut app = running_session();
     // Draw once so the pane knows how tall it is and how much it holds; the
     // event loop has always drawn before a wheel notch can arrive.
@@ -2026,304 +2021,53 @@ fn the_changes_pane_scrolls_to_what_is_below_the_files() {
 
     assert_snapshot("changes-scrolled-200x60", &frame);
     assert!(
-        frame.contains("▾ Commits"),
-        "the commits section is what the pane was scrolled to"
-    );
-    assert!(
-        frame.contains("9f2c1ab"),
-        "a commit the session made is drawn with its short hash"
+        frame.contains("verify.ts"),
+        "the last file is what the pane was scrolled to"
     );
 }
 
-/// A repository is shared. What another agent or the operator in a second
-/// terminal committed while the session was open is not the session's, and
-/// is not drawn as one of its commits.
+/// A test run is the transcript's to show, under the call that ran it: its
+/// counts beside a bar of them, and no section of the Changes pane repeating
+/// the last of them.
 #[test]
-fn a_commit_nothing_in_this_session_made_is_not_drawn_as_its() {
-    let mut app = running_session();
-    let mut repo = app.repo().clone();
-    let theirs = repo.commits[0]
-        .at
-        .map(|at| at + std::time::Duration::from_secs(5 * 60));
-    repo.commits.insert(
-        0,
-        Commit {
-            hash: "c0ffee1".to_owned(),
-            subject: "made in another terminal".to_owned(),
-            at: theirs,
-            pushed: Some(false),
-        },
-    );
-    app.set_repo(repo);
-    let _ = screen(&mut app, 200, 60);
-    app.scroll_pane(Pane::Changes, 24);
-    let frame = screen(&mut app, 200, 60);
-
-    assert!(
-        frame.contains("9f2c1ab"),
-        "the session's own commit is drawn"
-    );
-    assert!(!frame.contains("c0ffee1"), "{frame}");
-    assert!(frame.contains("2 this session  1 unpushed"), "{frame}");
-}
-
-const GREEN: TestCounts = TestCounts {
-    passed: 637,
-    failed: 0,
-    ignored: 0,
-    suites: 30,
-};
-
-/// The Changes pane's rows, scrolled to the bottom, where the Tests section
-/// is drawn.
-fn changes_scrolled_down(app: &mut App, width: u16, height: u16) -> String {
-    let _ = screen(app, width, height);
-    app.scroll_pane(Pane::Changes, isize::MAX / 2);
-    screen(app, width, height)
-}
-
-/// The Tests section's header row, from its name to the pane's edge: the
-/// transcript beside it draws each run's own figures under its call, and
-/// those are not what the section says.
-fn tests_header(frame: &str) -> &str {
-    frame
-        .lines()
-        .find_map(|line| line.split_once("▾ Tests").map(|(_, header)| header))
-        .and_then(|header| header.split('│').next())
-        .expect("the frame draws the Tests section")
-}
-
-/// The test run the agent made, as its own summary reported it, at the foot
-/// of the Changes pane and dated by when its call finished.
-#[test]
-fn the_agents_own_test_run_is_drawn_with_its_counts_and_its_age() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false)]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert_snapshot("tests-200x60", &frame);
-    assert!(
-        frame.contains("▾ Tests  637 passed · 0 failed · 30 suites · 1m ago"),
-        "{frame}"
-    );
-    assert_eq!(
-        style_at(&mut app, 200, 60, "637 passed").and_then(|style| style.fg),
-        Some(CLASSIC.add),
-        "a run that passed says so in the colour of an addition"
-    );
-}
-
-#[test]
-fn a_session_that_ran_no_tests_draws_no_tests_section() {
-    // The session does run `npm test`, which is not a format this shell
-    // reads, so it is not a test run as far as the pane is concerned.
-    let mut app = running_session();
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert!(!frame.contains("Tests"), "{frame}");
-    assert!(!frame.contains("0 passed"), "{frame}");
-}
-
-#[test]
-fn a_failing_run_is_drawn_as_failing_with_its_own_count() {
-    let failing = TestCounts {
+fn a_test_run_is_drawn_under_its_call_with_a_bar_of_its_counts() {
+    let counts = TestCounts {
         passed: 612,
         failed: 3,
-        ignored: 2,
+        ignored: 0,
         suites: 30,
-    };
-    let mut app = session_with_test_runs(&[(Some(failing), Some(101), true)]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert!(
-        frame.contains("612 passed · 3 failed · 2 ignored · 30 suites · 1m ago"),
-        "{frame}"
-    );
-    assert_eq!(
-        style_at(&mut app, 200, 60, "3 failed").and_then(|style| style.fg),
-        Some(CLASSIC.del)
-    );
-    assert_ne!(
-        style_at(&mut app, 200, 60, "612 passed").and_then(|style| style.fg),
-        Some(CLASSIC.add),
-        "a failing run does not colour its passes as if all were well"
-    );
-}
-
-#[test]
-fn a_run_whose_result_was_not_read_says_so_and_gives_no_count() {
-    let mut app =
-        session_with_test_runs(&[(Some(GREEN), Some(0), false), (None, Some(101), false)]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert!(
-        frame.contains("▾ Tests  exit 101 · result not read · 1m ago"),
-        "{frame}"
-    );
-    assert!(
-        !tests_header(&frame).contains("passed"),
-        "the earlier run's counts are not the latest run's"
-    );
-}
-
-/// A failing run whose output the backend could not read whole — the Claude
-/// CLI cuts a long failure and keeps none of it — says it failed, apart from
-/// a run whose result was simply not read, and still gives no count.
-#[test]
-fn a_run_known_to_have_failed_without_counts_says_it_failed_and_gives_no_count() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false), (None, Some(101), true)]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert!(
-        frame.contains("▾ Tests  failed · exit 101 · counts not read · 1m ago"),
-        "{frame}"
-    );
-    let header = tests_header(&frame);
-    assert!(!header.contains("passed"), "{header}");
-    assert!(!header.contains("result not read"), "{header}");
-    assert_eq!(
-        style_at(&mut app, 200, 60, "failed · exit").and_then(|style| style.fg),
-        Some(CLASSIC.del),
-        "a failure is drawn in the failure colour"
-    );
-}
-
-/// A failed run whose output still held a failing binary's list of what
-/// failed names those tests under the section's header, as that binary's: an
-/// earlier binary's failures may be in the part that was cut.
-#[test]
-fn the_tests_a_failed_run_named_are_listed_as_the_failures_of_their_binary() {
-    let run = TestRunRecord::new(
-        None,
-        Some(101),
-        true,
-        vec![FailedTests {
-            binary: "--test statement".to_owned(),
-            tests: vec![
-                "a_statement_line_037_rounds_like_the_ledger".to_owned(),
-                "a_statement_line_088_rounds_like_the_ledger".to_owned(),
-            ],
-        }],
-    );
-    let mut app = session_with_test_records(&[run]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    let row = |text: &str| {
-        frame
-            .lines()
-            .position(|line| line.contains(text))
-            .unwrap_or_else(|| panic!("{text:?} is drawn:\n{frame}"))
-    };
-    let header = row("▾ Tests  failed · exit 101 · counts not read · 1m ago");
-    assert_eq!(
-        [
-            row("│   failing in --test statement "),
-            row("│   ✗ a_statement_line_037_rounds_like_the_ledger "),
-            row("│   ✗ a_statement_line_088_rounds_like_the_ledger "),
-        ],
-        [header + 1, header + 2, header + 3],
-        "{frame}"
-    );
-    assert_eq!(
-        style_at(&mut app, 200, 60, "✗ a_statement_line_037").and_then(|style| style.fg),
-        Some(CLASSIC.del)
-    );
-
-    app.fold(Section::Tests);
-    let folded = changes_scrolled_down(&mut app, 200, 60);
-    assert!(folded.contains("▸ Tests  failed"), "{folded}");
-    assert!(!folded.contains("failing in --test statement"), "{folded}");
-    assert!(!folded.contains("✗ a_statement_line_037"), "{folded}");
-}
-
-/// A run that went on past a failing binary lists each binary's failures
-/// under its own label, in the order the binaries ran.
-#[test]
-fn a_run_that_failed_in_two_binaries_lists_each_binarys_failures_under_its_own_label() {
-    let counts = TestCounts {
-        passed: 5,
-        failed: 2,
-        ignored: 1,
-        suites: 3,
     };
     let run = TestRunRecord::new(
         Some(counts),
         Some(101),
         true,
-        vec![
-            FailedTests {
-                binary: "--lib".to_owned(),
-                tests: vec!["tests::wrong".to_owned()],
-            },
-            FailedTests {
-                binary: "--test api".to_owned(),
-                tests: vec!["from_outside".to_owned()],
-            },
-        ],
-    );
-    let mut app = session_with_test_records(&[run]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    let row = |text: &str| {
-        frame
-            .lines()
-            .position(|line| line.contains(text))
-            .unwrap_or_else(|| panic!("{text:?} is drawn:\n{frame}"))
-    };
-    let header = row("▾ Tests  5 passed · 2 failed");
-    assert_eq!(
-        [
-            row("│   failing in --lib "),
-            row("│   ✗ tests::wrong "),
-            row("│   failing in --test api "),
-            row("│   ✗ from_outside "),
-        ],
-        [header + 1, header + 2, header + 3, header + 4],
-        "{frame}"
-    );
-}
-
-/// `cargo test 2>&1 | tail -30` of a failing run exits with tail's status,
-/// and the list its tail kept proves the failure by itself: the section says
-/// the run failed, with no count and no `exit 0` beside it.
-#[test]
-fn a_tailed_run_that_listed_a_failure_reads_as_failed_with_no_count() {
-    let run = TestRunRecord::new(
-        None,
-        Some(0),
-        false,
         vec![FailedTests {
-            binary: "--lib".to_owned(),
-            tests: vec!["tests::wrong".to_owned()],
+            binary: "--test statement".to_owned(),
+            tests: vec!["a_statement_line_037_rounds_like_the_ledger".to_owned()],
         }],
     );
     let mut app = session_with_test_records(&[run]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
+    let frame = screen(&mut app, 200, 60);
 
+    assert_snapshot("tests-200x60", &frame);
     assert!(
-        frame.contains("▾ Tests  failed · counts not read · 1m ago"),
+        frame.contains("━━  612 passed · 3 failed · a_statement_line_037"),
         "{frame}"
     );
-    assert!(frame.contains("│   failing in --lib "), "{frame}");
-    assert!(frame.contains("│   ✗ tests::wrong "), "{frame}");
-    let header = tests_header(&frame);
-    assert!(!header.contains("exit"), "{header}");
+    assert!(!frame.contains("▾ Tests"), "{frame}");
+    assert_eq!(
+        style_at(&mut app, 200, 60, "━━━  612 passed").and_then(|style| style.fg),
+        Some(CLASSIC.add),
+        "the passes are the bar's colour of an addition"
+    );
 }
 
+/// A directory that is not a repository has no branch and no working tree,
+/// and the pane says nothing about either rather than drawing them empty: a
+/// `Working tree` section reading `no files` would be a claim about a
+/// repository that is not there.
 #[test]
-fn a_narrow_pane_keeps_the_counts_and_sheds_the_rest() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false)]);
-    let frame = changes_scrolled_down(&mut app, 120, 30);
-
-    assert!(frame.contains("▾ Tests  637 passed · 0 failed"), "{frame}");
-    assert!(!frame.contains("30 suites"), "{frame}");
-}
-
-/// A directory that is not a repository has no branch and no commits, and the
-/// pane says nothing about either rather than drawing them empty: a `Commits`
-/// section reading `none this session` would be a claim about a repository
-/// that is not there.
-#[test]
-fn a_session_outside_a_repository_draws_no_branch_and_no_commits() {
+fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
     let mut app = App::new(Repo {
         name: "scratch".to_owned(),
         branch: None,
@@ -2332,12 +2076,7 @@ fn a_session_outside_a_repository_draws_no_branch_and_no_commits() {
     let frame = screen(&mut app, 120, 30);
 
     assert!(!frame.contains('⎇'), "there is no branch to name");
-    assert!(!frame.contains("Commits"), "{frame}");
     assert!(!frame.contains("Working tree"), "{frame}");
-    assert!(
-        frame.contains("This session"),
-        "what the session itself changed is not the repository's to report"
-    );
 }
 
 /// The wheel goes to whatever the pointer is over. Two panes scroll, and a
@@ -3208,16 +2947,15 @@ fn a_focused_pane_folds_the_section_under_its_cursor() {
     let mut app = running_session();
     let _ = screen(&mut app, 200, 60);
     press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
     let _ = screen(&mut app, 200, 60);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     let frame = screen(&mut app, 200, 60);
 
-    // The cursor scrolled the pane down to the commits, below the files, and
-    // folding them keeps their header in view.
-    assert!(frame.contains("▸ Commits"), "{frame}");
+    assert!(frame.contains("▸ Decisions"), "{frame}");
     assert!(
-        !app.folded(Section::WorkingTree),
+        !app.folded(Section::SubAgents) && !app.folded(Section::Tools),
         "one section, the one under the cursor"
     );
     assert_eq!(app.composed(), "", "Enter folded rather than typed");

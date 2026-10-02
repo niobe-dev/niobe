@@ -27,7 +27,6 @@ pub mod app;
 pub mod bridge;
 mod calls;
 pub mod clock;
-mod commits;
 pub mod desktop;
 mod find;
 mod hunks;
@@ -58,8 +57,8 @@ pub mod usage;
 pub mod watch;
 
 pub use app::{
-    Answer, App, Arrival, Ask, Call, Commit, ConfigFile, Entry, EntryKind, Picker, Places, Purpose,
-    Repo, Section, SelectedProfile, Sheet, WorkingFile,
+    Answer, App, Arrival, Ask, Call, ConfigFile, Entry, EntryKind, Picker, Places, Purpose, Repo,
+    Section, SelectedProfile, Sheet, WorkingFile,
 };
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use desktop::{Desktop, Handoff, NoDesktop};

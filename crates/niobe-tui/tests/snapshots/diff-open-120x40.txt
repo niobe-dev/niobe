@@ -15,12 +15,12 @@
  ┃   11 + export const etag11 = "W/\"0011\"";                               ┃ │   .                                   █
  ┃   12 + export const etag12 = "W/\"0012\"";                               ┃ │     CHANGELOG.md                +0 −0 █
  ┃   13 + export const etag13 = "W/\"0013\"";                               ┃ │   catalog/                            █
- ┃   14 + export const etag14 = "W/\"0014\"";                               ┃ │     fetch.ts                 +149 −12 │
+ ┃   14 + export const etag14 = "W/\"0014\"";                               ┃ │     fetch.ts                 +149 −12 █
  ┃   15 + export const etag15 = "W/\"0015\"";                               ┃ │     etag.ts                   +88 −41 │
  ┃   16 + export const etag16 = "W/\"0016\"";                               ┃ │     cache/lru.ts               +31 −9 │
  ┃   17 + export const etag17 = "W/\"0017\"";                               ┃ │     cache/index.ts             +12 −0 │
  ┃   18 + export const etag18 = "W/\"0018\"";                               ┃ │   docs/                               │
- ┃   19 + export const etag19 = "W/\"0019\"";                               ┃ │     caching.md                +64 −22 │
+ ┃   19 + export const etag19 = "W/\"0019\"";                               █ │     caching.md                +64 −22 │
  ┃   20 + export const etag20 = "W/\"0020\"";                               █ │     adr/0004-etags.md          +34 −1 │
  ┃   21 + export const etag21 = "W/\"0021\"";                               █ │     diagrams/cache.png            — — │
  ┃   22 + export const etag22 = "W/\"0022\"";                               █ │   server/                             │

@@ -11,9 +11,9 @@
  ┃                                                                          ┃ ┌─────────────── Changes ───────────────┐
  ┃ ◆ claude                                                                 ┃ │ ⎇ main ↑3                             █
  ┃   Rewriting the 304 test around the cached body.                         ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃                                                                          ┃ │   .                                   │
+ ┃                                                                          ┃ │   .                                   █
  ┃ ◆ claude                                                                 ┃ │     CHANGELOG.md                +0 −0 │
- ┃   The notebook that demonstrates the fetcher needs the new call shape.   ┃ │   catalog/                            │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │   catalog/                            │
  ┃                                                                          █ │     fetch.ts                 +149 −12 │
  ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │     etag.ts                   +88 −41 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │     cache/lru.ts               +31 −9 │

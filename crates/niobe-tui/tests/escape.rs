@@ -20,7 +20,7 @@ mod common;
 
 use common::{hunk, running_session};
 use niobe_core::event::{AgentId, Event, SlashCommand, ToolOutcome};
-use niobe_tui::app::{App, Commit, Repo, WorkingFile};
+use niobe_tui::app::{App, Repo, WorkingFile};
 use niobe_tui::shell::Ran;
 use niobe_tui::ui;
 use ratatui::Terminal;
@@ -270,12 +270,6 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 added: Some(1),
                 removed: Some(1),
                 new: false,
-            }],
-            commits: vec![Commit {
-                hash: "abc1234".into(),
-                subject: format!("subj {p}"),
-                at: None,
-                pushed: Some(false),
             }],
             files: vec![],
         });

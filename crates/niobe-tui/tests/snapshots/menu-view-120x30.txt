@@ -12,7 +12,7 @@
  ┃   └ allowed by you                                                       ┃ ┌─────────────── Changes ───────────────┐
  ┃                                                                          ┃ │ ⎇ main ↑3                             █
  ┃ ◆ claude                                                                 ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   Rewriting the 304 test around the cached body.                         ┃ │   .                                   │
+ ┃   Rewriting the 304 test around the cached body.                         █ │   .                                   │
  ┃                                                                          █ │     CHANGELOG.md                +0 −0 │
  ┃ ◆ claude                                                                 █ │   catalog/                            │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │     fetch.ts                 +149 −12 │

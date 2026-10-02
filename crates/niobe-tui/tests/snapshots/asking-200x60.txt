@@ -6,9 +6,9 @@
  ┃ ⚙ Notion·fetch   {}                                                                                                   2.5 kB ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
  ┃ ✗ Notion·update… {}                                                                                                   failed ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k                                 │
  ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ │ API-equiv ≥$0.04                                                  │
- ┃                                                                                                                              ┃ │ ───────────────────────────────────────────────────────────────── │
- ┃ ◆ claude                                                                                                                     ┃ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
- ┃   Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ┃ └───────────────────────────────────────────────────────────────────┘
+ ┃                                                                                                                              █ │ ───────────────────────────────────────────────────────────────── │
+ ┃ ◆ claude                                                                                                                     █ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
+ ┃   Caching the etag beside the body so a 304 can be answered from the LRU.                                                    █ └───────────────────────────────────────────────────────────────────┘
  ┃                                                                                                                              █ ┌───────────────────────────── Changes ─────────────────────────────┐
  ┃ ⚙ Edit           catalog/fetch.ts                                                                               +6 −2 · 0.4s █ │ ⎇ main ↑3                                                         █
  ┃    41     const cached = cache.get(url);                                                                                     █ │ ▾ Working tree  23 files  +≥977 −≥259                             █
@@ -25,11 +25,11 @@
  ┃   115     cache.set(url, {                                                                                                   █ │     diagrams/cache.png                                        — — █
  ┃   116 +     etag: res.headers.get("ETag"),                                                                                   █ │   server/                                                         █
  ┃   117       body,                                                                                                            █ │     handlers/manifest.ts                                   +97 −4 █
- ┃   └ allowed by you                                                                                                           █ │     handlers/health.ts                                     +3 −19 │
- ┃                                                                                                                              █ │     middleware/etag.ts                                    +41 −37 │
- ┃ ◆ claude                                                                                                                     █ │     index.ts                                                +8 −6 │
- ┃   Rewriting the 304 test around the cached body.                                                                             █ │   tests/                                                          │
- ┃                                                                                                                              █ │     etag.test.ts                                          +122 −8 │
+ ┃   └ allowed by you                                                                                                           █ │     handlers/health.ts                                     +3 −19 █
+ ┃                                                                                                                              █ │     middleware/etag.ts                                    +41 −37 █
+ ┃ ◆ claude                                                                                                                     █ │     index.ts                                                +8 −6 █
+ ┃   Rewriting the 304 test around the cached body.                                                                             █ │   tests/                                                          █
+ ┃                                                                                                                              █ │     etag.test.ts                                          +122 −8 █
  ┃ ◆ claude                                                                                                                     █ │     fetch.test.ts                                         +76 −14 │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       █ │     helpers.ts                                              +5 −2 │
  ┃                                                                                                                              █ │     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 │
@@ -45,10 +45,10 @@
  ┃   │                                                                      │░░                                                 █ │         two manifests can share an id across catalogs.            │
  ┃   │ {"file_path":"/repo/notes.txt"}                                      │░░                                                 █ │   13:39 Reuse the existing LRU instead of a new Map — avoids a    │
  ┃   │                                                                      │░░                                                 █ │         second eviction policy.                                   │
- ┃   │ ▶ 1. Allow once                                       this call only │░░                                                 █ │ ▾ Tools  10 calls ✗ 2 · 0 denied · 21.6 kB out                    │
- ┃   │   2. Always allow Read                              niobe saves Read │░░                                                 █ │   Bash       3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
- ┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │░░                                                 █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
- ┃   │   4. Deny                                      the call does not run │░░                                                 █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
+ ┃   │ ▶ 1. Allow once                                       this call only │░░                                                 █ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
+ ┃   │   2. Always allow Read                              niobe saves Read │░░                                                 █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
+ ┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │░░                                                 █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
+ ┃   │   4. Deny                                      the call does not run │░░                                                 █ │   Bash       1 ▓▓▓▓         ✗ 1                                   │
  ┃   │                                                                      │░░                                                 █ │   Edit       1 ▓▓▓▓                                               │
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │░░                                                 █ │                                                                   │
  ┃   │ Esc decide later                                                     │░░                                                 █ │                                                                   │

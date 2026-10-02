@@ -7,8 +7,8 @@
  ┃                                                                          ┃ │ ⎇ main                                │
  ┃   What the agent did, decided and touched, what it is doing now          ┃ │ ▾ Working tree  —                     │
  ┃   and what it cost, visible while it happens and never a guess.          ┃ │   not read yet                        │
- ┃   You stay on the loop instead of in it.                                 ┃ │ ▾ Commits  —                          │
- ┃                                                                          ┃ │ ▾ This session  no files  +0 −0       │
+ ┃   You stay on the loop instead of in it.                                 ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
  ┃   No backend attached. `niobe profiles` shows what is defined.           ┃ │                                       │
  ┃                                                                          ┃ │                                       │
  ┃                                                                          ┃ │                                       │
