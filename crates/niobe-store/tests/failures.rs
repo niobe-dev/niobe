@@ -305,3 +305,31 @@ fn a_log_cut_off_mid_line_is_refused_at_its_last_line() {
     assert_eq!(error.line(), 3);
     assert!(error.to_string().contains("EOF"), "{error}");
 }
+
+/// The prompts are read across every session at once, so a row that is not
+/// JSON must not take the others' with it.
+#[test]
+fn a_row_that_is_not_json_hides_no_other_prompt() {
+    let (_dir, path) = scratch();
+    let broken = {
+        let store = Store::open(&path).expect("a store opens");
+        let broken = store.create_session().expect("a session is created");
+        let fine = store.create_session().expect("a session is created");
+        store.append(fine, &user("fine")).expect("append");
+        broken
+    };
+    raw(&path)
+        .execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (?1, 1, 0, ?2)",
+            rusqlite::params![raw_id(broken), r#"{"type":"user_mess"#],
+        )
+        .expect("a row can be appended directly");
+
+    let store = Store::open(&path).expect("the store opens");
+    let prompts = store.prompts().expect("one bad row does not fail the read");
+    assert_eq!(
+        prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+        ["fine"]
+    );
+    assert!(store.conversations().expect("nor this one").is_empty());
+}

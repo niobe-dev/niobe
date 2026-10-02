@@ -128,6 +128,17 @@ pub struct SessionSummary {
     pub first_prompt: Option<String>,
 }
 
+/// A prompt as it was stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPrompt {
+    /// The session it was sent in.
+    pub session: SessionId,
+    /// The wall clock when it was stored.
+    pub at: SystemTime,
+    /// What was sent.
+    pub text: String,
+}
+
 /// Why the store could not do what was asked.
 #[derive(Debug)]
 pub enum StoreError {
@@ -424,6 +435,49 @@ impl Store {
             })
         })?;
 
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every prompt of every session, newest first: what Up recalls and the
+    /// history dialog lists.
+    ///
+    /// Read in one statement rather than session by session, which would
+    /// decode every event of every session to find a few lines of text. A row
+    /// that is not JSON is passed over, as [`Store::sessions`] passes it over.
+    pub fn prompts(&self) -> Result<Vec<StoredPrompt>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, at, json_extract(event, '$.text')
+               FROM events
+              WHERE CASE WHEN json_valid(event)
+                         THEN json_extract(event, '$.type') = 'user_message'
+                    END
+              ORDER BY at DESC, session_id DESC, seq DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(StoredPrompt {
+                session: SessionId(row.get(0)?),
+                at: from_unix_millis(row.get(1)?),
+                text: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every conversation a session carried on, by the id its backend calls
+    /// it: a session the backend restarted under a new id names each.
+    ///
+    /// The `claude` CLI keeps a transcript of every conversation Niobe drives,
+    /// and this is what tells those from the ones it ran on its own.
+    pub fn conversations(&self) -> Result<Vec<(SessionId, String)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT session_id, json_extract(event, '$.backend_session')
+               FROM events
+              WHERE CASE WHEN json_valid(event)
+                         THEN json_extract(event, '$.type') = 'session_meta'
+                              AND json_extract(event, '$.backend_session') IS NOT NULL
+                    END",
+        )?;
+        let rows = statement.query_map([], |row| Ok((SessionId(row.get(0)?), row.get(1)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 }

@@ -4008,3 +4008,107 @@ fn a_pane_hidden_from_the_view_menu_gives_its_rows_to_the_others() {
         "with every pane hidden the session takes the width: {frame}"
     );
 }
+
+/// The session above with a store behind it holding two earlier sessions of
+/// Niobe's and one the `claude` CLI recorded, each dated back from the moment
+/// the session is read at.
+fn with_history() -> App {
+    use niobe_tui::history::{Past, PastPrompt, PastSession, Target};
+
+    let mut app = running_session().remembers();
+    let now = app
+        .stamp()
+        .expect("the session is read at a fixed moment")
+        .at();
+    let clock = niobe_tui::clock::Clock::fixed(0).expect("UTC is an offset");
+    let ago = |secs: u64| Some(clock.at(now - std::time::Duration::from_secs(secs)));
+    let prompt = |text: &str, session: &str, secs| PastPrompt {
+        text: text.to_owned(),
+        at: ago(secs),
+        session: Target::Recorded(session.to_owned()),
+    };
+    app.set_past(Past {
+        prompts: vec![
+            prompt("and a test for the 304 path", "12", 3_600),
+            prompt(
+                "add etag support to the static handler\nkeep the weak form for gzip",
+                "12",
+                4_000,
+            ),
+            prompt("why does the resume test hang?", "11", 3 * 86_400),
+        ],
+        sessions: vec![
+            PastSession {
+                target: Target::Recorded("12".to_owned()),
+                last: ago(3_500),
+                first_prompt: None,
+            },
+            PastSession {
+                target: Target::Claude("2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42".to_owned()),
+                last: ago(2 * 86_400),
+                first_prompt: Some("rename the crate".to_owned()),
+            },
+            PastSession {
+                target: Target::Recorded("11".to_owned()),
+                last: ago(3 * 86_400),
+                first_prompt: None,
+            },
+        ],
+        unread: None,
+    });
+    app
+}
+
+#[test]
+fn ctrl_r_lists_every_prompt_and_shows_the_chosen_one_whole() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = with_history();
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("this session"), "{frame}");
+        assert!(frame.contains("#12"), "{frame}");
+        assert!(
+            frame.contains("keep the weak form for gzip"),
+            "the prompt under the cursor is shown whole:\n{frame}"
+        );
+        assert!(frame.contains("Enter put in the prompt"), "{frame}");
+        assert_snapshot(&format!("history-prompts-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn the_history_turned_to_its_sessions_lists_each_with_its_prompts() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = with_history();
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Down);
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("claude 2f6c1e10"), "{frame}");
+        assert!(frame.contains("2 prompts"), "{frame}");
+        assert!(frame.contains("and a test for the 304 path"), "{frame}");
+        assert!(frame.contains("Enter open"), "{frame}");
+        assert_snapshot(&format!("history-sessions-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn the_history_opened_before_its_load_lands_says_it_is_reading() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session().remembers();
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Tab);
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("reading the earlier sessions"), "{frame}");
+    assert!(!frame.contains("no other session"), "{frame}");
+}

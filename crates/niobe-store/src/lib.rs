@@ -24,4 +24,6 @@ mod store;
 
 pub use jsonl::{LogError, read_log};
 pub use recorder::Recorder;
-pub use store::{SCHEMA_VERSION, SessionId, SessionSummary, Store, StoreError, StoredEvent};
+pub use store::{
+    SCHEMA_VERSION, SessionId, SessionSummary, Store, StoreError, StoredEvent, StoredPrompt,
+};

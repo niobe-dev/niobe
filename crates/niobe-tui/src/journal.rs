@@ -17,6 +17,12 @@ pub trait Journal {
     /// Keeps one event. Called in the order the events happened, before the
     /// frame that shows them is drawn.
     fn append(&mut self, event: &Event) -> Result<(), JournalError>;
+
+    /// The number the session is recorded under, as `niobe sessions` prints
+    /// it, once it is. Nothing for a journal that keeps no numbered record.
+    fn recorded_as(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A journal that keeps nothing: for a recorded log that is being looked at

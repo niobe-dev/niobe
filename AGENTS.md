@@ -76,7 +76,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   directory, because a repository's file arrives with the clone; `lib.rs` layers a repository's file over the user's, withholds
   what an untrusted file may not set, and selects the profile a session runs under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
-  SQLite (`store.rs`; the triggers in its schema refuse an update or a delete). `recorder.rs` is
+  SQLite (`store.rs`; the triggers in its schema refuse an update or a delete), which also reads
+  every prompt of every session in one statement, and the backend conversations each carried
+  on, for the shell's history. `recorder.rs` is
   the write side a running session holds; `jsonl.rs` reads a JSON Lines event log.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
@@ -106,7 +108,12 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   hands the operator's `!` commands to, and where who allows them and what they reach is written
   down, `images.rs` the one it asks for an image from — the clipboard on Ctrl+V or an empty paste,
   or the file a pasted or dropped path names — and what numbers each and sends it with the prompt
-  that still holds its placeholder, `markdown.rs` draws the assistant's replies
+  that still holds its placeholder, `history.rs` the one it asks for the repository's earlier
+  sessions — and the walk Up and Down take through earlier prompts from the composer's first and
+  last row, the draft set aside and given back — `browse.rs` draws the history dialog Ctrl+R
+  and Session › Resume… open, its prompts or its sessions filtered by what is typed, with the
+  row under the cursor in full below the list; Enter on a session ends this one and the loop
+  hands the chosen one back for the binary to open, `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   cut at twenty rows until Ctrl+T opens every cut diff in place,
@@ -164,7 +171,7 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the shell under the selected profile, with the session store as its journal and the
   repository's config as the place a standing answer is kept, and where `niobe trust` records
   that a repository's config may start a backend with what it names. `commands.rs` runs the
-  operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `images.rs` fetches the images the operator attaches, off the draw path: the clipboard through `osascript` on macOS and `wl-paste` or `xclip` on Linux, each with no terminal and a deadline, a pasted path relative to the session's directory, and an image too large to send shrunk with `sips` on macOS before it is refused. `desktop.rs` copies what the operator selected with `pbcopy`, or `wl-copy`, `xclip` or `xsel`, and opens a clicked link with `open` or `xdg-open`, each with no terminal, in a process group of its own and not waited on. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `consent.rs` builds that trust question from the file as written, values included, since
+  operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `images.rs` fetches the images the operator attaches, off the draw path: the clipboard through `osascript` on macOS and `wl-paste` or `xclip` on Linux, each with no terminal and a deadline, a pasted path relative to the session's directory, and an image too large to send shrunk with `sips` on macOS before it is refused. `history.rs` reads the repository's earlier sessions on a thread of its own — the store's prompts and sessions, and the `claude` CLI's own sessions there that no Niobe session carried on — and the binary opens the session the history dialog chose, as `--resume` would, once the shell that chose it has closed. `desktop.rs` copies what the operator selected with `pbcopy`, or `wl-copy`, `xclip` or `xsel`, and opens a clicked link with `open` or `xdg-open`, each with no terminal, in a process group of its own and not waited on. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `consent.rs` builds that trust question from the file as written, values included, since
   the operator is deciding on them, and records the answer as `niobe trust` does, for the text
   that was shown. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.

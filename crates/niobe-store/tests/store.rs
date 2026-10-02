@@ -514,3 +514,71 @@ fn a_session_that_opens_with_a_slash_command_is_listed_by_the_prompt_after_it() 
 
     assert_eq!(listed[0].first_prompt.as_deref(), Some("add etag support"));
 }
+
+fn meta(backend_session: &str) -> Event {
+    Event::SessionMeta(niobe_core::event::SessionMeta {
+        backend: niobe_core::event::Backend::Claude,
+        profile: "max".to_owned(),
+        model: "opus-5".to_owned(),
+        backend_session: Some(backend_session.to_owned()),
+    })
+}
+
+#[test]
+fn every_prompt_of_every_session_comes_back_newest_first_with_its_session() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let first = store.create_session().expect("a session is created");
+    let second = store.create_session().expect("a session is created");
+    store.append(first, &meta("conv-1")).expect("append");
+    store
+        .append(first, &user("add etag support"))
+        .expect("append");
+    store
+        .append(
+            first,
+            &Event::AssistantDelta {
+                text: "done".to_owned(),
+            },
+        )
+        .expect("append");
+    store.append(first, &user("/compact")).expect("append");
+    store
+        .append(second, &user("why does it hang?"))
+        .expect("append");
+
+    let prompts = store.prompts().expect("the prompts are read");
+    let listed: Vec<(SessionId, &str)> = prompts
+        .iter()
+        .map(|prompt| (prompt.session, prompt.text.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (second, "why does it hang?"),
+            (first, "/compact"),
+            (first, "add etag support"),
+        ]
+    );
+    assert!(prompts.windows(2).all(|w| w[0].at >= w[1].at));
+}
+
+#[test]
+fn every_conversation_a_session_carried_on_is_named_with_it() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let session = store.create_session().expect("a session is created");
+    let other = store.create_session().expect("a session is created");
+    for event in [meta("conv-1"), user("go"), meta("conv-1"), meta("conv-2")] {
+        store.append(session, &event).expect("append");
+    }
+    store.append(other, &user("nothing said")).expect("append");
+
+    let mut carried = store.conversations().expect("they are read");
+    carried.sort();
+    assert_eq!(
+        carried,
+        [
+            (session, "conv-1".to_owned()),
+            (session, "conv-2".to_owned())
+        ]
+    );
+}

@@ -20,6 +20,7 @@ mod commands;
 mod config;
 mod consent;
 mod desktop;
+mod history;
 mod images;
 mod journal;
 mod prices;
@@ -39,6 +40,7 @@ use std::time::{Duration, Instant, SystemTime};
 use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::{App, ConfigFile, Places};
+use niobe_tui::history::{NoHistory, Target};
 use niobe_tui::journal::Unrecorded;
 use niobe_tui::theme::{self, Depth};
 use niobe_tui::{Detached, Ended, Forgotten, NoImages, NoShell, Theme, Unwatched};
@@ -130,16 +132,45 @@ fn run(
             std::env::var("NO_COLOR").ok().as_deref(),
         ),
     };
+    let mut next = match command {
+        Command::Shell => shell(profile, &asked)?,
+        Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked)?,
+        Command::Resume(Resume::Imported(session)) => import(&session, profile, &asked)?,
+        other => return run_other(other, profile, &asked),
+    };
+    // The operator chose another session in the history dialog: the one the
+    // shell held has ended and is saved, and the chosen one opens the way
+    // `niobe --resume` would open it.
+    while let Some(target) = next {
+        next = open(&target, profile, &asked)?;
+    }
+    Ok(())
+}
+
+/// Opens `target` in place of the session that just ended, and returns the
+/// one the operator chose next, if they chose one.
+fn open(target: &Target, profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String> {
+    match target {
+        Target::Recorded(id) => {
+            let session = id
+                .parse()
+                .map_err(|e| format!("session {id} cannot be opened: {e}"))?;
+            resume(session, profile, asked)
+        }
+        Target::Claude(id) => import(id, profile, asked),
+    }
+}
+
+/// The commands that do not open a shell on a session.
+fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     match command {
-        Command::Shell => shell(profile, &asked),
-        Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked),
-        Command::Resume(Resume::Imported(session)) => import(&session, profile, &asked),
+        Command::Shell | Command::Resume(_) => Ok(()),
         Command::Sessions => list_sessions(),
         Command::Profiles => list_profiles(profile),
         Command::Trust => trust(),
         Command::Untrust => untrust(),
         Command::Prices(model) => list_prices(model.as_deref()),
-        Command::Replay(log) => replay(&log, &asked),
+        Command::Replay(log) => replay(&log, asked),
         Command::Help => {
             print_help();
             Ok(())
@@ -199,10 +230,10 @@ fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String>
 /// a piped or redirected run prints the help instead of an errno. The config is
 /// read first either way, so a config that cannot be used is reported rather
 /// than hidden behind the help.
-fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
+fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String> {
     let root = repo::root(&cwd()?);
     let Some(loaded) = consented(&root, asked)? else {
-        return Ok(());
+        return Ok(None);
     };
     let selected = loaded.select(profile)?;
     let app = say_untrusted(
@@ -226,7 +257,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
 
     if !std::io::stdout().is_terminal() {
         print_help();
-        return Ok(());
+        return Ok(None);
     }
     keys_can_be_read()?;
 
@@ -255,7 +286,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     };
     // A command typed after `!` runs whether or not a backend does: it is the
     // operator's, not the agent's.
-    let app = app.runs_commands();
+    let app = app.runs_commands().remembers();
 
     let mut journal = StoreJournal::Pending(root.clone());
     let mut rules = ConfigRules::at(&root);
@@ -273,24 +304,44 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<(), String> {
             shell: &mut commands,
             images: &mut images_for(&root),
             desktop: &mut desktop::System::new(),
+            history: &mut history_for(&root, selected.as_ref()),
         },
     )
     .map_err(|e| e.to_string())?;
 
-    match ended {
+    let next = match ended {
         // There is nothing left to print on: the terminal the shell drew on is
         // the one this line would go to, and writing to it now fails. The
         // session is recorded either way, and `niobe sessions` lists it.
-        Ended::TerminalGone => return Ok(()),
-        Ended::Quit => {}
-    }
+        Ended::TerminalGone => return Ok(None),
+        Ended::Quit => None,
+        Ended::Open(target) => Some(target),
+    };
     if let Some(session) = journal.session() {
         say!(
             "session {session} saved in {} — `niobe --resume {session}` continues it",
             repo::store_path(&root).display()
         );
     }
-    Ok(())
+    Ok(next)
+}
+
+/// The earlier sessions of `root`, and the `claude` CLI's own there where the
+/// profile's environment, or this process's, says where it keeps them.
+fn history_for(
+    root: &Path,
+    selected: Option<&niobe_config::Selected<'_>>,
+) -> history::StoreHistory {
+    history::StoreHistory::new(
+        root,
+        backend::transcripts(
+            selected,
+            root,
+            std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
+            std::env::var_os("HOME"),
+        ),
+        niobe_tui::clock::Clock::system(),
+    )
 }
 
 /// The images the operator attaches, where a relative path is `root`'s, as it
@@ -318,10 +369,14 @@ fn commands_for(root: &Path, backend: &backend::Attachment) -> commands::Command
 
 /// Opens the shell on a recorded session and keeps recording into it. Without
 /// a terminal, prints what the session folds to.
-fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
+fn resume(
+    session: SessionId,
+    profile: Option<&str>,
+    asked: &Asked,
+) -> Result<Option<Target>, String> {
     let root = repo::root(&cwd()?);
     let Some(loaded) = consented(&root, asked)? else {
-        return Ok(());
+        return Ok(None);
     };
     let selected = loaded.select(profile)?;
     let mut app = say_untrusted(
@@ -374,7 +429,7 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
             ),
             &app,
         );
-        return Ok(());
+        return Ok(None);
     }
     keys_can_be_read()?;
     let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
@@ -417,13 +472,13 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
     };
     // A command typed after `!` runs whether or not a backend does: it is the
     // operator's, not the agent's.
-    let app = app.runs_commands();
+    let app = app.runs_commands().remembers();
 
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&root);
     let mut commands = commands_for(&root, &backend);
-    niobe_tui::run(
+    let ended = niobe_tui::run(
         app,
         niobe_tui::Around {
             journal: &mut journal,
@@ -433,10 +488,14 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
             shell: &mut commands,
             images: &mut images_for(&root),
             desktop: &mut desktop::System::new(),
+            history: &mut history_for(&root, selected.as_ref()),
         },
     )
-    .map_err(|e| e.to_string())
-    .map(|_| ())
+    .map_err(|e| e.to_string())?;
+    Ok(match ended {
+        Ended::Open(target) => Some(target),
+        Ended::Quit | Ended::TerminalGone => None,
+    })
 }
 
 /// Opens the shell on a session the `claude` CLI recorded, reading its history
@@ -446,10 +505,10 @@ fn resume(session: SessionId, profile: Option<&str>, asked: &Asked) -> Result<()
 /// Nothing is written back to the CLI's own store. What is read becomes a
 /// Niobe session like any other, so from here on `niobe --resume <number>`
 /// continues it and every total on screen is a fold over the same events.
-fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
+fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String> {
     let root = repo::root(&cwd()?);
     let Some(loaded) = consented(&root, asked)? else {
-        return Ok(());
+        return Ok(None);
     };
     let selected = loaded.select(profile)?;
     let theme = chosen_theme(asked, &loaded)?;
@@ -490,7 +549,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
             ),
             &app,
         );
-        return Ok(());
+        return Ok(None);
     }
     keys_can_be_read()?;
 
@@ -526,7 +585,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
     };
     // A command typed after `!` runs whether or not a backend does: it is the
     // operator's, not the agent's.
-    let app = app.runs_commands();
+    let app = app.runs_commands().remembers();
 
     let mut journal = StoreJournal::Open(recorder);
     let mut rules = ConfigRules::at(&root);
@@ -542,14 +601,16 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
             shell: &mut commands,
             images: &mut images_for(&root),
             desktop: &mut desktop::System::new(),
+            history: &mut history_for(&root, selected.as_ref()),
         },
     )
     .map_err(|e| e.to_string())?;
 
-    match ended {
-        Ended::TerminalGone => return Ok(()),
-        Ended::Quit => {}
-    }
+    let next = match ended {
+        Ended::TerminalGone => return Ok(None),
+        Ended::Quit => None,
+        Ended::Open(target) => Some(target),
+    };
     if let Some(recorded) = journal.session() {
         say!(
             "claude session {session} is niobe session {recorded} in {} — \
@@ -557,7 +618,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<(), Str
             repo::store_path(&root).display()
         );
     }
-    Ok(())
+    Ok(next)
 }
 
 /// Prints the sessions this repository can carry on, newest first: the ones
@@ -886,6 +947,7 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
             shell: &mut NoShell,
             images: &mut NoImages::default(),
             desktop: &mut desktop::System::new(),
+            history: &mut NoHistory::default(),
         },
     )
     .map_err(|e| e.to_string())
@@ -1117,6 +1179,14 @@ IN THE SHELL:
     Ctrl+J                 Open a new line in the composer, on any terminal
     Alt+Enter              The same, where the terminal sends Option as Meta
     PgUp / PgDn            Scroll the transcript
+    Up / Down              On the composer's first row, the prompt sent before
+                           the one shown, from this session and then earlier
+                           ones; on its last row, the one after, and past the
+                           newest, what was being written
+    Ctrl+R                 The history: every prompt sent here, filtered by
+                           what is typed, Enter putting one in the composer
+                           unsent; Tab turns it to the sessions, where Enter
+                           ends this one and opens the chosen one in its place
     /                      On an empty composer, search the transcript: Up and
                            Enter step to the match above, Down to the one
                            below, Esc puts the view back where it was, and a

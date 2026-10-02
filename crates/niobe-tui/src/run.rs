@@ -20,6 +20,7 @@ use niobe_core::event::Event as SessionEvent;
 use crate::app::{App, Arrival};
 use crate::bridge::{Bridge, Detached};
 use crate::desktop::{Desktop, Handoff, NoDesktop};
+use crate::history::{History, NoHistory, Target};
 use crate::images::{Images, NoImages};
 use crate::input::{Input, Wait};
 use crate::journal::{Journal, Unrecorded};
@@ -97,6 +98,9 @@ pub struct Around<'a> {
     /// What copies the text the operator selects and opens the links they
     /// click.
     pub desktop: &'a mut dyn Desktop,
+    /// What reads the repository's earlier sessions, for the prompts Up
+    /// recalls and the history dialog lists, asked the same way.
+    pub history: &'a mut dyn History,
 }
 
 // By hand, because not every one of them can say what it holds.
@@ -111,12 +115,16 @@ impl std::fmt::Debug for Around<'_> {
 /// The caller needs the difference to know whether there is still a terminal
 /// to write to: a line printed after the shell closes goes to whatever the
 /// shell was drawing on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ended {
     /// The operator quit, or the process was asked to stop.
     Quit,
     /// The terminal the shell drew on went away.
     TerminalGone,
+    /// The operator chose another session to open in place of this one,
+    /// which has ended as a quit does. Opening it is the caller's: the shell
+    /// cannot start a backend.
+    Open(Target),
 }
 
 /// Runs the shell on `app` until the operator quits, the process is asked to
@@ -155,10 +163,11 @@ pub fn ask_trust(app: App, question: trust::Question) -> io::Result<Option<trust
             shell: &mut NoShell,
             images: &mut NoImages::default(),
             desktop: &mut NoDesktop,
+            history: &mut NoHistory::default(),
         },
     )?;
     Ok(match ended {
-        Ended::Quit => app.trust_answer(),
+        Ended::Quit | Ended::Open(_) => app.trust_answer(),
         Ended::TerminalGone => None,
     })
 }
@@ -225,7 +234,7 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
     );
 
     match &ended {
-        Ok(Ended::Quit) => {}
+        Ok(Ended::Quit | Ended::Open(_)) => {}
         // The drawing surface is abandoned rather than dropped: ratatui's
         // `Terminal` shows the cursor again as it drops and, when it cannot,
         // prints that failure to standard error. Standard error is the terminal
@@ -263,7 +272,7 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
 /// operator is owed that error.
 fn outcome(ended: io::Result<Ended>, restored: io::Result<()>) -> io::Result<Ended> {
     match ended {
-        Ok(Ended::Quit) => restored.map(|()| Ended::Quit),
+        Ok(ended @ (Ended::Quit | Ended::Open(_))) => restored.map(|()| ended),
         Ok(Ended::TerminalGone) => Ok(Ended::TerminalGone),
         Err(_) if restored.is_err() => Ok(Ended::TerminalGone),
         Err(error) => Err(error),
@@ -286,6 +295,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         shell,
         images,
         desktop,
+        history,
     } = around;
     let mut ended = Ended::Quit;
 
@@ -297,6 +307,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         let producing = fold_backend(app, journal, backend, watch);
         fold_commands(app, shell);
         fold_images(app, images);
+        fold_history(app, journal, history);
         // Whatever a read of the repository has finished with since the last
         // tick. Nothing is waited on here: an unfinished or failed read says
         // nothing and the pane keeps what it had.
@@ -399,7 +410,25 @@ fn event_loop<B: Backend<Error = io::Error>>(
     }
     send_produced(app, journal, backend, rules);
 
+    // Asked for by the operator, and ended as a quit is: what the shell held
+    // is recorded and the backend told, and the caller opens the other.
+    if let (Ended::Quit, Some(target)) = (&ended, app.take_opening()) {
+        ended = Ended::Open(target);
+    }
     Ok(ended)
+}
+
+/// Passes on a load of the earlier sessions the shell asked for, and hands it
+/// what one found, with the number this session is recorded under so that
+/// its own record is not listed as another.
+fn fold_history(app: &mut App, journal: &dyn Journal, history: &mut dyn History) {
+    app.set_recorded_as(journal.recorded_as());
+    if app.take_history_request() {
+        history.load();
+    }
+    if let Some(past) = history.drain() {
+        app.set_past(past);
+    }
 }
 
 /// Hands the app everything the terminal has for it.

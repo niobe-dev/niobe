@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ History ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   │
+ ┃   ┃   Prompts   Sessions                                                                             4 listed  ┃00 │
+ ┃   ┃  filter ▏type to filter                                                                                    ┃── │
+ ┃   ┃                                                                                                            ┃░░ │
+ ┃   ┃    1m  this session      1 prompt  add etag support to the catalog fetcher so we stop re-downloading unc…  ┃░░ │
+ ┃   ┃   58m  #12              2 prompts  add etag support to the static handler ⏎…                               ┃░░ │
+ ┃   ┃    2d  claude 2f6c1e10          —  rename the crate                                                        ┃── │
+ ┃   ┃    3d  #11               1 prompt  why does the resume test hang?                                          ┃0k │
+ ┃   ┃                                                                                                            ┃───┘
+ ┃   ┃                                                                                                            ┃───┐
+ ┃   ┃                                                                                                            ┃░░ █
+ ┃ ◆ ┃                                                                                                            ┃59 █
+ ┃   ┃                                                                                                            ┃░░ │
+ ┃   ┃                                                                                                            ┃−0 │
+ ┃ ◆ ┃                                                                                                            ┃░░ │
+ ┃   ┃                                                                                                            ┃12 │
+ ┃   ┃  ────────────────────────────────────────────────────────────────────────────────────────────────────────  ┃41 │
+ ┃ ✗ ┃    1  add etag support to the static handler ⏎…                                                            ┃−9 │
+ ┃   ┃    2  and a test for the 304 path                                                                          ┃───┘
+ ┃   ┃                                                                                                            ┃───┐
+ ┃ ◆ ┃                                                                                                            ┃░░ █
+ ┃   ┃                                                                                                            ┃2s █
+ ┃   ┃                                                                                                            ┃░░ █
+ ┃   ┃                                                                                                            ┃░░ █
+ ┃ ──┃                                                                                                            ┃░░ █
+ ┃  a┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ choose · Enter open · Tab prompts · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛░░ │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛░└───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

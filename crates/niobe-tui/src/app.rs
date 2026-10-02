@@ -30,6 +30,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use ratatui::style::Style;
 
 use crate::clock::{Clock, LocalTime, Stamp};
+use crate::history::{Browser, Newer, PromptRow, Recall, SessionRow, Target, View};
 use crate::images::{Attachments, Fetched, Source, image_path};
 use crate::prices::Prices;
 use crate::theme::{Depth, Theme};
@@ -1062,6 +1063,23 @@ pub struct App {
     /// Whether a [`crate::shell::Shell`] is there to run the operator's
     /// commands. Without one, `!` is a character like any other.
     runs_commands: bool,
+    /// Whether the shell was handed a record of the repository's sessions it
+    /// can open another of in place of this one.
+    remembers: bool,
+    /// What the last load of the repository's earlier sessions found; `None`
+    /// until one has landed.
+    past: Option<crate::history::Past>,
+    /// Whether a load has been asked for that the loop has not passed on.
+    history_wanted: bool,
+    /// The number this session is recorded under, once it is.
+    recorded_as: Option<String>,
+    /// A walk back through earlier prompts with Up and Down, while one is on.
+    recall: Option<Recall>,
+    /// The history dialog, while it is open.
+    browser: Option<Browser>,
+    /// The session the operator chose to open in place of this one, which
+    /// the loop hands back as it ends.
+    opening: Option<Target>,
     /// Whether the terminal tells Shift+Enter from Enter, which decides the
     /// key the bar names for a new line.
     reports_shift_enter: bool,
@@ -1347,6 +1365,15 @@ impl App {
             offer_closed: None,
             offer_selected: 0,
             runs_commands: false,
+            remembers: false,
+            past: None,
+            // Asked for as the shell opens, so Up has earlier sessions'
+            // prompts by the time anyone presses it.
+            history_wanted: true,
+            recorded_as: None,
+            recall: None,
+            browser: None,
+            opening: None,
             reports_shift_enter: false,
             shell_mode: false,
             commands: Vec::new(),
@@ -2858,7 +2885,8 @@ impl App {
             Action::Effort => self.listed("effort"),
             Action::Rewind => self.listed("rewind"),
             Action::Hooks => self.listed("hooks"),
-            Action::SignIn | Action::Resume => false,
+            Action::SignIn => false,
+            Action::Resume => self.remembers,
             Action::Memory => self.places.memory.is_some(),
             Action::SwitchModel => self
                 .profile
@@ -2867,6 +2895,7 @@ impl App {
             Action::Stop => self.working(),
             Action::Commands => !self.session.commands().is_empty(),
             Action::About
+            | Action::History
             | Action::Settings
             | Action::Permissions
             | Action::Quit
@@ -2899,13 +2928,11 @@ impl App {
             Action::Quit => self.quit(),
             Action::NewSession => self.send_command("clear", None),
             Action::Compact => self.send_command("compact", None),
-            Action::Resume => {
-                self.hint = Some(
-                    "A session is resumed as niobe starts: quit, then `niobe sessions` lists \
-                     them and `niobe --resume <id>` carries one on"
-                        .to_owned(),
-                );
-            }
+            Action::Resume => match self.remembers {
+                true => self.open_history(View::Sessions),
+                false => self.hint = Some(NO_RECORD_HINT.to_owned()),
+            },
+            Action::History => self.open_history(View::Prompts),
             Action::Rewind => self.send_or_say(
                 "rewind",
                 "The backend lists no /rewind to a session niobe drives, so it has no \
@@ -3251,6 +3278,14 @@ impl App {
             ("/", "search the transcript".to_owned()),
             ("//", "a backend command".to_owned()),
             ("@", "name a file".to_owned()),
+            (
+                "↑↓",
+                "an earlier prompt, from the first or last row".to_owned(),
+            ),
+            (
+                crate::history::SEARCH_KEY,
+                "earlier prompts and sessions".to_owned(),
+            ),
         ];
         if self.runs_commands {
             keys.push(("!", "a command for your own shell".to_owned()));
@@ -3919,6 +3954,7 @@ impl App {
             && !self.shell_mode
             && self.find.is_none()
             && self.picking.is_none()
+            && self.browser.is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -4781,13 +4817,15 @@ impl App {
     }
 
     /// Whether keys go to the composer — the prompt or the `!` command line —
-    /// rather than to a question, a list, a menu, a sheet or the search.
+    /// rather than to a question, a list, a menu, a sheet, the history or the
+    /// search.
     fn composer_has_the_keyboard(&self) -> bool {
         self.focus() == Focus::Session
             && self.find.is_none()
             && self.picking.is_none()
             && self.menu.is_none()
             && self.sheet.is_none()
+            && self.browser.is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -4804,6 +4842,7 @@ impl App {
             && self.picking.is_none()
             && self.menu.is_none()
             && self.sheet.is_none()
+            && self.browser.is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -4841,6 +4880,10 @@ impl App {
             }
         }
         if self.picking().is_some() || self.menu.is_some() || self.sheet.is_some() {
+            return;
+        }
+        if self.browser.is_some() {
+            self.paste_into_browser(pasted);
             return;
         }
         if let Some(find) = self.find.as_mut() {
@@ -4970,6 +5013,12 @@ impl App {
             self.on_sheet_key(key);
             return;
         }
+        // The history dialog takes it the same way: what is typed there
+        // filters it.
+        if self.browser.is_some() {
+            self.on_browser_key(key);
+            return;
+        }
         // A prompt takes the keyboard whole until it is put off. Typing into
         // the composer under a question would put the answer to it into the
         // next turn.
@@ -5037,6 +5086,15 @@ impl App {
             // Tab has nothing to do in a prompt, and Shift+Tab already cycles
             // the mode, so the plain key is the one that moves the focus.
             (KeyCode::Tab, KeyModifiers::NONE) => self.focus_next(),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.open_history(View::Prompts),
+            // Up on the composer's first row and Down on its last are where
+            // the cursor has nowhere to go, and where a shell walks its
+            // history; anywhere else they move the cursor as they always have.
+            (KeyCode::Up | KeyCode::Down, KeyModifiers::NONE)
+                if !self.shell_mode && self.recall_key(key.code == KeyCode::Up) =>
+            {
+                self.focus = Focus::Session;
+            }
             // Shift+Enter, Ctrl+J or Alt+Enter opens a line; Enter sends. The
             // other way round would make the common action the awkward one.
             _ if opens_a_line(key) => {
@@ -5340,6 +5398,7 @@ impl App {
 
         self.composer.clear();
         self.offer_closed = None;
+        self.recall = None;
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
             self.images.discard();
             self.produce(Event::ModelSelected { model });
@@ -5431,6 +5490,379 @@ impl App {
         self.composer.input(input);
     }
 }
+
+/// The prompts and sessions the operator can go back to: Up and Down in the
+/// composer, and the history dialog.
+impl App {
+    /// The same shell, handed a record of the repository's sessions: the
+    /// history dialog can open one of them in place of this one.
+    #[must_use]
+    pub fn remembers(mut self) -> Self {
+        self.remembers = true;
+        self
+    }
+
+    /// Whether the shell has asked for the repository's earlier sessions to
+    /// be read since this was last asked: once as it opens, and again each
+    /// time the history dialog does, so a session another shell ended since
+    /// is in it.
+    pub fn take_history_request(&mut self) -> bool {
+        std::mem::take(&mut self.history_wanted)
+    }
+
+    /// What a load of the repository's earlier sessions found.
+    ///
+    /// A walk through the prompts already under way keeps the ones it started
+    /// with, so the prompt on screen does not change under the operator.
+    pub fn set_past(&mut self, past: crate::history::Past) {
+        self.past = Some(past);
+        self.keep_browser_cursor();
+    }
+
+    /// Whether a load has landed, so that an empty list is one that is empty
+    /// rather than one that has not been read yet.
+    pub fn history_read(&self) -> bool {
+        self.past.is_some()
+    }
+
+    /// What the last load could not read, in words the operator reads.
+    pub fn history_unread(&self) -> Option<&str> {
+        self.past.as_ref()?.unread.as_deref()
+    }
+
+    /// The number this session is recorded under, once it is: its record is
+    /// this session, which the dialog lists as itself rather than as another.
+    pub fn set_recorded_as(&mut self, recorded: Option<String>) {
+        if self.recorded_as != recorded {
+            self.recorded_as = recorded;
+        }
+    }
+
+    /// The session the operator chose to open in place of this one, once.
+    pub fn take_opening(&mut self) -> Option<Target> {
+        self.opening.take()
+    }
+
+    /// The history dialog, while it is open.
+    pub fn browser(&self) -> Option<&Browser> {
+        self.browser.as_ref()
+    }
+
+    /// Opens the history dialog on `view`, and asks for what it lists to be
+    /// read again.
+    fn open_history(&mut self, view: View) {
+        self.menu = None;
+        self.browser = Some(Browser::new(view));
+        self.history_wanted = true;
+    }
+
+    /// Whether `target` is the record of this very session: the number it is
+    /// recorded under, or the conversation its backend is carrying on.
+    fn is_this_session(&self, target: &Target) -> bool {
+        match target {
+            Target::Recorded(id) => self.recorded_as.as_deref() == Some(id.as_str()),
+            Target::Claude(id) => {
+                self.session
+                    .meta()
+                    .and_then(|meta| meta.backend_session.as_deref())
+                    == Some(id.as_str())
+            }
+        }
+    }
+
+    /// This session's prompts, oldest first, with when each was sent.
+    fn own_prompts(&self) -> impl DoubleEndedIterator<Item = &Entry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::User)
+    }
+
+    /// Every prompt there is to go back to, newest first: this session's, then
+    /// the earlier sessions'. A prompt sent more than once is listed where it
+    /// was sent last.
+    fn every_prompt(&self) -> Vec<PromptRow> {
+        let own = self.own_prompts().rev().map(|entry| PromptRow {
+            text: entry.body.clone(),
+            at: entry.at,
+            session: None,
+        });
+        let earlier = self
+            .past
+            .iter()
+            .flat_map(|past| &past.prompts)
+            .filter(|prompt| !self.is_this_session(&prompt.session))
+            .map(|prompt| PromptRow {
+                text: prompt.text.clone(),
+                at: prompt.at,
+                session: Some(prompt.session.clone()),
+            });
+        let mut seen = std::collections::HashSet::new();
+        own.chain(earlier)
+            .filter(|row| !row.text.trim().is_empty() && seen.insert(row.text.clone()))
+            .collect()
+    }
+
+    /// The prompts the history dialog lists, newest first, as its filter
+    /// leaves them.
+    pub fn prompt_rows(&self) -> Vec<PromptRow> {
+        let query = self.browser.as_ref().map_or("", |browser| &browser.query);
+        self.every_prompt()
+            .into_iter()
+            .filter(|row| crate::history::matches(query, &row.text))
+            .collect()
+    }
+
+    /// The sessions the history dialog lists, as its filter leaves them: this
+    /// one first, then the others newest first, each with its prompts where
+    /// they are known.
+    pub fn session_rows(&self) -> Vec<SessionRow> {
+        let query = self.browser.as_ref().map_or("", |browser| &browser.query);
+        let this = SessionRow {
+            target: None,
+            last: self.entries.iter().rev().find_map(|entry| entry.at),
+            prompts: self.own_prompts().map(|entry| entry.body.clone()).collect(),
+            first_prompt: None,
+        };
+        let mut prompts: std::collections::HashMap<&Target, Vec<String>> =
+            std::collections::HashMap::new();
+        for prompt in self.past.iter().flat_map(|past| past.prompts.iter().rev()) {
+            prompts
+                .entry(&prompt.session)
+                .or_default()
+                .push(prompt.text.clone());
+        }
+        let others = self
+            .past
+            .iter()
+            .flat_map(|past| &past.sessions)
+            .filter(|session| !self.is_this_session(&session.target))
+            .map(|session| SessionRow {
+                target: Some(session.target.clone()),
+                last: session.last,
+                prompts: prompts.remove(&session.target).unwrap_or_default(),
+                first_prompt: session.first_prompt.clone(),
+            });
+        std::iter::once(this)
+            .chain(others)
+            .filter(|row| row.matches(query))
+            .collect()
+    }
+
+    /// How many rows the open dialog lists.
+    fn browser_rows(&self) -> usize {
+        match self.browser.as_ref().map(|browser| browser.view) {
+            Some(View::Prompts) => self.prompt_rows().len(),
+            Some(View::Sessions) => self.session_rows().len(),
+            None => 0,
+        }
+    }
+
+    /// Keeps the dialog's cursor on a row it lists, after what it lists
+    /// changed under it.
+    fn keep_browser_cursor(&mut self) {
+        let last = self.browser_rows().saturating_sub(1);
+        if let Some(browser) = self.browser.as_mut() {
+            browser.at = browser.at.min(last);
+        }
+    }
+
+    /// One key, while the history dialog is open. It takes the keyboard
+    /// whole: what is typed filters it, and nothing reaches the composer
+    /// behind it until a prompt is chosen.
+    fn on_browser_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let Some(browser) = self.browser.as_mut() else {
+            return;
+        };
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => self.browser = None,
+            (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::BackTab, _) => {
+                browser.view = browser.view.other();
+                browser.at = 0;
+            }
+            (KeyCode::Up, _) => browser.at = browser.at.saturating_sub(1),
+            (KeyCode::PageUp, _) => browser.at = browser.at.saturating_sub(BROWSER_PAGE),
+            // Ctrl+R again steps to the next older match, as a shell's
+            // reverse search does.
+            (KeyCode::Down, _) | (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                browser.at = browser.at.saturating_add(1);
+            }
+            (KeyCode::PageDown, _) => browser.at = browser.at.saturating_add(BROWSER_PAGE),
+            (KeyCode::Enter, _) => {
+                self.choose_from_history();
+                return;
+            }
+            (KeyCode::Backspace, _) => {
+                browser.query.pop();
+                browser.at = 0;
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                browser.query.clear();
+                browser.at = 0;
+            }
+            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                browser.query.push(c);
+                browser.at = 0;
+            }
+            _ => {}
+        }
+        self.keep_browser_cursor();
+    }
+
+    /// Text pasted while the history dialog is open: more of its filter, on
+    /// one line.
+    fn paste_into_browser(&mut self, pasted: &str) {
+        if let Some(browser) = self.browser.as_mut() {
+            browser
+                .query
+                .push_str(&pasted.split_whitespace().collect::<Vec<_>>().join(" "));
+            browser.at = 0;
+        }
+        self.keep_browser_cursor();
+    }
+
+    /// Does what Enter on the dialog's row does: puts a prompt in the
+    /// composer, or opens a session in place of this one.
+    fn choose_from_history(&mut self) {
+        let Some(browser) = self.browser.as_ref() else {
+            return;
+        };
+        let at = browser.at;
+        match browser.view {
+            View::Prompts => {
+                let Some(row) = self.prompt_rows().into_iter().nth(at) else {
+                    return;
+                };
+                self.browser = None;
+                self.recall = None;
+                self.focus = Focus::Session;
+                self.show_in_composer(&row.text, false);
+            }
+            View::Sessions => {
+                let Some(row) = self.session_rows().into_iter().nth(at) else {
+                    return;
+                };
+                self.open_session(row.target);
+            }
+        }
+    }
+
+    /// Ends this session and opens `target` in its place, where that is a
+    /// session that can be opened now.
+    fn open_session(&mut self, target: Option<Target>) {
+        let Some(target) = target else {
+            self.hint = Some("This is the session open now".to_owned());
+            return;
+        };
+        if !self.remembers {
+            self.hint = Some(NO_RECORD_HINT.to_owned());
+            return;
+        }
+        // The turn would be left half done, and the session it was part of
+        // reopened later would read it as one the process was killed under.
+        if self.working() {
+            self.hint = Some(
+                "A turn is running: stop it first with Esc, then open another session".to_owned(),
+            );
+            return;
+        }
+        self.browser = None;
+        self.opening = Some(target);
+        self.quit();
+    }
+
+    /// Up or Down where the composer's cursor cannot move that way: the
+    /// prompt before or after the one shown. Returns whether it was that.
+    fn recall_key(&mut self, older: bool) -> bool {
+        use ratatui_textarea::CursorMove;
+
+        let before = self.composer.cursor();
+        self.composer.move_cursor(match older {
+            true => CursorMove::Up,
+            false => CursorMove::Down,
+        });
+        if self.composer.cursor() != before {
+            return false;
+        }
+        match older {
+            true => self.recall_older(),
+            false => self.recall_newer(),
+        }
+        true
+    }
+
+    /// The prompt before the one shown, starting a walk on the newest with
+    /// what was being written set aside.
+    fn recall_older(&mut self) {
+        let shown = match self.recall.as_mut() {
+            Some(recall) => recall.older().map(str::to_owned),
+            None => {
+                let prompts: Vec<String> = self
+                    .every_prompt()
+                    .into_iter()
+                    .map(|row| row.text)
+                    .collect();
+                let recall = Recall::start(prompts, self.composed());
+                let shown = recall.as_ref().map(|recall| recall.current().to_owned());
+                self.recall = recall;
+                shown
+            }
+        };
+        if let Some(shown) = shown {
+            self.show_in_composer(&shown, true);
+        }
+    }
+
+    /// The prompt after the one shown, or past the newest the draft the walk
+    /// set aside, which ends it.
+    fn recall_newer(&mut self) {
+        let Some(recall) = self.recall.as_mut() else {
+            return;
+        };
+        let shown = match recall.newer() {
+            Newer::Prompt(prompt) => prompt.to_owned(),
+            Newer::Draft(draft) => {
+                self.recall = None;
+                draft
+            }
+        };
+        self.show_in_composer(&shown, false);
+    }
+
+    /// Replaces what the composer holds with `text`, the cursor at the end of
+    /// its first row or of its last: where the next Up, or the next Down,
+    /// steps on rather than moving inside it.
+    ///
+    /// A `/` or `@` it opens with is not offered a list: the arrows would go
+    /// to the list, and the walk would stop on the first such prompt.
+    fn show_in_composer(&mut self, text: &str, at_top: bool) {
+        use ratatui_textarea::CursorMove;
+
+        self.composer.clear();
+        self.composer.insert_str(text);
+        match at_top {
+            true => self.composer.move_cursor(CursorMove::Top),
+            false => self.composer.move_cursor(CursorMove::Bottom),
+        }
+        self.composer.move_cursor(CursorMove::End);
+        self.offer_selected = 0;
+        self.offer_closed = None;
+        if let Some(mention) = self.mention() {
+            self.offer_closed = Some((mention.row, mention.at));
+        } else if self.slash().is_some() {
+            self.offer_closed = Some((0, 0));
+        }
+    }
+}
+
+/// What opening another session says where there is no record to open one
+/// from: a log being read back.
+const NO_RECORD_HINT: &str =
+    "This shell was opened on a log, with no record of sessions to open another from";
+
+/// Rows PageUp and PageDown move the history dialog's cursor by.
+const BROWSER_PAGE: usize = 10;
 
 /// Backspace or Delete on the composer, taking what the operator sees as one
 /// character — a letter and the accents on it, an emoji and the ones joined
@@ -9862,5 +10294,303 @@ mod tests {
             Some(Duration::from_secs(42)),
             "the last counted run of the same command, not of another one"
         );
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn send_prompt(app: &mut App, text: &str) {
+        typed(app, text);
+        app.on_key(key(KeyCode::Enter));
+        app.take_produced();
+    }
+
+    fn earlier(text: &str, session: &str) -> crate::history::PastPrompt {
+        crate::history::PastPrompt {
+            text: text.to_owned(),
+            at: None,
+            session: Target::Recorded(session.to_owned()),
+        }
+    }
+
+    fn remembering(prompts: &[(&str, &str)], sessions: &[&str]) -> App {
+        let mut app = app().remembers();
+        assert!(
+            app.take_history_request(),
+            "the shell asks for its history as it opens"
+        );
+        app.set_past(crate::history::Past {
+            prompts: prompts
+                .iter()
+                .map(|(text, session)| earlier(text, session))
+                .collect(),
+            sessions: sessions
+                .iter()
+                .map(|id| crate::history::PastSession {
+                    target: Target::Recorded((*id).to_owned()),
+                    last: None,
+                    first_prompt: None,
+                })
+                .collect(),
+            unread: None,
+        });
+        app
+    }
+
+    #[test]
+    fn up_on_the_first_row_walks_back_through_the_prompts_and_down_brings_the_draft_back() {
+        let mut app = remembering(&[("from yesterday", "3")], &["3"]);
+        send_prompt(&mut app, "first");
+        send_prompt(&mut app, "second");
+        typed(&mut app, "half");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "second");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "first");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.composed(),
+            "from yesterday",
+            "earlier sessions come after this one"
+        );
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.composed(),
+            "from yesterday",
+            "the oldest is where the walk stops"
+        );
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "second");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(
+            app.composed(),
+            "half",
+            "past the newest is the draft, as it was"
+        );
+        assert!(app.take_produced().is_empty(), "recalling sends nothing");
+    }
+
+    #[test]
+    fn a_prompt_sent_in_this_session_and_an_earlier_one_is_recalled_once() {
+        let mut app = remembering(&[("run the tests", "3"), ("fix it", "3")], &["3"]);
+        send_prompt(&mut app, "run the tests");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "run the tests");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "fix it");
+    }
+
+    #[test]
+    fn up_below_the_first_row_of_the_composer_moves_the_cursor_and_recalls_nothing() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "one");
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        typed(&mut app, "two");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "one\ntwo");
+        assert_eq!(app.composer().cursor().0, 0);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "earlier", "the first row's Up recalls");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "one\ntwo");
+    }
+
+    #[test]
+    fn a_recalled_multiline_prompt_walks_on_with_the_next_arrow_either_way() {
+        let mut app = remembering(
+            &[("newest", "3"), ("two\nlines", "3"), ("oldest", "3")],
+            &["3"],
+        );
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "two\nlines");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.composed(),
+            "oldest",
+            "the cursor was left on the first row"
+        );
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "two\nlines");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(
+            app.composed(),
+            "newest",
+            "and on the last row going the other way"
+        );
+    }
+
+    #[test]
+    fn ctrl_r_finds_a_prompt_by_its_words_and_puts_it_in_the_composer_unsent() {
+        let mut app = remembering(
+            &[("fix the resume race", "4"), ("add etag support", "3")],
+            &["4", "3"],
+        );
+        typed(&mut app, "draft");
+
+        app.on_key(ctrl('r'));
+        let browser = app.browser().expect("Ctrl+R opens the history");
+        assert_eq!(browser.view, View::Prompts);
+        typed(&mut app, "ETAG");
+        let rows = app.prompt_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "add etag support");
+        assert_eq!(rows[0].session, Some(Target::Recorded("3".to_owned())));
+
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.browser().is_none());
+        assert_eq!(app.composed(), "add etag support");
+        assert!(
+            app.take_produced().is_empty(),
+            "choosing a prompt sends nothing"
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_history_and_leaves_the_composer_as_it_was() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.browser().is_none());
+        assert_eq!(app.composed(), "draft");
+    }
+
+    #[test]
+    fn the_history_lists_this_sessions_prompts_first_newest_first() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        send_prompt(&mut app, "one");
+        send_prompt(&mut app, "two");
+        app.on_key(ctrl('r'));
+
+        let rows = app.prompt_rows();
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert_eq!(texts, ["two", "one", "earlier"]);
+        assert_eq!(rows[0].session, None, "this session's own");
+    }
+
+    #[test]
+    fn the_history_says_it_is_reading_until_the_load_lands() {
+        let mut app = app().remembers();
+        app.on_key(ctrl('r'));
+        assert!(!app.history_read(), "nothing has arrived yet");
+        app.set_past(crate::history::Past::default());
+        assert!(app.history_read());
+    }
+
+    #[test]
+    fn opening_the_history_asks_for_it_to_be_read_again() {
+        let mut app = remembering(&[], &[]);
+        assert!(!app.take_history_request());
+        app.on_key(ctrl('r'));
+        assert!(
+            app.take_history_request(),
+            "a session another shell ended is listed"
+        );
+    }
+
+    #[test]
+    fn tab_turns_to_the_sessions_and_enter_opens_the_chosen_one_in_place_of_this() {
+        let mut app = remembering(&[("add etag support", "3")], &["3"]);
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.browser().map(|b| b.view), Some(View::Sessions));
+
+        let rows = app.session_rows();
+        assert_eq!(rows[0].target, None, "this session heads the list");
+        assert_eq!(rows[1].target, Some(Target::Recorded("3".to_owned())));
+        assert_eq!(rows[1].prompts, ["add etag support"]);
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.should_quit(), "this session ends");
+        assert_eq!(app.take_opening(), Some(Target::Recorded("3".to_owned())));
+    }
+
+    #[test]
+    fn the_session_open_now_is_not_opened_again() {
+        let mut app = remembering(&[("one", "5")], &["5"]);
+        app.set_recorded_as(Some("5".to_owned()));
+        app.perform(crate::menu::Action::Resume);
+        assert_eq!(app.browser().map(|b| b.view), Some(View::Sessions));
+
+        let rows = app.session_rows();
+        assert_eq!(rows.len(), 1, "its record is this session, not another");
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.should_quit());
+        assert!(app.hint().is_some_and(|hint| hint.contains("open now")));
+    }
+
+    #[test]
+    fn another_session_is_not_opened_while_a_turn_runs() {
+        let mut app = remembering(&[], &["3"]).attached();
+        send_prompt(&mut app, "go");
+        assert!(app.working());
+        app.perform(crate::menu::Action::Resume);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert!(!app.should_quit());
+        assert_eq!(app.take_opening(), None);
+        assert!(app.hint().is_some_and(|hint| hint.contains("stop")));
+    }
+
+    #[test]
+    fn a_shell_with_no_record_cannot_resume() {
+        let app = app();
+        assert!(!app.can(crate::menu::Action::Resume));
+        assert!(remembering(&[], &[]).can(crate::menu::Action::Resume));
+    }
+
+    #[test]
+    fn keys_read_together_while_the_history_is_open_go_to_it_not_the_composer() {
+        let mut app = remembering(&[("add etag support", "3"), ("fix it", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(ctrl('r'));
+
+        let keys: Vec<KeyEvent> = "etag\t\r"
+            .chars()
+            .map(|c| match c {
+                '\t' => key(KeyCode::Tab),
+                '\r' => key(KeyCode::Enter),
+                c => key(KeyCode::Char(c)),
+            })
+            .collect();
+        app.on_keys_read(
+            &keys[..4],
+            Arrival {
+                at: Instant::now(),
+                alone: false,
+            },
+        );
+        assert_eq!(app.browser().map(|b| b.query.as_str()), Some("etag"));
+        assert_eq!(app.composed(), "draft");
+        app.on_keys_read(
+            &keys[4..],
+            Arrival {
+                at: Instant::now(),
+                alone: false,
+            },
+        );
+        assert_eq!(
+            app.browser().map(|b| b.view),
+            None,
+            "the Enter chose a session"
+        );
+        assert_eq!(app.take_opening(), Some(Target::Recorded("3".to_owned())));
     }
 }

@@ -25,10 +25,12 @@
 
 pub mod app;
 pub mod bridge;
+mod browse;
 mod calls;
 pub mod clock;
 pub mod desktop;
 mod find;
+pub mod history;
 mod hunks;
 pub mod images;
 mod input;
@@ -62,6 +64,7 @@ pub use app::{
 };
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use desktop::{Desktop, Handoff, NoDesktop};
+pub use history::{History, NoHistory, Past, PastPrompt, PastSession, Target};
 pub use images::{Fetched, Images, NoImages, Source};
 pub use journal::{Journal, JournalError, Unrecorded};
 pub use prices::Prices;

@@ -1687,6 +1687,58 @@ fn a_resumed_session_starts_its_cli_on_the_same_conversation_and_in_the_same_mod
     assert!(started[1].contains("--permission-mode plan"), "{started:?}");
 }
 
+/// Choosing an earlier session in the history dialog ends the one open and
+/// opens the chosen one in the same terminal, its CLI carrying on the
+/// conversation that session recorded, as `niobe --resume` would.
+#[test]
+fn a_session_chosen_in_the_history_reopens_the_shell_on_it() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows(OPENING_FRAME);
+        terminal.typed(b"recorded-before\r");
+        terminal.shows("answered-the-turn");
+        lines_written(&repo.path().join("args.log"), 1);
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(
+            status.success(),
+            "the first session ended with {status}: {drawn}"
+        );
+    }
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+    lines_written(&repo.path().join("args.log"), 2);
+    // Ctrl+R, waiting for the earlier session's prompt to be listed, which
+    // says the load has landed, then Tab to the sessions.
+    terminal.typed(b"\x12");
+    terminal.shows("recorded-before");
+    // Waiting on what the turned dialog draws would wait on cells a frame
+    // may leave as they were; the keys are taken in order whatever is drawn.
+    terminal.typed(b"\t");
+    terminal.typed(b"\x1b[B");
+    terminal.typed(b"\r");
+    let started = lines_written(&repo.path().join("args.log"), 3);
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+
+    let started: Vec<&str> = started.lines().collect();
+    assert!(!started[1].contains("--resume"), "{started:?}");
+    assert!(started[2].contains("--resume conv-1"), "{started:?}");
+}
+
 /// A session read in from the CLI's own transcript carries on in the CLI
 /// under the transcript's own id, and in the mode the transcript left it in.
 #[test]

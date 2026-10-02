@@ -72,7 +72,7 @@ const ASK_COLUMNS: usize = 72;
 const ASK_INSET: usize = 4;
 
 /// Columns of margin a dialog leaves on each side of a narrow screen.
-const DIALOG_MARGIN: u16 = 4;
+pub(crate) const DIALOG_MARGIN: u16 = 4;
 
 /// Widest the model list is drawn, in columns. A model id is a word or two, so
 /// the list is narrow enough to read as a list rather than as a pane.
@@ -168,6 +168,7 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
     if app.sheet().is_some() {
         draw_sheet(frame, body, app, &theme);
     }
+    crate::browse::draw(frame, body, app, &theme);
     // The open menu hangs from the bar over everything, a list included: it
     // was opened last.
     let list = app
@@ -561,12 +562,12 @@ fn trust_grants(
 
 /// Columns a dialog's frame and padding take from its width: a border and two
 /// columns of padding on each side.
-const DIALOG_INSET: usize = 6;
+pub(crate) const DIALOG_INSET: usize = 6;
 
 /// Draws a dialog's frame, centred in `body` over whatever is there, with its
 /// shadow, and returns the area inside it. `size` is the width and the number
 /// of lines it will hold; `titles` are the text on its top and bottom edges.
-fn dialog(
+pub(crate) fn dialog(
     frame: &mut Frame,
     body: Rect,
     size: (u16, usize),

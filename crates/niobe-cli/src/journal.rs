@@ -36,6 +36,10 @@ impl StoreJournal {
 }
 
 impl Journal for StoreJournal {
+    fn recorded_as(&self) -> Option<String> {
+        self.session().map(|session| session.to_string())
+    }
+
     fn append(&mut self, event: &Event) -> Result<(), JournalError> {
         panic_if_the_environment_asks();
         // A store that failed to open stays pending, so the next event tries

@@ -34,8 +34,10 @@ pub enum Action {
     NewSession,
     /// Has the backend summarise the conversation to free context.
     Compact,
-    /// Carrying on an earlier session.
+    /// Opens the history dialog on the sessions, to carry an earlier one on.
     Resume,
+    /// Opens the history dialog on the prompts sent before.
+    History,
     /// Going back to an earlier point in the session.
     Rewind,
     /// Stops the turn that is running.
@@ -166,6 +168,7 @@ pub const MENUS: [Menu; 6] = [
             item("New session", 0, "F3  /clear", Action::NewSession),
             item("Compact context", 0, "F2  /compact", Action::Compact),
             item("Resume…", 0, "", Action::Resume),
+            item("History…", 0, "Ctrl+R", Action::History),
             ruled("Rewind to checkpoint", 2, "F6", Action::Rewind),
             item("Stop current run", 0, "Esc", Action::Stop),
             ruled("Export transcript", 0, "", Action::Export),
