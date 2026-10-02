@@ -1228,7 +1228,7 @@ pub struct App {
     stop_asked_in: Option<usize>,
 }
 
-/// A search through the transcript, from `/` on an empty composer to Esc.
+/// A search through the transcript, from Ctrl+F to Esc.
 #[derive(Debug)]
 struct Find {
     /// What is being looked for, edited like the composer.
@@ -2904,6 +2904,7 @@ impl App {
             | Action::SubAgents
             | Action::CycleMode
             | Action::Usage
+            | Action::Find
             | Action::Diff
             | Action::GroupByAgent
             | Action::Pane(_)
@@ -2959,6 +2960,7 @@ impl App {
             Action::CycleMode => self.cycle_mode(),
             Action::Effort => self.pick_effort(),
             Action::Usage => self.hint = Some(self.cost_hint(self.read_at())),
+            Action::Find => self.open_find(),
             Action::Diff => self.open_diffs(),
             Action::GroupByAgent => self.group_by_agent(),
             Action::Pane(pane) => self.toggle_pane(pane),
@@ -3099,7 +3101,7 @@ impl App {
             Some(path) => self.handoffs.push(crate::desktop::Handoff::Open(path)),
             None => {
                 let init = match self.listed("init") {
-                    true => "; `//init` has the backend write one",
+                    true => "; `/init` has the backend write one",
                     false => "",
                 };
                 self.hint = Some(format!(
@@ -3275,8 +3277,8 @@ impl App {
             ("Enter", "send the prompt".to_owned()),
             (self.newline_key(), "a new line in the prompt".to_owned()),
             ("⇧Tab", "the next permission mode".to_owned()),
-            ("/", "search the transcript".to_owned()),
-            ("//", "a backend command".to_owned()),
+            ("/", "a backend command or skill".to_owned()),
+            (FIND_KEY, "search the transcript".to_owned()),
             ("@", "name a file".to_owned()),
             (
                 "↑↓",
@@ -3911,8 +3913,8 @@ impl App {
     }
 
     /// Whether the composer holds nothing a prompt could be made of. Spaces
-    /// the operator cannot see must not turn the `/` and `!` that start a
-    /// search or a command into text, or the next command goes to the agent.
+    /// the operator cannot see must not turn the `!` that starts a command
+    /// into text, or the next command goes to the agent.
     fn composer_is_blank(&self) -> bool {
         self.composer
             .lines()
@@ -4473,9 +4475,7 @@ impl App {
     ///
     /// The F-keys, Shift+Tab, Ctrl+O and Ctrl+T still do what they do everywhere;
     /// every other key is the search's, so nothing typed at it lands in the
-    /// composer behind it. The key that opened it, pressed again on an empty
-    /// query, closes it and types itself: that is how a prompt starts with a
-    /// literal `/`.
+    /// composer behind it.
     fn on_find_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -4490,10 +4490,6 @@ impl App {
             }
             (KeyCode::Esc, _) => self.close_find(),
             (KeyCode::Backspace, _) if empty => self.close_find(),
-            (KeyCode::Char('/'), KeyModifiers::NONE | KeyModifiers::SHIFT) if empty => {
-                self.close_find();
-                self.composer.insert_char('/');
-            }
             (KeyCode::Enter | KeyCode::Up, _) => find.step(false),
             (KeyCode::Down, _) => find.step(true),
             (KeyCode::Tab, _) => {}
@@ -4832,9 +4828,8 @@ impl App {
     }
 
     /// Whether a character typed now would go into the prompt as itself: the
-    /// prompt has the keyboard and something in it already, so no `/` or `!`
-    /// could open the search or a command, and no `Esc` has made the next
-    /// digit an F-key.
+    /// prompt has the keyboard and something in it already, so no `!` could
+    /// open a command, and no `Esc` has made the next digit an F-key.
     fn types_into_the_prompt(&self) -> bool {
         self.focus() == Focus::Session
             && !self.escaped
@@ -4853,8 +4848,8 @@ impl App {
     ///
     /// Its line breaks stay line breaks, so a pasted log is one prompt to
     /// read over and send rather than a turn per line. It goes where typing
-    /// would go, but it presses nothing: no Enter, no `/` or `!` opening the
-    /// search or a command, and no answer to a question — a paste is exactly
+    /// would go, but it presses nothing: no Enter, no `!` opening a command,
+    /// and no answer to a question — a paste is exactly
     /// what a prompt must not take as one (see [`ASK_QUIET`]).
     pub fn on_paste(&mut self, pasted: &str) {
         self.hint = None;
@@ -5087,6 +5082,12 @@ impl App {
             // the mode, so the plain key is the one that moves the focus.
             (KeyCode::Tab, KeyModifiers::NONE) => self.focus_next(),
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.open_history(View::Prompts),
+            // A binding rather than a character, so it searches with a prompt
+            // half written and leaves the prompt as it was.
+            (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                self.focus = Focus::Session;
+                self.open_find();
+            }
             // Up on the composer's first row and Down on its last are where
             // the cursor has nowhere to go, and where a shell walks its
             // history; anywhere else they move the cursor as they always have.
@@ -5135,17 +5136,9 @@ impl App {
                 self.hint = Some(ESCAPED_HINT.to_owned());
             }
 
-            // `/` searches the transcript where it would start a prompt: in
-            // a composer with anything but spaces in it, it is a slash.
-            (KeyCode::Char('/'), KeyModifiers::NONE | KeyModifiers::SHIFT)
-                if self.composer_is_blank() =>
-            {
-                self.focus = Focus::Session;
-                self.composer.clear();
-                self.open_find();
-            }
-            // `!` runs a command where it would start a prompt, for the same
-            // reason `/` searches only there.
+            // `!` runs a command where it would start a prompt: in a
+            // composer with anything but spaces in it, it is an exclamation
+            // mark.
             (KeyCode::Char('!'), KeyModifiers::NONE | KeyModifiers::SHIFT)
                 if self.composer_is_blank() && self.runs_commands =>
             {
@@ -5971,11 +5964,14 @@ pub fn percent(utilization: f64) -> u64 {
 /// each only once it works.
 const PLACEHOLDER: [&str; 5] = [
     "Ask for a change",
-    "/ search transcript",
+    "/ command or skill",
     "@ file",
     "! shell",
-    "// command",
+    "Ctrl+F find",
 ];
+
+/// The key that searches the transcript.
+const FIND_KEY: &str = "Ctrl+F";
 
 /// What an empty composer says while it holds a command: where it runs, and
 /// the one thing about it an operator could not guess.
@@ -6028,14 +6024,14 @@ fn opens_a_line(key: ratatui::crossterm::event::KeyEvent) -> bool {
 /// `@ file` is left out where there are no files to name — a session outside
 /// a repository, or one whose repository has not been read yet — since it
 /// would be advertising a list that cannot open; `! shell` where nothing runs
-/// commands, as in a recorded log being looked at; `// command` where the
-/// backend has listed no commands of its own.
+/// commands, as in a recorded log being looked at; `/ command or skill` where
+/// the backend has listed no commands of its own.
 fn placeholder(columns: usize, can: Offers) -> String {
     let mut said = PLACEHOLDER[0].to_owned();
     for more in PLACEHOLDER[1..].iter().filter(|more| match **more {
         "@ file" => can.files,
         "! shell" => can.shell,
-        "// command" => can.commands,
+        "/ command or skill" => can.commands,
         _ => true,
     }) {
         let longer = format!("{said} · {more}");
@@ -6055,7 +6051,7 @@ struct Offers {
     files: bool,
     /// Something runs the operator's `!` commands.
     shell: bool,
-    /// The backend has listed commands to pick with `//`.
+    /// The backend has listed commands to pick with `/`.
     commands: bool,
 }
 
@@ -7081,7 +7077,7 @@ mod tests {
         // That Esc already did something; the digit after it is the start of
         // what the operator types next.
         let mut app = app();
-        app.on_key(key(KeyCode::Char('/')));
+        ctrl_f(&mut app);
         app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::Char('9')));
         assert_eq!(app.composer().lines(), ["9"]);
@@ -9333,6 +9329,10 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     }
 
+    fn ctrl_f(app: &mut App) {
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    }
+
     #[test]
     fn ctrl_t_opens_every_cut_diff_and_cuts_them_again() {
         let mut app = app();
@@ -9349,7 +9349,7 @@ mod tests {
     #[test]
     fn ctrl_t_opens_the_diffs_while_a_search_is_open_and_leaves_the_query_alone() {
         let mut app = app();
-        press(&mut app, KeyCode::Char('/'));
+        ctrl_f(&mut app);
         press(&mut app, KeyCode::Char('x'));
 
         ctrl_t(&mut app);
@@ -9504,14 +9504,29 @@ mod tests {
     }
 
     #[test]
-    fn a_slash_that_opens_a_read_searches_for_the_rest_of_it() {
+    fn a_slash_that_opens_a_read_starts_a_command_with_the_rest_of_it() {
         let mut app = app();
 
         read(&mut app, b"/build", Instant::now());
 
-        let query = app.finding().expect("the slash opened the search");
-        assert_eq!(query.lines(), ["build"]);
-        assert!(app.composer().is_empty(), "the query went into the prompt");
+        assert!(app.finding().is_none(), "the slash opened the search");
+        assert_eq!(app.composer().lines(), ["/build"]);
+    }
+
+    #[test]
+    fn ctrl_f_searches_with_a_prompt_half_written_and_esc_gives_it_back() {
+        let mut app = app();
+        read(&mut app, b"half a", Instant::now());
+
+        ctrl_f(&mut app);
+        press(&mut app, KeyCode::Char('x'));
+
+        let query = app.finding().expect("Ctrl+F opened the search");
+        assert_eq!(query.lines(), ["x"]);
+        assert_eq!(app.composer().lines(), ["half a"]);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.finding().is_none());
+        assert_eq!(app.composer().lines(), ["half a"]);
     }
 
     /// Typed quickly while the shell was busy, `run it` and its Enter can
@@ -9611,11 +9626,11 @@ mod tests {
     #[test]
     fn a_paste_into_the_search_is_one_line_of_query() {
         let mut app = app();
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        ctrl_f(&mut app);
 
         app.on_paste("two\rwords");
 
-        let query = app.finding().expect("the slash opened the search");
+        let query = app.finding().expect("Ctrl+F opened the search");
         assert_eq!(query.lines(), ["two words"]);
         assert!(
             app.composer().is_empty(),

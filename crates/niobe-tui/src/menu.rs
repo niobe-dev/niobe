@@ -62,6 +62,8 @@ pub enum Action {
     Effort,
     /// Says what the plan's windows stand at.
     Usage,
+    /// Opens a search through the transcript.
+    Find,
     /// Opens every cut diff, or cuts them again.
     Diff,
     /// Groups each turn's sub-agent rows under their agent, or interleaves
@@ -169,6 +171,7 @@ pub const MENUS: [Menu; 6] = [
             item("Compact context", 0, "F2  /compact", Action::Compact),
             item("Resume…", 0, "", Action::Resume),
             item("History…", 0, "Ctrl+R", Action::History),
+            item("Find in transcript", 0, "Ctrl+F", Action::Find),
             ruled("Rewind to checkpoint", 2, "F6", Action::Rewind),
             item("Stop current run", 0, "Esc", Action::Stop),
             ruled("Export transcript", 0, "", Action::Export),
@@ -208,7 +211,7 @@ pub const MENUS: [Menu; 6] = [
         name: "Help",
         items: &[
             item("Shortcuts", 0, "F1", Action::Shortcuts),
-            item("Commands", 0, "//", Action::Commands),
+            item("Commands & skills", 0, "/", Action::Commands),
             ruled("Release notes", 0, "", Action::ReleaseNotes),
             item("Report a bug", 9, "", Action::ReportBug),
         ],

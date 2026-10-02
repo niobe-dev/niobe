@@ -4,14 +4,15 @@
 //! Picking one of the backend's own commands with `/`.
 //!
 //! The commands are the ones the backend listed, folded into the session; the
-//! backend is what runs one, when a prompt starts with `/` and its name. What
-//! is here is which word of the prompt names a command and which of the
-//! listed commands it could be.
+//! backend is what runs one, when a prompt starts with `/` and its name. The
+//! `claude` CLI lists its skills among them, a plugin's under the plugin's
+//! name, so a skill is picked and run the way a command is. What is here is
+//! which word of the prompt names a command and which of the listed commands
+//! it could be.
 //!
-//! A `/` on an empty composer searches the transcript, and a second one puts
-//! a `/` in the prompt, so a command is always typed as `//` and then its
-//! name. Only the start of the prompt names one: that is the only place the
-//! backend reads a command from.
+//! Only the start of the prompt names one: that is the only place the backend
+//! reads a command from. The transcript is searched with Ctrl+F rather than
+//! `/`, so a prompt opens with a command the way it does in the CLI itself.
 
 use niobe_core::event::SlashCommand;
 

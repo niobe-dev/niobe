@@ -320,7 +320,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
     }));
     all.extend(check("find", |p| {
         let mut app = running_session();
-        app.on_key(key(KeyCode::Char('/')));
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         typed(&mut app, &format!("q{p}"));
         app
     }));

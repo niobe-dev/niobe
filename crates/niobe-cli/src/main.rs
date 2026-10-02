@@ -1187,10 +1187,13 @@ IN THE SHELL:
                            what is typed, Enter putting one in the composer
                            unsent; Tab turns it to the sessions, where Enter
                            ends this one and opens the chosen one in its place
-    /                      On an empty composer, search the transcript: Up and
-                           Enter step to the match above, Down to the one
-                           below, Esc puts the view back where it was, and a
-                           second / types a prompt that starts with one
+    Ctrl+F                 Search the transcript: Up and Enter step to the
+                           match above, Down to the one below, Esc puts the
+                           view back where it was
+    /                      At the start of a prompt, offer the commands and
+                           skills the backend listed: Up / Down choose, Tab or
+                           Enter put the name in the prompt, Esc leaves it as
+                           typed
     @                      At the start of a word, offer the files git lists
                            in the repository, by their paths from its root,
                            where the agent runs: Up / Down choose,

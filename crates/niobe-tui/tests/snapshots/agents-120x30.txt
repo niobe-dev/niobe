@@ -25,6 +25,6 @@
  ┃   Both reviewers are working.                                            █ │   └ Reading tests/stream.rs           █
  ┃                                                                          █ │ ◆ deep1 Review fetch.py            0s █
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ◆ deep2 Review cache.py            0s │
- ┃  ask  >  Ask for a change · / search transcript · @ file  Ctrl+J newline ┃ │ ▾ Tools  13 calls ✗ 2 · 0 denied      │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │ ▾ Tools  13 calls ✗ 2 · 0 denied      │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

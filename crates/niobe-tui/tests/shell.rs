@@ -2423,6 +2423,13 @@ fn press(app: &mut App, code: ratatui::crossterm::event::KeyCode) {
     ));
 }
 
+fn ctrl_f(app: &mut App) {
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char('f'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+}
+
 #[test]
 fn the_ask_bar_wears_its_badge_in_every_theme() {
     for theme in niobe_tui::theme::THEMES {
@@ -2446,8 +2453,12 @@ fn the_placeholder_names_only_what_the_composer_does_today() {
     let mut app = running_session();
     let row = bar_row(&screen(&mut app, 200, 60));
     assert!(row.contains("Ask for a change"), "{row}");
-    assert!(row.contains("/ search transcript"), "{row}");
     assert!(row.contains("@ file"), "{row}");
+    assert!(row.contains("Ctrl+F find"), "{row}");
+    assert!(
+        !row.contains("/ command"),
+        "the bar promises commands the backend has not listed:\n{row}"
+    );
     assert!(
         !row.contains("! shell"),
         "the bar promises `! shell`, which the composer does not do:\n{row}"
@@ -2532,7 +2543,7 @@ fn a_command_and_a_search_keep_their_own_badges() {
     assert!(!frame.contains(" auto  > "), "{frame}");
 
     press(&mut app, ratatui::crossterm::event::KeyCode::Esc);
-    press(&mut app, ratatui::crossterm::event::KeyCode::Char('/'));
+    ctrl_f(&mut app);
     let frame = screen(&mut app, 120, 30);
     assert!(frame.contains(" find  / "), "{frame}");
     assert!(!frame.contains(" auto  > "), "{frame}");
@@ -2611,7 +2622,7 @@ fn the_bar_keeps_the_key_that_opens_a_line_at_eighty_columns() {
         assert!(row.contains(&format!(" {mode}  > ")), "{row}");
         assert!(row.contains("Ctrl+J newline"), "{row}");
         assert!(
-            row.contains("Ask for a change · / search transcript · @ file"),
+            row.contains("Ask for a change · @ file · Ctrl+F find"),
             "with the mode in the badge, the placeholder has its room back:\n{row}"
         );
     }
@@ -2622,7 +2633,7 @@ fn a_terminal_that_reports_shift_enter_holds_no_newline_key_at_eighty_columns() 
     let mut app = running_session().reports_shift_enter();
     let row = bar_row(&screen(&mut app, 80, 24));
     assert!(
-        row.contains("Ask for a change · / search transcript · @ file"),
+        row.contains("Ask for a change · @ file · Ctrl+F find"),
         "Shift+Enter cannot be mistaken for Enter here, so the placeholder keeps its room:\n{row}"
     );
     assert!(row.contains(" ask  > "), "{row}");
@@ -2987,7 +2998,7 @@ fn type_keys(app: &mut App, typed: &str) {
 }
 
 #[test]
-fn slash_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_back() {
+fn ctrl_f_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_back() {
     use ratatui::crossterm::event::KeyCode;
 
     let mut app = session_with_a_needle();
@@ -2997,10 +3008,10 @@ fn slash_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_bac
         "the test needs it off screen"
     );
 
-    press(&mut app, KeyCode::Char('/'));
+    ctrl_f(&mut app);
     let row = find_row(&screen(&mut app, 120, 30));
     assert!(row.contains("Find in the transcript"), "{row}");
-    assert!(app.composed().is_empty(), "the slash went into the prompt");
+    assert!(app.composed().is_empty(), "the key went into the prompt");
 
     type_keys(&mut app, "needle");
     let frame = screen(&mut app, 120, 30);
@@ -3040,10 +3051,8 @@ fn slash_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_bac
 
 #[test]
 fn every_match_on_screen_is_marked_and_only_the_current_one_as_a_chip() {
-    use ratatui::crossterm::event::KeyCode;
-
     let mut app = session_with_a_needle();
-    press(&mut app, KeyCode::Char('/'));
+    ctrl_f(&mut app);
     type_keys(&mut app, "worth");
     let frame = screen(&mut app, 120, 30);
     let theme = app.theme().to_owned();
@@ -3069,7 +3078,7 @@ fn a_query_found_nowhere_says_so() {
 
     let mut app = session_with_a_needle();
     let tail = screen(&mut app, 120, 30);
-    press(&mut app, KeyCode::Char('/'));
+    ctrl_f(&mut app);
     type_keys(&mut app, "haystack");
     let frame = screen(&mut app, 120, 30);
     assert!(find_row(&frame).contains("no match"), "{frame}");
@@ -3087,12 +3096,15 @@ fn a_slash_anywhere_but_the_start_of_a_prompt_is_a_slash() {
     assert_eq!(app.composed(), "a/b");
 
     let mut app = session_with_a_needle();
-    type_keys(&mut app, "//etc");
-    assert!(app.finding().is_none(), "a second slash leaves the search");
-    assert_eq!(app.composed(), "/etc", "and starts the prompt with one");
+    type_keys(&mut app, "/etc");
+    assert!(
+        app.finding().is_none(),
+        "a slash opening the prompt searched"
+    );
+    assert_eq!(app.composed(), "/etc", "and the prompt starts with it");
 
     let mut app = session_with_a_needle();
-    press(&mut app, KeyCode::Char('/'));
+    ctrl_f(&mut app);
     press(&mut app, KeyCode::Backspace);
     assert!(
         app.finding().is_none(),
@@ -3275,11 +3287,11 @@ fn command_list(frame: &str) -> Vec<String> {
 }
 
 #[test]
-fn two_slashes_offer_the_backends_commands_and_enter_picks_one_to_send() {
+fn a_slash_offers_the_backends_commands_and_enter_picks_one_to_send() {
     use ratatui::crossterm::event::KeyCode;
 
     let mut app = session_with_commands();
-    type_keys(&mut app, "//");
+    type_keys(&mut app, "/");
     assert!(app.finding().is_none());
     let frame = screen(&mut app, 120, 30);
     let offered = command_list(&frame);
@@ -3331,7 +3343,7 @@ fn a_list_the_backend_sends_again_replaces_what_is_offered() {
         "Pre-commit review workflow",
         None,
     )]));
-    type_keys(&mut app, "//");
+    type_keys(&mut app, "/");
     let offered = command_list(&screen(&mut app, 120, 30));
     assert_eq!(offered.len(), 1, "{offered:?}");
     assert!(
@@ -3345,11 +3357,11 @@ fn a_command_is_offered_only_where_it_opens_the_prompt_and_esc_leaves_it_as_type
     use ratatui::crossterm::event::KeyCode;
 
     let mut app = session_with_commands();
-    type_keys(&mut app, "see //comp");
+    type_keys(&mut app, "see /comp");
     assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
 
     let mut app = session_with_commands();
-    type_keys(&mut app, "//co");
+    type_keys(&mut app, "/co");
     assert!(!command_list(&screen(&mut app, 120, 30)).is_empty());
     press(&mut app, KeyCode::Esc);
     type_keys(&mut app, "n");
@@ -3363,7 +3375,7 @@ fn a_command_is_offered_only_where_it_opens_the_prompt_and_esc_leaves_it_as_type
         "with the list closed, Enter sends"
     );
 
-    type_keys(&mut app, "//co");
+    type_keys(&mut app, "/co");
     assert!(
         !command_list(&screen(&mut app, 120, 30)).is_empty(),
         "a list closed on one prompt stayed closed for the next"
@@ -3390,15 +3402,15 @@ fn a_list_of_files_closed_on_a_word_opens_again_for_the_next_word_in_its_place()
 #[test]
 fn a_session_whose_backend_listed_no_commands_does_not_offer_one() {
     let mut app = empty_session();
-    assert!(!bar_row(&screen(&mut app, 200, 60)).contains("// command"));
-    type_keys(&mut app, "//");
+    assert!(!bar_row(&screen(&mut app, 200, 60)).contains("/ command"));
+    type_keys(&mut app, "/");
     assert_eq!(app.composed(), "/");
     assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
 
     let mut app = session_with_commands();
     let row = bar_row(&screen(&mut app, 200, 60));
     assert!(
-        row.contains("// command"),
+        row.contains("/ command or skill"),
         "a session with commands to run says how to reach them: {row}"
     );
 }
@@ -3529,21 +3541,10 @@ fn a_command_after_a_blank_one_still_runs_here_rather_than_reaching_the_agent() 
 }
 
 #[test]
-fn bang_and_slash_on_a_composer_of_spaces_open_what_they_open_on_nothing() {
-    use ratatui::crossterm::event::KeyCode;
-
+fn bang_on_a_composer_of_spaces_opens_what_it_opens_on_nothing() {
     let mut app = session_that_runs_commands();
     type_keys(&mut app, "  ");
     run_command(&mut app, "echo spaced");
-
-    type_keys(&mut app, "  ");
-    press(&mut app, KeyCode::Char('/'));
-    assert!(
-        app.finding().is_some(),
-        "`/` was typed rather than opening search: {:?}",
-        app.composed()
-    );
-    assert!(app.composed().is_empty(), "the spaces were left behind");
 }
 
 #[test]

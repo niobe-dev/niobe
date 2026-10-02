@@ -25,6 +25,6 @@
  ┃                ┗━━━━━━━━━━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C quit ━━━━━━━━━━━━━━━━━┛░░              │
  ┃                  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░│░░░░░░░░░░░░░░░░░░░░░░░░░              │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
- ┃  —  >  Ask for a change      Shift+Tab mode · Ctrl+J newline · Tab panes ┃ │                                       │
+ ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit
