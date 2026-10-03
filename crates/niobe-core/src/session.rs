@@ -445,6 +445,9 @@ pub struct SessionState {
     context: Option<Context>,
     tools: ToolTotals,
     in_flight_tools: BTreeMap<ToolCallId, String>,
+    /// The calls whose end has been counted, so that an end said again for
+    /// one of them is not a second call.
+    ended_tools: BTreeSet<ToolCallId>,
     /// Whether the backend is still answering the last prompt.
     turn_running: bool,
     /// Every turn that has ended, oldest first.
@@ -500,6 +503,10 @@ pub struct SessionState {
     /// Sub-agents still running when a fatal error ended the session.
     agents_interrupted: u64,
     running_agents: BTreeSet<AgentId>,
+    /// The sub-agents whose end has been counted, by their exit or by the
+    /// session ending under them, so that an exit said after it is not a
+    /// second end.
+    ended_agents: BTreeSet<AgentId>,
     peak_running_agents: u64,
     errors: u64,
     fatal_error: Option<String>,
@@ -526,9 +533,10 @@ impl SessionState {
     ///
     /// Every case is total: an end without a start, an exit without a spawn, a
     /// response without a request are all counted rather than dropped, because
-    /// a silently ignored event is a total that cannot be defended. The one
-    /// event that changes nothing is a turn's end said again straight after
-    /// the end it repeats.
+    /// a silently ignored event is a total that cannot be defended. What
+    /// changes nothing is an event said again: a turn's end straight after
+    /// the end it repeats, and a call's end or an agent's exit once that
+    /// call or agent has ended.
     pub fn apply(&mut self, event: &Event) {
         self.fold(event);
         self.ended_last = matches!(
@@ -594,7 +602,9 @@ impl SessionState {
             Event::ToolCallStart {
                 id, name, agent, ..
             } => {
-                // A start said again for a call already running is one call.
+                // A start said again for a call already running is one call;
+                // one for a call that has ended starts it again.
+                self.ended_tools.remove(id);
                 if self
                     .in_flight_tools
                     .insert(id.clone(), name.clone())
@@ -607,6 +617,9 @@ impl SessionState {
                 }
             }
 
+            // An end said again for a call already ended is the same call
+            // ending, as a start said twice is one start.
+            Event::ToolCallEnd { id, .. } if self.ended_tools.contains(id) => {}
             Event::ToolCallEnd {
                 id,
                 name,
@@ -614,6 +627,7 @@ impl SessionState {
                 outcome,
                 ..
             } => {
+                self.ended_tools.insert(id.clone());
                 bump(&mut self.tools.finished);
                 self.tools.output_bytes = self.tools.output_bytes.saturating_add(*bytes);
                 bump(self.tools.by_name.entry(name.clone()).or_default());
@@ -726,8 +740,10 @@ impl SessionState {
             }
 
             // A spawn said again for an agent already running is the same
-            // agent, as an exit said twice is one exit.
+            // agent, as an exit said twice is one exit. One for an agent that
+            // has ended runs it again, and its next exit is that run's.
             Event::AgentSpawn { id, .. } => {
+                self.ended_agents.remove(id);
                 if self.running_agents.insert(id.clone()) {
                     bump(&mut self.agents_spawned);
                 }
@@ -740,13 +756,13 @@ impl SessionState {
             // session's usage records, so nothing here counts them again.
             Event::AgentProgress { .. } => {}
 
-            // Counted only for an agent still running: one the backend's end
-            // already counted as interrupted did not also complete, and an
-            // exit reported twice is one exit.
+            // An exit without a spawn is still an agent that ended. One the
+            // backend's end already counted as interrupted did not also
+            // complete, and an exit reported twice is one exit.
+            Event::AgentExit { id, .. } if self.ended_agents.contains(id) => {}
             Event::AgentExit { id, outcome } => {
-                if !self.running_agents.remove(id) {
-                    return;
-                }
+                self.running_agents.remove(id);
+                self.ended_agents.insert(id.clone());
                 match outcome {
                     AgentOutcome::Completed => bump(&mut self.agents_completed),
                     AgentOutcome::Failed => bump(&mut self.agents_failed),
@@ -800,6 +816,7 @@ impl SessionState {
         }
         let agents = std::mem::take(&mut self.running_agents);
         self.agents_interrupted = self.agents_interrupted.saturating_add(agents.len() as u64);
+        self.ended_agents.extend(agents);
     }
 
     /// Where the session stands now, as a turn beginning or ending here would
@@ -1752,6 +1769,96 @@ mod tests {
 
         assert_eq!(state.agents_spawned(), 1);
         assert_eq!(state.tools().started, 1);
+    }
+
+    fn end(id: &str, name: &str) -> Event {
+        Event::ToolCallEnd {
+            id: id.into(),
+            name: name.to_owned(),
+            input: String::new(),
+            output: String::new(),
+            bytes: 64,
+            outcome: ToolOutcome::Failed,
+            summary: None,
+            exit_code: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn an_end_said_twice_is_one_finished_call() {
+        let state = SessionState::replay(&[
+            start("t1", "Bash", None),
+            end("t1", "Bash"),
+            end("t1", "Bash"),
+            end("t9", "Read"),
+            end("t9", "Read"),
+        ]);
+
+        let tools = state.tools();
+        assert_eq!(tools.started, 1);
+        assert_eq!(tools.finished, 2);
+        assert_eq!(tools.unmatched_ends, 1);
+        assert_eq!(tools.failed, 2);
+        assert_eq!(tools.output_bytes, 128);
+        assert_eq!(tools.by_name["Bash"], 1);
+        assert_eq!(tools.by_name["Read"], 1);
+        assert_eq!(tools.failed_by_name["Bash"], 1);
+    }
+
+    #[test]
+    fn a_call_started_again_after_its_end_ends_again() {
+        let state = SessionState::replay(&[
+            start("t1", "Bash", None),
+            end("t1", "Bash"),
+            start("t1", "Bash", None),
+            end("t1", "Bash"),
+        ]);
+
+        let tools = state.tools();
+        assert_eq!(tools.started, 2);
+        assert_eq!(tools.finished, 2);
+        assert_eq!(tools.unmatched_ends, 0);
+        assert!(state.in_flight_tools().is_empty());
+    }
+
+    fn exit(id: &str, outcome: AgentOutcome) -> Event {
+        Event::AgentExit {
+            id: id.into(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn an_exit_without_a_spawn_is_counted_and_an_exit_said_again_is_not() {
+        let state = SessionState::replay(&[
+            exit("a1", AgentOutcome::Completed),
+            exit("a1", AgentOutcome::Completed),
+            exit("a2", AgentOutcome::Failed),
+        ]);
+
+        assert_eq!(state.agents_spawned(), 0);
+        assert_eq!(state.agents_completed(), 1);
+        assert_eq!(state.agents_failed(), 1);
+        assert!(state.running_agents().is_empty());
+    }
+
+    #[test]
+    fn an_agent_the_session_ended_under_does_not_also_exit() {
+        let state = SessionState::replay(&[
+            Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                kind: None,
+                label: "test-writer".to_owned(),
+            },
+            Event::SessionLeft,
+            exit("a1", AgentOutcome::Completed),
+        ]);
+
+        assert_eq!(state.agents_spawned(), 1);
+        assert_eq!(state.agents_interrupted(), 1);
+        assert_eq!(state.agents_completed(), 0);
     }
 
     #[test]

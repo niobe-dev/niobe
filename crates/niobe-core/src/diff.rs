@@ -101,11 +101,13 @@ fn is_binary(text: &str) -> bool {
 /// grows with how much the texts differ times how long they are, not with the
 /// size of the file alone: a two-line change in a fifty-thousand-line file is
 /// a few hundred thousand steps, and seven hundred lines replaced by seven
-/// hundred others are just inside the million. A million is under ten
-/// milliseconds in a release build, which a replacement made between two
-/// frames can afford. Above it the change is reported as one whose size the backend did not
-/// state, because a redraw that waits on a diff is a redraw the operator
-/// watches stall.
+/// hundred others are just inside the million. Measured in a release build on
+/// an Apple M2 Pro, a million steps — those seven hundred lines, or a thousand
+/// lines reversed — took 4 to 5 milliseconds on an idle machine and 10 to 17
+/// on one busy with other builds: at worst about one frame, which a
+/// replacement made between two frames can afford. Above it the change is
+/// reported as one whose size the backend did not state, because a redraw
+/// that waits on a diff is a redraw the operator watches stall.
 const MAX_STEPS: usize = 1_000_000;
 
 /// How many lines the two sequences have in common, in order, or `None`

@@ -145,7 +145,8 @@ pub fn is_test_run(command: &str) -> bool {
 /// escaped with `\`, is part of a word: `git commit -m "fix; cargo test
 /// passes"` is one command, `git`'s. What a command substitution runs is not
 /// split out either, since what it prints is captured and its status is not
-/// the command's; its text is kept in the word as it was written. Nor is the
+/// the command's; its text is kept in the word as it was written, quotes and
+/// all, and a `)` quoted inside it does not close it. Nor is the
 /// body of a here-document, which is the input of the command that opened it,
 /// nor a comment, from an unquoted `#` that starts a word to the end of its
 /// line: writing a script that runs `cargo test` is not running it.
@@ -157,9 +158,13 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
     while let Some(&c) = chars.get(at) {
         let inner = open.last().copied();
         let next = chars.get(at + 1).copied();
+        let substituted = in_substitution(&open);
         match (inner, c) {
             (Some(Quoted::Single), '\'') => {
                 open.pop();
+                if in_substitution(&open) {
+                    split.push(c);
+                }
             }
             (Some(Quoted::Single), _) => split.push(c),
             (Some(Quoted::Double) | None, '\\') => {
@@ -168,7 +173,7 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
                     Some('\n') => {}
                     Some(next) => {
                         let kept = inner.is_none() || matches!(next, '"' | '\\' | '$' | '`');
-                        if !kept {
+                        if !kept || substituted {
                             split.push('\\');
                         }
                         split.push(next);
@@ -192,6 +197,9 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
             }
             (Some(Quoted::Double), '"') => {
                 open.pop();
+                if in_substitution(&open) {
+                    split.push(c);
+                }
             }
             (Some(Quoted::Backticks), '`') => {
                 open.pop();
@@ -202,13 +210,16 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
                 split.push(c);
             }
             (Some(Quoted::Double), _) => split.push(c),
-            (None, '\'') => {
-                open.push(Quoted::Single);
-                split.quoted();
-            }
-            (None, '"') => {
-                open.push(Quoted::Double);
-                split.quoted();
+            (None | Some(Quoted::Substitution | Quoted::Parenthesis), '\'' | '"') => {
+                open.push(match c {
+                    '\'' => Quoted::Single,
+                    _ => Quoted::Double,
+                });
+                if substituted {
+                    split.push(c);
+                } else {
+                    split.quoted();
+                }
             }
             (Some(Quoted::Substitution | Quoted::Parenthesis), '(') => {
                 open.push(Quoted::Parenthesis);
@@ -369,6 +380,14 @@ enum Quoted {
     Parenthesis,
     /// `` `…` ``.
     Backticks,
+}
+
+/// Whether what is being read is inside a `$(…)`, where a quote is kept as
+/// written, since the substitution's text is, and a `)` it quotes does not
+/// close the substitution.
+fn in_substitution(open: &[Quoted]) -> bool {
+    open.iter()
+        .any(|quoted| matches!(quoted, Quoted::Substitution | Quoted::Parenthesis))
 }
 
 /// Whether the byte at `at` ends a simple command. An `&` that follows `>` or
@@ -1224,6 +1243,9 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "cargo test <<EOF\ninput\nEOF",
             "cat <<EOF\nnotes\nEOF\ncargo test",
             "echo a#b; cargo test",
+            "echo $(echo ')') ; cargo test",
+            "echo $(echo \")\") ; cargo test",
+            "echo \"$(echo ')')\"; cargo test",
         ] {
             assert!(is_test_run(command), "{command:?} runs the tests");
         }
@@ -1251,6 +1273,9 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "git commit -m \"$(printf 'x'); cargo test\"",
             "echo $(date; cargo test)",
             "echo `date; cargo test`",
+            "echo \"$(echo ')')\"",
+            "echo \"$(echo ')') ; cargo test\"",
+            "echo $(echo ')'; cargo test)",
             "cargo xtask ci",
             "cargo nextest run",
             "pytest",
