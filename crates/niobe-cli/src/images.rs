@@ -292,7 +292,7 @@ fn read_with(reader: &Reader) -> std::io::Result<Option<Vec<u8>>> {
         Output::Path => {
             let named = String::from_utf8_lossy(&stdout);
             let path = named.trim_end_matches(['\n', '\r']);
-            if niobe_tui::images::image_path(path).is_none() {
+            if !niobe_tui::images::names_an_image(path) {
                 return Ok(None);
             }
             read_capped(Path::new(path))?
@@ -535,6 +535,23 @@ mod tests {
         );
         assert_eq!(
             names.fetch(&Source::Clipboard).map(|i| i.data().to_vec()),
+            Ok(PNG.to_vec())
+        );
+    }
+
+    #[test]
+    fn a_file_named_on_the_clipboard_is_read_by_its_name_as_written() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let image = wrote_png(dir.path(), r"Screen Shot \1.png");
+        let fetcher = fetcher(
+            dir.path(),
+            vec![sh(
+                &format!("printf '%s\\n' '{}'", image.display()),
+                Output::Path,
+            )],
+        );
+        assert_eq!(
+            fetcher.fetch(&Source::Clipboard).map(|i| i.data().to_vec()),
             Ok(PNG.to_vec())
         );
     }

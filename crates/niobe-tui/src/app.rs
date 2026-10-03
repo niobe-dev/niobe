@@ -1319,6 +1319,11 @@ const WITHDRAWN_NOT_SENT_HINT: &str =
 const TOO_SOON_HINT: &str =
     "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
 
+/// What the bar says when Enter was refused because an image for the prompt
+/// is still being read.
+const IMAGE_STILL_READING_HINT: &str =
+    "Not sent: an image for this prompt is still being read. Press Enter once it is attached";
+
 /// What the bar says when a click on the menus or the F-key bar was refused
 /// because a question waits.
 const QUESTION_FIRST_HINT: &str =
@@ -4299,10 +4304,10 @@ impl App {
     /// as the placeholder that stands for it; a failure says why on the bar.
     ///
     /// A path that was pasted and is not an image to attach goes into the
-    /// prompt as the path it named, since a paste of it would have put it
-    /// there — without the quoting a terminal dropping it added.
+    /// prompt as it was pasted, quoting and escapes included, since a paste
+    /// of anything else would have put it there unchanged.
     pub fn fetched(&mut self, fetched: Fetched) {
-        self.images.fetched();
+        let pasted = self.images.fetched(&fetched.source);
         match (fetched.image, fetched.source) {
             (Ok(image), _) => {
                 let placeholder = self.images.attach(image);
@@ -4314,7 +4319,7 @@ impl App {
             }
             (Err(reason), Source::File(path)) => {
                 self.hint = Some(format!("{path} is not attached: {reason}"));
-                self.insert_into_composer(&path);
+                self.insert_into_composer(&pasted.unwrap_or(path));
             }
         }
     }
@@ -5019,6 +5024,7 @@ impl App {
         }
         if let Some(path) = image_path(pasted) {
             self.focus = Focus::Session;
+            self.images.remember_paste(path.clone(), text);
             self.attach_image(Source::File(path));
             return;
         }
@@ -5579,10 +5585,15 @@ impl App {
     /// The prompt is folded in and queued: the event loop takes it from
     /// [`App::take_produced`] and hands it to the backend and to the journal.
     /// With nothing attached, the shell says so plainly rather than leaving a
-    /// prompt on screen that looks sent.
+    /// prompt on screen that looks sent. While an image asked for is still
+    /// being read, nothing is sent: it would land in the next prompt instead.
     pub fn submit(&mut self) {
         let text = self.composed();
         if text.trim().is_empty() {
+            return;
+        }
+        if self.images.fetching() {
+            self.hint = Some(IMAGE_STILL_READING_HINT.to_owned());
             return;
         }
 
@@ -6926,6 +6937,49 @@ mod tests {
             app.hint(),
             Some("/tmp/notes.png is not attached: it is not a PNG, JPEG, GIF or WebP image")
         );
+    }
+
+    #[test]
+    fn a_pasted_path_that_cannot_be_read_goes_back_as_it_was_pasted() {
+        for (pasted, path) in [
+            (r"^shot\d+\.png", "^shotd+.png"),
+            ("\"assets/logo.png\"", "assets/logo.png"),
+        ] {
+            let mut app = app();
+            app.on_paste(pasted);
+            assert_eq!(app.take_image_requests(), [Source::File(path.to_owned())]);
+            app.fetched(Fetched {
+                source: Source::File(path.to_owned()),
+                image: Err("it does not exist".to_owned()),
+            });
+
+            assert_eq!(app.composed(), pasted);
+        }
+    }
+
+    #[test]
+    fn a_prompt_waits_for_the_image_still_being_read_for_it() {
+        let mut app = app();
+        app.on_paste("/tmp/shot.png");
+        let produced = submitted(&mut app, "look at this");
+
+        assert_eq!(produced, Vec::new());
+        assert_eq!(app.composed(), "look at this");
+        assert_eq!(app.hint(), Some(IMAGE_STILL_READING_HINT));
+
+        app.fetched(Fetched {
+            source: Source::File("/tmp/shot.png".to_owned()),
+            image: Ok(png(b"a")),
+        });
+        app.submit();
+
+        assert_eq!(
+            app.take_produced(),
+            vec![Event::UserMessage {
+                text: "look at this[Image #1] ".to_owned()
+            }]
+        );
+        assert_eq!(app.take_turn_images(), vec![png(b"a")]);
     }
 
     #[test]

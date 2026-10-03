@@ -17,6 +17,7 @@
 //!   image it cannot give as text pastes an empty string.
 //! * A paste that is one path to an image file — which is also what dropping
 //!   a file on most terminals types — attaches that file instead of its path.
+//!   A path that is not attached goes into the prompt as it was pasted.
 //!
 //! What is attached is written into the prompt as `[Image #N]`, where it went,
 //! numbered across the session as Claude Code numbers them, and sent with the
@@ -24,7 +25,7 @@
 //!
 //! A fetch is never waited on: the clipboard is read by another program, and
 //! the loop has a terminal to draw on every tick. Its outcome arrives through
-//! [`Images::drain`].
+//! [`Images::drain`], and until it has, the prompt it is for is not sent.
 
 use std::collections::VecDeque;
 
@@ -39,8 +40,8 @@ pub enum Source {
     /// The image on the clipboard.
     Clipboard,
     /// The file at a path the operator pasted, as it was pasted once its
-    /// quoting was taken off: a relative path is the session's directory's,
-    /// and `~` is the operator's home.
+    /// quoting, escapes or `file://` address were taken off: a relative path
+    /// is the session's directory's, and `~` is the operator's home.
     File(String),
 }
 
@@ -104,6 +105,9 @@ pub(crate) struct Attachments {
     asked: Vec<Source>,
     /// Asked for and not yet handed back, so the bar can say one is coming.
     fetching: usize,
+    /// Each pasted path asked for and not yet handed back, with the paste it
+    /// was read from, oldest first.
+    pasted: Vec<(String, String)>,
     /// The images of each prompt sent and not yet handed to the backend,
     /// oldest first.
     turns: VecDeque<Vec<Image>>,
@@ -116,6 +120,12 @@ impl Attachments {
         self.fetching = self.fetching.saturating_add(1);
     }
 
+    /// Notes that the file at `path` was asked for because `pasted` named
+    /// it, so that a file which is not attached gives the paste back.
+    pub(crate) fn remember_paste(&mut self, path: String, pasted: String) {
+        self.pasted.push((path, pasted));
+    }
+
     /// What was asked for since the last call, oldest first.
     pub(crate) fn take_asked(&mut self) -> Vec<Source> {
         std::mem::take(&mut self.asked)
@@ -126,9 +136,15 @@ impl Attachments {
         self.fetching > 0
     }
 
-    /// Notes that a fetch ended, however it ended.
-    pub(crate) fn fetched(&mut self) {
+    /// Notes that the fetch from `source` ended, however it ended, and
+    /// returns the paste that asked for it, where a paste did.
+    pub(crate) fn fetched(&mut self, source: &Source) -> Option<String> {
         self.fetching = self.fetching.saturating_sub(1);
+        let Source::File(path) = source else {
+            return None;
+        };
+        let at = self.pasted.iter().position(|(asked, _)| asked == path)?;
+        Some(self.pasted.remove(at).1)
     }
 
     /// Attaches `image` to the prompt being written, and returns the
@@ -185,44 +201,101 @@ const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 ///
 /// A dropped file arrives quoted, or with its spaces escaped, or as a
 /// `file://` address, depending on the terminal; each is taken back to the
-/// path. Anything with a line break in it is text, however it ends.
+/// path. Text with a space no backslash escapes is a sentence, not a path,
+/// however it ends, unless it is quoted whole; and anything with a line break
+/// in it is text.
 pub fn image_path(pasted: &str) -> Option<String> {
     let trimmed = pasted.trim();
     if trimmed.is_empty() || trimmed.contains(['\n', '\r']) {
         return None;
     }
-    let unquoted = unquote(trimmed);
-    let path = unquoted.strip_prefix("file://").unwrap_or(&unquoted);
-    let (_, extension) = path.rsplit_once('.')?;
-    if !IMAGE_EXTENSIONS
-        .iter()
-        .any(|known| extension.eq_ignore_ascii_case(known))
-    {
-        return None;
-    }
+    let unquoted = match quoted(trimmed) {
+        Some(inner) => inner.to_owned(),
+        None if trimmed.starts_with(FILE_SCHEME) => trimmed.to_owned(),
+        None => unescaped(trimmed)?,
+    };
+    let path = match unquoted.strip_prefix(FILE_SCHEME) {
+        Some(address) => file_address_path(address)?,
+        None => unquoted,
+    };
+    names_an_image(&path).then_some(path)
+}
+
+/// Whether `path`, a path as it is written on disk, names an image file by
+/// its extension.
+pub fn names_an_image(path: &str) -> bool {
+    let Some((_, extension)) = path.rsplit_once('.') else {
+        return false;
+    };
     // A name alone, with nothing before its extension, is not a file anyone
     // dropped.
     let name = path.rsplit('/').next().unwrap_or(path);
-    (name.len() > extension.len() + 1).then(|| path.to_owned())
+    IMAGE_EXTENSIONS
+        .iter()
+        .any(|known| extension.eq_ignore_ascii_case(known))
+        && name.len() > extension.len() + 1
 }
 
-/// `text` without the quotes around it, or with its backslash escapes taken
-/// out where it has none.
-fn unquote(text: &str) -> String {
-    for quote in ['\'', '"'] {
-        if let Some(inner) = text
-            .strip_prefix(quote)
+/// How a dropped file's address starts.
+const FILE_SCHEME: &str = "file://";
+
+/// `text` without the quotes around it, where it is quoted whole.
+fn quoted(text: &str) -> Option<&str> {
+    ['\'', '"'].into_iter().find_map(|quote| {
+        text.strip_prefix(quote)
             .and_then(|rest| rest.strip_suffix(quote))
-        {
-            return inner.to_owned();
-        }
-    }
+    })
+}
+
+/// `text` with its backslash escapes taken out, or `None` where it holds
+/// whitespace no backslash escapes, which a terminal never leaves in a path
+/// it types.
+fn unescaped(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         match c {
             '\\' => out.extend(chars.next()),
+            c if c.is_whitespace() => return None,
             c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// The local path a `file://` address names, given what follows the scheme:
+/// its host empty or `localhost`, and its percent escapes decoded, since a
+/// terminal escapes a space or a byte past ASCII in a name it drops this way.
+/// `None` where the address names another host or decodes to no text.
+fn file_address_path(address: &str) -> Option<String> {
+    let path = address.strip_prefix("localhost").unwrap_or(address);
+    if !path.starts_with('/') {
+        return None;
+    }
+    String::from_utf8(percent_decoded(path)).ok()
+}
+
+/// The bytes of `text` with each `%` and two hex digits taken as the byte
+/// they name; a `%` without them stays as it is.
+fn percent_decoded(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        let escaped = (byte == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(decoded) => {
+                out.push(decoded);
+                at += 3;
+            }
+            None => {
+                out.push(byte);
+                at += 1;
+            }
         }
     }
     out
@@ -264,6 +337,45 @@ mod tests {
             ".png",
             "/tmp/.png",
             "png",
+        ] {
+            assert_eq!(image_path(pasted), None, "{pasted:?}");
+        }
+    }
+
+    #[test]
+    fn a_sentence_that_ends_in_an_image_name_is_text() {
+        for pasted in [
+            "rename the logo to logo.png",
+            r"the regex is ^shot\d+\.png",
+            "/Users/me/Screen Shot.png",
+        ] {
+            assert_eq!(image_path(pasted), None, "{pasted:?}");
+        }
+        assert_eq!(
+            image_path("'rename the logo to logo.png'").as_deref(),
+            Some("rename the logo to logo.png")
+        );
+    }
+
+    #[test]
+    fn a_dropped_file_address_is_read_back_to_the_path_it_names() {
+        for (pasted, path) in [
+            ("file:///Users/me/My%20Shot.png", "/Users/me/My Shot.png"),
+            ("file://localhost/Users/me/shot.png", "/Users/me/shot.png"),
+            ("file:///Users/me/%C3%A9t%C3%A9.png", "/Users/me/été.png"),
+            ("file:///Users/me/100%.png", "/Users/me/100%.png"),
+            ("'file:///Users/me/a%27b.png'", "/Users/me/a'b.png"),
+        ] {
+            assert_eq!(image_path(pasted).as_deref(), Some(path), "{pasted:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_address_that_names_no_local_path_is_text() {
+        for pasted in [
+            "file://server/share/shot.png",
+            "file://shot.png",
+            "file:///Users/me/%FF.png",
         ] {
             assert_eq!(image_path(pasted), None, "{pasted:?}");
         }
@@ -332,8 +444,20 @@ mod tests {
         assert!(attachments.fetching());
         assert_eq!(attachments.take_asked(), vec![Source::Clipboard]);
         assert!(attachments.take_asked().is_empty());
-        attachments.fetched();
+        assert_eq!(attachments.fetched(&Source::Clipboard), None);
         assert!(!attachments.fetching());
+    }
+
+    #[test]
+    fn a_pasted_path_hands_back_the_paste_it_was_read_from_once() {
+        let mut attachments = Attachments::default();
+        let source = Source::File("a b.png".to_owned());
+        attachments.remember_paste("a b.png".to_owned(), r"a\ b.png".to_owned());
+        attachments.ask(source.clone());
+        attachments.ask(Source::File("c.png".to_owned()));
+
+        assert_eq!(attachments.fetched(&source).as_deref(), Some(r"a\ b.png"));
+        assert_eq!(attachments.fetched(&source), None);
     }
 
     #[test]
