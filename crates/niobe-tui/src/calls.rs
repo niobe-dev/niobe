@@ -635,13 +635,13 @@ fn row(
 
     let mut spans = vec![
         Span::styled(format!("{glyph} "), Style::new().fg(glyph_colour).bold()),
-        Span::styled(format!("{name:<name_column$}"), Style::new().fg(colour)),
+        Span::styled(text::pad(&name, name_column), Style::new().fg(colour)),
         Span::raw(" "),
     ];
     if agent_column > 0 {
         let tag = text::truncate(doing.agent.unwrap_or_default(), agent_column);
         spans.push(Span::styled(
-            format!("{tag:<agent_column$} "),
+            format!("{} ", text::pad(&tag, agent_column)),
             Style::new().fg(theme.dim),
         ));
     }
@@ -695,7 +695,7 @@ pub(crate) fn said(
                     format!("{} ", EntryKind::SubAgent.glyph()),
                     Style::new().fg(theme.agent).bold(),
                 ),
-                Span::styled(format!("{tag:<lead$}"), Style::new().fg(theme.agent).bold()),
+                Span::styled(text::pad(&tag, lead), Style::new().fg(theme.agent).bold()),
             ],
             _ => vec![Span::raw(indent.clone())],
         };
@@ -735,7 +735,7 @@ pub(crate) fn heading(
     let tag = text::truncate(tag, lead.saturating_sub(1));
     Line::from(vec![
         Span::styled("▾ ", Style::new().fg(theme.title).bold()),
-        Span::styled(format!("{tag:<lead$}"), Style::new().fg(theme.title).bold()),
+        Span::styled(text::pad(&tag, lead), Style::new().fg(theme.title).bold()),
         Span::styled(task, Style::new().fg(theme.dim)),
         Span::raw(" ".repeat(gap)),
         Span::styled(count, Style::new().fg(theme.dim)),
@@ -1121,6 +1121,95 @@ mod tests {
         );
         assert!(rows[0].ends_with("running"), "{rows:?}");
         assert_eq!(rows[0].chars().count(), 80, "{rows:?}");
+    }
+
+    /// Each row of `app`'s transcript at 80 columns, one string a row.
+    fn every_row(app: &App) -> Vec<String> {
+        let detail = Detail {
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        app.entries()
+            .iter()
+            .flat_map(|entry| lines(entry, 80, detail, &Theme::default()))
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The cell `needle` starts at in `row`.
+    fn cell_of(row: &str, needle: &str) -> Option<usize> {
+        row.find(needle).map(|at| text::width(&row[..at]))
+    }
+
+    #[test]
+    fn what_a_call_does_starts_in_one_column_for_a_wide_tool_name_and_agent_tag() {
+        let mut app = app();
+        app.apply(&Event::AgentSpawn {
+            id: niobe_core::event::AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("漢字漢字-writer".to_owned()),
+            label: "漢字漢字-writer: 書く".to_owned(),
+        });
+        app.apply(&start_by("t1", "mcp__漢字サーバー__ツール", "toolu_a"));
+        app.apply(&Event::ToolCallStart {
+            id: "t2".into(),
+            name: "Read".to_owned(),
+            input: String::new(),
+            summary: Some("catalog/t2.py".to_owned()),
+            agent: None,
+        });
+
+        let rows = every_row(&app);
+        let rows: Vec<&String> = rows.iter().filter(|row| !row.is_empty()).collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(cell_of(rows[0], "catalog/t1.py"), Some(26), "{rows:?}");
+        assert_eq!(cell_of(rows[1], "catalog/t2.py"), Some(26), "{rows:?}");
+        assert_eq!(cell_of(rows[0], "漢字漢字"), Some(17), "{rows:?}");
+        for row in rows {
+            assert_eq!(text::width(row), 80, "{row:?}");
+            assert!(row.ends_with("running"), "{row:?}");
+        }
+    }
+
+    #[test]
+    fn a_wide_agent_tag_keeps_its_words_and_its_heading_in_their_columns() {
+        let mut app = app();
+        app.apply(&Event::AgentSpawn {
+            id: niobe_core::event::AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("漢字漢字-writer".to_owned()),
+            label: "漢字漢字-writer: 書く".to_owned(),
+        });
+        app.apply(&start_by("t1", "Read", "toolu_a"));
+        app.apply(&Event::AssistantMessage {
+            text: "Done.".into(),
+            agent: Some(niobe_core::event::AgentId::new("toolu_a")),
+        });
+
+        let detail = Detail {
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        let theme = Theme::default();
+        let words: String = said(&app.entries()[1], 60, detail, &theme)[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(cell_of(&words, "Done."), Some(16), "{words:?}");
+        assert_eq!(text::width(&words), 60, "{words:?}");
+        let head: String = heading("漢字漢字", "書く", 1, 60, detail, &theme)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(cell_of(&head, "書く"), Some(16), "{head:?}");
+        assert_eq!(text::width(&head), 60, "{head:?}");
     }
 
     #[test]

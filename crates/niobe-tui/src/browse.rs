@@ -86,11 +86,14 @@ fn prompts(
     let shown: Vec<Line> = window(&listed, browser.at, list_rows)
         .map(|(at, row)| {
             let said = format!(
-                "{:>AGE_COLUMNS$}{GAP}{:<SESSION_COLUMNS$}{GAP}{}",
+                "{:>AGE_COLUMNS$}{GAP}{}{GAP}{}",
                 age(now, row.at),
-                row.session
-                    .as_ref()
-                    .map_or_else(|| "this session".to_owned(), |target| target.label()),
+                text::pad(
+                    &row.session
+                        .as_ref()
+                        .map_or_else(|| "this session".to_owned(), |target| target.label()),
+                    SESSION_COLUMNS
+                ),
                 one_line(&row.text),
             );
             list_row(&said, at == browser.at, width, theme)
@@ -119,9 +122,9 @@ fn sessions(
     let shown: Vec<Line> = window(&listed, browser.at, list_rows)
         .map(|(at, row)| {
             let said = format!(
-                "{:>AGE_COLUMNS$}{GAP}{:<SESSION_COLUMNS$}{GAP}{:>9}{GAP}{}",
+                "{:>AGE_COLUMNS$}{GAP}{}{GAP}{:>9}{GAP}{}",
                 age(now, row.last),
-                name(row),
+                text::pad(&name(row), SESSION_COLUMNS),
                 count(row),
                 row.first().map_or_else(|| "—".to_owned(), one_line),
             );
@@ -222,7 +225,7 @@ fn empty_or(
 
 /// One row of the list, the cursor's in its colours.
 fn list_row(said: &str, on_it: bool, width: usize, theme: &Theme) -> Line<'static> {
-    let row = format!("{:<width$}", text::truncate(said, width));
+    let row = text::pad(&text::truncate(said, width), width);
     match on_it {
         true => Line::styled(
             row,

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! Wrapping, truncation and tab expansion, done here rather than by the
-//! widgets.
+//! Wrapping, truncation, padding and tab expansion, done here rather than by
+//! the widgets.
 //!
 //! The transcript scrolls, so the shell has to know how many lines a message
 //! occupies before it draws it. A [`ratatui::widgets::Paragraph`] wraps
@@ -40,6 +40,20 @@ fn cells(grapheme: &str) -> usize {
         true => 0,
         false => usize::from(grapheme.cell_width()),
     }
+}
+
+/// `text` followed by the spaces that make it `columns` cells wide, or
+/// `text` alone where it is already as wide or wider.
+///
+/// For a column a span after it has to start at. `format!`'s own padding
+/// counts characters, so a name in CJK, two cells to the character, came out
+/// as wide again as its column and pushed everything after it out of line.
+pub fn pad(text: &str, columns: usize) -> String {
+    let fill = columns.saturating_sub(width(text));
+    let mut out = String::with_capacity(text.len() + fill);
+    out.push_str(text);
+    out.extend(std::iter::repeat_n(' ', fill));
+    out
 }
 
 /// Columns between tab stops where the shell expands a tab itself.
@@ -277,6 +291,18 @@ mod tests {
             "set -e ↵ cd /tmp ↵ echo done"
         );
         assert_eq!(truncate("a\tb", 80), "a b");
+    }
+
+    #[test]
+    fn a_wide_string_is_padded_to_the_cells_it_takes_not_its_characters() {
+        assert_eq!(pad("漢字", 6), "漢字  ");
+        assert_eq!(width(&pad("漢字", 6)), 6);
+        assert_eq!(pad("Read", 6), "Read  ");
+        assert_eq!(
+            pad("漢字漢字", 6),
+            "漢字漢字",
+            "a string wider than the column is not cut"
+        );
     }
 
     #[test]

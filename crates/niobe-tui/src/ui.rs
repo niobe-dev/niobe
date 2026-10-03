@@ -226,11 +226,8 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
             Purpose::Theme => option.to_lowercase(),
             Purpose::Model | Purpose::Effort => option.clone(),
         };
-        let row = format!(
-            "{marker}{:<room$}",
-            text::truncate(&shown, text_width.saturating_sub(2)),
-            room = text_width.saturating_sub(2)
-        );
+        let room = text_width.saturating_sub(2);
+        let row = format!("{marker}{}", text::pad(&text::truncate(&shown, room), room));
         lines.push(match on_it {
             true => {
                 Line::from(row).style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold())
@@ -461,9 +458,11 @@ fn draw_trust(
         let on_it = i == asking.at;
         let marker = if on_it { PICK_CURSOR } else { "  " };
         let row = format!(
-            "{marker}{:<room$}",
-            format!("{}. {}", i + 1, answer.label()),
-            room = text_width.saturating_sub(2)
+            "{marker}{}",
+            text::pad(
+                &format!("{}. {}", i + 1, answer.label()),
+                text_width.saturating_sub(2)
+            )
         );
         tail.push(match on_it {
             true => {
@@ -526,10 +525,7 @@ fn trust_grants(
                         _ => String::new(),
                     };
                     Line::from(vec![
-                        Span::styled(
-                            format!("{name:<width$}", width = name_width + TRUST_GAP),
-                            name_style,
-                        ),
+                        Span::styled(text::pad(&name, name_width + TRUST_GAP), name_style),
                         Span::styled(part, value_style),
                     ])
                 })
@@ -1145,12 +1141,15 @@ fn draw_offer(
                 // A file's name is the end of its path, so a path too long
                 // for the list keeps that and gives up its leading
                 // directories.
-                let shown = format!(" {:<inside$} ", text::truncate_start(row, inside));
+                let shown = format!(
+                    " {} ",
+                    text::pad(&text::truncate_start(row, inside), inside)
+                );
                 return Line::from(shown).style(style);
             };
             // The names are a column, so the descriptions start together.
             let row = text::truncate(row, inside);
-            let row = format!("{row:<column$}", column = named.min(inside));
+            let row = text::pad(&row, named.min(inside));
             let left = inside.saturating_sub(text::width(&row));
             let said = match left > 2 {
                 true => format!("  {}", text::truncate(first_line(detail), left - 2)),
@@ -2827,9 +2826,7 @@ fn usage_figure_columns(app: &App) -> usize {
 /// A label set in the Usage pane's label column `columns` wide: cut to leave
 /// the column of gap, and padded to the column.
 fn usage_label(label: &str, columns: usize) -> String {
-    let label = text::truncate(label, columns.saturating_sub(1));
-    let pad = columns.saturating_sub(text::width(&label));
-    format!("{label}{:pad$}", "")
+    text::pad(&text::truncate(label, columns.saturating_sub(1)), columns)
 }
 
 /// What a share is drawn in: three columns for the figure and the sign, one
@@ -3440,7 +3437,10 @@ fn bar_line(
 
     Line::from(vec![
         Span::styled(
-            format!("{ROW_INDENT}{:<name$}", text::truncate(family, name)),
+            format!(
+                "{ROW_INDENT}{}",
+                text::pad(&text::truncate(family, name), name)
+            ),
             Style::new().fg(theme.dim),
         ),
         Span::styled(format!("{count:>BAR_COUNT$} "), Style::new().fg(theme.fg)),
@@ -3675,10 +3675,7 @@ fn agent_row(
     let colour = theme.agent;
     let mut row = vec![
         Span::styled("◆ ", Style::new().fg(colour).bold()),
-        Span::styled(
-            format!("{tag:<width$}", width = columns.tag),
-            Style::new().fg(colour),
-        ),
+        Span::styled(text::pad(tag, columns.tag), Style::new().fg(colour)),
         Span::raw(AGENT_SPACE),
         Span::styled(task, Style::new().fg(theme.fg)),
         Span::raw(" ".repeat(pad)),
@@ -3686,7 +3683,7 @@ fn agent_row(
     if columns.model > 0 {
         let model = text::truncate(&model.unwrap_or_default(), columns.model);
         row.push(Span::styled(
-            format!(" {model:<width$}", width = columns.model),
+            format!(" {}", text::pad(&model, columns.model)),
             Style::new().fg(theme.dim),
         ));
     }
@@ -4349,7 +4346,7 @@ fn draw_fkeys(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         let room = usize::from(width).saturating_sub(digit.len() + 1);
         spans.push(Span::styled(*digit, key_style));
         spans.push(Span::styled(
-            format!("{:<room$}", text::truncate(label, room), room = room),
+            text::pad(&text::truncate(label, room), room),
             stopped(app.can(*action)),
         ));
         spans.push(Span::styled(" ", bar));
@@ -6125,6 +6122,41 @@ mod tests {
                 .collect();
             (header_of(name, &kept) == drawn).then_some(kept)
         })
+    }
+
+    #[test]
+    fn a_wide_agent_tag_leaves_the_agents_status_whole_at_the_pane_edge() {
+        let theme = Theme::default();
+        let columns = AgentColumns {
+            tag: text::width("漢字漢字"),
+            model: 0,
+            status: text::width("running"),
+            task: 0,
+        };
+        let row = line_text(&agent_row(
+            "漢字漢字",
+            "書く",
+            (None, "running"),
+            columns.fitted(60),
+            &theme,
+        ));
+        assert!(row.ends_with(" running"), "{row:?}");
+        assert_eq!(text::width(&row), 60, "{row:?}");
+    }
+
+    #[test]
+    fn a_wide_tool_family_keeps_the_count_column_in_line() {
+        let theme = Theme::default();
+        let name = text::width("漢字サーバー");
+        let wide = line_text(&bar_line(("漢字サーバー", name), 3, 0, 3, 12, &theme));
+        let plain = line_text(&bar_line(("Read", name), 3, 0, 3, 12, &theme));
+        let count_cell = |row: &str| row.find(" 3 ").map(|at| text::width(&row[..at]));
+        assert_eq!(count_cell(&wide), count_cell(&plain), "{wide:?} {plain:?}");
+        assert_eq!(
+            text::width(&wide),
+            text::width(&plain),
+            "{wide:?} {plain:?}"
+        );
     }
 
     #[test]
