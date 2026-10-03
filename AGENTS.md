@@ -368,7 +368,8 @@ Where tests live:
     snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
   - `niobe-tui/tests/frame_budget.rs` times a 200×60 resize, and the steady redraw of a long
     session of markdown replies, against a 16 ms budget, and a long line typed or pasted into
-    the composer: a 100 KB paste against 50 ms, and keys read together against a linear ratio — and a
+    the composer: a paste as long as the composer holds against 50 ms, a key typed into it
+    against 16 ms, and keys read together against a linear ratio — and a
     100,000-line file written from scratch, applied and drawn against 50 ms. It is a test binary of its own and its
     tests take turns on a lock, so that nothing shares their cores, and each asserts the median
     of 31 frames so that a frame the scheduler interrupted cannot fail it. The frames are timed

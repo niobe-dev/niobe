@@ -1352,6 +1352,21 @@ const QUESTION_WITHDRAWN_HINT: &str = "The question was withdrawn before it was 
 const WITHDRAWN_NOT_SENT_HINT: &str =
     "Not sent: the question being answered was withdrawn. Press Enter again to send";
 
+/// The most the composer holds, in bytes.
+///
+/// Its editor lays out the whole of what it holds again after every edit, so
+/// what a key costs grows with the prompt: on one line of a megabyte, a key
+/// took 90 ms in an optimised build. This much keeps a key, and the frame
+/// drawn after it, inside 16 ms. Text that would take the composer past it
+/// is refused whole and the bar says so; longer text goes in a file the
+/// prompt names with `@`.
+pub const COMPOSER_CAP: usize = 64 * 1024;
+
+/// What the bar says when text was refused for taking the composer past
+/// [`COMPOSER_CAP`].
+const TOO_LONG_HINT: &str =
+    "Not added: a prompt holds at most 64 KB. Put longer text in a file and name it with @";
+
 /// What the bar says when keys reached a prompt too soon to answer it.
 const TOO_SOON_HINT: &str =
     "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
@@ -1894,8 +1909,12 @@ impl App {
                 target,
                 agent,
             } => {
+                // An Esc pressed before the question came up made the next
+                // digit an F-key for the shell, and that digit is now an
+                // answer to the question.
                 if self.asks.is_empty() {
                     self.ask_quiet_since = self.latest_instant();
+                    self.escaped = false;
                 }
                 if let Some(call) = self.call_mut(id) {
                     call.asked = true;
@@ -3451,6 +3470,9 @@ impl App {
             ("Alt+letter", "open a menu".to_owned()),
             ("Enter", "send the prompt".to_owned()),
             (self.newline_key(), "a new line in the prompt".to_owned()),
+            ("Ctrl+W", "delete the word before the cursor".to_owned()),
+            ("Ctrl+U", "delete to the start of the line".to_owned()),
+            ("Ctrl+K", "delete to the end of the line".to_owned()),
             ("⇧Tab", "the next permission mode".to_owned()),
             ("/", "a backend command or skill".to_owned()),
             (FIND_KEY, "search the transcript".to_owned()),
@@ -5061,7 +5083,9 @@ impl App {
             // one as Enter. Pressed, it would send the prompt or run the `!`
             // command the paste typed, which nobody asked for.
             if !arrival.alone && is_plain_enter(key) && self.composer_has_the_keyboard() {
-                self.composer.insert_newline();
+                if self.composer_has_room_for(1) {
+                    self.composer.insert_newline();
+                }
                 continue;
             }
             self.on_key_read(key, arrival);
@@ -5074,11 +5098,14 @@ impl App {
                 .count();
             let (typed, after) = rest.split_at(run);
             let text: String = typed.iter().copied().filter_map(typed_char).collect();
+            rest = after;
+            if !self.composer_has_room_for(text.len()) {
+                continue;
+            }
             if self.composer.insert_str(text) {
                 self.offer_selected = 0;
                 self.reopen_offers();
             }
-            rest = after;
         }
     }
 
@@ -5163,8 +5190,9 @@ impl App {
             return;
         }
         // A terminal that pastes an image it cannot give as text pastes
-        // nothing, and a dropped image file arrives as its path.
-        if text.trim().is_empty() {
+        // nothing, and a dropped image file arrives as its path. Blanks are
+        // text the operator copied, and go in as typed.
+        if text.is_empty() {
             self.focus = Focus::Session;
             self.attach_image(Source::Clipboard);
             return;
@@ -5176,10 +5204,30 @@ impl App {
             return;
         }
         self.focus = Focus::Session;
+        if !self.composer_has_room_for(text.len()) {
+            return;
+        }
         if self.composer.insert_str(text) {
             self.offer_selected = 0;
             self.reopen_offers();
         }
+    }
+
+    /// Whether `more` bytes still fit in the composer under
+    /// [`COMPOSER_CAP`]. Where they do not, the bar says so.
+    fn composer_has_room_for(&mut self, more: usize) -> bool {
+        let held = self
+            .composer
+            .lines()
+            .iter()
+            .map(|line| line.len().saturating_add(1))
+            .sum::<usize>()
+            .saturating_sub(1);
+        let fits = held.saturating_add(more) <= COMPOSER_CAP;
+        if !fits {
+            self.hint = Some(TOO_LONG_HINT.to_owned());
+        }
+        fits
     }
 
     /// Puts `text` into the search, joined onto one line, where a search is
@@ -5418,7 +5466,9 @@ impl App {
             // other way round would make the common action the awkward one.
             _ if opens_a_line(key) => {
                 self.focus = Focus::Session;
-                self.composer.insert_newline();
+                if self.composer_has_room_for(1) {
+                    self.composer.insert_newline();
+                }
             }
             (KeyCode::Enter, _) => self.submit(),
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.fold_calls(),
@@ -5464,11 +5514,27 @@ impl App {
                 self.composer.clear();
                 self.shell_mode = true;
             }
+            // A shell's line editor deletes back to the start of the line
+            // with Ctrl+U. The composer's editor would undo with it, giving
+            // back what Ctrl+W had just deleted.
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.focus = Focus::Session;
+                if self.composer.delete_line_by_head() {
+                    self.offer_selected = 0;
+                    self.reopen_offers();
+                }
+            }
+
             // What was typed goes where typing always goes, and the keyboard
             // follows it back: the Enter after it has to send it.
             _ => {
                 self.focus = Focus::Session;
-                let changed = match delete_whole(&mut self.composer, key) {
+                if let Some(typed) = typed_char(key)
+                    && !self.composer_has_room_for(typed.len_utf8())
+                {
+                    return;
+                }
+                let changed = match whole_character(&mut self.composer, key) {
                     Some(changed) => changed,
                     None => self.composer.input(Input::from(key)),
                 };
@@ -6301,14 +6367,16 @@ const NO_RECORD_HINT: &str =
 /// Rows PageUp and PageDown move the history dialog's cursor by.
 const BROWSER_PAGE: usize = 10;
 
-/// Backspace or Delete on the composer, taking what the operator sees as one
-/// character — a letter and the accents on it, an emoji and the ones joined
-/// to it — rather than the one code point the editor would. `None` where the
-/// editor's own handling is already that: a selection, a line break, a
-/// character that is one code point, or any other key.
+/// Backspace, Delete, Left or Right on the composer, taking what the
+/// operator sees as one character — a letter and the accents on it, an
+/// emoji and the ones joined to it — rather than the one code point the
+/// editor would. A cursor left inside one would put what is typed next
+/// between an emoji and the ones joined to it. `None` where the editor's
+/// own handling is already that: a selection, a line break, a character
+/// that is one code point, or any other key.
 ///
 /// `Some` says whether the text changed, as the editor's own input does.
-fn delete_whole(
+fn whole_character(
     composer: &mut TextArea<'static>,
     key: ratatui::crossterm::event::KeyEvent,
 ) -> Option<bool> {
@@ -6316,7 +6384,10 @@ fn delete_whole(
     use ratatui_textarea::CursorMove;
 
     if key.modifiers != KeyModifiers::NONE
-        || !matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+        || !matches!(
+            key.code,
+            KeyCode::Backspace | KeyCode::Delete | KeyCode::Left | KeyCode::Right
+        )
         || composer.selection_range().is_some()
     {
         return None;
@@ -6342,6 +6413,24 @@ fn delete_whole(
         KeyCode::Delete => {
             let chars = after.graphemes(true).next()?.chars().count();
             (chars >= 2).then(|| composer.delete_str(chars))
+        }
+        KeyCode::Left => {
+            let chars = before.graphemes(true).next_back()?.chars().count();
+            (chars >= 2).then(|| {
+                for _ in 0..chars {
+                    composer.move_cursor(CursorMove::Back);
+                }
+                false
+            })
+        }
+        KeyCode::Right => {
+            let chars = after.graphemes(true).next()?.chars().count();
+            (chars >= 2).then(|| {
+                for _ in 0..chars {
+                    composer.move_cursor(CursorMove::Forward);
+                }
+                false
+            })
         }
         _ => None,
     }
@@ -7951,6 +8040,21 @@ mod tests {
         }
     }
 
+    /// An Esc pressed with nothing waiting makes the next digit an F-key, and
+    /// that digit is meant for the shell. A question that comes up before it
+    /// is pressed is answered by its own number keys.
+    #[test]
+    fn a_question_coming_up_after_an_esc_takes_the_next_digit_as_its_option() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.on_key(key(KeyCode::Esc));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Char('4')));
+
+        assert_eq!(app.ask_selected(), Answer::No);
+    }
+
     #[test]
     fn a_number_past_the_last_option_selects_nothing() {
         use ratatui::crossterm::event::KeyCode;
@@ -8069,6 +8173,132 @@ mod tests {
         app.on_key(key(KeyCode::Home));
         app.on_key(key(KeyCode::Delete));
         assert_eq!(app.composed(), "b");
+    }
+
+    #[test]
+    fn right_moves_past_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        for (typed, then) in [
+            (
+                "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}x",
+                "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}Zx",
+            ),
+            ("e\u{301}x", "e\u{301}Zx"),
+            ("ex", "eZx"),
+        ] {
+            let mut app = app();
+            app.on_paste(typed);
+            app.on_key(key(KeyCode::Home));
+            app.on_key(key(KeyCode::Right));
+            app.on_key(key(KeyCode::Char('Z')));
+            assert_eq!(app.composed(), then, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn left_moves_back_past_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        for (typed, then) in [
+            (
+                "x\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+                "xZ\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+            ),
+            ("xe\u{301}", "xZe\u{301}"),
+            ("xe", "xZe"),
+        ] {
+            let mut app = app();
+            app.on_paste(typed);
+            app.on_key(key(KeyCode::Left));
+            app.on_key(key(KeyCode::Char('Z')));
+            assert_eq!(app.composed(), then, "{typed:?}");
+        }
+    }
+
+    /// Ctrl+U is what a shell's line editor deletes back to the start of the
+    /// line with. As the editor's undo, it gave back what Ctrl+W had just
+    /// deleted.
+    #[test]
+    fn ctrl_u_deletes_from_the_cursor_back_to_the_start_of_the_line() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut app = app();
+        app.on_paste("first\nhello world foo");
+        app.on_key(ctrl('w'));
+        app.on_key(key(KeyCode::Left));
+        app.on_key(ctrl('u'));
+        assert_eq!(app.composed(), "first\n ");
+
+        app.on_key(key(KeyCode::F(1)));
+        let sheet = app.sheet().expect("the shortcuts");
+        assert!(
+            sheet
+                .rows
+                .iter()
+                .any(|row| row.starts_with("Ctrl+U") && row.contains("start of the line")),
+            "{:?}",
+            sheet.rows
+        );
+    }
+
+    #[test]
+    fn a_paste_of_only_blanks_goes_into_the_prompt_rather_than_asking_for_an_image() {
+        let mut app = app();
+        app.on_paste("   \n  ");
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "   \n  ");
+    }
+
+    /// The composer's editor lays out the whole of what it holds again after
+    /// every edit, so past [`COMPOSER_CAP`] a key would no longer land inside
+    /// a frame. A paste that would take it past is refused whole rather than
+    /// cut, since a log sent without its end reads as the whole of it.
+    #[test]
+    fn a_paste_that_would_take_the_prompt_past_its_cap_is_refused_whole() {
+        let mut app = app();
+        app.on_paste(&"a".repeat(COMPOSER_CAP - 1));
+        app.on_paste("bc");
+        assert_eq!(app.composed().len(), COMPOSER_CAP - 1);
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+
+        app.on_paste("b");
+        assert_eq!(app.composed().len(), COMPOSER_CAP);
+        assert_eq!(app.hint(), None);
+    }
+
+    #[test]
+    fn a_key_typed_into_a_prompt_at_its_cap_is_refused() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.on_paste(&"a".repeat(COMPOSER_CAP));
+        app.on_key(key(KeyCode::Char('b')));
+        assert_eq!(app.composed().len(), COMPOSER_CAP);
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+
+        app.on_key(key(KeyCode::Backspace));
+        app.on_key(key(KeyCode::Char('b')));
+        assert_eq!(app.composed().len(), COMPOSER_CAP);
+        assert!(app.composed().ends_with("ab"));
+    }
+
+    #[test]
+    fn keys_read_together_that_would_take_the_prompt_past_its_cap_are_refused_whole() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        app.on_paste(&"a".repeat(COMPOSER_CAP - 2));
+        let keys: Vec<KeyEvent> = "bcd"
+            .chars()
+            .map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            .collect();
+        app.on_keys_read(
+            &keys,
+            Arrival {
+                at: Instant::now(),
+                alone: false,
+            },
+        );
+        assert_eq!(app.composed().len(), COMPOSER_CAP - 1);
+        assert!(app.composed().ends_with("ab"));
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
     }
 
     #[test]

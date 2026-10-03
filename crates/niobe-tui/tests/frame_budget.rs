@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use common::{MARKDOWN_REPLY, at_work, hunk, running_session, screen};
 use niobe_core::event::Event;
-use niobe_tui::app::{App, Arrival, WorkingFile};
+use niobe_tui::app::{App, Arrival, COMPOSER_CAP, WorkingFile};
 use niobe_tui::theme::{Depth, THEMES};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -687,14 +687,14 @@ fn keys_read_together_type_a_long_line_in_time_linear_in_its_length() {
 const PASTE_BUDGET: Duration = Duration::from_millis(50);
 
 /// A line pasted whole reaches the composer without a pause the operator
-/// would notice, however long.
+/// would notice, as long as the composer holds.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a paste is timed in an optimised build")]
-fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
+fn a_line_as_long_as_the_composer_holds_pasted_lands_inside_the_paste_budget() {
     let _alone = ALONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let text = typed_line(100_000);
+    let text = typed_line(COMPOSER_CAP);
 
     let mut times: Vec<Duration> = (0..FRAMES)
         .map(|_| {
@@ -704,8 +704,8 @@ fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
             app.on_paste(&text);
             let took = started.elapsed();
             assert_eq!(
-                app.composer().lines()[0].chars().count(),
-                100_000,
+                app.composer().lines()[0].len(),
+                COMPOSER_CAP,
                 "the paste did not land whole, so its time says nothing"
             );
             took
@@ -716,7 +716,45 @@ fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
 
     assert!(
         median <= PASTE_BUDGET,
-        "a 100 KB one-line paste took {median:?} to land, over the {PASTE_BUDGET:?} budget"
+        "a {COMPOSER_CAP}-byte one-line paste took {median:?} to land, over the \
+         {PASTE_BUDGET:?} budget"
+    );
+}
+
+/// A key typed into a prompt as long as the composer holds lands, and the
+/// frame after it is drawn, inside a frame. The composer's editor lays out
+/// the whole of what it holds again after every edit, which is what
+/// [`COMPOSER_CAP`] is set by: a megabyte on one line took 90 ms a key.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a key is timed in an optimised build")]
+fn a_key_typed_into_a_prompt_at_the_composer_cap_lands_and_draws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    app.on_paste(&typed_line(COMPOSER_CAP - FRAMES));
+    let _ = screen(&mut app, 200, 60);
+
+    let mut times: Vec<Duration> = (0..FRAMES)
+        .map(|_| {
+            let started = Instant::now();
+            app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            let _ = screen(&mut app, 200, 60);
+            started.elapsed()
+        })
+        .collect();
+    assert_eq!(
+        app.composer().lines()[0].len(),
+        COMPOSER_CAP,
+        "every key landed, or their times say nothing"
+    );
+    times.sort_unstable();
+    let median = times[FRAMES / 2];
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "a key typed into a {COMPOSER_CAP}-byte line took {median:?} to land and draw, over \
+         the {FRAME_BUDGET:?} budget"
     );
 }
 
