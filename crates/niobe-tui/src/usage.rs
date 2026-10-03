@@ -9,12 +9,15 @@
 //!
 //! * **Whose tokens are these?** [`shares`] apportions whole percent.
 //! * **What is this model called?** [`labels`] shortens ids without letting
-//!   two of them read as one.
+//!   two of them read as one, and [`fitted`] cuts them to a narrow pane
+//!   without letting two of them read as one there either.
 //! * **What did the cache save?** [`cache_hit_rate`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use niobe_core::session::Totals;
+
+use crate::text;
 
 /// Each count as whole percent of their sum, apportioned so that the figures
 /// add up to exactly 100.
@@ -91,6 +94,26 @@ pub fn labels<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
             _ => (*id).to_owned(),
         })
         .collect()
+}
+
+/// `labels` cut to `columns` cells each, for a pane too narrow for them.
+///
+/// Cut at the end, where an id's vendor and family are kept — unless two cut
+/// labels would read alike, as two ids that differ only in their date do;
+/// then every one is cut at the front, where the date is.
+pub fn fitted(labels: &[String], columns: usize) -> Vec<String> {
+    let ends: Vec<String> = labels
+        .iter()
+        .map(|label| text::truncate(label, columns))
+        .collect();
+    let distinct = ends.iter().collect::<BTreeSet<_>>().len() == ends.len();
+    match distinct {
+        true => ends,
+        false => labels
+            .iter()
+            .map(|label| text::truncate_start(label, columns))
+            .collect(),
+    }
 }
 
 /// What each model id is called where only a word fits, in the order they
@@ -280,6 +303,33 @@ mod tests {
     fn an_id_with_nothing_to_drop_is_left_exactly_as_reported() {
         assert_eq!(labels(["gpt-5-codex"]), ["gpt-5-codex"]);
         assert_eq!(labels(["claude-opus-5-2025"]), ["opus-5-2025"]);
+    }
+
+    #[test]
+    fn a_label_wider_than_its_column_loses_its_end() {
+        assert_eq!(
+            fitted(&["us.anthropic.claude-sonnet-4-5".to_owned()], 12),
+            ["us.anthropi…"]
+        );
+        assert_eq!(fitted(&["opus-5".to_owned()], 12), ["opus-5"]);
+    }
+
+    /// Two ids that differ only in their date read alike with their ends cut,
+    /// which is the pane that cannot be read that [`labels`] keeps them whole
+    /// to avoid.
+    #[test]
+    fn labels_that_would_cut_alike_lose_their_fronts_instead() {
+        assert_eq!(
+            fitted(
+                &[
+                    "claude-opus-5-20251001".to_owned(),
+                    "claude-opus-5-20260101".to_owned(),
+                    "sonnet-5".to_owned(),
+                ],
+                12
+            ),
+            ["…-5-20251001", "…-5-20260101", "sonnet-5"]
+        );
     }
 
     fn folded(records: &[Usage]) -> Totals {

@@ -2743,16 +2743,25 @@ fn metered(app: &App) -> bool {
 /// would have cost at API prices, which is not what the plan cost.
 const PLAN_LABEL: &str = "API-equiv";
 
-/// How wide the Usage pane's label column is: the widest label any of its
-/// rows carries, and a column of gap.
+/// How wide the Usage pane's label column is, drawn `width` columns wide:
+/// the widest label any of its rows carries and a column of gap, or what is
+/// left once every row's figures are paid for, whichever is less.
 ///
 /// Every block of the pane — the windows, the models and the cache, the
 /// money on a plan, the context — draws its rows in one grid of a label, a
 /// share, a meter and what follows it, so the shares stand in one column and
 /// the meters start in one. The column is as wide as the widest label the
 /// pane is drawing, so a session on one short-named model is not drawn as if
-/// it ran on the longest.
-fn usage_label_column(app: &App) -> usize {
+/// it ran on the longest. A label is what gives way where the pane is too
+/// narrow for it: a figure pushed past the pane's edge is cut by it, and
+/// `200k` cut to `20` is a different number.
+fn usage_label_column(app: &App, width: usize) -> usize {
+    let room = width.saturating_sub(usage_figure_columns(app)).max(1);
+    usage_label_widest(app).saturating_add(1).min(room)
+}
+
+/// The widest label the Usage pane's rows carry.
+fn usage_label_widest(app: &App) -> usize {
     let windows = app.session().usage_windows().map_or(0, |windows| {
         [
             (windows.five_hour.is_some(), "5h"),
@@ -2784,7 +2793,55 @@ fn usage_label_column(app: &App) -> usize {
         Some(_) => text::width(CONTEXT_LABEL),
         None => 0,
     };
-    windows.max(models).max(money).max(context) + 1
+    windows.max(models).max(money).max(context)
+}
+
+/// The most any row of the Usage pane needs beside its label with no meter
+/// drawn: the share, its gap and the figures after it, each whole.
+///
+/// The context's window figure is counted, though the row can drop it: a
+/// label is cut before a figure is given up.
+fn usage_figure_columns(app: &App) -> usize {
+    let share = SHARE_COLUMNS + SHARE_GAP.len();
+    let windows = app.session().usage_windows().map_or(0, |windows| {
+        let reported = [windows.five_hour, windows.seven_day]
+            .into_iter()
+            .flatten()
+            .map(|window| share + reset_clause(app, &window).as_deref().map_or(0, text::width))
+            .max()
+            .unwrap_or(0);
+        let extra = match windows.using_overage {
+            true => text::width(NO_FIGURE) + text::width(OVERAGE_ON),
+            false => 0,
+        };
+        reported.max(extra)
+    });
+    let spend = match models(app).is_empty() {
+        true => 0,
+        false => share + MODEL_TOKENS + model_cost_columns(app),
+    };
+    let money = match app.session().billing() {
+        Some(Billing::Plan) if !app.session().billing_changed() => {
+            text::width(&session_cost(app.session(), app.prices()))
+        }
+        Some(Billing::Plan | Billing::Metered) | None => 0,
+    };
+    let context = app
+        .session()
+        .context()
+        .map_or(0, |context| match context_window(app, context) {
+            Some(window) => share + text::width(&context_figures(context.tokens, window)),
+            None => text::width(&compact(context.tokens)),
+        });
+    windows.max(spend).max(money).max(context)
+}
+
+/// A label set in the Usage pane's label column `columns` wide: cut to leave
+/// the column of gap, and padded to the column.
+fn usage_label(label: &str, columns: usize) -> String {
+    let label = text::truncate(label, columns.saturating_sub(1));
+    let pad = columns.saturating_sub(text::width(&label));
+    format!("{label}{:pad$}", "")
 }
 
 /// What a share is drawn in: three columns for the figure and the sign, one
@@ -2864,7 +2921,7 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         .filter_map(|(_, _, clause)| clause.as_deref().map(text::width))
         .max()
         .unwrap_or(0);
-    let labels = usage_label_column(app);
+    let labels = usage_label_column(app, width);
     let cells = width
         .saturating_sub(labels + SHARE_COLUMNS + SHARE_GAP.len() + clause_columns)
         .min(METER_CELLS);
@@ -2876,7 +2933,7 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             let (filled, track) = meter(window.utilization, cells);
             let style = window_style(&window, theme);
             Line::from(vec![
-                Span::styled(format!("{label:<labels$}"), dim),
+                Span::styled(usage_label(label, labels), dim),
                 Span::styled(window_share(window.utilization), style.bold()),
                 Span::raw(SHARE_GAP),
                 Span::styled(filled, style),
@@ -2896,25 +2953,48 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     // promise something nothing reported.
     if windows.using_overage {
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<labels$}", "extra"), dim),
-            Span::styled("—", dim),
-            Span::styled(" · on", Style::new().fg(theme.hot).bold()),
+            Span::styled(usage_label("extra", labels), dim),
+            Span::styled(NO_FIGURE, dim),
+            Span::styled(OVERAGE_ON, Style::new().fg(theme.hot).bold()),
         ]));
     }
 
     lines
 }
 
+/// What the overage row draws where a figure would be: no backend reports
+/// what the extra costs.
+const NO_FIGURE: &str = "—";
+
+/// What the overage row says of the plan spending beyond its flat fee.
+const OVERAGE_ON: &str = " · on";
+
 /// What a model's tokens get: the widest figure [`compact`] produces for a
 /// session under a hundred million tokens (`999k`, `12.3M`) and a column of
 /// gap before it, which is drawn whatever the figure's width.
 const MODEL_TOKENS: usize = 6;
 
-/// What a model's cost is drawn in on a metered account: the widest figure
-/// the pane prints for one (`≥~$12.34`) and a column of gap before it. A wider
-/// one pushes the row out rather than into the count beside it: the gap is
-/// drawn whatever the figure's width.
+/// The least a model's cost is drawn in on a metered account: the widest
+/// figure under a hundred dollars the pane prints for one (`≥~$12.34`) and a
+/// column of gap before it, so that the costs of a session stand in one
+/// column as they grow. A wider one widens the column: see
+/// [`model_cost_columns`].
 const MODEL_COST: usize = 9;
+
+/// What the models' costs are drawn in this frame: [`MODEL_COST`], or the
+/// widest cost a row draws and its gap where that is wider, so that no cost
+/// is cut by the pane's edge. Nothing where the account is not metered and
+/// the rows carry no cost.
+fn model_cost_columns(app: &App) -> usize {
+    if !metered(app) {
+        return 0;
+    }
+    let totals = app.session().totals();
+    models(app)
+        .iter()
+        .map(|(model, _)| text::width(&model_cost(totals, model, app.prices())) + 1)
+        .fold(MODEL_COST, usize::max)
+}
 
 /// The label the cache row carries. It names what its figure means, because a
 /// hit rate and a share of the session are two different questions and the
@@ -2974,15 +3054,15 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         return vec![Line::from("no tokens reported yet").style(dim)];
     }
 
-    let labels = usage::labels(spent.iter().map(|(model, _)| model.as_str()));
-    let columns = usage_label_column(app);
+    let columns = usage_label_column(app, width);
+    let labels = usage::fitted(
+        &usage::labels(spent.iter().map(|(model, _)| model.as_str())),
+        columns.saturating_sub(1),
+    );
     // The meter gives up cells until the row fits, the way a window row's
     // does: how much of a bar is drawn is worth less than the figure beside it.
     let costed = metered(app);
-    let cost_columns = match costed {
-        true => MODEL_COST,
-        false => 0,
-    };
+    let cost_columns = model_cost_columns(app);
     let cells = width
         .saturating_sub(columns + SHARE_COLUMNS + SHARE_GAP.len() + MODEL_TOKENS + cost_columns)
         .min(METER_CELLS);
@@ -3000,7 +3080,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
                style: Style| {
         let (filled, track) = meter(share, cells);
         let mut spans = vec![
-            Span::styled(format!("{label:<columns$}"), dim),
+            Span::styled(usage_label(label, columns), dim),
             Span::styled(figure, style.bold()),
             Span::raw(SHARE_GAP),
             Span::styled(filled, style),
@@ -3009,7 +3089,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         ];
         if let Some(cost) = cost {
             spans.push(Span::styled(
-                format!(" {cost:>width$}", width = MODEL_COST - 1),
+                format!(" {cost:>width$}", width = cost_columns - 1),
                 Style::new().fg(theme.fg),
             ));
         }
@@ -3110,8 +3190,8 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         return Vec::new();
     };
     let dim = Style::new().fg(theme.dim);
-    let labels = usage_label_column(app);
-    let label = Span::styled(format!("{CONTEXT_LABEL:<labels$}"), dim);
+    let labels = usage_label_column(app, width);
+    let label = Span::styled(usage_label(CONTEXT_LABEL, labels), dim);
     let Some(window) = context_window(app, context) else {
         return vec![Line::from(vec![
             label,
@@ -3120,10 +3200,17 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     };
 
     let share = context.tokens as f64 / window.max(1) as f64;
-    let figures = format!(" {} / {}", compact(context.tokens), compact(window));
-    let cells = width
-        .saturating_sub(labels + SHARE_COLUMNS + SHARE_GAP.len() + text::width(&figures))
-        .min(METER_CELLS);
+    // The bar goes first and then the window's size, whole: `12k / 20` is
+    // not what `12k / 200k` reads as with a cell less.
+    let beside = labels + SHARE_COLUMNS + SHARE_GAP.len();
+    let figures = context_figures(context.tokens, window);
+    let (figures, cells) = match beside + text::width(&figures) <= width {
+        true => {
+            let cells = width - beside - text::width(&figures);
+            (figures, cells.min(METER_CELLS))
+        }
+        false => (format!(" {}", compact(context.tokens)), 0),
+    };
     let (filled, track) = meter(share, cells);
     let style = match share >= BUDGET_SHOWN_HOT {
         true => Style::new().fg(theme.hot),
@@ -3137,6 +3224,12 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         Span::styled(track, dim),
         Span::styled(figures, dim),
     ])]
+}
+
+/// What the context row says beside its meter: the size the last request
+/// sent, and the size of the window it went into.
+fn context_figures(tokens: u64, window: u64) -> String {
+    format!(" {} / {}", compact(tokens), compact(window))
 }
 
 /// The rule the mock draws between the pane's blocks. Its blocks answer
@@ -3250,10 +3343,7 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             Line::from(spans)
         }
         Some(Billing::Plan) => Line::from(vec![
-            Span::styled(
-                format!("{PLAN_LABEL:<width$}", width = usage_label_column(app)),
-                dim,
-            ),
+            Span::styled(usage_label(PLAN_LABEL, usage_label_column(app, width)), dim),
             Span::styled(cost(), dim),
         ]),
         None => Line::from(vec![
@@ -6396,5 +6486,115 @@ mod tests {
             );
             assert_eq!(cost_drawn, format!("{cost:.2}"), "{cost}: {rows:?}");
         }
+    }
+
+    /// A metered session on `records` of a model, the input it sent and the
+    /// cost reported for it, whose last request sent 12,000 tokens into a
+    /// window of 200,000.
+    fn metered_on(records: &[(&str, u64, Option<f64>)]) -> App {
+        use niobe_core::event::Event;
+        let mut app = bare();
+        app.apply(&Event::Billing {
+            billing: Billing::Metered,
+        });
+        for (model, input, cost) in records {
+            app.apply(&Event::Usage(Usage {
+                input: *input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: (*model).to_owned(),
+                cost_usd: *cost,
+                cost_basis: None,
+                settles_model: false,
+                fast: false,
+            }));
+        }
+        sent(&mut app, 12_000, "opus-5", Some(200_000));
+        app
+    }
+
+    fn pane_of(app: &App, width: usize) -> Vec<String> {
+        usage_lines(app, width, &Theme::default())
+            .iter()
+            .map(Line::to_string)
+            .collect()
+    }
+
+    /// Thirty-eight columns is the pane inside its border at 120. The two ids
+    /// differ only in their date, so their labels are cut at the front; the
+    /// meters go before any figure does.
+    #[test]
+    fn two_long_ids_that_collide_give_way_to_every_figure_beside_them() {
+        let app = metered_on(&[
+            ("claude-opus-5-20251001", 10_000, Some(12.34)),
+            ("claude-opus-5-20260101", 5_100, Some(3.21)),
+        ]);
+        assert_eq!(
+            pane_of(&app, 38),
+            [
+                "session $15.55",
+                "──────────────────────────────────────",
+                "…-opus-5-20251001  66%    10k   $12.34",
+                "…-opus-5-20260101  34%   5100    $3.21",
+                "cache hit           0%      0",
+                "──────────────────────────────────────",
+                "context             6% ▓░░░ 12k / 200k",
+            ]
+        );
+    }
+
+    /// A Bedrock inference profile's id is longer than the pane is wide; the
+    /// cache and the context keep their shares and their figures at 120
+    /// columns and at 160.
+    #[test]
+    fn an_inference_profile_id_leaves_the_cache_and_the_context_their_figures() {
+        let profile =
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5f6";
+        let app = metered_on(&[
+            (
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                9_000,
+                Some(2.5),
+            ),
+            (profile, 1_000, Some(0.25)),
+        ]);
+        for width in [38, 52] {
+            let rows = pane_of(&app, width);
+            for row in &rows {
+                assert!(text::width(row) <= width, "{row:?} overflows {width}");
+            }
+            let cache = rows
+                .iter()
+                .find(|row| row.starts_with("cache hit"))
+                .unwrap_or_else(|| panic!("no cache row at {width}: {rows:?}"));
+            assert!(cache.contains("  0%"), "{rows:?}");
+            let context = rows.last().expect("the context row is the last");
+            assert!(context.starts_with("context"), "{rows:?}");
+            assert!(context.contains("  6%"), "{rows:?}");
+            assert!(context.ends_with(" 12k / 200k"), "{rows:?}");
+            assert!(rows[2].ends_with(" $2.50"), "{rows:?}");
+            assert!(rows[3].ends_with(" $0.25"), "{rows:?}");
+        }
+    }
+
+    /// `≥$1234.56` is a column wider than `≥~$12.34`, the widest the pane
+    /// sets aside by default; the cost column grows to it rather than cut it.
+    #[test]
+    fn a_cost_wider_than_its_column_is_drawn_whole() {
+        let app = metered_on(&[("opus-5", 2_000, Some(1_234.56)), ("opus-5", 200, None)]);
+        let rows = pane_of(&app, 38);
+        assert_eq!(rows[2], "opus-5    100% ▓▓▓▓▓▓▓  2200 ≥$1234.56");
+    }
+
+    /// Too narrow for the window's size beside the share, the row gives up
+    /// the bar and then the size whole, never a digit of it.
+    #[test]
+    fn a_context_row_too_narrow_for_its_window_drops_the_window_whole() {
+        let mut app = bare();
+        sent(&mut app, 76_000, "opus-5", Some(200_000));
+        assert_eq!(context_of(&app, 15), ["  38%  76k"]);
     }
 }
