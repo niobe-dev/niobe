@@ -1298,6 +1298,11 @@ const TOP_OFF_SCREEN_HINT: &str =
 const TOO_SOON_HINT: &str =
     "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
 
+/// What the bar says when a click on the menus or the F-key bar was refused
+/// because a question waits.
+const QUESTION_FIRST_HINT: &str =
+    "The menus open once the question is answered; F10 and Esc still quit and stop";
+
 /// When a key reached the shell, as the event loop read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arrival {
@@ -3417,11 +3422,12 @@ impl App {
                 let item = usize::from(row.saturating_sub(list.y.saturating_add(1)));
                 let inside = row > list.y && row + 1 < list.bottom();
                 if let Some(item) = open.menu().items.get(item).filter(|_| inside) {
-                    self.perform(item.action);
+                    self.perform_clicked(item.action);
                 }
                 return true;
             }
-            self.menu = match crate::menu::title_at(column).filter(|_| on_menu_bar) {
+            let switches = on_menu_bar && !self.question_waits();
+            self.menu = match crate::menu::title_at(column).filter(|_| switches) {
                 Some(at) if at != open.menu => Some(crate::menu::Open::at(at)),
                 _ => None,
             };
@@ -3432,18 +3438,47 @@ impl App {
             return true;
         }
         if on_menu_bar {
-            if let Some(at) = crate::menu::title_at(column) {
-                self.open_menu(at);
+            match crate::menu::title_at(column) {
+                Some(_) if self.question_waits() => {
+                    self.hint = Some(QUESTION_FIRST_HINT.to_owned());
+                }
+                Some(at) => self.open_menu(at),
+                None => {}
             }
             return true;
         }
         if let Some((_, fkeys)) = self.bars.filter(|(_, fkeys)| fkeys.contains(point)) {
             if let Some(action) = crate::menu::fkey_at(fkeys.width, column - fkeys.x) {
-                self.perform(action);
+                self.perform_clicked(action);
             }
             return true;
         }
         false
+    }
+
+    /// Whether a permission question, or the question whether to trust the
+    /// repository's config, waits for an answer.
+    fn question_waits(&self) -> bool {
+        self.trusting.is_some() || self.asking().is_some()
+    }
+
+    /// Does what a clicked menu item or F-key names, unless a question waits
+    /// and it is neither quitting nor stopping the turn.
+    ///
+    /// A key goes to the question ahead of the bars, but a click reaches
+    /// them past it: a list or the search it opened would then be drawn
+    /// over the question, and what the operator typed at it would land on
+    /// whichever of the two takes the keys. Quitting and stopping are
+    /// always available, as their keys are.
+    fn perform_clicked(&mut self, action: crate::menu::Action) {
+        use crate::menu::Action;
+
+        if self.question_waits() && !matches!(action, Action::Quit | Action::Stop) {
+            self.menu = None;
+            self.hint = Some(QUESTION_FIRST_HINT.to_owned());
+            return;
+        }
+        self.perform(action);
     }
 
     /// Moves the session to the next mode in the cycle.
@@ -4861,6 +4896,14 @@ impl App {
             self.hint = Some(TOO_SOON_HINT.to_owned());
             return;
         }
+        // A list or a search open over a question takes what is pasted as it
+        // takes keys, ahead of the question.
+        if self.picking().is_some() {
+            return;
+        }
+        if self.asking().is_some() && self.paste_into_find(&text) {
+            return;
+        }
         if self.asking().is_some() {
             match self.ask_focus {
                 AskFocus::Writing => {
@@ -4874,17 +4917,14 @@ impl App {
                 AskFocus::Deferred => {}
             }
         }
-        if self.picking().is_some() || self.menu.is_some() || self.sheet.is_some() {
+        if self.menu.is_some() || self.sheet.is_some() {
             return;
         }
         if self.browser.is_some() {
             self.paste_into_browser(pasted);
             return;
         }
-        if let Some(find) = self.find.as_mut() {
-            if find.query.insert_str(joined_lines(&text)) {
-                find.current = None;
-            }
+        if self.paste_into_find(&text) {
             return;
         }
         // A terminal that pastes an image it cannot give as text pastes
@@ -4904,6 +4944,18 @@ impl App {
             self.offer_selected = 0;
             self.reopen_offers();
         }
+    }
+
+    /// Puts `text` into the search, joined onto one line, where a search is
+    /// open. Returns whether one was.
+    fn paste_into_find(&mut self, text: &str) -> bool {
+        let Some(find) = self.find.as_mut() else {
+            return false;
+        };
+        if find.query.insert_str(joined_lines(text)) {
+            find.current = None;
+        }
+        true
     }
 
     /// The latest moment the shell has been told of: the tick's, or the
@@ -5014,6 +5066,13 @@ impl App {
             self.on_browser_key(key);
             return;
         }
+        // A list or a search open over a question is what the operator is
+        // looking at, and the question is covered by it or not marked as the
+        // one with the keys: its keys answering the question would approve a
+        // call nobody was reading.
+        if self.on_overlay_key(key) {
+            return;
+        }
         // A prompt takes the keyboard whole until it is put off. Typing into
         // the composer under a question would put the answer to it into the
         // next turn.
@@ -5040,13 +5099,6 @@ impl App {
                 }
                 AskFocus::Deferred => {}
             }
-        }
-        // The model list takes the keyboard the same way, and for the same
-        // reason: an arrow key that scrolled the transcript behind an open
-        // list would move something the operator was not looking at.
-        if self.picking().is_some() {
-            self.on_pick_key(key);
-            return;
         }
         // A menu's letter after an Esc that did nothing else, or with Alt
         // held, opens it: the same two bytes, as a digit is an F-key.
@@ -5160,6 +5212,32 @@ impl App {
                 }
             }
         }
+    }
+
+    /// One key, while a list is up, or a search is up over a question.
+    /// Returns whether one of them took it.
+    ///
+    /// The list takes the keyboard whole: an arrow key that scrolled the
+    /// transcript behind it, or moved the answer of a question under it,
+    /// would move something the operator was not looking at. A search with
+    /// no question waiting takes its keys later, after the shell's own
+    /// bindings. A question the closing uncovers waits for a quiet keyboard
+    /// again, as one that has just come up does: an Enter held on the list
+    /// is not an answer to it.
+    fn on_overlay_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        if self.picking.is_some() {
+            self.on_pick_key(key);
+        } else if self.find.is_some() && self.asking().is_some() {
+            if !(self.scroll_key(key) || self.on_find_key(key)) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        if self.picking.is_none() && self.find.is_none() && self.asking().is_some() {
+            self.ask_quiet_since = self.latest_instant();
+        }
+        true
     }
 
     /// One key, while a prompt has the keyboard.
@@ -9963,6 +10041,260 @@ mod tests {
         assert!(app.diffs_open(), "5 Diff");
         app.on_mouse(click_at(start(9) + 2, 29));
         assert!(app.should_quit(), "0 Quit");
+    }
+
+    /// Whether anything that takes keys of its own, or answers for the
+    /// operator, is open over the shell.
+    fn opened_over(app: &App) -> Vec<&'static str> {
+        [
+            (app.picking().is_some(), "a list"),
+            (app.finding().is_some(), "the search"),
+            (app.menu().is_some(), "a menu"),
+            (app.sheet().is_some(), "a sheet"),
+            (app.browser().is_some(), "the history"),
+            (app.diffs_open(), "the cut diffs"),
+        ]
+        .into_iter()
+        .filter_map(|(open, what)| open.then_some(what))
+        .collect()
+    }
+
+    #[test]
+    fn no_click_on_the_bars_opens_anything_while_a_question_waits() {
+        for focus in [AskFocus::Choosing, AskFocus::Deferred] {
+            for (row, columns) in [(0, 0..60), (29, 0..120)] {
+                for column in columns {
+                    let mut app = under_a_profile(&["opus", "sonnet"]);
+                    app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+                    app.apply(&prompt(Some("rm -rf build")));
+                    if focus == AskFocus::Deferred {
+                        app.on_key(key(KeyCode::Esc));
+                    }
+
+                    app.on_mouse(click_at(column, row));
+
+                    assert_eq!(
+                        opened_over(&app),
+                        [] as [&str; 0],
+                        "{focus:?} {column},{row}"
+                    );
+                    assert_eq!(app.ask_focus(), focus, "{column},{row}");
+                    assert!(app.asking().is_some(), "{column},{row}");
+                    assert_eq!(app.take_produced(), [], "{column},{row}");
+                    assert!(app.take_handoffs().is_empty(), "{column},{row}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_bars_while_a_question_waits_says_to_answer_it_first() {
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        app.apply(&prompt(Some("rm -rf build")));
+        let widths = crate::menu::fkey_widths(120);
+        let model = crate::menu::stop_columns() + widths[..3].iter().sum::<u16>() + 2;
+
+        app.on_mouse(click_at(model, 29));
+
+        assert_eq!(app.hint(), Some(QUESTION_FIRST_HINT));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::AllowAlways,
+                message: None,
+            }],
+            "the keys went to the question the operator was looking at"
+        );
+    }
+
+    #[test]
+    fn quitting_from_the_f_key_bar_still_works_while_a_question_waits() {
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        app.apply(&prompt(Some("rm -rf build")));
+        let widths = crate::menu::fkey_widths(120);
+        let quit = crate::menu::stop_columns() + widths[..9].iter().sum::<u16>() + 2;
+
+        app.on_mouse(click_at(quit, 29));
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn no_item_of_a_menu_open_when_a_question_comes_runs_from_a_click_but_quit() {
+        use crate::menu::{Action, MENUS};
+        for (at, menu) in MENUS.iter().enumerate() {
+            for (row, item) in (2..).zip(menu.items) {
+                let mut app = under_a_profile(&["opus", "sonnet"]);
+                app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+                let (title, _) = crate::menu::title_columns()[at];
+                app.on_mouse(click_at(title + 1, 0));
+                app.apply(&prompt(Some("rm -rf build")));
+                let rows = u16::try_from(menu.items.len()).expect("a menu holds a few items");
+                app.drew_menu_list(Some(Rect::new(title, 1, 30, rows + 2)));
+
+                app.on_mouse(click_at(title + 2, row));
+
+                assert_eq!(opened_over(&app), [] as [&str; 0], "{}", item.label);
+                assert!(app.asking().is_some(), "{}", item.label);
+                assert_eq!(app.take_produced(), [], "{}", item.label);
+                assert!(app.take_handoffs().is_empty(), "{}", item.label);
+                assert_eq!(
+                    app.should_quit(),
+                    item.action == Action::Quit,
+                    "{}",
+                    item.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_click_on_the_bars_opens_anything_under_the_trust_question() {
+        for (row, columns) in [(0, 0..60), (29, 0..120)] {
+            for column in columns {
+                let shown = Instant::now();
+                let mut app = trusting_at(shown);
+                app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+
+                app.on_mouse(click_at(column, row));
+                read(&mut app, b"\x1b[B", shown + ASK_QUIET * 2);
+
+                assert_eq!(opened_over(&app), [] as [&str; 0], "{column},{row}");
+                assert_eq!(app.trust_answer(), None, "{column},{row}");
+                assert!(app.take_handoffs().is_empty(), "{column},{row}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_open_when_a_question_comes_takes_its_keys_and_answers_nothing() {
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.on_key(key(KeyCode::F(4)));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModelSelected {
+                model: "sonnet".to_owned()
+            }]
+        );
+        assert!(app.picking().is_none());
+        assert!(app.asking().is_some());
+        assert_eq!(
+            app.ask_selected(),
+            Answer::Once,
+            "Down moved the question's answer"
+        );
+    }
+
+    #[test]
+    fn the_search_open_when_a_question_comes_takes_typing_and_enter_and_answers_nothing() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Char('2')));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.finding().map(|query| query.lines().to_vec()),
+            Some(vec!["2".to_owned()])
+        );
+        assert_eq!(app.take_produced(), []);
+        assert!(app.asking().is_some());
+        assert_eq!(
+            app.ask_selected(),
+            Answer::Once,
+            "Down moved the question's answer"
+        );
+    }
+
+    #[test]
+    fn a_paste_into_the_search_open_over_a_question_goes_into_the_search() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_paste("error");
+
+        assert_eq!(
+            app.finding().map(|query| query.lines().to_vec()),
+            Some(vec!["error".to_owned()])
+        );
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn esc_closes_a_list_opened_under_a_question_put_aside_and_leaves_it_aside() {
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.apply(&prompt(Some("rm -rf build")));
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::F(4)));
+        assert!(app.picking().is_some());
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_produced(), []);
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn esc_closes_a_search_opened_under_a_question_put_aside_and_leaves_it_aside() {
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(app.finding().is_some());
+        app.on_key(key(KeyCode::Char('e')));
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.finding().is_none());
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_produced(), []);
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn a_question_uncovered_by_closing_a_list_waits_for_a_quiet_keyboard_again() {
+        let shown = Instant::now();
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.tick(shown, None);
+        app.on_key(key(KeyCode::F(4)));
+        app.apply(&prompt(Some("rm -rf build")));
+        let alone = |at| Arrival { at, alone: true };
+
+        app.on_key_read(key(KeyCode::Esc), alone(shown + ASK_QUIET * 2));
+        app.on_key_read(
+            key(KeyCode::Enter),
+            alone(shown + ASK_QUIET * 2 + ASK_QUIET / 5),
+        );
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.hint(), Some(TOO_SOON_HINT));
+        app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 5));
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
     }
 
     #[test]
