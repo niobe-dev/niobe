@@ -26,8 +26,9 @@ pub trait Watch {
     /// tick and can never be inside a subprocess waiting for it.
     fn look(&mut self) -> Option<Repo>;
 
-    /// Tells the watch the session has just changed a file, so that the pane
-    /// catches up with an edit sooner than the next scheduled read would.
+    /// Tells the watch the session may just have changed a file — the backend
+    /// reported an edit, or one of the operator's commands ended — so that the
+    /// pane catches up sooner than the next scheduled read would.
     /// Advisory: a watch that reads on its own cadence may ignore it.
     fn changed(&mut self) {}
 }

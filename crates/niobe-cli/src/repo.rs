@@ -6,10 +6,11 @@
 //! Read here rather than in the TUI, which has no business touching the
 //! filesystem.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use niobe_store::Store;
 use niobe_tui::app::{Repo, WorkingFile};
@@ -437,10 +438,11 @@ pub fn watch(root: &Path) -> Watcher {
 /// look the same, and only one of them would be true.
 fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver<()>) {
     let mut last: Option<Repo> = None;
+    let mut counts = Counts::default();
 
     loop {
         let began = Instant::now();
-        if let Ok(repo) = read(root, name)
+        if let Ok(repo) = read(root, name, &mut counts)
             && last.as_ref() != Some(&repo)
         {
             if reads.send(repo.clone()).is_err() {
@@ -461,7 +463,11 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver
 }
 
 /// Everything the shell shows about the repository at `root`, in one pass.
-fn read(root: &Path, name: &str) -> Result<Repo, String> {
+///
+/// `counts` is what the last read counted in the files git does not track,
+/// and leaves holding what this one did.
+fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
+    let began = SystemTime::now();
     let status = branch_status(&git(
         root,
         // The per-file lines are discarded — what the tree did to each file is
@@ -516,10 +522,11 @@ fn read(root: &Path, name: &str) -> Result<Repo, String> {
             "--exclude-standard",
         ],
     )?);
+    let last = std::mem::take(counts);
     working.extend(
         tree.iter()
             .filter(|(untracked, _)| *untracked)
-            .map(|(_, path)| new_file(root, path)),
+            .map(|(_, path)| new_file(root, path, &last, counts, began)),
     );
     working.sort_by(|one, other| one.path.cmp(&other.path));
     let files = files(tree.into_iter().map(|(_, path)| path));
@@ -561,17 +568,100 @@ fn files(listed: impl Iterator<Item = String>) -> Vec<String> {
 /// gives it once it is added — and not counted where it cannot: a link, not a
 /// regular file, or past [`niobe_config::read::LIMIT`], which is read no
 /// further than that rather than whole on every look at the tree.
-fn new_file(root: &Path, path: &str) -> WorkingFile {
+///
+/// A file that looks as it did when `last` counted it keeps that count
+/// without being opened; whatever is counted goes into `now`. `began` is when
+/// the read started, which says whether a stamp can be trusted yet.
+fn new_file(
+    root: &Path,
+    path: &str,
+    last: &Counts,
+    now: &mut Counts,
+    began: SystemTime,
+) -> WorkingFile {
     let added = std::fs::symlink_metadata(root.join(path))
         .ok()
         .filter(std::fs::Metadata::is_file)
-        .and_then(|_| niobe_config::read::bytes(&root.join(path)).ok())
-        .and_then(|bytes| lines_in(&bytes));
+        .and_then(|meta| {
+            let stamp = Stamp::settled(&meta, began);
+            let lines = match stamp.and_then(|stamp| last.of(path, stamp)) {
+                Some(lines) => lines,
+                None => niobe_config::read::bytes(&root.join(path))
+                    .ok()
+                    .and_then(|bytes| lines_in(&bytes)),
+            };
+            if let Some(stamp) = stamp {
+                now.keep(path, stamp, lines);
+            }
+            lines
+        });
     WorkingFile {
         path: path.to_owned(),
         added,
         removed: Some(0),
         new: true,
+    }
+}
+
+/// The lines counted in each file git does not track, by its path, with the
+/// [`Stamp`] it had when it was counted.
+///
+/// Opening every untracked file on every read is what makes a read of a tree
+/// with many of them cost minutes, and almost none of them change between
+/// two reads. A read keeps only the files it saw, so one that is gone is
+/// forgotten with it.
+#[derive(Debug, Default)]
+struct Counts(HashMap<String, (Stamp, Option<u64>)>);
+
+impl Counts {
+    /// The count kept for `path`, where it was taken from a file stamped
+    /// `stamp`: `Some(None)` is a file that was read and has no count.
+    fn of(&self, path: &str, stamp: Stamp) -> Option<Option<u64>> {
+        self.0
+            .get(path)
+            .filter(|(kept, _)| *kept == stamp)
+            .map(|(_, lines)| *lines)
+    }
+
+    fn keep(&mut self, path: &str, stamp: Stamp, lines: Option<u64>) {
+        self.0.insert(path.to_owned(), (stamp, lines));
+    }
+
+    #[cfg(test)]
+    fn paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.0.keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+}
+
+/// What says a file has not changed without opening it: its size and when it
+/// was last modified, which is what git's own index trusts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: SystemTime,
+}
+
+/// How long before a read a file has to have been last modified for its
+/// stamp to be trusted. Some filesystems keep the time to the second, or two,
+/// and a file written twice within that time can read the same both times;
+/// one modified that recently is counted again on the next read instead.
+const SETTLED: Duration = Duration::from_secs(2);
+
+impl Stamp {
+    /// The stamp of the file `meta` describes, or `None` where it cannot be
+    /// trusted to change when the file does: the system keeps no modification
+    /// time, or the file was modified too close to `began`.
+    fn settled(meta: &std::fs::Metadata, began: SystemTime) -> Option<Stamp> {
+        let modified = meta.modified().ok()?;
+        let settled = modified
+            .checked_add(SETTLED)
+            .is_some_and(|after| after < began);
+        settled.then_some(Stamp {
+            len: meta.len(),
+            modified,
+        })
     }
 }
 
@@ -963,7 +1053,7 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\ne\n").expect("the file is written");
 
-        let read = read(&work, "work").expect("the repository reads");
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
 
         assert_eq!(read.branch.as_deref(), Some("main"));
         assert_eq!(read.ahead, Some(0));
@@ -1000,7 +1090,7 @@ mod tests {
         .expect("written");
         std::fs::write(work.join("noise.log"), "ignored\n").expect("the file is written");
 
-        let read = read(&work, "work").expect("the repository reads");
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
 
         assert_eq!(
             read.working,
@@ -1035,6 +1125,96 @@ mod tests {
         assert_eq!(lines_in(b"PNG\0\x01\x02\n"), None);
     }
 
+    /// Writes `contents` to `path` and stamps it as last modified `at`, so
+    /// that two writes of the same size can leave a file looking untouched.
+    fn write_as_of(path: &Path, contents: &str, at: SystemTime) {
+        std::fs::write(path, contents).expect("the file is written");
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(at))
+            .expect("the file's modification time can be set");
+    }
+
+    /// The lines a read counts in the new file at `path`.
+    fn counted(read: &Repo, path: &str) -> Option<u64> {
+        read.working
+            .iter()
+            .find(|file| file.path == path)
+            .and_then(|file| file.added)
+    }
+
+    #[test]
+    fn a_new_file_unchanged_since_the_last_read_is_not_opened_again() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let then = SystemTime::now() - Duration::from_secs(60);
+        write_as_of(&work.join("new.txt"), "abcde\n", then);
+        let mut counts = Counts::default();
+        let first = read(&work, "work", &mut counts).expect("the repository reads");
+        assert_eq!(counted(&first, "new.txt"), Some(1));
+
+        // The same size and the same modification time: what a file that was
+        // not touched looks like without opening it.
+        write_as_of(&work.join("new.txt"), "a\nb\nc\n", then);
+        let again = read(&work, "work", &mut counts).expect("the repository reads");
+
+        assert_eq!(
+            counted(&again, "new.txt"),
+            Some(1),
+            "a file that looked untouched was opened and counted again"
+        );
+    }
+
+    #[test]
+    fn a_new_file_that_changed_since_the_last_read_is_counted_again() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let then = SystemTime::now() - Duration::from_secs(60);
+        write_as_of(&work.join("new.txt"), "a\n", then);
+        let mut counts = Counts::default();
+        read(&work, "work", &mut counts).expect("the repository reads");
+
+        write_as_of(&work.join("new.txt"), "a\nb\nc\n", then);
+        let again = read(&work, "work", &mut counts).expect("the repository reads");
+
+        assert_eq!(counted(&again, "new.txt"), Some(3));
+    }
+
+    /// A filesystem that keeps modification times to the second, or two, can
+    /// give a file written twice within that time the same stamp both times,
+    /// so a file modified that recently is counted again on the next read.
+    #[test]
+    fn a_new_file_written_just_before_a_read_is_counted_again_on_the_next() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let now = SystemTime::now();
+        write_as_of(&work.join("new.txt"), "abcde\n", now);
+        let mut counts = Counts::default();
+        read(&work, "work", &mut counts).expect("the repository reads");
+
+        write_as_of(&work.join("new.txt"), "a\nb\nc\n", now);
+        let again = read(&work, "work", &mut counts).expect("the repository reads");
+
+        assert_eq!(counted(&again, "new.txt"), Some(3));
+    }
+
+    #[test]
+    fn a_new_file_that_is_gone_is_not_remembered() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let then = SystemTime::now() - Duration::from_secs(60);
+        write_as_of(&work.join("gone.txt"), "a\n", then);
+        write_as_of(&work.join("kept.new"), "a\n", then);
+        let mut counts = Counts::default();
+        read(&work, "work", &mut counts).expect("the repository reads");
+
+        std::fs::remove_file(work.join("gone.txt")).expect("the file is removed");
+        read(&work, "work", &mut counts).expect("the repository reads");
+
+        assert_eq!(counts.paths(), ["kept.new"]);
+    }
+
     #[test]
     fn a_read_lists_the_files_in_the_repository_that_git_does_not_ignore() {
         let dir = repository();
@@ -1045,7 +1225,7 @@ mod tests {
         std::fs::write(work.join("scratch.log"), "noise\n").expect("the file is written");
         std::fs::write(work.join(".gitignore"), "*.log\n").expect("the file is written");
 
-        let whole = read(&work, "work").expect("the repository reads");
+        let whole = read(&work, "work", &mut Counts::default()).expect("the repository reads");
 
         assert_eq!(
             whole.files,
@@ -1060,7 +1240,7 @@ mod tests {
         run(dir.path(), &["init", "--initial-branch=main", "."]);
         std::fs::write(dir.path().join("new.txt"), "a\n").expect("the file is written");
 
-        let read = read(dir.path(), "work").expect("the repository reads");
+        let read = read(dir.path(), "work", &mut Counts::default()).expect("the repository reads");
 
         assert_eq!(read.branch.as_deref(), Some("main"));
         assert_eq!(
@@ -1079,7 +1259,8 @@ mod tests {
     fn a_directory_that_is_not_a_repository_is_a_failed_read_and_not_a_panic() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
 
-        let failed = read(dir.path(), "work").expect_err("there is no repository");
+        let failed =
+            read(dir.path(), "work", &mut Counts::default()).expect_err("there is no repository");
 
         assert!(failed.starts_with("git status"), "{failed}");
     }
@@ -1131,7 +1312,7 @@ mod tests {
         );
         std::fs::write(checkout.join("kept.txt"), "a\n").expect("the file is written");
 
-        let read = read(&checkout, "wt").expect("the worktree reads");
+        let read = read(&checkout, "wt", &mut Counts::default()).expect("the worktree reads");
 
         assert_eq!(read.branch.as_deref(), Some("side"));
         assert_eq!(read.ahead, None, "a branch made here has no upstream yet");
@@ -1147,7 +1328,7 @@ mod tests {
         let head = head.trim();
         run(&work, &["checkout", "--detach", head]);
 
-        let read = read(&work, "work").expect("a detached head reads");
+        let read = read(&work, "work", &mut Counts::default()).expect("a detached head reads");
 
         assert_eq!(read.branch.as_deref(), Some(&head[..7]));
         assert_eq!(read.ahead, None, "a commit has no upstream");
@@ -1262,7 +1443,7 @@ mod tests {
             std::fs::write(work.join(name), "a\nc\n").expect("the file is written");
         }
 
-        let read = read(&work, "work").expect("the repository reads");
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
 
         none_ran(&[monitored, cleaned, processed, converted, diffed]);
         let changed = |path: &str| WorkingFile {
@@ -1316,7 +1497,7 @@ mod tests {
             .expect("the attributes are written");
         std::fs::write(work.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
 
-        read(&work, "work").expect("the repository reads");
+        read(&work, "work", &mut Counts::default()).expect("the repository reads");
 
         none_ran(&[cleaned]);
     }
@@ -1354,7 +1535,7 @@ mod tests {
         .expect("the attributes are written");
         std::fs::write(sub.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
 
-        read(&work, "work").expect("the repository reads");
+        read(&work, "work", &mut Counts::default()).expect("the repository reads");
 
         none_ran(&[cleaned]);
     }
@@ -1383,7 +1564,7 @@ mod tests {
             .expect("the blob is a loose object");
         std::fs::write(work.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
 
-        let _ = read(&work, "work");
+        let _ = read(&work, "work", &mut Counts::default());
 
         none_ran(&[connected]);
     }

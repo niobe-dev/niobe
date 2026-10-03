@@ -306,7 +306,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         app.tick(std::time::Instant::now(), Some(machine.clock.now()));
         let producing = fold_backend(app, journal, backend, watch);
         fold_journal(app, journal);
-        fold_commands(app, shell);
+        fold_commands(app, shell, watch);
         fold_images(app, images);
         fold_history(app, journal, history);
         // Whatever a read of the repository has finished with since the last
@@ -402,7 +402,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
     // A command still running is stopped as the session ends, when whatever
     // runs it is dropped; its call is ended here, so a session read back does
     // not show it running for ever.
-    fold_commands(app, shell);
+    fold_commands(app, shell, watch);
     app.abandon_commands();
     // A turn still running ends with the session, and the record says so,
     // rather than leaving the next session to join it.
@@ -614,9 +614,14 @@ fn fold_images(app: &mut App, images: &mut dyn Images) {
 /// Records how each command that has ended since the last tick ended. What
 /// that produces is kept with everything else the operator produced, by the
 /// next [`send_produced`].
-fn fold_commands(app: &mut App, shell: &mut dyn Shell) {
+///
+/// Each one that ended tells `watch` the tree may have changed: a command can
+/// write, move or delete any file, and nothing else reports what it did, so
+/// waiting out the watch's own cadence would leave the pane behind it.
+fn fold_commands(app: &mut App, shell: &mut dyn Shell, watch: &mut dyn Watch) {
     for ran in shell.drain() {
         app.ran(ran);
+        watch.changed();
     }
 }
 
@@ -628,8 +633,9 @@ fn fold_commands(app: &mut App, shell: &mut dyn Shell) {
 /// through `take_produced`, which is the queue of what was done *here* and is
 /// what gets sent back to the backend.
 ///
-/// It is also where `watch` is told a file changed, because this is the one
-/// place a file change is seen arriving.
+/// It is also where `watch` is told the backend changed a file, because this
+/// is the one place such a change is seen arriving; the operator's own
+/// commands tell it in [`fold_commands`].
 fn fold_backend(
     app: &mut App,
     journal: &mut dyn Journal,
@@ -895,7 +901,7 @@ mod tests {
             exit_code: Some(0),
             error: None,
         });
-        fold_commands(&mut app, &mut shell);
+        fold_commands(&mut app, &mut shell, &mut Unwatched);
         send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
 
         assert_eq!(ended_calls(&kept), [(ToolOutcome::Ok, None)]);
@@ -937,6 +943,44 @@ mod tests {
 
         assert_eq!(shell.stopped, [id]);
         assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_command_that_ends_has_the_repository_read_again() {
+        let mut app = app_that_ran("touch new.txt");
+        let mut shell = Running::default();
+        run_commands(&mut app, &mut shell);
+        let [(id, _)] = shell.started.as_slice() else {
+            panic!("the command did not reach the shell: {:?}", shell.started);
+        };
+        shell.ends.push(crate::shell::Ran {
+            id: id.clone(),
+            output: String::new(),
+            bytes: 0,
+            whole: true,
+            exit_code: Some(0),
+            error: None,
+        });
+        let mut watch = Watching::default();
+
+        fold_commands(&mut app, &mut shell, &mut watch);
+
+        assert_eq!(
+            watch.nudges, 1,
+            "what the operator's command did to the tree waited out the watch's cadence"
+        );
+    }
+
+    #[test]
+    fn a_command_still_running_leaves_the_repository_unread() {
+        let mut app = app_that_ran("sleep 60");
+        let mut shell = Running::default();
+        run_commands(&mut app, &mut shell);
+        let mut watch = Watching::default();
+
+        fold_commands(&mut app, &mut shell, &mut watch);
+
+        assert_eq!(watch.nudges, 0);
     }
 
     #[test]
