@@ -1024,6 +1024,11 @@ pub struct App {
     /// between it and the next call: see [`Entry::calls`] for what breaks a
     /// run.
     run: Option<usize>,
+    /// The session's reply whose deltas are still coming in, by its place:
+    /// what the rest of them, and the message that finishes it, land in.
+    /// Held rather than looked for from the end, because a prompt sent while
+    /// it streams is drawn under it before it has finished.
+    reply: Option<usize>,
     /// Whether a run of calls is drawn as its group row alone, rather than
     /// with a row for each call under it.
     calls_folded: bool,
@@ -1395,6 +1400,7 @@ impl App {
             tool_entries: BTreeMap::new(),
             agent_entries: BTreeMap::new(),
             run: None,
+            reply: None,
             calls_folded: false,
             by_agent: false,
             diffs_open: false,
@@ -1612,6 +1618,7 @@ impl App {
                 Some(entry) => entry.body.push_str(text),
                 None => {
                     let head = self.agent_name();
+                    self.reply = Some(self.entries.len());
                     self.push(Entry {
                         kind: EntryKind::Agent,
                         head,
@@ -1642,7 +1649,7 @@ impl App {
                 });
             }
 
-            Event::AssistantMessage { text, agent: None } => match self.streaming_agent_entry() {
+            Event::AssistantMessage { text, agent: None } => match self.finish_reply() {
                 Some(entry) => {
                     entry.body = text.clone();
                     entry.streaming = false;
@@ -1797,6 +1804,7 @@ impl App {
             // A question still open when the turn ended waits on nobody.
             Event::TurnEnded => {
                 self.run = None;
+                self.reply = None;
                 self.forget_asks();
             }
 
@@ -1808,7 +1816,7 @@ impl App {
             Event::SessionLeft => {
                 self.forget_asks();
                 self.interrupt_what_the_fold_stopped();
-                if let Some(entry) = self.streaming_agent_entry() {
+                if let Some(entry) = self.finish_reply() {
                     entry.streaming = false;
                     entry.meta = CUT_OFF.to_owned();
                 }
@@ -3624,24 +3632,41 @@ impl App {
         self.produce(Event::ModeSelected { mode });
     }
 
+    /// The session's reply still being written, where nothing drawn since it
+    /// began has ended it.
     fn streaming_agent_entry(&mut self) -> Option<&mut Entry> {
+        let at = self.reply?;
         // A sub-agent's rows land while the session is still writing, and do
         // not end its reply: the reply keeps its place above them rather than
-        // being started again below. Nor does the store refusing the reply's
-        // first fragment, or every fragment after it would start a reply of
-        // its own under the failure.
+        // being started again below. Nor does a prompt sent while it streams,
+        // which the CLI reads once the reply is done. Nor does the store
+        // refusing the reply's first fragment, or every fragment after it
+        // would start a reply of its own under the failure.
         let unsaved = self.unsaved.as_ref().map(|unsaved| unsaved.entry);
-        match self
+        let ended = self
             .entries
-            .iter_mut()
+            .iter()
             .enumerate()
-            .rev()
-            .find(|(at, entry)| entry.agent.is_none() && Some(*at) != unsaved)
-            .map(|(_, entry)| entry)
-        {
-            Some(entry) if entry.kind == EntryKind::Agent && entry.streaming => Some(entry),
-            _ => None,
+            .skip(at.saturating_add(1))
+            .any(|(later, entry)| {
+                entry.agent.is_none() && entry.kind != EntryKind::User && Some(later) != unsaved
+            });
+        if ended {
+            return None;
         }
+        self.entries
+            .get_mut(at)
+            .filter(|entry| entry.kind == EntryKind::Agent && entry.streaming)
+    }
+
+    /// The reply still being written, which the event being folded finishes:
+    /// no delta after it lands in it.
+    fn finish_reply(&mut self) -> Option<&mut Entry> {
+        let at = self
+            .reply
+            .filter(|_| self.streaming_agent_entry().is_some());
+        self.reply = None;
+        self.entries.get_mut(at?)
     }
 
     pub(crate) fn agent_name(&self) -> String {
@@ -6957,6 +6982,98 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// A prompt sent while the reply streams is drawn where it was sent, and
+    /// the reply keeps its place above it: the rest of its deltas and its
+    /// whole message finish that one entry rather than start it again under
+    /// the prompt, as though it answered it.
+    #[test]
+    fn a_prompt_sent_while_the_reply_streams_leaves_one_reply_above_it() {
+        let mut app = app();
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "default".to_owned(),
+            model: "opus-5".to_owned(),
+            backend_session: None,
+        }));
+        app.apply(&Event::UserMessage {
+            text: "slow".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "word0 ".to_owned(),
+        });
+        app.apply(&Event::UserMessage {
+            text: "hello during".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "word1".to_owned(),
+        });
+        let streamed: Vec<(EntryKind, &str, bool)> = app
+            .entries()
+            .iter()
+            .map(|entry| (entry.kind, entry.body.as_str(), entry.streaming))
+            .collect();
+        assert_eq!(
+            streamed,
+            [
+                (EntryKind::User, "slow", false),
+                (EntryKind::Agent, "word0 word1", true),
+                (EntryKind::User, "hello during", false),
+            ]
+        );
+
+        app.apply(&Event::AssistantMessage {
+            text: "word0 word1 word2".to_owned(),
+            agent: None,
+        });
+        let finished: Vec<(EntryKind, &str, bool)> = app
+            .entries()
+            .iter()
+            .map(|entry| (entry.kind, entry.body.as_str(), entry.streaming))
+            .collect();
+        assert_eq!(
+            finished,
+            [
+                (EntryKind::User, "slow", false),
+                (EntryKind::Agent, "word0 word1 word2", false),
+                (EntryKind::User, "hello during", false),
+            ]
+        );
+    }
+
+    /// A reply a turn ended on without its message is not the next turn's:
+    /// that turn's words start a reply of their own under its prompt.
+    #[test]
+    fn a_reply_left_streaming_by_its_turn_does_not_take_the_next_turns_words() {
+        let mut app = app();
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "default".to_owned(),
+            model: "opus-5".to_owned(),
+            backend_session: None,
+        }));
+        app.apply(&Event::UserMessage {
+            text: "first".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "cut ".to_owned(),
+        });
+        app.apply(&Event::TurnEnded);
+        app.apply(&Event::UserMessage {
+            text: "second".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "fresh".to_owned(),
+        });
+
+        let replies: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Agent)
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(replies, ["cut ", "fresh"]);
     }
 
     /// An agent tagged by its first word while it was the only one is
