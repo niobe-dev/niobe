@@ -271,6 +271,25 @@ mod tests {
         }
     }
 
+    /// Trusting the file would put its broader rule in force, not the one the
+    /// operator granted, so the one they granted is what the file is given.
+    #[test]
+    fn an_always_a_broader_rule_in_a_config_nobody_trusted_covers_is_written_into_it() {
+        let repo = Repo::with_config("[permissions]\nallow = [\"Bash\"]\n");
+
+        let reach = repo
+            .rules()
+            .remember(&Rule::targeted("Bash", "cargo test"))
+            .expect("the config is written");
+
+        assert_eq!(reach, Reach::UntilTrusted);
+        assert_eq!(
+            std::fs::read_to_string(crate::repo::config_path(repo.dir.path()))
+                .expect("the config reads"),
+            "[permissions]\nallow = [\"Bash\", \"Bash(cargo test)\"]\n"
+        );
+    }
+
     #[test]
     fn an_always_into_a_trusted_or_a_new_config_reaches_the_next_session() {
         let repo = Repo::with_config("[profiles.p]\nbackend = \"claude\"\n");

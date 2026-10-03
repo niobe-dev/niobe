@@ -36,8 +36,12 @@ const INDENT: &str = "    ";
 /// Adds `rule` to the config file at `path`, creating the file and its
 /// directory if this is the first rule kept there.
 ///
-/// A rule the file's own allowlist already covers is not written again: the
-/// operator answering "always" twice must not grow the file twice.
+/// A rule the file already lists is not written again: the operator answering
+/// "always" twice must not grow the file twice. One a broader rule in the file
+/// covers is written all the same, because whether that broader rule is in
+/// force depends on the file being trusted, which this does not know: in a
+/// file nobody trusted it answers nothing, and trusting the file would grant
+/// it rather than the narrower rule the operator chose.
 ///
 /// Says what the file held when the lock was taken and what it holds when it
 /// is let go, both read under it: whoever decides whether the new text is
@@ -53,7 +57,7 @@ pub struct Remembered {
     /// What the file held before, or `None` where there was no file.
     pub before: Option<String>,
     /// What it holds now: the text written, or the text as it was where the
-    /// rule was already covered and nothing was.
+    /// rule was already listed and nothing was.
     pub after: String,
 }
 
@@ -92,8 +96,8 @@ fn remember_with(
 
     // Parsed before anything is written, so a rule is never added to a file
     // that would not load afterwards.
-    let config = Config::parse(&text, path)?;
-    if config.allowed().includes(rule) {
+    Config::parse(&text, path)?;
+    if lists(&text, rule) {
         return Ok(Remembered {
             before,
             after: text,
@@ -105,6 +109,30 @@ fn remember_with(
     Ok(Remembered {
         before,
         after: written,
+    })
+}
+
+/// Whether the `permissions.allow` array of `text`, a config that parses,
+/// holds `rule` itself.
+///
+/// Read from the array as written rather than from the parsed allowlist,
+/// which leaves out a rule a broader one before it covers: that rule is in
+/// the file all the same, and writing it again would grow the file on every
+/// "always".
+fn lists(text: &str, rule: &Rule) -> bool {
+    let Ok(document) = DeTable::parse(text) else {
+        return false;
+    };
+    let root = document.get_ref();
+    let Some(DeValue::Table(table)) = root.get("permissions").map(|value| value.get_ref()) else {
+        return false;
+    };
+    let Some(DeValue::Array(items)) = table.get("allow").map(|value| value.get_ref()) else {
+        return false;
+    };
+    items.iter().any(|item| match item.get_ref() {
+        DeValue::String(listed) => Rule::parse(listed).is_ok_and(|listed| listed == *rule),
+        _ => false,
     })
 }
 
@@ -413,6 +441,37 @@ allow = [
         assert_eq!(
             std::fs::read_to_string(&file).expect("the file is still there"),
             "[permissions]\nallow = [\"Read\"]\n"
+        );
+    }
+
+    /// The broader rule may be in a file nobody has trusted, where it answers
+    /// nothing; the narrower one is what the operator granted.
+    #[test]
+    fn a_rule_a_broader_one_in_the_file_covers_is_still_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("config.toml");
+        std::fs::write(&file, "[permissions]\nallow = [\"Bash\"]\n").expect("the file is written");
+
+        remember(&file, &Rule::targeted("Bash", "cargo test")).expect("the rule is written");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file is still there"),
+            "[permissions]\nallow = [\"Bash\", \"Bash(cargo test)\"]\n"
+        );
+    }
+
+    #[test]
+    fn a_rule_listed_after_a_broader_one_is_not_written_again() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("config.toml");
+        let text = "[permissions]\nallow = [\"Bash\", \"Bash(cargo test)\"]\n";
+        std::fs::write(&file, text).expect("the file is written");
+
+        remember(&file, &Rule::targeted("Bash", "cargo test")).expect("nothing to do");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file is still there"),
+            text
         );
     }
 
