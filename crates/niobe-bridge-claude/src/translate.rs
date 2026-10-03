@@ -76,7 +76,7 @@
 //!   words.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use niobe_core::diff::{self, Hunk, Line};
@@ -253,6 +253,8 @@ struct Reported {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Spent {
     by_model: BTreeMap<String, Reported>,
+    /// Why the earlier spend could not be read, where it could not.
+    unknown: Option<String>,
 }
 
 impl Spent {
@@ -269,13 +271,35 @@ impl Spent {
                 (model.clone(), reported)
             })
             .collect();
-        Self { by_model }
+        Self {
+            by_model,
+            unknown: None,
+        }
+    }
+
+    /// A session whose earlier spend could not be read, for the reason `why`.
+    ///
+    /// Not the same as nothing spent: the CLI restores its running totals
+    /// whatever this side could read, so the first `result` still carries
+    /// the earlier session, and only how much of it is unknown.
+    pub fn unknown(why: impl Into<String>) -> Self {
+        Self {
+            by_model: BTreeMap::new(),
+            unknown: Some(why.into()),
+        }
     }
 
     /// Whether nothing was recorded as spent: a session the CLI never left
-    /// cleanly, or one that has not run a turn.
+    /// cleanly, or one that has not run a turn. Not a session whose spend is
+    /// [`Spent::unknown`].
     pub fn is_empty(&self) -> bool {
-        self.by_model.is_empty()
+        self.by_model.is_empty() && self.unknown.is_none()
+    }
+
+    /// Whether what was spent is known, which it is unless it was
+    /// [`Spent::unknown`].
+    pub fn is_known(&self) -> bool {
+        self.unknown.is_none()
     }
 
     /// What was recorded as spent on `model`, in USD.
@@ -339,6 +363,17 @@ pub struct Translator {
     turn: Counts,
     /// Per model, everything reported for it so far this session.
     reported: BTreeMap<String, Reported>,
+    /// Why a resumed session's earlier spend is unknown, until the notice
+    /// saying so has gone out with the first events.
+    unknown_spend: Option<String>,
+    /// Whether the next bill's running totals still carry an earlier spend
+    /// nothing here knows: that of a resumed session whose transcript could
+    /// not be read, until its first `result` or a `/clear`.
+    restored_unknown: bool,
+    /// The models that first bill named, whose cost from then on is short by
+    /// an amount nothing here knows. Each settlement of one is followed by a
+    /// record no cost covers, so the session's figure stays a floor.
+    short: BTreeSet<String>,
     /// The call each permission prompt the CLI has asked is about, by the
     /// id the CLI asked it under, so that a prompt it withdraws is known.
     open_requests: BTreeMap<String, ToolCallId>,
@@ -411,6 +446,9 @@ impl Translator {
             denied: BTreeMap::new(),
             turn: Counts::default(),
             reported: BTreeMap::new(),
+            unknown_spend: None,
+            restored_unknown: false,
+            short: BTreeSet::new(),
             open_requests: BTreeMap::new(),
             unattributed: Vec::new(),
             windows: BTreeMap::new(),
@@ -426,9 +464,20 @@ impl Translator {
     /// The same translator, for a resumed session the CLI had recorded as
     /// having spent `spent`: what the CLI restores is counted as already
     /// reported, so the first turn reports only its own cost.
+    ///
+    /// Where `spent` is [`Spent::unknown`], the first bill cannot be split
+    /// into what was restored and what the turn added, so none of it is
+    /// counted: that turn's tokens are its messages' own, and its cost goes
+    /// unreported. Leaving it out understates the session by one turn, so
+    /// its figure is kept a floor from then on; counting it would add the
+    /// whole earlier session again, which is the larger error and the one
+    /// nothing on screen could tell apart from a real cost. The first events
+    /// say so.
     #[must_use]
     pub fn resuming(mut self, spent: &Spent) -> Self {
         self.reported = spent.by_model.clone();
+        self.unknown_spend = spent.unknown.clone();
+        self.restored_unknown = spent.unknown.is_some();
         self
     }
 
@@ -531,7 +580,13 @@ impl Translator {
     /// nobody has read yet, which the operator should see without being told
     /// that something went wrong.
     pub fn line(&mut self, line: &str) -> Vec<Event> {
-        match serde_json::from_str::<wire::Message>(line) {
+        let mut out: Vec<Event> = self
+            .unknown_spend
+            .take()
+            .map(unknown_spend)
+            .into_iter()
+            .collect();
+        out.extend(match serde_json::from_str::<wire::Message>(line) {
             Ok(wire::Message::Unknown) => vec![unread(format!(
                 "the CLI sent a message of type `{}`, which this version of Niobe does not \
                  know how to read. It was not counted.",
@@ -543,7 +598,8 @@ impl Translator {
                  not counted: {error}",
                 kind_of(line)
             ))],
-        }
+        });
+        out
     }
 
     /// The events one of the CLI's messages produced.
@@ -923,6 +979,7 @@ impl Translator {
     /// before.
     fn reset(&mut self, out: &mut Vec<Event>) {
         self.reported.clear();
+        self.restored_unknown = false;
         self.unattributed.clear();
         self.turn = Counts::default();
         self.context = None;
@@ -1629,6 +1686,27 @@ impl Translator {
     /// models that never produced a message of their own, such as the small
     /// model it summarises with — and those are reported here or nowhere.
     fn report_cost(&mut self, outcome: &wire::Outcome, out: &mut Vec<Event>) {
+        if std::mem::take(&mut self.restored_unknown) {
+            self.take_as_reported(outcome);
+            return;
+        }
+        let from = out.len();
+        self.report_bill(outcome, out);
+        let settled: Vec<String> = out[from..]
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) if usage.settles_model && self.short.contains(&usage.model) => {
+                    Some(usage.model.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        out.extend(settled.into_iter().map(short_by_unknown));
+    }
+
+    /// [`Translator::report_cost`] for a bill whose running totals hold
+    /// nothing this side does not know.
+    fn report_bill(&mut self, outcome: &wire::Outcome, out: &mut Vec<Event>) {
         if outcome.model_usage.is_empty() {
             self.report_session_cost(outcome, out);
             return;
@@ -1673,6 +1751,25 @@ impl Translator {
                 "the CLI's per-model costs add up to ${costs:.6}, and it reported \
                  ${total:.6} for the session. The per-model figures are what was counted."
             )));
+        }
+    }
+
+    /// Counts the running totals `outcome` states as already reported,
+    /// reporting none of them: the first bill of a resumed session whose
+    /// earlier spend is unknown. See [`Translator::resuming`].
+    fn take_as_reported(&mut self, outcome: &wire::Outcome) {
+        for (model, usage) in &outcome.model_usage {
+            let seen = self.reported.entry(model.clone()).or_default();
+            seen.tokens = Counts::from(usage);
+            seen.cost_usd = usage.cost_usd.unwrap_or_default();
+            self.short.insert(model.clone());
+        }
+        if outcome.model_usage.is_empty()
+            && let Some(total) = outcome.total_cost_usd
+        {
+            let model = self.model.clone().unwrap_or_default();
+            self.reported.entry(model.clone()).or_default().cost_usd = total;
+            self.short.insert(model);
         }
     }
 
@@ -1893,6 +1990,29 @@ fn covered_elsewhere(model: String) -> Event {
     })
 }
 
+/// A record of nothing under `model` that no cost covers, put after each
+/// settlement of a model whose first resumed bill went uncounted.
+///
+/// A settlement covers every record of its model folded before it, the
+/// uncounted turn's among them, and would leave the session's figure reading
+/// as whole while it is short by that turn. Owing for one empty record keeps
+/// it a floor until the next settlement, which this follows again.
+fn short_by_unknown(model: String) -> Event {
+    Event::Usage(Usage {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: 0,
+        reasoning: 0,
+        model,
+        cost_usd: None,
+        cost_basis: None,
+        settles_model: false,
+        fast: false,
+    })
+}
+
 /// How a session is billed, from where its credential came from and the
 /// providers that served its models. `None` where the two do not settle it.
 ///
@@ -1952,6 +2072,19 @@ pub(crate) fn warn(message: String) -> Event {
     Event::Error {
         message,
         fatal: false,
+    }
+}
+
+/// What a resumed session says first where what it had spent before could
+/// not be read, for the reason `why`.
+fn unknown_spend(why: String) -> Event {
+    Event::Notice {
+        message: format!(
+            "what this session had spent before it was resumed could not be read ({why}). \
+             The CLI's first bill carries that earlier spend with the first turn's, so it is \
+             not counted: the first turn's cost is left out, and its tokens are its \
+             messages' own."
+        ),
     }
 }
 
@@ -2844,6 +2977,76 @@ mod tests {
     const FIRST_TURN_ON_THE_FAMILY: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":10},"modelUsage":{"opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5,"canonicalModel":"opus-5"}},"total_cost_usd":0.5}"#;
     const SECOND_TURN_ON_THE_WINDOW: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5,"canonicalModel":"opus-5"},"opus-5[1m]":{"inputTokens":40,"outputTokens":4,"costUSD":0.3,"canonicalModel":"opus-5"}},"total_cost_usd":0.8}"#;
     const MAIN_ON_THE_WINDOW_AGENT_ON_THE_FAMILY: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":150,"output_tokens":15},"modelUsage":{"opus-5[1m]":{"inputTokens":100,"outputTokens":10,"costUSD":0.6,"canonicalModel":"opus-5"},"opus-5":{"inputTokens":50,"outputTokens":5,"costUSD":0.3,"canonicalModel":"opus-5"}},"total_cost_usd":0.9}"#;
+
+    /// The CLI restores a resumed session's running totals whether or not
+    /// its transcript could be read here, so its first bill carries the
+    /// earlier session in a share nothing here knows. That bill is not
+    /// counted, the operator is told why, and each bill after it is counted
+    /// by what it added.
+    #[test]
+    fn a_resumed_session_whose_earlier_spend_is_unknown_does_not_bill_it_again() {
+        let mut translator =
+            Translator::new("max").resuming(&Spent::unknown("cannot read s-1.jsonl"));
+        let events: Vec<Event> = [
+            INIT_FAMILY,
+            MAIN_START,
+            &delta(40, 4),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"opus-5":{"inputTokens":140,"outputTokens":14,"costUSD":0.7}},"total_cost_usd":0.7}"#,
+            MAIN_START,
+            &delta(10, 1),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":1},"modelUsage":{"opus-5":{"inputTokens":150,"outputTokens":15,"costUSD":0.75}},"total_cost_usd":0.75}"#,
+        ]
+        .iter()
+        .flat_map(|line| translator.line(line))
+        .collect();
+        let totals = niobe_core::session::SessionState::replay(&events)
+            .totals()
+            .clone();
+
+        assert_eq!((totals.input, totals.output), (50, 5));
+        assert!(
+            (totals.reported_cost_usd - 0.05).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+        assert!(!totals.cost_fully_reported(), "{totals:?}");
+        assert_eq!(totals.records_unsettled, 1);
+        let said = notices(&events);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("cannot read s-1.jsonl"), "{said:?}");
+        assert!(
+            matches!(events.first(), Some(Event::Notice { .. })),
+            "{events:?}"
+        );
+        assert_eq!(warnings(&events), Vec::<String>::new());
+    }
+
+    /// After `/clear` the CLI's totals restart from nothing, so the first
+    /// bill after it is the new conversation's alone, whatever was unknown
+    /// before it.
+    #[test]
+    fn a_clear_before_the_first_bill_leaves_nothing_unknown_in_it() {
+        let mut translator = Translator::new("max").resuming(&Spent::unknown("unreadable"));
+        let events: Vec<Event> = [
+            INIT_FAMILY,
+            r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#,
+            MAIN_START,
+            &delta(40, 4),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"opus-5":{"inputTokens":40,"outputTokens":4,"costUSD":0.2}},"total_cost_usd":0.2}"#,
+        ]
+        .iter()
+        .flat_map(|line| translator.line(line))
+        .collect();
+        let totals = niobe_core::session::SessionState::replay(&events)
+            .totals()
+            .clone();
+
+        assert!(
+            (totals.reported_cost_usd - 0.2).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+    }
 
     fn assert_counted_once(totals: &niobe_core::session::Totals, input: u64, output: u64) {
         assert_eq!((totals.input, totals.output), (input, output));

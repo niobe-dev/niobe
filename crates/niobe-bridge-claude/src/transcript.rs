@@ -348,10 +348,7 @@ pub fn list(dir: &Path) -> Result<Vec<Transcript>, TranscriptError> {
 /// resumed process's first turn reports on top of. Nothing where the CLI never
 /// wrote a `cost-state`, which is a session it did not leave cleanly.
 pub fn spent(path: &Path) -> Result<Spent, TranscriptError> {
-    let text = std::fs::read_to_string(path).map_err(|error| TranscriptError::File {
-        path: path.to_path_buf(),
-        error,
-    })?;
+    let text = read(path)?;
     let last = text
         .lines()
         .rev()
@@ -372,10 +369,7 @@ pub fn spent(path: &Path) -> Result<Spent, TranscriptError> {
 /// is still folded, exactly as on the live stream: a transcript written by a
 /// newer CLI than this build knows must not take the history with it.
 pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, TranscriptError> {
-    let text = std::fs::read_to_string(path).map_err(|error| TranscriptError::File {
-        path: path.to_path_buf(),
-        error,
-    })?;
+    let text = read(path)?;
     let id = path
         .file_stem()
         .and_then(OsStr::to_str)
@@ -433,6 +427,21 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
     }
     threads.fold_before(None, &mut fold);
     Ok(fold.out)
+}
+
+/// The text of the transcript at `path`, with anything that is not UTF-8 in
+/// it read as U+FFFD.
+///
+/// A CLI stopped while it writes a record can cut it inside a character, and
+/// a file read as strict UTF-8 is then not read at all — the whole history
+/// gone over the one record that was never finished. Read this way, the cut
+/// record is a last line that does not parse, which [`records`] leaves out.
+fn read(path: &Path) -> Result<String, TranscriptError> {
+    let bytes = std::fs::read(path).map_err(|error| TranscriptError::File {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// One record of a transcript, as read, with the time the CLI stamped on it.
@@ -621,7 +630,7 @@ fn side_files(path: &Path) -> Vec<SideFile> {
         else {
             continue;
         };
-        let Ok(text) = std::fs::read_to_string(dir.join(format!("{stem}.{EXTENSION}"))) else {
+        let Ok(text) = read(&dir.join(format!("{stem}.{EXTENSION}"))) else {
             continue;
         };
         sides.push(SideFile { call, text });
@@ -1807,6 +1816,30 @@ mod tests {
     }
 
     #[test]
+    fn an_agents_transcript_cut_inside_a_character_is_still_found_and_answers() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let session = dir.path().join("s.jsonl");
+        let agents = dir.path().join("s").join(SUB_AGENTS);
+        std::fs::create_dir_all(&agents).expect("the sub-agents' directory is made");
+        std::fs::write(
+            agents.join(format!("agent-a1{META}")),
+            r#"{"toolUseId":"toolu_a"}"#,
+        )
+        .expect("written");
+        let answer = r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Done."}]}}"#;
+        let mut bytes = format!("{answer}\n").into_bytes();
+        bytes.extend_from_slice(&"{\"type\":\"assistant\",\"text\":\"—".as_bytes()[..30]);
+        std::fs::write(agents.join(format!("agent-a1.{EXTENSION}")), bytes).expect("written");
+
+        let found = side_files(&session);
+        let [side] = found.as_slice() else {
+            panic!("one agent: {:?}", found.len());
+        };
+        assert_eq!(side.call, "toolu_a");
+        assert_eq!(recorded_agent(&side.text).answer.as_deref(), Some("Done."));
+    }
+
+    #[test]
     fn the_mode_is_reported_when_it_changes_and_not_on_every_record() {
         let events = folded(&[
             r#"{"type":"permission-mode","permissionMode":"plan"}"#,
@@ -1940,6 +1973,45 @@ mod tests {
             Some(&Event::UserMessage {
                 text: "folded".to_owned()
             }),
+        );
+    }
+
+    /// A CLI stopped part-way through a record can leave it cut inside a
+    /// character, which is not text at all. That record is on its way like
+    /// any other, and what the CLI finished writing before it still reads.
+    #[test]
+    fn a_record_cut_inside_a_character_is_left_out_and_the_rest_still_reads() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let cut = prompt("cut — here");
+        let dash = cut.find('—').expect("the prompt holds a dash");
+        let mut bytes = [
+            prompt("folded"),
+            r#"{"type":"cost-state","totalCostUSD":0.01,"modelUsage":{"claude-sonnet-5":{"inputTokens":1,"outputTokens":2,"costUSD":0.01}}}"#.to_owned(),
+            prompt("after"),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat()
+        .into_bytes();
+        bytes.extend_from_slice(&cut.as_bytes()[..=dash]);
+        let path = dir.path().join(format!("s-1.{EXTENSION}"));
+        std::fs::write(&path, bytes).expect("the transcript is written");
+
+        let spent = spent(&path).expect("the transcript reads");
+        assert_eq!(spent.cost_usd("claude-sonnet-5"), Some(0.01));
+        let events = events(&path, "max", Path::new("/repo")).expect("the transcript reads");
+        let prompts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts, ["folded", "after"]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. } | Event::Notice { .. })),
+            "{events:?}"
         );
     }
 

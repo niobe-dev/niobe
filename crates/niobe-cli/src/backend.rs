@@ -11,8 +11,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use niobe_bridge_claude::transcript;
-use niobe_bridge_claude::{Options, Session, SpawnError};
+use niobe_bridge_claude::transcript::{self, TranscriptError};
+use niobe_bridge_claude::{Options, Session, SpawnError, Spent};
 use niobe_config::Selected;
 use niobe_core::event::{Backend, Event, Mode, PermissionDecision, ToolCallId};
 use niobe_core::image::Image;
@@ -247,19 +247,30 @@ pub fn history(
 /// left it, which it restores on `--resume` and which the resumed process's
 /// first turn therefore reports on top of.
 ///
-/// Nothing where the transcript cannot be found or read: the CLI then has
-/// nothing to restore from either, as far as anything here can tell, and the
-/// resume itself is what reports a session that is not there.
+/// Nothing where the transcript cannot be found: the CLI then has nothing to
+/// restore from either, as far as anything here can tell, and the resume
+/// itself is what reports a session that is not there. A transcript that is
+/// there and cannot be read is a spend that is unknown, not nothing: the CLI
+/// may still restore it, and reading it as nothing would bill it again.
 fn spent(
     profile: &Selected<'_>,
     root: &Path,
     id: &str,
     config_dir: Option<OsString>,
     home: Option<OsString>,
-) -> niobe_bridge_claude::Spent {
-    transcripts(Some(profile), root, config_dir, home)
-        .and_then(|dir| transcript::spent(&dir.join(format!("{id}.jsonl"))).ok())
-        .unwrap_or_default()
+) -> Spent {
+    let Some(dir) = transcripts(Some(profile), root, config_dir, home) else {
+        return Spent::default();
+    };
+    match transcript::spent(&dir.join(format!("{id}.jsonl"))) {
+        Ok(spent) => spent,
+        Err(TranscriptError::File { error, .. })
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Spent::default()
+        }
+        Err(error) => Spent::unknown(error.to_string()),
+    }
 }
 
 /// [`claude_options`], starting from what the CLI's own transcript last
@@ -430,6 +441,35 @@ mod tests {
             NO_HOME,
         );
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn a_transcript_that_cannot_be_read_leaves_the_earlier_spend_unknown_and_says_why() {
+        let config = config("[profiles.max]\nbackend = \"claude\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let claude = tempfile::tempdir().expect("a temporary directory");
+        let root = Path::new("/repo");
+        let dir = transcript::directory(claude.path(), root);
+        std::fs::create_dir_all(dir.join("s-1.jsonl")).expect("a directory where the file is");
+
+        let found = spent(
+            &selected,
+            root,
+            "s-1",
+            Some(claude.path().as_os_str().to_owned()),
+            NO_HOME,
+        );
+        assert!(!found.is_known());
+        let first = niobe_bridge_claude::Translator::new("max")
+            .resuming(&found)
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+        let Some(Event::Notice { message }) = first.first() else {
+            panic!("the first event says the spend is unknown: {first:?}");
+        };
+        assert!(message.contains("s-1.jsonl"), "{message}");
     }
 
     #[test]

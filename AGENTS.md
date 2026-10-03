@@ -150,7 +150,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   itself, so a session started in plain Claude Code can be listed and carried on — it writes
   nothing back, and folds through the same `translate.rs` as the live stream — and a resumed
   session's translator starts from the spend its last `cost-state` records, because the CLI
-  restores those running totals on `--resume`; a sub-agent's
+  restores those running totals on `--resume` — where the file cannot be read, that spend is
+  unknown, the session says so and counts nothing of its first bill, rather than bill the
+  earlier session again — and a record the CLI was cut off writing, even inside a character,
+  is left out while the rest still reads; a sub-agent's
   own messages — its calls, its edits, its model and its tokens — are read from the file the CLI
   keeps for that agent beside the session's and folded in where the CLI's timestamps put them,
   and its answer from the same file; `conformance.rs`
