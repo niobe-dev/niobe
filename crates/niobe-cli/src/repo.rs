@@ -1188,12 +1188,15 @@ mod tests {
     fn a_new_file_written_just_before_a_read_is_counted_again_on_the_next() {
         let dir = repository();
         let work = dir.path().join("work");
-        let now = SystemTime::now();
-        write_as_of(&work.join("new.txt"), "abcde\n", now);
+        // Stamped ahead of the clock rather than at it: a read that starts
+        // more than SETTLED after a stamp taken here, as it can on a loaded
+        // machine, would otherwise find the file already settled.
+        let recent = SystemTime::now() + Duration::from_secs(60);
+        write_as_of(&work.join("new.txt"), "abcde\n", recent);
         let mut counts = Counts::default();
         read(&work, "work", &mut counts).expect("the repository reads");
 
-        write_as_of(&work.join("new.txt"), "a\nb\nc\n", now);
+        write_as_of(&work.join("new.txt"), "a\nb\nc\n", recent);
         let again = read(&work, "work", &mut counts).expect("the repository reads");
 
         assert_eq!(counted(&again, "new.txt"), Some(3));
