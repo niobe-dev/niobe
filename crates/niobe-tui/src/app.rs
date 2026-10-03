@@ -2801,7 +2801,9 @@ impl App {
         let Some(asking) = self.trusting.as_mut() else {
             return;
         };
-        if let Some(answer) = asking.on_key(key.code) {
+        if let Some(code) = answer_key(key)
+            && let Some(answer) = asking.on_key(code)
+        {
             self.trusting = None;
             self.trusted = Some(answer);
             self.quit();
@@ -5435,23 +5437,26 @@ impl App {
         // The answer field takes words, and words may arrive together —
         // pasted, expanded, dictated. Only what would send the answer is
         // held to the guard against keys that were not meant for it.
-        if self.ask_focus == AskFocus::Writing && key.code != KeyCode::Enter {
-            self.on_writing_key(key.code);
+        if self.ask_focus == AskFocus::Writing && !is_plain_enter(key) {
+            self.on_writing_key(key);
             return;
         }
         if self.too_soon_to_answer() {
             return;
         }
         match self.ask_focus {
-            AskFocus::Writing => self.on_writing_key(key.code),
-            AskFocus::Choosing | AskFocus::Deferred => self.on_choosing_key(key.code),
+            AskFocus::Writing => self.on_writing_key(key),
+            AskFocus::Choosing | AskFocus::Deferred => self.on_choosing_key(key),
         }
     }
 
     /// One key, on the numbered answers.
-    fn on_choosing_key(&mut self, code: ratatui::crossterm::event::KeyCode) {
+    fn on_choosing_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
 
+        let Some(code) = answer_key(key) else {
+            return;
+        };
         match code {
             KeyCode::Enter => self.answer(self.ask_selected()),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(true),
@@ -5468,9 +5473,12 @@ impl App {
     }
 
     /// One key, on an answer being written.
-    fn on_writing_key(&mut self, code: ratatui::crossterm::event::KeyCode) {
+    fn on_writing_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
 
+        let Some(code) = answer_key(key) else {
+            return;
+        };
         match code {
             KeyCode::Enter => {
                 let words = self.ask_draft.clone();
@@ -6229,6 +6237,25 @@ fn typed_char(key: ratatui::crossterm::event::KeyEvent) -> Option<char> {
     match (key.code, key.modifiers) {
         (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) if !c.is_control() => Some(c),
         _ => None,
+    }
+}
+
+/// The key a question's answer keys take `key` as, or `None` where it is
+/// one they ignore.
+///
+/// A key held with Ctrl or Alt is a binding elsewhere in the shell, and
+/// Shift+Enter opens a line in the composer: taken by its code alone, Ctrl+W
+/// would type a `w` into a refusal the model reads verbatim, and an Enter
+/// pressed out of the composer's habit would confirm an answer. A character
+/// typed with Shift is still the character.
+fn answer_key(
+    key: ratatui::crossterm::event::KeyEvent,
+) -> Option<ratatui::crossterm::event::KeyCode> {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    match key.code {
+        KeyCode::Char(_) => typed_char(key).map(KeyCode::Char),
+        code => (key.modifiers == KeyModifiers::NONE).then_some(code),
     }
 }
 
@@ -8712,6 +8739,76 @@ mod tests {
         assert_eq!(app.ask_selected(), Answer::Once);
     }
 
+    #[test]
+    fn enter_held_with_a_modifier_confirms_no_answer() {
+        let mut app = asked(Some("ls"));
+        for held in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+        ] {
+            app.on_key(KeyEvent::new(KeyCode::Enter, held));
+        }
+
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t1"));
+    }
+
+    #[test]
+    fn ctrl_with_a_vi_key_or_a_digit_moves_no_selection() {
+        let mut app = asked(Some("ls"));
+        for c in ['j', 'k', '3'] {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+
+        assert_eq!(app.ask_selected(), Answer::Once);
+    }
+
+    #[test]
+    fn a_control_key_types_no_letter_into_a_written_answer() {
+        let mut app = asked(Some("ls"));
+        press(&mut app, KeyCode::Tab);
+        for c in "hello".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        for c in ['w', 'u', 'o'] {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        app.on_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
+
+        assert_eq!(app.ask_draft(), "helloW");
+    }
+
+    #[test]
+    fn enter_held_with_a_modifier_sends_no_written_answer() {
+        let mut app = asked(Some("ls"));
+        press(&mut app, KeyCode::Tab);
+        for c in "no".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        for held in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+        ] {
+            app.on_key(KeyEvent::new(KeyCode::Enter, held));
+        }
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.ask_draft(), "no");
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Deny,
+                message: Some("no".to_owned()),
+            }]
+        );
+    }
+
     fn wheel(app: &mut App, kind: MouseEventKind) {
         app.on_mouse(MouseEvent {
             kind,
@@ -10200,6 +10297,27 @@ mod tests {
         assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
         assert!(app.trusting().is_none());
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn enter_held_with_a_modifier_trusts_nothing() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = trusting_at(Instant::now());
+
+        for held in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+        ] {
+            app.on_key(KeyEvent::new(KeyCode::Enter, held));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.trust_answer(), None);
+        assert_eq!(
+            app.trusting().map(crate::trust::Asking::selected),
+            Some(crate::trust::Answer::Trust)
+        );
     }
 
     #[test]
