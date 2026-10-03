@@ -63,6 +63,7 @@ use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2716,6 +2717,9 @@ const LEAVES_SOMETHING_DETACHED_CLAUDE: &str = "#!/bin/sh\n\
 /// A `!` command's `sh` ending does not end what it put in the background,
 /// and a shell that forgets the command's group once its `sh` has gone has
 /// nothing left to stop at the end of the session.
+///
+/// The shell leads a process group of its own, as a job an operator's shell
+/// starts does, so that `end` can signal the whole of it without the test.
 fn ends_with_nothing_left_running(
     path: &str,
     within: Duration,
@@ -2725,6 +2729,7 @@ fn ends_with_nothing_left_running(
     let home = stand_in(repo.path(), LEAVES_SOMETHING_DETACHED_CLAUDE);
     let (terminal, slave) = Terminal::open();
     let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .process_group(0)
         .spawn()
         .expect("the niobe binary runs");
     terminal.shows(OPENING_FRAME);
@@ -2797,6 +2802,16 @@ fn a_quit_takes_along_what_the_cli_and_an_ended_bang_command_left_running() {
 fn a_sigkill_leaves_nothing_the_session_started_running() {
     ends_with_nothing_left_running("a SIGKILL", 2 * DEADLINE, |_, shell| {
         signal(shell, Signal::KILL);
+    });
+}
+
+/// An operator's shell signals a job's whole process group. The session is
+/// in it, and what ends what the session started must not be.
+#[test]
+fn a_sigkill_to_the_sessions_whole_group_leaves_nothing_it_started_running() {
+    ends_with_nothing_left_running("a SIGKILL to its group", 2 * DEADLINE, |_, shell| {
+        rustix::process::kill_process_group(Pid::from_child(shell), Signal::KILL)
+            .expect("the shell's group can be signalled");
     });
 }
 

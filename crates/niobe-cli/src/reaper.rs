@@ -212,6 +212,34 @@ mod tests {
     }
 
     #[test]
+    fn a_group_the_session_started_is_asked_to_end_before_it_is_killed() {
+        let reaper = Reaper::start().expect("sh starts");
+        let mut started = group();
+        reaper.watch(started.id());
+
+        session_killed(&reaper);
+
+        let status = ended_within(&mut started, PATIENCE).expect("the group outlived the session");
+        assert_eq!(
+            status.signal(),
+            Some(15),
+            "the group ended on something other than SIGTERM: {status:?}"
+        );
+    }
+
+    #[test]
+    fn the_reaper_leads_a_process_group_of_its_own() {
+        let reaper = Reaper::start().expect("sh starts");
+        let watcher = reaper.0.lock().expect("nothing else holds the reaper");
+        let pid = rustix::process::Pid::from_child(&watcher.sh);
+
+        assert_eq!(
+            rustix::process::getpgid(Some(pid)).expect("the reaper's group can be read"),
+            pid
+        );
+    }
+
+    #[test]
     fn a_group_that_will_not_end_when_asked_is_killed_a_second_later() {
         let reaper = Reaper::start().expect("sh starts");
         let mut ignoring = group_ignoring_term();

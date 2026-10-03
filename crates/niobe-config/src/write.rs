@@ -400,6 +400,22 @@ allow = [
     }
 
     #[test]
+    fn a_comma_in_the_comment_after_the_last_element_is_not_taken_for_its_comma() {
+        let written = spliced("[permissions]\nallow = [\"Bash(ls)\" # a, b\n]\n", "Read")
+            .expect("the array is spliced");
+
+        assert_eq!(
+            written,
+            "[permissions]\nallow = [\"Bash(ls)\", # a, b\n    \"Read\",\n]\n"
+        );
+        let config = Config::parse(&written, &path()).expect("what was written reads back");
+        assert_eq!(
+            config.allowed().rules(),
+            [Rule::targeted("Bash", "ls"), Rule::tool("Read")]
+        );
+    }
+
+    #[test]
     fn a_rule_that_would_not_read_back_is_escaped() {
         let written =
             spliced("", r#"Bash(echo "one" \ two)"#).expect("the rule is written escaped");

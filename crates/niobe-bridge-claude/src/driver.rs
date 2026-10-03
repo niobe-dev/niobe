@@ -1797,6 +1797,100 @@ mod tests {
         drop(session);
     }
 
+    /// What the CLI left in its group that will not end when asked is killed.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_cli_left_running_that_ignores_sigterm_is_killed() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pid = dir.path().join("left.pid");
+        let (session, _) = stand_in(&format!(
+            "trap '' TERM\nsleep 77108 >/dev/null 2>&1 &\necho $! > '{pid}'\nread -r first\nread -r turn\nexit 0\n",
+            pid = pid.display()
+        ));
+
+        let left = std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|written| written.trim().parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("the stand-in wrote the pid of what it left running");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let outlived = rustix::process::test_kill_process(left).is_ok();
+        if outlived {
+            let _ = rustix::process::kill_process(left, rustix::process::Signal::KILL);
+        }
+        assert!(!outlived, "what ignored SIGTERM outlived the CLI's end");
+        drop(session);
+    }
+
+    /// What the CLI left in its group is asked to end before anything kills
+    /// it, so that it can let go of what it holds.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_cli_left_running_is_asked_to_end_with_sigterm() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pid = dir.path().join("left.pid");
+        let asked = dir.path().join("asked");
+        let (session, _) = stand_in(&format!(
+            "perl -e '$SIG{{TERM}} = sub {{ open(my $f, \">\", $ARGV[1]); close($f); exit 0 }}; open(my $p, \">\", $ARGV[0]); print $p $$; close($p); sleep 1 while 1' '{pid}' '{asked}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nexit 0\n",
+            pid = pid.display(),
+            asked = asked.display()
+        ));
+
+        assert!(
+            session.group_ended,
+            "the group was left for the quit to end"
+        );
+        let left = std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|written| written.trim().parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("the stand-in wrote the pid of what it left running");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            rustix::process::test_kill_process(left).is_err(),
+            "what the CLI left running outlived the CLI's end"
+        );
+        assert!(asked.exists(), "what the CLI left was killed unasked");
+        drop(session);
+    }
+
+    /// Closing the CLI's standard input is how it is asked to leave, and a
+    /// CLI that does leaves on its own rather than being killed, with time to
+    /// write out the session `--resume` reads.
+    #[cfg(unix)]
+    #[test]
+    fn a_closing_session_lets_the_cli_see_its_input_end_and_leave() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let read = dir.path().join("read");
+        let left = dir.path().join("left");
+        let (mut session, _script) = started(&format!(
+            "read -r first\nread -r turn\n: > '{read}'\nwhile read -r line; do :; done\n: > '{left}'\nexit 0\n",
+            read = read.display(),
+            left = left.display()
+        ));
+        session
+            .send("list the files", &[])
+            .expect("the stand-in takes a turn");
+        let started = Instant::now();
+        while !read.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the stand-in never read the turn"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        drop(session);
+
+        assert!(left.exists(), "the CLI was killed before its input ended");
+    }
+
     /// Something that left the CLI's group cannot be ended with it, so its
     /// hold on the CLI's output is not waited out: the end is reported in the
     /// CLI's words, after what the CLI wrote before it, and nothing else.

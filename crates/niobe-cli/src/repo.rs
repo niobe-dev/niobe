@@ -813,18 +813,23 @@ fn reading(root: &Path) -> Command {
         // The repository is only ever read here, and this runs every few
         // seconds beside an operator who is using the same tree: refreshing
         // the index under them would take the lock their own `git` wants.
+        // `status` heeds this; `diff` does not, and is told below.
         .env("GIT_OPTIONAL_LOCKS", "0")
         // A partial clone fetches an object it lacks from the remote it came
         // from, over whatever transport and `core.sshCommand` the config
         // names. A read goes to no network: the object is missing instead.
         .env("GIT_NO_LAZY_FETCH", "1")
         // A filesystem monitor runs on every status, and a hook on anything
-        // that would write the index.
+        // that would write the index. `diff` writes it, lock and all, for
+        // every file whose time changed and whose content did not, unless it
+        // is told to leave the index as it found it.
         .args([
             "-c",
             "core.fsmonitor=false",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "diff.autoRefreshIndex=false",
         ])
         .current_dir(root)
         // Nothing here may stop for a prompt or a pager: there is no terminal
@@ -1463,6 +1468,64 @@ mod tests {
                 changed("processed.txt"),
             ]
         );
+    }
+
+    /// Sets the modification time of the file at `path` an hour back, leaving
+    /// what it holds alone: the index no longer describes it, and git has to
+    /// read it again to see that it did not change.
+    fn touched(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(SystemTime::now() - Duration::from_secs(3600)))
+            .expect("the file's modification time is set");
+    }
+
+    /// A file git has to read again is one it would refresh the index for,
+    /// and refreshing it takes the lock the operator's own `git` wants.
+    #[test]
+    fn a_read_leaves_the_index_as_the_operator_had_it() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        touched(&work.join("kept.txt"));
+        let index = work.join(".git").join("index");
+        let before = std::fs::read(&index).expect("the index is read");
+
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+
+        assert_eq!(read.working, []);
+        assert_eq!(
+            std::fs::read(&index).expect("the index is read again"),
+            before,
+            "the read rewrote the index"
+        );
+    }
+
+    /// The repository's config can name a directory of hooks, and git runs one
+    /// whenever it writes the index, whatever it was asked.
+    #[cfg(unix)]
+    #[test]
+    fn a_reading_git_runs_no_hook_the_repository_names_even_where_it_writes_the_index() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir(&hooks).expect("the hooks directory can be made");
+        let (hook, ran) = marking(&hooks, "post-index-change");
+        std::fs::rename(&hook, hooks.join("post-index-change"))
+            .expect("the hook is put under the name git runs it by");
+        run(
+            &work,
+            &["config", "core.hooksPath", &hooks.display().to_string()],
+        );
+        touched(&work.join("kept.txt"));
+
+        let refreshed = reading(&work)
+            .args(["update-index", "--refresh"])
+            .output()
+            .expect("git runs");
+
+        assert!(refreshed.status.success(), "{refreshed:?}");
+        none_ran(&[ran]);
     }
 
     /// A filter can be defined in a file the repository's config only

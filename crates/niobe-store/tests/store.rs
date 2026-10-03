@@ -487,6 +487,22 @@ fn a_session_whose_hold_cannot_be_taken_is_opened_once_and_taken_up_when_it_can_
 
 #[cfg(unix)]
 #[test]
+fn a_link_at_the_hold_name_is_refused_and_nothing_is_made_where_it_points() {
+    let (dir, path) = scratch();
+    let target = dir.path().join("planted");
+    std::os::unix::fs::symlink(&target, dir.path().join("sessions.db-open-1"))
+        .expect("a link can be made at the hold's name");
+    let mut recorder = Recorder::new(Store::open(&path).expect("a store opens"));
+
+    assert!(matches!(
+        recorder.record(&user("one")),
+        Err(StoreError::Hold(_))
+    ));
+    assert!(!target.exists(), "the link was not followed");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_recorder_removes_its_hold_file_when_it_lets_go() {
     let (dir, path) = scratch();
     let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
