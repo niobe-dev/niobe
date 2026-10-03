@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! How long the shell takes to redraw, and to take a long line into the
-//! composer.
+//! How long the shell takes to redraw, to take a long line into the
+//! composer, and to show a file written from scratch.
 //!
 //! This is a test binary of its own. Cargo runs test binaries one after
 //! another, so no other test draws while these frames are timed; inside one
@@ -206,6 +206,122 @@ fn edit_hunk(start: u64) -> niobe_core::diff::Hunk {
             " ",
         ],
     )
+}
+
+/// Lines in a file written from scratch, as an agent writes a generated file
+/// or a lock file: a diff of every line in it, which the transcript cuts at
+/// twenty rows.
+const WRITTEN_LINES: usize = 100_000;
+
+/// How long a file of [`WRITTEN_LINES`] may take to reach the transcript and
+/// be drawn there. Longer than a frame, because the change is hashed and
+/// laid out once when it arrives; short enough that the shell does not stop.
+const WRITE_BUDGET: Duration = Duration::from_millis(50);
+
+/// How many times the write is applied and drawn. Odd, so the median is one
+/// of them; few, because each needs a session and a file of its own.
+const WRITES: usize = 7;
+
+/// A file written from scratch reaches the transcript and is drawn there
+/// without a pause the operator would notice, however many lines it has:
+/// the transcript draws twenty of them, and what that costs grows with the
+/// file no faster than its length.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a write is timed in an optimised build")]
+fn a_hundred_thousand_line_write_lands_and_draws_inside_the_write_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let written = written_file();
+
+    let mut times: Vec<Duration> = (0..WRITES)
+        .map(|_| {
+            let mut app = running_session();
+            let _ = screen(&mut app, 200, 60);
+            let write = write_of(&written);
+            let started = Instant::now();
+            for event in &write {
+                app.apply(event);
+            }
+            let frame = screen(&mut app, 200, 60);
+            let took = started.elapsed();
+            assert!(
+                frame.contains("… 99980 more rows"),
+                "the write is drawn cut, or its time says nothing: {frame}"
+            );
+            took
+        })
+        .collect();
+    times.sort_unstable();
+    let median = times[WRITES / 2];
+
+    assert!(
+        median <= WRITE_BUDGET,
+        "a {WRITTEN_LINES}-line write took {median:?} to apply and draw, over the \
+         {WRITE_BUDGET:?} budget"
+    );
+}
+
+/// A resize with a file of [`WRITTEN_LINES`] in the transcript lays its diff
+/// out again at every width, and still redraws inside a frame.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_resize_redraws_a_hundred_thousand_line_write_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for event in &write_of(&written_file()) {
+        app.apply(event);
+    }
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60), (180, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median resized frame with a {WRITTEN_LINES}-line write at 200x60 took \
+         {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// A file of [`WRITTEN_LINES`] lines, each different.
+fn written_file() -> String {
+    (1..=WRITTEN_LINES)
+        .map(|n| format!("export const entry{n:06} = \"W/{n:06}\";\n"))
+        .collect()
+}
+
+/// The events of a `Write` that created a file holding `written`: the call,
+/// and the change it made, as the backend reports a file it created.
+fn write_of(written: &str) -> Vec<Event> {
+    let path = "catalog/generated.ts".to_owned();
+    vec![
+        Event::ToolCallStart {
+            id: "write".into(),
+            name: "Write".to_owned(),
+            input: path.clone(),
+            summary: Some(path.clone()),
+            agent: None,
+        },
+        Event::ToolCallEnd {
+            id: "write".into(),
+            name: "Write".to_owned(),
+            input: path.clone(),
+            output: String::new(),
+            bytes: written.len() as u64,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some(path.clone()),
+            exit_code: None,
+            error: None,
+        },
+        Event::FileChange {
+            path,
+            added: Some(WRITTEN_LINES as u64),
+            removed: Some(0),
+            hunks: vec![niobe_core::diff::Hunk::created(written).expect("lines written")],
+        },
+    ]
 }
 
 /// The redraw every tick makes while a turn is running, in every theme: the

@@ -100,20 +100,33 @@ fn rows(hunks: &[Hunk]) -> Vec<Row<'_>> {
 }
 
 /// For each line, whether it is a change or within [`CONTEXT_LINES`] of one.
+///
+/// One pass each way, carrying how far back the last change was, so a file
+/// written from scratch — a change on every one of its lines — costs its
+/// length rather than its length squared.
 fn near_a_change(lines: &[DiffLine]) -> Vec<bool> {
-    let changed: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| !matches!(line, DiffLine::Context(_)))
-        .map(|(at, _)| at)
-        .collect();
-    (0..lines.len())
-        .map(|at| {
-            changed
-                .iter()
-                .any(|&change| at.abs_diff(change) <= CONTEXT_LINES)
-        })
-        .collect()
+    let mut near = vec![false; lines.len()];
+    let mut since = None;
+    for (line, near) in lines.iter().zip(near.iter_mut()) {
+        since = lines_since_a_change(line, since);
+        *near = since.is_some_and(|since| since <= CONTEXT_LINES);
+    }
+    let mut until = None;
+    for (line, near) in lines.iter().zip(near.iter_mut()).rev() {
+        until = lines_since_a_change(line, until);
+        *near |= until.is_some_and(|until| until <= CONTEXT_LINES);
+    }
+    near
+}
+
+/// How many lines `line` is from the nearest change on the side already
+/// walked, given how far the line before it was; `None` while no change has
+/// been walked past.
+fn lines_since_a_change(line: &DiffLine, before: Option<usize>) -> Option<usize> {
+    match line {
+        DiffLine::Context(_) => before.map(|before| before.saturating_add(1)),
+        DiffLine::Removed(_) | DiffLine::Added(_) => Some(0),
+    }
 }
 
 /// A change's rows, fitted to `width` cells, and the row under them that says
@@ -132,11 +145,11 @@ pub(crate) fn lines(
     let number_width = rows
         .iter()
         .filter_map(|row| match row {
-            Row::Line(number, _) => Some(number.to_string().len()),
+            Row::Line(number, _) => Some(*number),
             Row::Elided => None,
         })
         .max()
-        .unwrap_or(1);
+        .map_or(1, digits);
 
     let shown = match open {
         true => rows.len(),
@@ -155,6 +168,11 @@ pub(crate) fn lines(
         lines.push(footer(gate, width, theme));
     }
     lines
+}
+
+/// How many digits `number` is written in.
+fn digits(number: u64) -> usize {
+    number.checked_ilog10().map_or(1, |log| log as usize + 1)
 }
 
 /// One row: the number right-aligned in its column, the sign, and the line
@@ -374,6 +392,40 @@ mod tests {
                 "6   5       ",
                 "7 - b       ",
                 "7 + B       ",
+            ]
+        );
+    }
+
+    #[test]
+    fn unchanged_lines_before_the_first_change_and_after_the_last_keep_only_their_context() {
+        let diff = change(
+            vec![hunk(
+                1,
+                1,
+                vec![
+                    context("1"),
+                    context("2"),
+                    context("3"),
+                    context("4"),
+                    added("A"),
+                    context("5"),
+                    context("6"),
+                    context("7"),
+                ],
+            )],
+            None,
+        );
+
+        let rows = drawn(&diff, 12);
+
+        assert_eq!(
+            rows,
+            vec![
+                "3   3       ",
+                "4   4       ",
+                "5 + A       ",
+                "6   5       ",
+                "7   6       ",
             ]
         );
     }
