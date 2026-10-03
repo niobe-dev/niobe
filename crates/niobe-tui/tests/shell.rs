@@ -4279,16 +4279,19 @@ fn with_history() -> App {
                 target: Target::Recorded("12".to_owned()),
                 last: ago(3_500),
                 first_prompt: None,
+                open_elsewhere: false,
             },
             PastSession {
                 target: Target::Claude("2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42".to_owned()),
                 last: ago(2 * 86_400),
                 first_prompt: Some("rename the crate".to_owned()),
+                open_elsewhere: false,
             },
             PastSession {
                 target: Target::Recorded("11".to_owned()),
                 last: ago(3 * 86_400),
                 first_prompt: None,
+                open_elsewhere: true,
             },
         ],
         unread: None,
@@ -4335,6 +4338,28 @@ fn the_history_turned_to_its_sessions_lists_each_with_its_prompts() {
         assert!(frame.contains("Enter open"), "{frame}");
         assert_snapshot(&format!("history-sessions-{width}x{height}"), &frame);
     }
+}
+
+#[test]
+fn a_session_another_niobe_has_open_is_marked_and_enter_on_it_says_why_it_stays_shut() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = with_history();
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Tab);
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(!app.should_quit());
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("#11 in use"), "{frame}");
+    assert!(
+        frame.contains("#11 is open in another niobe: quit it there to open it here"),
+        "{frame}"
+    );
+    assert_snapshot("history-session-in-use-80x24", &frame);
 }
 
 #[test]

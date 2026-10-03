@@ -80,7 +80,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   SQLite (`store.rs`; the triggers in its schema refuse an update or a delete), which also reads
   every prompt of every session in one statement, and the backend conversations each carried
   on, for the shell's history. `recorder.rs` is
-  the write side a running session holds; `jsonl.rs` reads a JSON Lines event log.
+  the write side a running session holds, and says whether another holds a session without
+  taking it; `jsonl.rs` reads a JSON Lines event log.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
@@ -116,7 +117,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   sent, and an edit that ends the walk — `browse.rs` draws the history dialog Ctrl+R
   and Session › Resume… open, its prompts or its sessions filtered by what is typed, with the
   row under the cursor in full below the list; Enter on a session ends this one and the loop
-  hands the chosen one back for the binary to open, `markdown.rs` draws the assistant's replies
+  hands the chosen one back for the binary to open — one another niobe has open is marked in
+  use and refused while this one is still open, `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   cut at twenty rows until Ctrl+T opens every cut diff in place,

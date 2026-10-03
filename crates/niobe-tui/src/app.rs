@@ -5927,6 +5927,7 @@ impl App {
             last: self.entries.iter().rev().find_map(|entry| entry.at),
             prompts: self.own_prompts().map(|entry| entry.body.clone()).collect(),
             first_prompt: None,
+            open_elsewhere: false,
         };
         let mut prompts: std::collections::HashMap<&Target, Vec<String>> =
             std::collections::HashMap::new();
@@ -5946,6 +5947,7 @@ impl App {
                 last: session.last,
                 prompts: prompts.remove(&session.target).unwrap_or_default(),
                 first_prompt: session.first_prompt.clone(),
+                open_elsewhere: session.open_elsewhere,
             });
         std::iter::once(this)
             .chain(others)
@@ -6047,18 +6049,28 @@ impl App {
                 let Some(row) = self.session_rows().into_iter().nth(at) else {
                     return;
                 };
-                self.open_session(row.target);
+                self.open_session(row);
             }
         }
     }
 
-    /// Ends this session and opens `target` in its place, where that is a
+    /// Ends this session and opens `row`'s in its place, where that is a
     /// session that can be opened now.
-    fn open_session(&mut self, target: Option<Target>) {
-        let Some(target) = target else {
+    fn open_session(&mut self, row: SessionRow) {
+        let Some(target) = row.target else {
             self.hint = Some("This is the session open now".to_owned());
             return;
         };
+        // Refused here, while this session is still open: the other niobe
+        // would refuse it once this one had ended, and the operator would be
+        // left with neither, and without what they were writing.
+        if row.open_elsewhere {
+            self.hint = Some(format!(
+                "{} is open in another niobe: quit it there to open it here",
+                target.label()
+            ));
+            return;
+        }
         if !self.remembers {
             self.hint = Some(NO_RECORD_HINT.to_owned());
             return;
@@ -11354,6 +11366,7 @@ mod tests {
                     target: Target::Recorded((*id).to_owned()),
                     last: None,
                     first_prompt: None,
+                    open_elsewhere: false,
                 })
                 .collect(),
             unread: None,
@@ -11676,6 +11689,34 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(!app.should_quit());
         assert!(app.hint().is_some_and(|hint| hint.contains("open now")));
+    }
+
+    #[test]
+    fn a_session_open_in_another_niobe_is_not_opened_and_the_draft_stays() {
+        let mut app = remembering(&[("add etag support", "3")], &[]);
+        app.set_past(crate::history::Past {
+            prompts: vec![earlier("add etag support", "3")],
+            sessions: vec![crate::history::PastSession {
+                target: Target::Recorded("3".to_owned()),
+                last: None,
+                first_prompt: None,
+                open_elsewhere: true,
+            }],
+            unread: None,
+        });
+        typed(&mut app, "half a thought");
+        app.perform(crate::menu::Action::Resume);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert!(!app.should_quit());
+        assert_eq!(app.take_opening(), None);
+        assert_eq!(
+            app.hint(),
+            Some("#3 is open in another niobe: quit it there to open it here")
+        );
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.composed(), "half a thought");
     }
 
     #[test]

@@ -64,11 +64,16 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
         View::Prompts => prompts(app, browser, (text_width, rows), theme),
         View::Sessions => sessions(app, browser, (text_width, rows), theme),
     };
-    let footer = match browser.view {
-        View::Prompts => " ↑↓ choose · Enter put in the prompt · Tab sessions · Esc close ",
-        View::Sessions => " ↑↓ choose · Enter open · Tab prompts · Esc close ",
+    // What the shell says of the key just pressed goes where the dialog's
+    // keys are said: the bar it is said on elsewhere is under the dialog.
+    let footer = match (app.hint(), browser.view) {
+        (Some(hint), _) => format!(" {hint} "),
+        (None, View::Prompts) => {
+            " ↑↓ choose · Enter put in the prompt · Tab sessions · Esc close ".to_owned()
+        }
+        (None, View::Sessions) => " ↑↓ choose · Enter open · Tab prompts · Esc close ".to_owned(),
     };
-    let inner = crate::ui::dialog(frame, body, (width, rows), ("History", footer), theme);
+    let inner = crate::ui::dialog(frame, body, (width, rows), ("History", &footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -308,11 +313,16 @@ fn pad(lines: &mut Vec<Line<'static>>, rows: usize) {
     lines.truncate(rows);
 }
 
-/// What the list calls a session.
+/// What the list calls a session, marked where another niobe has it open.
 fn name(row: &SessionRow) -> String {
-    row.target
+    let label = row
+        .target
         .as_ref()
-        .map_or_else(|| "this session".to_owned(), |target| target.label())
+        .map_or_else(|| "this session".to_owned(), |target| target.label());
+    match row.open_elsewhere {
+        true => format!("{label} in use"),
+        false => label,
+    }
 }
 
 /// How many prompts a session holds, where that is known.

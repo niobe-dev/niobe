@@ -181,6 +181,41 @@ impl Drop for Held {
     }
 }
 
+/// Whether `session` of `store` is held: see [`Store::is_held`].
+///
+/// A holder always has its file at the name, so a session with none is not
+/// held; one with a file is held where a shared lock on it is refused. The
+/// shared lock is let go at once, and a hold being taken in that instant is
+/// refused as a hold on a held session is: only a session the list already
+/// shows is looked at, and only a resume of that same session can be taking
+/// its hold then.
+#[cfg(unix)]
+pub(crate) fn is_held(store: &Store, session: SessionId) -> Result<bool, StoreError> {
+    use rustix::fs::{FlockOperation, Mode, OFlags};
+    let Some(path) = store.path() else {
+        return Ok(false);
+    };
+    let file = match rustix::fs::open(
+        hold_path(&path, session),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(file) => file,
+        Err(rustix::io::Errno::NOENT) => return Ok(false),
+        Err(e) => return Err(StoreError::Hold(e.into())),
+    };
+    match rustix::fs::flock(&file, FlockOperation::NonBlockingLockShared) {
+        Ok(()) => Ok(false),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
+        Err(e) => Err(StoreError::Hold(e.into())),
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn is_held(_store: &Store, _session: SessionId) -> Result<bool, StoreError> {
+    Ok(false)
+}
+
 /// Whether `file` is the file at `path` now, not one that was there.
 #[cfg(unix)]
 fn is_at(file: &std::os::fd::OwnedFd, path: &std::path::Path) -> Result<bool, StoreError> {

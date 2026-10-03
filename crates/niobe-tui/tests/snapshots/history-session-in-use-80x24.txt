@@ -13,12 +13,12 @@
 ┃   ┃                                                                      ┃░░ ┃
 ┃ ✗ ┃                                                                      ┃4s █
 ┃   ┃  ──────────────────────────────────────────────────────────────────  ┃░░ █
-┃   ┃    1  add etag support to the static handler ⏎…                      ┃░░ █
-┃ ◆ ┃    2  and a test for the 304 path                                    ┃░░ █
+┃   ┃    1  why does the resume test hang?                                 ┃░░ █
+┃ ◆ ┃                                                                      ┃░░ █
 ┃   ┃                                                                      ┃4░ █
 ┃   ┃                                                                      ┃░░ █
 ┃   ┃                                                                      ┃░░ █
 ┃ ──┃                                                                      ┃── ┃
-┃  a┗━━━━━━━━━━ ↑↓ choose · Enter open · Tab prompts · Esc close ━━━━━━━━━━┛ne ┃
+┃  a┗━━━━ #11 is open in another niobe: quit it there to open it here ━━━━━┛░░ ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 EscStop 1Help 2Compact 3Clear 4Model 5Diff 6Rewind 7MCP 8Memory 9Settings 0Quit

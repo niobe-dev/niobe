@@ -23,7 +23,8 @@
 //!   filter it, and Enter puts the chosen prompt in the composer unsent, as
 //!   a step of a walk that set the draft aside and goes on from it.
 //! * Tab in the dialog turns it to the sessions, where Enter ends this one and
-//!   opens the chosen one in its place.
+//!   opens the chosen one in its place. A session another niobe has open is
+//!   marked in use, and Enter on it keeps this one open and says why.
 
 use std::collections::HashSet;
 
@@ -80,6 +81,9 @@ pub struct PastSession {
     /// The first thing it was asked. A `claude` session's other prompts are
     /// not read until it is opened, so this is all a list can say of it.
     pub first_prompt: Option<String>,
+    /// Whether another niobe has it open, which it cannot be opened here
+    /// while it does. Read with the list, so it says how things stood then.
+    pub open_elsewhere: bool,
 }
 
 /// Everything a load found.
@@ -273,6 +277,8 @@ pub struct SessionRow {
     pub prompts: Vec<String>,
     /// What it was first asked, where its prompts are not known.
     pub first_prompt: Option<String>,
+    /// Whether another niobe has it open: see [`PastSession::open_elsewhere`].
+    pub open_elsewhere: bool,
 }
 
 impl SessionRow {
@@ -376,6 +382,7 @@ mod tests {
             last: None,
             prompts: vec!["add etag support".to_owned(), "and a 304 test".to_owned()],
             first_prompt: None,
+            open_elsewhere: false,
         };
 
         assert!(row.matches("304"));

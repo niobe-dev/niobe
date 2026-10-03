@@ -118,6 +118,7 @@ fn read(root: &Path, transcripts: Option<&Path>, clock: &Clock) -> Past {
                     target: Target::Recorded(session.id.to_string()),
                     last: dated(session.last_at.unwrap_or(session.started_at)),
                     first_prompt: session.first_prompt,
+                    open_elsewhere: store.held.contains(&session.id),
                 })
                 .collect();
             carried = store.carried;
@@ -139,6 +140,7 @@ fn read(root: &Path, transcripts: Option<&Path>, clock: &Clock) -> Past {
                     target: Target::Claude(transcript.id),
                     last: transcript.last_at.and_then(dated),
                     first_prompt: transcript.first_prompt,
+                    open_elsewhere: false,
                 }),
         ),
         Err(error) => unread.push(error.to_string()),
@@ -157,6 +159,8 @@ struct Recorded {
     sessions: Vec<niobe_store::SessionSummary>,
     /// The conversations its sessions carried on, by the backend's ids.
     carried: HashSet<String>,
+    /// The sessions another niobe is recording now.
+    held: HashSet<niobe_store::SessionId>,
 }
 
 /// The store's prompts, sessions and conversations; `None` where nothing has
@@ -166,9 +170,19 @@ fn recorded(root: &Path) -> Result<Option<Recorded>, String> {
         return Ok(None);
     };
     let failed = |e: niobe_store::StoreError| e.to_string();
+    let sessions = store.sessions().map_err(failed)?;
+    // A hold that cannot be looked at is listed as free: opening it says
+    // why it cannot be, where the list could only leave it out.
+    let held = sessions
+        .iter()
+        .filter(|session| session.events > 0)
+        .map(|session| session.id)
+        .filter(|&id| store.is_held(id).unwrap_or(false))
+        .collect();
     Ok(Some(Recorded {
         prompts: store.prompts().map_err(failed)?,
-        sessions: store.sessions().map_err(failed)?,
+        sessions,
+        held,
         carried: store
             .conversations()
             .map_err(failed)?
@@ -247,6 +261,39 @@ mod tests {
              session with nothing in it not at all"
         );
         assert_eq!(past.unread, None);
+    }
+
+    #[test]
+    fn a_session_another_niobe_is_recording_is_listed_as_open_elsewhere() {
+        let (root, _claude, dir) = repository();
+        let store = repo::open_existing_store(root.path())
+            .expect("the store opens")
+            .expect("there is a store");
+        let session = "1".parse().expect("a number is a session id");
+        let recorder = niobe_store::Recorder::resume(store, session).expect("nobody holds it");
+
+        let open = |past: Past| -> HashSet<(Target, bool)> {
+            past.sessions
+                .into_iter()
+                .map(|s| (s.target, s.open_elsewhere))
+                .collect()
+        };
+        assert_eq!(
+            open(read(root.path(), Some(&dir), &clock())),
+            HashSet::from([
+                (Target::Recorded("1".to_owned()), true),
+                (Target::Claude("own-2".to_owned()), false),
+            ])
+        );
+
+        drop(recorder);
+        assert_eq!(
+            open(read(root.path(), Some(&dir), &clock())),
+            HashSet::from([
+                (Target::Recorded("1".to_owned()), false),
+                (Target::Claude("own-2".to_owned()), false),
+            ])
+        );
     }
 
     #[test]

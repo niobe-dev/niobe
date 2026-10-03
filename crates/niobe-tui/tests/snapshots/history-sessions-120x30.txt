@@ -7,7 +7,7 @@
  ┃   ┃    1m  this session      1 prompt  add etag support to the catalog fetcher so we stop re-downloading unc…  ┃░░ │
  ┃   ┃   58m  #12              2 prompts  add etag support to the static handler ⏎…                               ┃── │
  ┃   ┃    2d  claude 2f6c1e10          —  rename the crate                                                        ┃0k │
- ┃   ┃    3d  #11               1 prompt  why does the resume test hang?                                          ┃───┘
+ ┃   ┃    3d  #11 in use        1 prompt  why does the resume test hang?                                          ┃───┘
  ┃   ┃                                                                                                            ┃───┐
  ┃   ┃                                                                                                            ┃░░ █
  ┃   ┃                                                                                                            ┃59 █

@@ -562,6 +562,41 @@ fn a_session_can_still_be_read_while_a_recorder_holds_it() {
     assert_eq!(reader.events(session).expect("load").len(), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_session_reads_as_held_while_a_recorder_holds_it_and_the_look_takes_nothing() {
+    let (dir, path) = scratch();
+    let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
+    first.record(&user("held")).expect("record");
+    let session = first.session().expect("a session was opened");
+    let reader = Store::open_to_read(&path).expect("the store opens to read");
+
+    assert!(reader.is_held(session).expect("the hold is looked at"));
+
+    drop(first);
+    assert!(!reader.is_held(session).expect("the hold is looked at"));
+    assert!(
+        !dir.path()
+            .join(format!("sessions.db-open-{session}"))
+            .exists(),
+        "looking made no hold file"
+    );
+    Recorder::resume(Store::open(&path).expect("opens"), session)
+        .expect("a session that was looked at is still taken up");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hold_file_a_killed_niobe_left_behind_does_not_read_as_held() {
+    let (dir, path) = scratch();
+    let store = Store::open(&path).expect("a store opens");
+    let session = store.create_session().expect("a session is created");
+    std::fs::write(dir.path().join(format!("sessions.db-open-{session}")), "")
+        .expect("the hold file is written");
+
+    assert!(!store.is_held(session).expect("the hold is looked at"));
+}
+
 #[test]
 fn a_session_that_opens_with_a_slash_command_is_listed_by_the_prompt_after_it() {
     let store = Store::open_in_memory().expect("an in-memory store opens");

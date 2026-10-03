@@ -318,6 +318,17 @@ impl Store {
         Ok(SessionId(self.conn.last_insert_rowid()))
     }
 
+    /// Whether a recorder — in this process or another — holds `session` now,
+    /// so that [`Recorder::resume`](crate::Recorder::resume) would refuse it.
+    ///
+    /// Looked at without taking the hold: a session nobody holds is left as
+    /// it was found, with no file made for it. What it says can be out of date
+    /// by the time it is acted on, so a resume is refused all the same where
+    /// the session was taken meanwhile.
+    pub fn is_held(&self, session: SessionId) -> Result<bool, StoreError> {
+        crate::recorder::is_held(self, session)
+    }
+
     /// Whether a session with this id exists.
     pub fn has_session(&self, session: SessionId) -> Result<bool, StoreError> {
         Ok(self

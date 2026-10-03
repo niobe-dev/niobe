@@ -1739,6 +1739,65 @@ fn a_session_chosen_in_the_history_reopens_the_shell_on_it() {
     assert!(started[2].contains("--resume conv-1"), "{started:?}");
 }
 
+/// A session another niobe has open is marked in the history dialog, and
+/// choosing it leaves the operator in their own shell, with what they were
+/// writing, told why: ending this one first would leave them with neither.
+#[test]
+fn a_session_another_niobe_holds_is_not_opened_from_the_history() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let (holding, holding_slave) = Terminal::open();
+    let mut holder = shell_driving_the_stand_in(&holding_slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    holding.shows(OPENING_FRAME);
+    holding.typed(b"recorded-before\r");
+    holding.shows("answered-the-turn");
+    lines_written(&repo.path().join("args.log"), 1);
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+    lines_written(&repo.path().join("args.log"), 2);
+    terminal.typed(b"draft-kept");
+    terminal.shows("draft-kept");
+    terminal.typed(b"\x12");
+    terminal.shows("recorded-before");
+    // The list's rows are not waited on: a frame redraws only the cells that
+    // changed, so a row can arrive in pieces. The keys are taken in order.
+    terminal.typed(b"\t");
+    terminal.typed(b"\x1b[B");
+    let chosen = terminal.mark();
+    terminal.typed(b"\r");
+    terminal.shows_since(chosen, "#1 is open in another niobe");
+    // Esc closes the dialog, and the draft is sent: only the shell that kept
+    // it can send it. The Enter waits for the welcome the dialog covered to
+    // be drawn again, since the two read together are Alt+Enter.
+    let closing = terminal.mark();
+    terminal.typed(b"\x1b");
+    terminal.shows_since(closing, "visible");
+    terminal.typed(b"\r");
+    let started = lines_written(&repo.path().join("args.log"), 2);
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+
+    holding.typed(CTRL_Q);
+    let (_, held) = ended(&mut holder);
+    let (drawn, _) = released(holding, holding_slave);
+    assert!(held.success(), "{drawn}");
+
+    let started: Vec<&str> = started.lines().collect();
+    assert_eq!(started.len(), 2, "no third CLI was started: {started:?}");
+    let listed = niobe(repo.path(), &["sessions"]);
+    let listed = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
+    assert!(listed.contains("draft-kept"), "{listed}");
+}
+
 /// A session read in from the CLI's own transcript carries on in the CLI
 /// under the transcript's own id, and in the mode the transcript left it in.
 #[test]
