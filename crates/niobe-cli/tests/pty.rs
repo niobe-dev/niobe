@@ -2151,6 +2151,15 @@ fn repo_with_an_untrusted_config() -> (tempfile::TempDir, tempfile::TempDir) {
 fn answering_the_trust_question(
     keys: &[u8],
 ) -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, home, terminal, slave, shell) = asked_the_trust_question();
+    terminal.typed(keys);
+    (repo, home, terminal, slave, shell)
+}
+
+/// Opens the shell on a repository config nobody trusted, waits for the
+/// question, and checks the backend has not been started under it once the
+/// keyboard has been quiet long enough for a key to answer.
+fn asked_the_trust_question() -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
     let (repo, home) = repo_with_an_untrusted_config();
     let (terminal, slave) = Terminal::open();
     let shell = Reaped(
@@ -2165,8 +2174,18 @@ fn answering_the_trust_question(
         !repo.path().join("started").exists(),
         "the backend was started before the question was answered"
     );
-    terminal.typed(keys);
     (repo, home, terminal, slave, shell)
+}
+
+/// Rewrites the repository config of a repository made by
+/// [`repo_with_an_untrusted_config`] to allow `cargo build` where it allowed
+/// `cargo test`, with a profile of its own for `niobe profiles` to list.
+fn rewrite_the_untrusted_config(repo: &Path) {
+    std::fs::write(
+        repo.join(".niobe").join("config.toml"),
+        "[permissions]\nallow = [\"Bash(cargo build)\"]\n\n[profiles.work]\nbackend = \"claude\"\n",
+    )
+    .expect("the repository config is rewritten");
 }
 
 /// Trusting the file from the question records it as `niobe trust` would,
@@ -2220,6 +2239,38 @@ fn answering_no_to_the_trust_question_opens_the_session_without_the_file() {
     );
 }
 
+/// What trusting from the question records is the file the question showed:
+/// one rewritten while the question waited is asked about again, with what
+/// it says now, rather than trusted unread.
+#[test]
+fn a_config_rewritten_while_the_trust_question_waits_is_asked_about_again() {
+    let (repo, home, terminal, slave, mut shell) = asked_the_trust_question();
+    rewrite_the_untrusted_config(repo.path());
+    let answered = terminal.mark();
+    terminal.typed(ENTER);
+    terminal.shows_since(answered, TRUST_QUESTION);
+    terminal.shows_since(answered, "allow Bash(cargo build)");
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back_times(
+        &drawn,
+        cooked,
+        "a quit from the second trust question",
+        Keys::Reported,
+        2,
+    );
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started under a config nobody was shown"
+    );
+    let record = written(&home.path().join("niobe").join("trusted.list"));
+    assert!(record.contains(".niobe/config.toml"), "{record}");
+}
+
 /// Quitting from the question starts nothing and hands the terminal back.
 #[test]
 fn quitting_from_the_trust_question_starts_nothing() {
@@ -2239,13 +2290,20 @@ fn quitting_from_the_trust_question_starts_nothing() {
 /// Runs `niobe trust` on a terminal in a repository whose config nobody
 /// trusted, waits for it to ask, and answers with `keys`.
 fn answering_niobe_trust(keys: &[u8]) -> (tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, terminal, slave, shell) = asked_by_niobe_trust();
+    terminal.typed(keys);
+    (repo, terminal, slave, shell)
+}
+
+/// Runs `niobe trust` on a terminal in a repository whose config nobody
+/// trusted, and waits for it to ask.
+fn asked_by_niobe_trust() -> (tempfile::TempDir, Terminal, File, Reaped) {
     let (repo, _home) = repo_with_an_untrusted_config();
     let (terminal, slave) = Terminal::open();
     let mut command = shell_command(&slave, repo.path());
     let shell = Reaped(command.arg("trust").spawn().expect("the niobe binary runs"));
     terminal.shows("permissions  allow Bash(cargo test)");
     terminal.shows("trust it? [y/N]");
-    terminal.typed(keys);
     (repo, terminal, slave, shell)
 }
 
@@ -2283,6 +2341,29 @@ fn niobe_trust_on_a_terminal_records_nothing_unless_the_answer_is_yes() {
         !trust_record(repo.path()).exists(),
         "declining recorded the file as trusted"
     );
+}
+
+/// A yes to `niobe trust` trusts the file it listed: one rewritten while the
+/// question waited is not in force, and neither is what it says now.
+#[test]
+fn a_config_rewritten_while_niobe_trust_asks_is_not_trusted_by_the_yes() {
+    let (repo, terminal, slave, mut shell) = asked_by_niobe_trust();
+    rewrite_the_untrusted_config(repo.path());
+    terminal.typed(b"y\r");
+
+    let (_, status) = ended(&mut shell);
+    terminal.shows("trusted /");
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "niobe trust ended with {status}: {drawn}");
+    let profiles = niobe(repo.path(), &["profiles"]);
+    let out = String::from_utf8_lossy(&profiles.stdout);
+    assert!(out.contains("not trusted"), "{out}");
+    assert!(
+        out.contains("permissions allow `Bash(cargo build)`"),
+        "{out}"
+    );
+    assert!(out.contains("are not in force"), "{out}");
 }
 
 /// Puts `script` in `cwd` as the `claude` a session runs, and gives back a
