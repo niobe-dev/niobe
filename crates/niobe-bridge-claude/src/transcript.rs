@@ -33,9 +33,13 @@
 //!   session cost is in a `cost-state` record the CLI writes when it leaves,
 //!   whose `modelUsage` is the same running total per model that closes a live
 //!   turn — but keyed by the id the session was *billed* under, which is not
-//!   the id its messages named. A session that has one is therefore counted
-//!   from it alone, and one the CLI has not closed yet is counted from its
-//!   messages; see [`Fold::assistant`] for why the two cannot be added.
+//!   the id its messages named. What one covers is therefore counted from it
+//!   alone, and what none does — a session the CLI has not closed yet, or the
+//!   turns a resumed session took after the last time it was — is counted
+//!   from its messages; see [`Fold::assistant`] for why the two cannot both
+//!   count the same message. The CLI writes one each time a process leaves,
+//!   so a resumed session's file holds several, each the running total up to
+//!   where it stands.
 //! * **Most records are the CLI's own furniture.** Attachments, file
 //!   snapshots and queue operations say nothing about what the session did,
 //!   what it changed or what it cost. They are named here so that they are
@@ -378,12 +382,14 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         .unwrap_or_default()
         .to_owned();
 
-    // Read once, then folded: whether the session was priced decides where its
-    // tokens are counted from, and the record that says so is at the end.
+    // Read once, then folded: whether a message is covered by an accounting
+    // decides where its tokens are counted from, and the record that says so
+    // comes after it.
     let read = records(&text);
-    let priced = read
+    let accountings = read
         .iter()
-        .any(|record| matches!(record.record, Ok(Line::CostState(_))));
+        .filter(|record| matches!(record.record, Ok(Line::CostState(_))))
+        .count();
     let sides = side_files(path);
     let mut threads = Threads::read(&sides);
     let last_usage = last_usage(read.iter().chain(threads.records()));
@@ -392,7 +398,7 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         .map(|side| (side.call.clone(), recorded_agent(&side.text)))
         .collect();
 
-    let mut fold = Fold::new(profile, cwd, id, priced, agents).counting(last_usage);
+    let mut fold = Fold::new(profile, cwd, id, accountings, agents).counting(last_usage);
     // A session the CLI never titled is captioned by what the operator first
     // asked. Said here rather than left to the first message, because the
     // first message in a transcript may be one the CLI wrote itself.
@@ -706,10 +712,11 @@ const COMPACTED: &str = "the context was compacted; the session carried on from 
 struct Fold {
     translator: Translator,
     out: Vec<Event>,
-    /// Whether the transcript carries the CLI's own accounting for the session,
-    /// which is where a session that has one is counted from. See
+    /// How many of the CLI's `cost-state` records are still to be folded. A
+    /// message with one still ahead of it is counted by that accounting, and
+    /// one after the last is counted by nothing but itself. See
     /// [`Fold::assistant`].
-    priced: bool,
+    accountings: usize,
     /// The `message.id` of every API response whose tokens have been counted,
     /// so that the records that repeat one are not billed again.
     counted: BTreeMap<String, ()>,
@@ -732,7 +739,7 @@ impl Fold {
         profile: &str,
         cwd: &Path,
         id: String,
-        priced: bool,
+        accountings: usize,
         agents: BTreeMap<String, RecordedAgent>,
     ) -> Self {
         Self {
@@ -742,7 +749,7 @@ impl Fold {
                 .reading_spilled_with(spilled::read)
                 .knowing_agents(agents),
             out: Vec::new(),
-            priced,
+            accountings,
             counted: BTreeMap::new(),
             last_usage: BTreeMap::new(),
             mode: None,
@@ -834,7 +841,7 @@ impl Fold {
             tool_result_meta: Vec::new(),
         }));
 
-        // Counted here only where the session was never priced. A message
+        // Counted here only where no accounting is still to come. A message
         // names the model it ran on as the family — `claude-opus-5` — and the
         // CLI bills the session against the id that carries the context window
         // with it — `claude-opus-5[1m]`, which is a different rate. Measured on
@@ -843,10 +850,11 @@ impl Fold {
         // would report every token twice, and deciding that one id is the
         // other would be a guess about a price: the live `result` names the
         // family behind a billed id in `canonicalModel`, and `cost-state`
-        // does not. So a priced session is counted
-        // from the CLI's own accounting and this from the messages, and a
-        // session the CLI has not closed yet — which has no accounting — is
-        // counted from the messages, which is measured and reads as a floor.
+        // does not. So what an accounting covers is counted from it, and this
+        // from the messages. What none covers — the whole of a session the CLI
+        // has not closed yet, or what a resumed one did after the last time
+        // it was closed — is counted from the messages, which is measured and
+        // reads as a floor.
         //
         // A sub-agent's messages are counted the same way. They are billed
         // like the session's own, and the CLI's accounting for a session
@@ -855,9 +863,9 @@ impl Fold {
         // sessions' own messages came to 33.6% of the cache writes their
         // `cost-state` recorded and 92.4% with their agents' messages added,
         // and the agents' took no session over its own record in 55 of them.
-        // A session with that record is counted from it, so an agent's
-        // messages add nothing to one; an unclosed session's floor without
-        // them would leave out most of what it spent.
+        // What that record covers is counted from it, so an agent's messages
+        // add nothing there; an unclosed session's floor without them would
+        // leave out most of what it spent.
         let usage = message
             .id
             .as_ref()
@@ -865,7 +873,7 @@ impl Fold {
             .or(message.usage);
         if let Some(usage) = usage
             && first_time
-            && !self.priced
+            && self.accountings == 0
         {
             self.fold(wire::Message::StreamEvent(wire::StreamEvent {
                 event: wire::StreamBody::MessageDelta { usage: Some(usage) },
@@ -970,7 +978,12 @@ impl Fold {
         }
     }
 
+    /// The CLI's accounting as a process left the session. The CLI carries
+    /// its running totals over into a process that resumes the session, so
+    /// each covers every message written before it, in this process or an
+    /// earlier one; see `tests/fixtures/README.md`.
     fn cost(&mut self, record: CostState) {
+        self.accountings = self.accountings.saturating_sub(1);
         // The CLI says when it could not price something it ran, and a total
         // that is missing a model is a floor rather than the bill. Said
         // plainly, because nothing else in the record marks which model it was.
@@ -1599,10 +1612,17 @@ mod tests {
     /// Folds `lines` as the transcript of a session in `/repo` whose
     /// sub-agents' own transcripts say `agents`.
     fn folded_knowing(lines: &[&str], agents: BTreeMap<String, RecordedAgent>) -> Vec<Event> {
-        let priced = lines
+        let accountings = lines
             .iter()
-            .any(|line| line.contains(r#""type":"cost-state""#));
-        let mut fold = Fold::new("max", Path::new("/repo"), "s-1".to_owned(), priced, agents);
+            .filter(|line| line.contains(r#""type":"cost-state""#))
+            .count();
+        let mut fold = Fold::new(
+            "max",
+            Path::new("/repo"),
+            "s-1".to_owned(),
+            accountings,
+            agents,
+        );
         for line in lines {
             fold.record(line, serde_json::from_str::<Line>(line), None);
         }

@@ -1039,6 +1039,47 @@ transcript's last `cost-state`, to cost $0.0085642 and carry those tokens; and
 the same stream translated from nothing to cost $0.064619, which is the whole
 earlier session billed a second time.
 
+## `resumed-open-transcript.jsonl`
+
+A session's transcript while a process that resumed it is still running,
+recorded from Claude Code 2.1.287 on 3 October 2026 with `--setting-sources
+project` and `--model sonnet`, in an empty directory. One process ran a
+one-word turn with `-p` and left; a second ran another with `-p --resume` and
+left; a third was started with `--resume` and stream-json input, ran a third
+turn, and the file was copied once that turn's `result` had arrived and before
+the process was told to stop. It is cut to its prompts, its replies and its
+`cost-state` records, with `cwd` rewritten to `/repo` and `gitBranch` to
+`main`.
+
+What it settles: **the CLI writes a `cost-state` each time a process leaves,
+and each is the running total since the session began**, carried over the
+resume, so the file holds two and the turn after the second is in neither:
+
+```sh
+jq -c 'select(.type=="cost-state") | .modelUsage["claude-sonnet-5-5"]
+       | [.inputTokens, .outputTokens, .cacheReadInputTokens,
+          .cacheCreationInputTokens, .costUSD]' resumed-open-transcript.jsonl
+# [2,3,10341,9370,0.0395822]
+# [4,6,22412,20888,0.0881024]
+jq -c 'select(.type=="assistant") | .message.usage
+       | [.input_tokens, .output_tokens, .cache_read_input_tokens,
+          .cache_creation_input_tokens]' resumed-open-transcript.jsonl
+# [2,3,10341,9370]
+# [2,3,12071,11518]
+# [2,3,12071,12221]
+```
+
+The second record less the first is the second reply's usage exactly — 2
+input, 3 output, 12,071 cache read and 11,518 cache write — and $0.0485202.
+The third reply comes after both. `tests/transcript.rs` expects three usage
+records: the first accounting, the second's difference from it, and the third
+reply from its own message, with no cost. The totals are the last accounting
+plus that reply: 6 input, 9 output, 34,483 cache read and 33,109 cache write,
+$0.0881024, with one record no cost settles — a floor. When the third process
+did leave, the `cost-state` it wrote (not in the fixture) held 6 input,
+9 output, 34,483 cache read and 33,109 cache write, for $0.1394346: the tokens
+counted from the reply are the ones the CLI went on to bill.
+
 ## `hand-written.jsonl`
 
 **Written by hand, not recorded**, for two shapes of the protocol no

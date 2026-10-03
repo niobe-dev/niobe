@@ -931,3 +931,83 @@ fn a_saved_test_run_whose_file_is_gone_or_changed_is_not_read() {
         "the file holds more than the CLI wrote"
     );
 }
+
+/// A session closed, resumed and closed again, then resumed once more and
+/// still open, as the README records it: two `cost-state` records and a turn
+/// after the second.
+fn resumed_and_open() -> Vec<Event> {
+    transcript::events(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resumed-open-transcript.jsonl"),
+        "max",
+        Path::new("/repo"),
+    )
+    .expect("the transcript reads")
+}
+
+/// Each `cost-state` is the session's running total when a process left,
+/// and the CLI carries that total on into the process that resumes it. What
+/// each covers is counted from it, as the difference from the one before;
+/// the turn after the last is covered by none, and is counted from its own
+/// message.
+#[test]
+fn a_turn_after_the_last_accounting_is_counted_from_its_message_and_the_rest_from_the_accounting() {
+    let events = resumed_and_open();
+
+    let counted: Vec<(&str, [u64; 4], Option<f64>)> = usage_records(&events)
+        .iter()
+        .map(|usage| {
+            (
+                usage.model.as_str(),
+                [
+                    usage.input,
+                    usage.output,
+                    usage.cache_read,
+                    usage.cache_write,
+                ],
+                usage.cost_usd,
+            )
+        })
+        .collect();
+    assert_eq!(counted.len(), 3, "{counted:?}");
+    assert_eq!(
+        (counted[0].0, counted[0].1),
+        ("claude-sonnet-5-5", [2, 3, 10_341, 9_370])
+    );
+    assert_eq!(
+        (counted[1].0, counted[1].1),
+        ("claude-sonnet-5-5", [2, 3, 12_071, 11_518])
+    );
+    assert_eq!(
+        counted[2],
+        ("claude-sonnet-5-5", [2, 3, 12_071, 12_221], None),
+        "the open turn is priced by nothing the CLI wrote"
+    );
+    let cost = |at: usize| counted[at].2.expect("an accounting carries what it cost");
+    assert!((cost(0) - 0.039_582_2).abs() < 1e-9, "{}", cost(0));
+    assert!((cost(1) - 0.048_520_2).abs() < 1e-9, "{}", cost(1));
+}
+
+/// The open turn's tokens are measured, so they are in the totals; what it
+/// cost was never written down, so the bill is a floor. The totals come to
+/// what the CLI recorded once that process left, as the README shows.
+#[test]
+fn a_resumed_session_still_open_is_counted_whole_and_its_bill_reads_as_a_floor() {
+    let totals = SessionState::replay(&resumed_and_open()).totals().clone();
+
+    assert_eq!(
+        (
+            totals.input,
+            totals.output,
+            totals.cache_read,
+            totals.cache_write
+        ),
+        (6, 9, 34_483, 33_109)
+    );
+    assert!(
+        (totals.reported_cost_usd - 0.088_102_4).abs() < 1e-9,
+        "{}",
+        totals.reported_cost_usd
+    );
+    assert_eq!(totals.records_unsettled, 1);
+    assert!(!totals.cost_fully_reported());
+}
