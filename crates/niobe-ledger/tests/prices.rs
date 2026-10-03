@@ -123,6 +123,31 @@ fn claude_opus_5_5_reads_its_cache_at_five_percent_of_input() {
 }
 
 #[test]
+fn claude_sonnet_5_5_on_the_claude_api_matches_a_hand_computed_cost() {
+    // Claude Sonnet 5.5: input $2, output $10, cache read $0.20, 1-hour write
+    // $4.
+    //   1,000 input × 2        =  2,000
+    //     500 output × 10      =  5,000
+    //  20,000 cache read × .2  =  4,000
+    //   4,000 1h write × 4     = 16,000
+    //                            27,000 / 1e6 = $0.027
+    let usage = Usage {
+        input: 1_000,
+        output: 500,
+        cache_read: 20_000,
+        cache_write: 4_000,
+        cache_write_1h: 4_000,
+        ..usage("claude-sonnet-5-5[1m]")
+    };
+    assert_eq!(usd(bundled().cost(&usage, date(2026, 10, 1))), 0.027);
+    assert_eq!(
+        bundled().cost(&usage, date(2026, 9, 27)).provenance(),
+        Provenance::Unpriced,
+        "priced before its release"
+    );
+}
+
+#[test]
 fn claude_sonnet_5_on_a_bedrock_eu_profile_matches_a_hand_computed_cost() {
     // Bedrock EU cross-region inference, Claude Sonnet 5: input $2.20, output
     // $11, cache read $0.22, 1-hour write $4.40 (the global rates plus 10%).
@@ -260,7 +285,7 @@ fn claude_api_id(bedrock: &str) -> String {
 #[test]
 fn every_bedrock_rate_is_the_claude_api_rate_plus_ten_percent_in_a_region_and_equal_globally() {
     let table = bundled();
-    let today = date(2026, 9, 16);
+    let today = date(2026, 10, 1);
     let bedrock: Vec<&str> = table
         .ids()
         .filter(|id| id.contains(".anthropic."))
@@ -383,7 +408,7 @@ fn request(case: &Case) -> Usage {
 
 /// Every entry of the bundled table, at the published rates its comments in
 /// `prices.toml` cite, written out here rather than read from the table.
-const CASES: [Case; 44] = [
+const CASES: [Case; 46] = [
     // claude-fable-5-1, from 2026-09-01, standard: (10 + 50 + 0.25 + 12.5 + 20) / 100 = 0.9275
     Case {
         id: "claude-fable-5-1",
@@ -488,6 +513,14 @@ const CASES: [Case; 44] = [
         one_hour: true,
         usd: 0.4675,
     },
+    // claude-sonnet-5-5, from 2026-09-28, standard: (2 + 10 + 0.2 + 2.5 + 4) / 100 = 0.187
+    Case {
+        id: "claude-sonnet-5-5",
+        from: (2026, 9, 28),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.187,
+    },
     // claude-sonnet-5, from 2026-06-30, standard: (2 + 10 + 0.2 + 2.5 + 4) / 100 = 0.187
     Case {
         id: "claude-sonnet-5",
@@ -575,6 +608,14 @@ const CASES: [Case; 44] = [
         tier: Tier::Standard,
         one_hour: true,
         usd: 0.51425,
+    },
+    // eu.anthropic.claude-sonnet-5-5, from 2026-09-28, standard: (2.2 + 11 + 0.22 + 2.75 + 4.4) / 100 = 0.2057
+    Case {
+        id: "eu.anthropic.claude-sonnet-5-5",
+        from: (2026, 9, 28),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.2057,
     },
     // eu.anthropic.claude-sonnet-5, from 2026-06-30, standard: (2.2 + 11 + 0.22 + 2.75 + 4.4) / 100 = 0.2057
     Case {

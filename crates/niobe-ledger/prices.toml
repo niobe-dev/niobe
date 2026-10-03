@@ -188,6 +188,25 @@ cache_read = 0.50
 cache_write = 6.25
 cache_write_1h = 10.00
 
+# Claude Sonnet 5.5, released on 28 September 2026 by its model page
+# (https://platform.claude.com/docs/en/models/sonnet-5-5/overview) and the
+# release notes; its rates read from the pricing page on 3 October 2026. Its 1M
+# window is billed at standard rates, so it has no long-context tier, and it
+# has no fast mode.
+[[model]]
+ids = [
+    "claude-sonnet-5-5",
+    "claude-sonnet-5-5[1m]",
+]
+
+[[model.price]]
+from = 2026-09-28
+input = 2.00
+output = 10.00
+cache_read = 0.20
+cache_write = 2.50
+cache_write_1h = 4.00
+
 # Claude Sonnet 5
 [[model]]
 ids = [
@@ -291,6 +310,10 @@ cache_write_1h = 2.00
 # came to standard pricing: what Bedrock billed a long prompt before that is
 # not on record here. Claude Fable 5.1 is not listed: its only regional
 # endpoint is in us-east-1, and no profile id for it is documented.
+#
+# Claude Sonnet 5.5's rates were read from the copy of 30 September 2026, two
+# days after its release, and its profile ids from its model card,
+# https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html
 
 # Claude Fable 5, EU and US geographic profiles
 [[model]]
@@ -359,6 +382,23 @@ output = 27.50
 cache_read = 0.55
 cache_write = 6.875
 cache_write_1h = 11.00
+
+# Claude Sonnet 5.5, EU and US geographic profiles
+[[model]]
+ids = [
+    "eu.anthropic.claude-sonnet-5-5",
+    "eu.anthropic.claude-sonnet-5-5[1m]",
+    "us.anthropic.claude-sonnet-5-5",
+    "us.anthropic.claude-sonnet-5-5[1m]",
+]
+
+[[model.price]]
+from = 2026-09-28
+input = 2.20
+output = 11.00
+cache_read = 0.22
+cache_write = 2.75
+cache_write_1h = 4.40
 
 # Claude Sonnet 5, EU and US geographic profiles
 [[model]]
@@ -603,10 +643,11 @@ cache_write = 1.75
 #
 # https://platform.claude.com/docs/en/build-with-claude/context-windows for the
 # sizes: "Claude Fable 5.1, …, Claude Fable 5, …, Claude Opus 5.5, Claude Opus
-# 5, Claude Opus 4.8, Claude Opus 4.7, Claude Opus 4.6, Claude Sonnet 5, Claude
-# Sonnet 4.6 … have a 1M-token context window … Other Claude models, including
-# Claude Sonnet 4.5, have a 200k-token context window", and "for every model
-# with a 1M-token context window, 1M is the default". The models overview
+# 5, Claude Opus 4.8, Claude Opus 4.7, Claude Opus 4.6, Claude Sonnet 5.5,
+# Claude Sonnet 5, Claude Sonnet 4.6 … have a 1M-token context window … Other
+# Claude models, including Claude Sonnet 4.5, have a 200k-token context
+# window", and "for every model with a 1M-token context window, 1M is the
+# default". The models overview
 # (https://platform.claude.com/docs/en/models/overview) lists Claude Haiku 4.5
 # at 200K. The dates are the release dates the prices above start from. A
 # window belongs to the model, so a Bedrock profile id has the window of the
@@ -663,6 +704,21 @@ ids = [
 
 [[context.window]]
 from = 2026-07-24
+tokens = 1_000_000
+
+# Claude Sonnet 5.5
+[[context]]
+ids = [
+    "claude-sonnet-5-5",
+    "claude-sonnet-5-5[1m]",
+    "eu.anthropic.claude-sonnet-5-5",
+    "eu.anthropic.claude-sonnet-5-5[1m]",
+    "us.anthropic.claude-sonnet-5-5",
+    "us.anthropic.claude-sonnet-5-5[1m]",
+]
+
+[[context.window]]
+from = 2026-09-28
 tokens = 1_000_000
 
 # Claude Sonnet 5
