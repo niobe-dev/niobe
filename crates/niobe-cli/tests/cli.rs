@@ -14,7 +14,8 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use niobe_store::{Store, read_log};
 
@@ -50,14 +51,54 @@ fn niobe_with_user_config(cwd: &Path, config_home: &Path, args: &[&str]) -> Outp
 /// the operator's real sessions would otherwise be listed by every test that
 /// runs `niobe sessions` on this machine.
 fn niobe_with(cwd: &Path, config_home: &Path, claude_config: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_niobe"))
+    niobe_command(cwd, config_home, claude_config, args)
+        .output()
+        .expect("the niobe binary runs")
+}
+
+/// The binary, set up to run as [`niobe_with`] runs it.
+fn niobe_command(cwd: &Path, config_home: &Path, claude_config: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_niobe"));
+    command
         .args(args)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", config_home)
         .env("CLAUDE_CONFIG_DIR", claude_config)
-        .env_remove("HOME")
-        .output()
-        .expect("the niobe binary runs")
+        .env_remove("HOME");
+    command
+}
+
+/// Runs the binary as [`niobe`] does, killing it and failing the test where
+/// it has not exited within `deadline`: a binary that waits on what it was
+/// given would otherwise hold the test, and the whole run, up for ever.
+fn niobe_within(cwd: &Path, args: &[&str], deadline: Duration) -> Output {
+    let mut child = niobe_command(
+        cwd,
+        &cwd.join("no-user-config-here"),
+        &cwd.join("no-claude-sessions-here"),
+        args,
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("the niobe binary runs");
+    let started = Instant::now();
+    while child
+        .try_wait()
+        .expect("the binary can be waited on")
+        .is_none()
+    {
+        if started.elapsed() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("niobe {args:?} had not exited after {deadline:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child
+        .wait_with_output()
+        .expect("the binary's output is read")
 }
 
 /// Runs the binary with descriptor 2 closed, the way `niobe 2>&-` does.
@@ -1549,20 +1590,17 @@ fn replaying_something_that_is_not_a_file_fails_at_once_naming_it() {
     assert!(made.success());
 
     for log in [Path::new("/dev/zero"), fifo.as_path()] {
-        let started = std::time::Instant::now();
-        let output = niobe(dir.path(), &["replay", log.to_str().expect("a UTF-8 path")]);
+        let output = niobe_within(
+            dir.path(),
+            &["replay", log.to_str().expect("a UTF-8 path")],
+            Duration::from_secs(10),
+        );
 
         assert!(!output.status.success(), "{}", log.display());
         assert!(
             stderr(&output).contains(&log.display().to_string()),
             "{}",
             stderr(&output)
-        );
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "{} took {:?}",
-            log.display(),
-            started.elapsed()
         );
     }
 }

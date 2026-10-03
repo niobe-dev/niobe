@@ -312,6 +312,10 @@ mod tests {
             vec![vec![(10, 4, 5), (11, 2, 6)]]
         );
         assert_eq!(
+            found_in("zebra quokka", &["a zebra", "quokka b"]),
+            vec![vec![(10, 2, 5), (11, 0, 6)]]
+        );
+        assert_eq!(
             found_in("zebra quokka", &["  a zebra quokka"]),
             vec![vec![(10, 4, 12)]]
         );

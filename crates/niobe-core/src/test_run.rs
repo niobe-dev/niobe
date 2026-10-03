@@ -911,6 +911,16 @@ mod tests {
         assert_eq!(summary.total(), Some(2));
     }
 
+    #[test]
+    fn a_verdict_that_disagrees_with_the_failures_counted_is_no_summary() {
+        for line in [
+            "test result: ok. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+            "test result: FAILED. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        ] {
+            assert_eq!(Summary::of(line), None, "{line}");
+        }
+    }
+
     // Recorded from `cargo test` 1.91 on a crate with five unit tests (one
     // ignored), one integration test and one doc-test, with its standard
     // error in the output as a shell tool captures it.
@@ -1517,6 +1527,14 @@ error: test failed, to rerun pass `--lib`
         ] {
             assert!(failed(command, &kept, Some(101)), "{command:?}");
         }
+    }
+
+    #[test]
+    fn a_failing_run_cut_from_its_start_is_not_known_to_have_failed() {
+        let start = FAILED
+            .find("running 5 tests")
+            .expect("the recording runs its tests");
+        assert!(!failed("cargo test", &FAILED[start..], Some(101)));
     }
 
     #[test]

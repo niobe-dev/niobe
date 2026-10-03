@@ -84,21 +84,22 @@ fn open(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     /// How long a refusal may take: long enough for a loaded machine, far
     /// shorter than reading `/dev/zero` into memory or waiting on a FIFO.
     const FAST: Duration = Duration::from_secs(2);
 
+    /// The refusal of `path`, read on a thread of its own so that a read
+    /// that waits fails the test at the deadline rather than holding it up.
     fn refused(path: &Path) -> io::Error {
-        let started = Instant::now();
-        let error = text(path).expect_err("the file is refused");
-        assert!(
-            started.elapsed() < FAST,
-            "refused in {:?}",
-            started.elapsed()
-        );
-        error
+        let (sender, received) = std::sync::mpsc::channel();
+        let path = path.to_path_buf();
+        std::thread::spawn(move || sender.send(text(&path)));
+        received
+            .recv_timeout(FAST)
+            .expect("the read returns without waiting on the file")
+            .expect_err("the file is refused")
     }
 
     #[test]

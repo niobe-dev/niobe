@@ -323,6 +323,17 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_does_not_end_its_last_line_gets_the_table_on_a_line_of_its_own() {
+        let written = spliced("[profiles.max]\nbackend = \"claude\"", "Read")
+            .expect("the file takes a new table");
+
+        assert_eq!(
+            written,
+            "[profiles.max]\nbackend = \"claude\"\n\n[permissions]\nallow = [\n    \"Read\",\n]\n"
+        );
+    }
+
+    #[test]
     fn an_empty_file_is_written_without_a_blank_line_at_the_top() {
         let written = spliced("", "Read").expect("an empty file takes a table");
 

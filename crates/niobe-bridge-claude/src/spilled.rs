@@ -119,13 +119,12 @@ mod tests {
             .expect("mkfifo runs");
         assert!(made.success(), "the FIFO is made");
 
-        let started = std::time::Instant::now();
-        assert_eq!(read(&fifo, 100), None);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "waited {:?} on the FIFO",
-            started.elapsed()
-        );
+        let (sender, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(read(&fifo, 100)));
+        let read = received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the read returns without waiting on the FIFO");
+        assert_eq!(read, None);
     }
 
     #[test]

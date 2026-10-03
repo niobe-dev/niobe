@@ -417,6 +417,15 @@ mod tests {
         assert_eq!(lines_changed(&before, &after), Some((1, 0)));
     }
 
+    /// The 8000th byte is the last git looks at, so a nul there makes the
+    /// file binary.
+    #[test]
+    fn a_nul_in_the_last_byte_git_looks_at_makes_the_file_binary() {
+        let before = format!("{}\n", "x".repeat(7_999));
+        let after = format!("{}\0\n", "x".repeat(7_999));
+        assert_eq!(lines_changed(&before, &after), None);
+    }
+
     /// Two changes far apart leave the whole file between them to compare, and
     /// that is still cheap when the files are mostly the same.
     #[test]

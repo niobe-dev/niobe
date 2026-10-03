@@ -2461,6 +2461,25 @@ mod tests {
         assert_eq!(state.pending_assistant(), "Reading fetch");
     }
 
+    /// A sub-agent that said nothing before editing a file the session had
+    /// explained leaves the explanation where it was.
+    #[test]
+    fn a_file_changed_again_with_nothing_said_keeps_the_explanation_it_had() {
+        let mut events = vec![Event::AssistantMessage {
+            text: "Adding the etag header.".to_owned(),
+            agent: None,
+        }];
+        events.extend(edited_by(None, "t1", "src/fetch.rs"));
+        events.extend(edited_by(Some("toolu_a"), "t2", "src/fetch.rs"));
+        let state = SessionState::replay(&events);
+
+        assert_eq!(state.files()[0].changes, 2);
+        assert_eq!(
+            state.files()[0].why.as_deref(),
+            Some("Adding the etag header.")
+        );
+    }
+
     #[test]
     fn a_file_changed_before_the_model_said_anything_has_no_why_invented_for_it() {
         let state = SessionState::replay(&[changed("src/fetch.rs", Some(1), Some(1))]);

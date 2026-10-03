@@ -360,6 +360,23 @@ mod tests {
     }
 
     #[test]
+    fn a_link_in_quotes_angle_brackets_or_a_list_leaves_the_punctuation_out() {
+        let line = "  \"https://example.com/a\" <https://example.com/b> https://example.com/c, end";
+        assert_eq!(
+            link(&[line], 80, 0, 5).as_deref(),
+            Some("https://example.com/a")
+        );
+        assert_eq!(
+            link(&[line], 80, 0, 30).as_deref(),
+            Some("https://example.com/b")
+        );
+        assert_eq!(
+            link(&[line], 80, 0, 55).as_deref(),
+            Some("https://example.com/c")
+        );
+    }
+
+    #[test]
     fn a_link_drawn_after_its_text_in_brackets_leaves_the_bracket_out() {
         let line = "  the docs (https://example.com/wiki/Rust_(language)) say";
         assert_eq!(

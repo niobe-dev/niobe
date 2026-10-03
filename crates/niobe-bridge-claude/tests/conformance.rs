@@ -608,38 +608,31 @@ fn every_recording_says_which_cli_version_it_was_recorded_from() {
 /// Asks the `claude` installed on this machine, which updates itself: the day
 /// it moves to a series nobody recorded, this fails for a commit that changed
 /// nothing. So it is run by hand, as AGENTS.md says, rather than by every
-/// `cargo test`.
+/// `cargo test`. Run where no `claude` answers with its version, it fails:
+/// it is asked for only to check an installed release, and passing would say
+/// one was checked.
 #[test]
 #[ignore = "reads the machine's own claude; run with --ignored after it updates"]
 fn the_installed_cli_is_a_release_these_recordings_cover() {
-    let Ok(output) = Command::new(niobe_bridge_claude::BINARY)
+    let binary = niobe_bridge_claude::BINARY;
+    let output = Command::new(binary)
         .arg("--version")
         .output()
-    else {
-        // The CLI is not on this machine, which is every CI runner: there is
-        // no installed release to check the recordings against, and the test
-        // passes having checked nothing. The line below says so only where
-        // output is shown (`cargo test -- --nocapture`); where the CLI is
-        // installed, as on a developer's machine, the check runs.
-        println!("skipped: the `claude` CLI is not installed here");
-        return;
-    };
+        .unwrap_or_else(|error| {
+            panic!("`{binary} --version` did not run ({error}): there is no CLI here to check")
+        });
     let said = String::from_utf8_lossy(&output.stdout);
-    let Some(installed) = output
+    let installed = output
         .status
         .success()
         .then(|| said.split_whitespace().next())
         .flatten()
-    else {
-        // Something on this machine answers to `claude` and does not answer
-        // `--version` with one. There is nothing to compare, and guessing at
-        // what it is would be worse than saying so.
-        println!(
-            "skipped: `{} --version` said no version",
-            niobe_bridge_claude::BINARY
-        );
-        return;
-    };
+        .unwrap_or_else(|| {
+            panic!(
+                "`{binary} --version` said no version ({}): there is no release to check",
+                output.status
+            )
+        });
 
     assert!(
         conformance::recorded(installed),

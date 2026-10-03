@@ -318,6 +318,10 @@ mod tests {
             format!("/u/trusted.list:1: expected a 64-character hexadecimal digest{RECOVER}")
         );
         assert_eq!(
+            said(&format!("{} /a\n", "g".repeat(64))),
+            format!("/u/trusted.list:1: expected a 64-character hexadecimal digest{RECOVER}")
+        );
+        assert_eq!(
             said(&format!("{} \n", digest("a"))),
             format!("/u/trusted.list:1: expected a path after the digest{RECOVER}")
         );

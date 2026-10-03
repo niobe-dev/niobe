@@ -1645,9 +1645,13 @@ mod tests {
             .expect("mkfifo runs");
         assert!(made.success());
 
-        let started = Instant::now();
-        assert_eq!(git_branch(dir.path()), None);
-        assert!(started.elapsed() < Duration::from_secs(2));
+        let (sender, received) = std::sync::mpsc::channel();
+        let from = dir.path().to_path_buf();
+        std::thread::spawn(move || sender.send(git_branch(&from)));
+        let branch = received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the branch is read without waiting on the pipe");
+        assert_eq!(branch, None);
     }
 
     #[test]

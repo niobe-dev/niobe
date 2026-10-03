@@ -275,9 +275,13 @@ cache_write = 1.25
         std::os::unix::fs::symlink("/dev/zero", &zero).expect("the link is made");
 
         for path in [fifo, zero] {
-            let started = std::time::Instant::now();
-            let said = user_table(&path).expect_err("not a file to read");
-            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            let (sender, received) = std::sync::mpsc::channel();
+            let read = path.clone();
+            std::thread::spawn(move || sender.send(user_table(&read)));
+            let said = received
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("the read returns without waiting on the file")
+                .expect_err("not a file to read");
             assert!(said.contains(&path.display().to_string()), "{said}");
         }
         assert!(matches!(

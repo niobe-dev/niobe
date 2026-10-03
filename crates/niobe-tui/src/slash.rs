@@ -139,9 +139,9 @@ mod tests {
     #[test]
     fn a_command_whose_name_starts_with_what_was_typed_comes_first() {
         let commands = [
+            command("autocompact"),
             command("context"),
             command("compact"),
-            command("autocompact"),
             command("fast"),
         ];
         let names = |typed: &str, limit: usize| -> Vec<String> {
@@ -153,7 +153,7 @@ mod tests {
 
         assert_eq!(names("COMPACT", 10), ["compact", "autocompact"]);
         assert_eq!(names("co", 10), ["context", "compact", "autocompact"]);
-        assert_eq!(names("", 2), ["context", "compact"]);
+        assert_eq!(names("", 2), ["autocompact", "context"]);
         assert!(names("nothing", 10).is_empty());
     }
 
