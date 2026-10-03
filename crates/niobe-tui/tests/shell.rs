@@ -3430,6 +3430,58 @@ fn a_slash_offers_the_backends_commands_and_enter_picks_one_to_send() {
 }
 
 #[test]
+fn enter_on_a_command_typed_in_full_sends_it_rather_than_a_longer_one() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = empty_session();
+    app.apply(&listed_commands(&[
+        ("review-pr", "Review a pull request", None),
+        ("review", "Review the changes", None),
+    ]));
+    type_keys(&mut app, "/review");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert!(offered[0].starts_with("/review "), "{offered:?}");
+
+    press(&mut app, KeyCode::Enter);
+    let sent = app.take_produced();
+    assert!(
+        sent.iter().any(|event| matches!(
+            event,
+            Event::UserMessage { text } if text == "/review"
+        )),
+        "the command typed in full is sent on the first Enter: {sent:?}"
+    );
+    assert_eq!(app.composed(), "");
+}
+
+#[test]
+fn enter_on_another_command_than_the_one_typed_in_full_puts_that_one_in_the_prompt() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = empty_session();
+    app.apply(&listed_commands(&[
+        ("review-pr", "Review a pull request", None),
+        ("review", "Review the changes", None),
+    ]));
+    type_keys(&mut app, "/review");
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.composed(), "/review-pr ");
+    assert!(app.take_produced().is_empty());
+
+    let mut app = empty_session();
+    app.apply(&listed_commands(&[("review", "Review the changes", None)]));
+    type_keys(&mut app, "/REVIEW");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.composed(),
+        "/review ",
+        "a name typed in another case is written as the backend lists it"
+    );
+    assert!(app.take_produced().is_empty());
+}
+
+#[test]
 fn a_list_the_backend_sends_again_replaces_what_is_offered() {
     let mut app = session_with_commands();
     app.apply(&listed_commands(&[(

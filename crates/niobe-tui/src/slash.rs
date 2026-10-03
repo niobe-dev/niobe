@@ -60,8 +60,10 @@ pub(crate) fn model_named(prompt: &str, commands: &[SlashCommand]) -> Option<Str
 /// Up to `limit` of `commands` that `typed` could name.
 ///
 /// A command matches when its name holds what was typed, ignoring case. One
-/// whose name starts with it comes first; within each, the backend's own
-/// order, which is the order it lists them in everywhere else.
+/// whose name is what was typed comes first, so that Enter on a name typed in
+/// full never takes a longer one it starts; then one whose name starts with
+/// it; within each, the backend's own order, which is the order it lists them
+/// in everywhere else.
 pub(crate) fn candidates<'a>(
     commands: &'a [SlashCommand],
     typed: &str,
@@ -73,10 +75,12 @@ pub(crate) fn candidates<'a>(
         .enumerate()
         .filter_map(|(at, command)| {
             let name = command.name.to_lowercase();
-            let rank = if name.starts_with(&typed) {
+            let rank = if name == typed {
                 0
-            } else if name.contains(&typed) {
+            } else if name.starts_with(&typed) {
                 1
+            } else if name.contains(&typed) {
+                2
             } else {
                 return None;
             };
@@ -151,5 +155,20 @@ mod tests {
         assert_eq!(names("co", 10), ["context", "compact", "autocompact"]);
         assert_eq!(names("", 2), ["context", "compact"]);
         assert!(names("nothing", 10).is_empty());
+    }
+
+    #[test]
+    fn a_command_named_in_full_comes_before_the_longer_ones_it_starts() {
+        let commands = [
+            command("review-pr"),
+            command("Review"),
+            command("pre-review"),
+        ];
+        let names: Vec<&str> = candidates(&commands, "review", 10)
+            .into_iter()
+            .map(|command| command.name.as_str())
+            .collect();
+
+        assert_eq!(names, ["Review", "review-pr", "pre-review"]);
     }
 }

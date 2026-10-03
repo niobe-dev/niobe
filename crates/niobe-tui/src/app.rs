@@ -4137,7 +4137,8 @@ impl App {
     }
 
     /// One key, while the list of the backend's commands is open. Returns
-    /// whether the list took it: the same keys as the list of files.
+    /// whether the list took it: the same keys as the list of files, except
+    /// an Enter on a command typed in full, which is left to send the prompt.
     fn on_command_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -4146,6 +4147,13 @@ impl App {
         let Some(chosen) = commands.get(selected).map(|command| command.name.clone()) else {
             return false;
         };
+        // A command already typed in full, as the backend spells it, has
+        // nothing left to pick: Enter sends it, as it does in the CLI itself.
+        if (key.code, key.modifiers) == (KeyCode::Enter, KeyModifiers::NONE)
+            && self.slash().as_deref() == Some(chosen.as_str())
+        {
+            return false;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Up, KeyModifiers::NONE) => {
                 self.offer_selected = (selected + count - 1) % count;
