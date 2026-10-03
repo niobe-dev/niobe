@@ -20,16 +20,6 @@ use niobe_store::{Store, read_log};
 
 const FIXTURE: &str = "../niobe-core/tests/fixtures/claude-session.jsonl";
 
-/// The fixture must be read and folded in under this many milliseconds.
-///
-/// This test stays in the binary it shares with the ones around it, where the
-/// shell redraw needed one of its own, although those siblings are the
-/// heaviest of the three suites that time a replay: each spawns the binary
-/// again. Timed on four two-vCPU CI runners, the binary reported a median of
-/// 1.6 to 2.3 ms with them running in parallel and 1.1 to 1.4 ms alone, and
-/// the slowest single run of the 80 timed was 4.2 ms.
-const REPLAY_BUDGET_MS: f64 = 50.0;
-
 /// What the binary exits with when a failure's reason was written to standard
 /// error, whatever standard error pointed at.
 const FAILED: i32 = 1;
@@ -118,7 +108,7 @@ fn body(summary: &str) -> Vec<&str> {
 }
 
 #[test]
-fn replaying_the_fixture_prints_its_totals_inside_the_budget() {
+fn replaying_the_fixture_prints_its_totals() {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let fixture = fixture_path();
     let output = niobe(here, &["replay", fixture.to_str().expect("a UTF-8 path")]);
@@ -134,18 +124,6 @@ fn replaying_the_fixture_prints_its_totals_inside_the_budget() {
     assert!(
         out.contains("14 of 25 usage records no reported cost covers"),
         "{out}"
-    );
-
-    let millis: f64 = out
-        .lines()
-        .next()
-        .and_then(|header| header.split(" in ").nth(1))
-        .and_then(|rest| rest.strip_suffix(" ms"))
-        .and_then(|ms| ms.parse().ok())
-        .unwrap_or_else(|| panic!("no timing in the header: {out}"));
-    assert!(
-        millis < REPLAY_BUDGET_MS,
-        "replay took {millis} ms, over the {REPLAY_BUDGET_MS} ms budget"
     );
 }
 

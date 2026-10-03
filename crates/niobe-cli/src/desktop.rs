@@ -138,6 +138,11 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    /// How long a test waits for a program it started to write what it
+    /// writes. Starting `sh` takes seconds on a loaded Mac, and ten of them
+    /// have run out there; the wait returns as soon as the file is written.
+    const PATIENCE: Duration = Duration::from_secs(60);
+
     /// A directory of its own under the system's temporary one, removed when
     /// dropped.
     struct Scratch(PathBuf);
@@ -168,7 +173,7 @@ mod tests {
     /// the program writing it on another thread.
     fn written(path: &std::path::Path) -> String {
         let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(10) {
+        while started.elapsed() < PATIENCE {
             if let Ok(text) = std::fs::read_to_string(path)
                 && !text.is_empty()
             {

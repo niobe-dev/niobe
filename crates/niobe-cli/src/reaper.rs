@@ -120,13 +120,18 @@ mod tests {
     /// tenth of a second or more to start on an idle Mac and seconds on a
     /// loaded one, and the reaper starts one and forks a `sleep` before its
     /// SIGKILL, so a budget of a few seconds measures the machine rather than
-    /// the reaper. Waiting returns as soon as the thing has happened.
-    const PATIENCE: Duration = Duration::from_secs(20);
+    /// the reaper. Waiting returns as soon as the thing has happened; twenty
+    /// seconds ran out under a load average of forty.
+    const PATIENCE: Duration = Duration::from_secs(60);
+
+    /// How long each group's `sleep` runs if nothing ends it: well past
+    /// [`PATIENCE`], so a group can only have ended because it was signalled.
+    const ASLEEP: &str = "300";
 
     /// A process leading a group of its own, as a `!` command is.
     fn group() -> Child {
         let mut sleep = Command::new("sleep");
-        sleep.arg("30").process_group(0);
+        sleep.arg(ASLEEP).process_group(0);
         sleep.spawn().expect("sleep starts")
     }
 
@@ -139,9 +144,12 @@ mod tests {
     /// child killed and exit with 128 + 9 before its own turn came.
     fn group_ignoring_term() -> Child {
         let mut sh = Command::new("sh");
-        sh.args(["-c", "trap '' TERM; echo trapped; exec sleep 30"])
-            .stdout(Stdio::piped())
-            .process_group(0);
+        sh.args([
+            "-c",
+            &format!("trap '' TERM; echo trapped; exec sleep {ASLEEP}"),
+        ])
+        .stdout(Stdio::piped())
+        .process_group(0);
         let mut ignoring = sh.spawn().expect("sh starts");
         let mut said = String::new();
         BufReader::new(ignoring.stdout.take().expect("its output is piped"))

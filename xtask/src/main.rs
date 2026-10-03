@@ -105,14 +105,15 @@ fn ci() -> Result<(), String> {
         "warnings",
     ])?;
     cargo(&["test", "--workspace"])?;
-    cargo(&[
-        "test",
-        "--release",
-        "--package",
-        "niobe-tui",
-        "--test",
-        "frame_budget",
-    ])?;
+    // The timed tests, each a binary of its own, in the optimised build that
+    // ships: the debug suite reports them ignored.
+    for (package, test) in [
+        ("niobe-tui", "frame_budget"),
+        ("niobe-store", "replay_budget"),
+        ("niobe-cli", "replay_budget"),
+    ] {
+        cargo(&["test", "--release", "--package", package, "--test", test])?;
+    }
     layering()?;
     headers()?;
     version::run(&["--check".to_owned()])?;

@@ -677,13 +677,37 @@ mod tests {
     /// running exits on its own. It is let go of at the next look rather than
     /// kept for the quit to signal, by which time its number could be
     /// someone else's.
+    ///
+    /// What the command left running is ended by the test, once the shell
+    /// has, and waited out, so the one drain made after is the first to see
+    /// the group empty however long the machine took to get there.
     #[test]
     fn a_group_that_empties_after_its_shell_ended_is_let_go_of_at_the_next_drain() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("left-running");
         let mut commands = Commands::at(dir.path());
+        ran_in(
+            &mut commands,
+            &format!(
+                "(sleep 300 >/dev/null 2>&1 & echo $! > {})",
+                marker.display()
+            ),
+        );
+        let child = pid_in(&marker);
+        assert_eq!(
+            commands
+                .groups
+                .lock()
+                .expect("nothing else holds the list")
+                .len(),
+            1,
+            "a group with something still running in it was let go of"
+        );
 
-        ran_in(&mut commands, "(sleep 0.3 >/dev/null 2>&1 &)");
-        std::thread::sleep(Duration::from_millis(600));
+        let pid = rustix::process::Pid::from_raw(child).expect("a pid is positive");
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL)
+            .expect("what the command left running can be killed");
+        gone(child, "what the command left running outlived its kill");
         commands.drain();
 
         let groups = commands.groups.lock().expect("nothing else holds the list");

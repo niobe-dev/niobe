@@ -24,7 +24,17 @@ use niobe_core::event::Event;
 
 /// The longest one [`Session::drain`] may take. It runs on the thread that
 /// draws the screen, so anything it waits on is a frozen shell.
-const DRAIN: Duration = Duration::from_millis(100);
+///
+/// What a drain could wait on here is the stand-in, which stays for
+/// [`STAYS`] once it has printed, so a drain that waited on it would take
+/// that long. One that does not takes a few milliseconds on an idle machine
+/// and took 400 ms under a load average of forty, where a hundred failed, so
+/// the ceiling sits well clear of both.
+const DRAIN: Duration = Duration::from_secs(5);
+
+/// How long each stand-in stays once it has printed, in seconds: six times
+/// [`DRAIN`], and within the [`PATIENCE`] a turn is given.
+const STAYS: u64 = 30;
 
 /// How long a stand-in may take to print what it prints, from its first line.
 ///
@@ -132,7 +142,7 @@ fn replies(events: &[Event]) -> Vec<&str> {
 /// not quite: it does not even leave when its standard input closes.
 fn around(between: &str) -> String {
     format!(
-        "printf '%s\\n' '{before}'\n{between}\nprintf '%s\\n' '{after}' '{RESULT}'\nexec sleep 30\n",
+        "printf '%s\\n' '{before}'\n{between}\nprintf '%s\\n' '{after}' '{RESULT}'\nexec sleep {STAYS}\n",
         before = assistant("before"),
         after = assistant("after"),
     )
@@ -156,7 +166,7 @@ fn a_line_that_is_not_utf8_is_passed_over_and_the_turn_goes_on() {
 #[test]
 fn a_reply_carrying_bytes_that_are_not_utf8_is_shown_with_them_replaced() {
     let body = format!(
-        "printf '%s\\n' '{before}'\nprintf '{bad}\\n'\nprintf '%s\\n' '{RESULT}'\nexec sleep 30\n",
+        "printf '%s\\n' '{before}'\nprintf '{bad}\\n'\nprintf '%s\\n' '{RESULT}'\nexec sleep {STAYS}\n",
         before = assistant("before"),
         bad = assistant(r"caf\351"),
     );
@@ -182,7 +192,7 @@ fn standard_error_that_is_not_utf8_is_still_read_so_the_cli_is_never_stopped_by_
 #[test]
 fn a_cli_that_closes_its_output_and_keeps_running_is_stopped_without_freezing_the_shell() {
     let body = format!(
-        "printf '%s\\n' '{before}'\nexec 1>&-\nexec sleep 30\n",
+        "printf '%s\\n' '{before}'\nexec 1>&-\nexec sleep {STAYS}\n",
         before = assistant("before"),
     );
     let fatal = |events: &[Event]| {

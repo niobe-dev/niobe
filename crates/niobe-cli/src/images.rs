@@ -149,6 +149,8 @@ struct Fetcher {
     /// What shrinks an image too large to send, where this platform has
     /// something: it reads [`INPUT`] and writes [`FILE`].
     shrinker: Option<Reader>,
+    /// How long each program is given before it is killed: [`PATIENCE`].
+    patience: Duration,
 }
 
 /// What shrinks an image on this platform, where there is something.
@@ -183,6 +185,7 @@ impl Clipboard {
             home,
             readers: platform_readers(),
             shrinker: platform_shrinker(),
+            patience: PATIENCE,
         })
     }
 
@@ -231,7 +234,7 @@ impl Fetcher {
             Some(shrinker) if too_large && MediaType::sniff(&bytes).is_some() => {
                 // Where shrinking fails, the image as it was is refused for
                 // its size, which is the reason the operator can act on.
-                shrink(shrinker, &bytes).unwrap_or(bytes)
+                shrink(shrinker, &bytes, self.patience).unwrap_or(bytes)
             }
             _ => bytes,
         };
@@ -251,7 +254,7 @@ impl Fetcher {
     fn clipboard(&self) -> Result<Vec<u8>, String> {
         let mut installed = false;
         for reader in &self.readers {
-            match read_with(reader) {
+            match read_with(reader, self.patience) {
                 Ok(Some(bytes)) => return Ok(bytes),
                 Ok(None) => installed = true,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -276,13 +279,13 @@ impl Fetcher {
 
 /// What `reader` read off the clipboard: `None` where it ran and found no
 /// image there.
-fn read_with(reader: &Reader) -> std::io::Result<Option<Vec<u8>>> {
+fn read_with(reader: &Reader, patience: Duration) -> std::io::Result<Option<Vec<u8>>> {
     let scratch = Scratch::new("png");
     let args = reader
         .args
         .iter()
         .map(|arg| arg.replace(FILE, &scratch.path().display().to_string()));
-    let (succeeded, stdout) = run(Command::new(&reader.program).args(args))?;
+    let (succeeded, stdout) = run(Command::new(&reader.program).args(args), patience)?;
     if !succeeded {
         return Ok(None);
     }
@@ -304,30 +307,30 @@ fn read_with(reader: &Reader) -> std::io::Result<Option<Vec<u8>>> {
 /// `bytes`, an image, as `shrinker` shrinks it to the first of
 /// [`SHRUNK_EDGES`] that brings it within what a model takes; `None` where
 /// none does, or it could not be shrunk at all.
-fn shrink(shrinker: &Reader, bytes: &[u8]) -> Option<Vec<u8>> {
+fn shrink(shrinker: &Reader, bytes: &[u8], patience: Duration) -> Option<Vec<u8>> {
     let input = Scratch::new("image");
     std::fs::write(input.path(), bytes).ok()?;
     SHRUNK_EDGES.iter().find_map(|&edge| {
-        let shrunk = shrink_to(shrinker, input.path(), edge)?;
+        let shrunk = shrink_to(shrinker, input.path(), edge, patience)?;
         (encoded_len(shrunk.len()) <= MAX_ENCODED_BYTES).then_some(shrunk)
     })
 }
 
 /// The image at `input` as `shrinker` shrinks it to `edge` on its long side.
-fn shrink_to(shrinker: &Reader, input: &Path, edge: u32) -> Option<Vec<u8>> {
+fn shrink_to(shrinker: &Reader, input: &Path, edge: u32, patience: Duration) -> Option<Vec<u8>> {
     let output = Scratch::new("jpg");
     let args = shrinker.args.iter().map(|arg| {
         arg.replace(INPUT, &input.display().to_string())
             .replace(FILE, &output.path().display().to_string())
             .replace(EDGE, &edge.to_string())
     });
-    let (succeeded, _) = run(Command::new(&shrinker.program).args(args)).ok()?;
+    let (succeeded, _) = run(Command::new(&shrinker.program).args(args), patience).ok()?;
     succeeded.then(|| read_capped(output.path()).ok()).flatten()
 }
 
 /// Runs `command` with no terminal, and says whether it succeeded and what it
-/// wrote to its standard output. Killed, and failed, after [`PATIENCE`].
-fn run(command: &mut Command) -> std::io::Result<(bool, Vec<u8>)> {
+/// wrote to its standard output. Killed, and failed, after `patience`.
+fn run(command: &mut Command, patience: Duration) -> std::io::Result<(bool, Vec<u8>)> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -352,12 +355,12 @@ fn run(command: &mut Command) -> std::io::Result<(bool, Vec<u8>)> {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if started.elapsed() > PATIENCE {
+        if started.elapsed() > patience {
             let _ = child.kill();
             let _ = child.wait();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("it had not finished after {} s", PATIENCE.as_secs()),
+                format!("it had not finished after {} s", patience.as_secs()),
             ));
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -423,12 +426,19 @@ mod tests {
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
 
+    /// How long a stand-in program, and a fetch, is waited for. Each is a
+    /// `sh`, which takes seconds to start on a loaded Mac, and the ten
+    /// [`PATIENCE`] gives `osascript` have run out there. Nothing here hangs,
+    /// so a passing test waits no longer for this being long.
+    const STAND_IN_PATIENCE: Duration = Duration::from_secs(60);
+
     fn fetcher(root: &Path, readers: Vec<Reader>) -> Fetcher {
         Fetcher {
             root: root.to_path_buf(),
             home: Some(PathBuf::from("/home/me")),
             readers,
             shrinker: None,
+            patience: STAND_IN_PATIENCE,
         }
     }
 
@@ -705,7 +715,7 @@ mod tests {
         let started = Instant::now();
         let mut fetched = Vec::new();
         while fetched.is_empty() {
-            assert!(started.elapsed() < Duration::from_secs(10), "it never came");
+            assert!(started.elapsed() < STAND_IN_PATIENCE, "it never came");
             fetched = clipboard.drain();
             std::thread::sleep(Duration::from_millis(5));
         }

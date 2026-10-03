@@ -1342,6 +1342,14 @@ fn group_of(leader: u32) -> Option<rustix::process::Pid> {
 mod tests {
     use super::*;
 
+    /// How long a test waits on a stand-in to do what it was written to.
+    ///
+    /// Generous for the reason `tests/answers.rs` gives: a freshly written
+    /// script can be held at its first instruction for seconds, and with a
+    /// `yes` on every core thirty of them ran out. Every wait returns as soon
+    /// as what it waits for happens.
+    const PATIENCE: Duration = Duration::from_secs(60);
+
     fn options() -> Options {
         Options::new("/repo", "max")
     }
@@ -1684,13 +1692,11 @@ mod tests {
         // reported by the drain rather than here.
         let _ = session.send("list the files", &[]);
 
-        // Generous for the reason `tests/answers.rs` gives: a freshly written
-        // script can be held at its first instruction for seconds.
         let started = Instant::now();
         let mut events = Vec::new();
         while !session.reported {
             assert!(
-                started.elapsed() < Duration::from_secs(60),
+                started.elapsed() < PATIENCE,
                 "the stand-in never ended: {events:#?}"
             );
             events.extend(session.drain());
@@ -1756,7 +1762,7 @@ mod tests {
             .and_then(|written| written.trim().parse().ok())
             .and_then(rustix::process::Pid::from_raw)
             .expect("the stand-in wrote the pid of what it left running");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PATIENCE;
         while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -1775,8 +1781,10 @@ mod tests {
     /// from the spawn: starting a freshly written script takes seconds on a
     /// loaded machine, and that is not the driver's to answer for. On an idle
     /// machine the end is reported 510–520 ms after it, which is [`GOODBYE`]
-    /// and the drain's polling; the bound leaves room for a loaded one while
-    /// still failing a driver that waits on the detached process.
+    /// and the drain's polling. With a `yes` on every core it came more than
+    /// two seconds after, so the bound is set against what a driver that
+    /// waited would wait on — the detached process, which sleeps for most of
+    /// a day — rather than against the idle figure.
     #[cfg(unix)]
     #[test]
     fn a_cli_that_dies_while_something_outside_its_group_holds_its_output_is_reported_ended() {
@@ -1804,7 +1812,7 @@ mod tests {
         drop(session);
 
         assert!(
-            took < Duration::from_secs(2),
+            took < Duration::from_secs(20),
             "the end was reported {took:?} after the CLI left"
         );
         assert!(
@@ -1844,7 +1852,7 @@ mod tests {
         let mut asked = Vec::new();
         while asked.len() < 2 {
             assert!(
-                started.elapsed() < Duration::from_secs(60),
+                started.elapsed() < PATIENCE,
                 "the stand-in never asked twice: {asked:?}"
             );
             asked.extend(session.drain().into_iter().filter_map(|event| match event {
@@ -1860,7 +1868,7 @@ mod tests {
         }
         while !session.reported {
             assert!(
-                started.elapsed() < Duration::from_secs(60),
+                started.elapsed() < PATIENCE,
                 "the stand-in never took both answers"
             );
             session.drain();
@@ -1901,7 +1909,7 @@ mod tests {
         let started = Instant::now();
         while !dir.path().join("done").exists() {
             assert!(
-                started.elapsed() < Duration::from_secs(30),
+                started.elapsed() < PATIENCE,
                 "the detached writer never wrote"
             );
             std::thread::sleep(Duration::from_millis(5));
@@ -2024,10 +2032,7 @@ mod tests {
         let started = Instant::now();
         let mut events = Vec::new();
         while !events.iter().any(&wanted) {
-            assert!(
-                started.elapsed() < Duration::from_secs(30),
-                "it never came: {events:#?}"
-            );
+            assert!(started.elapsed() < PATIENCE, "it never came: {events:#?}");
             events.extend(session.drain());
             std::thread::sleep(Duration::from_millis(5));
         }

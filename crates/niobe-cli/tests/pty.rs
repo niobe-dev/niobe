@@ -76,9 +76,21 @@ use rustix::process::{Pid, Signal};
 use rustix::pty::OpenptFlags;
 use rustix::termios::Winsize;
 
-/// How long the shell may take to act on its terminal going away, or on a
-/// SIGTERM. Both are noticed once per tick of the event loop.
-const DEADLINE: Duration = Duration::from_secs(1);
+/// How long the shell may take to end once its terminal has gone, a signal
+/// has asked it to or the operator has quit, and how long what it started may
+/// take to be gone after.
+///
+/// Each is noticed within a tick of the event loop, and a quit gives a `!`
+/// command half a second and the CLI half a second more to leave, so on an
+/// idle machine the shell is gone in well under a second. What these tests
+/// tell apart from that is a shell that waits on something that does not end
+/// — the stand-ins and `!` commands here sleep for most of a day — or that
+/// never notices at all, so the ceiling is set by the machine, not by the
+/// tick: it is wall-clock time for processes to be scheduled and to exit.
+/// With a `yes` on every core of a 12-core Mac, a SIGTERM with a `!` command
+/// running took 4.7 to 5.5 s, and with two whole-workspace runs sharing it a
+/// shell took 9.27 s to end; one second failed there.
+const DEADLINE: Duration = Duration::from_secs(20);
 
 /// How long a test waits, once the shell has drawn what a line typed into it
 /// did, before pressing Enter, so that the shell reads the two apart as it

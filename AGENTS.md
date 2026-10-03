@@ -375,6 +375,12 @@ Where tests live:
     only in an optimised build, `cargo test --release -p niobe-tui --test frame_budget`, because
     a debug build draws them at 10–18 ms, where the budget measures the machine's load rather
     than the drawing code; `cargo test --workspace` reports them ignored.
+  - `niobe-store/tests/replay_budget.rs` times a stored session opened, loaded and folded again,
+    asserting the fastest of 31 runs, since it waits on the disk too, and
+    `niobe-cli/tests/replay_budget.rs` the fold `niobe replay` reports, asserting the median of 31.
+    Each is against 50 ms, a binary of its own, and timed only in an optimised build
+    (`cargo test --release -p niobe-store --test replay_budget`, and the same for `niobe-cli`):
+    in the debug suite under other builds' load they took from 20 ms to over a second.
   - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached
     the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM,
     SIGINT or SIGQUIT and a panic, and around a stop — a SIGTSTP or Ctrl+Z hands the terminal
@@ -396,6 +402,8 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test --release -p niobe-tui --test frame_budget
+cargo test --release -p niobe-store --test replay_budget
+cargo test --release -p niobe-cli --test replay_budget
 cargo xtask layering
 cargo xtask headers
 cargo xtask version --check
@@ -555,8 +563,10 @@ at the moment the maintainer approves them.
   terminal, not to a writer. Tests use `TerminalGuard::enter_screen_only`, never `enter`.
 - **Release binary over budget**: check what a new dependency pulls in with
   `cargo tree -p niobe-cli -e normal` before tuning the profile.
-- **Timing tests flake**: the replay budget is generous for debug builds, and the frame budgets
-  are timed in an optimised build only, because a debug frame lands within noise of 16 ms; a failure
+- **Timing tests flake**: the fold's replay budget is generous for debug builds, and the frame
+  and stored-replay budgets are timed in an optimised build only, because a debug build lands
+  within noise of them; a test that waits on a process gives it a ceiling set by a loaded
+  machine, not by the code, since starting `sh` takes seconds there; a failure
   on a loaded machine should be re-run once before being treated as a regression, then
   investigated. A timing test that shares a binary with tests that draw or replay is timing them
   too: give it a binary of its own, as `frame_budget.rs` has.
