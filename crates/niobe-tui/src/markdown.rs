@@ -250,7 +250,7 @@ impl<'t> Renderer<'t> {
         if let CodeBlockKind::Fenced(language) = kind
             && !language.is_empty()
         {
-            let label = format!("╭ {language}");
+            let label = text::truncate(&format!("╭ {language}"), self.room());
             self.emit(vec![Span::styled(label, Style::new().fg(self.theme.dim))]);
         }
         self.code = Some(String::new());
@@ -394,10 +394,30 @@ impl<'t> Renderer<'t> {
         }
     }
 
-    /// The columns left for text once the enclosing blocks' indents are paid.
+    /// The columns left for text once the drawn indents are paid.
     fn room(&self) -> usize {
-        let indent: usize = self.indents.iter().map(|i| text::width(&i.rest)).sum();
+        let indent: usize = self.indents[self.outermost_drawn()..]
+            .iter()
+            .map(|i| text::width(&i.rest))
+            .sum();
         self.width.saturating_sub(indent).max(1)
+    }
+
+    /// The first of the enclosing blocks whose indent is drawn. Indents take
+    /// at most half the width, the innermost first: past that, each level
+    /// deeper would leave its text a narrower column, until a word a cell
+    /// wide stood behind a line wider than the pane. The bullet or bar
+    /// nearest the text is the one that says what the text is in.
+    fn outermost_drawn(&self) -> usize {
+        let limit = self.width / 2;
+        let mut taken: usize = 0;
+        for (at, indent) in self.indents.iter().enumerate().rev() {
+            taken = taken.saturating_add(text::width(&indent.rest));
+            if taken > limit {
+                return at + 1;
+            }
+        }
+        0
     }
 
     /// Wraps the gathered runs and emits them.
@@ -408,16 +428,21 @@ impl<'t> Renderer<'t> {
         }
     }
 
-    /// Emits one line behind the enclosing blocks' indents.
+    /// Emits one line behind the enclosing blocks' drawn indents. An indent
+    /// not drawn still counts as used, so the first line it would have
+    /// marked is not marked again further down.
     fn emit(&mut self, content: Vec<Span<'static>>) {
+        let drawn = self.outermost_drawn();
         let mut spans = Vec::with_capacity(self.indents.len() + content.len());
-        for indent in &mut self.indents {
+        for (at, indent) in self.indents.iter_mut().enumerate() {
             let marker = match indent.used {
                 true => indent.rest.clone(),
                 false => indent.first.clone(),
             };
             indent.used = true;
-            spans.push(Span::styled(marker, indent.style));
+            if at >= drawn {
+                spans.push(Span::styled(marker, indent.style));
+            }
         }
         spans.extend(content);
         self.lines.push(Line::from(spans));
@@ -450,7 +475,9 @@ impl<'t> Renderer<'t> {
     /// Columns take the width their widest cell needs while the table fits.
     /// When it does not, the narrow columns keep theirs and the wide ones share
     /// what is left, wrapping their cells: a table cut at the edge would lose
-    /// the columns a reader most often wants, the last ones.
+    /// the columns a reader most often wants, the last ones. Where even that
+    /// leaves a column too narrow to read, the table is drawn a row at a
+    /// time instead, each cell on lines of its own after its column's header.
     fn table_lines(&mut self, table: &Table) {
         let columns = std::iter::once(&table.header)
             .chain(&table.rows)
@@ -472,7 +499,10 @@ impl<'t> Renderer<'t> {
             })
             .collect();
         let gaps = text::width(COLUMN_GAP) * (columns - 1);
-        let widths = fit_columns(&natural, self.room().saturating_sub(gaps));
+        let Some(widths) = fit_columns(&natural, self.room().saturating_sub(gaps)) else {
+            self.stacked_table(table);
+            return;
+        };
 
         let separator = Style::new().fg(self.theme.dim);
         if !table.header.is_empty() {
@@ -482,6 +512,36 @@ impl<'t> Renderer<'t> {
         }
         for row in &table.rows {
             self.table_row(row, &widths, &table.alignments);
+        }
+    }
+
+    /// A table a row at a time, each cell as `header: value` wrapped to the
+    /// pane, the rows a blank line apart. A table still streaming that has
+    /// no row yet shows its headers, one to a line.
+    fn stacked_table(&mut self, table: &Table) {
+        if table.rows.is_empty() {
+            for cell in &table.header {
+                for line in wrap_runs(cell, self.room()) {
+                    self.emit(line);
+                }
+            }
+            return;
+        }
+        let label = Style::new().fg(self.theme.dim);
+        for (at, row) in table.rows.iter().enumerate() {
+            if at > 0 {
+                self.emit(Vec::new());
+            }
+            for (column, cell) in row.iter().enumerate() {
+                let mut runs: Vec<Run> = table.header.get(column).cloned().unwrap_or_default();
+                if !runs.is_empty() {
+                    runs.push((": ".to_owned(), label));
+                }
+                runs.extend(cell.iter().cloned());
+                for line in wrap_runs(&runs, self.room()) {
+                    self.emit(line);
+                }
+            }
         }
     }
 
@@ -556,24 +616,33 @@ impl<'t> Renderer<'t> {
 
 /// Column widths that fit `room`: every column its natural width if they all
 /// fit, otherwise the narrow ones keep theirs and the rest share what is left
-/// equally, none narrower than a few cells.
-fn fit_columns(natural: &[usize], room: usize) -> Vec<usize> {
+/// equally. `None` where that would leave a column narrower than a few cells,
+/// or narrower than its widest cell where that is fewer.
+///
+/// The share never falls below that floor once the floors fit: a column is
+/// kept at its natural width only while that is no wider than the share, so
+/// the share only grows as columns are kept.
+fn fit_columns(natural: &[usize], room: usize) -> Option<Vec<usize>> {
     const NARROWEST: usize = 4;
     if natural.iter().sum::<usize>() <= room {
-        return natural.to_vec();
+        return Some(natural.to_vec());
+    }
+    let floors: usize = natural.iter().map(|w| (*w).min(NARROWEST)).sum();
+    if floors > room {
+        return None;
     }
     let mut widths = natural.to_vec();
     let mut fixed = vec![false; natural.len()];
     loop {
         let open: Vec<usize> = (0..natural.len()).filter(|c| !fixed[*c]).collect();
         if open.is_empty() {
-            return widths;
+            return Some(widths);
         }
         let taken: usize = (0..natural.len())
             .filter(|c| fixed[*c])
             .map(|c| widths[c])
             .sum();
-        let share = (room.saturating_sub(taken) / open.len()).max(NARROWEST);
+        let share = room.saturating_sub(taken) / open.len();
         let narrow: Vec<usize> = open
             .iter()
             .copied()
@@ -583,7 +652,7 @@ fn fit_columns(natural: &[usize], room: usize) -> Vec<usize> {
             for column in open {
                 widths[column] = share;
             }
-            return widths;
+            return Some(widths);
         }
         for column in narrow {
             widths[column] = natural[column];
@@ -805,6 +874,103 @@ mod tests {
         let text: String = lines.join(" ");
         for word in ["reads", "whole", "session", "store"] {
             assert!(text.contains(word), "{word} was cut: {lines:#?}");
+        }
+    }
+
+    #[test]
+    fn a_table_with_more_columns_than_the_pane_can_line_up_reads_one_cell_to_a_line() {
+        assert_eq!(
+            drawn(
+                "| a | b | c | d | e | f | g | h |\n|---|---|---|---|---|---|---|---|\n\
+                 | alpha | beta | gamma | delta | epsilon | zeta | eta | lambda |\n\
+                 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |",
+                30,
+            ),
+            [
+                "a: alpha",
+                "b: beta",
+                "c: gamma",
+                "d: delta",
+                "e: epsilon",
+                "f: zeta",
+                "g: eta",
+                "h: lambda",
+                "",
+                "a: 1",
+                "b: 2",
+                "c: 3",
+                "d: 4",
+                "e: 5",
+                "f: 6",
+                "g: 7",
+                "h: 8",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_too_wide_to_line_up_shows_its_headers_before_its_first_row_arrives() {
+        assert_eq!(
+            drawn(
+                "| one | two | three | four | five |\n|---|---|---|---|---|",
+                20
+            ),
+            ["one", "two", "three", "four", "five"]
+        );
+    }
+
+    #[test]
+    fn a_long_code_block_label_is_cut_at_the_edge() {
+        assert_eq!(
+            drawn("```a-language-name-longer-than-the-pane\nx\n```", 20),
+            ["╭ a-language-name-l…", "│ x"]
+        );
+    }
+
+    #[test]
+    fn deep_nesting_gives_up_its_outermost_indents_before_the_text_its_room() {
+        let source = "> > > > > > > > > > - - - - - - - - - - deep";
+        let lines = drawn(source, 20);
+        assert_eq!(lines, ["• • • • • deep"]);
+    }
+
+    #[test]
+    fn no_line_is_wider_than_the_pane_whatever_the_table_fence_or_nesting() {
+        let wide_table = format!(
+            "| {} |\n|{}|\n| {} |",
+            (1..=12)
+                .map(|n| format!("col{n}"))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            ["---"; 12].join("|"),
+            (1..=12)
+                .map(|n| format!("value number {n}"))
+                .collect::<Vec<_>>()
+                .join(" | "),
+        );
+        let nested_table = format!("> - - {wide_table}");
+        let fence = format!("```{}\ncode\n```", "language".repeat(20));
+        let nesting = format!("{}{}word", "> ".repeat(10), "- ".repeat(10));
+        let numbered = format!("{}text", "100. ".repeat(10));
+        let mut narrow_columns = String::from("| a | b | c | d | e | f | g | h | i | j | k |\n");
+        narrow_columns.push_str(&"|---".repeat(11));
+        narrow_columns.push_str("|\n| alpha | beta | gamma | delta | epsilon | zeta | eta | theta | iota | kappa | lambda |");
+        for source in [
+            wide_table.as_str(),
+            nested_table.as_str(),
+            fence.as_str(),
+            nesting.as_str(),
+            numbered.as_str(),
+            narrow_columns.as_str(),
+        ] {
+            for width in 20..=160 {
+                for line in drawn(source, width) {
+                    assert!(
+                        text::width(&line) <= width,
+                        "{line:?} is wider than {width} for {source:?}"
+                    );
+                }
+            }
         }
     }
 
