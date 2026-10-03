@@ -125,6 +125,7 @@ fn replaying_the_fixture_prints_its_totals() {
         out.contains("14 of 25 usage records no reported cost covers"),
         "{out}"
     );
+    assert!(!out.contains("reasoning"), "{out}");
 }
 
 #[test]
@@ -240,6 +241,34 @@ fn resuming_a_session_that_does_not_exist_says_which_and_fails() {
         "{}",
         stderr(&output)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_is_refused_in_words() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let unreadable = std::ffi::OsStr::from_bytes(b"\xff");
+    for args in [
+        vec![unreadable],
+        vec![std::ffi::OsStr::new("--resume"), unreadable],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_niobe"))
+            .args(&args)
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join("no-user-config-here"))
+            .output()
+            .expect("the niobe binary runs");
+
+        assert_eq!(output.status.code(), Some(FAILED), "{args:?}");
+        assert_eq!(
+            stderr(&output),
+            "niobe: the argument `\u{fffd}` is not UTF-8, and niobe reads only UTF-8 arguments\n\
+             Run `niobe --help` for usage.\n",
+            "{args:?}"
+        );
+    }
 }
 
 /// A failure reported onto a standard error that was closed before the process

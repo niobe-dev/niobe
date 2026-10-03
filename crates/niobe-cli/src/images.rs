@@ -11,7 +11,10 @@
 //! Code reads it: `osascript` on macOS, `wl-paste` or `xclip` on Linux. Each
 //! runs with no terminal — its input closed, its output read here and its
 //! errors dropped — so nothing it says can land on the screen the shell draws
-//! on, and each is killed if it has not finished in [`PATIENCE`].
+//! on, and each is killed, with everything it started, if it has not finished
+//! and closed its output in [`PATIENCE`]; the fetch then fails naming it. A
+//! file a reader names is read only if it is a regular file, as a pasted path
+//! is.
 //!
 //! An image larger than a model takes is shrunk on macOS with `sips` — to a
 //! JPEG no longer than the first of [`SHRUNK_EDGES`] on its long side that
@@ -19,10 +22,11 @@
 //! routinely over the limit and a screenshot is the image most often pasted.
 
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 use niobe_core::image::{Image, MAX_ENCODED_BYTES, MediaType, encoded_len};
@@ -149,7 +153,7 @@ struct Fetcher {
     /// What shrinks an image too large to send, where this platform has
     /// something: it reads [`INPUT`] and writes [`FILE`].
     shrinker: Option<Reader>,
-    /// How long each program is given before it is killed: [`PATIENCE`].
+    /// How long each program is given: [`PATIENCE`], other than in tests.
     patience: Duration,
 }
 
@@ -251,14 +255,18 @@ impl Fetcher {
     }
 
     /// The image on the clipboard, from the first reader that has one.
+    ///
+    /// A reader that had to be stopped, or that named something no image can
+    /// be read from, ends the fetch with its reason: the next reader would be
+    /// asked the same clipboard, and "no image" would hide what went wrong.
     fn clipboard(&self) -> Result<Vec<u8>, String> {
         let mut installed = false;
         for reader in &self.readers {
             match read_with(reader, self.patience) {
                 Ok(Some(bytes)) => return Ok(bytes),
-                Ok(None) => installed = true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => installed = true,
+                Ok(None) | Err(Unread::Failed) => installed = true,
+                Err(Unread::NotInstalled) => {}
+                Err(Unread::Refused(reason)) => return Err(reason),
             }
         }
         if installed || self.readers.is_empty() {
@@ -277,28 +285,51 @@ impl Fetcher {
     }
 }
 
+/// Why a reader brought back no image, where it did not simply find none.
+#[derive(Debug)]
+enum Unread {
+    /// The program is not installed here.
+    NotInstalled,
+    /// It could not be run or read for a reason that says nothing about the
+    /// clipboard, so the next reader is tried.
+    Failed,
+    /// It, or the file it named, could not be read for a reason the operator
+    /// is told.
+    Refused(String),
+}
+
 /// What `reader` read off the clipboard: `None` where it ran and found no
 /// image there.
-fn read_with(reader: &Reader, patience: Duration) -> std::io::Result<Option<Vec<u8>>> {
+fn read_with(reader: &Reader, patience: Duration) -> Result<Option<Vec<u8>>, Unread> {
     let scratch = Scratch::new("png");
     let args = reader
         .args
         .iter()
         .map(|arg| arg.replace(FILE, &scratch.path().display().to_string()));
-    let (succeeded, stdout) = run(Command::new(&reader.program).args(args), patience)?;
+    let (succeeded, stdout) =
+        run(Command::new(&reader.program).args(args), patience).map_err(|error| {
+            match error.kind() {
+                std::io::ErrorKind::NotFound => Unread::NotInstalled,
+                std::io::ErrorKind::TimedOut => Unread::Refused(format!(
+                    "`{}` had not read the clipboard after {patience:?}, and was stopped",
+                    reader.program
+                )),
+                _ => Unread::Failed,
+            }
+        })?;
     if !succeeded {
         return Ok(None);
     }
     let bytes = match reader.output {
         Output::Bytes => stdout,
-        Output::File => read_capped(scratch.path())?,
+        Output::File => read_capped(scratch.path()).map_err(|_| Unread::Failed)?,
         Output::Path => {
             let named = String::from_utf8_lossy(&stdout);
             let path = named.trim_end_matches(['\n', '\r']);
             if !niobe_tui::images::names_an_image(path) {
                 return Ok(None);
             }
-            read_capped(Path::new(path))?
+            read_image_file(Path::new(path)).map_err(Unread::Refused)?
         }
     };
     Ok((!bytes.is_empty()).then_some(bytes))
@@ -328,13 +359,19 @@ fn shrink_to(shrinker: &Reader, input: &Path, edge: u32, patience: Duration) -> 
     succeeded.then(|| read_capped(output.path()).ok()).flatten()
 }
 
-/// Runs `command` with no terminal, and says whether it succeeded and what it
-/// wrote to its standard output. Killed, and failed, after `patience`.
+/// Runs `command` with no terminal and in a process group of its own, and
+/// says whether it succeeded and what it wrote to its standard output.
+///
+/// Failed after `patience`, counted until its output has closed as well as
+/// until it has ended: something it put in the background can hold the
+/// output open after it ends. Then the whole group is killed, so nothing it
+/// started is left running.
 fn run(command: &mut Command, patience: Duration) -> std::io::Result<(bool, Vec<u8>)> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()?;
     // Read on a thread of its own, so an image larger than the pipe holds
     // does not stop the program before it can end.
@@ -342,34 +379,74 @@ fn run(command: &mut Command, patience: Duration) -> std::io::Result<(bool, Vec<
         .stdout
         .take()
         .ok_or_else(|| std::io::Error::other("the program's output was not piped"))?;
-    let reading = std::thread::spawn(move || {
+    let (read, reading) = channel();
+    std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        stdout
+        let result = stdout
             .by_ref()
             .take(MOST_READ)
             .read_to_end(&mut bytes)
-            .map(|_| bytes)
+            .map(|_| bytes);
+        // Nobody is waiting where the program was stopped.
+        let _ = read.send(result);
     });
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if started.elapsed() > patience {
+    let deadline = Instant::now() + patience;
+    match finish(&mut child, &reading, deadline) {
+        Some(finished) => finished,
+        None => {
+            kill_group(child.id());
             let _ = child.kill();
             let _ = child.wait();
-            return Err(std::io::Error::new(
+            Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("it had not finished after {} s", patience.as_secs()),
-            ));
+                format!("it had not finished after {patience:?}"),
+            ))
+        }
+    }
+}
+
+/// How `child` ended and what `reading` read of its output, or `None` where
+/// either was still going at `deadline`.
+fn finish(
+    child: &mut Child,
+    reading: &Receiver<std::io::Result<Vec<u8>>>,
+    deadline: Instant,
+) -> Option<std::io::Result<(bool, Vec<u8>)>> {
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => return Some(Err(error)),
+        }
+        if Instant::now() >= deadline {
+            return None;
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let bytes = reading
-        .join()
-        .map_err(|_| std::io::Error::other("reading the program's output failed"))??;
-    Ok((status.success(), bytes))
+    let left = deadline.saturating_duration_since(Instant::now());
+    match reading.recv_timeout(left) {
+        Ok(bytes) => Some(bytes.map(|bytes| (status.success(), bytes))),
+        Err(RecvTimeoutError::Timeout) => None,
+        Err(RecvTimeoutError::Disconnected) => Some(Err(std::io::Error::other(
+            "reading the program's output failed",
+        ))),
+    }
 }
+
+/// Ends the process group `leader` leads, and everything still in it.
+#[cfg(unix)]
+fn kill_group(leader: u32) {
+    let group = i32::try_from(leader)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw);
+    if let Some(group) = group {
+        // A group that has already gone is what was wanted.
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_leader: u32) {}
 
 /// The bytes of the image file at `path`, in words the operator reads where
 /// there are none.
@@ -573,6 +650,91 @@ mod tests {
         assert_eq!(
             fetcher.fetch(&Source::Clipboard),
             Err("there is no image on the clipboard".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_pipe_named_on_the_clipboard_is_refused_rather_than_waited_on() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pipe = dir.path().join("copied.png");
+        let made = Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "the pipe is made");
+        let fetcher = fetcher(
+            dir.path(),
+            vec![sh(&format!("echo '{}'", pipe.display()), Output::Path)],
+        );
+
+        assert_eq!(
+            fetcher.fetch(&Source::Clipboard),
+            Err(format!("{} is not a file", pipe.display()))
+        );
+    }
+
+    /// Whether the process `pid` names is still running, waiting up to a
+    /// second for one that was just killed to go.
+    fn still_running(pid: &str) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(1) {
+            let alive = Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .expect("kill runs");
+            if !alive.success() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    #[test]
+    fn a_reader_that_leaves_its_output_open_is_stopped_in_time_with_all_it_started() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let started = dir.path().join("started");
+        let mut fetcher = fetcher(
+            dir.path(),
+            vec![sh(
+                &format!("sleep 300 & echo $! > '{}'; exit 0", started.display()),
+                Output::Bytes,
+            )],
+        );
+        fetcher.patience = PATIENCE;
+
+        let asked = Instant::now();
+        let fetched = fetcher.fetch(&Source::Clipboard);
+
+        assert!(
+            asked.elapsed() < PATIENCE + Duration::from_secs(1),
+            "it took {:?}",
+            asked.elapsed()
+        );
+        assert_eq!(
+            fetched,
+            Err("`sh` had not read the clipboard after 10s, and was stopped".to_owned())
+        );
+        let sleep = std::fs::read_to_string(&started).expect("the reader said what it started");
+        assert!(
+            !still_running(sleep.trim()),
+            "sleep {sleep} is still running"
+        );
+    }
+
+    #[test]
+    fn a_reader_that_does_not_end_is_stopped_and_named() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut fetcher = fetcher(
+            dir.path(),
+            vec![sh("sleep 300", Output::Bytes), sh("exit 1", Output::Bytes)],
+        );
+        fetcher.patience = Duration::from_millis(300);
+
+        assert_eq!(
+            fetcher.fetch(&Source::Clipboard),
+            Err("`sh` had not read the clipboard after 300ms, and was stopped".to_owned())
         );
     }
 

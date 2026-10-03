@@ -60,8 +60,8 @@ use crate::journal::StoreJournal;
 use crate::rules::ConfigRules;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args::parse(&args) {
+    let parsed = args::utf8(std::env::args_os().skip(1)).and_then(|args| args::parse(&args));
+    let result = match parsed {
         Ok(invocation) => run(invocation),
         Err(usage) => Err(format!("{usage}\nRun `niobe --help` for usage.")),
     };
@@ -387,10 +387,11 @@ fn commands_for(root: &Path, backend: &backend::Attachment) -> commands::Command
     let Ok(reaper) = reaper::Reaper::start() else {
         return commands;
     };
-    if let Some(group) = backend.process_group() {
-        reaper.watch(group);
+    let commands = commands.reaped_by(reaper);
+    match backend.process_group() {
+        Some(group) => commands.reaping_the_backend(group),
+        None => commands,
     }
-    commands.reaped_by(reaper)
 }
 
 /// Opens the shell on a recorded session and keeps recording into it. Without

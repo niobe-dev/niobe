@@ -62,6 +62,10 @@ pub struct Commands {
     /// How long what is still running when the session ends is given to end
     /// on SIGTERM before it is killed: [`QUIT_GRACE`], but for a test.
     grace: Duration,
+    /// The process group the backend leads, while the reaper is told of it.
+    /// It is the bridge's to stop; it is kept here only so that the reaper
+    /// is told when the group is seen empty, as a command's is.
+    backend: Option<u32>,
 }
 
 /// The process group one command's `sh` leads.
@@ -85,6 +89,7 @@ impl Commands {
             groups: Arc::new(Mutex::new(Vec::new())),
             reaper: None,
             grace: QUIT_GRACE,
+            backend: None,
         }
     }
 
@@ -92,6 +97,32 @@ impl Commands {
     /// empty.
     pub fn reaped_by(mut self, reaper: Reaper) -> Self {
         self.reaper = Some(reaper);
+        self
+    }
+
+    /// Tells the reaper the backend's group has ended once nobody is left in
+    /// it. Until then its number cannot be given to anyone else, so whatever
+    /// the backend started is still the session's to stop.
+    fn let_go_of_the_backend_once_empty(&mut self) {
+        let Some(group) = self.backend else {
+            return;
+        };
+        if occupied(group) {
+            return;
+        }
+        if let Some(reaper) = &self.reaper {
+            reaper.forget(group);
+        }
+        self.backend = None;
+    }
+
+    /// Tells the reaper of the process group the backend leads, and, once
+    /// the group is seen with nobody left in it, that it has ended.
+    pub fn reaping_the_backend(mut self, group: u32) -> Self {
+        if let Some(reaper) = &self.reaper {
+            reaper.watch(group);
+            self.backend = Some(group);
+        }
         self
     }
 }
@@ -167,13 +198,15 @@ impl Shell for Commands {
         });
     }
 
-    /// Also lets go of every group that has emptied since the last look, so
+    /// Also lets go of every group that has emptied since the last look, the
+    /// backend's among them, so
     /// that neither the quit nor the reaper is left holding the number of a
     /// group that is gone: once empty, it can be given to anyone's.
     fn drain(&mut self) -> Vec<Ran> {
         if let Ok(mut groups) = self.groups.lock() {
             let_go_of_the_empty(&mut groups, self.reaper.as_ref());
         }
+        self.let_go_of_the_backend_once_empty();
         self.ended.try_iter().collect()
     }
 }
@@ -185,6 +218,13 @@ impl Drop for Commands {
     /// group is asked first and killed if anything in it is still running
     /// after [`QUIT_GRACE`]; a quit with nothing still running, or only what
     /// ends when asked, is not held up.
+    ///
+    /// What is stopped is what is still in a command's process group. A
+    /// process that calls `setsid` leaves it for a session and a group of its
+    /// own, whose number nothing here is told, and is left running: a group
+    /// is the most that can be signalled without walking every process on
+    /// the machine, and a command that daemonises itself has asked to
+    /// outlive what started it.
     fn drop(&mut self) {
         if let Ok(mut groups) = self.groups.lock() {
             let_go_of_the_empty(&mut groups, self.reaper.as_ref());
@@ -657,6 +697,29 @@ mod tests {
             child,
             "what an ended command left running outlived the session",
         );
+    }
+
+    /// The backend's group is the bridge's to stop. Once it has emptied, its
+    /// number can be given to anyone's, so the reaper is told to let it go,
+    /// as it is of a command's.
+    #[test]
+    fn the_backends_group_is_let_go_of_once_it_has_emptied() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let mut backend = Command::new("sleep");
+        std::os::unix::process::CommandExt::process_group(backend.arg("30"), 0);
+        let mut backend = backend.spawn().expect("sleep starts");
+        let reaper = Reaper::start().expect("sh starts");
+        let mut commands = Commands::at(dir.path())
+            .reaped_by(reaper)
+            .reaping_the_backend(backend.id());
+
+        commands.drain();
+        assert_eq!(commands.backend, Some(backend.id()));
+
+        backend.kill().expect("sleep is killed");
+        backend.wait().expect("sleep is reaped");
+        commands.drain();
+        assert_eq!(commands.backend, None);
     }
 
     #[test]

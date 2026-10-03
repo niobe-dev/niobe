@@ -30,20 +30,28 @@ pub fn lines(app: &App) -> Vec<String> {
     ]
 }
 
+/// The session's tokens, and what kind they were.
+///
+/// Reasoning is named only where some record counted it: a backend that
+/// bills it as output, as the `claude` CLI does, reports none apart, and a
+/// zero there would read as a session that did no reasoning.
 fn tokens(session: &SessionState) -> String {
     let t = session.totals();
     if t.records == 0 {
         return "—".to_owned();
     }
-    format!(
-        "{} — {} in · {} out · {} cache read · {} cache write · {} reasoning",
+    let mut line = format!(
+        "{} — {} in · {} out · {} cache read · {} cache write",
         grouped(t.tokens()),
         grouped(t.input),
         grouped(t.output),
         grouped(t.cache_read),
-        grouped(t.cache_write),
-        grouped(t.reasoning)
-    )
+        grouped(t.cache_write)
+    );
+    if t.reasoning > 0 {
+        line.push_str(&format!(" · {} reasoning", grouped(t.reasoning)));
+    }
+    line
 }
 
 /// The pane's label, and the reason a figure is an estimate, a floor or
@@ -248,7 +256,21 @@ mod tests {
         );
         assert_eq!(
             summary[0],
-            "tokens      3,000 — 2,400 in · 600 out · 0 cache read · 0 cache write · 0 reasoning"
+            "tokens      3,000 — 2,400 in · 600 out · 0 cache read · 0 cache write"
+        );
+    }
+
+    #[test]
+    fn reasoning_is_counted_only_where_the_backend_reported_it_apart() {
+        let mut thought = usage(Some(0.25));
+        if let Event::Usage(usage) = &mut thought {
+            usage.reasoning = 2_000;
+        }
+        let summary = lines(&folded(&[thought, usage(Some(0.5))]));
+        assert_eq!(
+            summary[0],
+            "tokens      5,000 — 2,400 in · 600 out · 0 cache read · 0 cache write · 2,000 \
+             reasoning"
         );
     }
 

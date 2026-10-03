@@ -6,6 +6,7 @@
 //! Hand-rolled: a handful of forms do not justify an argument-parsing
 //! dependency in a binary with a size budget.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use niobe_store::SessionId;
@@ -72,6 +73,25 @@ pub struct Invocation {
     /// The palette `--theme` named, if it was given. It beats the one a config
     /// names, and `F9` beats both for the rest of the session.
     pub theme: Option<Theme>,
+}
+
+/// The arguments after the program name, as text, or a sentence for the
+/// operator naming the first that is not UTF-8.
+///
+/// Every form the line takes is spelled in text, and a session id or a
+/// profile name that is not text names nothing, so such an argument is
+/// refused here rather than read as something it is not.
+pub fn utf8(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, String> {
+    args.into_iter()
+        .map(|arg| {
+            arg.into_string().map_err(|arg| {
+                format!(
+                    "the argument `{}` is not UTF-8, and niobe reads only UTF-8 arguments",
+                    arg.to_string_lossy()
+                )
+            })
+        })
+        .collect()
 }
 
 /// Parses the arguments after the program name. The error is a sentence for
@@ -297,6 +317,28 @@ mod tests {
 
     fn id(n: &str) -> Resume {
         Resume::Recorded(n.parse().expect("a number is a session id"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_argument_that_is_not_utf8_is_named_as_well_as_it_reads() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let args = vec![
+            OsString::from("--resume"),
+            OsString::from_vec(b"a\xffb".to_vec()),
+        ];
+        assert_eq!(
+            utf8(args),
+            Err(
+                "the argument `a\u{fffd}b` is not UTF-8, and niobe reads only UTF-8 arguments"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            utf8([OsString::from("replay"), OsString::from("log.jsonl")]),
+            Ok(vec!["replay".to_owned(), "log.jsonl".to_owned()])
+        );
     }
 
     #[test]
