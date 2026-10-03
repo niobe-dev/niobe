@@ -784,6 +784,58 @@ fn enter_answers_nothing_while_the_top_of_the_question_is_not_drawn() {
     assert!(app.asking().is_some());
 }
 
+/// A key read on its own, at `at`.
+fn alone(at: std::time::Instant) -> niobe_tui::app::Arrival {
+    niobe_tui::app::Arrival { at, alone: true }
+}
+
+fn answered(app: &mut App) -> bool {
+    app.take_produced()
+        .iter()
+        .any(|event| matches!(event, Event::PermissionResponse { .. }))
+}
+
+#[test]
+fn a_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the_window_grows() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::{Duration, Instant};
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let shown = Instant::now();
+    let mut app = session_waiting_on_a_prompt();
+    app.tick(shown, None);
+    let frame = screen(&mut app, 60, 20);
+    assert!(!frame.contains("claude asks"), "{frame}");
+
+    app.on_key_read(key(KeyCode::Down), alone(shown + ASK_QUIET * 2));
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 4));
+    app.on_key_read(key(KeyCode::Char('2')), alone(shown + ASK_QUIET * 6));
+
+    assert!(!answered(&mut app), "a call was answered off screen");
+    assert!(app.take_rules().is_empty());
+    assert!(app.asking().is_some());
+    let frame = screen(&mut app, 60, 20);
+    assert!(
+        frame.contains("Not taken as an answer: the window is too small"),
+        "{frame}"
+    );
+
+    let grown = shown + Duration::from_secs(10);
+    app.tick(grown, None);
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("claude asks"), "{frame}");
+    app.on_key_read(key(KeyCode::Enter), alone(grown + ASK_QUIET / 5));
+    assert!(
+        !answered(&mut app),
+        "a key pressed as the question came into view answered it"
+    );
+
+    app.on_key_read(key(KeyCode::Enter), alone(grown + ASK_QUIET * 3));
+    assert!(answered(&mut app), "the question on screen took no answer");
+    assert!(app.asking().is_none());
+}
+
 /// The rows of the question box, with its borders and the pane's taken off.
 fn question_rows(frame: &str) -> Vec<String> {
     frame
@@ -1197,6 +1249,48 @@ fn a_config_that_sets_more_than_fits_keeps_the_answers_on_screen() {
         "the rows left out were not counted:\n{frame}"
     );
     assert_snapshot("trust-long-80x24", &frame);
+}
+
+#[test]
+fn the_trust_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the_window_grows() {
+    use niobe_tui::app::ASK_QUIET;
+    use niobe_tui::trust::Answer;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::{Duration, Instant};
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let shown = Instant::now();
+    let mut app = asking_trust(vec![row("work", "env AWS_PROFILE=work-sso")]);
+    app.tick(shown, None);
+    let frame = screen(&mut app, 60, 20);
+    assert!(
+        !frame.contains("Trust this repository's config?"),
+        "{frame}"
+    );
+
+    app.on_key_read(enter, alone(shown + ASK_QUIET * 2));
+    app.on_key_read(
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+        alone(shown + ASK_QUIET * 4),
+    );
+
+    assert_eq!(app.trust_answer(), None);
+    assert!(app.trusting().is_some());
+    let frame = screen(&mut app, 60, 20);
+    assert!(
+        frame.contains("Not taken as an answer: the window is too small"),
+        "{frame}"
+    );
+
+    let grown = shown + Duration::from_secs(10);
+    app.tick(grown, None);
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("Trust this repository's config?"), "{frame}");
+    app.on_key_read(enter, alone(grown + ASK_QUIET / 5));
+    assert_eq!(app.trust_answer(), None);
+
+    app.on_key_read(enter, alone(grown + ASK_QUIET * 3));
+    assert_eq!(app.trust_answer(), Some(Answer::Trust));
 }
 
 #[test]

@@ -986,6 +986,9 @@ pub struct App {
     /// Whether the last frame drew the top row of the question waiting, which
     /// says who asks and what is asked. `true` until a frame says otherwise.
     question_top_drawn: bool,
+    /// Whether the last frame was too small to draw the shell, and so drew
+    /// no question at all. `false` until a frame says otherwise.
+    too_small: bool,
     /// Where the last frame drew the transcript's lines, and how many of them
     /// are the session's rather than the question waiting at their end: the
     /// mouse selects and opens links only on those.
@@ -1294,6 +1297,10 @@ pub const ASK_QUIET: Duration = Duration::from_millis(500);
 const TOP_OFF_SCREEN_HINT: &str =
     "Not taken as an answer: the top of the question is off screen. Ctrl+T cuts it to fit";
 
+/// What the shell says when a key reached a prompt the window is too small
+/// to draw.
+const TOO_SMALL_HINT: &str = "Not taken as an answer: the window is too small to show the question";
+
 /// What the bar says when keys reached a prompt too soon to answer it.
 const TOO_SOON_HINT: &str =
     "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
@@ -1341,6 +1348,7 @@ impl App {
             session_area: None,
             jump: None,
             question_top_drawn: true,
+            too_small: false,
             transcript_drawn: None,
             pressed: None,
             selection: None,
@@ -2701,6 +2709,10 @@ impl App {
             self.hint = Some(TOO_SOON_HINT.to_owned());
             return;
         }
+        if self.too_small {
+            self.hint = Some(TOO_SMALL_HINT.to_owned());
+            return;
+        }
         if self.too_soon_to_answer() {
             return;
         }
@@ -3777,6 +3789,24 @@ impl App {
     /// Whether the last frame drew the top row of the question waiting.
     pub fn drew_question_top(&mut self, drawn: bool) {
         self.question_top_drawn = drawn;
+    }
+
+    /// Whether the last frame was too small to draw the shell, and with it
+    /// any question waiting.
+    ///
+    /// A question the window grows back over comes up as it does when it is
+    /// first asked, waiting from then for a quiet keyboard: an Enter pressed
+    /// at the blank window must not answer what appears under it.
+    pub fn drew_too_small(&mut self, too_small: bool) {
+        let shown = self.too_small && !too_small;
+        self.too_small = too_small;
+        if !shown || (self.asking().is_none() && self.trusting.is_none()) {
+            return;
+        }
+        self.ask_quiet_since = self.latest_instant();
+        if self.hint.as_deref() == Some(TOO_SMALL_HINT) {
+            self.hint = None;
+        }
     }
 
     /// The pane under a point on the screen, if the point is on one that
@@ -5257,6 +5287,12 @@ impl App {
         // may be the one that was cut.
         if (key.code, key.modifiers) == (KeyCode::Char('t'), KeyModifiers::CONTROL) {
             self.open_diffs();
+            return;
+        }
+        // Below the smallest window the shell draws only the size it needs,
+        // so no part of the question is on screen to answer.
+        if self.too_small {
+            self.hint = Some(TOO_SMALL_HINT.to_owned());
             return;
         }
         // The question is the last thing in the transcript. Scrolled back,

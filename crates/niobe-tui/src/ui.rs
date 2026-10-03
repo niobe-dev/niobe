@@ -26,7 +26,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    Widget,
+    Widget, Wrap,
 };
 
 use niobe_core::event::{Billing, Context, UsageWindow};
@@ -137,8 +137,10 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
     let theme = *app.theme();
     let area = frame.area();
 
-    if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
-        draw_too_small(frame, area, &theme);
+    let too_small = area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1;
+    app.drew_too_small(too_small);
+    if too_small {
+        draw_too_small(frame, area, app.hint(), &theme);
         return;
     }
 
@@ -635,18 +637,25 @@ const SHADE: char = '░';
 ///
 /// Drawing the four regions anyway would produce panes one row high with their
 /// borders overlapping their contents, which reads as a broken program rather
-/// than a small window.
-fn draw_too_small(frame: &mut Frame, area: Rect, theme: &Theme) {
+/// than a small window. `hint` is what the shell has to say about a key it
+/// held back: a question waiting is not drawn here, and a key pressed at it
+/// is answered with why it was not taken.
+fn draw_too_small(frame: &mut Frame, area: Rect, hint: Option<&str>, theme: &Theme) {
     let (columns, rows) = MIN_SIZE;
-    let lines = vec![
+    let mut lines = vec![
         Line::from("niobe").style(Style::new().fg(theme.hot).bold()),
         Line::from(format!("needs {columns}×{rows}")),
         Line::from(format!("this window is {}×{}", area.width, area.height))
             .style(Style::new().fg(theme.dim)),
     ];
+    if let Some(hint) = hint {
+        lines.push(Line::from(""));
+        lines.push(Line::from(hint.to_owned()).style(Style::new().fg(theme.hot).bold()));
+    }
 
     frame.render_widget(
         Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
             .alignment(Alignment::Center)
             .style(Style::new().bg(theme.pane_bg).fg(theme.fg)),
         area,
