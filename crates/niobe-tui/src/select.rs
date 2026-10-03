@@ -166,9 +166,9 @@ fn in_link(c: char) -> bool {
 /// one.
 ///
 /// A link too long for the line was cut where the line ended and carried on
-/// at the start of the next, so a link that runs to the end of a line takes
-/// in the start of the next where the two were cut apart: where what the
-/// next line starts with would not have fitted after it.
+/// at the start of the next, so a link that fills a line from where its text
+/// starts takes in the start of the next. A link that ends a line the words
+/// wrapped on is whole: the next line's first word is another word.
 pub(crate) fn link_at(lines: &[String], width: usize, row: usize, column: usize) -> Option<String> {
     let drawn = lines.get(row)?;
     let (start, end) = word_at(drawn, column)?;
@@ -275,16 +275,25 @@ fn indent(drawn: &str) -> usize {
     drawn.len() - drawn.trim_start().len()
 }
 
-/// Whether `above` and `below` are one run of text the line's width cut in
-/// two: `above` ends in a link character, `below` starts with one after its
-/// indent, and the first word of `below` would not have fitted on `above`.
+/// Whether `above` and `below` are one word the line's width cut in two.
+///
+/// The wrappers break a line inside a word only where the word is wider than
+/// the line, and then start it on a line of its own and fill each line with
+/// it. So `above` must end in a link character with no break before it since
+/// where its text starts — the column `below`'s text starts at, past a bullet
+/// as well as an indent — and must be filled to the width, or to one cell
+/// short of it where a two-cell character did not fit in the last. A word that
+/// merely did not fit after the others is an ordinary wrap, not a cut.
 fn cut_between(above: &str, below: &str, width: usize) -> bool {
     let ends = above.trim_end();
     let starts = below.trim_start();
-    let next = starts.split(char::is_whitespace).next().unwrap_or_default();
-    ends.ends_with(in_link)
-        && starts.starts_with(in_link)
-        && text::width(ends) + 1 + text::width(next) > width
+    let Some((word, _)) = last_word(above) else {
+        return false;
+    };
+    let text_column = |line: &str, byte: usize| line.get(..byte).map(text::width);
+    starts.starts_with(in_link)
+        && text_column(above, word) == text_column(below, indent(below))
+        && text::width(ends) + 2 > width
 }
 
 #[cfg(test)]
@@ -374,6 +383,33 @@ mod tests {
             link(&lines, 80, 0, 10).as_deref(),
             Some("https://example.com")
         );
+    }
+
+    #[test]
+    fn a_link_that_ends_a_word_wrapped_line_is_not_joined_to_the_next_word() {
+        let lines = ["  read https://example.com/x", "  documentation now"];
+        assert_eq!(
+            link(&lines, 30, 0, 10).as_deref(),
+            Some("https://example.com/x")
+        );
+    }
+
+    #[test]
+    fn a_link_alone_on_a_line_it_does_not_fill_is_not_joined_to_the_next_word() {
+        let lines = ["  https://example.com/x", "  documentation now"];
+        assert_eq!(
+            link(&lines, 30, 0, 5).as_deref(),
+            Some("https://example.com/x")
+        );
+        assert_eq!(link(&lines, 30, 1, 4), None);
+    }
+
+    #[test]
+    fn a_link_cut_under_a_bullet_is_found_from_either_half() {
+        let lines = ["• https://example.com/a/very/lon", "  g/path and more"];
+        let whole = Some("https://example.com/a/very/long/path".to_owned());
+        assert_eq!(link(&lines, 32, 0, 5), whole);
+        assert_eq!(link(&lines, 32, 1, 3), whole);
     }
 
     #[test]
