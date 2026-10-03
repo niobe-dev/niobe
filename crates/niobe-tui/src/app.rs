@@ -1121,6 +1121,11 @@ pub struct App {
     /// came to the front, or when a key last reached it that was not taken
     /// as an answer. `None` where no clock was handed in.
     ask_quiet_since: Option<Instant>,
+    /// Since when the keyboard has been quiet after a question that had it
+    /// was taken away rather than answered, until a key comes after
+    /// [`ASK_QUIET`] of quiet. `None` otherwise, or where no clock was handed
+    /// in.
+    withdrawn_quiet_since: Option<Instant>,
     /// When the key being handled was read, where the event loop said.
     arrival: Option<Arrival>,
     /// The standing answers this session starts with, plus the ones made in
@@ -1301,6 +1306,15 @@ const TOP_OFF_SCREEN_HINT: &str =
 /// to draw.
 const TOO_SMALL_HINT: &str = "Not taken as an answer: the window is too small to show the question";
 
+/// What the bar says when the question that had the keyboard was taken away
+/// rather than answered.
+const QUESTION_WITHDRAWN_HINT: &str = "The question was withdrawn before it was answered";
+
+/// What the bar says when an Enter typed on through a withdrawn question was
+/// not taken as a send.
+const WITHDRAWN_NOT_SENT_HINT: &str =
+    "Not sent: the question being answered was withdrawn. Press Enter again to send";
+
 /// What the bar says when keys reached a prompt too soon to answer it.
 const TOO_SOON_HINT: &str =
     "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
@@ -1395,6 +1409,7 @@ impl App {
             stopping: BTreeSet::new(),
             commands_started: 0,
             ask_quiet_since: None,
+            withdrawn_quiet_since: None,
             arrival: None,
             asks: VecDeque::new(),
             ask_selected: 0,
@@ -2259,8 +2274,6 @@ impl App {
         self.asks.remove(at)
     }
 
-    /// Drops every prompt waiting, and whatever the operator had begun
-    /// answering the one on screen with.
     /// Takes the question about `id` off the queue, where it is still there:
     /// the backend stopped asking it.
     fn withdraw_ask(&mut self, id: &ToolCallId) {
@@ -2269,20 +2282,46 @@ impl App {
         };
         self.asks.remove(at);
         if at == 0 {
-            self.ask_selected = 0;
-            self.ask_focus = AskFocus::Choosing;
-            self.ask_draft.clear();
+            self.front_ask_taken_away();
         }
     }
 
+    /// Drops every prompt waiting, and whatever the operator had begun
+    /// answering the one on screen with.
     fn forget_asks(&mut self) {
         if self.asks.is_empty() {
             return;
         }
         self.asks.clear();
+        self.front_ask_taken_away();
+    }
+
+    /// Settles the keyboard after the question on screen was taken away
+    /// rather than answered, with what is left of the queue in place.
+    ///
+    /// The operator may be halfway through answering it, and the keys they
+    /// type on were meant for it. The question behind it comes up as a new
+    /// one does, waiting for a quiet keyboard; with none behind it, the
+    /// prompt takes those keys but no Enter among them sends it, and an
+    /// answer being written is moved into an empty prompt rather than lost.
+    fn front_ask_taken_away(&mut self) {
+        let draft = std::mem::take(&mut self.ask_draft);
+        let had_keyboard = self.ask_focus != AskFocus::Deferred;
         self.ask_selected = 0;
         self.ask_focus = AskFocus::Choosing;
-        self.ask_draft.clear();
+        if !self.asks.is_empty() {
+            self.ask_quiet_since = self.latest_instant();
+        }
+        if !had_keyboard {
+            return;
+        }
+        self.hint = Some(QUESTION_WITHDRAWN_HINT.to_owned());
+        if self.asks.is_empty() {
+            self.withdrawn_quiet_since = self.latest_instant();
+            if self.composer.is_empty() && self.composer.insert_str(draft) {
+                self.focus = Focus::Session;
+            }
+        }
     }
 
     /// The answers the prompt on screen offers, in the order they are
@@ -5021,6 +5060,33 @@ impl App {
         true
     }
 
+    /// Whether the key being handled is an Enter that would send the prompt
+    /// before the keyboard has been quiet since a question that had it was
+    /// taken away, and if so, says so. Every key until then starts the quiet
+    /// over again, as a key held back from a question does: the operator
+    /// typing on is still answering it.
+    fn sends_too_soon_after_withdrawal(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> bool {
+        let (Some(since), Some(arrival)) = (self.withdrawn_quiet_since, self.arrival) else {
+            return false;
+        };
+        if self.asking().is_some() {
+            return false;
+        }
+        if arrival.alone && arrival.at >= since + ASK_QUIET {
+            self.withdrawn_quiet_since = None;
+            return false;
+        }
+        self.withdrawn_quiet_since = Some(arrival.at);
+        if !is_plain_enter(key) {
+            return false;
+        }
+        self.hint = Some(WITHDRAWN_NOT_SENT_HINT.to_owned());
+        true
+    }
+
     /// Handles one key.
     ///
     /// The shell's own bindings are taken first and everything left over goes
@@ -5129,6 +5195,9 @@ impl App {
                 }
                 AskFocus::Deferred => {}
             }
+        }
+        if self.sends_too_soon_after_withdrawal(key) {
+            return;
         }
         // A menu's letter after an Esc that did nothing else, or with Alt
         // held, opens it: the same two bytes, as a digit is an F-key.
@@ -9851,6 +9920,97 @@ mod tests {
 
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
         assert_eq!(app.take_produced().len(), 1);
+    }
+
+    /// Types `text` a key at a time, `every` apart from `from`, and gives
+    /// back when the last key was read.
+    fn typed_apart(app: &mut App, text: &str, from: Instant, every: Duration) -> Instant {
+        let mut at = from;
+        for c in text.chars() {
+            at += every;
+            read(app, c.to_string().as_bytes(), at);
+        }
+        at
+    }
+
+    #[test]
+    fn a_question_brought_up_by_withdrawing_the_one_being_answered_waits_for_a_quiet_keyboard() {
+        let shown = Instant::now();
+        let mut app = asked(Some("ls"));
+        app.tick(shown, None);
+        let every = Duration::from_millis(150);
+        read(&mut app, b"\t", shown + ASK_QUIET * 2);
+        let written = typed_apart(&mut app, "use rg", shown + ASK_QUIET * 2, every);
+
+        let withdrawn = written + every;
+        app.tick(withdrawn, None);
+        app.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(app.hint(), Some(QUESTION_WITHDRAWN_HINT));
+        let last = typed_apart(&mut app, " instead", withdrawn, every);
+        read(&mut app, b"\r", last + every);
+
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.hint(), Some(TOO_SOON_HINT));
+        assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
+        assert_eq!(app.ask_focus(), AskFocus::Choosing);
+        read(&mut app, b"\r", last + every + ASK_QUIET * 2);
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t2".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
+    }
+
+    /// A shell whose only question was being answered when `ended` took it
+    /// away, the operator typing on through it to an Enter; with when the
+    /// Enter was read.
+    fn written_through_a_withdrawal(ended: &Event) -> (App, Instant) {
+        let shown = Instant::now();
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("rm -rf build")));
+        let every = Duration::from_millis(150);
+        read(&mut app, b"\t", shown + ASK_QUIET * 2);
+        let written = typed_apart(&mut app, "no, use", shown + ASK_QUIET * 2, every);
+
+        let withdrawn = written + every;
+        app.tick(withdrawn, None);
+        app.apply(ended);
+        assert!(app.asking().is_none());
+        assert_eq!(app.hint(), Some(QUESTION_WITHDRAWN_HINT));
+        let last = typed_apart(&mut app, " rg", withdrawn, every);
+        read(&mut app, b"\r", last + every);
+        (app, last + every)
+    }
+
+    #[test]
+    fn an_enter_typed_through_a_withdrawn_question_sends_nothing() {
+        let (mut app, pressed) =
+            written_through_a_withdrawal(&Event::PermissionWithdrawn { id: "t1".into() });
+
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
+        assert_eq!(app.composed(), "no, use rg");
+        read(&mut app, b"\r", pressed + ASK_QUIET * 2);
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "no, use rg".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_enter_typed_through_a_question_its_turn_ended_on_sends_nothing() {
+        let (mut app, _) = written_through_a_withdrawal(&Event::TurnEnded);
+
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
+        assert_eq!(app.composed(), "no, use rg");
     }
 
     #[test]
