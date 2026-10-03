@@ -305,6 +305,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         // read this pass, rather than with the one before it.
         app.tick(std::time::Instant::now(), Some(machine.clock.now()));
         let producing = fold_backend(app, journal, backend, watch);
+        fold_journal(app, journal);
         fold_commands(app, shell);
         fold_images(app, images);
         fold_history(app, journal, history);
@@ -499,10 +500,7 @@ fn send_produced(
     rules: &mut dyn Rules,
 ) {
     for event in app.take_produced() {
-        match journal.append(&event) {
-            Ok(()) => app.kept(),
-            Err(error) => app.not_kept(&error.to_string()),
-        }
+        journal.append(&event);
         // Taken for every prompt, sent or not, so the next prompt's images
         // are never handed out with this one.
         let images = match &event {
@@ -544,6 +542,7 @@ fn send_produced(
             _ => {}
         }
     }
+    fold_journal(app, journal);
 
     // After the turn it is about has been sent, and before anything is
     // drawn, so a stop is on its way while the bar says it is.
@@ -649,12 +648,27 @@ fn fold_backend(
         if matches!(event, SessionEvent::FileChange { .. }) {
             watch.changed();
         }
-        match journal.append(event) {
+        journal.append(event);
+    }
+    fold_journal(app, journal);
+    true
+}
+
+/// Puts on screen how the journal kept what it was handed, as far as it has
+/// said: a failure for each event it could not keep, and a note when it keeps
+/// one again after refusing.
+///
+/// Called every pass as well as after each hand-over, because a journal that
+/// writes off the loop answers on a later pass than the one that handed the
+/// event on, and a refusal nobody looked for would be a loss nobody was told
+/// of.
+fn fold_journal(app: &mut App, journal: &mut dyn Journal) {
+    for outcome in journal.settled() {
+        match outcome {
             Ok(()) => app.kept(),
             Err(error) => app.not_kept(&error.to_string()),
         }
     }
-    true
 }
 
 #[cfg(test)]
@@ -672,20 +686,31 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::VecDeque;
 
-    /// Keeps everything, or refuses everything.
+    /// Keeps everything, or refuses everything, and says so at once unless
+    /// it is told to hold its answers back.
     #[derive(Default)]
     struct Kept {
         events: Vec<SessionEvent>,
         refuse: bool,
+        holding: bool,
+        answers: Vec<Result<(), JournalError>>,
     }
 
     impl Journal for Kept {
-        fn append(&mut self, event: &SessionEvent) -> Result<(), JournalError> {
+        fn append(&mut self, event: &SessionEvent) {
             if self.refuse {
-                return Err("the store is read-only".into());
+                self.answers.push(Err("the store is read-only".into()));
+                return;
             }
             self.events.push(event.clone());
-            Ok(())
+            self.answers.push(Ok(()));
+        }
+
+        fn settled(&mut self) -> Vec<Result<(), JournalError>> {
+            if self.holding {
+                return Vec::new();
+            }
+            std::mem::take(&mut self.answers)
         }
     }
 
@@ -1137,6 +1162,32 @@ mod tests {
             .find(|entry| entry.head == "not saved")
             .expect("the failure is on screen");
         assert!(saved.body.ends_with("the store is read-only"));
+    }
+
+    #[test]
+    fn a_refusal_the_journal_reports_after_the_event_was_handed_on_is_shown_when_it_arrives() {
+        let mut app = app_with_a_sent_prompt();
+        let mut journal = Kept {
+            refuse: true,
+            holding: true,
+            ..Kept::default()
+        };
+        let not_saved = |app: &App| {
+            app.entries()
+                .iter()
+                .filter(|entry| entry.head == "not saved")
+                .map(|entry| entry.meta.clone())
+                .collect::<Vec<_>>()
+        };
+
+        send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
+        assert_eq!(not_saved(&app), Vec::<String>::new());
+
+        journal.holding = false;
+        fold_journal(&mut app, &mut journal);
+        assert_eq!(not_saved(&app), ["1 event"]);
+        fold_journal(&mut app, &mut journal);
+        assert_eq!(not_saved(&app), ["1 event"]);
     }
 
     #[test]

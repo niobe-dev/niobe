@@ -805,6 +805,7 @@ dependencies = [
  "niobe-store",
  "niobe-tui",
  "ratatui",
+ "rusqlite",
  "rustix",
  "serde_json",
  "sha2",

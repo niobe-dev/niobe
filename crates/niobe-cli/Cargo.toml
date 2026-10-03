@@ -37,6 +37,9 @@ rustix = { workspace = true, features = ["process"] }
 # The shell's key events are ratatui's; the tests drive the shell with them.
 ratatui.workspace = true
 tempfile.workspace = true
+# A second connection to the session store, holding the lock another process
+# would, for the tests that prove recording never waits on it.
+rusqlite.workspace = true
 # The checksum a fake release is published with, computed apart from the
 # `shasum` / `sha256sum` the installer verifies it with.
 sha2.workspace = true

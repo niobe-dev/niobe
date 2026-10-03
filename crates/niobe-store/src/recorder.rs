@@ -3,6 +3,8 @@
 
 //! The write side a running session holds.
 
+use std::time::SystemTime;
+
 use niobe_core::event::Event;
 
 use crate::store::{SessionId, Store, StoreError};
@@ -58,9 +60,15 @@ impl Recorder {
         &self.store
     }
 
-    /// Appends one event, opening the session first if this is its first.
-    /// Returns the event's sequence number.
+    /// Appends one event, dated now, opening the session first if this is its
+    /// first. Returns the event's sequence number.
     pub fn record(&mut self, event: &Event) -> Result<u64, StoreError> {
+        self.record_at(event, SystemTime::now())
+    }
+
+    /// Appends one event dated `at`, as [`record`](Self::record) does: see
+    /// [`Store::append_at`].
+    pub fn record_at(&mut self, event: &Event, at: SystemTime) -> Result<u64, StoreError> {
         let session = match self.session {
             Some(session) => session,
             None => {
@@ -70,7 +78,7 @@ impl Recorder {
                 session
             }
         };
-        self.store.append(session, event)
+        self.store.append_at(session, event, at)
     }
 }
 

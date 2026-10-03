@@ -13,7 +13,7 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::event::{AgentId, Event, ToolCallId, Usage};
 use niobe_core::session::SessionState;
@@ -437,6 +437,22 @@ fn a_recorder_creates_its_session_on_the_first_event_and_not_before() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, session);
     assert_eq!(sessions[0].events, 2);
+}
+
+#[test]
+fn an_event_recorded_late_is_dated_when_it_happened() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let mut recorder = Recorder::new(store);
+    let happened = SystemTime::UNIX_EPOCH + Duration::from_millis(1_759_449_600_250);
+
+    recorder
+        .record_at(&user("typed while the store was locked"), happened)
+        .expect("record");
+
+    let session = recorder.session().expect("the event opened a session");
+    let stored = recorder.store().events(session).expect("load");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].at, happened);
 }
 
 #[test]

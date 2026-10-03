@@ -312,7 +312,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
     // operator's, not the agent's.
     let app = app.runs_commands().remembers();
 
-    let mut journal = StoreJournal::Pending(root.clone());
+    let mut journal = StoreJournal::pending(root.clone());
     let mut rules = ConfigRules::at(&root);
     // Started with the shell and stopped with it: the thread behind it reads
     // the repository while the session runs, and a piped run never gets here.
@@ -341,7 +341,9 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         Ended::Quit => None,
         Ended::Open(target) => Some(target),
     };
-    if let Some(session) = journal.session() {
+    let finished = journal.finish();
+    say_unsaved(&finished);
+    if let Some(session) = finished.session {
         say!(
             "session {session} saved in {} — `niobe --resume {session}` continues it",
             repo::store_path(&root).display()
@@ -499,7 +501,7 @@ fn resume(
     // operator's, not the agent's.
     let app = app.runs_commands().remembers();
 
-    let mut journal = StoreJournal::Open(recorder);
+    let mut journal = StoreJournal::open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&root);
     let mut commands = commands_for(&root, &backend);
@@ -517,10 +519,35 @@ fn resume(
         },
     )
     .map_err(|e| e.to_string())?;
-    Ok(match ended {
+    let next = match ended {
+        Ended::TerminalGone => return Ok(None),
+        Ended::Quit => None,
         Ended::Open(target) => Some(target),
-        Ended::Quit | Ended::TerminalGone => None,
-    })
+    };
+    say_unsaved(&journal.finish());
+    Ok(next)
+}
+
+/// Says how many of a session's last events the store refused after the
+/// shell had closed, which the shell could no longer put on screen: a resumed
+/// session will not show them, and the operator is owed knowing that.
+fn say_unsaved(finished: &journal::Finished) {
+    if finished.unsaved == 0 {
+        return;
+    }
+    let events = if finished.unsaved == 1 {
+        "event"
+    } else {
+        "events"
+    };
+    say!(
+        "the session store did not save the last {} {events}: {}",
+        finished.unsaved,
+        finished
+            .error
+            .as_deref()
+            .unwrap_or("the session store stopped")
+    );
 }
 
 /// Opens the shell on a session the `claude` CLI recorded, reading its history
@@ -613,7 +640,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     // operator's, not the agent's.
     let app = app.runs_commands().remembers();
 
-    let mut journal = StoreJournal::Open(recorder);
+    let mut journal = StoreJournal::open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&root);
     let mut commands = commands_for(&root, &backend);
@@ -637,7 +664,9 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         Ended::Quit => None,
         Ended::Open(target) => Some(target),
     };
-    if let Some(recorded) = journal.session() {
+    let finished = journal.finish();
+    say_unsaved(&finished);
+    if let Some(recorded) = finished.session {
         say!(
             "claude session {session} is niobe session {recorded} in {} — \
              `niobe --resume {recorded}` continues it",

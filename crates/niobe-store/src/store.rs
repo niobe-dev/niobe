@@ -107,7 +107,8 @@ impl std::str::FromStr for SessionId {
 pub struct StoredEvent {
     /// Position in the session, from 1, without gaps.
     pub seq: u64,
-    /// The wall clock when the event was stored.
+    /// The wall clock the event is dated by: when it was stored, or when
+    /// the writer said it happened.
     pub at: SystemTime,
     /// What happened.
     pub event: Event,
@@ -330,18 +331,32 @@ impl Store {
             .is_some())
     }
 
-    /// Appends one event to a session and returns its sequence number.
+    /// Appends one event to a session, dated now, and returns its sequence
+    /// number.
     ///
     /// The sequence number is computed and inserted in one statement, and the
     /// `(session, seq)` key is unique, so two writers to the same session get an
     /// error rather than two events at the same position.
     pub fn append(&self, session: SessionId, event: &Event) -> Result<u64, StoreError> {
+        self.append_at(session, event, SystemTime::now())
+    }
+
+    /// Appends one event to a session, dated `at`, and returns its sequence
+    /// number: for an event written some time after it happened, as one queued
+    /// behind a lock another process held is, which dated by its write would
+    /// stretch the call it belongs to by however long the lock was held.
+    pub fn append_at(
+        &self,
+        session: SessionId,
+        event: &Event,
+        at: SystemTime,
+    ) -> Result<u64, StoreError> {
         let json = serde_json::to_string(event).map_err(StoreError::Encode)?;
         let inserted = self.conn.query_row(
             "INSERT INTO events (session_id, seq, at, event)
              SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3 FROM events WHERE session_id = ?1
              RETURNING seq",
-            params![session.0, unix_millis(SystemTime::now()), json],
+            params![session.0, unix_millis(at), json],
             |row| row.get::<_, i64>(0),
         );
 
