@@ -344,6 +344,9 @@ pub struct Translator {
     /// The permission prompts read since the last drain, for whatever owns the
     /// CLI's standard input to answer.
     asked: Vec<Asked>,
+    /// The calls whose prompts the CLI withdrew since the last drain, which
+    /// whatever answers prompts must stop holding as asked.
+    withdrawn: Vec<ToolCallId>,
     /// The sub-agents this session has spawned, by the id of the call that
     /// spawned each, and whether each is still running.
     agents: BTreeMap<String, Running>,
@@ -440,6 +443,7 @@ impl Translator {
             tool_calls: BTreeMap::new(),
             ended_agents: BTreeMap::new(),
             asked: Vec::new(),
+            withdrawn: Vec::new(),
             agents: BTreeMap::new(),
             agent_models: BTreeMap::new(),
             recorded_agents: BTreeMap::new(),
@@ -569,6 +573,17 @@ impl Translator {
     /// know what the CLI calls the question.
     pub fn take_asked(&mut self) -> Vec<Asked> {
         std::mem::take(&mut self.asked)
+    }
+
+    /// The calls whose prompts the CLI withdrew since the last call, oldest
+    /// first.
+    ///
+    /// The CLI takes no answer to a request it has cancelled, so whatever
+    /// took a prompt from [`Translator::take_asked`] has to let it go here:
+    /// held on to, the call would still be answerable, and a session that
+    /// ended after it would read as one that ended while asking.
+    pub fn take_withdrawn(&mut self) -> Vec<ToolCallId> {
+        std::mem::take(&mut self.withdrawn)
     }
 
     /// The events one line of the CLI's standard output produced.
@@ -1452,6 +1467,7 @@ impl Translator {
         else {
             return;
         };
+        self.withdrawn.push(id.clone());
         out.push(Event::PermissionWithdrawn { id });
     }
 
@@ -3727,8 +3743,11 @@ mod tests {
             }]
         );
 
+        assert_eq!(translator.take_withdrawn(), [ToolCallId::from("toolu_1")]);
+
         let again = translator.line(r#"{"type":"control_cancel_request","request_id":"c1"}"#);
         assert!(again.is_empty(), "{again:?}");
+        assert!(translator.take_withdrawn().is_empty());
     }
 
     #[test]

@@ -465,10 +465,16 @@ impl Session {
                 // Recorded before the events go out, never after: the shell
                 // learns of a prompt by draining the events, and an answer to
                 // one this side had not yet written down would be refused for
-                // a request that is in fact waiting.
+                // a request that is in fact waiting. A prompt the CLI withdrew
+                // is let go of here too, so that no answer is written to a
+                // request it cancelled and its end is not read as one that
+                // left a question open.
                 if let Ok(mut waiting) = asked.lock() {
                     for ask in translator.take_asked() {
                         waiting.insert(ask.id.as_str().to_owned(), (ask.request_id, ask.input));
+                    }
+                    for id in translator.take_withdrawn() {
+                        waiting.remove(id.as_str());
                     }
                 }
                 for event in events {
@@ -1855,6 +1861,52 @@ mod tests {
                 .expect("nothing panicked holding it")
                 .is_empty()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_withdraws_its_prompt_and_leaves_cleanly_ends_cleanly() {
+        let request = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#;
+        let cancel = r#"{"type":"control_cancel_request","request_id":"c1"}"#;
+        let (_, events) = stand_in(&format!(
+            "read -r first\nread -r turn\nprintf '%s\\n' '{request}' '{cancel}'\nexit 0\n"
+        ));
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::PermissionRequest { .. },
+                    Event::PermissionWithdrawn { .. },
+                    Event::Notice { message },
+                ] if message == "the `claude` session ended."
+            ),
+            "{events:#?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_to_a_prompt_the_cli_withdrew_is_refused_rather_than_written() {
+        let request = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#;
+        let cancel = r#"{"type":"control_cancel_request","request_id":"c1"}"#;
+        let (mut session, _dir) = started(&format!(
+            "read -r first\nread -r turn\nprintf '%s\\n' '{request}' '{cancel}'\nexec sleep 300\n"
+        ));
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        drained_until(&mut session, |event| {
+            matches!(event, Event::PermissionWithdrawn { .. })
+        });
+
+        let said = session
+            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow, None)
+            .expect_err("the CLI no longer waits on this call")
+            .to_string();
+
+        assert!(said.contains("not waiting on a decision"), "{said}");
+        assert!(said.contains("toolu_1"), "{said}");
     }
 
     /// More than a pipe holds, so a CLI that is not reading cannot take it
