@@ -32,6 +32,23 @@ pub(crate) struct Found {
     /// The rest of a match the pane wrapped, one `(line, start, len)` per
     /// line it runs on to, in order. Empty for a match on one line.
     pub(crate) more: Vec<(usize, usize, usize)>,
+    /// Which match this is, by what it was found in.
+    pub(crate) which: Which,
+}
+
+/// Which match of the transcript one is, named by what it was found in rather
+/// than by how far down it is: the entry, whether in the heading drawn over a
+/// sub-agent's rows from that entry, and how many matches in the same lines
+/// come before it.
+///
+/// Folding a run of calls, or opening a diff, adds and takes away lines and
+/// matches above a match without changing what it was found in, so this is
+/// what the match stepped to is kept by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Which {
+    pub(crate) entry: usize,
+    pub(crate) heading: bool,
+    pub(crate) nth: usize,
 }
 
 impl Found {
@@ -44,6 +61,26 @@ impl Found {
     pub(crate) fn last_line(&self) -> usize {
         self.more.last().map_or(self.line, |(line, _, _)| *line)
     }
+
+    /// The match found in lines that start `first` lines further down, in
+    /// the entry and heading `which` names, keeping its own place among the
+    /// matches in them.
+    pub(crate) fn placed(&self, first: usize, which: Which) -> Self {
+        Self {
+            line: self.line.saturating_add(first),
+            start: self.start,
+            len: self.len,
+            more: self
+                .more
+                .iter()
+                .map(|&(line, start, len)| (line.saturating_add(first), start, len))
+                .collect(),
+            which: Which {
+                nth: self.which.nth,
+                ..which
+            },
+        }
+    }
 }
 
 /// A query, ready to be compared against lines.
@@ -52,7 +89,7 @@ impl Found {
 /// in the transcript — including the break where the pane wrapped a line and
 /// the indent the next one starts with, so a phrase is found wherever it was
 /// cut.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Query {
     chars: Vec<char>,
     exact: bool,
@@ -74,7 +111,9 @@ impl Query {
 
     /// Every place the query is in `lines` — one transcript entry's lines as
     /// drawn, the first of them line `first` of the transcript — top to
-    /// bottom and not overlapping.
+    /// bottom and not overlapping, each numbered among them in its
+    /// [`Which::nth`]. The lines do not say what they were drawn from, so
+    /// the rest of each [`Which`] is left to [`Found::placed`].
     ///
     /// The lines are read as one text with a space between each, so a match
     /// can run from one line on to the next. Lines of different entries are
@@ -100,7 +139,8 @@ impl Query {
                 });
                 Some((end, parts(located)?))
             }) {
-                Some((end, parts)) => {
+                Some((end, mut parts)) => {
+                    parts.which.nth = found.len();
                     found.push(parts);
                     at = end;
                 }
@@ -168,6 +208,7 @@ fn parts(places: impl Iterator<Item = (usize, usize, bool)>) -> Option<Found> {
         start,
         len,
         more: kept.collect(),
+        which: Which::default(),
     })
 }
 

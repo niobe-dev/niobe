@@ -1216,10 +1216,11 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
         headings.as_deref(),
         theme,
     );
-    let found = crate::find::Query::new(&query)
-        .map(|query| drawn.find(&query))
-        .unwrap_or_default();
-    app.found(found);
+    let changed = match crate::find::Query::new(&query) {
+        Some(query) => drawn.find(&query),
+        None => drawn.forget_search(),
+    };
+    app.found(changed);
 }
 
 /// The border cells a pane's title leaves on its top edge: a corner and a
@@ -1757,6 +1758,14 @@ fn mark_found(
 #[derive(Debug, Default)]
 pub struct DrawnEntries {
     drawn: Vec<Drawn>,
+    /// The query each entry's [`Drawn::found`] holds the matches of.
+    searched: Option<crate::find::Query>,
+    /// Every place `searched` is in the transcript as drawn, top to bottom,
+    /// as [`DrawnEntries::find`] last put them together.
+    found: Vec<crate::find::Found>,
+    /// Whether an entry has been drawn again, or the order changed, since
+    /// `found` was put together.
+    moved: bool,
 }
 
 /// One thing the transcript draws, in the order it is drawn: an entry, or
@@ -1769,6 +1778,12 @@ struct Drawn {
     entry: usize,
     heading: bool,
     lines: Vec<Line<'static>>,
+    /// Where [`DrawnEntries::searched`] is in `lines`, counted from their
+    /// first, once they have been searched. Kept with the lines, so a search
+    /// held open reads again only the entries drawn again: every frame
+    /// counts the matches, and reading every line of a long session for them
+    /// is what the frame would otherwise spend its time on.
+    found: Option<Vec<crate::find::Found>>,
 }
 
 /// What the transcript draws at one place, before it is drawn.
@@ -1805,6 +1820,7 @@ impl DrawnEntries {
             ..detail
         };
         let order = order(entries, headings.is_some());
+        self.moved |= self.drawn.len() > order.len();
         self.drawn.truncate(order.len());
         for (at, slot) in order.iter().enumerate() {
             let next_is_row = match order.get(at + 1) {
@@ -1852,36 +1868,81 @@ impl DrawnEntries {
             };
             match self.drawn.get_mut(at) {
                 Some(drawn) if drawn.key == key => {
+                    self.moved |= drawn.entry != entry || drawn.heading != heading;
                     drawn.entry = entry;
                     drawn.heading = heading;
                 }
                 Some(drawn) => {
+                    self.moved = true;
                     *drawn = Drawn {
                         key,
                         entry,
                         heading,
                         lines: draw(),
+                        found: None,
                     }
                 }
-                None => self.drawn.push(Drawn {
-                    key,
-                    entry,
-                    heading,
-                    lines: draw(),
-                }),
+                None => {
+                    self.moved = true;
+                    self.drawn.push(Drawn {
+                        key,
+                        entry,
+                        heading,
+                        lines: draw(),
+                        found: None,
+                    });
+                }
             }
         }
     }
 
-    /// Every place `query` is in the transcript as drawn, top to bottom.
-    fn find(&self, query: &crate::find::Query) -> Vec<crate::find::Found> {
-        let mut first = 0;
-        let mut found = Vec::new();
-        for drawn in &self.drawn {
-            found.extend(query.in_lines(&drawn.lines, first));
-            first += drawn.lines.len();
+    /// Finds every place `query` is in the transcript as drawn, top to
+    /// bottom, for [`DrawnEntries::found`]. Returns whether that changed.
+    ///
+    /// An entry is read for it only where its lines have changed since it
+    /// was last read for the same query, and the places are put together
+    /// again only where an entry has.
+    fn find(&mut self, query: &crate::find::Query) -> bool {
+        if self.searched.as_ref() != Some(query) {
+            for drawn in &mut self.drawn {
+                drawn.found = None;
+            }
+            self.searched = Some(query.clone());
+            self.moved = true;
         }
-        found
+        if !std::mem::take(&mut self.moved) {
+            return false;
+        }
+        let mut first = 0;
+        let found = &mut self.found;
+        found.clear();
+        for drawn in &mut self.drawn {
+            let which = crate::find::Which {
+                entry: drawn.entry,
+                heading: drawn.heading,
+                nth: 0,
+            };
+            let lines = &drawn.lines;
+            let here = drawn.found.get_or_insert_with(|| query.in_lines(lines, 0));
+            found.extend(here.iter().map(|at| at.placed(first, which)));
+            first += lines.len();
+        }
+        true
+    }
+
+    /// Forgets the search, for a query with nothing in it, which finds
+    /// nothing. Returns whether anything had been found.
+    fn forget_search(&mut self) -> bool {
+        self.searched = None;
+        let had = !self.found.is_empty();
+        self.found.clear();
+        had
+    }
+
+    /// Every place the search is in the transcript as last drawn, top to
+    /// bottom.
+    pub(crate) fn found(&self) -> &[crate::find::Found] {
+        &self.found
     }
 
     fn line_count(&self) -> usize {

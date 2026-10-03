@@ -102,6 +102,51 @@ fn a_long_session_of_markdown_redraws_inside_a_frame_budget() {
     );
 }
 
+/// Replies in the transcript a search is held open over, each
+/// [`MARKDOWN_REPLY`].
+const SEARCHED_REPLIES: usize = 600;
+
+/// The redraw every tick makes with a search open over a long session, a
+/// phrase of every reply found: the bar counts the matches before anything is
+/// drawn, so the frame has to know them all, and an entry is searched when
+/// it is drawn again rather than on every frame.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_search_open_over_a_long_session_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for _ in 0..SEARCHED_REPLIES {
+        app.apply(&Event::UserMessage {
+            text: "What changed?".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: MARKDOWN_REPLY.to_owned(),
+            agent: None,
+        });
+    }
+    app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    for c in "answered from the lru".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let frame = screen(&mut app, 200, 60);
+    // The session the replies are added to says the phrase once itself.
+    let found = SEARCHED_REPLIES + 1;
+    assert!(
+        frame.contains(&format!(" of {found} ")),
+        "every reply's matches are counted, or the frame times nothing: {frame}"
+    );
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame with a search open over {SEARCHED_REPLIES} markdown replies at \
+         200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
 /// File changes in a long session's transcript, each drawn as its diff.
 const LONG_SESSION_DIFFS: usize = 50;
 

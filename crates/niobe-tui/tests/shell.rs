@@ -3270,6 +3270,66 @@ fn a_query_found_nowhere_says_so() {
     assert_eq!(screen(&mut app, 120, 30), tail);
 }
 
+/// Folding the runs of calls takes the matches inside them off the
+/// transcript, above the one stepped to; the one stepped to is the same text
+/// after it, not whichever match now has its number.
+#[test]
+fn folding_the_calls_above_the_current_match_keeps_the_same_match_current() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session();
+    for text in ["look in fetch.ts first", "look in fetch.ts second"] {
+        app.apply(&Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        });
+    }
+    let open = screen(&mut app, 200, 60);
+    assert!(open.contains("├ catalog/fetch.ts"), "{open}");
+    ctrl_f(&mut app);
+    type_keys(&mut app, "fetch.ts");
+    let _ = screen(&mut app, 200, 60);
+    press(&mut app, KeyCode::Up);
+    let frame = screen(&mut app, 200, 60);
+    let theme = app.theme().to_owned();
+    let chip = Some((Some(theme.pane_bg), Some(theme.hot)));
+    let current =
+        |app: &mut App, text: &str| style_at(app, 200, 60, text).map(|style| (style.fg, style.bg));
+    assert_eq!(current(&mut app, "fetch.ts first"), chip, "{frame}");
+    let before = find_row(&frame);
+
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let folded = screen(&mut app, 200, 60);
+
+    assert!(!folded.contains("├ catalog/fetch.ts"), "{folded}");
+    assert_ne!(
+        find_row(&folded),
+        before,
+        "the fold took no match away:\n{folded}"
+    );
+    assert_eq!(current(&mut app, "fetch.ts first"), chip, "{folded}");
+    assert_ne!(current(&mut app, "fetch.ts second"), chip, "{folded}");
+}
+
+/// A reply that arrives while the search is open is searched too, and the
+/// match stepped to stays where it was.
+#[test]
+fn a_reply_arriving_while_the_search_is_open_is_counted() {
+    let mut app = session_with_a_needle();
+    let _ = screen(&mut app, 120, 30);
+    ctrl_f(&mut app);
+    type_keys(&mut app, "needle");
+    assert!(find_row(&screen(&mut app, 120, 30)).contains("2 of 2"));
+
+    app.apply(&Event::AssistantMessage {
+        text: "a needle at the end".to_owned(),
+        agent: None,
+    });
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(find_row(&frame).contains("2 of 3"), "{frame}");
+}
+
 #[test]
 fn a_slash_anywhere_but_the_start_of_a_prompt_is_a_slash() {
     use ratatui::crossterm::event::KeyCode;

@@ -1264,12 +1264,12 @@ struct Find {
     /// Where the view was when the search opened — the first line drawn and
     /// whether it followed the tail — which is where Esc puts it back.
     from: (usize, bool),
-    /// Every place the query was found by the last draw, top to bottom.
-    found: Vec<crate::find::Found>,
-    /// Which of them is the one stepped to. `None` until a draw has found
-    /// the query at all, and after every edit of it, when the draw picks the
+    /// Which of the places the last draw found the query is the one stepped
+    /// to: its number among them, and which match it is, which is what keeps
+    /// it when lines above it come and go. `None` until a draw has found the
+    /// query at all, and after every edit of it, when the draw picks the
     /// match nearest where the view was.
-    current: Option<usize>,
+    current: Option<(usize, crate::find::Which)>,
     /// Whether the view has been moved to the current match since it last
     /// changed. Kept so the view is moved once per step rather than every
     /// frame, which would undo the operator scrolling away from it.
@@ -1277,18 +1277,19 @@ struct Find {
 }
 
 impl Find {
-    /// Steps to the next match down the transcript, or up it, going round at
-    /// either end.
-    fn step(&mut self, down: bool) {
-        let count = self.found.len();
-        let Some(at) = self.current.filter(|_| count > 0) else {
+    /// Steps to the next of `found` down the transcript, or up it, going
+    /// round at either end.
+    fn step(&mut self, found: &[crate::find::Found], down: bool) {
+        let count = found.len();
+        let Some((at, _)) = self.current.filter(|_| count > 0) else {
             return;
         };
-        self.current = Some(if down {
+        let at = if down {
             (at + 1) % count
         } else {
             (at + count - 1) % count
-        });
+        };
+        self.current = found.get(at).map(|found| (at, found.which));
         self.revealed = false;
     }
 }
@@ -4586,30 +4587,42 @@ impl App {
     pub(crate) fn find_marks(&self) -> Option<(&[crate::find::Found], Option<usize>)> {
         self.find
             .as_ref()
-            .map(|find| (find.found.as_slice(), find.current))
+            .map(|find| (self.drawn.found(), find.current.map(|(at, _)| at)))
     }
 
-    /// Told by the draw where the query is in the transcript as it is drawn
-    /// now.
+    /// Told by the draw that it has found the query in the transcript as it
+    /// is drawn now, and whether where it found it has `changed` since the
+    /// last frame.
     ///
     /// A query just typed starts on the match nearest the bottom of where the
     /// view was when the search opened, and on the first one where none is
     /// above it: the transcript is read upwards from where the operator was.
-    pub(crate) fn found(&mut self, found: Vec<crate::find::Found>) {
+    /// After that the match stepped to stays the same match while lines
+    /// above it come and go — a run of calls folded, a diff opened — and
+    /// only where it is no longer drawn at all does the one with its number
+    /// take its place.
+    pub(crate) fn found(&mut self, changed: bool) {
         let viewport = self.viewport_lines;
+        let found = self.drawn.found();
         let Some(find) = self.find.as_mut() else {
             return;
         };
         let bottom = find.from.0.saturating_add(viewport);
-        find.current = match find.current {
+        let at = match find.current {
             _ if found.is_empty() => None,
-            Some(at) => Some(at.min(found.len() - 1)),
+            Some((at, _)) if !changed => Some(at),
+            Some((at, which)) => Some(
+                found
+                    .iter()
+                    .position(|found| found.which == which)
+                    .unwrap_or(at.min(found.len() - 1)),
+            ),
             None => {
                 find.revealed = false;
                 Some(found.iter().rposition(|at| at.line < bottom).unwrap_or(0))
             }
         };
-        find.found = found;
+        find.current = at.and_then(|at| found.get(at).map(|found| (at, found.which)));
     }
 
     /// Moves the view to the current match, once for each time it changes:
@@ -4619,7 +4632,7 @@ impl App {
             return;
         };
         let line = match (find.revealed, find.current) {
-            (false, Some(at)) => find.found.get(at).map(|found| found.line),
+            (false, Some((at, _))) => self.drawn.found().get(at).map(|found| found.line),
             _ => None,
         };
         find.revealed = true;
@@ -4648,7 +4661,6 @@ impl App {
         self.find = Some(Find {
             query,
             from: (self.scroll(), self.follow),
-            found: Vec::new(),
             current: None,
             revealed: true,
         });
@@ -4709,8 +4721,8 @@ impl App {
             }
             (KeyCode::Esc, _) => self.close_find(),
             (KeyCode::Backspace, _) if empty => self.close_find(),
-            (KeyCode::Enter | KeyCode::Up, _) => find.step(false),
-            (KeyCode::Down, _) => find.step(true),
+            (KeyCode::Enter | KeyCode::Up, _) => find.step(self.drawn.found(), false),
+            (KeyCode::Down, _) => find.step(self.drawn.found(), true),
             (KeyCode::Tab, _) => {}
             _ => {
                 if find.query.input(Input::from(key)) {
