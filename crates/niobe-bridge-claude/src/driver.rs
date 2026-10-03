@@ -22,7 +22,8 @@
 //! CLI's own words rather than with an exit status. Both read bytes, not text:
 //! a line that is not UTF-8 is read with the bytes replaced, because a reader
 //! that stopped on one would lose the rest of the session and could leave the
-//! CLI blocked on a pipe nobody drains.
+//! CLI blocked on a pipe nobody drains. For the same reason a line past
+//! [`LINE_LIMIT`] is passed over, with a notice, rather than held whole.
 //!
 //! The CLI leads a process group of its own, and everything it starts — the
 //! shell a tool call runs in, an MCP server — is in it unless it leaves. That
@@ -87,6 +88,14 @@ const LET_GO: Duration = Duration::from_millis(100);
 /// gone in by then is waiting on a CLI that has stopped reading, not on one
 /// that is busy; saying so sooner would fire on a slow machine.
 const STALLED: Duration = Duration::from_secs(5);
+
+/// The longest line of the CLI's standard output read, in bytes.
+///
+/// A line is one message, and the largest the CLI writes carry an image or a
+/// file's contents: a few megabytes. Anything a CLI writes past this without a
+/// line break is passed over a buffer at a time rather than held, so a CLI
+/// that never ends a line cannot fill memory with one.
+const LINE_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// What the CLI is told when the operator refuses a call.
 ///
@@ -449,7 +458,16 @@ impl Session {
         let refused = Arc::clone(&refusals);
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
-            while let Some((line, decoded)) = next_line(&mut stdout) {
+            while let Some(output) = next_line(&mut stdout) {
+                let (line, decoded) = match output {
+                    Output::Line { text, decoded } => (text, decoded),
+                    Output::Overlong => {
+                        if sender.send(overlong()).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -983,19 +1001,36 @@ fn read_tail(mut from: impl Read, into: &Mutex<Tail>) {
     }
 }
 
-/// The next line of one of the CLI's pipes, without its line ending, and
-/// whether it was UTF-8 as sent. `None` once the pipe is closed or cannot be
-/// read.
+/// What one read of the CLI's standard output came to.
+#[derive(Debug, PartialEq, Eq)]
+enum Output {
+    /// A line, without its line ending, and whether it was UTF-8 as sent.
+    Line { text: String, decoded: bool },
+    /// A line longer than [`LINE_LIMIT`], passed over unread.
+    Overlong,
+}
+
+/// The next line of one of the CLI's pipes. `None` once the pipe is closed or
+/// cannot be read.
 ///
 /// A line that is not UTF-8 is read with each byte that is not replaced by
 /// U+FFFD rather than ending the pipe: the bytes come from whatever a tool
 /// printed or a file held, and one of them must not cost the rest of the
 /// session — nor leave the CLI blocked writing to a pipe nobody reads.
-fn next_line(reader: &mut impl BufRead) -> Option<(String, bool)> {
+fn next_line(reader: &mut impl BufRead) -> Option<Output> {
     let mut bytes = Vec::new();
-    match reader.read_until(b'\n', &mut bytes) {
+    // One byte past the limit with no line break in it is a line past it.
+    match reader
+        .take(LINE_LIMIT.saturating_add(1))
+        .read_until(b'\n', &mut bytes)
+    {
         Ok(0) | Err(_) => return None,
         Ok(_) => {}
+    }
+    if bytes.last() != Some(&b'\n') && u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LINE_LIMIT {
+        drop(bytes);
+        pass_over_line(reader);
+        return Some(Output::Overlong);
     }
     if bytes.last() == Some(&b'\n') {
         bytes.pop();
@@ -1004,12 +1039,48 @@ fn next_line(reader: &mut impl BufRead) -> Option<(String, bool)> {
         }
     }
     Some(match String::from_utf8(bytes) {
-        Ok(line) => (line, true),
-        Err(error) => (
-            String::from_utf8_lossy(error.as_bytes()).into_owned(),
-            false,
-        ),
+        Ok(text) => Output::Line {
+            text,
+            decoded: true,
+        },
+        Err(error) => Output::Line {
+            text: String::from_utf8_lossy(error.as_bytes()).into_owned(),
+            decoded: false,
+        },
     })
+}
+
+/// Reads `reader` up to and past the next line break, a buffer at a time,
+/// keeping none of it.
+fn pass_over_line(reader: &mut impl BufRead) {
+    loop {
+        let (used, ended) = match reader.fill_buf() {
+            Ok([]) => return,
+            Ok(buffer) => match buffer.iter().position(|&byte| byte == b'\n') {
+                Some(at) => (at + 1, true),
+                None => (buffer.len(), false),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        reader.consume(used);
+        if ended {
+            return;
+        }
+    }
+}
+
+/// The warning for a line of the CLI's output too long to read.
+fn overlong() -> Event {
+    Event::Error {
+        message: format!(
+            "the CLI sent a line longer than {} MiB, which was passed over unread: whatever \
+             it carried — a reply, a tool call's result, a question — is missing from the \
+             session.",
+            LINE_LIMIT / (1024 * 1024)
+        ),
+        fatal: false,
+    }
 }
 
 /// The warning for a line of the CLI's output that was not UTF-8.
@@ -1273,6 +1344,36 @@ mod tests {
 
     fn options() -> Options {
         Options::new("/repo", "max")
+    }
+
+    #[test]
+    fn a_line_past_the_limit_is_passed_over_and_the_next_one_read() {
+        let hundred_megabytes = std::io::repeat(b'x').take(100 * 1024 * 1024);
+        let mut stdout = BufReader::new(hundred_megabytes.chain(&b"\n{\"type\":\"result\"}\n"[..]));
+
+        assert!(
+            matches!(next_line(&mut stdout), Some(Output::Overlong)),
+            "the line was read whole"
+        );
+        assert_eq!(
+            next_line(&mut stdout),
+            Some(Output::Line {
+                text: r#"{"type":"result"}"#.to_owned(),
+                decoded: true
+            })
+        );
+        assert_eq!(next_line(&mut stdout), None);
+    }
+
+    #[test]
+    fn a_line_exactly_at_the_limit_is_read() {
+        let limit = usize::try_from(LINE_LIMIT).expect("64 MiB fits a usize");
+        let mut stdout = BufReader::new(std::io::repeat(b'x').take(LINE_LIMIT).chain(&b"\n"[..]));
+
+        let Some(Output::Line { text, decoded }) = next_line(&mut stdout) else {
+            panic!("the line is read");
+        };
+        assert_eq!((text.len(), decoded), (limit, true));
     }
 
     #[test]

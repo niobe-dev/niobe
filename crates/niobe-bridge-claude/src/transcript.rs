@@ -62,7 +62,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -82,6 +82,14 @@ const PROJECTS: &str = "projects";
 
 /// The extension the CLI gives a transcript.
 const EXTENSION: &str = "jsonl";
+
+/// The largest transcript read, in bytes.
+///
+/// The largest of the 1,052 transcripts on the machine this was written on,
+/// 3 October 2026, was 49 MB. A file five times that is not a session anyone
+/// will read back, and holding more of one in memory would cost the shell
+/// more than its history is worth.
+const LIMIT: u64 = 256 * 1024 * 1024;
 
 /// What the CLI wraps a turn it wrote itself in, rather than one the operator
 /// typed: a slash command as the CLI expanded it, and the output of one.
@@ -234,7 +242,7 @@ fn recorded_cwd(path: &Path) -> Option<PathBuf> {
     struct Placed {
         cwd: Option<PathBuf>,
     }
-    BufReader::new(File::open(path).ok()?)
+    BufReader::new(open(path).ok()?)
         .lines()
         .map_while(Result::ok)
         .filter_map(|line| serde_json::from_str::<Placed>(&line).ok())
@@ -437,11 +445,41 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
 /// gone over the one record that was never finished. Read this way, the cut
 /// record is a last line that does not parse, which [`records`] leaves out.
 fn read(path: &Path) -> Result<String, TranscriptError> {
-    let bytes = std::fs::read(path).map_err(|error| TranscriptError::File {
-        path: path.to_path_buf(),
-        error,
-    })?;
+    let mut bytes = Vec::new();
+    open(path)
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|error| TranscriptError::File {
+            path: path.to_path_buf(),
+            error,
+        })?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The file at `path`, opened to be read no further than [`LIMIT`], where it
+/// is a regular file no larger than that.
+///
+/// The CLI's directory is the operator's, but what is in it is whatever was
+/// put there: a FIFO named as a transcript would hold the open until something
+/// wrote to it, and a device or a file of gigabytes would be read into memory
+/// whole. Either is refused without waiting on it or reading it. One that
+/// grows past the limit while it is read is cut there, and its last record,
+/// cut with it, is left out as one still being written would be.
+fn open(path: &Path) -> std::io::Result<std::io::Take<File>> {
+    let file = spilled::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    if metadata.len() > LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("larger than {} MiB", LIMIT / (1024 * 1024)),
+        ));
+    }
+    Ok(file.take(LIMIT))
 }
 
 /// One record of a transcript, as read, with the time the CLI stamped on it.
@@ -623,7 +661,7 @@ fn side_files(path: &Path) -> Vec<SideFile> {
         let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(META)) else {
             continue;
         };
-        let Some(call) = std::fs::read_to_string(entry.path())
+        let Some(call) = read(&entry.path())
             .ok()
             .and_then(|text| serde_json::from_str::<Meta>(&text).ok())
             .and_then(|meta| meta.tool_use_id)
@@ -688,7 +726,7 @@ fn release_of(text: &str) -> Option<String> {
 /// The first turn of the transcript at `path` that the CLI did not write
 /// itself.
 fn first_prompt(path: &Path) -> Option<String> {
-    let file = BufReader::new(File::open(path).ok()?);
+    let file = BufReader::new(open(path).ok()?);
     for line in file.lines() {
         let Ok(record) = serde_json::from_str::<Line>(&line.ok()?) else {
             continue;
@@ -1570,6 +1608,74 @@ mod tests {
                 ("older", Some("the older one"))
             ]
         );
+    }
+
+    /// What `read` returns, or a failure where it has not returned within a
+    /// couple of seconds: long enough for a loaded machine, far shorter than
+    /// waiting on a FIFO or reading a file past [`LIMIT`] into memory.
+    fn promptly<T: Send + 'static>(read: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(read()));
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the read returns without waiting on the file")
+    }
+
+    /// Lists `dir`, and reads the transcript named `id` in it every other way,
+    /// each of which has to return promptly; the listing's prompt for `id`,
+    /// and what reading its events and its spend said.
+    fn read_every_way(dir: &Path, id: &str) -> (Option<String>, String, String) {
+        let path = dir.join(format!("{id}.{EXTENSION}"));
+        let listed = promptly({
+            let dir = dir.to_path_buf();
+            move || list(&dir).expect("the directory lists")
+        });
+        let named = listed
+            .iter()
+            .find(|transcript| transcript.id == id)
+            .expect("the file is still listed");
+        let events = promptly({
+            let path = path.clone();
+            move || {
+                events(&path, "max", Path::new("/repo"))
+                    .expect_err("the file is refused")
+                    .to_string()
+            }
+        });
+        let spent = promptly(move || spent(&path).expect_err("the file is refused").to_string());
+        (named.first_prompt.clone(), events, spent)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_as_a_transcript_is_refused_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join(format!("stuck.{EXTENSION}")))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "the FIFO is made");
+
+        let (first_prompt, events, spent) = read_every_way(dir.path(), "stuck");
+
+        assert_eq!(first_prompt, None);
+        assert!(events.ends_with("not a regular file"), "{events}");
+        assert!(spent.ends_with("not a regular file"), "{spent}");
+    }
+
+    #[test]
+    fn a_transcript_past_the_limit_is_refused_without_reading_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        File::create(dir.path().join(format!("vast.{EXTENSION}")))
+            .expect("the file is made")
+            .set_len(LIMIT + 1)
+            .expect("the file is sized");
+
+        let (first_prompt, events, spent) = read_every_way(dir.path(), "vast");
+
+        assert_eq!(first_prompt, None);
+        assert!(events.ends_with("larger than 256 MiB"), "{events}");
+        assert!(spent.ends_with("larger than 256 MiB"), "{spent}");
     }
 
     #[test]

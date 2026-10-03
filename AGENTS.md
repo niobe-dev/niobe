@@ -146,7 +146,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on, and starts it as the leader of a process group of its own, which a closing
   session ends whole, and so does a CLI that leaves mid-session, so nothing the CLI started
-  outlives it or holds the quit, or the report of its end, up on its pipes; `spilled.rs` reads the file the CLI saves a shell output
+  outlives it or holds the quit, or the report of its end, up on its pipes, and passes over a
+  line of its output past 64 MiB with a notice rather than hold it; `spilled.rs` reads the file the CLI saves a shell output
   too large to hand over to, so a whole test run is counted from it rather than from the
   preview, and both the driver and the transcript reader hand it to the translator;
   `transcript.rs` reads the session files the CLI keeps for
@@ -156,7 +157,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   restores those running totals on `--resume` — where the file cannot be read, that spend is
   unknown, the session says so and counts nothing of its first bill, rather than bill the
   earlier session again — and a record the CLI was cut off writing, even inside a character,
-  is left out while the rest still reads; a sub-agent's
+  is left out while the rest still reads, and only a regular file of at most 256 MiB is read,
+  so a FIFO or a vast file in the CLI's directory is refused rather than waited on or held in
+  memory; a sub-agent's
   own messages — its calls, its edits, its model and its tokens — are read from the file the CLI
   keeps for that agent beside the session's and folded in where the CLI's timestamps put them,
   and its answer from the same file; `conformance.rs`

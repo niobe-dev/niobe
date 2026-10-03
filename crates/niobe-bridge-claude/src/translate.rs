@@ -1938,17 +1938,24 @@ impl Translator {
 
     /// The fallback for a `result` that priced the session without saying how
     /// it split by model: one record, against the model the session is on.
+    ///
+    /// The total is the session's, so what it adds is measured against all
+    /// that has been reported under every model, not under the current one:
+    /// after a move between models, or a bill split across several, the
+    /// current model's share alone would count the others' again. A
+    /// difference within [`COST_TOLERANCE_USD`] is the sum's rounding rather
+    /// than spend, and is left for the next total, which still holds it.
     fn report_session_cost(&mut self, outcome: &wire::Outcome, out: &mut Vec<Event>) {
         let Some(total) = outcome.total_cost_usd else {
             return;
         };
-        let model = self.model.clone().unwrap_or_default();
-        let seen = self.reported.entry(model.clone()).or_default();
-        let spent = total - seen.cost_usd;
-        if spent <= 0.0 {
+        let reported: f64 = self.reported.values().map(|seen| seen.cost_usd).sum();
+        let spent = total - reported;
+        if spent <= COST_TOLERANCE_USD {
             return;
         }
-        seen.cost_usd = total;
+        let model = self.model.clone().unwrap_or_default();
+        self.reported.entry(model.clone()).or_default().cost_usd += spent;
         out.push(self.cost_record(model, Counts::default(), spent));
     }
 
@@ -3413,6 +3420,58 @@ mod tests {
         assert!(
             (second.cost_usd.unwrap_or_default() - 0.15).abs() < 1e-9,
             "the running total was reported again instead of what the turn added"
+        );
+    }
+
+    fn cost_reported(events: &[Event]) -> f64 {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => usage.cost_usd,
+                _ => None,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_session_total_after_a_model_change_reports_only_what_the_session_added() {
+        let mut translator = Translator::new("max");
+        let mut events = translator
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"sonnet-5"}"#);
+        events.extend(
+            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.05}"#),
+        );
+        events.extend(
+            translator
+                .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#),
+        );
+        let last =
+            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.08}"#);
+        events.extend(last.clone());
+
+        assert!((cost_reported(&events) - 0.08).abs() < 1e-9, "{events:?}");
+        let [Event::Usage(usage), Event::TurnEnded] = last.as_slice() else {
+            panic!("one cost record: {last:?}");
+        };
+        assert_eq!(usage.model, "opus-5");
+        assert!((usage.cost_usd.unwrap_or_default() - 0.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_session_total_after_a_split_bill_counts_every_models_share_as_reported() {
+        let mut translator = translator();
+        let mut events = translator.line(
+            r#"{"type":"result","subtype":"success","modelUsage":{"sonnet-5":{"costUSD":0.04},"haiku-4-5":{"costUSD":0.01}},"total_cost_usd":0.05}"#,
+        );
+        let last =
+            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.05}"#);
+        events.extend(last.clone());
+
+        assert!((cost_reported(&events) - 0.05).abs() < 1e-9, "{events:?}");
+        assert_eq!(
+            last,
+            vec![Event::TurnEnded],
+            "a total that has not moved was billed again"
         );
     }
 

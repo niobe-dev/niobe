@@ -48,7 +48,7 @@ pub(crate) fn read(path: &Path, size: u64) -> Option<String> {
 /// Opens `path` for reading without waiting for a writer, which opening a
 /// FIFO otherwise does. On a regular file the flag changes nothing.
 #[cfg(unix)]
-fn open(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     // The flag's bits fit an `i32`; were they not to, the regular-file check
     // after the open would still refuse a FIFO, only after waiting on it.
@@ -60,7 +60,7 @@ fn open(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
 
