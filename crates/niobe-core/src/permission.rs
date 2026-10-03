@@ -29,6 +29,11 @@
 //! star escaped, `Bash(rm -rf build/\*)`, so that it reads back as that
 //! command and nothing else. A prefix therefore cannot end in `\`.
 //!
+//! Claude Code's own `Bash(git status:*)` and `Read(src/**)` are refused
+//! rather than read as written, which would make them prefixes ending in `:`
+//! and `*` that cover nothing the operator meant: the refusal names the rule
+//! to write instead, `Bash(git status *)` and `Read(src/*)`.
+//!
 //! **Niobe writes only the first two.** A prompt answered with "always this
 //! target" stores the target as it stood, never a generalisation of it:
 //! turning `cargo test` into `cargo *` would be Niobe deciding on its own that
@@ -136,9 +141,12 @@ impl Rule {
     /// brackets of its own survives being written down and read back. A target
     /// is whatever a call acts on, and a rule that could not hold one of those
     /// would be a rule the operator could make and never keep.
+    ///
+    /// A rule in Claude Code's own form, `Bash(git status:*)` or
+    /// `Read(src/**)`, is refused with the rule to write instead.
     pub fn parse(text: &str) -> Result<Self, RuleError> {
         let text = text.trim();
-        let invalid = || RuleError(text.to_owned());
+        let invalid = || RuleError(text.to_owned(), None);
         let Some((tool, rest)) = text.split_once('(') else {
             return match text.contains(')') || text.is_empty() {
                 true => Err(invalid()),
@@ -147,12 +155,19 @@ impl Rule {
         };
 
         let target = rest.strip_suffix(')').ok_or_else(invalid)?;
-        if tool.trim().is_empty() || target.is_empty() {
+        let tool = tool.trim();
+        if tool.is_empty() || target.is_empty() {
             return Err(invalid());
         }
+        let target = Target::parse(target);
+        if let Target::Prefix(prefix) = &target {
+            if let Some(form) = ClaudeCodeForm::of(tool, prefix) {
+                return Err(RuleError(text.to_owned(), Some(form)));
+            }
+        }
         Ok(Self {
-            tool: tool.trim().to_owned(),
-            target: Some(Target::parse(target)),
+            tool: tool.to_owned(),
+            target: Some(target),
         })
     }
 
@@ -329,18 +344,68 @@ impl std::str::FromStr for Rule {
     }
 }
 
-/// Text that is not a rule, kept whole so the operator sees what they wrote.
+/// Text that is not a rule, kept whole so the operator sees what they wrote,
+/// and the rule they meant where it is one in Claude Code's own form.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuleError(String);
+pub struct RuleError(String, Option<ClaudeCodeForm>);
+
+/// A rule written the way Claude Code writes its own, which this syntax would
+/// read as something else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaudeCodeForm {
+    /// `Bash(git status:*)`: the command, with arguments or without.
+    ColonStar { tool: String, command: String },
+    /// `Read(src/**)`: every path under a directory, however deep.
+    DoubleStar { tool: String, path: String },
+}
+
+impl ClaudeCodeForm {
+    /// The form `prefix`, read from a rule for `tool`, was copied from, if
+    /// it was. A star escaped to be a literal one is the operator's own, and
+    /// a prefix with nothing before the `:` or `*` is read as written: it
+    /// names no command or path to suggest a rule for.
+    fn of(tool: &str, prefix: &str) -> Option<Self> {
+        if let Some(command) = prefix.strip_suffix(':') {
+            return (!command.is_empty()).then(|| Self::ColonStar {
+                tool: tool.to_owned(),
+                command: command.to_owned(),
+            });
+        }
+        if prefix.ends_with(ESCAPED_WILDCARD) {
+            return None;
+        }
+        prefix
+            .strip_suffix(WILDCARD)
+            .filter(|path| !path.is_empty())
+            .map(|path| Self::DoubleStar {
+                tool: tool.to_owned(),
+                path: path.to_owned(),
+            })
+    }
+}
 
 impl fmt::Display for RuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "`{}` is not a permission rule; expected a tool name, such as `Read`, \
-             or a tool name and what it is allowed on, such as `Bash(cargo test)`",
-            self.0
-        )
+        let text = &self.0;
+        match &self.1 {
+            None => write!(
+                f,
+                "`{text}` is not a permission rule; expected a tool name, such as `Read`, \
+                 or a tool name and what it is allowed on, such as `Bash(cargo test)`"
+            ),
+            Some(ClaudeCodeForm::ColonStar { tool, command }) => write!(
+                f,
+                "`{text}` is Claude Code's form of a prefix rule, which reads here as a \
+                 command starting `{command}:`; write `{tool}({command} *)` for the command \
+                 with arguments, and `{tool}({command})` for it alone"
+            ),
+            Some(ClaudeCodeForm::DoubleStar { tool, path }) => write!(
+                f,
+                "`{text}` is Claude Code's form of a path rule, which reads here as a path \
+                 starting `{path}*`; write `{tool}({path}*)`, whose star reaches into every \
+                 directory under `{path}`"
+            ),
+        }
     }
 }
 
@@ -716,6 +781,36 @@ mod tests {
                 "the operator's own text is missing from: {error}"
             );
         }
+    }
+
+    #[test]
+    fn claude_codes_colon_star_is_refused_with_the_form_that_covers_the_same_calls() {
+        let said = Rule::parse("Bash(git status:*)")
+            .expect_err("the colon would be read as part of the command")
+            .to_string();
+
+        assert_eq!(
+            said,
+            "`Bash(git status:*)` is Claude Code's form of a prefix rule, which reads here as \
+             a command starting `git status:`; write `Bash(git status *)` for the command \
+             with arguments, and `Bash(git status)` for it alone"
+        );
+    }
+
+    #[test]
+    fn claude_codes_double_star_is_refused_with_the_single_star_that_reaches_as_far() {
+        let said = Rule::parse("Read(src/**)")
+            .expect_err("the second star would be read as part of the path")
+            .to_string();
+
+        assert_eq!(
+            said,
+            "`Read(src/**)` is Claude Code's form of a path rule, which reads here as a path \
+             starting `src/*`; write `Read(src/*)`, whose star reaches into every \
+             directory under `src/`"
+        );
+        assert!(Rule::parse(r"Bash(ls \**)").is_ok());
+        assert!(Rule::parse(r"Bash(echo a:\*)").is_ok());
     }
 
     #[test]

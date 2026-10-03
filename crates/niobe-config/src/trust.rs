@@ -58,6 +58,16 @@ const HEADER: &str = "\
 # so does deleting it.
 ";
 
+/// What follows the reason a line of the record could not be read.
+///
+/// The whole record is refused, so every session in a repository with a config
+/// stops on it, and so does `niobe untrust`, which reads it before writing it
+/// back: the operator has to be told the way out, which is the line itself.
+/// Deleting a line only ever takes trust away, so it is the safe edit to name.
+const RECOVER: &str = "; niobe wrote this file and cannot read it while this line is in \
+     it, so neither a session nor `niobe untrust` can use it: delete the line, and any \
+     config it trusted is asked about again";
+
 /// The SHA-256 of a config file's contents, as lower-case hex.
 ///
 /// Of the text rather than of the parsed config: what the operator reads is
@@ -112,7 +122,7 @@ impl Trusted {
                 path: path.to_path_buf(),
                 line: index + 1,
                 key: None,
-                message: message.to_owned(),
+                message: format!("{message}{RECOVER}"),
             };
             let (hex, file) = line
                 .split_once(' ')
@@ -299,15 +309,32 @@ mod tests {
         let second_entry = HEADER.lines().count() + 2;
         assert_eq!(
             said(&format!("{HEADER}{} /a\nnodigest\n", digest("a"))),
-            format!("/u/trusted.list:{second_entry}: expected a digest, a space and a path")
+            format!(
+                "/u/trusted.list:{second_entry}: expected a digest, a space and a path{RECOVER}"
+            )
         );
         assert_eq!(
             said("beef /a\n"),
-            "/u/trusted.list:1: expected a 64-character hexadecimal digest"
+            format!("/u/trusted.list:1: expected a 64-character hexadecimal digest{RECOVER}")
         );
         assert_eq!(
             said(&format!("{} \n", digest("a"))),
-            "/u/trusted.list:1: expected a path after the digest"
+            format!("/u/trusted.list:1: expected a path after the digest{RECOVER}")
+        );
+    }
+
+    #[test]
+    fn a_record_that_is_not_one_says_how_to_get_past_it() {
+        let said = Trusted::parse("nodigest\n", Path::new("/u/trusted.list"))
+            .expect_err("the line is not an entry")
+            .to_string();
+
+        assert_eq!(
+            said,
+            "/u/trusted.list:1: expected a digest, a space and a path; niobe wrote this file \
+             and cannot read it while this line is in it, so neither a session nor \
+             `niobe untrust` can use it: delete the line, and any config it trusted is asked \
+             about again"
         );
     }
 

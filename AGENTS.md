@@ -40,7 +40,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-core/`** — the shared vocabulary. `event.rs` is the event model, the one type
   every backend produces into; `session.rs` is `SessionState`, the fold every consumer derives its
   numbers from, for each turn that has ended as well as for the whole session; `permission.rs` is the standing answer to a permission prompt (`Rule`,
-  `Allowlist`), which the shell matches and the config stores; `diff.rs` is the line arithmetic
+  `Allowlist`), which the shell matches and the config stores, and which refuses a rule copied in
+  Claude Code's own `:*` or `**` form with the rule to write instead; `diff.rs` is the line arithmetic
   every backend counts a file change with, so two bridges cannot disagree about what a changed
   line is, and the `Hunk` a change's lines travel in where the backend reported them; `test_run.rs` recognises a shell
   command that runs `cargo test` and reads the counts out of its output, only where the output

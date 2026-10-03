@@ -1009,6 +1009,14 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     }
 
     #[test]
+    fn a_rule_copied_from_claude_code_is_reported_at_its_line_with_the_form_to_write() {
+        let said = invalid("[permissions]\nallow = [\n  \"Read\",\n  \"Bash(git status:*)\",\n]\n");
+
+        assert!(said.starts_with("/configs/user/config.toml:4:"), "{said}");
+        assert!(said.contains("write `Bash(git status *)`"), "{said}");
+    }
+
+    #[test]
     fn a_config_with_no_permissions_allows_nothing_by_itself() {
         assert!(parsed(EXAMPLE).allowed().is_empty());
     }
