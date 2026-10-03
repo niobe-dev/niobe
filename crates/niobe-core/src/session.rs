@@ -2918,6 +2918,21 @@ mod tests {
         assert_eq!(state.turns()[1].five_hour_share, None);
     }
 
+    /// The level falling within one reset is no measure of what the turn
+    /// spent, and a share of nothing would read as a measured one.
+    #[test]
+    fn a_level_that_fell_within_one_reset_gives_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.15, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns()[1].five_hour_share, None);
+    }
+
     #[test]
     fn a_window_reported_without_its_reset_gives_no_share() {
         let state = SessionState::replay(&[
@@ -2970,6 +2985,43 @@ mod tests {
         ]);
         let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
         assert_eq!(tokens, [Some(100), Some(30)]);
+    }
+
+    /// What arrives between an end and the next prompt is in neither turn:
+    /// a turn the fold saw begin is measured from its prompt, not from the
+    /// end of the turn before.
+    #[test]
+    fn a_turn_with_a_prompt_counts_from_the_prompt_and_not_from_the_last_end() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(100, 0, 0, 0),
+            Event::TurnEnded,
+            cached(20, 0, 0, 0),
+            prompt(),
+            cached(5, 0, 0, 0),
+            Event::TurnEnded,
+        ]);
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [Some(100), Some(5)]);
+    }
+
+    /// The same for a report of the window: a level reported between turns
+    /// is where the next turn began, not part of what it moved.
+    #[test]
+    fn a_window_reported_between_turns_is_where_the_next_one_began() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            five_hour(0.16, RESET),
+            prompt(),
+            five_hour(0.17, RESET),
+            Event::TurnEnded,
+        ]);
+        let share = state.turns()[1]
+            .five_hour_share
+            .expect("both ends were reported");
+        assert!((share - 0.01).abs() < 1e-9, "{share}");
     }
 
     fn command(name: &str) -> SlashCommand {

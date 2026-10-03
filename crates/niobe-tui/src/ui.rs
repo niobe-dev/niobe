@@ -5508,7 +5508,8 @@ mod tests {
     /// A sub-agent's messages can name the family while the CLI bills them
     /// under the 1M-window id beside it, which settles the family's row at
     /// no cost of its own. Its money is in the `[1m]` row, and the row says
-    /// so rather than drawing `$0.00` beside tokens that were spent.
+    /// so rather than drawing `$0.00` beside tokens that were spent. Where
+    /// the `[1m]` row was reported no money either, there is none to point to.
     #[test]
     fn a_family_row_billed_under_its_1m_window_says_where_its_money_is() {
         let usage = |model: &str, input: u64, cost: Option<f64>, settles: bool| {
@@ -5537,6 +5538,12 @@ mod tests {
 
         let free = SessionState::replay(&[usage("opus-5", 50, Some(0.0), true)]);
         assert_eq!(model_cost(free.totals(), "opus-5", None), "$0.00");
+
+        let both_free = SessionState::replay(&[
+            usage("opus-5[1m]", 100, Some(0.0), true),
+            usage("opus-5", 50, Some(0.0), true),
+        ]);
+        assert_eq!(model_cost(both_free.totals(), "opus-5", None), "$0.00");
     }
 
     /// A model's cost carries the same labels the session's does, with an em

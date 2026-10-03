@@ -3165,6 +3165,9 @@ mod tests {
         ]);
 
         assert_counted_once(&totals, 150, 15);
+        // The two messages and one cost record per billed id: the family
+        // gave tokens up and grew in cost, so its own record settles it.
+        assert_eq!(totals.records, 4);
     }
 
     /// A sub-agent's messages name the family and the CLI bills them under the
@@ -3182,6 +3185,26 @@ mod tests {
         assert_counted_once(&totals, 50, 5);
     }
 
+    /// The same over two turns, the second billing 30 input and 3 output
+    /// tokens no message carried: what the first turn moved to the windowed
+    /// id is no longer the family's, so the second moves only its own
+    /// message, and the tokens no message carried are counted from the bill.
+    #[test]
+    fn a_family_billed_under_its_window_turn_after_turn_moves_each_message_once() {
+        let totals = folded(&[
+            INIT_WINDOW,
+            AGENT_START,
+            AGENT_DELTA,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":50,"output_tokens":5},"modelUsage":{"opus-5[1m]":{"inputTokens":50,"outputTokens":5,"costUSD":0.3,"canonicalModel":"opus-5"}},"total_cost_usd":0.3}"#,
+            AGENT_START,
+            AGENT_DELTA,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":80,"output_tokens":8},"modelUsage":{"opus-5[1m]":{"inputTokens":130,"outputTokens":13,"costUSD":0.8,"canonicalModel":"opus-5"}},"total_cost_usd":0.8}"#,
+        ]);
+
+        assert_counted_once(&totals, 130, 13);
+        assert!((totals.reported_cost_usd - 0.8).abs() < 1e-9);
+    }
+
     fn billed_models(events: &[Event]) -> Vec<String> {
         events
             .iter()
@@ -3194,15 +3217,18 @@ mod tests {
 
     /// A `message_delta` whose `message_start` never arrived, before anything
     /// named the session's model, is filed under the one id the turn's bill
-    /// names, rather than under no model and then again under that id.
+    /// names, rather than under no model and then again under that id. It is
+    /// filed as the message reported it, with the cache writes' lifetime and
+    /// the speed that `modelUsage` does not carry.
     #[test]
     fn a_message_no_model_was_named_for_is_billed_to_the_one_id_the_result_names() {
         let lines = [
-            &delta(100, 10) as &str,
-            r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":10},"modelUsage":{"claude-opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5}},"total_cost_usd":0.5}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":100,"output_tokens":10,"cache_creation_input_tokens":90,"cache_creation":{"ephemeral_1h_input_tokens":60,"ephemeral_5m_input_tokens":30},"speed":"fast"}}}"#,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":10,"cache_creation_input_tokens":90},"modelUsage":{"claude-opus-5":{"inputTokens":100,"outputTokens":10,"cacheCreationInputTokens":90,"costUSD":0.5}},"total_cost_usd":0.5}"#,
         ];
         let totals = folded(&lines);
         assert_counted_once(&totals, 100, 10);
+        assert_eq!((totals.cache_write, totals.cache_write_1h), (90, 60));
         assert!((totals.reported_cost_usd - 0.5).abs() < 1e-9);
 
         let mut translator = Translator::new("max");
@@ -3215,6 +3241,25 @@ mod tests {
             "billed to no model: {events:?}"
         );
         assert_eq!(warnings(&events), Vec::<String>::new());
+        let filed = events.iter().find_map(|event| match event {
+            Event::Usage(usage) => Some(usage.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            filed,
+            Some(Usage {
+                input: 100,
+                output: 10,
+                cache_read: 0,
+                cache_write: 90,
+                cache_write_1h: 60,
+                reasoning: 0,
+                model: "claude-opus-5".to_owned(),
+                cost_usd: None,
+                settles_model: false,
+                fast: true,
+            })
+        );
     }
 
     /// A `result` that names no model holds the message over to the next
@@ -3498,6 +3543,41 @@ mod tests {
             vec![Event::TurnEnded],
             "a total that has not moved was billed again"
         );
+    }
+
+    /// A bill whose tokens grew while its cost did not says nothing about
+    /// what those tokens cost: the record for them carries no figure, and
+    /// the turn's tokens are left owed rather than read as free.
+    #[test]
+    fn a_bill_that_grew_in_tokens_and_not_in_cost_reports_no_cost_for_them() {
+        let mut translator = Translator::new("max");
+        let mut events: Vec<Event> = [
+            INIT_FAMILY,
+            MAIN_START,
+            &delta(100, 10),
+            FIRST_TURN_ON_THE_FAMILY,
+            MAIN_START,
+            &delta(40, 4),
+        ]
+        .iter()
+        .flat_map(|line| translator.line(line))
+        .collect();
+        let last = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"opus-5":{"inputTokens":150,"outputTokens":15,"costUSD":0.5,"canonicalModel":"opus-5"}},"total_cost_usd":0.5}"#,
+        );
+        events.extend(last.clone());
+
+        let [Event::Usage(usage), Event::TurnEnded] = last.as_slice() else {
+            panic!("one usage record: {last:?}");
+        };
+        assert_eq!((usage.input, usage.output), (10, 1));
+        assert_eq!(usage.cost_usd, None);
+        let totals = niobe_core::session::SessionState::replay(&events)
+            .totals()
+            .clone();
+        assert_eq!((totals.input, totals.output), (150, 15));
+        assert_eq!(totals.records_unsettled, 2, "{:?}", totals.unsettled);
+        assert!((totals.reported_cost_usd - 0.5).abs() < 1e-9);
     }
 
     #[test]
