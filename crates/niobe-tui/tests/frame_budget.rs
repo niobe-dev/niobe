@@ -147,6 +147,65 @@ fn a_search_open_over_a_long_session_redraws_inside_a_frame_budget() {
     );
 }
 
+/// The size of the one reply an idle session holds: an agent that printed a
+/// generated file, or a log, back into the conversation.
+const HUGE_REPLY_BYTES: usize = 20 * 1024 * 1024;
+
+/// What holding a reply of [`HUGE_REPLY_BYTES`] may add to the redraw an idle
+/// shell makes every tick, ten a second: 1% of one core. A fresh idle shell
+/// spends about as much again, and the two together stay under 2%, which is
+/// what a shell left open beside the editor may cost.
+const IDLE_ALLOWANCE: Duration = Duration::from_millis(1);
+
+/// The redraw every tick makes while nothing happens, with one reply of
+/// [`HUGE_REPLY_BYTES`] in the transcript, against the same session's redraw
+/// without it. The reply was laid out once when it arrived; a frame that asks
+/// again whether it changed must not cost what reading all of it costs.
+///
+/// The two sessions' frames are timed in turn, so that what else the machine
+/// is doing slows both alike.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn an_idle_session_holding_a_twenty_megabyte_reply_redraws_as_fast_as_one_without() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let idle = |reply: String| {
+        let mut app = running_session();
+        app.apply(&Event::UserMessage {
+            text: "Print the generated catalog.".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: reply,
+            agent: None,
+        });
+        app.apply(&Event::TurnEnded);
+        let _ = screen(&mut app, 200, 60);
+        app
+    };
+    let mut holding = idle(MARKDOWN_REPLY.repeat(HUGE_REPLY_BYTES / MARKDOWN_REPLY.len()));
+    let mut without = idle(MARKDOWN_REPLY.to_owned());
+
+    let mut times: Vec<(Duration, Duration)> = (0..FRAMES)
+        .map(|_| (frame_time(&mut holding), frame_time(&mut without)))
+        .collect();
+    times.sort_unstable_by_key(|(holding, without)| holding.saturating_sub(*without));
+    let (holding, without) = times[FRAMES / 2];
+
+    assert!(
+        holding.saturating_sub(without) <= IDLE_ALLOWANCE,
+        "the median idle frame holding a {HUGE_REPLY_BYTES}-byte reply at 200x60 took \
+         {holding:?} against {without:?} without it, over the {IDLE_ALLOWANCE:?} allowance"
+    );
+}
+
+/// How long one frame of `app` takes to draw at 200x60.
+fn frame_time(app: &mut App) -> Duration {
+    let started = Instant::now();
+    let _ = screen(app, 200, 60);
+    started.elapsed()
+}
+
 /// File changes in a long session's transcript, each drawn as its diff.
 const LONG_SESSION_DIFFS: usize = 50;
 

@@ -584,6 +584,7 @@ pub(crate) fn dialog(
         .flex(Flex::Center)
         .areas(area);
 
+    uncover_left_edge(frame.buffer_mut(), area);
     cast_shadow(frame, area, body, theme);
 
     let frame_style = Style::new().fg(theme.dialog_frame).bg(theme.dialog_bg);
@@ -602,6 +603,23 @@ pub(crate) fn dialog(
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
     inner
+}
+
+/// Blanks each character two columns wide whose second half is under the
+/// left edge of `area`. A terminal draws such a character over the column
+/// after it whatever is drawn there, so the dialog's border would be missing
+/// on that row; the half left outside reads as a blank instead.
+fn uncover_left_edge(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
+    let Some(left) = area.x.checked_sub(1) else {
+        return;
+    };
+    for y in area.top()..area.bottom() {
+        if let Some(cell) = buffer.cell_mut((left, y))
+            && text::width(cell.symbol()) > 1
+        {
+            cell.set_char(' ');
+        }
+    }
 }
 
 /// Darkens the two columns right of `area` and the row under it, offset by
@@ -2197,10 +2215,30 @@ fn is_row(entry: &Entry) -> bool {
 /// Whether the diffs are open goes in only for an entry that holds a diff it
 /// would cut, so opening them lays out again those entries and no other; the
 /// clock goes in only for one holding a test run still going.
+///
+/// The body goes in whole only while the entry is streaming. A finished
+/// entry's body is not written again unless something else about the entry
+/// changes with it ([`Entry::body`]), so its length stands in for it: this is
+/// asked on every frame, and reading a reply of twenty megabytes to answer it
+/// is what an idle shell holding one would otherwise spend its time on.
 fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    entry.hash(&mut hasher);
+    let Entry {
+        kind,
+        head,
+        meta,
+        body,
+        streaming,
+        at,
+        calls,
+        agent,
+    } = entry;
+    (kind, head, meta, streaming, at, calls, agent).hash(&mut hasher);
+    match streaming {
+        true => body.hash(&mut hasher),
+        false => body.len().hash(&mut hasher),
+    }
     width.hash(&mut hasher);
     detail.folded.hash(&mut hasher);
     detail.columns.hash(&mut hasher);
@@ -5333,6 +5371,58 @@ mod tests {
                 "{key}{label} is cut: {row}"
             );
         }
+    }
+
+    #[test]
+    fn a_dialog_over_wide_characters_keeps_its_left_border() {
+        let theme = Theme::default();
+        let set = theme.border_focus.to_border_set();
+        // Shifted by a column, so that one of the two runs has a character
+        // whose second half is under the border.
+        for lead in ["", " "] {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12))
+                .expect("a test terminal");
+            let mut inner = Rect::default();
+            terminal
+                .draw(|frame| {
+                    let body = frame.area();
+                    let under = format!("{lead}{}", "漢字".repeat(20));
+                    frame.render_widget(Paragraph::new(vec![Line::from(under); 12]), body);
+                    inner = dialog(frame, body, (20, 4), ("History", ""), &theme);
+                })
+                .expect("drawing never fails on a test backend");
+            let left = inner.x - 3;
+            let buffer = terminal.backend().buffer();
+            for y in inner.y - 1..=inner.bottom() {
+                let border = match y {
+                    y if y < inner.y => set.top_left,
+                    y if y == inner.bottom() => set.bottom_left,
+                    _ => set.vertical_left,
+                };
+                let shown = as_a_terminal_shows(buffer, y);
+                assert_eq!(
+                    shown.get(usize::from(left)).copied(),
+                    Some(border),
+                    "row {y} with {lead:?} before it: {shown:?}"
+                );
+            }
+        }
+    }
+
+    /// Row `y` of `buffer` as a terminal draws it, a cell to a column: a
+    /// character two columns wide covers the column after it, whatever the
+    /// buffer holds there.
+    fn as_a_terminal_shows(buffer: &ratatui::buffer::Buffer, y: u16) -> Vec<&str> {
+        let mut shown = Vec::new();
+        let mut x = 0;
+        while x < buffer.area.width {
+            let symbol = buffer[(x, y)].symbol();
+            let wide = text::width(symbol).max(1);
+            shown.push(symbol);
+            shown.extend(std::iter::repeat_n("", wide - 1));
+            x = x.saturating_add(u16::try_from(wide).unwrap_or(1));
+        }
+        shown
     }
 
     /// What one row of the working tree reads as, counts and all.

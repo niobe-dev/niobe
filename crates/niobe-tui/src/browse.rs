@@ -124,10 +124,17 @@ fn sessions(
     let mut lines = head(browser, listed.len(), width, theme);
     let (list_rows, detail_rows) = split(rows);
     let now = app.stamp();
+    // As wide as the widest count of every row, not only of those shown, so
+    // the column stays put as the list scrolls.
+    let counted = listed
+        .iter()
+        .map(|row| text::width(&count(row)))
+        .max()
+        .unwrap_or(0);
     let shown: Vec<Line> = window(&listed, browser.at, list_rows)
         .map(|(at, row)| {
             let said = format!(
-                "{:>AGE_COLUMNS$}{GAP}{}{GAP}{:>9}{GAP}{}",
+                "{:>AGE_COLUMNS$}{GAP}{}{GAP}{:>counted$}{GAP}{}",
                 age(now, row.last),
                 text::pad(&name(row), SESSION_COLUMNS),
                 count(row),

@@ -254,9 +254,11 @@ pub struct ToolTotals {
     /// Ends that arrived without a matching start. A non-zero count means the
     /// producer is dropping events, so it is surfaced rather than swallowed.
     pub unmatched_ends: u64,
-    /// Calls the session ended under: still running when a fatal error ended
-    /// the backend, so no end will arrive for them. Neither finished nor
-    /// failed — the agent did not fail them, the session stopped them.
+    /// Calls the session or their turn ended under: still running when a
+    /// fatal error ended the backend, or when the backend ended the turn
+    /// without reporting their end, so no end will arrive for them. Neither
+    /// finished nor failed — the agent did not fail them, the session stopped
+    /// them.
     pub interrupted: u64,
 }
 
@@ -815,14 +817,43 @@ impl SessionState {
             .filter(|(_, name)| name.as_str() != OPERATOR_SHELL)
             .map(|(id, _)| id.clone())
             .collect();
+        self.cut_calls(cut);
+        let agents = std::mem::take(&mut self.running_agents);
+        self.agents_interrupted = self.agents_interrupted.saturating_add(agents.len() as u64);
+        self.ended_agents.extend(agents);
+    }
+
+    /// Records every call the ending turn left running as cut short: the
+    /// backend has said the turn is over, and an end it did not send before
+    /// that — a call whose permission prompt the stop withdrew — it will not
+    /// send after it.
+    ///
+    /// A sub-agent still running goes on past the turn that spawned it, in
+    /// the background, and its calls with it; so does a command the operator
+    /// ran with `!`.
+    fn interrupt_what_the_turn_left(&mut self) {
+        let cut: Vec<ToolCallId> = self
+            .in_flight_tools
+            .iter()
+            .filter(|(id, name)| {
+                name.as_str() != OPERATOR_SHELL
+                    && !self
+                        .agent_calls
+                        .get(*id)
+                        .is_some_and(|agent| self.running_agents.contains(agent))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.cut_calls(cut);
+    }
+
+    /// Records each of `cut` as cut short: no end will arrive for it.
+    fn cut_calls(&mut self, cut: Vec<ToolCallId>) {
         for id in cut {
             self.in_flight_tools.remove(&id);
             self.agent_calls.remove(&id);
             bump(&mut self.tools.interrupted);
         }
-        let agents = std::mem::take(&mut self.running_agents);
-        self.agents_interrupted = self.agents_interrupted.saturating_add(agents.len() as u64);
-        self.ended_agents.extend(agents);
     }
 
     /// Where the session stands now, as a turn beginning or ending here would
@@ -843,6 +874,7 @@ impl SessionState {
         // reply it left half-streamed is not the start of the next one.
         self.pending_permissions.clear();
         self.pending_assistant.clear();
+        self.interrupt_what_the_turn_left();
         let ended = self.mark();
         let began = self.turn_began.take().unwrap_or(self.turn_last_ended);
         let five_hour_share = match self.window_reported {
@@ -1897,6 +1929,51 @@ mod tests {
         assert_eq!(tools.finished, 0);
         assert_eq!(tools.failed, 0);
         assert_eq!(tools.unmatched_ends, 0);
+    }
+
+    #[test]
+    fn a_turn_that_ends_before_a_call_does_records_the_call_as_cut_short() {
+        let mut state = SessionState::new();
+        state.apply(&start("t1", "Bash", None));
+
+        state.apply(&Event::TurnEnded);
+
+        let tools = state.tools();
+        assert!(state.in_flight_tools().is_empty());
+        assert_eq!(tools.interrupted, 1);
+        assert_eq!(tools.finished, 0);
+        assert_eq!(tools.failed, 0);
+    }
+
+    #[test]
+    fn a_turn_end_leaves_a_running_sub_agents_calls_and_the_operators_commands_running() {
+        let mut state = SessionState::new();
+        for id in ["a1", "a2"] {
+            state.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: None,
+                label: "explorer".to_owned(),
+            });
+        }
+        state.apply(&start("t1", "Read", Some("a1")));
+        state.apply(&start("t2", "Read", Some("a2")));
+        state.apply(&Event::AgentExit {
+            id: "a2".into(),
+            outcome: AgentOutcome::Completed,
+        });
+        state.apply(&start("op1", OPERATOR_SHELL, None));
+
+        state.apply(&Event::TurnEnded);
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("op1"), &ToolCallId::from("t1")],
+            "an agent working in the background and the operator's command go on"
+        );
+        assert_eq!(state.tools().interrupted, 1);
+        assert_eq!(state.running_agents().len(), 1);
+        assert_eq!(state.agents_interrupted(), 0);
     }
 
     #[test]

@@ -309,11 +309,15 @@ fn printed_lines(
     if call.error.is_some() {
         lines.push(reason(call, room, theme));
     }
-    if printed.above > 0 {
-        lines.push(Line::from(Span::styled(
-            format!("… {} lines above", printed.above),
-            dim.italic(),
-        )));
+    let above = match (printed.cut, printed.above) {
+        (false, 0) => None,
+        (false, above) => Some(format!("… {above} lines above")),
+        // What was not kept was not counted, so the count is a floor.
+        (true, 0) => Some("… more above".to_owned()),
+        (true, above) => Some(format!("… at least {above} lines above")),
+    };
+    if let Some(above) = above {
+        lines.push(Line::from(Span::styled(above, dim.italic())));
     }
     // Wrapped rather than cut at the edge: what a command printed is read
     // here and nowhere else in the shell, and a path cut at the pane's edge
@@ -780,8 +784,8 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| text::width(&span.content)).sum()
 }
 
-/// What a call the session ended under says in place of its cost: it has
-/// none, and it did not fail.
+/// What a call the session or its turn ended under says in place of its
+/// cost: it has none, and it did not fail.
 const CUT_SHORT: &str = "cut short";
 
 /// What one call cost, as the backend and the clock reported it.
@@ -827,8 +831,8 @@ const RULE_MARK: &str = "rule";
 
 /// What a run of calls cost, summed: the lines its changes added and removed
 /// where every call that succeeded changed a file, and otherwise the bytes
-/// every call returned; how many failed, and how many the session ended
-/// under; and how long they ran.
+/// every call returned; how many failed, how many were refused, and how many
+/// the session ended under; and how long they ran.
 ///
 /// A sum is marked `≥` where one of the calls in it had no figure to add, by
 /// [`count`]'s rule — and a call that has not finished has none yet.
@@ -841,8 +845,13 @@ fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
         .iter()
         .filter(|call| !call.failed() && !call.interrupted)
         .collect();
+    let ended = |outcome: ToolOutcome| {
+        calls
+            .iter()
+            .filter(|call| call.outcome == Some(outcome))
+            .count()
+    };
     let cut = calls.iter().filter(|call| call.interrupted).count();
-    let failed = calls.len() - succeeded.len() - cut;
 
     let mut spans = match succeeded
         .iter()
@@ -861,25 +870,26 @@ fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
             vec![Span::styled(human_bytes(bytes), dim)]
         }
     };
-    if cut > 0 {
-        let said = match cut == calls.len() {
-            true => format!("{CUT_SHORT} ×{cut}"),
-            false => format!("{cut} {CUT_SHORT}"),
-        };
-        match succeeded.is_empty() && failed == 0 {
-            true => spans = vec![Span::styled(said, dim)],
-            false => spans.push(Span::styled(format!(" · {said}"), dim)),
+    // Where nothing in the run succeeded, what became of its calls is the
+    // whole of what it says: it returned nothing worth a figure.
+    let mut follows = !succeeded.is_empty();
+    for (count, said, style) in [
+        (cut, CUT_SHORT, dim),
+        (ended(ToolOutcome::Failed), "failed", theme_del(theme)),
+        (ended(ToolOutcome::Denied), "denied", theme_del(theme)),
+    ] {
+        if count == 0 {
+            continue;
         }
-    }
-    if failed > 0 {
-        let said = match failed == calls.len() {
-            true => format!("failed ×{failed}"),
-            false => format!("{failed} failed"),
+        let said = match count == calls.len() {
+            true => format!("{said} ×{count}"),
+            false => format!("{count} {said}"),
         };
-        match succeeded.is_empty() {
-            true => spans = vec![Span::styled(said, theme_del(theme))],
-            false => spans.push(Span::styled(format!(" · {said}"), theme_del(theme))),
+        match follows {
+            true => spans.push(Span::styled(format!(" · {said}"), style)),
+            false => spans = vec![Span::styled(said, style)],
         }
+        follows = true;
     }
     if let Some(took) = summed_time(calls) {
         spans.push(Span::styled(format!(" · {took}"), dim));
@@ -1351,6 +1361,46 @@ mod tests {
         assert!(!rows[0].contains("failed"), "{rows:?}");
     }
 
+    #[test]
+    fn a_call_its_turn_ended_without_says_it_was_cut_short() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash"));
+        app.apply(&Event::TurnEnded);
+
+        let rows = drawn(&app, false);
+        assert!(rows[0].ends_with("cut short"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_run_counts_a_refused_call_as_denied_rather_than_failed() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash"));
+        app.apply(&end("t1", "Bash", ToolOutcome::Ok, None));
+        app.apply(&start("t2", "Bash"));
+        app.apply(&end("t2", "Bash", ToolOutcome::Denied, None));
+
+        let rows = drawn(&app, true);
+        assert!(rows[0].ends_with("2.0 kB · 1 denied"), "{rows:?}");
+        assert!(!rows[0].contains("failed"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_run_of_refused_calls_reads_as_denied_and_a_failure_beside_them_as_failed() {
+        let mut refused = app();
+        for id in ["t1", "t2"] {
+            refused.apply(&start(id, "Bash"));
+            refused.apply(&end(id, "Bash", ToolOutcome::Denied, None));
+        }
+        assert!(drawn(&refused, true)[0].ends_with("denied ×2"));
+
+        let mut mixed = app();
+        mixed.apply(&start("t1", "Bash"));
+        mixed.apply(&end("t1", "Bash", ToolOutcome::Failed, Some("gone")));
+        mixed.apply(&start("t2", "Bash"));
+        mixed.apply(&end("t2", "Bash", ToolOutcome::Denied, None));
+        assert!(drawn(&mixed, true)[0].ends_with("1 failed · 1 denied"));
+    }
+
     /// A `cargo test` call that ended with `status`, and the run it reported.
     fn tested(app: &mut App, status: i32, counts: Option<niobe_core::TestCounts>, failed: bool) {
         tested_naming(app, status, counts, failed, Vec::new());
@@ -1596,6 +1646,7 @@ mod tests {
         call.outcome = Some(ToolOutcome::Ok);
         call.printed = Some(crate::app::Printed {
             above: 0,
+            cut: false,
             tail: vec![long.clone(), String::new(), "after".to_owned()],
         });
 
@@ -1622,6 +1673,48 @@ mod tests {
         assert!(
             drawn.iter().any(String::is_empty),
             "the blank line was lost"
+        );
+    }
+
+    /// The rows of a command the operator ran that printed `output`, of
+    /// `bytes` in all.
+    fn printed_rows(output: &str, bytes: u64) -> Vec<String> {
+        let mut app = app();
+        app.apply(&start("op1", crate::shell::OPERATOR_SHELL));
+        app.apply(&Event::ToolCallEnd {
+            id: "op1".into(),
+            name: crate::shell::OPERATOR_SHELL.to_owned(),
+            input: "yes | head -c 50000000".to_owned(),
+            output: output.to_owned(),
+            bytes,
+            outcome: ToolOutcome::Ok,
+            summary: None,
+            exit_code: Some(0),
+            error: None,
+        });
+        drawn(&app, false)
+    }
+
+    #[test]
+    fn the_lines_above_a_commands_whole_output_are_counted() {
+        let output = "y\n".repeat(20);
+
+        let rows = printed_rows(&output, output.len() as u64);
+
+        assert_eq!(rows[1].trim(), "… 8 lines above", "{rows:?}");
+    }
+
+    #[test]
+    fn the_lines_above_the_kept_end_of_a_longer_output_are_a_floor() {
+        let kept = "y\n".repeat(20);
+
+        assert_eq!(
+            printed_rows(&kept, 50_000_000)[1].trim(),
+            "… at least 8 lines above"
+        );
+        assert_eq!(
+            printed_rows(&"y\n".repeat(12), 50_000_000)[1].trim(),
+            "… more above"
         );
     }
 

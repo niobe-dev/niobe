@@ -529,6 +529,12 @@ pub struct Entry {
     /// on a tool call's own entry, whose figures are its [`Entry::calls`].
     pub meta: String,
     /// The body, wrapped at draw time.
+    ///
+    /// Once the entry is not streaming, its body is written again only
+    /// together with something else about the entry — its meta, its
+    /// streaming flag — or to text of another length: the transcript keeps a
+    /// finished entry's layout by its body's length, so that a frame does not
+    /// read the whole of a long reply to learn it has not changed.
     pub body: String,
     /// Whether more of this entry is still arriving.
     pub streaming: bool,
@@ -608,9 +614,10 @@ pub struct Call {
     /// is drawn against while it runs. A run that stopped short is nothing to
     /// measure by, and the backend reports no progress of its own.
     pub last_run: Option<Duration>,
-    /// Whether the session ended while the call was running, so that no end
-    /// will arrive for it. It is not running, and it did not fail: the
-    /// backend that was running it is gone.
+    /// Whether the session, or the turn it ran in, ended while the call was
+    /// running, so that no end will arrive for it. It is not running, and it
+    /// did not fail: the backend that was running it is gone, or has said the
+    /// turn is over without reporting it.
     pub interrupted: bool,
     /// Who let it through, where this shell can say; `None` while it runs
     /// and where it cannot.
@@ -684,8 +691,13 @@ impl Call {
 /// them under the call.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Printed {
-    /// How many lines it printed above the ones kept.
+    /// How many lines it printed above the ones kept, as far as what reached
+    /// the shell holds them: all of them, unless `cut`.
     pub above: usize,
+    /// Whether only the end of what it printed reached the shell, so that
+    /// `above` is a floor: the lines before that end were not kept, and are
+    /// not counted.
+    pub cut: bool,
     /// The last lines, as they would read on a terminal: a line a carriage
     /// return rewrote is what it was rewritten to, and nothing that would
     /// move a terminal's cursor or change its colours is left in.
@@ -698,8 +710,12 @@ impl Printed {
     /// session store.
     const LINES: usize = 12;
 
-    /// The end of `output`.
-    fn of(output: &str) -> Self {
+    /// The end of `output`, which is what was kept of `bytes` printed in
+    /// all.
+    fn of(output: &str, bytes: u64) -> Self {
+        // Unequal as well where what it printed was not all text, whose
+        // reading replaced the bytes that were not: a floor is still true.
+        let cut = !u64::try_from(output.len()).is_ok_and(|kept| kept == bytes);
         let output = without_sequences(output);
         let lines: Vec<&str> = output.lines().collect();
         let above = lines.len().saturating_sub(Self::LINES);
@@ -708,7 +724,7 @@ impl Printed {
             .skip(above)
             .map(|line| terminal_line(line))
             .collect();
-        Self { above, tail }
+        Self { above, cut, tail }
     }
 }
 
@@ -1763,7 +1779,7 @@ impl App {
                             .and_then(|entry| entry.calls.get_mut(index))
                     })
                 {
-                    call.printed = Some(Printed::of(output));
+                    call.printed = Some(Printed::of(output, *bytes));
                 }
                 if let Some(call) = ended.and_then(|(at, index)| {
                     self.entries
@@ -1802,11 +1818,15 @@ impl App {
             // The working line reads the end off the fold; the transcript has
             // already shown everything the turn said. A turn's calls are not
             // grouped with the next turn's.
-            // A question still open when the turn ended waits on nobody.
+            // A question still open when the turn ended waits on nobody, a
+            // call it left running will report no end, and a stop asked for
+            // it has nothing left to stop.
             Event::TurnEnded => {
                 self.run = None;
                 self.reply = None;
                 self.forget_asks();
+                self.interrupt_what_the_fold_stopped();
+                self.forget_stopping_hint();
             }
 
             Event::PermissionWithdrawn { id } => self.withdraw_ask(id),
@@ -2158,9 +2178,10 @@ impl App {
     }
 
     /// Marks every call and sub-agent the fold no longer counts as running as
-    /// cut short, after a fatal error ended the backend under them. The fold
-    /// decides which: a command the operator ran is not the backend's, and
-    /// runs on to an end of its own.
+    /// cut short, after a fatal error ended the backend under them or a turn
+    /// ended without their ends. The fold decides which: a command the
+    /// operator ran is not the backend's, and runs on to an end of its own,
+    /// and a sub-agent working in the background outlives the turn.
     fn interrupt_what_the_fold_stopped(&mut self) {
         let running = self.session.in_flight_tools();
         let cut: Vec<(usize, usize)> = self
@@ -2771,8 +2792,11 @@ impl App {
         // session is billed that row withholds the spend, and on a plan it
         // shows no dollars at all, so this does too: the backend counts the
         // budget in the same figure, and the warning stands without it.
+        let over = usd > budget;
         let meta = match billed {
+            crate::ui::Billed::Plan if over => "over the budget".to_owned(),
             crate::ui::Billed::Plan => "most of the budget".to_owned(),
+            crate::ui::Billed::Unknown if over => format!("over {}", crate::ui::dollars(budget)),
             crate::ui::Billed::Unknown => format!("most of {}", crate::ui::dollars(budget)),
             crate::ui::Billed::Metered | crate::ui::Billed::Both => {
                 let budget = crate::ui::dollars(budget);
@@ -2787,11 +2811,15 @@ impl App {
             kind: EntryKind::Notice,
             head: "budget".to_owned(),
             meta,
-            body: "Most of this session's budget is spent. The backend stops the session \
-                   when the budget is reached, and it checks between turns rather than \
-                   inside one, so the session can finish above the figure by what the turn \
-                   that crosses the line costs."
-                .to_owned(),
+            body: format!(
+                "{} The backend stops the session when the budget is reached, and it \
+                 checks between turns rather than inside one, so the session can finish \
+                 above the figure by what the turn that crosses the line costs.",
+                match over {
+                    true => "This session has spent more than its budget.",
+                    false => "Most of this session's budget is spent.",
+                }
+            ),
             streaming: false,
             at: self.at,
             calls: Vec::new(),
@@ -4772,6 +4800,14 @@ impl App {
         self.hint = Some(STOPPING_HINT.to_owned());
     }
 
+    /// Takes back the hint that the turn is stopping, where it is the hint
+    /// shown: the turn has ended, or the stop was not taken.
+    fn forget_stopping_hint(&mut self) {
+        if self.hint.as_deref() == Some(STOPPING_HINT) {
+            self.hint = None;
+        }
+    }
+
     /// Whether a stop has been asked for the turn that is running.
     fn stopping(&self) -> bool {
         self.working() && self.stop_asked_in == Some(self.session.turns().len())
@@ -4782,9 +4818,7 @@ impl App {
     /// Ctrl+C asks for the stop once more instead of the Ctrl+C quitting.
     pub fn not_stopped(&mut self, error: &str) {
         self.stop_asked_in = None;
-        if self.hint.as_deref() == Some(STOPPING_HINT) {
-            self.hint = None;
-        }
+        self.forget_stopping_hint();
         self.push(Entry {
             kind: EntryKind::Failure,
             head: "not stopped".to_owned(),
@@ -8544,6 +8578,36 @@ mod tests {
     }
 
     #[test]
+    fn a_budget_already_overspent_is_said_to_be_over_rather_than_mostly_spent() {
+        let mut app = metered().with_budget(0.02);
+
+        app.apply(&priced(0.05));
+        app.settle_budget();
+
+        let warning = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "budget")
+            .expect("a spend past the budget is warned about");
+        assert_eq!(warning.meta, "$0.05 of $0.02");
+        assert!(
+            warning
+                .body
+                .starts_with("This session has spent more than its budget."),
+            "{}",
+            warning.body
+        );
+        assert_eq!(
+            budget_warning(&[(Some(Billing::Plan), 1.5)]).as_deref(),
+            Some("over the budget")
+        );
+        assert_eq!(
+            budget_warning(&[(None, 1.5)]).as_deref(),
+            Some("over $1.00")
+        );
+    }
+
+    #[test]
     fn a_session_with_no_budget_is_never_warned_about_one() {
         let mut app = app();
         app.apply(&priced(99.0));
@@ -8562,10 +8626,11 @@ mod tests {
 
     #[test]
     fn a_commands_colours_and_title_are_taken_out_whole_and_not_drawn_as_text() {
-        let printed = Printed::of("\x1b[31mred\x1b[0m \x1b]0;TITLE\x07 x\ty\n");
+        let whole = |output: &str| Printed::of(output, output.len() as u64);
+        let printed = whole("\x1b[31mred\x1b[0m \x1b]0;TITLE\x07 x\ty\n");
         assert_eq!(printed.tail, ["red  x  y"]);
 
-        let linked = Printed::of("\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\ done\n");
+        let linked = whole("\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\ done\n");
         assert_eq!(linked.tail, ["link done"]);
     }
 
@@ -8853,6 +8918,18 @@ mod tests {
         assert_eq!(app.hint(), Some(STOPPING_HINT));
 
         app.not_stopped("the pipe is closed");
+
+        assert_eq!(app.hint(), None);
+    }
+
+    #[test]
+    fn a_turn_that_ended_after_a_stop_no_longer_says_it_is_stopping() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.hint(), Some(STOPPING_HINT));
+
+        app.apply(&Event::TurnEnded);
 
         assert_eq!(app.hint(), None);
     }

@@ -4401,6 +4401,39 @@ fn the_history_turned_to_its_sessions_lists_each_with_its_prompts() {
 }
 
 #[test]
+fn a_session_of_ten_prompts_lists_its_first_prompt_in_the_same_column_as_the_rest() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = with_history();
+    for n in 2..=10 {
+        app.apply(&Event::UserMessage {
+            text: format!("step {n}"),
+        });
+    }
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Tab);
+
+    let frame = screen(&mut app, 120, 30);
+    // The column the first prompt starts at in the row of the session `row`
+    // names.
+    let column = |row: &str, said: &str| {
+        frame
+            .lines()
+            .filter(|line| line.contains(row))
+            .find_map(|line| line.find(said).map(|at| line[..at].chars().count()))
+            .unwrap_or_else(|| panic!("{said:?} is listed for {row:?}:\n{frame}"))
+    };
+    let rename = column("claude 2f6c1e10", "rename the crate");
+    assert!(frame.contains("10 prompts"), "{frame}");
+    assert_eq!(
+        column("this session", "add etag support"),
+        rename,
+        "{frame}"
+    );
+    assert_eq!(column("#12", "add etag support"), rename, "{frame}");
+}
+
+#[test]
 fn a_session_another_niobe_has_open_is_marked_and_enter_on_it_says_why_it_stays_shut() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
