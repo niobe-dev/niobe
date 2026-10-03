@@ -1936,6 +1936,7 @@ impl App {
             | Event::Usage(_)
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
+            | Event::ModelRefused
             | Event::UsageWindows(_)
             | Event::Billing { .. }
             | Event::Context(_)

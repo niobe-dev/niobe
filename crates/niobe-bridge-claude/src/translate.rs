@@ -362,6 +362,10 @@ pub struct Translator {
     /// reported, so that the closing `result`'s list of the same refusals is
     /// not counted a second time.
     denied: BTreeMap<String, ()>,
+    /// The `request_id`s of the model changes Niobe asked for that the CLI has
+    /// not answered yet: a refusal of one of those is what puts the session
+    /// back on the model it last reported.
+    model_requests: BTreeSet<String>,
     /// Per-message usage since the last `result`, for the turn reconciliation.
     turn: Counts,
     /// Per model, everything reported for it so far this session.
@@ -448,6 +452,7 @@ impl Translator {
             agent_models: BTreeMap::new(),
             recorded_agents: BTreeMap::new(),
             denied: BTreeMap::new(),
+            model_requests: BTreeSet::new(),
             turn: Counts::default(),
             reported: BTreeMap::new(),
             unknown_spend: None,
@@ -565,6 +570,17 @@ impl Translator {
         self.denied.insert(id.as_str().to_owned(), ());
     }
 
+    /// Records that the control request `request_id` asks the CLI for a
+    /// different model.
+    ///
+    /// The CLI's answer names the request it answers and nothing else, so
+    /// only this says that a refusal is of a model: told it, the translator
+    /// follows the refusal's warning with [`Event::ModelRefused`], and the
+    /// session goes back to showing the model that is still running.
+    pub fn asked_for_model(&mut self, request_id: &str) {
+        self.model_requests.insert(request_id.to_owned());
+    }
+
     /// The permission prompts read since the last call, oldest first.
     ///
     /// Separate from the events because an answer is addressed by an id the
@@ -652,11 +668,17 @@ impl Translator {
     /// Only this side asks the CLI anything, so every `control_response` is an
     /// answer to a request made here — what the CLI offers, or a mode or a
     /// model the session was asked to move to. A refusal left unreported would
-    /// leave the shell showing a change that never happened.
+    /// leave the shell showing a change that never happened, which for a model
+    /// takes [`Event::ModelRefused`] as well as the warning: the shell shows
+    /// the model the operator chose until the CLI answers otherwise.
     fn answered(&mut self, response: wire::ControlResponse, out: &mut Vec<Event>) {
         let Some(outcome) = response.response else {
             return;
         };
+        let of_model = outcome
+            .request_id
+            .as_deref()
+            .is_some_and(|id| self.model_requests.remove(id));
         if outcome.subtype.as_deref() == Some("success") {
             let Some(answer) = outcome.response else {
                 return;
@@ -673,6 +695,9 @@ impl Translator {
             "the CLI refused a change Niobe asked for, so the session is running as it was: {}",
             outcome.error.as_deref().unwrap_or("the CLI gave no reason")
         )));
+        if of_model {
+            out.push(Event::ModelRefused);
+        }
     }
 
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
@@ -4064,6 +4089,46 @@ mod tests {
             accepted.is_empty(),
             "a request the CLI took was reported: {accepted:?}"
         );
+    }
+
+    #[test]
+    fn a_refused_model_change_is_reported_as_one_and_any_other_refusal_is_not() {
+        let mut translator = translator();
+        translator.asked_for_model("niobe-2");
+
+        let mode = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-1","error":"Cannot set permission mode"}}"#,
+        );
+        let model = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"model refuse is not available"}}"#,
+        );
+
+        assert_eq!(warnings(&mode).len(), 1, "{mode:?}");
+        assert_eq!(mode.len(), 1, "{mode:?}");
+        assert_eq!(warnings(&model).len(), 1, "{model:?}");
+        assert!(
+            warnings(&model)[0].contains("model refuse is not available"),
+            "{model:?}"
+        );
+        assert_eq!(model.len(), 2, "{model:?}");
+        assert_eq!(model[1], Event::ModelRefused);
+    }
+
+    #[test]
+    fn a_model_change_the_cli_took_is_not_refused_by_a_later_answer_to_the_same_id() {
+        let mut translator = translator();
+        translator.asked_for_model("niobe-2");
+
+        let taken = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2"}}"#,
+        );
+        let again = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"said twice"}}"#,
+        );
+
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(again.len(), 1, "{again:?}");
+        assert_eq!(warnings(&again).len(), 1, "{again:?}");
     }
 
     #[test]

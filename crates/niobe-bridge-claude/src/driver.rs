@@ -127,6 +127,16 @@ type Waiting = Arc<Mutex<BTreeMap<String, (String, serde_json::Value)>>>;
 /// and drained before every line, which is what puts it there first.
 type Refusals = Arc<Mutex<Vec<ToolCallId>>>;
 
+/// The `request_id`s of model changes asked for that the thread reading the
+/// CLI has not been told about yet.
+///
+/// The CLI's answer names only the request it answers, so the translator has
+/// to be told which requests were for a model before the answer arrives, or a
+/// refused change reads as any other refusal and the shell goes on showing the
+/// model it never moved to. Written before the request goes out and drained
+/// before every line, as [`Refusals`] is.
+type ModelRequests = Arc<Mutex<Vec<String>>>;
+
 /// The line being written to the CLI's standard input, what it is, and when
 /// the writing started; nothing while the writer is waiting for a line.
 ///
@@ -363,6 +373,7 @@ pub struct Session {
     events: Receiver<Event>,
     waiting: Waiting,
     refusals: Refusals,
+    model_requests: ModelRequests,
     stderr: Arc<Mutex<Tail>>,
     /// The threads reading standard output and standard error, in that
     /// order, and the one writing standard input.
@@ -456,6 +467,8 @@ impl Session {
         let asked = Arc::clone(&waiting);
         let refusals: Refusals = Arc::new(Mutex::new(Vec::new()));
         let refused = Arc::clone(&refusals);
+        let model_requests: ModelRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_for_model = Arc::clone(&model_requests);
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             while let Some(output) = next_line(&mut stdout) {
@@ -477,6 +490,11 @@ impl Session {
                 if let Ok(mut refused) = refused.lock() {
                     for id in refused.drain(..) {
                         translator.refused(&id);
+                    }
+                }
+                if let Ok(mut asked) = asked_for_model.lock() {
+                    for request_id in asked.drain(..) {
+                        translator.asked_for_model(&request_id);
                     }
                 }
                 let events = translator.line(&line);
@@ -524,6 +542,7 @@ impl Session {
             events,
             waiting,
             refusals,
+            model_requests,
             stderr: kept,
             threads: vec![reader, errors, writer],
             control_requests: 0,
@@ -637,9 +656,14 @@ impl Session {
     /// The conversation is kept: this is the running session being told to
     /// change, not a new one, so nothing of what has been said is lost. The
     /// CLI resolves the name — an alias such as `haiku`, or a full model id —
-    /// and announces what it ended up on with the next message it starts.
+    /// and announces what it ended up on with the next message it starts. A
+    /// name it will not take comes back as a refusal, which the reading
+    /// thread turns into a visible entry and [`Event::ModelRefused`].
     pub fn set_model(&mut self, model: &str) -> std::io::Result<()> {
         let id = self.next_request_id();
+        if let Ok(mut asked) = self.model_requests.lock() {
+            asked.push(id.clone());
+        }
         self.ask(&control_request(
             &id,
             serde_json::json!({ "subtype": "set_model", "model": model }),
@@ -2056,6 +2080,25 @@ mod tests {
         // minutes on; queued, the lines took 105 ms at worst with two
         // whole-workspace test runs sharing the machine.
         assert!(took < Duration::from_secs(10), "writing took {took:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_model_the_cli_refuses_is_reported_as_refused() {
+        // `initialize` goes out as the session starts, so the model change is
+        // the second request.
+        let (mut session, _dir) = started(
+            "read -r initialize\nread -r model\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"niobe-2\",\"error\":\"model refuse is not available\"}}'\nexec sleep 30\n",
+        );
+
+        session.set_model("refuse").expect("the request is queued");
+        let events = drained_until(&mut session, |event| matches!(event, Event::ModelRefused));
+
+        assert!(
+            matches!(events.as_slice(), [.., Event::Error { message, fatal: false }, Event::ModelRefused]
+                if message.contains("model refuse is not available")),
+            "{events:#?}"
+        );
     }
 
     #[cfg(unix)]

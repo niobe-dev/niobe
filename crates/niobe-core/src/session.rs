@@ -555,10 +555,16 @@ impl SessionState {
             Event::ModeSelected { mode } => self.mode = Some(*mode),
 
             // The operator's choice stands until the backend says what it
-            // resolved that to, which is the next `SessionMeta`. Showing the
-            // model it has moved off instead would tell the operator their
-            // choice did not land.
+            // resolved that to, which is the next `SessionMeta`, or refuses
+            // it. Showing the model it has moved off instead would tell the
+            // operator their choice did not land.
             Event::ModelSelected { model } => self.model = Some(model.clone()),
+
+            // Back to what the backend last reported running, or to no model
+            // where it has reported none: the choice it refused never ran.
+            Event::ModelRefused => {
+                self.model = self.meta.as_ref().map(|meta| meta.model.clone());
+            }
 
             Event::Titled { title } => self.title = Some(title.clone()),
 
@@ -2056,6 +2062,37 @@ mod tests {
             backend_session: None,
         }));
         assert_eq!(state.model(), Some("claude-haiku-4-5-20251001"));
+    }
+
+    #[test]
+    fn a_refused_model_gives_way_to_the_one_the_backend_last_reported() {
+        let mut state = SessionState::new();
+        state.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+        state.apply(&Event::ModelSelected {
+            model: "no-such-model".to_owned(),
+        });
+        assert_eq!(state.model(), Some("no-such-model"));
+
+        state.apply(&Event::ModelRefused);
+
+        assert_eq!(state.model(), Some("claude-opus-5"));
+    }
+
+    #[test]
+    fn a_model_refused_before_the_backend_reported_one_leaves_no_model() {
+        let mut state = SessionState::new();
+        state.apply(&Event::ModelSelected {
+            model: "no-such-model".to_owned(),
+        });
+
+        state.apply(&Event::ModelRefused);
+
+        assert_eq!(state.model(), None);
     }
 
     fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> Event {

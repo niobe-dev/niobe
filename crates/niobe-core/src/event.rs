@@ -661,11 +661,22 @@ pub enum Event {
     /// A backend applies it from its next turn and says what it ended up on
     /// with a fresh [`Event::SessionMeta`], which may name the model
     /// differently from the way it was asked for — an alias resolves to an id.
-    /// Until then this is the honest answer to what the session is on.
+    /// Until then, or until the backend refuses it with
+    /// [`Event::ModelRefused`], this is the honest answer to what the session
+    /// is on.
     ModelSelected {
         /// The model, as the operator named it.
         model: String,
     },
+
+    /// The backend refused the model the operator last chose, so the session
+    /// is still on the one the backend last reported with a
+    /// [`Event::SessionMeta`].
+    ///
+    /// Without it the operator's choice would stand until the next
+    /// `SessionMeta`, and the session would be shown, priced and measured
+    /// against a model that is not running.
+    ModelRefused,
 
     /// A tool call changed a file, and by how many lines.
     ///
@@ -1186,6 +1197,7 @@ mod tests {
             Event::ModelSelected {
                 model: "haiku".to_owned(),
             },
+            Event::ModelRefused,
         ] {
             let line = serde_json::to_string(&event).expect("an event serializes");
             let read: Event = serde_json::from_str(&line).expect("what was written reads back");

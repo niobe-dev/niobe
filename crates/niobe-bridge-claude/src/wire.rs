@@ -550,6 +550,8 @@ pub(crate) struct ControlResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ControlOutcome {
     pub(crate) subtype: Option<String>,
+    /// The request this answers, as Niobe addressed it.
+    pub(crate) request_id: Option<String>,
     pub(crate) error: Option<String>,
     /// What a request that succeeded answered with. Only the answer to
     /// `initialize` carries anything Niobe reads.
