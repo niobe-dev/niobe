@@ -4708,8 +4708,13 @@ impl App {
     }
 
     /// Says in the transcript that the backend did not take a stop, so the
-    /// turn runs on.
+    /// turn runs on. The turn counts as not asked again, so the next Esc or
+    /// Ctrl+C asks for the stop once more instead of the Ctrl+C quitting.
     pub fn not_stopped(&mut self, error: &str) {
+        self.stop_asked_in = None;
+        if self.hint.as_deref() == Some(STOPPING_HINT) {
+            self.hint = None;
+        }
         self.push(Entry {
             kind: EntryKind::Failure,
             head: "not stopped".to_owned(),
@@ -8547,6 +8552,45 @@ mod tests {
         let last = app.entries().last().expect("an entry");
         assert_eq!(last.kind, EntryKind::Failure);
         assert!(last.body.contains("the pipe is closed"), "{}", last.body);
+    }
+
+    #[test]
+    fn esc_after_a_stop_the_backend_would_not_take_asks_for_the_stop_again() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.take_interrupt());
+        app.not_stopped("the pipe is closed");
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.take_interrupt());
+    }
+
+    #[test]
+    fn ctrl_c_after_a_stop_the_backend_would_not_take_stops_rather_than_quits() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.on_key(ctrl_c());
+        assert!(app.take_interrupt());
+        app.not_stopped("the pipe is closed");
+
+        app.on_key(ctrl_c());
+
+        assert!(app.take_interrupt());
+        assert!(!app.should_quit(), "the Ctrl+C ended the session");
+    }
+
+    #[test]
+    fn a_stop_the_backend_would_not_take_no_longer_says_the_turn_is_stopping() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.on_key(ctrl_c());
+        assert_eq!(app.hint(), Some(STOPPING_HINT));
+
+        app.not_stopped("the pipe is closed");
+
+        assert_eq!(app.hint(), None);
     }
 
     fn sent(mut app: App, prompt: &str) -> App {
