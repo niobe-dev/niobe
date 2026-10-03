@@ -2693,11 +2693,25 @@ impl App {
             return;
         }
 
+        // Named as the pane's budget row names it. Where nothing said how the
+        // session is billed that row withholds the spend, so this does too:
+        // the backend counts the budget in the same figure, and the warning
+        // stands without it.
+        let budget = crate::ui::dollars(budget);
+        let meta = match crate::ui::Billed::of(&self.session) {
+            crate::ui::Billed::Unknown => format!("most of {budget}"),
+            billed @ (crate::ui::Billed::Metered
+            | crate::ui::Billed::Plan
+            | crate::ui::Billed::Both) => match billed.qualifier() {
+                Some(qualifier) => format!("{qualifier} {spent} of {budget}"),
+                None => format!("{spent} of {budget}"),
+            },
+        };
         self.budget_warned = true;
         self.push(Entry {
             kind: EntryKind::Notice,
             head: "budget".to_owned(),
-            meta: format!("{spent} of {}", crate::ui::dollars(budget)),
+            meta,
             body: "Most of this session's budget is spent. The backend stops the session \
                    when the budget is reached, and it checks between turns rather than \
                    inside one, so the session can finish above the figure by what the turn \
@@ -6353,6 +6367,7 @@ pub fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::clock::LocalMoment;
+    use niobe_core::Billing;
     use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindows};
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -8045,7 +8060,7 @@ mod tests {
 
     #[test]
     fn four_fifths_of_a_budget_is_warned_about_once_and_says_the_stop_can_overshoot() {
-        let mut app = app().with_budget(1.0);
+        let mut app = metered().with_budget(1.0);
 
         app.apply(&priced(0.79));
         app.settle_budget();
@@ -8074,7 +8089,7 @@ mod tests {
 
     #[test]
     fn a_floor_past_four_fifths_of_the_budget_is_warned_about_as_a_floor() {
-        let mut app = app().with_budget(1.0);
+        let mut app = metered().with_budget(1.0);
         let mut unreported = priced(0.0);
         if let Event::Usage(usage) = &mut unreported {
             usage.cost_usd = None;
@@ -8095,6 +8110,53 @@ mod tests {
             .find(|entry| entry.head == "budget")
             .expect("a floor past the line is warned about");
         assert_eq!(warning.meta, "≥$0.85 of $1.00");
+    }
+
+    /// A session whose backend said it is billed by use.
+    fn metered() -> App {
+        let mut app = app();
+        app.apply(&Event::Billing {
+            billing: Billing::Metered,
+        });
+        app
+    }
+
+    /// What the budget warning says beside its head, once $0.90 of a $1.00
+    /// budget has been spent in equal parts under each of `billings`.
+    fn budget_warning(billings: &[Billing]) -> String {
+        let mut app = app().with_budget(1.0);
+        let parts = billings.len().max(1) as f64;
+        for billing in billings {
+            app.apply(&Event::Billing { billing: *billing });
+            app.apply(&priced(0.9 / parts));
+        }
+        if billings.is_empty() {
+            app.apply(&priced(0.9));
+        }
+        app.settle_budget();
+        app.entries()
+            .iter()
+            .find(|entry| entry.head == "budget")
+            .map(|entry| entry.meta.clone())
+            .expect("nine tenths of the budget is warned about")
+    }
+
+    #[test]
+    fn the_budget_warning_names_its_figure_as_the_usage_pane_does() {
+        assert_eq!(
+            budget_warning(&[Billing::Plan]),
+            "API-equivalent $0.90 of $1.00"
+        );
+        assert_eq!(budget_warning(&[Billing::Metered]), "$0.90 of $1.00");
+        assert_eq!(
+            budget_warning(&[Billing::Plan, Billing::Metered]),
+            "plan and metered $0.90 of $1.00"
+        );
+        assert_eq!(
+            budget_warning(&[Billing::Metered, Billing::Plan]),
+            "plan and metered $0.90 of $1.00"
+        );
+        assert_eq!(budget_warning(&[]), "most of $1.00");
     }
 
     #[test]

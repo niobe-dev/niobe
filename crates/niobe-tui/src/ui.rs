@@ -2732,11 +2732,13 @@ fn usage_height(app: &App) -> u16 {
 /// Whether the session is billed by use, which makes money the pane's
 /// headline.
 ///
-/// Only where something said so. A session nothing has said of keeps the
-/// plan's order, windows first where there are any, and shows no dollar
-/// figure at all: see [`money_lines`].
+/// Only where something said so and nothing said otherwise. A session
+/// nothing has said of keeps the plan's order, windows first where there are
+/// any, and shows no dollar figure at all; one billed both ways keeps it too,
+/// and its models' rows carry no cost, since their figures are neither money
+/// spent nor list price: see [`money_lines`].
 fn metered(app: &App) -> bool {
-    app.session().billing() == Some(Billing::Metered)
+    Billed::of(app.session()) == Billed::Metered
 }
 
 /// The label a plan's money row carries in the pane's grid: what the work
@@ -2785,9 +2787,9 @@ fn usage_label_widest(app: &App) -> usize {
             .max()
             .unwrap_or(0),
     };
-    let money = match app.session().billing() {
-        Some(Billing::Plan) if !app.session().billing_changed() => text::width(PLAN_LABEL),
-        Some(Billing::Plan | Billing::Metered) | None => 0,
+    let money = match Billed::of(app.session()) {
+        Billed::Plan => text::width(PLAN_LABEL),
+        Billed::Metered | Billed::Both | Billed::Unknown => 0,
     };
     let context = match app.session().context() {
         Some(_) => text::width(CONTEXT_LABEL),
@@ -2820,11 +2822,9 @@ fn usage_figure_columns(app: &App) -> usize {
         true => 0,
         false => share + MODEL_TOKENS + model_cost_columns(app),
     };
-    let money = match app.session().billing() {
-        Some(Billing::Plan) if !app.session().billing_changed() => {
-            text::width(&session_cost(app.session(), app.prices()))
-        }
-        Some(Billing::Plan | Billing::Metered) | None => 0,
+    let money = match Billed::of(app.session()) {
+        Billed::Plan => text::width(&session_cost(app.session(), app.prices())),
+        Billed::Metered | Billed::Both | Billed::Unknown => 0,
     };
     let context = app
         .session()
@@ -3317,18 +3317,14 @@ fn money_rows(app: &App) -> usize {
 fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
     let cost = || session_cost(app.session(), app.prices());
-    let billing = match app.session().billing_changed() {
-        true => None,
-        false => app.session().billing(),
-    };
-    let mut lines = vec![match billing {
+    let mut lines = vec![match Billed::of(app.session()) {
         // Part of it list-price work on a plan and part money spent: neither
         // label is true of the whole, so the figure says it is both.
-        None if app.session().billing_changed() => Line::from(vec![
-            Span::styled("plan and metered ", dim),
+        Billed::Both => Line::from(vec![
+            Span::styled(format!("{BOTH_LABEL} "), dim),
             Span::styled(cost(), Style::new().fg(theme.fg)),
         ]),
-        Some(Billing::Metered) => {
+        Billed::Metered => {
             let cost = cost();
             let mut spans = vec![
                 Span::styled("session ", dim),
@@ -3342,11 +3338,11 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             }
             Line::from(spans)
         }
-        Some(Billing::Plan) => Line::from(vec![
+        Billed::Plan => Line::from(vec![
             Span::styled(usage_label(PLAN_LABEL, usage_label_column(app, width)), dim),
             Span::styled(cost(), dim),
         ]),
-        None => Line::from(vec![
+        Billed::Unknown => Line::from(vec![
             Span::styled("session ", dim),
             Span::styled("—", Style::new().fg(theme.fg)),
             Span::styled(" · billing not known", dim),
@@ -3365,18 +3361,33 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
 /// `$0.00` that would read as a session that has cost nothing. On a plan the
 /// figure is what the work would have cost on the API — the budget is counted
 /// in that money too — so the row says so, shortened only where the pane has
-/// no room for the whole word.
+/// no room for the whole word; a session billed both ways says that, as its
+/// cost does. Where nothing said how the session is billed, the spend is an
+/// em dash as the session's cost is: the row shows no figure the one above it
+/// withholds, though it still turns hot as the figure nears the budget, as the
+/// warning in the transcript still comes.
 fn budget_line(app: &App, budget: f64, width: usize, theme: &Theme) -> Line<'static> {
+    let billed = Billed::of(app.session());
     let spent = known_spend(app.session(), app.prices());
-    let figure = spent.as_ref().map_or("—", |(text, _)| text.as_str());
+    let figure = match billed {
+        Billed::Metered | Billed::Plan | Billed::Both => {
+            spent.as_ref().map(|(text, _)| text.as_str())
+        }
+        Billed::Unknown => None,
+    }
+    .unwrap_or("—");
     let amounts = format!("{figure}/{}", dollars(budget));
-    let head = match app.session().billing() {
-        Some(Billing::Plan) => ["API-equivalent budget ", "API-eq. budget "]
-            .into_iter()
-            .find(|head| text::width(head) + text::width(&amounts) <= width)
-            .unwrap_or("API-eq. budget "),
-        Some(Billing::Metered) | None => "budget ",
+    let heads: &[&'static str] = match billed {
+        Billed::Plan => &["API-equivalent budget ", "API-eq. budget "],
+        Billed::Both => &["plan and metered budget ", "plan+metered budget "],
+        Billed::Metered | Billed::Unknown => &["budget "],
     };
+    let head = heads
+        .iter()
+        .find(|head| text::width(head) + text::width(&amounts) <= width)
+        .or(heads.last())
+        .copied()
+        .unwrap_or("budget ");
     let hot = spent.is_some_and(|(_, usd)| usd >= budget * BUDGET_SHOWN_HOT);
     Line::from(format!("{head}{amounts}")).style(match hot {
         true => Style::new().fg(theme.hot).bold(),
@@ -4389,6 +4400,54 @@ fn identity(
         (None, None) => (None, None),
     }
 }
+
+/// What a session's dollar figures are, from what was said of how it is
+/// billed.
+///
+/// Every place that prints the session's money — the Usage pane's rows, its
+/// budget row, the budget warning and the printed summary — reads it here, so
+/// that no two of them name one figure two ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Billed {
+    /// Billed by use throughout: the figure is money spent.
+    Metered,
+    /// On a flat-rate plan throughout: the figure is what the work would have
+    /// cost on the API, which is not what the plan cost.
+    Plan,
+    /// One way for part of the session and the other way for the rest, as a
+    /// session resumed under a profile billed differently is. The fold keeps
+    /// one total, not one for each, so the figure is neither money spent nor
+    /// list price, and says it is both.
+    Both,
+    /// Nothing said: the figure may be either, so none is shown as spent.
+    Unknown,
+}
+
+impl Billed {
+    /// How `session` has been billed, by every billing it was told of.
+    pub fn of(session: &SessionState) -> Self {
+        match (session.billing(), session.billing_changed()) {
+            (Some(_), true) => Billed::Both,
+            (Some(Billing::Metered), false) => Billed::Metered,
+            (Some(Billing::Plan), false) => Billed::Plan,
+            (None, _) => Billed::Unknown,
+        }
+    }
+
+    /// The words a dollar figure of this kind is printed after, where it is
+    /// not money spent: `None` where it is, and where nothing said and the
+    /// figure is not to be printed as spent at all.
+    pub fn qualifier(self) -> Option<&'static str> {
+        match self {
+            Billed::Plan => Some("API-equivalent"),
+            Billed::Both => Some(BOTH_LABEL),
+            Billed::Metered | Billed::Unknown => None,
+        }
+    }
+}
+
+/// What a figure billed both ways is called.
+const BOTH_LABEL: &str = "plan and metered";
 
 /// The session's cost, labelled for what it is.
 ///
@@ -6409,6 +6468,46 @@ mod tests {
             .map(line_text)
             .collect();
         assert_eq!(said[0], "plan and metered $0.50");
+    }
+
+    /// The rows of the Usage pane, 38 columns wide, that draw a dollar sign.
+    fn dollar_rows(app: &App) -> Vec<String> {
+        pane_of(app, 38)
+            .into_iter()
+            .filter(|row| row.contains('$'))
+            .collect()
+    }
+
+    #[test]
+    fn every_dollar_figure_of_a_session_billed_both_ways_says_both() {
+        use niobe_core::event::Event;
+        for [first, then] in [
+            [Billing::Plan, Billing::Metered],
+            [Billing::Metered, Billing::Plan],
+        ] {
+            let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+            app.apply(&Event::Billing { billing: first });
+            app.apply(&priced(Some(1.0)));
+            app.apply(&Event::Billing { billing: then });
+            app.apply(&priced(Some(2.0)));
+
+            assert_eq!(
+                dollar_rows(&app),
+                [
+                    "plan and metered $3.00",
+                    "plan and metered budget $3.00/$5.00"
+                ],
+                "{first:?} then {then:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_nothing_said_the_billing_of_draws_no_dollar_spend_against_its_budget() {
+        let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+        app.apply(&priced(Some(1.25)));
+
+        assert_eq!(dollar_rows(&app), ["budget —/$5.00"]);
     }
 
     #[test]

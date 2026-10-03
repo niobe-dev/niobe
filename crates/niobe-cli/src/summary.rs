@@ -7,8 +7,8 @@
 //! Every figure is read off the same fold the shell's panes read, and the cost
 //! carries the same label the Usage pane gives it.
 
-use niobe_core::Billing;
 use niobe_core::session::SessionState;
+use niobe_tui::Billed;
 use niobe_tui::app::App;
 
 /// The lines describing a folded session, without a header.
@@ -49,15 +49,14 @@ fn tokens(session: &SessionState) -> String {
 /// The pane's label, and the reason a figure is an estimate, a floor or
 /// missing.
 ///
-/// On a plan the figure is named for what it is, as the pane names it.
+/// On a plan, or billed both ways, the figure is named for what it is, as the
+/// pane names it.
 fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> String {
     let t = session.totals();
-    let label = match session.billing() {
-        Some(Billing::Plan) if t.records > 0 => format!(
-            "API-equivalent {}",
-            niobe_tui::session_cost(session, prices)
-        ),
-        Some(Billing::Plan | Billing::Metered) | None => niobe_tui::session_cost(session, prices),
+    let figure = niobe_tui::session_cost(session, prices);
+    let label = match Billed::of(session).qualifier() {
+        Some(qualifier) if t.records > 0 => format!("{qualifier} {figure}"),
+        Some(_) | None => figure,
     };
     if t.records == 0 || t.cost_fully_reported() {
         return label;
@@ -74,18 +73,22 @@ fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> Strin
 /// Printed where the pane has no room to: the pane shows no dollar figure for
 /// a session nothing described, and this says why and what would.
 fn billing(session: &SessionState) -> String {
-    match session.billing() {
-        Some(Billing::Plan) => {
+    match Billed::of(session) {
+        Billed::Plan => {
             "plan — the cost is what the work would have cost on the API; no money moved \
              with it"
                 .to_owned()
         }
-        Some(Billing::Metered) => {
-            "metered — every token is billed, so the cost is money spent".to_owned()
-        }
-        None => "not known — the backend did not say and the profile does not set `billing`, \
-                 so the cost may be money spent or what a plan's work would have cost"
+        Billed::Metered => "metered — every token is billed, so the cost is money spent".to_owned(),
+        Billed::Both => "plan and metered — part of the session was billed on a plan and part \
+                         by use, so the cost is partly money spent and partly what plan work \
+                         would have cost on the API"
             .to_owned(),
+        Billed::Unknown => {
+            "not known — the backend did not say and the profile does not set `billing`, \
+             so the cost may be money spent or what a plan's work would have cost"
+                .to_owned()
+        }
     }
 }
 
@@ -167,6 +170,7 @@ fn grouped(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niobe_core::Billing;
     use niobe_core::event::{Event, Usage};
     use niobe_tui::app::Repo;
 
@@ -328,6 +332,27 @@ mod tests {
             "{}",
             unsaid[2]
         );
+    }
+
+    #[test]
+    fn a_session_billed_both_ways_says_so_on_its_cost_and_its_billing() {
+        for [first, then] in [
+            [Billing::Plan, Billing::Metered],
+            [Billing::Metered, Billing::Plan],
+        ] {
+            let summary = lines(&folded(&[
+                billed(first),
+                usage(Some(0.25)),
+                billed(then),
+                usage(Some(0.5)),
+            ]));
+            assert_eq!(summary[1], "cost        plan and metered $0.75");
+            assert!(
+                summary[2].starts_with("billing     plan and metered — "),
+                "{}",
+                summary[2]
+            );
+        }
     }
 
     #[test]

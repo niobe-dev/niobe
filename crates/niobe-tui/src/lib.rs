@@ -73,7 +73,7 @@ pub use run::{Around, Ended, ask_trust, run};
 pub use shell::{NoShell, OPERATOR_SHELL, Ran, Shell, ShellError};
 pub use terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 pub use theme::{CLASSIC, CYBER, MODERN, NEO, Theme};
-pub use ui::{MIN_SIZE, WIDE_COLUMNS, draw, session_cost};
+pub use ui::{Billed, MIN_SIZE, WIDE_COLUMNS, draw, session_cost};
 pub use watch::{Unwatched, Watch};
 
 #[cfg(test)]
