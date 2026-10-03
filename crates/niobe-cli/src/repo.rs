@@ -467,12 +467,15 @@ fn read(root: &Path, name: &str) -> Result<Repo, String> {
         // The per-file lines are discarded — what the tree did to each file is
         // counted from `git diff --numstat`, which the header does not carry —
         // so git is told not to go looking for untracked ones, which is the
-        // part of the scan that grows with the tree.
+        // part of the scan that grows with the tree. Nor into a submodule's
+        // working tree: that is a repository with a config of its own, which
+        // the `git` run inside it to look would read and run the filters of.
         &[
             "status",
             "--porcelain=v2",
             "--branch",
             "--untracked-files=no",
+            "--ignore-submodules=dirty",
         ],
     )?);
 
@@ -480,7 +483,22 @@ fn read(root: &Path, name: &str) -> Result<Repo, String> {
         // A repository with no commits has nothing to have changed against,
         // and git counts no lines in a file it has only staged.
         None => Vec::new(),
-        Some(_) => working_tree(&git(root, &["diff", "--numstat", "-z", "HEAD"])?),
+        Some(_) => working_tree(&git(
+            root,
+            &[
+                "diff",
+                "--numstat",
+                "-z",
+                // A count needs no converter and no external diff, and a
+                // config that names either must not get to run it. A
+                // submodule is looked at only for the commit it is on, as
+                // the status above is.
+                "--no-textconv",
+                "--no-ext-diff",
+                "--ignore-submodules=dirty",
+                "HEAD",
+            ],
+        )?),
     };
 
     // Listed from the root, which is where the agent runs and the operator's
@@ -663,42 +681,128 @@ fn working_tree(numstat: &str) -> Vec<WorkingFile> {
 ///
 /// Shelled out to rather than linked: a git library is megabytes in a binary
 /// with a size budget, and this asks git the same questions the operator would.
+///
+/// A tree that did not come from a clone can carry a `.git/config` of its own
+/// choosing, and some of its settings run commands on what is only a read.
+/// None may run here, so every `git` this runs has them turned off, whatever
+/// it was asked.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let drivers = filter_drivers(&filters_configured(root)?);
+    let mut command = reading(root);
+    // A filter runs on any file whose attributes name it, and attributes come
+    // from the tree, the index and `.git/info/attributes`, none of which can
+    // be turned off. What can be is the command a name stands for: every
+    // driver the configuration defines, through whatever file it includes, is
+    // given none, which git takes as no filter. Set through the environment
+    // because a driver's name can hold an `=`, which `-c` would split it at.
+    let blanks = blanks(&drivers);
+    command.env("GIT_CONFIG_COUNT", blanks.len().to_string());
+    for (at, (key, value)) in blanks.iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{at}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{at}"), value);
+    }
+    let output = command
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+
+    if !output.status.success() {
+        return Err(failed(args, &output.stderr));
+    }
+    // Lossy: a path that is not UTF-8 is a path the shell cannot draw anyway,
+    // and one of them must not cost the other files their counts.
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A `git` in `root` that only reads, set up so that nothing the repository
+/// configures runs a command while it does.
+fn reading(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         // The repository is only ever read here, and this runs every few
         // seconds beside an operator who is using the same tree: refreshing
         // the index under them would take the lock their own `git` wants.
         .env("GIT_OPTIONAL_LOCKS", "0")
-        // A tree that did not come from a clone can carry a `.git/config` of
-        // its own choosing, and some of its settings run commands on a read:
-        // a filesystem monitor on every status. None is wanted for a read.
+        // A partial clone fetches an object it lacks from the remote it came
+        // from, over whatever transport and `core.sshCommand` the config
+        // names. A read goes to no network: the object is missing instead.
+        .env("GIT_NO_LAZY_FETCH", "1")
+        // A filesystem monitor runs on every status, and a hook on anything
+        // that would write the index.
         .args([
             "-c",
             "core.fsmonitor=false",
             "-c",
             "core.hooksPath=/dev/null",
         ])
-        .args(args)
         .current_dir(root)
         // Nothing here may stop for a prompt or a pager: there is no terminal
         // to answer on — the shell has it.
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::piped());
+    command
+}
+
+/// Every `filter.*` setting the repository's configuration holds, from every
+/// file git reads it from, as `git config -z --get-regexp` prints them, or
+/// nothing where there is none, which it says by exiting with 1.
+fn filters_configured(root: &Path) -> Result<String, String> {
+    let args = ["config", "-z", "--get-regexp", r"^filter\."];
+    let output = reading(root)
+        .args(args)
         .output()
         .map_err(|e| format!("cannot run git: {e}"))?;
-
-    if !output.status.success() {
-        let said = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "git {}: {}",
-            args.join(" "),
-            said.lines().next().unwrap_or("failed").trim()
-        ));
+    match output.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+        Some(1) => Ok(String::new()),
+        _ => Err(failed(&args, &output.stderr)),
     }
-    // Lossy: a path that is not UTF-8 is a path the shell cannot draw anyway,
-    // and one of them must not cost the other files their counts.
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The names of the filter drivers in what `git config -z --get-regexp
+/// '^filter\.'` printed, each once: a record is a key, then a newline and its
+/// value, and a key is `filter.<name>.<variable>` with dots allowed in the
+/// name, so the name is everything between the first dot and the last.
+fn filter_drivers(listed: &str) -> Vec<String> {
+    let mut names: Vec<String> = listed
+        .split('\0')
+        .filter_map(|record| record.split('\n').next())
+        .filter_map(|key| key.strip_prefix("filter."))
+        .filter_map(|rest| rest.rsplit_once('.'))
+        .map(|(name, _)| name.to_owned())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The settings that leave each of `drivers` with no command to run. An empty
+/// `process` also stops git from using `clean`, and a driver marked
+/// `required` would fail the read for having none, so it is marked not to be.
+fn blanks(drivers: &[String]) -> Vec<(String, &'static str)> {
+    drivers
+        .iter()
+        .flat_map(|name| {
+            [
+                (format!("filter.{name}.clean"), ""),
+                (format!("filter.{name}.process"), ""),
+                (format!("filter.{name}.required"), "false"),
+            ]
+        })
+        .collect()
+}
+
+/// The error a `git` that failed is reported as: its arguments and the first
+/// line it said.
+fn failed(args: &[&str], stderr: &[u8]) -> String {
+    let said = String::from_utf8_lossy(stderr);
+    format!(
+        "git {}: {}",
+        args.join(" "),
+        said.lines().next().unwrap_or("failed").trim()
+    )
 }
 
 #[cfg(test)]
@@ -1095,26 +1199,193 @@ mod tests {
         None
     }
 
+    /// Writes a script under `dir` that leaves `<name>-ran` beside it when
+    /// anything runs it, and hands back the script and that marker. It passes
+    /// what it is given through, so a git that did run it reads on unharmed.
+    #[cfg(unix)]
+    fn marking(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join(format!("{name}.sh"));
+        let marker = dir.join(format!("{name}-ran"));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\nexec cat \"$@\"\n", marker.display()),
+        )
+        .expect("the script is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the script is made executable");
+        (script, marker)
+    }
+
+    /// Asserts that none of `markers` was left, naming the first that was.
+    fn none_ran(markers: &[PathBuf]) {
+        for marker in markers {
+            assert!(!marker.exists(), "a read ran {}", marker.display());
+        }
+    }
+
+    /// Every file here is rewritten to the size it was committed at, so git
+    /// cannot tell from the size alone that it changed and has to read it,
+    /// which is where a filter or a converter would run.
     #[cfg(unix)]
     #[test]
     fn a_read_runs_no_command_the_repositorys_own_config_names() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = repository();
         let work = dir.path().join("work");
-        let marker = dir.path().join("ran");
-        let hook = dir.path().join("monitor.sh");
-        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display()))
-            .expect("the hook is written");
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-            .expect("the hook is made executable");
+        let (monitor, monitored) = marking(dir.path(), "monitor");
+        let (clean, cleaned) = marking(dir.path(), "clean");
+        let (process, processed) = marking(dir.path(), "process");
+        let (textconv, converted) = marking(dir.path(), "textconv");
+        let (external, diffed) = marking(dir.path(), "external");
+        for name in ["cleaned.txt", "processed.txt", "converted.txt"] {
+            std::fs::write(work.join(name), "a\nb\n").expect("the file is written");
+        }
+        std::fs::write(
+            work.join(".gitattributes"),
+            "cleaned.txt filter=x\nprocessed.txt filter=y\nconverted.txt diff=x\n",
+        )
+        .expect("the attributes are written");
+        run(&work, &["add", "."]);
+        run(&work, &["commit", "-m", "attributed"]);
+        for (key, value) in [
+            ("core.fsmonitor", &monitor),
+            ("filter.x.clean", &clean),
+            ("filter.y.process", &process),
+            ("diff.x.textconv", &textconv),
+            ("diff.external", &external),
+        ] {
+            run(&work, &["config", key, &value.display().to_string()]);
+        }
+        run(&work, &["config", "filter.x.required", "true"]);
+        run(&work, &["config", "filter.y.required", "true"]);
+        for name in ["cleaned.txt", "processed.txt", "converted.txt"] {
+            std::fs::write(work.join(name), "a\nc\n").expect("the file is written");
+        }
+
+        let read = read(&work, "work").expect("the repository reads");
+
+        none_ran(&[monitored, cleaned, processed, converted, diffed]);
+        let changed = |path: &str| WorkingFile {
+            path: path.to_owned(),
+            added: Some(1),
+            removed: Some(1),
+            new: false,
+        };
+        assert_eq!(
+            read.working,
+            [
+                changed("cleaned.txt"),
+                changed("converted.txt"),
+                changed("processed.txt"),
+            ]
+        );
+    }
+
+    /// A filter can be defined in a file the repository's config only
+    /// includes, under a name with dots in it, and given to a file by
+    /// attributes that are not in the tree at all.
+    #[test]
+    fn every_filter_driver_the_config_lists_is_named_once() {
+        let listed = "filter.lfs.clean\ngit-lfs clean -- %f\0\
+                      filter.lfs.required\ntrue\0\
+                      filter.x.y=z.process\nrun it\0\
+                      filter.bare\0";
+
+        assert_eq!(filter_drivers(listed), ["lfs", "x.y=z"]);
+        assert_eq!(filter_drivers(""), Vec::<String>::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_runs_no_filter_an_included_file_defines_for_attributes_outside_the_tree() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let (clean, cleaned) = marking(dir.path(), "clean");
+        let included = dir.path().join("included");
+        std::fs::write(
+            &included,
+            format!("[filter \"x.y=z\"]\n\tclean = {}\n", clean.display()),
+        )
+        .expect("the included file is written");
         run(
             &work,
-            &["config", "core.fsmonitor", &hook.display().to_string()],
+            &["config", "include.path", &included.display().to_string()],
         );
+        std::fs::create_dir_all(work.join(".git/info")).expect("the info directory can be made");
+        std::fs::write(work.join(".git/info/attributes"), "kept.txt filter=x.y=z\n")
+            .expect("the attributes are written");
+        std::fs::write(work.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
 
         read(&work, "work").expect("the repository reads");
 
-        assert!(!marker.exists(), "a read ran the repository's monitor");
+        none_ran(&[cleaned]);
+    }
+
+    /// A submodule is a repository of its own, with a config of its own that
+    /// a read of the repository around it never looks at.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_runs_no_filter_a_submodules_own_config_names() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let (clean, cleaned) = marking(dir.path(), "clean");
+        let origin = dir.path().join("origin").display().to_string();
+        run(
+            &work,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &origin,
+                "sub",
+            ],
+        );
+        run(&work, &["commit", "-m", "submodule"]);
+        let sub = work.join("sub");
+        run(
+            &sub,
+            &["config", "filter.x.clean", &clean.display().to_string()],
+        );
+        std::fs::write(
+            work.join(".git/modules/sub/info/attributes"),
+            "kept.txt filter=x\n",
+        )
+        .expect("the attributes are written");
+        std::fs::write(sub.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
+
+        read(&work, "work").expect("the repository reads");
+
+        none_ran(&[cleaned]);
+    }
+
+    /// A repository can say an object it lacks is to be fetched from a
+    /// remote, and how to reach that remote. A read goes to no network, and
+    /// runs no command to get there.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_fetches_no_object_the_repository_is_missing() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let (ssh, connected) = marking(dir.path(), "ssh");
+        for (key, value) in [
+            ("core.repositoryformatversion", "1"),
+            ("extensions.partialClone", "origin"),
+            ("remote.origin.promisor", "true"),
+            ("remote.origin.url", "ssh://example.invalid/repository"),
+            ("core.sshCommand", &ssh.display().to_string()),
+        ] {
+            run(&work, &["config", key, value]);
+        }
+        let blob = git(&work, &["rev-parse", "HEAD:kept.txt"]).expect("the file has a blob");
+        let blob = blob.trim();
+        std::fs::remove_file(work.join(".git/objects").join(&blob[..2]).join(&blob[2..]))
+            .expect("the blob is a loose object");
+        std::fs::write(work.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
+
+        let _ = read(&work, "work");
+
+        none_ran(&[connected]);
     }
 
     #[cfg(unix)]
