@@ -93,7 +93,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   events of those bytes as crossterm would, plus the modifyOtherKeys form crossterm drops, and
   a bracketed paste as one paste whose line breaks are not Enter, `menu.rs` is the menus and
   the F-key bar — every action the shell can be asked for, the key or backend command that
-  reaches each without the menu, and where each is drawn so a click lands on it; a backend
+  reaches each without the menu, what each does in the words `niobe --help` lists the F-keys
+  with, and where each is drawn so a click lands on it; a backend
   command is sent only where the backend listed it, and an action no backend offers says why —
   `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets

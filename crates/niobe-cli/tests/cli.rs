@@ -827,24 +827,67 @@ fn the_help_says_how_the_mode_the_model_the_budget_and_the_theme_are_changed() {
     for said in [
         "--budget <amount>",
         "Shift+Tab",
-        "F8",
+        "Model on the F-key bar picks",
         "between turns",
         "models = [",
         "niobe trust",
         "trusted.list",
         "--theme <name>",
-        "F9",
+        "View › Theme…",
         "theme = \"neo\"",
         "Ctrl+G",
-        "Esc 8",
-        "Esc 9",
-        "Esc 0",
     ] {
         assert!(
             out.contains(said),
             "the help does not mention {said}:\n{out}"
         );
     }
+}
+
+/// The help names the F-keys the shell's bar draws: each against its digit,
+/// with the bar's label and what it does, and names no F-key anywhere else, so
+/// nothing in it can claim a key the bar has given to something else.
+#[test]
+fn the_help_names_each_f_key_as_the_bar_does_and_no_other() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    let rows: Vec<String> = (1u8..)
+        .zip(niobe_tui::menu::FKEYS)
+        .map(|(n, (digit, label, action))| {
+            format!(
+                "{:<23}{label}: {}",
+                format!("F{n}, Esc {digit}"),
+                action.what()
+            )
+        })
+        .collect();
+    for row in &rows {
+        assert!(
+            out.lines().any(|line| line.trim() == row),
+            "the help has no row `{row}`:\n{out}"
+        );
+    }
+    for line in out.lines().filter(|line| names_an_f_key(line)) {
+        assert!(
+            rows.iter().any(|row| line.trim() == row),
+            "the help names an F-key off the bar's rows: `{line}`"
+        );
+    }
+}
+
+/// Whether `line` names an F-key, as `F4` or as `Esc 4`.
+fn names_an_f_key(line: &str) -> bool {
+    let named = line
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| {
+            word.strip_prefix('F')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        });
+    named
+        || line
+            .match_indices("Esc ")
+            .any(|(at, _)| line[at + 4..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
 #[test]

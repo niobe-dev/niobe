@@ -8,7 +8,8 @@
 //! reaches it without the menu; the F-key bar is the ten used most. Both are
 //! read from the tables here, so an action cannot be in the bar and missing
 //! from the menus, and the menu cannot name a key the bar does something else
-//! with.
+//! with. `niobe --help` prints its F-keys from the same table, with what each
+//! action does in [`Action::what`]'s words.
 //!
 //! What is here is what each entry is called, where it is drawn and how the
 //! cursor moves through an open menu. What an action does is
@@ -81,6 +82,47 @@ pub enum Action {
     ReleaseNotes,
     /// Opens the page an issue is filed on.
     ReportBug,
+}
+
+impl Action {
+    /// What it does, in the few words `niobe --help` prints beside the key
+    /// that does it, so the help cannot describe an F-key the bar has since
+    /// given to something else.
+    pub const fn what(self) -> &'static str {
+        match self {
+            Action::About => "say what this program is and which release",
+            Action::Settings => "the profile and config files in force",
+            Action::Permissions => "the standing answers prompts are given",
+            Action::SignIn => "say how the backend signs in or out",
+            Action::Doctor => "the backend's own health check",
+            Action::Quit => "end the session",
+            Action::NewSession => "start over with empty context, as /clear",
+            Action::Compact => "have the backend summarise, as /compact",
+            Action::Resume => "carry an earlier session on",
+            Action::History => "the prompts sent before",
+            Action::Rewind => "go back to a checkpoint, as /rewind",
+            Action::Stop => "stop the running turn",
+            Action::Export => "copy the transcript to the clipboard",
+            Action::Memory => "open the repository's CLAUDE.md",
+            Action::AddFile => "name a file for the prompt",
+            Action::Mcp => "the backend's MCP servers, as /mcp",
+            Action::SubAgents => "the pane the sub-agents are listed in",
+            Action::Hooks => "the backend's hooks, as /hooks",
+            Action::SwitchModel => "pick one of the models the profile names",
+            Action::CycleMode => "the next permission mode",
+            Action::Effort => "pick an effort level",
+            Action::Usage => "what the plan's usage windows stand at",
+            Action::Find => "search the transcript",
+            Action::Diff => "open every cut diff, or cut them again",
+            Action::GroupByAgent => "group sub-agent rows by agent",
+            Action::Pane(_) => "show or hide that pane",
+            Action::Theme => "pick the palette the shell draws in",
+            Action::Shortcuts => "list the keys the shell answers to",
+            Action::Commands => "the backend's commands and skills",
+            Action::ReleaseNotes => "open the page releases are described on",
+            Action::ReportBug => "open the page an issue is filed on",
+        }
+    }
 }
 
 /// A pane of the right-hand stack, which the View menu shows and hides.

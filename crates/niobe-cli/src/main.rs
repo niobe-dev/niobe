@@ -204,8 +204,8 @@ struct Asked {
 ///
 /// A name in the config that no theme answers to is reported at its line
 /// rather than falling back: an operator who wrote a theme into their config
-/// and got the usual one would read it as the file not being loaded. `F9`
-/// changes it from here for the rest of the session.
+/// and got the usual one would read it as the file not being loaded. View ›
+/// Theme… changes it from here for the rest of the session.
 fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String> {
     if let Some(theme) = asked.theme {
         return Ok(theme);
@@ -1170,9 +1170,9 @@ PROFILES:
     when that is set); a repository's is .niobe/config.toml at its root, and
     overrides the user's, replacing any profile of the same name whole. The
     env of a profile is passed on exactly as written. The models of a profile
-    are the ones F8 offers in the shell, named the way its backend takes them;
-    a profile that names none has nothing to switch between, because niobe
-    never invents a model id.
+    are the ones Model on the F-key bar offers in the shell, named the way its
+    backend takes them; a profile that names none has nothing to switch
+    between, because niobe never invents a model id.
 
     billing says how the account behind a profile is billed, \"plan\" or
     \"metered\". It decides what the Usage pane leads with: a plan's usage
@@ -1323,20 +1323,15 @@ IN THE SHELL:
                            in the same turn quits; with no turn running,
                            Ctrl+C quits at once and Esc leads to an F-key
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
-    F1, Esc 1              Say which keys move around the shell
-    F5, Esc 5              On a plan, say when its usage windows come back
-    F6, Esc 6              Fold or open the working tree section
-    F7, Esc 7              Fold or open the tools section
-    F8, Esc 8              Pick a model from the ones the profile names
-    F9, Esc 9              Cycle the palette the shell draws in
-    F10, Esc 0, Ctrl+Q     Quit
+{fkeys}
+    Ctrl+Q                 Quit
 
-    F2, F3 and F4 name views that are not implemented yet, and say so.
-
-    Every F-key is also Esc and then its digit, 0 for F10, which is how the
-    bar at the foot of the shell names them: on a Mac the top row is media
+    Every F-key is also Esc and then its digit, 0 for the tenth, which is how
+    the bar at the foot of the shell names them: on a Mac the top row is media
     keys unless Fn is held, and Esc and a digit reach every terminal. Alt and
-    the digit does the same where the terminal sends Option as Meta.
+    the digit does the same where the terminal sends Option as Meta. Esc and a
+    menu's first letter, or Alt and the letter, open that menu, which holds
+    every action the shell has, F-keys and all.
 
     When a backend stops for permission, the question is asked at the foot of
     the transcript and the turn waits on it:
@@ -1357,17 +1352,17 @@ MODE AND MODEL:
     backend has said which it is. A mode a backend reports that niobe has no
     word for is carried as reported rather than forced into one of these three.
 
-    F8 picks a model from the ones the profile names. The switch applies from
-    the next turn and keeps everything said so far: the running session is told
-    to change, not replaced. The backend resolves the name it is given and says
-    what it ended up on, which may be spelt differently from the way it was
-    asked for.
+    Model on the F-key bar picks one of the models the profile names. The
+    switch applies from the next turn and keeps everything said so far: the
+    running session is told to change, not replaced. The backend resolves the
+    name it is given and says what it ended up on, which may be spelt
+    differently from the way it was asked for.
 
 THEME:
     cyber is green and magenta on black, classic is DOS blue, neo is green on
     black and modern is an editor's grey. --theme <name> opens the shell in
     one, theme = \"neo\" at the top of a config makes it the one every session
-    opens in, and F9 cycles them while a session runs.
+    opens in, and View › Theme… picks another while a session runs.
 
     classic is drawn in the sixteen colours the terminal names, so your own
     colour scheme is what they mean. cyber, neo and modern are drawn in their
@@ -1415,7 +1410,22 @@ BACKENDS:
     prompt and says so.",
         name = niobe_core::APP_NAME,
         version = niobe_core::VERSION,
+        fkeys = fkey_rows(),
     );
+}
+
+/// The help's rows for the F-key bar, read from the table the shell draws
+/// the bar from, so the help cannot name a key the bar has given to
+/// something else.
+fn fkey_rows() -> String {
+    (1u8..)
+        .zip(niobe_tui::menu::FKEYS)
+        .map(|(n, (digit, label, action))| {
+            let keys = format!("F{n}, Esc {digit}");
+            format!("    {keys:<23}{label}: {}", action.what())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
