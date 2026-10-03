@@ -25,7 +25,8 @@
 //! counts where its output held the whole run, beside a bar of them, and
 //! otherwise that the result was not read — never a number the output did
 //! not give. While it runs it says how long it has run, against the last
-//! whole run of the same command where there was one.
+//! whole run of the same command where there was one — timed from when it was
+//! allowed, and not drawn at all while a question about it waits.
 //!
 //! A run of calls to the same tool is one group: a row with the run's summed
 //! figures, and a row for each call under it unless the operator has folded
@@ -263,7 +264,7 @@ fn under(
     let progress = call
         .running()
         .then_some(call)
-        .filter(|call| call.testing)
+        .filter(|call| call.testing && !call.asked)
         .map(|call| progress_line(call, detail.now, room, theme));
     let body = match (&call.printed, tested, call.failed(), &call.change) {
         (Some(printed), _, _, _) => {
@@ -1650,6 +1651,50 @@ mod tests {
         assert_eq!(
             text_of(&testing(150)).trim(),
             "└ ━━━━━━━━━━━━━━━━━━━━  testing · 50s, past the last run's 40s"
+        );
+    }
+
+    /// A run waiting on a question has not started its tests: the time it
+    /// waits is the operator's, and a bar of it against the last run would
+    /// claim a run nobody measured.
+    #[test]
+    fn a_test_run_waiting_on_a_question_is_not_drawn_as_testing() {
+        let mut app = app();
+        cargo_test(&mut app, "t1", 0, Some(40));
+        cargo_test(&mut app, "t2", 100, None);
+        app.apply_at(
+            &Event::PermissionRequest {
+                id: "t2".into(),
+                tool: "Bash".to_owned(),
+                input: r#"{"command":"cargo test"}"#.to_owned(),
+                target: Some("cargo test".to_owned()),
+                agent: None,
+            },
+            second(100),
+        );
+
+        let waiting = drawn_at(&app, 130);
+        assert!(
+            !waiting.iter().any(|line| text_of(line).contains("testing")),
+            "{:?}",
+            waiting.iter().map(text_of).collect::<Vec<_>>()
+        );
+
+        app.apply_at(
+            &Event::PermissionResponse {
+                id: "t2".into(),
+                decision: niobe_core::event::PermissionDecision::Allow,
+                message: None,
+            },
+            second(130),
+        );
+        let running = drawn_at(&app, 140)
+            .into_iter()
+            .find(|line| text_of(line).contains("testing"))
+            .expect("the run says so once it is allowed");
+        assert_eq!(
+            text_of(&running).trim(),
+            "└ ━━━━━───────────────  testing · 10s of the last run's 40s"
         );
     }
 

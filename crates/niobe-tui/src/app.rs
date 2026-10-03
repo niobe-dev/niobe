@@ -615,6 +615,10 @@ pub struct Call {
     /// Who let it through, where this shell can say; `None` while it runs
     /// and where it cannot.
     pub gate: Option<Gate>,
+    /// Whether a question about it is waiting on the operator, so it has not
+    /// started running: what it is doing is waiting, and a test run is not
+    /// drawn as one until it is allowed.
+    pub asked: bool,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -639,6 +643,7 @@ impl Call {
             last_run: None,
             interrupted: false,
             gate: None,
+            asked: false,
             started: at,
         }
     }
@@ -1831,6 +1836,9 @@ impl App {
                 if self.asks.is_empty() {
                     self.ask_quiet_since = self.latest_instant();
                 }
+                if let Some(call) = self.call_mut(id) {
+                    call.asked = true;
+                }
                 self.asks.push_back(Ask {
                     id: id.clone(),
                     tool: tool.clone(),
@@ -2140,13 +2148,23 @@ impl App {
     /// let it run: the time it spent waiting on them is not the tool's.
     fn restart_clock(&mut self, id: &ToolCallId) {
         let now = self.at;
-        if let Some(&(at, index)) = self.tool_entries.get(id)
-            && let Some(call) = self
-                .entries
-                .get_mut(at)
-                .and_then(|entry| entry.calls.get_mut(index))
-        {
+        if let Some(call) = self.call_mut(id) {
             call.started = now;
+        }
+    }
+
+    /// The call `id` names, while it runs.
+    fn call_mut(&mut self, id: &ToolCallId) -> Option<&mut Call> {
+        let &(at, index) = self.tool_entries.get(id)?;
+        self.entries
+            .get_mut(at)
+            .and_then(|entry| entry.calls.get_mut(index))
+    }
+
+    /// Marks the call a question was about as no longer waiting on it.
+    fn unask(&mut self, id: &ToolCallId) {
+        if let Some(call) = self.call_mut(id) {
+            call.asked = false;
         }
     }
 
@@ -2270,6 +2288,7 @@ impl App {
     /// question put off is not mistaken for the one behind it.
     fn forget_ask(&mut self, id: &ToolCallId) -> Option<Ask> {
         let at = self.asks.iter().position(|ask| &ask.id == id)?;
+        self.unask(id);
         if at == 0 {
             self.ask_selected = 0;
             self.ask_focus = AskFocus::Choosing;
@@ -2285,6 +2304,7 @@ impl App {
         let Some(at) = self.asks.iter().position(|ask| ask.id == *id) else {
             return;
         };
+        self.unask(id);
         self.asks.remove(at);
         if at == 0 {
             self.front_ask_taken_away();
@@ -2296,6 +2316,10 @@ impl App {
     fn forget_asks(&mut self) {
         if self.asks.is_empty() {
             return;
+        }
+        let asked: Vec<ToolCallId> = self.asks.iter().map(|ask| ask.id.clone()).collect();
+        for id in &asked {
+            self.unask(id);
         }
         self.asks.clear();
         self.front_ask_taken_away();
