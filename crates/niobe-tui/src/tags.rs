@@ -15,6 +15,7 @@
 //! agent's task, which is where a tag is read back to what it names.
 
 use crate::text;
+use std::collections::{HashMap, HashSet};
 
 /// The widest a tag is drawn.
 pub(crate) const TAG_MAX: usize = 8;
@@ -30,13 +31,15 @@ pub(crate) struct Named<'a> {
     pub(crate) label: &'a str,
 }
 
-/// Every agent's tag, in the order given.
+/// Every agent's tag, in the order given. No two are alike.
 ///
 /// Two agents whose tags would read alike — two of one kind, or two kinds cut
 /// to the same letters — are numbered in the order they were spawned,
 /// `explore1` and `explore2`, because a tag that names two agents names
-/// neither. The tags are worked out afresh from the whole list, so a second
-/// agent of a kind renumbers the first.
+/// neither. A number that would make a tag another agent already has is
+/// passed over: beside an agent of kind `explore1`, two `explore` agents are
+/// `explore2` and `explore3`. The tags are worked out afresh from the whole
+/// list, so a second agent of a kind renumbers the first.
 pub(crate) fn tags(agents: &[Named<'_>]) -> Vec<String> {
     let words: Vec<Vec<String>> = agents.iter().map(|agent| words(base(agent))).collect();
     let stems: Vec<String> = (0..agents.len())
@@ -46,15 +49,27 @@ pub(crate) fn tags(agents: &[Named<'_>]) -> Vec<String> {
         .iter()
         .map(|stem| text::truncate(stem, TAG_MAX))
         .collect();
+    let alone = |at: usize| cut.iter().filter(|other| **other == cut[at]).count() == 1;
+    let mut taken: HashSet<String> = (0..agents.len())
+        .filter(|&at| alone(at))
+        .map(|at| cut[at].clone())
+        .collect();
+    let mut next: HashMap<&str, usize> = HashMap::new();
     (0..agents.len())
         .map(|at| {
-            let alike: Vec<usize> = (0..agents.len())
-                .filter(|&other| cut[other] == cut[at])
-                .collect();
-            match alike.iter().position(|&other| other == at) {
-                Some(place) if alike.len() > 1 => numbered(&stems[at], place + 1),
-                _ => cut[at].clone(),
+            if alone(at) {
+                return cut[at].clone();
             }
+            let number = next.entry(cut[at].as_str()).or_insert(1);
+            let tag = loop {
+                let tag = numbered(&stems[at], *number);
+                *number = number.saturating_add(1);
+                if !taken.contains(&tag) {
+                    break tag;
+                }
+            };
+            taken.insert(tag.clone());
+            tag
         })
         .collect()
 }
@@ -161,6 +176,19 @@ mod tests {
             kinds(&["methodologist", "methodologist"]),
             ["method…1", "method…2"],
             "the number is kept and the word gives way"
+        );
+    }
+
+    #[test]
+    fn a_number_another_agent_is_already_tagged_with_is_passed_over() {
+        assert_eq!(
+            kinds(&["explore", "explore", "explore1"]),
+            ["explore2", "explore3", "explore1"]
+        );
+        assert_eq!(
+            kinds(&["methodologist", "methodologist", "methodical", "methodical"]),
+            ["method…1", "method…2", "method…3", "method…4"],
+            "two kinds cut to different letters can still number alike"
         );
     }
 

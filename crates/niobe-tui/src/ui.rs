@@ -2908,12 +2908,17 @@ const METER_CELLS: usize = 12;
 
 /// A share of a window as its column draws it: a percent, no wider than the
 /// column holds, and an em dash for a level that is not one — below nothing,
-/// or not a number — rather than a `0%` nobody measured.
+/// or not a number — rather than a `0%` nobody measured. A level above
+/// nothing that rounds to nothing reads `<1%`, as [`share_label`] draws it.
 fn window_share(utilization: f64) -> String {
     if !utilization.is_finite() || utilization < 0.0 {
         return format!("{:>3} ", "—");
     }
-    format!("{:>3}%", crate::app::percent(utilization).min(999))
+    share_label(
+        crate::app::percent(utilization).min(999),
+        utilization > 0.0,
+        false,
+    )
 }
 
 /// How many rows the plan's windows take: one per window a backend reported,
@@ -5443,6 +5448,14 @@ mod tests {
         assert_eq!(window_share(f64::NAN), "  — ");
         assert_eq!(window_share(1e300), "999%");
         assert_eq!(window_share(0.5), " 50%");
+    }
+
+    #[test]
+    fn a_level_above_nothing_that_rounds_to_nothing_reads_under_one_percent() {
+        assert_eq!(window_share(0.004), " <1%");
+        assert_eq!(window_share(6.0 / 1_000_000.0), " <1%");
+        assert_eq!(window_share(0.0), "  0%");
+        assert_eq!(window_share(0.005), "  1%");
     }
 
     fn window(utilization: f64, resets_at: Option<u64>) -> UsageWindow {

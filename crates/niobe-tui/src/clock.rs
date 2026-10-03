@@ -305,11 +305,16 @@ pub fn took(duration: Duration) -> String {
 /// One unit, and coarser the older it gets: an age sits in a narrow column
 /// beside the thing it dates, and `12m` there says everything `12m 04s` would.
 /// Under ten seconds it keeps its tenths, because that is the range where the
-/// operator is asking whether something *just* happened.
+/// operator is asking whether something *just* happened, and cuts them down
+/// as [`took`] does, so 9.96 s ago reads `9.9s` and never a `10.0s` the next
+/// unit would have drawn `10s`.
 pub fn ago(duration: Duration) -> String {
     let seconds = duration.as_secs_f64();
     match seconds {
-        ..10.0 => format!("{seconds:.1}s"),
+        ..10.0 => {
+            let tenths = duration.as_millis() / 100;
+            format!("{}.{}s", tenths / 10, tenths % 10)
+        }
         ..60.0 => format!("{}s", duration.as_secs()),
         ..3600.0 => format!("{}m", duration.as_secs() / 60),
         ..86_400.0 => format!("{}h", duration.as_secs() / 3600),
@@ -503,6 +508,13 @@ mod tests {
     fn an_age_under_ten_seconds_keeps_its_tenths_and_one_over_it_does_not() {
         assert_eq!(ago(Duration::from_millis(9900)), "9.9s");
         assert_eq!(ago(Duration::from_millis(10_100)), "10s");
+    }
+
+    #[test]
+    fn an_age_is_cut_down_to_its_tenth_as_a_span_is() {
+        assert_eq!(ago(Duration::from_millis(9_960)), "9.9s");
+        assert_eq!(ago(Duration::from_millis(999)), "0.9s");
+        assert_eq!(ago(Duration::from_millis(40)), "0.0s");
     }
     /// A stamp in a timezone the test names, so the rendering can be asserted
     /// without the machine's own zone reaching it.

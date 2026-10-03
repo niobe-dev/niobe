@@ -6586,13 +6586,24 @@ fn one_line(input: &str) -> String {
     result
 }
 
-/// Bytes, short enough for a meta line.
+/// Bytes, short enough for a meta line: in the largest unit whose figure,
+/// rounded to its tenth, is still under 1024 — `1.0 MB`, not `1024.0 kB` —
+/// so no count a `u64` holds reads wider than `1023.9 kB`.
 pub fn human_bytes(bytes: u64) -> String {
-    match bytes {
-        0..=1023 => format!("{bytes} B"),
-        1024..=1_048_575 => format!("{:.1} kB", bytes as f64 / 1024.0),
-        _ => format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)),
+    const UNITS: [&str; 6] = ["kB", "MB", "GB", "TB", "PB", "EB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
     }
+    let mut scaled = bytes as f64 / 1024.0;
+    let mut unit = UNITS[0];
+    for larger in &UNITS[1..] {
+        if scaled < 1023.95 {
+            break;
+        }
+        scaled /= 1024.0;
+        unit = larger;
+    }
+    format!("{scaled:.1} {unit}")
 }
 
 #[cfg(test)]
@@ -8717,6 +8728,14 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(4_096), "4.0 kB");
         assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn bytes_that_round_up_to_the_next_unit_read_in_it_and_any_count_fits() {
+        assert_eq!(human_bytes(1_048_575), "1.0 MB");
+        assert_eq!(human_bytes(1_073_741_823), "1.0 GB");
+        assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GB");
+        assert_eq!(human_bytes(u64::MAX), "16.0 EB");
     }
 
     fn ctrl_c() -> ratatui::crossterm::event::KeyEvent {
