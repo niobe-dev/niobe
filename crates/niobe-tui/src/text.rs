@@ -152,6 +152,30 @@ fn wrap_paragraph(paragraph: &str, columns: usize, lines: &mut Vec<String>) {
     }
 }
 
+/// Wraps `text` to `columns` cells keeping every character it has: each
+/// space, each indent and each blank line, with tabs expanded to their stops.
+/// A line breaks only where it reaches the column, mid-word if that is where.
+///
+/// For what the operator is asked to approve. [`wrap`] joins words with one
+/// space, so a quoted `"a    b"` would read as `"a b"` and an indented Python
+/// or YAML body as one flush column — a different command from the one that
+/// would run. Breaking only at the column also keeps a line break honest:
+/// every row but a line's last is full, so a run of spaces never hides at the
+/// end of a row cut short.
+pub fn wrap_exact(text: &str, columns: usize) -> Vec<String> {
+    if columns == 0 || text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for line in text.split('\n') {
+        match line.is_empty() {
+            true => lines.push(String::new()),
+            false => lines.extend(split_to_width(&expand_tabs(line), columns)),
+        }
+    }
+    lines
+}
+
 /// Cuts a string into pieces no wider than `columns` cells.
 pub fn split_to_width(text: &str, columns: usize) -> Vec<String> {
     let mut chunks = Vec::new();
@@ -396,6 +420,26 @@ mod tests {
     #[test]
     fn a_zero_width_pane_produces_no_lines() {
         assert!(wrap("anything", 0).is_empty());
+        assert!(wrap_exact("anything", 0).is_empty());
+    }
+
+    #[test]
+    fn an_exact_wrap_keeps_every_space_indent_and_blank_line() {
+        assert_eq!(
+            wrap_exact("if x:\n    print(\"a    b\")\n\n  # done  ", 40),
+            ["if x:", "    print(\"a    b\")", "", "  # done  "]
+        );
+    }
+
+    #[test]
+    fn an_exact_wrap_expands_a_tab_to_its_stop() {
+        assert_eq!(wrap_exact("\tpass\nID\tx", 40), ["    pass", "ID  x"]);
+    }
+
+    #[test]
+    fn an_exact_wrap_breaks_only_at_the_column() {
+        assert_eq!(wrap_exact("echo a    b  c", 6), ["echo a", "    b ", " c"]);
+        assert_eq!(wrap_exact("日本語", 4), ["日本", "語"]);
     }
 
     #[test]

@@ -24,7 +24,7 @@
  ┃   │ echo step 18 && \                                                  │ █ │     diagrams/cache.png            — — │
  ┃   │ echo step 19 && \                                                  │ █ │   server/                             │
  ┃   │ echo step 20 && \                                                  │ █ └───────────────────────────────────────┘
- ┃   │ … 124 more lines · Ctrl+T shows the whole call                     │ █ ┌────────────── Activity ───────────────┐
+ ┃   │ … 123 more lines · Ctrl+T shows the whole call                     │ █ ┌────────────── Activity ───────────────┐
  ┃   │                                                                    │ █ │ ▾ Sub-agents  1 running · 1 failed    │
  ┃   │ ▶ 1. Allow once                                     this call only │ █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
  ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │   └ Reading tests/stream.rs           │

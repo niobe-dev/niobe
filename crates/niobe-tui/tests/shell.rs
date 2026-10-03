@@ -845,6 +845,20 @@ fn question_rows(frame: &str) -> Vec<String> {
         .collect()
 }
 
+/// The rows of the question box with its borders and their one-cell margins
+/// taken off, and nothing else: each is the frame's inner width, and its
+/// spaces, leading or trailing, are its own.
+fn question_cells(frame: &str) -> Vec<String> {
+    frame
+        .lines()
+        .filter_map(|row| row.split('│').nth(1))
+        .map(|row| {
+            let row = row.strip_prefix(' ').unwrap_or(row);
+            row.strip_suffix(' ').unwrap_or(row).to_owned()
+        })
+        .collect()
+}
+
 #[test]
 fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     use niobe_tui::app::Answer;
@@ -937,15 +951,13 @@ fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
             .any(|row| row.starts_with("2. Always allow Notion·search")),
         "the tool's option does not name it the way the timeline does:\n{frame}"
     );
-    let rule: String = rows
-        .iter()
+    let rule: String = question_cells(&frame)
+        .into_iter()
         .skip_while(|row| !row.starts_with("3. niobe saves"))
-        .take_while(|row| !row.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
+        .take_while(|row| !row.trim().is_empty())
+        .collect();
     assert_eq!(
-        rule,
+        rule.trim_end(),
         format!("3. niobe saves mcp__claude_ai_Notion__notion-search({command})"),
         "the rule the operator would save is not shown whole:\n{frame}"
     );
@@ -964,15 +976,104 @@ fn a_long_request_wraps_inside_the_question() {
     });
     let frame = screen(&mut app, 200, 60);
 
-    let rows = question_rows(&frame);
-    let words = rows
-        .iter()
+    let call: String = question_cells(&frame)
+        .into_iter()
         .take_while(|row| !row.starts_with("▶ 1."))
-        .map(|row| row.matches("word").count())
-        .sum::<usize>();
+        .collect();
+    let words = call.matches("word").count();
     // Forty in the command and forty again in the arguments, none cut off.
     assert_eq!(words, 80, "{frame}");
     assert!(frame.lines().all(|row| text_width(row) <= 200));
+}
+
+/// A session waiting on a `Bash` call whose command means what its spacing
+/// says: an indented Python body, a tab, and a quoted string and a comment
+/// with runs of spaces in them.
+fn session_waiting_on_a_spaced_command() -> App {
+    let mut app = running_session();
+    let command = "python3 -c '\nclass H:\n    def log(self, a): pass\n\tprint(\"a    b\")\n' # three   spaces";
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_spaced".into(),
+        tool: "Bash".to_owned(),
+        input: format!(
+            r#"{{"command":"{}"}}"#,
+            command
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t")
+        ),
+        target: Some(command.to_owned()),
+        agent: None,
+    });
+    app
+}
+
+#[test]
+fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
+    let frame = screen(&mut session_waiting_on_a_spaced_command(), 120, 40);
+    let rows = question_cells(&frame);
+    let from = |first: &str, count: usize| -> Vec<String> {
+        rows.iter()
+            .map(|row| row.trim_end().to_owned())
+            .skip_while(|row| row != first)
+            .take(count)
+            .collect()
+    };
+    let arguments: String = rows
+        .iter()
+        .skip_while(|row| !row.starts_with(r#"{"command""#))
+        .take_while(|row| !row.trim().is_empty())
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        from("python3 -c '", 5),
+        [
+            "python3 -c '",
+            "class H:",
+            "    def log(self, a): pass",
+            "    print(\"a    b\")",
+            "' # three   spaces",
+        ],
+        "{frame}"
+    );
+    assert_eq!(
+        arguments.trim_end(),
+        r#"{"command":"python3 -c '\nclass H:\n    def log(self, a): pass\n\tprint(\"a    b\")\n' # three   spaces"}"#,
+        "the arguments are not drawn as they arrived:\n{frame}"
+    );
+    assert_eq!(
+        from("3. niobe saves Bash(python3 -c '", 5),
+        [
+            "3. niobe saves Bash(python3 -c '",
+            "class H:",
+            "    def log(self, a): pass",
+            "    print(\"a    b\")",
+            "' # three   spaces)",
+        ],
+        "the rule the operator would save is not drawn as it is kept:\n{frame}"
+    );
+    assert_snapshot("asking-spaced-120x40", &frame);
+}
+
+#[test]
+fn a_short_standing_answer_with_a_tab_in_it_is_repeated_as_it_is_kept() {
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_tab".into(),
+        tool: "Bash".to_owned(),
+        input: r#"{"command":"ls\t-l"}"#.to_owned(),
+        target: Some("ls\t-l".to_owned()),
+        agent: None,
+    });
+    let frame = screen(&mut app, 120, 30);
+    let rows = question_cells(&frame);
+
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end() == "3. niobe saves Bash(ls  -l)"),
+        "the rule is drawn only on its row, its tab a single space:\n{frame}"
+    );
 }
 
 fn text_width(row: &str) -> usize {

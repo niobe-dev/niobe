@@ -8,7 +8,7 @@
 ┃   │ echo step 2 && \                                                     │░░ ┃
 ┃   │ echo step 3 && \                                                     │░░ ┃
 ┃   │ echo step 4 && \                                                     │░░ ┃
-┃   │ … 139 more lines · Ctrl+T shows the whole call                       │░░ ┃
+┃   │ … 138 more lines · Ctrl+T shows the whole call                       │░░ ┃
 ┃   │                                                                      │░░ ┃
 ┃   │ ▶ 1. Allow once                                       this call only │░░ ┃
 ┃   │   2. Always allow Bash                              niobe saves Bash │░░ ┃

@@ -2394,12 +2394,12 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
         Span::styled(tool_label(&ask.tool), plain.bold()),
     ]);
     let mut call = Vec::new();
-    for wrapped in text::wrap(ask.target.as_deref().unwrap_or(&ask.input), inner) {
+    for wrapped in text::wrap_exact(ask.target.as_deref().unwrap_or(&ask.input), inner) {
         call.push(Line::from(wrapped).style(plain.bold()));
     }
     if ask.target.is_some() {
         call.push(Line::from(""));
-        for wrapped in text::wrap(&ask.input, inner) {
+        for wrapped in text::wrap_exact(&ask.input, inner) {
             call.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
         }
     }
@@ -2422,7 +2422,7 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
     if !cut.is_empty() {
         consequences.push(Line::from(""));
         for (number, hint) in cut {
-            for wrapped in text::wrap(&format!("{number}. {hint}"), inner) {
+            for wrapped in text::wrap_exact(&format!("{number}. {hint}"), inner) {
                 consequences.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
             }
         }
@@ -2498,7 +2498,10 @@ fn option_row(
     let rest = width.saturating_sub(text::width(&lead));
     let label = text::truncate(&label, rest);
     let hint_room = rest.saturating_sub(text::width(&label) + 2);
-    let whole = text::width(&hint) <= hint_room;
+    // A hint holding a tab or a line break is drawn on its row with each
+    // turned into a space or a `↵`, which is not the rule as it is kept, so
+    // it counts as cut however short it is.
+    let whole = text::width(&hint) <= hint_room && !hint.contains(['\t', '\n', '\r']);
     let hint = text::truncate(&hint, hint_room);
     let gap = rest.saturating_sub(text::width(&label) + text::width(&hint));
 
