@@ -16,6 +16,14 @@
 //! * `Bash(cargo *)` — that tool, called on a target starting `cargo `,
 //!   where what follows neither starts another command (`;`, `&&`, `|`, a
 //!   redirection, a substitution) nor climbs above the prefix with `..`.
+//! * `Edit(/repo/src/*)`, `Bash(cat src/*)` — a star inside a word finishes
+//!   that one word and nothing else: a name of plain characters, with no
+//!   space before a second argument and nothing a shell would expand, and one
+//!   that, read with the part of the name before the star, stays under the
+//!   prefix — `Edit(/repo/.*)` covers `/repo/.env` but not `/repo/../x`.
+//!
+//! Paths are read as written, never resolved on disk: a link under the prefix
+//! that points elsewhere, `/repo/src/link -> /`, takes a covered path with it.
 //!
 //! A target that itself ends in `*` — `rm -rf build/*` — is written with the
 //! star escaped, `Bash(rm -rf build/\*)`, so that it reads back as that
@@ -167,7 +175,10 @@ impl Rule {
     /// A `*` covers what follows the prefix only where that is more of the
     /// same call: `Bash(cargo *)` covers `cargo test --workspace` but not
     /// `cargo test && rm -rf ~`, and `Edit(/repo/src/*)` does not cover
-    /// `/repo/src/../../etc/passwd`.
+    /// `/repo/src/../../etc/passwd`. A star inside a word stands for the rest
+    /// of that word alone, so `Bash(cat src/*)` does not cover
+    /// `cat src/x ../secret`. The check reads the text, not the filesystem, so
+    /// a symbolic link under the prefix leads wherever it points.
     pub fn covers(&self, tool: &str, target: Option<&str>) -> bool {
         if self.tool != tool {
             return false;
@@ -178,7 +189,7 @@ impl Rule {
             (Some(Target::Exact(allowed)), Some(target)) => allowed == target,
             (Some(Target::Prefix(prefix)), Some(target)) => target
                 .strip_prefix(prefix.as_str())
-                .is_some_and(star_stands_for),
+                .is_some_and(|rest| star_stands_for(prefix, rest)),
         }
     }
 
@@ -204,7 +215,7 @@ impl Rule {
             (Some(Target::Exact(_)), Some(Target::Prefix(_))) => false,
             (Some(Target::Prefix(outer)), Some(Target::Prefix(inner))) => inner
                 .strip_prefix(outer.as_str())
-                .is_some_and(star_stands_for),
+                .is_some_and(|rest| star_stands_for(outer, rest)),
         }
     }
 }
@@ -214,20 +225,60 @@ impl Rule {
 /// redirection, and both forms of substitution.
 const COMMAND_BREAKS: [&str; 9] = [";", "&", "|", "\n", "\r", ">", "<", "`", "$("];
 
-/// Whether `rest`, the part of a target a `*` matched, is something the star
-/// can stand for.
+/// Characters other than letters and digits that a star inside a word may
+/// stand for. Every one is literal to a shell in the middle of a word; a
+/// space, a quote, a backslash, a `$`, a `~`, a brace or a glob is not, and
+/// could turn the word into a second argument or into a `..` the text did not
+/// show.
+const PLAIN_IN_A_WORD: [char; 10] = ['/', '.', '_', '-', '+', ',', '@', '=', ':', '%'];
+
+/// Whether `rest`, the part of a target the `*` of `prefix` matched, is
+/// something the star can stand for.
 ///
 /// A rule is matched before the backend's own checks could apply, so this is
 /// the only thing between the rule and the call. The star stands for more of
 /// what the operator wrote, never for a way out of it: not for a second
-/// command chained after the first, and not for a path that climbs back above
-/// the prefix. Neither test knows which tools run shell commands and which
-/// take paths — a rule names a tool the backend chose — so both apply to every
-/// rule. A call they refuse is asked about rather than denied, which is why
-/// erring this way is safe: a URL with a `&` in its query is asked about, a
-/// command that deletes the home directory is not let through.
-fn star_stands_for(rest: &str) -> bool {
-    !COMMAND_BREAKS.iter().any(|stop| rest.contains(stop)) && !climbs_out(rest)
+/// command chained after the first, not for a path that climbs back above
+/// the prefix, and, where the star sits inside a word, not for anything past
+/// that word. None of these tests knows which tools run shell commands and
+/// which take paths — a rule names a tool the backend chose — so all apply to
+/// every rule. A call they refuse is asked about rather than denied, which is
+/// why erring this way is safe: a URL with a `&` in its query is asked about,
+/// a command that deletes the home directory is not let through.
+fn star_stands_for(prefix: &str, rest: &str) -> bool {
+    if COMMAND_BREAKS.iter().any(|stop| rest.contains(stop)) {
+        return false;
+    }
+    let word = prefix
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default();
+    match word.is_empty() {
+        true => !climbs_out(rest),
+        false => finishes_word(word, rest),
+    }
+}
+
+/// Whether `rest` finishes `word`, the last word of a prefix, as one name
+/// that stays under the prefix.
+///
+/// Where the word ends part-way into a name — `/repo/.` — that part and the
+/// start of `rest` are one name, so `./etc` after it is the `..` it reads as,
+/// and what follows that name may not climb back out of it.
+fn finishes_word(word: &str, rest: &str) -> bool {
+    if !rest
+        .chars()
+        .all(|c| c.is_alphanumeric() || PLAIN_IN_A_WORD.contains(&c))
+    {
+        return false;
+    }
+    let started = word.rsplit('/').next().unwrap_or_default();
+    if started.is_empty() {
+        return !climbs_out(rest);
+    }
+    let (end, after) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let name = format!("{started}{end}");
+    !matches!(name.as_str(), "." | "..") && !climbs_out(after)
 }
 
 /// Whether a path, read lexically from where the prefix left it, goes above
@@ -461,6 +512,66 @@ mod tests {
 
         let rule = Rule::parse("Edit(/repo/src*)").expect("the rule is valid");
         assert!(!rule.covers("Edit", Some("/repo/src/../secrets")));
+    }
+
+    #[test]
+    fn a_star_inside_a_word_does_not_cover_a_second_argument() {
+        let rule = Rule::parse("Bash(cat src/*)").expect("the rule is valid");
+
+        assert!(!rule.covers("Bash", Some("cat src/x ../secret")));
+        assert!(!rule.covers("Bash", Some("cat src/x /etc/passwd")));
+        assert!(!rule.covers("Bash", Some("cat src/x ~/.ssh/id_rsa")));
+        assert!(!rule.covers("Bash", Some("cat src/x\t/etc/passwd")));
+        assert!(rule.covers("Bash", Some("cat src/lib.rs")));
+        assert!(rule.covers("Bash", Some("cat src/a/b-c_d.rs")));
+
+        let rule = Rule::parse("Edit(/repo/src/*)").expect("the rule is valid");
+        assert!(!rule.covers("Edit", Some("/repo/src/my notes.txt")));
+    }
+
+    #[test]
+    fn a_star_inside_a_word_does_not_cover_what_a_shell_would_rewrite_into_a_climb() {
+        let rule = Rule::parse("Bash(cat src/*)").expect("the rule is valid");
+
+        assert!(!rule.covers("Bash", Some("cat src/{a,..}/../x")));
+        assert!(!rule.covers("Bash", Some("cat src/.''./x")));
+        assert!(!rule.covers("Bash", Some("cat src/.\"\"./x")));
+        assert!(!rule.covers("Bash", Some(r"cat src/.\./x")));
+        assert!(!rule.covers("Bash", Some("cat src/.?/x")));
+        assert!(!rule.covers("Bash", Some("cat src/.*/x")));
+        assert!(!rule.covers("Bash", Some("cat src/[.][.]/x")));
+        assert!(!rule.covers("Bash", Some("cat src/$UP/x")));
+    }
+
+    #[test]
+    fn a_star_after_part_of_a_name_does_not_join_it_into_a_climb() {
+        let rule = Rule::parse("Edit(/repo/.*)").expect("the rule is valid");
+
+        assert!(!rule.covers("Edit", Some("/repo/../etc/passwd")));
+        assert!(!rule.covers("Edit", Some("/repo/./etc/passwd")));
+        assert!(rule.covers("Edit", Some("/repo/.env")));
+        assert!(rule.covers("Edit", Some("/repo/.git/config")));
+
+        let rule = Rule::parse("Edit(/repo/src/.*)").expect("the rule is valid");
+        assert!(!rule.covers("Edit", Some("/repo/src/../x")));
+        assert!(rule.covers("Edit", Some("/repo/src/.env")));
+
+        let rule = Rule::parse("Edit(/repo/src*)").expect("the rule is valid");
+        assert!(!rule.covers("Edit", Some("/repo/srcx/../secrets")));
+        assert!(rule.covers("Edit", Some("/repo/srcx/a/../b.rs")));
+
+        let rule = Rule::parse("Bash(cat .*)").expect("the rule is valid");
+        assert!(!rule.covers("Bash", Some("cat ../secret")));
+        assert!(rule.covers("Bash", Some("cat .env")));
+    }
+
+    #[test]
+    fn a_prefix_inside_a_word_includes_only_rules_that_stay_in_that_word() {
+        let outer = Rule::parse("Bash(cat src/*)").expect("the rule is valid");
+
+        assert!(outer.includes(&Rule::parse("Bash(cat src/a/*)").expect("valid")));
+        assert!(!outer.includes(&Rule::parse("Bash(cat src/a *)").expect("valid")));
+        assert!(!outer.includes(&Rule::parse("Bash(cat src/x ../*)").expect("valid")));
     }
 
     #[test]

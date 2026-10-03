@@ -1294,8 +1294,11 @@ PERMISSIONS:
     only you write one: Niobe stores the target as it stood, never a guess at
     what else you meant. The * never covers a second command chained after
     the first (;, &&, |, a redirection or a substitution) or a path that climbs
-    above the prefix with ..; such a call is asked about. The user's config and
-    the repository's both apply; a rule in either allows the call.
+    above the prefix with ..; a * inside a word, as in Bash(cat src/*), finishes
+    that word and covers no argument after it. Such a call is asked about.
+    Paths are read as written: a link under the prefix leads where it points.
+    The user's config and the repository's both apply; a rule in either allows
+    the call.
 
 BACKENDS:
     A claude profile drives the official `claude` CLI as a subprocess, with the
