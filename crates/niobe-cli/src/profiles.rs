@@ -148,7 +148,9 @@ fn status_details(
         rows.push(detail_row("not in force", listed(withheld), name_width));
         rows.push(detail_row(
             "not trusted",
-            "`niobe trust` reads that file as it stands and puts them in force".to_owned(),
+            "`niobe trust` shows what that file sets, values included, and asks before it \
+             puts them in force"
+                .to_owned(),
             name_width,
         ));
     }
@@ -160,7 +162,9 @@ fn status_details(
         ));
         rows.push(detail_row(
             "not trusted",
-            "`niobe trust` reads that file as it stands and puts its profile in force".to_owned(),
+            "`niobe trust` shows what that file sets, values included, and asks before it \
+             puts its profile in force"
+                .to_owned(),
             name_width,
         ));
     }
@@ -334,8 +338,8 @@ auth_refresh = "aws sso login"
                 "  personal  claude   /r/.niobe/config.toml",
                 "  work      claude   /r/.niobe/config.toml",
                 "            not in force env (AWS_PROFILE, SECRET_TOKEN), args, auth_refresh",
-                "            not trusted  `niobe trust` reads that file as it stands and puts \
-                 them in force",
+                "            not trusted  `niobe trust` shows what that file sets, values included, \
+                 and asks before it puts them in force",
             ]
         );
         let listing = table(&config, None, None).join("\n");

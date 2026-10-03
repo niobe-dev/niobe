@@ -63,7 +63,7 @@ use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2234,6 +2234,55 @@ fn quitting_from_the_trust_question_starts_nothing() {
         "the backend was started though the operator quit from the question"
     );
     assert!(!home.path().join("niobe").join("trusted.list").exists());
+}
+
+/// Runs `niobe trust` on a terminal in a repository whose config nobody
+/// trusted, waits for it to ask, and answers with `keys`.
+fn answering_niobe_trust(keys: &[u8]) -> (tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, _home) = repo_with_an_untrusted_config();
+    let (terminal, slave) = Terminal::open();
+    let mut command = shell_command(&slave, repo.path());
+    let shell = Reaped(command.arg("trust").spawn().expect("the niobe binary runs"));
+    terminal.shows("permissions  allow Bash(cargo test)");
+    terminal.shows("trust it? [y/N]");
+    terminal.typed(keys);
+    (repo, terminal, slave, shell)
+}
+
+/// The record `niobe trust` keeps for the repository in `repo`, under the
+/// user config directory [`shell_command`] names.
+fn trust_record(repo: &Path) -> PathBuf {
+    repo.join("no-user-config-here")
+        .join("niobe")
+        .join("trusted.list")
+}
+
+#[test]
+fn niobe_trust_on_a_terminal_shows_what_it_would_trust_and_records_it_on_yes() {
+    let (repo, terminal, slave, mut shell) = answering_niobe_trust(b"y\r");
+
+    let (_, status) = ended(&mut shell);
+    terminal.shows("trusted /");
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "niobe trust ended with {status}: {drawn}");
+    let record = written(&trust_record(repo.path()));
+    assert!(record.contains(".niobe/config.toml"), "{record}");
+}
+
+#[test]
+fn niobe_trust_on_a_terminal_records_nothing_unless_the_answer_is_yes() {
+    let (repo, terminal, slave, mut shell) = answering_niobe_trust(b"\r");
+
+    let (_, status) = ended(&mut shell);
+    terminal.shows("nothing was recorded");
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "niobe trust ended with {status}: {drawn}");
+    assert!(
+        !trust_record(repo.path()).exists(),
+        "declining recorded the file as trusted"
+    );
 }
 
 /// Puts `script` in `cwd` as the `claude` a session runs, and gives back a

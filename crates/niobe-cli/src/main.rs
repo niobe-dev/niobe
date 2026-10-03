@@ -167,7 +167,7 @@ fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(
         Command::Shell | Command::Resume(_) => Ok(()),
         Command::Sessions => list_sessions(),
         Command::Profiles => list_profiles(profile),
-        Command::Trust => trust(),
+        Command::Trust { yes } => trust(yes),
         Command::Untrust => untrust(),
         Command::Prices(model) => list_prices(model.as_deref()),
         Command::Replay(log) => replay(&log, asked),
@@ -688,7 +688,7 @@ fn list_sessions() -> Result<(), String> {
 /// explanation on screen.
 const UNTRUSTED: &str = "\
 Opened without what it sets that needs your trust. The next session asks \
-again; `niobe trust` trusts it from the command line.";
+again, and `niobe trust` shows what it sets, values included, and asks too.";
 
 /// The shell with a price sheet, so that a turn the backend has not priced yet
 /// shows what it is costing rather than nothing.
@@ -803,14 +803,30 @@ fn consented(root: &Path, asked: &Asked) -> Result<Option<config::Loaded>, Strin
     Ok(Some(loaded))
 }
 
-/// Records this repository's config as one the operator has read, so that the
+/// Shows what this repository's config would put in force, values included,
+/// and records it as one the operator has read once they agree, so that the
 /// `env`, `args`, `settings`, `auth_refresh` and `billing` of the profiles it
 /// defines take effect, along with its `default_profile`, its `[permissions]`
 /// rules and the profiles it defines under names the user's config already
 /// uses.
-fn trust() -> Result<(), String> {
+///
+/// `yes` is the operator agreeing on the command line. Without it they are
+/// asked on the terminal, and where standard input is not one nothing is
+/// recorded: a trust nobody was shown the values of is the one the question
+/// in the shell exists to prevent. What is recorded is the text the listing
+/// was made from, so a file changed while the question waited is not trusted
+/// unread.
+fn trust(yes: bool) -> Result<(), String> {
     let (path, text) = repo_config()?;
-    consent::record(&path, &text)?;
+    let untrusted = config::as_written(&path, text)?;
+    for line in consent::listing(&untrusted) {
+        say!("{line}");
+    }
+    if !yes && !agreed(&path)? {
+        say!("{} is not trusted; nothing was recorded", path.display());
+        return Ok(());
+    }
+    consent::record(&untrusted.path, &untrusted.text)?;
 
     say!("trusted {}", path.display());
     say!(
@@ -819,6 +835,29 @@ fn trust() -> Result<(), String> {
          permissions; `niobe profiles` lists them, and editing the file asks again"
     );
     Ok(())
+}
+
+/// Whether the operator, asked on the terminal whether to trust the config at
+/// `path`, answered yes. Anything but a yes, the end of input included, is a
+/// no.
+fn agreed(path: &Path) -> Result<bool, String> {
+    if !io::stdin().is_terminal() {
+        return Err(format!(
+            "{} is not trusted: there is no terminal to ask on; read what it puts in force \
+             above, and `niobe trust --yes` trusts it as it stands",
+            path.display()
+        ));
+    }
+    print!("trust it? [y/N] ");
+    io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| format!("no answer was read: {e}"))?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// Takes that back. The file stays where it is; what it may start a backend
@@ -1032,7 +1071,8 @@ USAGE:
     niobe --resume <id>    Open the shell on an earlier session and continue it
     niobe sessions         List the sessions this repository can carry on
     niobe profiles         List the profiles the config defines, the selected one marked
-    niobe trust            Let this repository's config start a backend with what it names
+    niobe trust [--yes]    Show what this repository's config sets and let it start a
+                           backend with that, once you agree
     niobe untrust          Take that back
     niobe prices [model]   List the prices in force today, or every price a model has had
     niobe replay <file>    Fold a JSON Lines event log into the shell (development)
@@ -1117,6 +1157,11 @@ TRUST:
 
         niobe trust        this repository's config, as it now stands
         niobe untrust      take it back
+
+    niobe trust prints what trusting the file would put in force, values
+    included, and asks; only a yes records it. Where standard input is not a
+    terminal there is no one to ask, and it records nothing unless --yes says
+    you have read what it prints.
 
     The user's own config is never gated; it is the file you write. What was
     trusted is recorded as the config's SHA-256 in
@@ -1397,7 +1442,11 @@ mod tests {
             .expect("the shell opens on the notice");
         assert_eq!(entry.kind, niobe_tui::app::EntryKind::Notice);
         assert_eq!(entry.meta, path.display().to_string());
-        assert!(entry.body.contains("niobe trust"), "{}", entry.body);
+        assert!(
+            entry.body.contains("`niobe trust` shows what it sets"),
+            "{}",
+            entry.body
+        );
         assert!(entry.body.contains("asks again"), "{}", entry.body);
         // Short enough to read at a glance: the question that came before it
         // already said what the file sets.

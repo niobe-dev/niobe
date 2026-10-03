@@ -153,12 +153,7 @@ fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
     let repo = repo::config_path(root);
     let searched: Vec<PathBuf> = user.iter().cloned().chain([repo.clone()]).collect();
 
-    let mut config = match &user {
-        Some(user) => Config::read(user)
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default(),
-        None => Config::default(),
-    };
+    let mut config = user_config(user.as_deref())?;
     let mut untrusted = None;
     repo::inside(root, &repo)?;
     if let Some(layer) = repository(&repo)? {
@@ -168,13 +163,7 @@ fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
         if layer.gated && (layer.needs_trust || config.replaces(&layer.config)) {
             untrusted = Some(Untrusted {
                 path: repo.clone(),
-                replaces: layer
-                    .whole
-                    .profiles()
-                    .keys()
-                    .filter(|name| config.profiles().contains_key(*name))
-                    .cloned()
-                    .collect(),
+                replaces: replaced(&config, &layer.whole),
                 text: layer.text,
                 config: layer.whole,
             });
@@ -187,6 +176,51 @@ fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
         searched,
         untrusted,
     })
+}
+
+/// The repository's config at `path`, holding `text`, read whole whether or
+/// not it has been trusted, with the user's profiles it would replace: what
+/// `niobe trust` shows before it records anything.
+///
+/// A file that is not a config says nothing the operator could read and agree
+/// to, so it is refused as one that is not trusted.
+pub fn as_written(path: &Path, text: String) -> Result<Untrusted, String> {
+    let config = Config::parse(&text, path)
+        .map_err(|error| format!("{} is not trusted: {error}", path.display()))?;
+    let user = user_config(
+        user_path(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        )
+        .as_deref(),
+    )?;
+    Ok(Untrusted {
+        path: path.to_owned(),
+        replaces: replaced(&user, &config),
+        text,
+        config,
+    })
+}
+
+/// The user's config at `user`, or none where there is no such file or
+/// nowhere it could be.
+fn user_config(user: Option<&Path>) -> Result<Config, String> {
+    match user {
+        Some(user) => Ok(Config::read(user)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default()),
+        None => Ok(Config::default()),
+    }
+}
+
+/// The profiles of `user` that `repository`, read whole, defines too.
+fn replaced(user: &Config, repository: &Config) -> Vec<String> {
+    repository
+        .profiles()
+        .keys()
+        .filter(|name| user.profiles().contains_key(*name))
+        .cloned()
+        .collect()
 }
 
 /// One config file, as it applies.

@@ -1367,7 +1367,12 @@ mod tests {
             .iter()
             .find(|entry| entry.head == "not kept" && entry.meta == "Bash")
             .expect("the notice names the rule that waits");
-        assert!(entry.body.contains("niobe trust"), "{entry:?}");
+        assert!(
+            entry
+                .body
+                .contains("`niobe trust` shows what the file sets"),
+            "{entry:?}"
+        );
         assert!(app.allowed().allows("Bash", Some("anything")));
     }
 

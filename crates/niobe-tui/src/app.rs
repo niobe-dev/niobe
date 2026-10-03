@@ -2512,8 +2512,8 @@ impl App {
             head: "not kept".to_owned(),
             meta: rule.to_string(),
             body: "The rule holds for this session. The repository's config it is kept in is \
-                   not trusted, so the next session does not use it until you run \
-                   `niobe trust`."
+                   not trusted, so the next session does not use it until you trust it: the \
+                   next session asks, and `niobe trust` shows what the file sets and asks too."
                 .to_owned(),
             streaming: false,
             at: self.at,

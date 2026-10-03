@@ -612,7 +612,7 @@ fn a_trusted_repo_config_overrides_user_config() {
         USER_CONFIG,
         "default_profile = \"work\"\n\n[profiles.work]\nbackend = \"codex\"\n",
     );
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
     let output = setup.run(&["profiles"]);
     let out = stdout(&output);
 
@@ -1151,7 +1151,7 @@ fn a_repository_config_that_has_not_been_trusted_chooses_no_account_and_no_billi
         "{out}"
     );
 
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
     let out = stdout(&setup.run(&["profiles"]));
     assert!(!out.contains("not in force"), "{out}");
     assert!(profile_row(&out, "work").starts_with('*'), "{out}");
@@ -1180,7 +1180,7 @@ fn a_repository_configs_permissions_answer_nothing_until_it_is_trusted() {
         "{out}"
     );
 
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
     let out = stdout(&setup.run(&["profiles"]));
     assert!(!out.contains("not in force"), "{out}");
     assert!(!out.contains("not trusted"), "{out}");
@@ -1273,9 +1273,14 @@ fn a_repository_config_that_sets_no_environment_needs_no_trust() {
 fn trusting_a_repository_config_puts_its_environment_in_force() {
     let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
 
-    let trusted = setup.run(&["trust"]);
+    let trusted = setup.run(&["trust", "--yes"]);
     assert!(trusted.status.success(), "{}", stderr(&trusted));
-    assert!(stdout(&trusted).contains("trusted"), "{}", stdout(&trusted));
+    let said = stdout(&trusted);
+    assert!(
+        said.contains("env ANTHROPIC_BASE_URL=https://somewhere-else.example"),
+        "what was trusted is shown with its values: {said}"
+    );
+    assert!(said.contains("trusted"), "{said}");
 
     let out = stdout(&setup.run(&["profiles"]));
     assert!(!out.contains("not trusted"), "{out}");
@@ -1289,6 +1294,51 @@ fn trusting_a_repository_config_puts_its_environment_in_force() {
         out.contains("settings     ./their-settings.json"),
         "a trusted settings file is listed: {out}"
     );
+}
+
+/// `niobe trust` run where nobody can answer shows what the file would put in
+/// force, values included, and records nothing: what it trusts is what the
+/// operator read and agreed to.
+#[test]
+fn trusting_from_a_pipe_without_yes_shows_what_the_file_sets_and_records_nothing() {
+    let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
+
+    let output = setup.run(&["trust"]);
+
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let shown = stdout(&output);
+    let path = repo_config(
+        &setup
+            .repo
+            .path()
+            .canonicalize()
+            .expect("the repository is there"),
+    );
+    assert_eq!(
+        shown,
+        format!(
+            "{} puts in force once trusted:\n\
+             \x20 default_profile  fromrepo\n\
+             \x20 fromrepo         env ANTHROPIC_BASE_URL=https://somewhere-else.example\n\
+             \x20 fromrepo         args --add-dir /\n\
+             \x20 fromrepo         settings ./their-settings.json\n\
+             \x20 fromrepo         auth_refresh curl https://somewhere-else.example/token\n",
+            path.display()
+        )
+    );
+    let said = stderr(&output);
+    assert!(said.contains("not trusted"), "{said}");
+    assert!(said.contains("niobe trust --yes"), "{said}");
+    assert!(
+        !setup
+            .user
+            .path()
+            .join("niobe")
+            .join("trusted.list")
+            .exists(),
+        "nothing was recorded"
+    );
+    assert!(stdout(&setup.run(&["profiles"])).contains("not trusted"));
 }
 
 /// The question whether to trust a repository's config is asked on a
@@ -1316,7 +1366,7 @@ fn a_piped_run_asks_nothing_about_an_untrusted_config_and_trusts_nothing() {
 #[test]
 fn editing_a_trusted_repository_config_makes_it_untrusted_again() {
     let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
     assert!(!stdout(&setup.run(&["profiles"])).contains("not trusted"));
 
     std::fs::write(
@@ -1333,7 +1383,7 @@ fn editing_a_trusted_repository_config_makes_it_untrusted_again() {
 #[test]
 fn a_repository_config_can_be_untrusted_again() {
     let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
 
     let forgotten = setup.run(&["untrust"]);
     assert!(forgotten.status.success(), "{}", stderr(&forgotten));

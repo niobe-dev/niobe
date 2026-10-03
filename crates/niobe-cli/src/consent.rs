@@ -5,10 +5,11 @@
 //! what only a trusted file may, and how the answer is recorded.
 //!
 //! The question shows what trusting the file would put in force, values
-//! included. `niobe profiles` names a variable without its value because a
-//! listing is what gets pasted into an issue; this is the one place the
-//! operator decides whether to let the file start a backend, and
-//! `ANTHROPIC_BASE_URL` is harmless or not by what it is set to.
+//! included, and `niobe trust` prints the same rows before it asks.
+//! `niobe profiles` names a variable without its value because a listing is
+//! what gets pasted into an issue; these two are where the operator decides
+//! whether to let the file start a backend, and `ANTHROPIC_BASE_URL` is
+//! harmless or not by what it is set to.
 
 use std::path::{Path, PathBuf};
 
@@ -73,6 +74,29 @@ fn grants(config: &Config, replaces: &[String]) -> Vec<(String, String)> {
         }
     }
     rows
+}
+
+/// What `niobe trust` prints before it asks: the file, and the same rows the
+/// question in the shell shows, values included, one line each under it.
+pub fn listing(untrusted: &Untrusted) -> Vec<String> {
+    let path = untrusted.path.display();
+    let rows = grants(&untrusted.config, &untrusted.replaces);
+    if rows.is_empty() {
+        return vec![format!(
+            "{path} sets nothing that takes effect only once it is trusted"
+        )];
+    }
+    let width = rows
+        .iter()
+        .map(|(name, _)| name.chars().count())
+        .max()
+        .unwrap_or(0);
+    std::iter::once(format!("{path} puts in force once trusted:"))
+        .chain(
+            rows.iter()
+                .map(|(name, value)| format!("  {name:<width$}  {value}")),
+        )
+        .collect()
 }
 
 fn row(name: &str, value: String) -> (String, String) {
@@ -176,6 +200,42 @@ backend = "claude"
                 .all(|(_, value)| !value.contains("opus\"")),
             "{:?}",
             question.grants
+        );
+    }
+
+    #[test]
+    fn the_listing_shows_the_questions_rows_under_the_file_aligned() {
+        assert_eq!(
+            listing(&untrusted(&["max"])),
+            [
+                "/r/.niobe/config.toml puts in force once trusted:",
+                "  permissions      allow Edit, Bash(cargo test)",
+                "  default_profile  work",
+                "  max              replaces your profile of this name",
+                "  work             env ANTHROPIC_BASE_URL=https://proxy.example, \
+                 AWS_PROFILE=work-sso",
+                "  work             args --model opus",
+                "  work             settings ./claude.json",
+                "  work             auth_refresh aws sso login",
+                "  work             billing metered",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_that_sets_nothing_gated_is_listed_as_setting_nothing() {
+        let path = PathBuf::from("/r/.niobe/config.toml");
+        let plain = "[profiles.plain]\nbackend = \"codex\"\n";
+        let untrusted = Untrusted {
+            config: Config::parse(plain, &path).expect("the config is valid"),
+            text: plain.to_owned(),
+            path,
+            replaces: Vec::new(),
+        };
+
+        assert_eq!(
+            listing(&untrusted),
+            ["/r/.niobe/config.toml sets nothing that takes effect only once it is trusted"]
         );
     }
 

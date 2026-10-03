@@ -24,9 +24,16 @@ pub enum Command {
     Sessions,
     /// List the profiles the config defines, marking the selected one.
     Profiles,
-    /// Record this repository's config as one whose profiles may start a
-    /// backend with the environment, arguments and refresh command they name.
-    Trust,
+    /// Show what this repository's config would put in force, values
+    /// included, and record it as one whose profiles may start a backend with
+    /// the environment, arguments and refresh command they name once the
+    /// operator agrees.
+    Trust {
+        /// `--yes` was given: the operator agrees without being asked, as a
+        /// script that has read the file does. Without it the operator is
+        /// asked on the terminal, and where there is none nothing is recorded.
+        yes: bool,
+    },
     /// Take that back, for this repository's config.
     Untrust,
     /// List the prices in force today, or every price one model has had.
@@ -208,9 +215,13 @@ fn command(args: &[&str]) -> Result<Command, String> {
             no_more(rest)?;
             Command::Profiles
         }
+        ["trust", "--yes", rest @ ..] => {
+            no_more(rest)?;
+            Command::Trust { yes: true }
+        }
         ["trust", rest @ ..] => {
             no_more(rest)?;
-            Command::Trust
+            Command::Trust { yes: false }
         }
         ["untrust", rest @ ..] => {
             no_more(rest)?;
@@ -348,7 +359,7 @@ mod tests {
 
     #[test]
     fn trust_and_untrust_name_this_repositorys_config_and_nothing_else() {
-        assert_eq!(parsed(&["trust"]), Ok(Command::Trust));
+        assert_eq!(parsed(&["trust"]), Ok(Command::Trust { yes: false }));
         assert_eq!(parsed(&["untrust"]), Ok(Command::Untrust));
         assert_eq!(
             parsed(&["trust", "/elsewhere/.niobe/config.toml"]),
@@ -363,6 +374,22 @@ mod tests {
             let error = invocation(args).expect_err("does not apply");
             assert!(error.contains("applies to"), "{args:?}: {error}");
         }
+    }
+
+    #[test]
+    fn trust_agrees_without_asking_only_where_yes_is_given() {
+        assert_eq!(
+            parsed(&["trust", "--yes"]),
+            Ok(Command::Trust { yes: true })
+        );
+        assert_eq!(
+            parsed(&["trust", "-y"]),
+            Err("unexpected argument `-y`".to_owned())
+        );
+        assert_eq!(
+            parsed(&["untrust", "--yes"]),
+            Err("unexpected argument `--yes`".to_owned())
+        );
     }
 
     #[test]
