@@ -219,13 +219,13 @@ impl niobe_tui::Prices for ATenthOfACentPerThousand {
 /// reads `unpriced`; with one it reads the estimate, marked as one.
 #[test]
 fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
-    let without = screen(&mut running_session(), 120, 40);
+    let without = screen(&mut metered_session(), 120, 40);
     assert!(
         without.contains("≥$0.04"),
         "with nothing to value the rest, the figure is a floor:\n{without}"
     );
 
-    let mut priced = running_session().with_prices(Box::new(ATenthOfACentPerThousand));
+    let mut priced = metered_session().with_prices(Box::new(ATenthOfACentPerThousand));
     let totals = priced.session().totals().clone();
     let owed: u64 = totals
         .unsettled
@@ -235,9 +235,9 @@ fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
     let expected = totals.reported_cost_usd + owed as f64 / 1_000.0 * 0.001;
 
     let frame = screen(&mut priced, 120, 40);
-    // 27,220 tokens owed for, at a tenth of a cent per thousand, is $0.02722
-    // on top of the $0.04 the recording reported: $0.06722, to the cent.
-    assert_eq!(owed, 27_220);
+    // 30,420 tokens owed for, at a tenth of a cent per thousand, is $0.03042
+    // on top of the $0.04 the recording reported: $0.07042, to the cent.
+    assert_eq!(owed, 30_420);
     assert_eq!(
         format!("~${expected:.2}"),
         "~$0.07",
@@ -1295,17 +1295,13 @@ fn the_trust_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the
 
 #[test]
 fn a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it() {
-    let mut app = running_session().with_budget(0.50);
+    let mut app = metered_session().with_budget(0.50);
 
     let frame = screen(&mut app, 120, 30);
 
-    // The fixture reports $0.04 of cost and one record without any, on a
-    // plan, so the figure beside the budget is the floor of what the work
-    // would have cost on the API, and is labelled both ways.
-    assert!(
-        frame.contains("API-equivalent budget ≥$0.04/$0.50"),
-        "{frame}"
-    );
+    // The fixture reports $0.04 of cost and one record without any, so the
+    // figure beside the budget is the floor of what was spent.
+    assert!(frame.contains("budget ≥$0.04/$0.50"), "{frame}");
     assert!(
         !screen(&mut running_session(), 120, 30).contains("budget"),
         "a session with no budget was given one"
@@ -1465,7 +1461,6 @@ fn billed_turn(billing: niobe_core::Billing, worked_seconds: u64, cost_usd: Opti
         reasoning: 0,
         model: "opus-5".to_owned(),
         cost_usd,
-        cost_basis: cost_usd.map(|_| niobe_core::event::CostBasis::Measured),
         settles_model: false,
         fast: false,
     });
@@ -1527,7 +1522,6 @@ fn a_session_with_no_measured_time_shows_no_rate() {
 fn a_plan_shows_no_spend_rate() {
     let mut app = billed_turn(niobe_core::Billing::Plan, 1_800, Some(0.50));
     let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("API-equiv $0.50"), "{frame}");
     assert!(!frame.contains("/h"), "{frame}");
 }
 
@@ -1542,20 +1536,17 @@ fn a_metered_profiles_budget_stands_under_its_cost() {
     assert!(session < budget && budget < model, "{frame}");
 }
 
-/// On a plan no money moves with the work, so what the CLI prices it at is
-/// what the same work would have cost on the API: shown, labelled so, dimmed,
-/// and never as the session's cost.
+/// On a plan no money moves with the work, and what limits it is the
+/// plan's windows: the figure the CLI prices it at is what the same work
+/// would have cost on the API, which nobody pays, so no dollar figure is
+/// drawn at all — in the pane, the transcript or a turn's rule.
 #[test]
-fn a_plan_shows_what_the_work_would_have_cost_as_api_equivalent_and_dim() {
+fn a_plan_shows_no_dollar_figure() {
     let mut app = running_session();
     let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("API-equiv ≥$0.04"), "{frame}");
+    assert!(!frame.contains('$'), "{frame}");
+    assert!(!frame.contains("API-eq"), "{frame}");
     assert!(!frame.contains("session "), "{frame}");
-    let dim = app.theme().dim;
-    assert_eq!(
-        style_at(&mut app, 120, 30, "≥$0.04").and_then(|style| style.fg),
-        Some(dim)
-    );
 }
 
 /// A session whose billing nothing has said and the profile does not set
@@ -1632,7 +1623,6 @@ fn session_on_three_models() -> App {
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: Some(0.01),
-            cost_basis: None,
             settles_model: false,
             fast: false,
         }));
@@ -1959,7 +1949,7 @@ fn usage_pane(frame: &str) -> Vec<String> {
 fn nothing_the_backends_did_not_report_appears_as_a_number() {
     // Two usage records, one of them without a cost: the pane must show the sum
     // as a floor rather than as the session's bill.
-    let floor = usage_pane(&screen(&mut running_session(), 120, 30)).join("\n");
+    let floor = usage_pane(&screen(&mut metered_session(), 120, 30)).join("\n");
     assert!(floor.contains("≥$0.04"), "{floor}");
 
     // A metered session with a budget, whose only record carries no cost:
@@ -1977,7 +1967,6 @@ fn nothing_the_backends_did_not_report_appears_as_a_number() {
         reasoning: 0,
         model: "opus-5".to_owned(),
         cost_usd: None,
-        cost_basis: None,
         settles_model: false,
         fast: false,
     }));

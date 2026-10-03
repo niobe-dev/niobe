@@ -224,6 +224,29 @@ fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String>
     })
 }
 
+/// Refuses a `--budget` for a session on a profile billed as a plan.
+///
+/// A budget is counted in dollars, and a plan has none to count: no money
+/// moves with the work, and what stops a plan user is the plan's usage
+/// windows, which the shell shows. Refused before anything starts, so the
+/// operator learns it from the command they typed rather than from a session
+/// that runs against a figure it does not show. A profile that leaves its
+/// billing to the backend is not refused: nothing yet says which it is.
+fn budget_fits(asked: &Asked, selected: Option<&niobe_config::Selected<'_>>) -> Result<(), String> {
+    let Some(selected) = selected.filter(|_| asked.budget.is_some()) else {
+        return Ok(());
+    };
+    match selected.profile.billing() {
+        Some(niobe_core::Billing::Plan) => Err(format!(
+            "--budget is counted in money, and profile `{}` is billed as a plan, which is \
+             limited by its usage windows, not by money; the Usage pane shows how much of \
+             each is left",
+            selected.name
+        )),
+        Some(niobe_core::Billing::Metered) | None => Ok(()),
+    }
+}
+
 /// Opens the shell on a new session, recorded into this repository's store.
 ///
 /// Without a terminal there is nothing to draw into and raw mode would fail, so
@@ -236,6 +259,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         return Ok(None);
     };
     let selected = loaded.select(profile)?;
+    budget_fits(asked, selected.as_ref())?;
     let app = say_untrusted(
         say_prices(
             App::new(repo::describe(&root))
@@ -379,6 +403,7 @@ fn resume(
         return Ok(None);
     };
     let selected = loaded.select(profile)?;
+    budget_fits(asked, selected.as_ref())?;
     let mut app = say_untrusted(
         say_prices(
             App::new(repo::describe(&root))
@@ -511,6 +536,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         return Ok(None);
     };
     let selected = loaded.select(profile)?;
+    budget_fits(asked, selected.as_ref())?;
     let theme = chosen_theme(asked, &loaded)?;
 
     let started = Instant::now();
@@ -1080,6 +1106,7 @@ USAGE:
 OPTIONS:
     --profile <name>       Run under this profile instead of the default one
     --budget <amount>      Stop the session once it has cost this many dollars
+                           (refused on a profile billed as a plan)
     --theme <name>         Draw the shell in this palette: cyber, classic, neo
                            or modern
     -h, --help             Print this help
@@ -1120,11 +1147,12 @@ PROFILES:
 
     billing says how the account behind a profile is billed, \"plan\" or
     \"metered\". It decides what the Usage pane leads with: a plan's usage
-    windows, with the CLI's dollar figure dimmed as API-equivalent, or the
-    money a metered account is spending. Left out, the backend works it out
-    where it can — an API key or a cloud provider is metered, a claude.ai
-    login a plan — and until it has, the pane shows no dollar figure. A seat
-    billed by use signs in exactly as a plan does, so that is the one to set.
+    windows and tokens, with no dollar figure, since no money moves with the
+    work, or the money a metered account is spending. Left out, the backend
+    works it out where it can — an API key or a cloud provider is metered, a
+    claude.ai login a plan — and until it has, the pane shows no dollar
+    figure. A seat billed by use signs in exactly as a plan does, so that is
+    the one to set.
 
     settings names a file the backend runs under, passed to the claude CLI as
     --settings <path>: its own settings file, which that CLI reads in front of
@@ -1322,10 +1350,9 @@ BUDGET:
     --budget <amount> caps what a session may spend, in dollars, and niobe says
     so in the transcript once most of it is gone. The backend enforces the cap
     and checks it between turns rather than inside one, so a session can finish
-    above the figure by what the turn that crosses the line costs. On a
-    subscription plan the figure the backend reports is what the same work
-    would have cost on the provider's API, so the cap is on that and not on
-    money that moved.
+    above the figure by what the turn that crosses the line costs. A profile
+    billed as a plan refuses it: a plan is limited by its usage windows, not
+    by money, and the Usage pane shows how much of each is left.
 
 PERMISSIONS:
     An \"always\" answer is written into this repository's .niobe/config.toml as
@@ -1350,8 +1377,9 @@ BACKENDS:
     profile's environment, arguments and settings file and the repository as
     its working directory. Niobe never reads the CLI's credential files and never sets its
     user agent: whatever that binary is signed in as is what the session runs
-    on. Every cost the CLI reports is one it computed from published prices, so
-    Niobe stores it as API-equivalent and never as money that moved.
+    on. Every cost the CLI reports is one it computed from published prices:
+    on a metered account Niobe shows it as the bill, and on a plan it shows
+    none.
 
     Not implemented yet: the codex bridge and the native agent loop spawn
     nothing, so a session under one of those profiles has nowhere to send a

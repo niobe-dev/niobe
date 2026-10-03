@@ -5,19 +5,19 @@
  ┃    46 +   const res = await fetch(url, { ...init, headers });            ┃ │ ───────────────────────────────────── │
  ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃    48     return res;                                                    ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃       …                                                                  ┃ │ API-equiv ≥$0.04                      │
- ┃   115     cache.s┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────────── │
- ┃   116 +     etag:┃                                                                              ┃░░░░░░ 25k / 200k │
- ┃   117       body,┃  Profile   claude · default                                                  ┃──────────────────┘
- ┃   └ allowed by yo┃  Model     opus-5                                                            ┃es ───────────────┐
- ┃                  ┃  Mode      ask                                                               ┃░░                █
- ┃ ◆ claude         ┃  Theme     cyber                                                             ┃iles  +≥977 −≥259 █
- ┃   Rewriting the 3┃                                                                              ┃░░                │
- ┃                  ┃  Config files, the later over the earlier:                                   ┃░░          +0 −0 │
- ┃ ◆ claude         ┃    /home/me/.config/niobe/config.toml                                        ┃░░                │
- ┃   The notebook th┃    /home/me/src/niobe/.niobe/config.toml — not there                         ┃░░       +149 −12 │
- ┃                  ┃                                                                              ┃░░        +88 −41 │
- ┃ ✗ Bash           ┃  niobe reads them as a session starts, so a change takes effect in the next  ┃░░         +31 −9 │
+ ┃       …                                                                  ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.s┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓░░░░░░ 25k / 200k │
+ ┃   116 +     etag:┃                                                                              ┃──────────────────┘
+ ┃   117       body,┃  Profile   claude · default                                                  ┃es ───────────────┐
+ ┃   └ allowed by yo┃  Model     opus-5                                                            ┃░░                █
+ ┃                  ┃  Mode      ask                                                               ┃iles  +≥977 −≥259 █
+ ┃ ◆ claude         ┃  Theme     cyber                                                             ┃░░                █
+ ┃   Rewriting the 3┃                                                                              ┃░░          +0 −0 │
+ ┃                  ┃  Config files, the later over the earlier:                                   ┃░░                │
+ ┃ ◆ claude         ┃    /home/me/.config/niobe/config.toml                                        ┃░░       +149 −12 │
+ ┃   The notebook th┃    /home/me/src/niobe/.niobe/config.toml — not there                         ┃░░        +88 −41 │
+ ┃                  ┃                                                                              ┃░░         +31 −9 │
+ ┃ ✗ Bash           ┃  niobe reads them as a session starts, so a change takes effect in the next  ┃░░         +12 −0 │
  ┃   └ 1 failing: fe┃  one.                                                                        ┃──────────────────┘
  ┃                  ┃                                                                              ┃ty ───────────────┐
  ┃ ◆ claude         ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ o open · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ing · 1 failed    █

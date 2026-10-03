@@ -5,36 +5,36 @@
  ┃    1 + export const etag01 = "W/\"0001\"";                               ┃ │ ───────────────────────────────────── │
  ┃    2 + export const etag02 = "W/\"0002\"";                               ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃    3 + export const etag03 = "W/\"0003\"";                               ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃    4 + export const etag04 = "W/\"0004\"";                               ┃ │ API-equiv ≥$0.04                      │
- ┃    5 + export const etag05 = "W/\"0005\"";                               ┃ │ ───────────────────────────────────── │
- ┃    6 + export const etag06 = "W/\"0006\"";                               ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃    7 + export const etag07 = "W/\"0007\"";                               ┃ └───────────────────────────────────────┘
- ┃    8 + export const etag08 = "W/\"0008\"";                               ┃ ┌─────────────── Changes ───────────────┐
- ┃    9 + export const etag09 = "W/\"0009\"";                               ┃ │ ⎇ main ↑3                             █
- ┃   10 + export const etag10 = "W/\"0010\"";                               ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   11 + export const etag11 = "W/\"0011\"";                               ┃ │   .                                   █
- ┃   12 + export const etag12 = "W/\"0012\"";                               ┃ │     CHANGELOG.md                +0 −0 █
- ┃   13 + export const etag13 = "W/\"0013\"";                               ┃ │   catalog/                            █
- ┃   14 + export const etag14 = "W/\"0014\"";                               ┃ │     fetch.ts                 +149 −12 █
- ┃   15 + export const etag15 = "W/\"0015\"";                               ┃ │     etag.ts                   +88 −41 │
- ┃   16 + export const etag16 = "W/\"0016\"";                               ┃ │     cache/lru.ts               +31 −9 │
- ┃   17 + export const etag17 = "W/\"0017\"";                               ┃ │     cache/index.ts             +12 −0 │
- ┃   18 + export const etag18 = "W/\"0018\"";                               ┃ │   docs/                               │
- ┃   19 + export const etag19 = "W/\"0019\"";                               █ │     caching.md                +64 −22 │
- ┃   20 + export const etag20 = "W/\"0020\"";                               █ │     adr/0004-etags.md          +34 −1 │
- ┃   21 + export const etag21 = "W/\"0021\"";                               █ │     diagrams/cache.png            — — │
- ┃   22 + export const etag22 = "W/\"0022\"";                               █ │   server/                             │
- ┃   23 + export const etag23 = "W/\"0023\"";                               █ └───────────────────────────────────────┘
- ┃   24 + export const etag24 = "W/\"0024\"";                               █ ┌────────────── Activity ───────────────┐
- ┃   25 + export const etag25 = "W/\"0025\"";                               █ │ ▾ Sub-agents  1 running · 1 failed    │
- ┃   26 + export const etag26 = "W/\"0026\"";                               █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
- ┃   27 + export const etag27 = "W/\"0027\"";                               █ │   └ Reading tests/stream.rs           │
- ┃   28 + export const etag28 = "W/\"0028\"";                               █ │ ▾ Tools  9 calls ✗ 2 · 0 denied       │
- ┃   29 + export const etag29 = "W/\"0029\"";                               █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃   30 + export const etag30 = "W/\"0030\"";                               █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
- ┃   ▴ the last 10 rows are shown · Ctrl+T hides them                       █ │   Bash       1 ▓▓▓▓         ✗ 1       │
- ┃                                                                          █ │   Edit       1 ▓▓▓▓                   │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Write      1 ▓▓▓▓                   │
+ ┃    4 + export const etag04 = "W/\"0004\"";                               ┃ │ ───────────────────────────────────── │
+ ┃    5 + export const etag05 = "W/\"0005\"";                               ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃    6 + export const etag06 = "W/\"0006\"";                               ┃ └───────────────────────────────────────┘
+ ┃    7 + export const etag07 = "W/\"0007\"";                               ┃ ┌─────────────── Changes ───────────────┐
+ ┃    8 + export const etag08 = "W/\"0008\"";                               ┃ │ ⎇ main ↑3                             █
+ ┃    9 + export const etag09 = "W/\"0009\"";                               ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃   10 + export const etag10 = "W/\"0010\"";                               ┃ │   .                                   █
+ ┃   11 + export const etag11 = "W/\"0011\"";                               ┃ │     CHANGELOG.md                +0 −0 █
+ ┃   12 + export const etag12 = "W/\"0012\"";                               ┃ │   catalog/                            █
+ ┃   13 + export const etag13 = "W/\"0013\"";                               ┃ │     fetch.ts                 +149 −12 █
+ ┃   14 + export const etag14 = "W/\"0014\"";                               ┃ │     etag.ts                   +88 −41 │
+ ┃   15 + export const etag15 = "W/\"0015\"";                               ┃ │     cache/lru.ts               +31 −9 │
+ ┃   16 + export const etag16 = "W/\"0016\"";                               ┃ │     cache/index.ts             +12 −0 │
+ ┃   17 + export const etag17 = "W/\"0017\"";                               ┃ │   docs/                               │
+ ┃   18 + export const etag18 = "W/\"0018\"";                               ┃ │     caching.md                +64 −22 │
+ ┃   19 + export const etag19 = "W/\"0019\"";                               █ │     adr/0004-etags.md          +34 −1 │
+ ┃   20 + export const etag20 = "W/\"0020\"";                               █ │     diagrams/cache.png            — — │
+ ┃   21 + export const etag21 = "W/\"0021\"";                               █ │   server/                             │
+ ┃   22 + export const etag22 = "W/\"0022\"";                               █ └───────────────────────────────────────┘
+ ┃   23 + export const etag23 = "W/\"0023\"";                               █ ┌────────────── Activity ───────────────┐
+ ┃   24 + export const etag24 = "W/\"0024\"";                               █ │ ▾ Sub-agents  1 running · 1 failed    │
+ ┃   25 + export const etag25 = "W/\"0025\"";                               █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
+ ┃   26 + export const etag26 = "W/\"0026\"";                               █ │   └ Reading tests/stream.rs           │
+ ┃   27 + export const etag27 = "W/\"0027\"";                               █ │ ▾ Tools  9 calls ✗ 2 · 0 denied       │
+ ┃   28 + export const etag28 = "W/\"0028\"";                               █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
+ ┃   29 + export const etag29 = "W/\"0029\"";                               █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
+ ┃   30 + export const etag30 = "W/\"0030\"";                               █ │   Bash       1 ▓▓▓▓         ✗ 1       │
+ ┃   ▴ the last 10 rows are shown · Ctrl+T hides them                       █ │   Edit       1 ▓▓▓▓                   │
+ ┃                                                                          █ │   Write      1 ▓▓▓▓                   │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

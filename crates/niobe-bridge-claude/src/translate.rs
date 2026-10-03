@@ -81,8 +81,8 @@ use std::path::{Path, PathBuf};
 
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Billing, Context, CostBasis, Event, Mode, PermissionDecision,
-    SessionMeta, SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
+    SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
@@ -1419,7 +1419,6 @@ impl Translator {
                     // `result` does, for the session so far, and settles this
                     // record along with it.
                     cost_usd: None,
-                    cost_basis: None,
                     settles_model: false,
                     fast,
                 };
@@ -1721,7 +1720,7 @@ impl Translator {
             {
                 out.push(warn(format!(
                     "the CLI priced {model} on a basis this version of Niobe does not know \
-                     (`{basis}`). The figure is still labelled API-equivalent, never measured."
+                     (`{basis}`). Its figure is kept as the CLI reported it."
                 )));
             }
             let cost_now = usage.cost_usd.unwrap_or_default();
@@ -1940,11 +1939,11 @@ impl Translator {
     /// A usage record carrying what a turn cost, and whatever tokens the
     /// per-message records had not already accounted for.
     ///
-    /// Always API-equivalent, never measured: the CLI computes every figure it
-    /// prints from published list prices, whatever login is behind it. Money
-    /// that moved is on the provider's invoice, not in this stream, and
-    /// labelling a list price as a measurement is the one thing this product
-    /// cannot do.
+    /// The CLI computes every figure it prints from published list prices,
+    /// whatever login is behind it. On a metered account that is taken as the
+    /// bill, the provider charging those prices; on a plan no money moves with
+    /// the work, and the shell shows no figure at all, so nothing here needs
+    /// to say which the record is: the session's billing does.
     fn cost_record(&self, model: String, tokens: Counts, spent: f64) -> Event {
         Event::Usage(Usage {
             input: tokens.input,
@@ -1957,7 +1956,6 @@ impl Translator {
             model,
             // A difference of zero is not a report that the turn was free.
             cost_usd: (spent > 0.0).then_some(spent),
-            cost_basis: (spent > 0.0).then_some(CostBasis::ApiEquivalent),
             // `spent` is what the CLI has billed under this model less what it
             // had already billed, and the tokens above are those no message
             // reported. Between them the two cover every record emitted under
@@ -1984,7 +1982,6 @@ fn covered_elsewhere(model: String) -> Event {
         reasoning: 0,
         model,
         cost_usd: Some(0.0),
-        cost_basis: Some(CostBasis::ApiEquivalent),
         settles_model: true,
         fast: false,
     })
@@ -2007,7 +2004,6 @@ fn short_by_unknown(model: String) -> Event {
         reasoning: 0,
         model,
         cost_usd: None,
-        cost_basis: None,
         settles_model: false,
         fast: false,
     })
@@ -3350,7 +3346,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pricing_basis_the_bridge_does_not_know_is_reported_and_still_not_called_measured() {
+    fn a_pricing_basis_the_bridge_does_not_know_is_reported_and_its_figure_kept() {
         let mut translator = translator();
 
         let events = before_the_end(translator.line(
@@ -3363,7 +3359,7 @@ mod tests {
         let [_, Event::Usage(usage)] = events.as_slice() else {
             panic!("a warning and a cost record: {events:?}");
         };
-        assert_eq!(usage.cost_basis, Some(CostBasis::ApiEquivalent));
+        assert_eq!(usage.cost_usd, Some(0.5));
     }
 
     #[test]

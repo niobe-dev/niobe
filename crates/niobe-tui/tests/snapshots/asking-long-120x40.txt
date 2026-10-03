@@ -5,35 +5,35 @@
  ┃   │ set -e                                                             │ ┃ │ ───────────────────────────────────── │
  ┃   │ cd /tmp                                                            │ ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃   │ echo step 1 && \                                                   │ ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃   │ echo step 2 && \                                                   │ ┃ │ API-equiv ≥$0.04                      │
- ┃   │ echo step 3 && \                                                   │ ┃ │ ───────────────────────────────────── │
- ┃   │ echo step 4 && \                                                   │ ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   │ echo step 5 && \                                                   │ ┃ └───────────────────────────────────────┘
- ┃   │ echo step 6 && \                                                   │ ┃ ┌─────────────── Changes ───────────────┐
- ┃   │ echo step 7 && \                                                   │ ┃ │ ⎇ main ↑3                             █
- ┃   │ echo step 8 && \                                                   │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   │ echo step 9 && \                                                   │ ┃ │   .                                   █
- ┃   │ echo step 10 && \                                                  │ ┃ │     CHANGELOG.md                +0 −0 █
- ┃   │ echo step 11 && \                                                  │ ┃ │   catalog/                            █
- ┃   │ echo step 12 && \                                                  │ ┃ │     fetch.ts                 +149 −12 █
- ┃   │ echo step 13 && \                                                  │ ┃ │     etag.ts                   +88 −41 │
- ┃   │ echo step 14 && \                                                  │ ┃ │     cache/lru.ts               +31 −9 │
- ┃   │ echo step 15 && \                                                  │ ┃ │     cache/index.ts             +12 −0 │
- ┃   │ echo step 16 && \                                                  │ ┃ │   docs/                               │
- ┃   │ echo step 17 && \                                                  │ █ │     caching.md                +64 −22 │
- ┃   │ echo step 18 && \                                                  │ █ │     adr/0004-etags.md          +34 −1 │
- ┃   │ echo step 19 && \                                                  │ █ │     diagrams/cache.png            — — │
- ┃   │ echo step 20 && \                                                  │ █ │   server/                             │
- ┃   │ … 124 more lines · Ctrl+T shows the whole call                     │ █ └───────────────────────────────────────┘
- ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
- ┃   │ ▶ 1. Allow once                                     this call only │ █ │ ▾ Sub-agents  1 running · 1 failed    │
- ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
- ┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp … │ █ │   └ Reading tests/stream.rs           │
- ┃   │   4. Deny                                    the call does not run │ █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
- ┃   │                                                                    │ █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
- ┃   │ Esc decide later                                                   │ █ │   Bash       1 ▓▓▓▓         ✗ 1       │
- ┃   └────────────────────────────────────────────────────────────────────┘ █ │   Edit       1 ▓▓▓▓                   │
+ ┃   │ echo step 2 && \                                                   │ ┃ │ ───────────────────────────────────── │
+ ┃   │ echo step 3 && \                                                   │ ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   │ echo step 4 && \                                                   │ ┃ └───────────────────────────────────────┘
+ ┃   │ echo step 5 && \                                                   │ ┃ ┌─────────────── Changes ───────────────┐
+ ┃   │ echo step 6 && \                                                   │ ┃ │ ⎇ main ↑3                             █
+ ┃   │ echo step 7 && \                                                   │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃   │ echo step 8 && \                                                   │ ┃ │   .                                   █
+ ┃   │ echo step 9 && \                                                   │ ┃ │     CHANGELOG.md                +0 −0 █
+ ┃   │ echo step 10 && \                                                  │ ┃ │   catalog/                            █
+ ┃   │ echo step 11 && \                                                  │ ┃ │     fetch.ts                 +149 −12 █
+ ┃   │ echo step 12 && \                                                  │ ┃ │     etag.ts                   +88 −41 │
+ ┃   │ echo step 13 && \                                                  │ ┃ │     cache/lru.ts               +31 −9 │
+ ┃   │ echo step 14 && \                                                  │ ┃ │     cache/index.ts             +12 −0 │
+ ┃   │ echo step 15 && \                                                  │ ┃ │   docs/                               │
+ ┃   │ echo step 16 && \                                                  │ ┃ │     caching.md                +64 −22 │
+ ┃   │ echo step 17 && \                                                  │ █ │     adr/0004-etags.md          +34 −1 │
+ ┃   │ echo step 18 && \                                                  │ █ │     diagrams/cache.png            — — │
+ ┃   │ echo step 19 && \                                                  │ █ │   server/                             │
+ ┃   │ echo step 20 && \                                                  │ █ └───────────────────────────────────────┘
+ ┃   │ … 124 more lines · Ctrl+T shows the whole call                     │ █ ┌────────────── Activity ───────────────┐
+ ┃   │                                                                    │ █ │ ▾ Sub-agents  1 running · 1 failed    │
+ ┃   │ ▶ 1. Allow once                                     this call only │ █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
+ ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │   └ Reading tests/stream.rs           │
+ ┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp … │ █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
+ ┃   │   4. Deny                                    the call does not run │ █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
+ ┃   │                                                                    │ █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
+ ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │   Bash       1 ▓▓▓▓         ✗ 1       │
+ ┃   │ Esc decide later                                                   │ █ │   Edit       1 ▓▓▓▓                   │
+ ┃   └────────────────────────────────────────────────────────────────────┘ █ │                                       │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘

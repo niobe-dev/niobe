@@ -5,19 +5,19 @@
  ┃    46 +   const res = await fetch(url, { ...init, headers });            ┃ │ ───────────────────────────────────── │
  ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃    48     return res;                                                    ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃       …                                                                  ┃ │ API-equiv ≥$0.04                      │
- ┃   115     cache.set(url, {                                               ┃ │ ───────────────────────────────────── │
- ┃   116 +     etag: res.headers.get("ETag"),                               ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   117       body,                                                        ┃ └───────────────────────────────────────┘
- ┃   └ allowed by you                                                       ┃ ┌────────────── Activity ───────────────┐
- ┃                                                                          ┃ │ ▾ Sub-agents  1 running · 1 failed    │
- ┃ ◆ claude                                                                 ┃ │ ◆ test Cover tests/fet… sonnet 1m 42s │
- ┃   Rewriting the 304 test around the cached body.                         █ │   └ Reading tests/stream.rs           │
- ┃                                                                          █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
- ┃ ◆ claude                                                                 █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
- ┃                                                                          █ │   Bash       1 ▓▓▓▓         ✗ 1       │
- ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │   Edit       1 ▓▓▓▓                   │
+ ┃       …                                                                  ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {                                               ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   116 +     etag: res.headers.get("ETag"),                               ┃ └───────────────────────────────────────┘
+ ┃   117       body,                                                        ┃ ┌────────────── Activity ───────────────┐
+ ┃   └ allowed by you                                                       ┃ │ ▾ Sub-agents  1 running · 1 failed    │
+ ┃                                                                          ┃ │ ◆ test Cover tests/fet… sonnet 1m 42s │
+ ┃ ◆ claude                                                                 ┃ │   └ Reading tests/stream.rs           │
+ ┃   Rewriting the 304 test around the cached body.                         █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
+ ┃                                                                          █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
+ ┃ ◆ claude                                                                 █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │   Bash       1 ▓▓▓▓         ✗ 1       │
+ ┃                                                                          █ │   Edit       1 ▓▓▓▓                   │
+ ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │                                       │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │                                       │
  ┃                                                                          █ │                                       │
  ┃ ◆ claude                                                                 █ │                                       │

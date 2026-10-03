@@ -133,8 +133,8 @@ pub struct SessionMeta {
 ///
 /// On a flat-rate plan the fee does not move with the work, and what runs out
 /// is the plan's usage windows; a figure in dollars there is what the same
-/// work would have cost elsewhere. On a metered account every token is billed,
-/// and the dollars are the budget.
+/// work would have cost elsewhere, which nobody pays, so none is shown. On a
+/// metered account every token is billed, and the dollars are the budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Billing {
@@ -152,22 +152,6 @@ impl Billing {
             Self::Metered => "metered",
         }
     }
-}
-
-/// Where a cost a backend reported came from.
-///
-/// A subscription plan bills a flat fee, so a per-session figure a plan
-/// backend prints is what the same work would have cost on the provider's API
-/// — not money that moved. Showing it as though it were measured spend is the
-/// difference between a bill and a guess, so the stream carries which one it
-/// is rather than leaving every consumer to infer it from the backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CostBasis {
-    /// The provider billed this amount for this work.
-    Measured,
-    /// The backend derived it from published list prices.
-    ApiEquivalent,
 }
 
 /// Token counts and, when the backend reports one, the billed cost of a single
@@ -199,14 +183,11 @@ pub struct Usage {
     pub model: String,
     /// The cost the backend reported, in USD. `None` means "not reported",
     /// never "zero".
+    ///
+    /// Money spent only where the session is billed by use
+    /// ([`Billing::Metered`]). On a plan no money moves with the work, and a
+    /// figure the backend prints anyway is not a bill: consumers show none.
     pub cost_usd: Option<f64>,
-    /// What [`Usage::cost_usd`] is: money the provider billed, or a figure the
-    /// backend derived from list prices. `None` wherever there is no cost, and
-    /// wherever a producer did not say — an unlabelled cost is never read as a
-    /// measured one, so a record from a producer that says nothing cannot be
-    /// promoted to a measurement by being stored.
-    #[serde(default)]
-    pub cost_basis: Option<CostBasis>,
     /// Whether [`Usage::cost_usd`] settles every record already folded in for
     /// the same model, rather than pricing this record alone.
     ///
@@ -902,7 +883,6 @@ mod tests {
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         };
@@ -920,7 +900,6 @@ mod tests {
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         };
@@ -936,20 +915,6 @@ mod tests {
         };
         assert_eq!(usage.cache_write, 4);
         assert_eq!(usage.cache_write_1h, 0);
-    }
-
-    #[test]
-    fn a_record_from_before_the_basis_field_reads_as_unlabelled() {
-        let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":0.25}"#;
-        let event: Event = serde_json::from_str(json).expect("a record from before the field");
-        let Event::Usage(usage) = event else {
-            panic!("the record is a usage record: {event:?}");
-        };
-        assert_eq!(usage.cost_usd, Some(0.25));
-        assert_eq!(
-            usage.cost_basis, None,
-            "a cost whose producer said nothing about it was read as a measurement"
-        );
     }
 
     #[test]
@@ -1083,27 +1048,21 @@ mod tests {
         );
     }
 
+    /// Records once said whether their cost was billed or derived from list
+    /// prices, which nothing read. A store holding them still opens.
     #[test]
-    fn a_plan_backends_cost_survives_the_round_trip_labelled() {
-        let usage = Usage {
-            input: 6,
-            output: 305,
-            cache_read: 84_805,
-            cache_write: 16_178,
-            cache_write_1h: 16_178,
-            reasoning: 0,
-            model: "claude-sonnet-5".to_owned(),
-            cost_usd: Some(0.084_735),
-            cost_basis: Some(CostBasis::ApiEquivalent),
-            settles_model: false,
-            fast: false,
-        };
-
-        let line = serde_json::to_string(&Event::Usage(usage.clone())).expect("a usage record");
-        let read: Event = serde_json::from_str(&line).expect("what was written reads back");
-
-        assert_eq!(read, Event::Usage(usage));
-        assert!(line.contains(r#""cost_basis":"api_equivalent""#), "{line}");
+    fn a_usage_record_written_with_a_cost_basis_still_reads() {
+        for basis in ["null", r#""api_equivalent""#, r#""measured""#] {
+            let json = format!(
+                r#"{{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":0.25,"cost_basis":{basis}}}"#
+            );
+            let event: Event = serde_json::from_str(&json).expect("a record with the old field");
+            let Event::Usage(usage) = event else {
+                panic!("the record is a usage record: {event:?}");
+            };
+            assert_eq!(usage.cost_usd, Some(0.25), "{basis}");
+            assert_eq!(usage.tokens(), 10, "{basis}");
+        }
     }
 
     #[test]
@@ -1177,7 +1136,6 @@ mod tests {
             reasoning: 0,
             model: "gpt-5-codex".to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         };

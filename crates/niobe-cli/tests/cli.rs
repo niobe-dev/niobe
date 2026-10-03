@@ -871,6 +871,32 @@ fn a_budget_that_is_not_an_amount_is_refused_before_anything_is_started() {
 }
 
 #[test]
+fn a_budget_on_a_plan_profile_is_refused_with_what_limits_a_plan() {
+    let setup = Configured::new(
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\nbilling = \"plan\"\n",
+        "",
+    );
+    let output = setup.run(&["--budget", "5"]);
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(err.contains("--budget"), "{err}");
+    assert!(err.contains("usage windows"), "{err}");
+    assert!(!err.contains('$'), "{err}");
+}
+
+#[test]
+fn a_budget_on_a_metered_profile_is_taken() {
+    let setup = Configured::new(
+        "default_profile = \"api\"\n\n[profiles.api]\nbackend = \"claude\"\nbilling = \"metered\"\n",
+        "",
+    );
+    let output = setup.run(&["--budget", "5"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+}
+
+#[test]
 fn commands_that_run_no_session_do_not_read_the_config() {
     let setup = Configured::new("this is not toml", "");
     for args in [&["sessions"][..], &["--help"], &["--version"]] {

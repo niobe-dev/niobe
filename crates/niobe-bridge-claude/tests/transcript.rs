@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use niobe_bridge_claude::transcript;
-use niobe_core::event::{AgentOutcome, Backend, CostBasis, Event, Mode, SessionMeta, ToolOutcome};
+use niobe_core::event::{AgentOutcome, Backend, Event, Mode, SessionMeta, ToolOutcome};
 use niobe_core::session::SessionState;
 use niobe_core::test_run::{FailedTests, TestCounts};
 
@@ -298,26 +298,6 @@ fn an_imported_session_folds_into_the_totals_the_cli_recorded() {
         "the session cost {} rather than the 0.051 the CLI recorded",
         totals.reported_cost_usd
     );
-}
-
-#[test]
-fn an_imported_cost_is_api_equivalent_and_never_measured() {
-    let events = folded();
-    let priced: Vec<_> = usage_records(&events)
-        .into_iter()
-        .filter(|usage| usage.cost_usd.is_some())
-        .collect();
-
-    assert_eq!(priced.len(), 2, "one per model the session spent on");
-    for usage in &priced {
-        assert_eq!(
-            usage.cost_basis,
-            Some(CostBasis::ApiEquivalent),
-            "{} was priced as {:?}",
-            usage.model,
-            usage.cost_basis
-        );
-    }
 }
 
 #[test]

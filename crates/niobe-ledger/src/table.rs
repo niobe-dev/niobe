@@ -277,7 +277,6 @@ cache_write = 0.625
             reasoning: 0,
             model: "m".to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         };

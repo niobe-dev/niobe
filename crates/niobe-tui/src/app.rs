@@ -2712,10 +2712,13 @@ impl App {
         if self.budget_warned || budget <= 0.0 {
             return;
         }
-        // The same labelled figure the Usage pane draws: a floor or an
-        // estimate past the line is past the line, and a cost nobody reported
-        // is no reason to warn.
-        let Some((spent, usd)) = crate::ui::known_spend(&self.session, self.prices()) else {
+        // The same labelled figure the Usage pane's budget row counts: a
+        // floor or an estimate past the line is past the line, and a cost
+        // nobody reported is no reason to warn.
+        let billed = crate::ui::Billed::of(&self.session);
+        let Some((spent, usd)) =
+            crate::ui::known_spend(billed.counted(&self.session), self.prices())
+        else {
             return;
         };
         if usd < budget * BUDGET_WARNING {
@@ -2723,18 +2726,19 @@ impl App {
         }
 
         // Named as the pane's budget row names it. Where nothing said how the
-        // session is billed that row withholds the spend, so this does too:
-        // the backend counts the budget in the same figure, and the warning
-        // stands without it.
-        let budget = crate::ui::dollars(budget);
-        let meta = match crate::ui::Billed::of(&self.session) {
-            crate::ui::Billed::Unknown => format!("most of {budget}"),
-            billed @ (crate::ui::Billed::Metered
-            | crate::ui::Billed::Plan
-            | crate::ui::Billed::Both) => match billed.qualifier() {
-                Some(qualifier) => format!("{qualifier} {spent} of {budget}"),
-                None => format!("{spent} of {budget}"),
-            },
+        // session is billed that row withholds the spend, and on a plan it
+        // shows no dollars at all, so this does too: the backend counts the
+        // budget in the same figure, and the warning stands without it.
+        let meta = match billed {
+            crate::ui::Billed::Plan => "most of the budget".to_owned(),
+            crate::ui::Billed::Unknown => format!("most of {}", crate::ui::dollars(budget)),
+            crate::ui::Billed::Metered | crate::ui::Billed::Both => {
+                let budget = crate::ui::dollars(budget);
+                match billed.qualifier() {
+                    Some(qualifier) => format!("{qualifier} {spent} of {budget}"),
+                    None => format!("{spent} of {budget}"),
+                }
+            }
         };
         self.budget_warned = true;
         self.push(Entry {
@@ -7304,7 +7308,6 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(cost_usd),
-            cost_basis: None,
             settles_model: false,
             fast: false,
         })
@@ -8234,42 +8237,49 @@ mod tests {
         app
     }
 
-    /// What the budget warning says beside its head, once $0.90 of a $1.00
-    /// budget has been spent in equal parts under each of `billings`.
-    fn budget_warning(billings: &[Billing]) -> String {
+    /// What the budget warning says beside its head, against a $1.00
+    /// budget, once each of `parts` has been spent under its billing; or
+    /// `None` where it gave none.
+    fn budget_warning(parts: &[(Option<Billing>, f64)]) -> Option<String> {
         let mut app = app().with_budget(1.0);
-        let parts = billings.len().max(1) as f64;
-        for billing in billings {
-            app.apply(&Event::Billing { billing: *billing });
-            app.apply(&priced(0.9 / parts));
-        }
-        if billings.is_empty() {
-            app.apply(&priced(0.9));
+        for (billing, spent) in parts {
+            if let Some(billing) = billing {
+                app.apply(&Event::Billing { billing: *billing });
+            }
+            app.apply(&priced(*spent));
         }
         app.settle_budget();
         app.entries()
             .iter()
             .find(|entry| entry.head == "budget")
             .map(|entry| entry.meta.clone())
-            .expect("nine tenths of the budget is warned about")
     }
 
     #[test]
     fn the_budget_warning_names_its_figure_as_the_usage_pane_does() {
+        let plan = Some(Billing::Plan);
+        let metered = Some(Billing::Metered);
         assert_eq!(
-            budget_warning(&[Billing::Plan]),
-            "API-equivalent $0.90 of $1.00"
-        );
-        assert_eq!(budget_warning(&[Billing::Metered]), "$0.90 of $1.00");
-        assert_eq!(
-            budget_warning(&[Billing::Plan, Billing::Metered]),
-            "plan and metered $0.90 of $1.00"
+            budget_warning(&[(plan, 0.9)]).as_deref(),
+            Some("most of the budget")
         );
         assert_eq!(
-            budget_warning(&[Billing::Metered, Billing::Plan]),
-            "plan and metered $0.90 of $1.00"
+            budget_warning(&[(metered, 0.9)]).as_deref(),
+            Some("$0.90 of $1.00")
         );
-        assert_eq!(budget_warning(&[]), "most of $1.00");
+        assert_eq!(
+            budget_warning(&[(plan, 0.5), (metered, 0.85)]).as_deref(),
+            Some("metered part $0.85 of $1.00")
+        );
+        assert_eq!(
+            budget_warning(&[(metered, 0.85), (plan, 0.1)]).as_deref(),
+            Some("metered part $0.85 of $1.00")
+        );
+        assert_eq!(budget_warning(&[(plan, 0.7), (metered, 0.25)]), None);
+        assert_eq!(
+            budget_warning(&[(None, 0.9)]).as_deref(),
+            Some("most of $1.00")
+        );
     }
 
     #[test]
@@ -8855,7 +8865,6 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         })

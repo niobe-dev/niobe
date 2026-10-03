@@ -49,12 +49,18 @@ fn tokens(session: &SessionState) -> String {
 /// The pane's label, and the reason a figure is an estimate, a floor or
 /// missing.
 ///
-/// On a plan, or billed both ways, the figure is named for what it is, as the
-/// pane names it.
+/// On a plan there is no figure, as the pane draws none; a session billed
+/// both ways costs what its metered part did, named as the pane names it.
 fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> String {
-    let t = session.totals();
-    let figure = niobe_tui::session_cost(session, prices);
-    let label = match Billed::of(session).qualifier() {
+    let billed = Billed::of(session);
+    let t = match billed {
+        Billed::Plan => return "—".to_owned(),
+        Billed::Metered | Billed::Both | Billed::Unknown => {
+            billed.spent(session).unwrap_or(session.totals())
+        }
+    };
+    let figure = niobe_tui::cost_of(t, prices);
+    let label = match billed.qualifier() {
         Some(qualifier) if t.records > 0 => format!("{qualifier} {figure}"),
         Some(_) | None => figure,
     };
@@ -74,15 +80,12 @@ fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> Strin
 /// a session nothing described, and this says why and what would.
 fn billing(session: &SessionState) -> String {
     match Billed::of(session) {
-        Billed::Plan => {
-            "plan — the cost is what the work would have cost on the API; no money moved \
-             with it"
-                .to_owned()
-        }
+        Billed::Plan => "plan — a plan is limited by its usage windows, not by money, so no \
+                         cost is shown"
+            .to_owned(),
         Billed::Metered => "metered — every token is billed, so the cost is money spent".to_owned(),
         Billed::Both => "plan and metered — part of the session was billed on a plan and part \
-                         by use, so the cost is partly money spent and partly what plan work \
-                         would have cost on the API"
+                         by use, and the cost is the money the metered part spent"
             .to_owned(),
         Billed::Unknown => {
             "not known — the backend did not say and the profile does not set `billing`, \
@@ -184,7 +187,6 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         })
@@ -315,7 +317,7 @@ mod tests {
     #[test]
     fn the_billing_mode_is_printed_with_the_cost_it_explains() {
         let plan = lines(&folded(&[billed(Billing::Plan), usage(Some(0.25))]));
-        assert_eq!(plan[1], "cost        API-equivalent $0.25");
+        assert_eq!(plan[1], "cost        —");
         assert!(plan[2].starts_with("billing     plan — "), "{}", plan[2]);
 
         let metered = lines(&folded(&[billed(Billing::Metered), usage(Some(0.25))]));
@@ -335,10 +337,10 @@ mod tests {
     }
 
     #[test]
-    fn a_session_billed_both_ways_says_so_on_its_cost_and_its_billing() {
-        for [first, then] in [
-            [Billing::Plan, Billing::Metered],
-            [Billing::Metered, Billing::Plan],
+    fn a_session_billed_both_ways_costs_what_it_spent_by_use_and_says_so() {
+        for ([first, then], spent) in [
+            ([Billing::Plan, Billing::Metered], "$0.50"),
+            ([Billing::Metered, Billing::Plan], "$0.25"),
         ] {
             let summary = lines(&folded(&[
                 billed(first),
@@ -346,13 +348,27 @@ mod tests {
                 billed(then),
                 usage(Some(0.5)),
             ]));
-            assert_eq!(summary[1], "cost        plan and metered $0.75");
+            assert_eq!(summary[1], format!("cost        metered part {spent}"));
             assert!(
                 summary[2].starts_with("billing     plan and metered — "),
                 "{}",
                 summary[2]
             );
         }
+    }
+
+    #[test]
+    fn a_plan_session_prints_no_dollar_figure() {
+        let summary = lines(&folded(&[
+            billed(Billing::Plan),
+            usage(Some(0.25)),
+            usage(None),
+        ]));
+        for line in &summary {
+            assert!(!line.contains('$'), "{line}");
+            assert!(!line.contains("API"), "{line}");
+        }
+        assert_eq!(summary[1], "cost        —");
     }
 
     #[test]

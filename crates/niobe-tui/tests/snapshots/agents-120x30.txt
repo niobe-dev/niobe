@@ -5,19 +5,19 @@
  ┃                                                                          ┃ │ ───────────────────────────────────── │
  ┃ ✗ Bash                 npm test -- fetch                   exit 1 · 0.4s ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃                                                                          ┃ │ API-equiv ≥$0.04                      │
- ┃ ◆ claude                                                                 ┃ │ ───────────────────────────────────── │
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   304 path asserts a body that is no longer sent.                        ┃ └───────────────────────────────────────┘
- ┃                                                                          ┃ ┌─────────────── Changes ───────────────┐
- ┃ > you                                                                    ┃ │ ⎇ main ↑3                             █
- ┃   Review fetch.py and cache.py in parallel.                              ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃                                                                          ┃ │   .                                   │
- ┃ ▾ Agent ×2             deep-reasoner: Review fetch.py, deep-reas…  240 B ┃ │     CHANGELOG.md                +0 −0 │
- ┃   ├ deep-reasoner: Review fetch.py                                 120 B ┃ │   catalog/                            │
- ┃   └ deep-reasoner: Review cache.py                                 120 B █ │     fetch.ts                 +149 −12 │
- ┃ ⚙ Read           deep1 catalog/fetch.py                           4.0 kB █ │     etag.ts                   +88 −41 │
- ┃ ↳ deep2                Let me check how eviction is triggered.      says █ │     cache/lru.ts               +31 −9 │
+ ┃                                                                          ┃ │ ───────────────────────────────────── │
+ ┃ ◆ claude                                                                 ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  ┃ └───────────────────────────────────────┘
+ ┃   304 path asserts a body that is no longer sent.                        ┃ ┌─────────────── Changes ───────────────┐
+ ┃                                                                          ┃ │ ⎇ main ↑3                             █
+ ┃ > you                                                                    ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃   Review fetch.py and cache.py in parallel.                              ┃ │   .                                   █
+ ┃                                                                          ┃ │     CHANGELOG.md                +0 −0 │
+ ┃ ▾ Agent ×2             deep-reasoner: Review fetch.py, deep-reas…  240 B ┃ │   catalog/                            │
+ ┃   ├ deep-reasoner: Review fetch.py                                 120 B ┃ │     fetch.ts                 +149 −12 │
+ ┃   └ deep-reasoner: Review cache.py                                 120 B █ │     etag.ts                   +88 −41 │
+ ┃ ⚙ Read           deep1 catalog/fetch.py                           4.0 kB █ │     cache/lru.ts               +31 −9 │
+ ┃ ↳ deep2                Let me check how eviction is triggered.      says █ │     cache/index.ts             +12 −0 │
  ┃ ⚙ Read           deep2 catalog/cache.py                           2.8 kB █ └───────────────────────────────────────┘
  ┃ ⚙ Read           deep1 catalog/etag.py                            1.3 kB █ ┌────────────── Activity ───────────────┐
  ┃                                                                          █ │ ▾ Sub-agents  3 running · 1 failed    █

@@ -347,7 +347,6 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.01),
-            cost_basis: None,
             settles_model: false,
             fast: false,
         }

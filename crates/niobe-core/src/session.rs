@@ -112,7 +112,6 @@ impl Owed {
                 reasoning: 0,
                 model: model.to_owned(),
                 cost_usd: None,
-                cost_basis: None,
                 settles_model: false,
                 fast: false,
             },
@@ -440,6 +439,8 @@ pub struct SessionState {
     /// Whether the session has been billed more than one way: resumed under
     /// a profile billed differently from the one it was recorded under.
     billing_changed: bool,
+    /// The usage folded while the session was billed by use.
+    metered: Totals,
     /// The main agent's last request. `None` until one has been reported.
     context: Option<Context>,
     tools: ToolTotals,
@@ -635,6 +636,9 @@ impl SessionState {
 
             Event::Usage(usage) => {
                 self.totals.add(usage);
+                if self.billing == Some(Billing::Metered) {
+                    self.metered.add(usage);
+                }
                 self.usage_reported = true;
             }
 
@@ -935,10 +939,22 @@ impl SessionState {
     }
 
     /// Whether the session has been billed more than one way, so that its
-    /// cost is part list-price work on a plan and part money spent, and
-    /// labelling it as either would mislabel the rest.
+    /// cost is part list-price work on a plan and part money spent: the
+    /// money is in [`SessionState::metered_totals`].
     pub fn billing_changed(&self) -> bool {
         self.billing_changed
+    }
+
+    /// Token and cost totals of the usage folded while the session was billed
+    /// by use: of a session billed both ways, the part whose cost is money
+    /// spent. A plan's part is left out, because its figure is what the work
+    /// would have cost on the API and not what anyone paid.
+    ///
+    /// Usage is taken to be billed the way the session was last said to be
+    /// when it arrived, so a record folded before anything said is in no
+    /// part. A turn's cost settles only the records of its own part.
+    pub fn metered_totals(&self) -> &Totals {
+        &self.metered
     }
 
     /// The prompt the main agent's last request sent, and the window it went
@@ -1155,7 +1171,6 @@ mod tests {
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: cost,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         })
@@ -1363,6 +1378,49 @@ mod tests {
         assert_eq!(state.billing(), Some(Billing::Metered));
     }
 
+    #[test]
+    fn what_a_session_billed_both_ways_spent_by_use_is_kept_apart() {
+        for [first, then] in [
+            [Billing::Plan, Billing::Metered],
+            [Billing::Metered, Billing::Plan],
+        ] {
+            let mut events = vec![Event::Billing { billing: first }];
+            events.extend([usage(100, 10, None), settlement("opus-5", 0.25)]);
+            events.push(Event::Billing { billing: then });
+            events.extend([usage(200, 20, None), settlement("opus-5", 0.5)]);
+            let state = SessionState::replay(&events);
+
+            let metered = state.metered_totals();
+            let (tokens, cost) = match first {
+                Billing::Metered => (110, 0.25),
+                Billing::Plan => (220, 0.5),
+            };
+            assert_eq!(metered.tokens(), tokens, "{first:?} then {then:?}");
+            assert_eq!(metered.records, 2, "{first:?} then {then:?}");
+            assert!(metered.cost_fully_reported(), "{first:?} then {then:?}");
+            assert!(
+                (metered.reported_cost_usd - cost).abs() < 1e-9,
+                "{first:?} then {then:?}: {}",
+                metered.reported_cost_usd
+            );
+            assert_eq!(state.totals().tokens(), 330, "{first:?} then {then:?}");
+        }
+    }
+
+    #[test]
+    fn a_session_never_billed_by_use_spent_nothing_by_use() {
+        for billing in [None, Some(Billing::Plan)] {
+            let mut events: Vec<Event> = billing
+                .map(|billing| Event::Billing { billing })
+                .into_iter()
+                .collect();
+            events.extend([usage(100, 10, None), settlement("opus-5", 0.25)]);
+            let state = SessionState::replay(&events);
+
+            assert_eq!(state.metered_totals(), &Totals::default(), "{billing:?}");
+        }
+    }
+
     /// Who spent the session's tokens is a different question from what is
     /// still owed for: a model whose cost has landed has not stopped having
     /// spent them. `unsettled` empties as money arrives, so it cannot answer
@@ -1399,7 +1457,6 @@ mod tests {
                 reasoning: 120,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(0.04),
-                cost_basis: None,
                 settles_model: false,
                 fast: false,
             }),
@@ -1452,7 +1509,6 @@ mod tests {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: None,
-                cost_basis: None,
                 settles_model: false,
                 fast: false,
             })
@@ -2394,7 +2450,6 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         })
@@ -2853,7 +2908,6 @@ mod tests {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(1e308),
-                cost_basis: Some(crate::event::CostBasis::Measured),
                 settles_model: false,
                 fast: false,
             })

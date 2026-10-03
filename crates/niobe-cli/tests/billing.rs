@@ -149,8 +149,10 @@ fn a_recorded_max_session_shows_windows_and_tokens_and_no_dollar_total() {
     let pane = usage_pane(&mut app);
     assert!(pane.contains("5h "), "{pane}");
     assert!(pane.contains("7d "), "{pane}");
-    // What the CLI priced the work at is on screen, and named for what it is.
-    assert!(pane.contains("API-equiv $"), "{pane}");
+    // What the CLI priced the work at is not money a plan user pays, and is
+    // not drawn in any form.
+    assert!(!pane.contains('$'), "{pane}");
+    assert!(!pane.contains("API-eq"), "{pane}");
     assert!(!pane.contains("session "), "{pane}");
     assert_snapshot("usage-max-120x30", &pane);
 }
@@ -194,5 +196,5 @@ fn the_same_login_on_a_profile_billed_by_use_leads_with_money() {
     let session = pane.find("session $").expect("the cost leads the pane");
     let model = pane.find("sonnet-5").expect("the model rows are drawn");
     assert!(session < model, "{pane}");
-    assert!(!pane.contains("API-equivalent"), "{pane}");
+    assert!(!pane.contains("API-eq"), "{pane}");
 }

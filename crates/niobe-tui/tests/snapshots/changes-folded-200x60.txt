@@ -5,13 +5,13 @@
  ┃                                                                                                                              ┃ │ ───────────────────────────────────────────────────────────────── │
  ┃ ◆ claude                                                                                                                     ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
  ┃   Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                             ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k                                 │
- ┃                                                                                                                              ┃ │ API-equiv ≥$0.04                                                  │
- ┃ ▾ Read ×3        catalog/fetch.ts, catalog/cache.ts, tests/fetch.test.ts                                      15.3 kB · 3.6s ┃ │ ───────────────────────────────────────────────────────────────── │
- ┃   ├ catalog/fetch.ts                                                                                           7.2 kB · 1.2s ┃ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
- ┃   ├ catalog/cache.ts                                                                                           3.1 kB · 1.2s ┃ └───────────────────────────────────────────────────────────────────┘
- ┃   └ tests/fetch.test.ts                                                                                        4.9 kB · 1.2s ┃ ┌───────────────────────────── Changes ─────────────────────────────┐
- ┃ ⚙ Notion·search  {}                                                                                                   1.1 kB ┃ │ ⎇ main ↑3                                                         │
- ┃ ⚙ Notion·fetch   {}                                                                                                   2.5 kB ┃ │ ▸ Working tree  23 files  +≥977 −≥259                             │
+ ┃                                                                                                                              ┃ │ ───────────────────────────────────────────────────────────────── │
+ ┃ ▾ Read ×3        catalog/fetch.ts, catalog/cache.ts, tests/fetch.test.ts                                      15.3 kB · 3.6s ┃ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
+ ┃   ├ catalog/fetch.ts                                                                                           7.2 kB · 1.2s ┃ └───────────────────────────────────────────────────────────────────┘
+ ┃   ├ catalog/cache.ts                                                                                           3.1 kB · 1.2s ┃ ┌───────────────────────────── Changes ─────────────────────────────┐
+ ┃   └ tests/fetch.test.ts                                                                                        4.9 kB · 1.2s ┃ │ ⎇ main ↑3                                                         │
+ ┃ ⚙ Notion·search  {}                                                                                                   1.1 kB ┃ │ ▸ Working tree  23 files  +≥977 −≥259                             │
+ ┃ ⚙ Notion·fetch   {}                                                                                                   2.5 kB ┃ │                                                                   │
  ┃ ✗ Notion·update… {}                                                                                                   failed ┃ │                                                                   │
  ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ │                                                                   │
  ┃                                                                                                                              ┃ │                                                                   │

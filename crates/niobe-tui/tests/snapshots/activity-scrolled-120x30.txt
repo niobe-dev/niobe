@@ -5,19 +5,19 @@
  ┃    46 +   const res = await fetch(url, { ...init, headers });            ┃ │ ───────────────────────────────────── │
  ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃    48     return res;                                                    ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃       …                                                                  ┃ │ API-equiv ≥$0.04                      │
- ┃   115     cache.set(url, {                                               ┃ │ ───────────────────────────────────── │
- ┃   116 +     etag: res.headers.get("ETag"),                               ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   117       body,                                                        ┃ └───────────────────────────────────────┘
- ┃   └ allowed by you                                                       ┃ ┌─────────────── Changes ───────────────┐
- ┃                                                                          ┃ │ ⎇ main ↑3                             █
- ┃ ◆ claude                                                                 ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   Rewriting the 304 test around the cached body.                         █ │   .                                   │
- ┃                                                                          █ │     CHANGELOG.md                +0 −0 │
- ┃ ◆ claude                                                                 █ │   catalog/                            │
- ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │     fetch.ts                 +149 −12 │
- ┃                                                                          █ │     etag.ts                   +88 −41 │
- ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │     cache/lru.ts               +31 −9 │
+ ┃       …                                                                  ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {                                               ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   116 +     etag: res.headers.get("ETag"),                               ┃ └───────────────────────────────────────┘
+ ┃   117       body,                                                        ┃ ┌─────────────── Changes ───────────────┐
+ ┃   └ allowed by you                                                       ┃ │ ⎇ main ↑3                             █
+ ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃ ◆ claude                                                                 ┃ │   .                                   █
+ ┃   Rewriting the 304 test around the cached body.                         █ │     CHANGELOG.md                +0 −0 │
+ ┃                                                                          █ │   catalog/                            │
+ ┃ ◆ claude                                                                 █ │     fetch.ts                 +149 −12 │
+ ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │     etag.ts                   +88 −41 │
+ ┃                                                                          █ │     cache/lru.ts               +31 −9 │
+ ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │     cache/index.ts             +12 −0 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ └───────────────────────────────────────┘
  ┃                                                                          █ ┌────────────── Activity ───────────────┐
  ┃ ◆ claude                                                                 █ │   └ Reading tests/stream.rs           │

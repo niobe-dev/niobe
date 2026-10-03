@@ -5,19 +5,19 @@
  ┃ ⚙ Read           deep1 catalog/etag.py                            1.3 kB ┃ │ ───────────────────────────────────── │
  ┃                                                                          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃ ◆ claude                                                                 ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃   Both reviewers are working.                                            ┃ │ API-equiv ≥$0.04                      │
- ┃                                                                          ┃ │ ───────────────────────────────────── │
- ┃ ! denied  deep1 › Bash · curl -sI localhost:8080                         ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃                                                                          ┃ └───────────────────────────────────────┘
- ┃   ┌─ ? deep2 asks ────────────────────────────────────── blocks turn 2 ┐ ┃ ┌─────────────── Changes ───────────────┐
- ┃   │ to run Bash                                                        │ ┃ │ ⎇ main ↑3                             █
- ┃   │ python3 probe.py                                                   │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   │                                                                    │ ┃ │   .                                   │
- ┃   │ {"command":"python3 probe.py"}                                     │ ┃ │     CHANGELOG.md                +0 −0 │
- ┃   │                                                                    │ ┃ │   catalog/                            │
- ┃   │ ▶ 1. Allow once                                     this call only │ ┃ │     fetch.ts                 +149 −12 │
- ┃   │   2. Always allow Bash                            niobe saves Bash │ ┃ │     etag.ts                   +88 −41 │
- ┃   │   3. Always allow this target   niobe saves Bash(python3 probe.py) │ █ │     cache/lru.ts               +31 −9 │
+ ┃   Both reviewers are working.                                            ┃ │ ───────────────────────────────────── │
+ ┃                                                                          ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃ ! denied  deep1 › Bash · curl -sI localhost:8080                         ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌─────────────── Changes ───────────────┐
+ ┃   ┌─ ? deep2 asks ────────────────────────────────────── blocks turn 2 ┐ ┃ │ ⎇ main ↑3                             █
+ ┃   │ to run Bash                                                        │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃   │ python3 probe.py                                                   │ ┃ │   .                                   █
+ ┃   │                                                                    │ ┃ │     CHANGELOG.md                +0 −0 │
+ ┃   │ {"command":"python3 probe.py"}                                     │ ┃ │   catalog/                            │
+ ┃   │                                                                    │ ┃ │     fetch.ts                 +149 −12 │
+ ┃   │ ▶ 1. Allow once                                     this call only │ ┃ │     etag.ts                   +88 −41 │
+ ┃   │   2. Always allow Bash                            niobe saves Bash │ ┃ │     cache/lru.ts               +31 −9 │
+ ┃   │   3. Always allow this target   niobe saves Bash(python3 probe.py) │ █ │     cache/index.ts             +12 −0 │
  ┃   │   4. Deny                                    the call does not run │ █ └───────────────────────────────────────┘
  ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │ ▾ Sub-agents  3 running · 1 failed    █

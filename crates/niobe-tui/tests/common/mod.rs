@@ -119,7 +119,6 @@ fn session_events() -> Vec<Event> {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.04),
-            cost_basis: None,
             settles_model: false,
             fast: false,
         }),
@@ -341,7 +340,6 @@ fn session_events() -> Vec<Event> {
             reasoning: 1_200,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         }),
@@ -599,7 +597,6 @@ pub fn metered_session() -> App {
         reasoning: 0,
         model: "haiku-4-5".to_owned(),
         cost_usd: None,
-        cost_basis: None,
         settles_model: false,
         fast: false,
     }));
@@ -801,7 +798,6 @@ pub fn session_with_finished_turns() -> App {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         })

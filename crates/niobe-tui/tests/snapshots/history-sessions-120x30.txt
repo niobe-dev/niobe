@@ -5,19 +5,19 @@
  ┃   ┃  filter ▏type to filter                                                                                    ┃── │
  ┃   ┃                                                                                                            ┃░░ │
  ┃   ┃    1m  this session      1 prompt  add etag support to the catalog fetcher so we stop re-downloading unc…  ┃░░ │
- ┃   ┃   58m  #12              2 prompts  add etag support to the static handler ⏎…                               ┃░░ │
- ┃   ┃    2d  claude 2f6c1e10          —  rename the crate                                                        ┃── │
- ┃   ┃    3d  #11               1 prompt  why does the resume test hang?                                          ┃0k │
- ┃   ┃                                                                                                            ┃───┘
+ ┃   ┃   58m  #12              2 prompts  add etag support to the static handler ⏎…                               ┃── │
+ ┃   ┃    2d  claude 2f6c1e10          —  rename the crate                                                        ┃0k │
+ ┃   ┃    3d  #11               1 prompt  why does the resume test hang?                                          ┃───┘
  ┃   ┃                                                                                                            ┃───┐
  ┃   ┃                                                                                                            ┃░░ █
- ┃ ◆ ┃                                                                                                            ┃59 █
- ┃   ┃                                                                                                            ┃░░ │
+ ┃   ┃                                                                                                            ┃59 █
+ ┃ ◆ ┃                                                                                                            ┃░░ █
  ┃   ┃                                                                                                            ┃−0 │
- ┃ ◆ ┃                                                                                                            ┃░░ │
- ┃   ┃                                                                                                            ┃12 │
- ┃   ┃  ────────────────────────────────────────────────────────────────────────────────────────────────────────  ┃41 │
- ┃ ✗ ┃    1  add etag support to the static handler ⏎…                                                            ┃−9 │
+ ┃   ┃                                                                                                            ┃░░ │
+ ┃ ◆ ┃                                                                                                            ┃12 │
+ ┃   ┃                                                                                                            ┃41 │
+ ┃   ┃  ────────────────────────────────────────────────────────────────────────────────────────────────────────  ┃−9 │
+ ┃ ✗ ┃    1  add etag support to the static handler ⏎…                                                            ┃−0 │
  ┃   ┃    2  and a test for the 304 path                                                                          ┃───┘
  ┃   ┃                                                                                                            ┃───┐
  ┃ ◆ ┃                                                                                                            ┃░░ █

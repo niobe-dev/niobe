@@ -393,7 +393,6 @@ fn a_session_owing_for_many_requests_redraws_inside_a_frame_budget() {
             reasoning: 0,
             model: TIERED_MODELS[(n % 2) as usize].to_owned(),
             cost_usd: None,
-            cost_basis: None,
             settles_model: false,
             fast: false,
         }));

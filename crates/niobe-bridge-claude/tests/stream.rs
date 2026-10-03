@@ -10,7 +10,7 @@
 
 use niobe_bridge_claude::{Translator, transcript};
 use niobe_core::event::{
-    AgentOutcome, Backend, Billing, CostBasis, Event, PermissionDecision, ToolOutcome, UsageWindow,
+    AgentOutcome, Backend, Billing, Event, PermissionDecision, ToolOutcome, UsageWindow,
 };
 use niobe_core::session::SessionState;
 
@@ -245,33 +245,14 @@ fn usage_is_folded_from_the_stream_events_not_from_the_assistant_snapshot() {
 }
 
 #[test]
-fn a_plan_backends_cost_is_api_equivalent_and_never_measured() {
+fn a_cost_is_reported_once_per_model_per_turn_that_cost_something_new() {
     let events = translated();
-    let priced: Vec<_> = usage_records(&events)
+    let priced = usage_records(&events)
         .into_iter()
         .filter(|usage| usage.cost_usd.is_some())
-        .collect();
+        .count();
 
-    assert_eq!(
-        priced.len(),
-        3,
-        "one per model per turn that cost something new"
-    );
-    for usage in &priced {
-        assert_eq!(
-            usage.cost_basis,
-            Some(CostBasis::ApiEquivalent),
-            "{} was priced as {:?}",
-            usage.model,
-            usage.cost_basis
-        );
-    }
-    assert!(
-        usage_records(&events)
-            .iter()
-            .all(|usage| usage.cost_basis != Some(CostBasis::Measured)),
-        "a figure the CLI computed from list prices was stored as money that moved"
-    );
+    assert_eq!(priced, 3);
 }
 
 #[test]
@@ -854,7 +835,6 @@ mod long_context {
         assert_eq!(billed.len(), 2, "one cost record a turn: {billed:?}");
         for usage in billed {
             assert_eq!(usage.model, "claude-opus-5[1m]");
-            assert_eq!(usage.cost_basis, Some(CostBasis::ApiEquivalent));
             assert_eq!(
                 (
                     usage.input,
