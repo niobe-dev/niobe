@@ -354,7 +354,7 @@ impl TestRunRecord {
     /// whether the run failed from what is left: the start of a run is what
     /// survives a cut from the end.
     pub fn read(command: &str, output: &str, whole: Option<&str>, exit_code: Option<i32>) -> Self {
-        let counts = whole.and_then(|whole| test_run::counts(whole, exit_code));
+        let counts = whole.and_then(|whole| test_run::counts(command, whole, exit_code));
         let failed = match counts {
             Some(counts) => counts.failing(),
             None => test_run::failed(command, output, exit_code),

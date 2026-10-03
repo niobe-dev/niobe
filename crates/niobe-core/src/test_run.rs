@@ -36,7 +36,9 @@
 //! after its last binary, so a run killed between two binaries reads as a
 //! whole run of fewer. What says it finished is the status it exited with,
 //! which has to agree with the counts — `0` for a run with no failures, `101`
-//! for one with any — or the counts are not read.
+//! for one with any — or the counts are not read. Only a command that ends in
+//! `cargo test` exits with the run's status: one cut off by `| head` or
+//! followed by `; echo done` exits with that other command's.
 //!
 //! A hook that rewrites the command before it runs leaves the command the
 //! agent wrote in the call, so a run whose output was replaced by another
@@ -521,11 +523,17 @@ fn is_assignment(word: &str) -> bool {
 /// status is not known or disagrees with its counts: `cargo test` exits `0`
 /// where no test failed and `101` where one did, and anything else — a
 /// signal, a status nobody reported — is a run that may have stopped between
-/// two binaries.
+/// two binaries. The status has to be `cargo test`'s own for that, so
+/// `command` must end in it, as for [`failed`]: `cargo test | head -20` exits
+/// with `head`'s status, and `cargo test; echo done` with `echo`'s, whether or
+/// not the run went on past where its output stops.
 ///
 /// `output` is what the command printed, with its standard error in it: the
 /// headers that say which binary is running are written there.
-pub fn counts(output: &str, exit_code: Option<i32>) -> Option<TestCounts> {
+pub fn counts(command: &str, output: &str, exit_code: Option<i32>) -> Option<TestCounts> {
+    if !ends_in_cargo_test(command) {
+        return None;
+    }
     let counts = whole_run(&uncoloured(output))?;
     match (exit_code, counts.failing()) {
         (Some(0), false) | (Some(FAILED_STATUS), true) => Some(counts),
@@ -1033,24 +1041,28 @@ error: could not compile `demo` (lib test) due to 1 previous error
 
     #[test]
     fn a_clean_pass_is_read_as_the_sum_of_its_binaries() {
-        assert_eq!(counts(PASSED, Some(0)), counted(6, 0, 1, 3));
+        assert_eq!(counts("cargo test", PASSED, Some(0)), counted(6, 0, 1, 3));
     }
 
     #[test]
     fn a_run_with_a_failure_is_read_as_failing_with_its_own_count() {
-        let read = counts(FAILED, Some(101)).expect("a failing run's summary is whole");
+        let read =
+            counts("cargo test", FAILED, Some(101)).expect("a failing run's summary is whole");
         assert_eq!(Some(read), counted(3, 1, 1, 1));
         assert!(read.failing());
     }
 
     #[test]
     fn a_run_that_kept_going_past_a_failure_counts_every_binary() {
-        assert_eq!(counts(FAILED_EVERY_BINARY, Some(101)), counted(5, 1, 1, 3));
+        assert_eq!(
+            counts("cargo test", FAILED_EVERY_BINARY, Some(101)),
+            counted(5, 1, 1, 3)
+        );
     }
 
     #[test]
     fn an_interrupted_run_is_not_read() {
-        assert_eq!(counts(INTERRUPTED, None), None);
+        assert_eq!(counts("cargo test", INTERRUPTED, None), None);
     }
 
     #[test]
@@ -1058,7 +1070,7 @@ error: could not compile `demo` (lib test) due to 1 previous error
         let (before, _) = PASSED
             .split_once("test result: ok. 1 passed")
             .expect("the recording has a second binary");
-        assert_eq!(counts(before, Some(0)), None);
+        assert_eq!(counts("cargo test", before, Some(0)), None);
     }
 
     #[test]
@@ -1072,20 +1084,39 @@ error: could not compile `demo` (lib test) due to 1 previous error
              test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; \
              finished in 60.01s\n\n"
         );
-        assert_eq!(counts(&orphaned, Some(142)), None);
-        assert_eq!(counts(&orphaned, None), None);
+        assert_eq!(counts("cargo test", &orphaned, Some(142)), None);
+        assert_eq!(counts("cargo test", &orphaned, None), None);
+    }
+
+    #[test]
+    fn a_run_cut_by_head_between_two_binaries_is_not_read_as_the_binaries_before() {
+        let first: String = PASSED.lines().take(11).map(|l| format!("{l}\n")).collect();
+        assert_eq!(counts("cargo test", &first, Some(0)), counted(4, 0, 1, 1));
+        assert_eq!(counts("cargo test 2>&1 | head -11", &first, Some(0)), None);
+        assert_eq!(
+            counts("timeout 5 cargo test; echo done", &first, Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_whole_run_whose_status_is_its_own_is_read_however_it_is_led() {
+        assert_eq!(
+            counts("cd crates/x && cargo test", PASSED, Some(0)),
+            counted(6, 0, 1, 3)
+        );
     }
 
     #[test]
     fn counts_the_status_disagrees_with_are_not_read() {
-        assert_eq!(counts(PASSED, Some(101)), None);
-        assert_eq!(counts(FAILED, Some(0)), None);
-        assert_eq!(counts(FAILED, Some(1)), None);
+        assert_eq!(counts("cargo test", PASSED, Some(101)), None);
+        assert_eq!(counts("cargo test", FAILED, Some(0)), None);
+        assert_eq!(counts("cargo test", FAILED, Some(1)), None);
     }
 
     #[test]
     fn a_filtered_run_is_not_read_as_the_summaries_that_survived() {
-        assert_eq!(counts(TAILED, Some(0)), None);
+        assert_eq!(counts("cargo test", TAILED, Some(0)), None);
     }
 
     #[test]
@@ -1094,37 +1125,38 @@ error: could not compile `demo` (lib test) due to 1 previous error
         // run under a hook that rewrote the command before it ran; the call
         // still named `cargo test`.
         let replaced = "cargo test: 111 passed (1 suite, 0.00s)";
-        assert_eq!(counts(replaced, Some(0)), None);
+        assert_eq!(counts("cargo test", replaced, Some(0)), None);
     }
 
     #[test]
     fn a_build_that_failed_ran_no_tests_and_is_not_read() {
-        assert_eq!(counts(BUILD_FAILED, Some(101)), None);
+        assert_eq!(counts("cargo test", BUILD_FAILED, Some(101)), None);
     }
 
     #[test]
     fn a_run_cut_out_of_its_middle_is_not_read() {
         let cut = PASSED.replace("running 1 test\ntest from_outside ... ok\n", "");
-        assert_eq!(counts(&cut, Some(0)), None);
+        assert_eq!(counts("cargo test", &cut, Some(0)), None);
     }
 
     #[test]
     fn a_summary_that_does_not_add_up_to_its_binary_is_not_read() {
         let wrong = PASSED.replace("running 5 tests", "running 6 tests");
-        assert_eq!(counts(&wrong, Some(0)), None);
+        assert_eq!(counts("cargo test", &wrong, Some(0)), None);
     }
 
     #[test]
     fn a_verdict_that_disagrees_with_the_failures_is_not_read() {
         let wrong = FAILED.replace("test result: FAILED.", "test result: ok.");
-        assert_eq!(counts(&wrong, Some(0)), None);
+        assert_eq!(counts("cargo test", &wrong, Some(0)), None);
     }
 
     #[test]
     fn output_with_no_test_binary_in_it_is_not_read() {
-        assert_eq!(counts("", Some(0)), None);
+        assert_eq!(counts("cargo test", "", Some(0)), None);
         assert_eq!(
             counts(
+                "cargo test",
                 "    Finished `test` profile [unoptimized] target(s) in 0.01s\n",
                 Some(0)
             ),
@@ -1135,7 +1167,7 @@ error: could not compile `demo` (lib test) due to 1 previous error
     #[test]
     fn a_line_ending_in_a_carriage_return_reads_as_the_line() {
         assert_eq!(
-            counts(&PASSED.replace('\n', "\r\n"), Some(0)),
+            counts("cargo test", &PASSED.replace('\n', "\r\n"), Some(0)),
             counted(6, 0, 1, 3)
         );
     }
@@ -1331,10 +1363,12 @@ error: test failed, to rerun pass `--lib`
 
     #[test]
     fn a_verbose_run_is_read_like_any_other() {
-        let passed = counts(VERBOSE_PASS, Some(0)).expect("a whole verbose run is read");
+        let passed =
+            counts("cargo test", VERBOSE_PASS, Some(0)).expect("a whole verbose run is read");
         assert_eq!((passed.passed, passed.failed, passed.suites), (4, 0, 3));
 
-        let failing = counts(VERBOSE_FAIL, Some(101)).expect("a whole failing run is read");
+        let failing =
+            counts("cargo test", VERBOSE_FAIL, Some(101)).expect("a whole failing run is read");
         assert_eq!((failing.passed, failing.failed, failing.suites), (1, 1, 1));
         assert!(failed("cargo test -v", VERBOSE_FAIL, Some(101)));
         let cut = &VERBOSE_FAIL[..VERBOSE_FAIL.find("failures:").expect("a list")];
@@ -1356,14 +1390,14 @@ test it ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ";
-        assert_eq!(counts(cut, Some(0)), None);
+        assert_eq!(counts("cargo test", cut, Some(0)), None);
     }
 
     #[test]
     fn a_quiet_run_is_a_test_run_whose_counts_are_not_read() {
         assert!(is_test_run("cargo test -q"));
         assert!(is_test_run("cargo -q test"));
-        assert_eq!(counts(QUIET, Some(0)), None);
+        assert_eq!(counts("cargo test", QUIET, Some(0)), None);
     }
 
     // The same crate under `CARGO_TERM_COLOR=always`: cargo's own status
@@ -1389,7 +1423,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn a_coloured_run_is_read_as_the_same_run_uncoloured() {
         assert!(is_test_run("CARGO_TERM_COLOR=always cargo test"));
-        assert_eq!(counts(COLOURED, Some(0)), counted(2, 0, 0, 2));
+        assert_eq!(counts("cargo test", COLOURED, Some(0)), counted(2, 0, 0, 2));
     }
 
     #[test]
@@ -1417,7 +1451,7 @@ error: test failed, to rerun pass `--lib`
     fn a_binary_that_refused_its_flags_ran_no_tests_and_did_not_fail() {
         let command = "cargo test -- -Z unstable-options --format json";
         assert!(is_test_run(command));
-        assert_eq!(counts(REFUSED_FLAG, Some(101)), None);
+        assert_eq!(counts("cargo test", REFUSED_FLAG, Some(101)), None);
         assert!(!failed(command, REFUSED_FLAG, Some(101)));
     }
 
@@ -1433,7 +1467,11 @@ error: test failed, to rerun pass `--lib`
     #[test]
     fn a_run_that_exited_failing_after_its_tests_started_failed_though_it_was_cut() {
         let kept = cut(FAILED);
-        assert_eq!(counts(&kept, Some(101)), None, "no count survives the cut");
+        assert_eq!(
+            counts("cargo test", &kept, Some(101)),
+            None,
+            "no count survives the cut"
+        );
         assert!(failed("cargo test --workspace", &kept, Some(101)));
         assert!(failed("cd crates/x && cargo test", &kept, Some(101)));
     }
@@ -1558,7 +1596,7 @@ error: test failed, to rerun pass `--lib`
         // list proves itself.
         let lines: Vec<&str> = FAILED.lines().collect();
         let tail = lines[lines.len() - 8..].join("\n");
-        assert_eq!(counts(&tail, Some(0)), None);
+        assert_eq!(counts("cargo test", &tail, Some(0)), None);
         assert!(!failed("cargo test 2>&1 | tail -8", &tail, Some(0)));
         assert_eq!(
             failures(&tail),
@@ -1651,6 +1689,6 @@ error: doctest failed, to rerun pass `--doc`
     #[test]
     fn an_unrelated_commands_output_is_not_read() {
         let listing = "total 24\ndrwxr-xr-x  5 op  staff  160 Sep 25 10:00 .\n-rw-r--r--  1 op  staff  42 Sep 25 10:00 Cargo.toml\n";
-        assert_eq!(counts(listing, Some(0)), None);
+        assert_eq!(counts("cargo test", listing, Some(0)), None);
     }
 }
