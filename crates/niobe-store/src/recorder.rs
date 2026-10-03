@@ -13,14 +13,17 @@ use crate::store::{SessionId, Store, StoreError};
 ///
 /// A new recorder opens its session on the first event rather than up front,
 /// so opening the shell and quitting without doing anything leaves no empty
-/// session in the list.
+/// session in the list. It opens it once: where the session's hold cannot be
+/// taken, the event is refused and the next one tries the hold again on the
+/// same session, rather than opening another — rows are never deleted, so
+/// each would stay in the list for good.
 #[derive(Debug)]
 pub struct Recorder {
     store: Store,
     session: Option<SessionId>,
     /// The session's hold, kept for as long as the recorder is: see
-    /// [`Held`].
-    _held: Option<Held>,
+    /// [`Held`]. `None` until it has been taken.
+    held: Option<Held>,
 }
 
 impl Recorder {
@@ -29,7 +32,7 @@ impl Recorder {
         Self {
             store,
             session: None,
-            _held: None,
+            held: None,
         }
     }
 
@@ -46,7 +49,7 @@ impl Recorder {
         Ok(Self {
             store,
             session: Some(session),
-            _held: held,
+            held: Some(held),
         })
     }
 
@@ -69,16 +72,24 @@ impl Recorder {
     /// Appends one event dated `at`, as [`record`](Self::record) does: see
     /// [`Store::append_at`].
     pub fn record_at(&mut self, event: &Event, at: SystemTime) -> Result<u64, StoreError> {
+        let session = self.held_session()?;
+        self.store.append_at(session, event, at)
+    }
+
+    /// The session, opened if it is not yet and held if it is not yet.
+    fn held_session(&mut self) -> Result<SessionId, StoreError> {
         let session = match self.session {
             Some(session) => session,
             None => {
                 let session = self.store.create_session()?;
-                self._held = Held::take(&self.store, session)?;
                 self.session = Some(session);
                 session
             }
         };
-        self.store.append_at(session, event, at)
+        if self.held.is_none() {
+            self.held = Some(Held::take(&self.store, session)?);
+        }
+        Ok(session)
     }
 }
 
@@ -87,24 +98,56 @@ impl Recorder {
 ///
 /// Advisory, and released by the kernel when the file is closed — with the
 /// recorder, or with the process however it ends — so a session a killed
-/// niobe was recording is free again at once. A store with no file behind it,
-/// in memory, holds nothing. Where there is no `flock`, nothing is held.
+/// niobe was recording is free again at once. The recorder removes the file
+/// as it lets go, while it still holds the lock, so the store's directory does
+/// not gather one file per session; a killed niobe leaves its file behind,
+/// and the next hold on that session takes it over. A store with no file
+/// behind it, in memory, holds nothing. Where there is no `flock`, nothing is
+/// held.
 #[derive(Debug)]
 struct Held {
+    /// The file and the name it was locked at; `None` for a store in memory.
     #[cfg(unix)]
-    _file: std::os::fd::OwnedFd,
+    file: Option<(std::path::PathBuf, std::os::fd::OwnedFd)>,
 }
 
+/// How many times a hold is tried on a file that was removed between being
+/// opened and being locked, before the session is taken to be held: each
+/// retry means another recorder took the session and let it go meanwhile.
+#[cfg(unix)]
+const HOLD_ATTEMPTS: usize = 3;
+
 impl Held {
-    fn take(store: &Store, session: SessionId) -> Result<Option<Self>, StoreError> {
+    #[cfg(unix)]
+    fn take(store: &Store, session: SessionId) -> Result<Self, StoreError> {
         let Some(path) = store.path() else {
-            return Ok(None);
+            return Ok(Self { file: None });
         };
-        Self::at(&hold_path(&path, session), session).map(Some)
+        let path = hold_path(&path, session);
+        for _ in 0..HOLD_ATTEMPTS {
+            let file = Self::lock(&path, session)?;
+            // A recorder letting go removes the file before closing it, so the
+            // lock just taken may be on a file no longer at this name, which
+            // the next recorder would make afresh and lock as well.
+            if is_at(&file, &path)? {
+                return Ok(Self {
+                    file: Some((path, file)),
+                });
+            }
+        }
+        Err(StoreError::SessionOpen(session))
+    }
+
+    #[cfg(not(unix))]
+    fn take(_store: &Store, _session: SessionId) -> Result<Self, StoreError> {
+        Ok(Self {})
     }
 
     #[cfg(unix)]
-    fn at(path: &std::path::Path, session: SessionId) -> Result<Self, StoreError> {
+    fn lock(
+        path: &std::path::Path,
+        session: SessionId,
+    ) -> Result<std::os::fd::OwnedFd, StoreError> {
         use rustix::fs::{FlockOperation, Mode, OFlags};
         // Not through a link: a repository chooses its links, and one at this
         // name would choose where an empty file is made.
@@ -115,15 +158,37 @@ impl Held {
         )
         .map_err(|e| StoreError::Hold(e.into()))?;
         match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(file),
             Err(rustix::io::Errno::WOULDBLOCK) => Err(StoreError::SessionOpen(session)),
             Err(e) => Err(StoreError::Hold(e.into())),
         }
     }
+}
 
-    #[cfg(not(unix))]
-    fn at(_path: &std::path::Path, _session: SessionId) -> Result<Self, StoreError> {
-        Ok(Self {})
+#[cfg(unix)]
+impl Drop for Held {
+    fn drop(&mut self) {
+        let Some((path, file)) = &self.file else {
+            return;
+        };
+        // Only the file this hold locked, and before the lock goes with it:
+        // removed after, it could be another recorder's by then. A file left
+        // behind is taken over by the next hold, so a failure here costs a
+        // file and nothing else, and a drop has nowhere to report it.
+        if matches!(is_at(file, path), Ok(true)) {
+            let _ = rustix::fs::unlink(path);
+        }
+    }
+}
+
+/// Whether `file` is the file at `path` now, not one that was there.
+#[cfg(unix)]
+fn is_at(file: &std::os::fd::OwnedFd, path: &std::path::Path) -> Result<bool, StoreError> {
+    let held = rustix::fs::fstat(file).map_err(|e| StoreError::Hold(e.into()))?;
+    match rustix::fs::lstat(path) {
+        Ok(named) => Ok(held.st_dev == named.st_dev && held.st_ino == named.st_ino),
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(e) => Err(StoreError::Hold(e.into())),
     }
 }
 

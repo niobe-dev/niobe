@@ -506,6 +506,52 @@ fn a_session_one_recorder_holds_cannot_be_taken_up_by_another_until_it_lets_go()
 
 #[cfg(unix)]
 #[test]
+fn a_session_whose_hold_cannot_be_taken_is_opened_once_and_taken_up_when_it_can_be() {
+    let (dir, path) = scratch();
+    let blocker = dir.path().join("sessions.db-open-1");
+    std::fs::create_dir(&blocker).expect("a directory can be made at the hold's name");
+    let mut recorder = Recorder::new(Store::open(&path).expect("a store opens"));
+
+    for text in ["one", "two", "three"] {
+        assert!(matches!(
+            recorder.record(&user(text)),
+            Err(StoreError::Hold(_))
+        ));
+    }
+    std::fs::remove_dir(&blocker).expect("the directory is removed");
+    recorder.record(&user("four")).expect("record");
+
+    let listed = recorder.store().sessions().expect("listing works");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].id,
+        recorder.session().expect("a session was opened")
+    );
+    assert_eq!(listed[0].events, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recorder_removes_its_hold_file_when_it_lets_go() {
+    let (dir, path) = scratch();
+    let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
+    first.record(&user("held")).expect("record");
+    let session = first.session().expect("a session was opened");
+    let hold = dir.path().join(format!("sessions.db-open-{session}"));
+    assert!(hold.exists());
+
+    drop(first);
+    assert!(!hold.exists());
+
+    let resumed = Recorder::resume(Store::open(&path).expect("opens"), session)
+        .expect("a session nobody holds is taken up");
+    assert!(hold.exists());
+    drop(resumed);
+    assert!(!hold.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn a_session_can_still_be_read_while_a_recorder_holds_it() {
     let (_dir, path) = scratch();
     let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
