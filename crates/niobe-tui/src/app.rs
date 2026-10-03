@@ -1202,13 +1202,20 @@ pub struct App {
     /// no time at all, rather than the moment the log was parsed.
     at: Option<Stamp>,
     /// When the running turn's first prompt was folded in, by the clock it
-    /// was stamped with: what a turn's duration is counted from. `None`
-    /// between turns, and for a turn whose prompt came with no time.
+    /// was stamped with: what a turn's duration is counted from. Between
+    /// turns, the last turn's end where a prompt sent during it waits to run
+    /// as a turn of its own, and `None` otherwise; `None` too for a turn
+    /// whose prompt came with no time.
     turn_began_at: Option<Stamp>,
     /// How many sub-agents had been spawned, and how many entries the
-    /// transcript held, when the running turn's first prompt was folded in:
-    /// what the turn's rule counts its agents and calls from.
+    /// transcript held, when the running turn's first prompt was folded in —
+    /// or, for a turn the fold did not see a prompt open, when the last turn
+    /// ended: what the turn's rule counts its agents and calls from.
     turn_began_with: (usize, usize),
+    /// Whether a prompt was sent while the running turn ran. The CLI can
+    /// queue one as a turn of its own, which then begins where this one
+    /// ends, with no prompt of its own folded in to mark it.
+    prompt_queued: bool,
     /// The failure entry that stands for the run of events the journal has
     /// refused since it last kept one, while it keeps refusing.
     unsaved: Option<Unsaved>,
@@ -1455,6 +1462,7 @@ impl App {
             unsaved: None,
             turn_began_at: None,
             turn_began_with: (0, 0),
+            prompt_queued: false,
             turns_took: Some(Duration::ZERO),
             last_folded_at: None,
             working_since: None,
@@ -1484,9 +1492,14 @@ impl App {
     /// Folds one event in, from wherever it came.
     fn fold_event(&mut self, event: &Event) {
         let turns = self.session.turns().len();
-        if matches!(event, Event::UserMessage { .. }) && !self.session.turn_running() {
-            self.turn_began_at = self.at;
-            self.turn_began_with = (self.agents.len(), self.entries.len());
+        if matches!(event, Event::UserMessage { .. }) {
+            match self.session.turn_running() {
+                true => self.prompt_queued = true,
+                false => {
+                    self.turn_began_at = self.at;
+                    self.turn_began_with = (self.agents.len(), self.entries.len());
+                }
+            }
         }
         self.session.apply(event);
         // A session left is recorded when the process stopped, or when the
@@ -1531,7 +1544,7 @@ impl App {
             .zip(measured)
             .map(|(sum, took)| sum.saturating_add(took));
         let took = measured.filter(|took| *took >= TIMED);
-        let (agents_before, entries_before) = std::mem::take(&mut self.turn_began_with);
+        let (agents_before, entries_before) = self.turn_began_with;
         let calls = self
             .entries
             .get(entries_before..)
@@ -1559,6 +1572,21 @@ impl App {
             calls: Vec::new(),
             agent: None,
         });
+        self.mark_next_turn_from_this_end(at);
+    }
+
+    /// Marks where the turn after this one begins in case it ends without a
+    /// prompt folded in to open it: here, so that its rule counts only what
+    /// came after this end. Its clock starts here only where a prompt sent
+    /// during this turn is waiting to run; an end with nothing behind it —
+    /// a command the CLI answers itself, a result said once too often — is
+    /// left untimed rather than timed across the idle before it.
+    fn mark_next_turn_from_this_end(&mut self, at: Option<Stamp>) {
+        self.turn_began_with = (self.agents.len(), self.entries.len());
+        self.turn_began_at = match std::mem::take(&mut self.prompt_queued) {
+            true => at,
+            false => None,
+        };
     }
 
     /// Puts what `event` says in the transcript, where it says anything there.
@@ -9073,6 +9101,58 @@ mod tests {
             .map(|(_, rule)| (rule.agents, rule.calls))
             .collect();
         assert_eq!(counted, [(0, 1), (1, 3)]);
+    }
+
+    #[test]
+    fn a_prompt_sent_mid_turn_is_ruled_as_a_turn_from_where_the_last_one_ended() {
+        let mut app = app();
+        app.apply_at(&said("run three"), at(100, 14, 0));
+        for id in ["t1", "t2", "t3"] {
+            app.apply_at(&start(id, "Bash", "{}", None), at(110, 14, 0));
+        }
+        app.apply_at(
+            &Event::AgentSpawn {
+                id: AgentId::new("toolu_a"),
+                parent: None,
+                kind: Some("Explore".to_owned()),
+                label: "Find the loop".to_owned(),
+            },
+            at(115, 14, 0),
+        );
+        app.apply_at(&said("hello during"), at(120, 14, 0));
+        app.apply_at(&Event::TurnEnded, at(130, 14, 0));
+        app.apply_at(&start("t4", "Read", "{}", None), at(140, 14, 0));
+        app.apply_at(&Event::TurnEnded, at(160, 14, 0));
+
+        let counted: Vec<(u64, u64, Option<Duration>)> = rules(&app)
+            .into_iter()
+            .map(|(_, rule)| (rule.agents, rule.calls, rule.took))
+            .collect();
+        assert_eq!(
+            counted,
+            [
+                (1, 3, Some(Duration::from_secs(30))),
+                (0, 1, Some(Duration::from_secs(30)))
+            ]
+        );
+    }
+
+    #[test]
+    fn an_end_with_no_prompt_behind_it_counts_from_the_last_end_and_is_not_timed() {
+        let mut app = app();
+        app.apply_at(&said("run three"), at(100, 14, 0));
+        for id in ["t1", "t2", "t3"] {
+            app.apply_at(&start(id, "Bash", "{}", None), at(110, 14, 0));
+        }
+        app.apply_at(&Event::TurnEnded, at(130, 14, 0));
+        app.apply_at(&start("t4", "Read", "{}", None), at(140, 14, 0));
+        app.apply_at(&Event::TurnEnded, at(600, 14, 8));
+
+        let counted: Vec<(u64, Option<Duration>)> = rules(&app)
+            .into_iter()
+            .map(|(_, rule)| (rule.calls, rule.took))
+            .collect();
+        assert_eq!(counted, [(3, Some(Duration::from_secs(30))), (1, None)]);
     }
 
     #[test]
