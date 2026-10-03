@@ -164,15 +164,20 @@ impl Attachments {
     }
 
     /// Sends the prompt `text`: the images whose placeholders it still holds
-    /// go with it, in the order they were attached, and the rest are dropped.
-    pub(crate) fn send(&mut self, text: &str) {
+    /// go with it, in the order they were attached, the ones a draft in
+    /// `kept` names wait on for it, and the rest are dropped.
+    ///
+    /// A draft set aside to send a recalled prompt is still the operator's,
+    /// and comes back to the composer after; its images come back with it.
+    pub(crate) fn send(&mut self, text: &str, kept: &[&str]) {
         let named = placeholders_in(text);
-        let images = std::mem::take(&mut self.waiting)
+        let (images, waiting) = std::mem::take(&mut self.waiting)
             .into_iter()
-            .filter(|(number, _)| named.contains(number))
-            .map(|(_, image)| image)
-            .collect();
-        self.turns.push_back(images);
+            .filter(|(number, _)| named.contains(number) || named_in(kept, *number))
+            .partition::<Vec<_>, _>(|(number, _)| named.contains(number));
+        self.waiting = waiting;
+        self.turns
+            .push_back(images.into_iter().map(|(_, image)| image).collect());
     }
 
     /// Notes a turn sent with no images, so the ones attached to the prompt
@@ -181,15 +186,23 @@ impl Attachments {
         self.turns.push_back(Vec::new());
     }
 
-    /// Drops what is attached to a prompt that will not be sent.
-    pub(crate) fn discard(&mut self) {
-        self.waiting.clear();
+    /// Drops what is attached to a prompt that will not be sent, keeping what
+    /// a draft in `kept` names.
+    pub(crate) fn discard(&mut self, kept: &[&str]) {
+        self.waiting.retain(|(number, _)| named_in(kept, *number));
     }
 
     /// The images of the oldest prompt sent and not yet handed on.
     pub(crate) fn take_turn(&mut self) -> Vec<Image> {
         self.turns.pop_front().unwrap_or_default()
     }
+}
+
+/// Whether any of `texts` holds the placeholder of image `number`.
+fn named_in(texts: &[&str], number: u32) -> bool {
+    texts
+        .iter()
+        .any(|text| placeholders_in(text).contains(&number))
 }
 
 /// The extensions a pasted path is taken as an image by, as Claude Code
@@ -399,7 +412,7 @@ mod tests {
         );
 
         // The second was deleted from the prompt before it went.
-        attachments.send(&format!("{third} after {first}"));
+        attachments.send(&format!("{third} after {first}"), &[]);
 
         assert_eq!(attachments.take_turn(), vec![image(b"1"), image(b"3")]);
         assert_eq!(attachments.take_turn(), Vec::new());
@@ -409,10 +422,10 @@ mod tests {
     fn each_prompt_takes_its_own_images() {
         let mut attachments = Attachments::default();
         let first = attachments.attach(image(b"1"));
-        attachments.send(&first);
-        attachments.send("no image");
+        attachments.send(&first, &[]);
+        attachments.send("no image", &[]);
         let third = attachments.attach(image(b"3"));
-        attachments.send(&third);
+        attachments.send(&third, &[]);
 
         assert_eq!(attachments.take_turn(), vec![image(b"1")]);
         assert_eq!(attachments.take_turn(), Vec::new());
@@ -432,9 +445,22 @@ mod tests {
     fn a_discarded_prompt_sends_nothing_it_had() {
         let mut attachments = Attachments::default();
         let first = attachments.attach(image(b"1"));
-        attachments.discard();
-        attachments.send(&first);
+        attachments.discard(&[]);
+        attachments.send(&first, &[]);
         assert_eq!(attachments.take_turn(), Vec::new());
+    }
+
+    #[test]
+    fn the_images_a_draft_set_aside_names_wait_for_it_to_be_sent() {
+        let mut attachments = Attachments::default();
+        let first = attachments.attach(image(b"1"));
+        let draft = format!("{first} what is this");
+        attachments.send("run the tests", &[&draft]);
+        attachments.discard(&[&draft]);
+        attachments.send(&draft, &[]);
+
+        assert_eq!(attachments.take_turn(), Vec::new());
+        assert_eq!(attachments.take_turn(), vec![image(b"1")]);
     }
 
     #[test]

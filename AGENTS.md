@@ -111,7 +111,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   or the file a pasted or dropped path names — and what numbers each and sends it with the prompt
   that still holds its placeholder, `history.rs` the one it asks for the repository's earlier
   sessions — and the walk Up and Down take through earlier prompts from the composer's first and
-  last row, the draft set aside and given back — `browse.rs` draws the history dialog Ctrl+R
+  last row, the draft set aside and given back, by Down past the newest or after the prompt shown is
+  sent, and an edit that ends the walk — `browse.rs` draws the history dialog Ctrl+R
   and Session › Resume… open, its prompts or its sessions filtered by what is typed, with the
   row under the cursor in full below the list; Enter on a session ends this one and the loop
   hands the chosen one back for the binary to open, `markdown.rs` draws the assistant's replies

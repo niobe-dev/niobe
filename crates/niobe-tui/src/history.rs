@@ -15,8 +15,13 @@
 //! * Up on the composer's first row recalls the prompt before the one shown,
 //!   and Down on its last row the one after, as a shell and Claude Code do.
 //!   Down past the newest gives back the draft that was being written.
+//!   Editing the prompt shown ends the walk, so the arrows move through the
+//!   edit rather than replacing it; a draft the walk set aside and did not
+//!   give back comes back to the composer, with its images, once a prompt is
+//!   sent.
 //! * [`SEARCH_KEY`] opens the history dialog on its prompts: typed words
-//!   filter it, and Enter puts the chosen prompt in the composer unsent.
+//!   filter it, and Enter puts the chosen prompt in the composer unsent, as
+//!   a step of a walk that set the draft aside and goes on from it.
 //! * Tab in the dialog turns it to the sessions, where Enter ends this one and
 //!   opens the chosen one in its place.
 
@@ -162,11 +167,20 @@ impl Recall {
     /// Starts a walk on the newest of `prompts`, newest first, setting `draft`
     /// aside. `None` where there is nothing to recall.
     pub fn start(prompts: Vec<String>, draft: String) -> Option<Self> {
-        (!prompts.is_empty()).then_some(Self {
-            prompts,
-            at: 0,
-            draft,
-        })
+        Self::start_on(prompts, 0, draft)
+    }
+
+    /// Starts a walk on the prompt at `at` of `prompts`, newest first, setting
+    /// `draft` aside: where a prompt chosen from the history dialog sits, so
+    /// the arrows go on from it. `None` where `prompts` has no such prompt.
+    pub fn start_on(prompts: Vec<String>, at: usize, draft: String) -> Option<Self> {
+        (at < prompts.len()).then_some(Self { prompts, at, draft })
+    }
+
+    /// Ends the walk anywhere but past the newest, handing back the draft it
+    /// set aside.
+    pub fn into_draft(self) -> String {
+        self.draft
     }
 
     /// The prompt the walk is on.
@@ -318,6 +332,23 @@ mod tests {
     #[test]
     fn nothing_to_recall_starts_no_walk() {
         assert_eq!(Recall::start(Vec::new(), "draft".to_owned()), None);
+    }
+
+    #[test]
+    fn a_walk_started_on_a_chosen_prompt_steps_on_from_it() {
+        let prompts = ["third", "second", "first"].map(str::to_owned).to_vec();
+        let mut recall =
+            Recall::start_on(prompts, 1, "draft".to_owned()).expect("the walk has a second");
+
+        assert_eq!(recall.current(), "second");
+        assert_eq!(recall.newer(), Newer::Prompt("third"));
+        assert_eq!(recall.newer(), Newer::Draft("draft".to_owned()));
+    }
+
+    #[test]
+    fn a_walk_is_not_started_past_the_oldest_prompt() {
+        let prompts = vec!["only".to_owned()];
+        assert_eq!(Recall::start_on(prompts, 1, "draft".to_owned()), None);
     }
 
     #[test]

@@ -1083,6 +1083,9 @@ pub struct App {
     recorded_as: Option<String>,
     /// A walk back through earlier prompts with Up and Down, while one is on.
     recall: Option<Recall>,
+    /// Drafts a walk set aside and an edit ended it before giving them back,
+    /// newest last: each comes back to the composer after a prompt is sent.
+    drafts: Vec<String>,
     /// The history dialog, while it is open.
     browser: Option<Browser>,
     /// The session the operator chose to open in place of this one, which
@@ -1409,6 +1412,7 @@ impl App {
             history_wanted: true,
             recorded_as: None,
             recall: None,
+            drafts: Vec::new(),
             browser: None,
             opening: None,
             reports_shift_enter: false,
@@ -5648,14 +5652,18 @@ impl App {
 
         self.composer.clear();
         self.offer_closed = None;
-        self.recall = None;
+        let draft = self.take_draft();
+        let kept: Vec<&str> = std::iter::once(draft.as_str())
+            .chain(self.drafts.iter().map(String::as_str))
+            .collect();
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
-            self.images.discard();
+            self.images.discard(&kept);
             self.produce(Event::ModelSelected { model });
+            self.give_back(&draft);
             self.scroll_to_tail();
             return;
         }
-        self.images.send(&text);
+        self.images.send(&text, &kept);
         self.produce(Event::UserMessage { text });
         self.sent_here = self.attached;
         if !self.attached {
@@ -5673,7 +5681,26 @@ impl App {
                 agent: None,
             });
         }
+        self.give_back(&draft);
         self.scroll_to_tail();
+    }
+
+    /// Ends a walk through earlier prompts, as sending what it shows does,
+    /// and takes the draft that is to come back after: the one it set aside,
+    /// or else the newest an edit left set aside.
+    fn take_draft(&mut self) -> String {
+        let draft = self.recall.take().map(Recall::into_draft);
+        match draft.filter(|draft| !draft.is_empty()) {
+            Some(draft) => draft,
+            None => self.drafts.pop().unwrap_or_default(),
+        }
+    }
+
+    /// Puts a draft set aside back in the empty composer, where there is one.
+    fn give_back(&mut self, draft: &str) {
+        if !draft.is_empty() {
+            self.show_in_composer(draft, false);
+        }
     }
 
     /// Says in the transcript that a turn never reached the backend, so that a
@@ -5985,9 +6012,8 @@ impl App {
                     return;
                 };
                 self.browser = None;
-                self.recall = None;
                 self.focus = Focus::Session;
-                self.show_in_composer(&row.text, false);
+                self.recall_chosen(&row.text);
             }
             View::Sessions => {
                 let Some(row) = self.session_rows().into_iter().nth(at) else {
@@ -6022,11 +6048,55 @@ impl App {
         self.quit();
     }
 
+    /// Puts `chosen`, a prompt from the history dialog, in the composer as a
+    /// step of a walk: what was being written is set aside as Up sets it
+    /// aside, and the arrows go on from where `chosen` was sent.
+    fn recall_chosen(&mut self, chosen: &str) {
+        self.end_walk_if_edited();
+        let draft = match self.recall.take() {
+            Some(recall) => recall.into_draft(),
+            None => self.composed(),
+        };
+        let prompts: Vec<String> = self
+            .every_prompt()
+            .into_iter()
+            .map(|row| row.text)
+            .collect();
+        let at = prompts.iter().position(|prompt| prompt == chosen);
+        match at.and_then(|at| Recall::start_on(prompts, at, draft.clone())) {
+            Some(recall) => self.recall = Some(recall),
+            None => self.set_aside(draft),
+        }
+        self.show_in_composer(chosen, false);
+    }
+
+    /// Ends the walk where the composer no longer shows the prompt it is on:
+    /// the operator has edited it, and the arrows move the cursor through
+    /// what they wrote rather than replacing it. The draft the walk set
+    /// aside stays set aside.
+    fn end_walk_if_edited(&mut self) {
+        let edited = self
+            .recall
+            .as_ref()
+            .is_some_and(|recall| recall.current() != self.composed());
+        if edited && let Some(recall) = self.recall.take() {
+            self.set_aside(recall.into_draft());
+        }
+    }
+
+    /// Keeps `draft` to come back after the next prompt is sent.
+    fn set_aside(&mut self, draft: String) {
+        if !draft.is_empty() {
+            self.drafts.push(draft);
+        }
+    }
+
     /// Up or Down where the composer's cursor cannot move that way: the
     /// prompt before or after the one shown. Returns whether it was that.
     fn recall_key(&mut self, older: bool) -> bool {
         use ratatui_textarea::CursorMove;
 
+        self.end_walk_if_edited();
         let before = self.composer.cursor();
         self.composer.move_cursor(match older {
             true => CursorMove::Up,
@@ -6082,7 +6152,9 @@ impl App {
 
     /// Replaces what the composer holds with `text`, the cursor at the end of
     /// its first row or of its last: where the next Up, or the next Down,
-    /// steps on rather than moving inside it.
+    /// steps on rather than moving inside it. A first line too long for the
+    /// composer wraps, and its end is on a later row, so the cursor goes to
+    /// its start instead.
     ///
     /// A `/` or `@` it opens with is not offered a list: the arrows would go
     /// to the list, and the walk would stop on the first such prompt.
@@ -6096,6 +6168,9 @@ impl App {
             false => self.composer.move_cursor(CursorMove::Bottom),
         }
         self.composer.move_cursor(CursorMove::End);
+        if at_top && self.composer.screen_cursor().row > 0 {
+            self.composer.move_cursor(CursorMove::Head);
+        }
         self.offer_selected = 0;
         self.offer_closed = None;
         if let Some(mention) = self.mention() {
@@ -11292,6 +11367,132 @@ mod tests {
             "newest",
             "and on the last row going the other way"
         );
+    }
+
+    #[test]
+    fn an_edit_to_a_recalled_prompt_ends_the_walk_and_down_leaves_it() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " plus my edit");
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "earlier plus my edit");
+    }
+
+    #[test]
+    fn a_recalled_prompt_typed_over_whole_is_kept_on_down() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        for _ in 0.."earlier".len() {
+            app.on_key(key(KeyCode::Backspace));
+        }
+        typed(&mut app, "brand new");
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "brand new");
+    }
+
+    #[test]
+    fn up_from_an_edited_recall_sets_the_edit_aside_as_a_draft() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " edited");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "earlier");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "earlier edited");
+    }
+
+    #[test]
+    fn sending_a_recalled_prompt_gives_the_draft_back_with_its_image() {
+        let mut app = remembering(&[("run the tests", "3")], &["3"]).attached();
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        typed(&mut app, "what is this");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "run the tests");
+
+        app.on_key(key(KeyCode::Enter));
+        app.take_produced();
+        assert!(app.take_turn_images().is_empty());
+        assert_eq!(app.composed(), "[Image #1] what is this");
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "[Image #1] what is this".to_owned()
+            }]
+        );
+        assert_eq!(app.take_turn_images(), [png(b"a")]);
+    }
+
+    #[test]
+    fn sending_an_edited_recalled_prompt_gives_the_draft_back() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " edited");
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "earlier edited");
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.composed(), "draft");
+    }
+
+    #[test]
+    fn a_prompt_chosen_from_the_history_sets_the_draft_aside_for_down() {
+        let mut app = remembering(&[("add etag support", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.composed(), "add etag support");
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "draft");
+    }
+
+    #[test]
+    fn a_prompt_chosen_from_the_history_walks_on_from_where_it_was_sent() {
+        let mut app = remembering(&[("newest", "3"), ("middle", "3"), ("oldest", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(ctrl('r'));
+        typed(&mut app, "middle");
+        app.on_key(key(KeyCode::Enter));
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "oldest");
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "newest");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "draft");
+    }
+
+    #[test]
+    fn a_recalled_prompt_whose_first_line_wraps_walks_on_with_one_up() {
+        use ratatui::widgets::Widget;
+
+        let long = "a long first line that wraps over several rows of a narrow composer";
+        let mut app = remembering(&[("newest", "3"), (long, "3"), ("oldest", "3")], &["3"]);
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut up = |app: &mut App| {
+            app.composer().render(area, &mut buf);
+            app.on_key(key(KeyCode::Up));
+        };
+        up(&mut app);
+        up(&mut app);
+        assert_eq!(app.composed(), long);
+        up(&mut app);
+        assert_eq!(app.composed(), "oldest");
     }
 
     #[test]
