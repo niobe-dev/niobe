@@ -310,7 +310,9 @@ fn still_running(groups: &Mutex<Vec<Group>>, id: &ToolCallId) -> Option<u32> {
 fn spawn(cwd: &Path, command: &str) -> Result<Child, ShellError> {
     let mut sh = Command::new("sh");
     sh.arg("-c")
-        .arg(format!("exec 2>&1\n{command}"))
+        .arg("exec 2>&1\neval \"$1\"")
+        .arg("sh")
+        .arg(command)
         .current_dir(cwd)
         .env("PAGER", "cat")
         .env("GIT_PAGER", "cat")
@@ -558,6 +560,19 @@ mod tests {
     }
 
     /// A pager would wait for a key there is no terminal to give it.
+    #[test]
+    fn a_command_with_quotes_and_newlines_runs_safely() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+
+        let ran = ran(
+            dir.path(),
+            "echo \"hello 'world'\"; echo '\nline\n'; echo '$1'",
+        );
+
+        assert_eq!(ran.output, "hello 'world'\n\nline\n\n$1\n");
+        assert_eq!(ran.exit_code, Some(0));
+    }
+
     #[test]
     fn a_command_is_told_to_page_through_cat() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
