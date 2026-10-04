@@ -148,7 +148,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on, and starts it as the leader of a process group of its own, which a closing
   session ends whole, and so does a CLI that leaves mid-session, so nothing the CLI started
-  outlives it or holds the quit, or the report of its end, up on its pipes, and passes over a
+  outlives it or holds the quit, or the report of its end, up on its pipes — a CLI that something
+  stops with a signal between turns is reported with a notice rather than as the session's end,
+  and the binary's bridge starts it again on its conversation, with `--resume`, at the next
+  prompt — and passes over a
   line of its output past 64 MiB with a notice rather than hold it; `spilled.rs` reads the file the CLI saves a shell output
   too large to hand over to, so a whole test run is counted from it rather than from the
   preview, and both the driver and the transcript reader hand it to the translator;

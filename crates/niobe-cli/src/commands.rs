@@ -62,10 +62,13 @@ pub struct Commands {
     /// How long what is still running when the session ends is given to end
     /// on SIGTERM before it is killed: [`QUIT_GRACE`], but for a test.
     grace: Duration,
-    /// The process group the backend leads, while the reaper is told of it.
-    /// It is the bridge's to stop; it is kept here only so that the reaper
-    /// is told when the group is seen empty, as a command's is.
-    backend: Option<u32>,
+    /// The process groups the backend has led, while the reaper is told of
+    /// them. They are the bridge's to stop; they are kept here only so that
+    /// the reaper is told when each is seen empty, as a command's is.
+    backend: Vec<u32>,
+    /// Where word of each group the backend leads comes from: the one it
+    /// started in, and one for each time it is started again.
+    backend_groups: Option<Receiver<u32>>,
 }
 
 /// The process group one command's `sh` leads.
@@ -89,7 +92,8 @@ impl Commands {
             groups: Arc::new(Mutex::new(Vec::new())),
             reaper: None,
             grace: QUIT_GRACE,
-            backend: None,
+            backend: Vec::new(),
+            backend_groups: None,
         }
     }
 
@@ -100,28 +104,39 @@ impl Commands {
         self
     }
 
-    /// Tells the reaper the backend's group has ended once nobody is left in
-    /// it. Until then its number cannot be given to anyone else, so whatever
-    /// the backend started is still the session's to stop.
-    fn let_go_of_the_backend_once_empty(&mut self) {
-        let Some(group) = self.backend else {
+    /// Tells the reaper of each group the backend has started since the last
+    /// look.
+    fn watch_the_backends_new_groups(&mut self) {
+        let (Some(reaper), Some(groups)) = (&self.reaper, &self.backend_groups) else {
             return;
         };
-        if occupied(group) {
-            return;
+        for group in groups.try_iter() {
+            reaper.watch(group);
+            self.backend.push(group);
         }
-        if let Some(reaper) = &self.reaper {
-            reaper.forget(group);
-        }
-        self.backend = None;
     }
 
-    /// Tells the reaper of the process group the backend leads, and, once
-    /// the group is seen with nobody left in it, that it has ended.
-    pub fn reaping_the_backend(mut self, group: u32) -> Self {
-        if let Some(reaper) = &self.reaper {
-            reaper.watch(group);
-            self.backend = Some(group);
+    /// Tells the reaper each of the backend's groups has ended once nobody is
+    /// left in it. Until then its number cannot be given to anyone else, so
+    /// whatever the backend started is still the session's to stop.
+    fn let_go_of_the_backend_once_empty(&mut self) {
+        let reaper = self.reaper.as_ref();
+        self.backend.retain(|&group| {
+            let kept = occupied(group);
+            if !kept && let Some(reaper) = reaper {
+                reaper.forget(group);
+            }
+            kept
+        });
+    }
+
+    /// Tells the reaper of each process group the backend leads, as `groups`
+    /// names them, and, once each is seen with nobody left in it, that it has
+    /// ended.
+    pub fn reaping_the_backend(mut self, groups: Receiver<u32>) -> Self {
+        if self.reaper.is_some() {
+            self.backend_groups = Some(groups);
+            self.watch_the_backends_new_groups();
         }
         self
     }
@@ -206,6 +221,7 @@ impl Shell for Commands {
         if let Ok(mut groups) = self.groups.lock() {
             let_go_of_the_empty(&mut groups, self.reaper.as_ref());
         }
+        self.watch_the_backends_new_groups();
         self.let_go_of_the_backend_once_empty();
         self.ended.try_iter().collect()
     }
@@ -709,17 +725,49 @@ mod tests {
         std::os::unix::process::CommandExt::process_group(backend.arg("30"), 0);
         let mut backend = backend.spawn().expect("sleep starts");
         let reaper = Reaper::start().expect("sh starts");
+        let (started, groups) = channel();
+        started.send(backend.id()).expect("the receiver is held");
         let mut commands = Commands::at(dir.path())
             .reaped_by(reaper)
-            .reaping_the_backend(backend.id());
+            .reaping_the_backend(groups);
 
         commands.drain();
-        assert_eq!(commands.backend, Some(backend.id()));
+        assert_eq!(commands.backend, [backend.id()]);
 
         backend.kill().expect("sleep is killed");
         backend.wait().expect("sleep is reaped");
         commands.drain();
-        assert_eq!(commands.backend, None);
+        assert!(commands.backend.is_empty());
+    }
+
+    /// A backend started again in the same session leads a group of its own,
+    /// which the reaper is told of as the first was, and let go of as it was.
+    #[test]
+    fn a_backend_started_again_has_its_group_reaped_and_let_go_of_too() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let backend = || {
+            let mut sleep = Command::new("sleep");
+            std::os::unix::process::CommandExt::process_group(sleep.arg("30"), 0);
+            sleep.spawn().expect("sleep starts")
+        };
+        let mut first = backend();
+        let (started, groups) = channel();
+        started.send(first.id()).expect("the receiver is held");
+        let mut commands = Commands::at(dir.path())
+            .reaped_by(Reaper::start().expect("sh starts"))
+            .reaping_the_backend(groups);
+        first.kill().expect("sleep is killed");
+        first.wait().expect("sleep is reaped");
+
+        let mut again = backend();
+        started.send(again.id()).expect("the receiver is held");
+        commands.drain();
+        assert_eq!(commands.backend, [again.id()]);
+
+        again.kill().expect("sleep is killed");
+        again.wait().expect("sleep is reaped");
+        commands.drain();
+        assert!(commands.backend.is_empty());
     }
 
     #[test]

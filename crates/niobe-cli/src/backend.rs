@@ -9,6 +9,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::SystemTime;
 
 use niobe_bridge_claude::transcript::{self, TranscriptError};
@@ -39,7 +40,7 @@ pub struct Attach {
 pub struct Attachment {
     bridge: Box<dyn Bridge>,
     attached: bool,
-    process_group: Option<u32>,
+    process_groups: Option<Receiver<u32>>,
 }
 
 impl Attachment {
@@ -49,10 +50,12 @@ impl Attachment {
         self.attached
     }
 
-    /// The process group the backend's subprocess leads, where one was
-    /// started.
-    pub fn process_group(&self) -> Option<u32> {
-        self.process_group
+    /// Where the process group each backend subprocess leads is named, where
+    /// one was started: the first is there already, and one more comes each
+    /// time the backend is started again within the session. Taken once, by
+    /// whatever is to end those groups if the session cannot.
+    pub fn take_process_groups(&mut self) -> Option<Receiver<u32>> {
+        self.process_groups.take()
     }
 
     /// The backend, for the event loop.
@@ -89,12 +92,20 @@ pub fn attach(
 
     match selected.profile.backend() {
         Backend::Claude => {
+            let transcripts = transcripts(Some(selected), root, config_dir.clone(), home.clone());
             let options = resumed_options(root, selected, with, config_dir, home)?;
             let session = Session::spawn(&options).map_err(describe)?;
+            let (groups, process_groups) = channel();
+            // The receiver is in hand, so the send cannot fail.
+            let _ = groups.send(session.process_group());
             Ok(Attachment {
-                process_group: Some(session.process_group()),
-                bridge: Box::new(Claude(session)),
+                bridge: Box::new(Claude {
+                    session,
+                    transcripts,
+                    groups,
+                }),
                 attached: true,
+                process_groups: Some(process_groups),
             })
         }
         // Not implemented yet: neither the `codex` bridge nor the native agent
@@ -259,7 +270,15 @@ fn spent(
     config_dir: Option<OsString>,
     home: Option<OsString>,
 ) -> Spent {
-    let Some(dir) = transcripts(Some(profile), root, config_dir, home) else {
+    spent_in(
+        transcripts(Some(profile), root, config_dir, home).as_deref(),
+        id,
+    )
+}
+
+/// [`spent`], from the directory `dir` the CLI keeps its transcripts in.
+fn spent_in(dir: Option<&Path>, id: &str) -> Spent {
+    let Some(dir) = dir else {
         return Spent::default();
     };
     match transcript::spent(&dir.join(format!("{id}.jsonl"))) {
@@ -320,14 +339,28 @@ fn claude_options(
     // flag is not set for a backend with nothing answering: the CLI stops the
     // turn on every gated call and waits for an answer that would never come.
     options.ask_over_stdio = true;
+    // The shell's bridge starts the CLI again on its conversation when
+    // something stops it between turns: see `Claude::carry_on`.
+    options.carry_on = true;
     Ok(options)
+}
+
+/// What a CLI started again is started with: `next`, as the session that
+/// stopped hands it on, from what the CLI's transcript in `transcripts` last
+/// recorded the conversation spending, for the reason [`resumed_options`]
+/// reads it.
+fn carried_on(mut next: Options, transcripts: Option<&Path>) -> Options {
+    if let Some(id) = &next.resume {
+        next.spent = spent_in(transcripts, id);
+    }
+    next
 }
 
 fn detached() -> Attachment {
     Attachment {
         bridge: Box::new(Detached),
         attached: false,
-        process_group: None,
+        process_groups: None,
     }
 }
 
@@ -341,11 +374,45 @@ fn describe(error: SpawnError) -> String {
 
 /// The `claude` bridge behind the trait the shell asked for.
 #[derive(Debug)]
-struct Claude(Session);
+struct Claude {
+    session: Session,
+    /// Where the CLI keeps its transcripts, which is where what a CLI started
+    /// again will restore as spent is read from.
+    transcripts: Option<PathBuf>,
+    /// Told the process group of each CLI started again.
+    groups: Sender<u32>,
+}
+
+impl Claude {
+    /// Starts the CLI again on its conversation where the one before was
+    /// stopped between turns, and does nothing otherwise.
+    ///
+    /// Done when the operator next asks the backend for something rather than
+    /// as soon as the stop is seen: whatever stopped the CLI — a shutdown, a
+    /// logout, the operator — may still be under way, and a CLI started into
+    /// it would only be stopped again. A start that fails leaves the session
+    /// as it was, to be tried again by the next request.
+    fn carry_on(&mut self) -> Result<(), BridgeError> {
+        let Some(next) = self.session.next() else {
+            return Ok(());
+        };
+        let next = carried_on(next, self.transcripts.as_deref());
+        let session = Session::spawn(&next).map_err(|error| {
+            BridgeError::from(format!(
+                "the `claude` CLI could not be started again: {error}"
+            ))
+        })?;
+        // Nothing may be listening: a session with no reaper.
+        let _ = self.groups.send(session.process_group());
+        self.session = session;
+        Ok(())
+    }
+}
 
 impl Bridge for Claude {
     fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError> {
-        self.0.send(prompt, images).map_err(BridgeError::from)
+        self.carry_on()?;
+        self.session.send(prompt, images).map_err(BridgeError::from)
     }
 
     fn answer(
@@ -354,25 +421,27 @@ impl Bridge for Claude {
         decision: PermissionDecision,
         message: Option<&str>,
     ) -> Result<(), BridgeError> {
-        self.0
+        self.session
             .answer(id, decision, message)
             .map_err(BridgeError::from)
     }
 
     fn set_mode(&mut self, mode: Mode) -> Result<(), BridgeError> {
-        self.0.set_mode(mode).map_err(BridgeError::from)
+        self.carry_on()?;
+        self.session.set_mode(mode).map_err(BridgeError::from)
     }
 
     fn set_model(&mut self, model: &str) -> Result<(), BridgeError> {
-        self.0.set_model(model).map_err(BridgeError::from)
+        self.carry_on()?;
+        self.session.set_model(model).map_err(BridgeError::from)
     }
 
     fn interrupt(&mut self) -> Result<(), BridgeError> {
-        self.0.interrupt().map_err(BridgeError::from)
+        self.session.interrupt().map_err(BridgeError::from)
     }
 
     fn drain(&mut self) -> Vec<Event> {
-        self.0.drain()
+        self.session.drain()
     }
 }
 
@@ -825,5 +894,108 @@ mod tests {
             "{said}"
         );
         assert!(said.contains("is not on PATH"), "{said}");
+    }
+    /// The opening and the end of one turn of conversation `s-9`, gated in
+    /// plan mode, as the CLI writes them.
+    const ONE_TURN: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"plan"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// Drains `bridge` until `wanted` arrives, and hands back what it drained.
+    fn drained_until(bridge: &mut dyn Bridge, wanted: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut events = Vec::new();
+        while !events.iter().any(&wanted) {
+            assert!(
+                std::time::Instant::now() < until,
+                "it never came: {events:#?}"
+            );
+            events.extend(bridge.drain());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        events
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_between_turns_is_started_again_on_its_conversation_by_the_next_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("the stand-in's directory is made");
+        let seen = dir.path().join("seen");
+        std::fs::create_dir(&seen).expect("the record's directory is made");
+        // Started once, it answers a turn and then leaves the way Node does on
+        // a SIGTERM; started again, it answers and stays. Each start records
+        // the arguments it was given. Only this directory and the system's
+        // own are on its PATH, so no real `claude` can be reached.
+        let script = bin.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nn=$(ls {seen} | wc -l | tr -d ' ')\necho \"$@\" > {seen}/$n\nread -r initialize\nread -r turn\n{ONE_TURN}\n[ \"$n\" = 0 ] && exit 143\nexec sleep 30\n",
+                seen = seen.display()
+            ),
+        )
+        .expect("the stand-in is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+        let config = config(&format!(
+            "[profiles.max]\nbackend = \"claude\"\nenv = {{ PATH = \"{}:/usr/bin:/bin\" }}\n",
+            bin.display()
+        ));
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let mut attachment = attach(
+            dir.path(),
+            Some(&selected),
+            &Attach::default(),
+            Some(dir.path().join("cli").into_os_string()),
+            NO_HOME,
+        )
+        .expect("the stand-in starts");
+        let groups = attachment.take_process_groups().expect("a CLI was started");
+        let first = groups.try_recv().expect("the first group is named");
+        let bridge = attachment.bridge();
+        bridge.send("one", &[]).expect("the turn is sent");
+        let events = drained_until(bridge, |event| matches!(event, Event::Notice { .. }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { fatal: true, .. })),
+            "{events:#?}"
+        );
+
+        bridge
+            .send("two", &[])
+            .expect("the CLI is started again and sent the turn");
+        drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+
+        let again = groups.try_recv().expect("the new group is named");
+        assert_ne!(again, first);
+        let argv = std::fs::read_to_string(seen.join("1")).expect("the second start recorded");
+        assert!(argv.contains("--resume s-9"), "{argv}");
+        assert!(argv.contains("--permission-mode plan"), "{argv}");
+    }
+
+    #[test]
+    fn a_cli_started_again_starts_from_what_its_transcript_last_recorded_it_spending() {
+        let claude = tempfile::tempdir().expect("a temporary directory");
+        let root = Path::new("/repo");
+        let dir = transcript::directory(claude.path(), root);
+        std::fs::create_dir_all(&dir).expect("the project directory is made");
+        std::fs::write(
+            dir.join("s-9.jsonl"),
+            r#"{"type":"cost-state","totalCostUSD":0.25,"modelUsage":{"opus-5":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4,"costUSD":0.25}}}"#,
+        )
+        .expect("the transcript is written");
+        let mut next = Options::new(root, "max");
+        next.resume = Some("s-9".to_owned());
+
+        let carried = carried_on(next, Some(&dir));
+
+        assert_eq!(carried.spent.cost_usd("opus-5"), Some(0.25));
+        assert_eq!(carried.resume.as_deref(), Some("s-9"));
     }
 }

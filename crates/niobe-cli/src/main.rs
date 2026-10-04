@@ -317,7 +317,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
     // Started with the shell and stopped with it: the thread behind it reads
     // the repository while the session runs, and a piped run never gets here.
     let mut watching = repo::watch(&root);
-    let mut commands = commands_for(&root, &backend);
+    let mut commands = commands_for(&root, &mut backend);
     let ended = niobe_tui::run(
         app,
         niobe_tui::Around {
@@ -382,14 +382,14 @@ fn images_for(root: &Path) -> images::Clipboard {
 ///
 /// A session whose reaper cannot be started still stops what it started on
 /// every way out it is given; only SIGKILL gives it none.
-fn commands_for(root: &Path, backend: &backend::Attachment) -> commands::Commands {
+fn commands_for(root: &Path, backend: &mut backend::Attachment) -> commands::Commands {
     let commands = commands::Commands::at(root);
     let Ok(reaper) = reaper::Reaper::start() else {
         return commands;
     };
     let commands = commands.reaped_by(reaper);
-    match backend.process_group() {
-        Some(group) => commands.reaping_the_backend(group),
+    match backend.take_process_groups() {
+        Some(groups) => commands.reaping_the_backend(groups),
         None => commands,
     }
 }
@@ -505,7 +505,7 @@ fn resume(
     let mut journal = StoreJournal::open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&root);
-    let mut commands = commands_for(&root, &backend);
+    let mut commands = commands_for(&root, &mut backend);
     let ended = niobe_tui::run(
         app,
         niobe_tui::Around {
@@ -644,7 +644,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     let mut journal = StoreJournal::open(recorder);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&root);
-    let mut commands = commands_for(&root, &backend);
+    let mut commands = commands_for(&root, &mut backend);
     let ended = niobe_tui::run(
         app,
         niobe_tui::Around {

@@ -30,6 +30,13 @@
 //! is what a closing session ends, rather than the CLI alone: something it
 //! started holds the pipes it inherited, so the readers would never see them
 //! close, and nobody would be left to see it end.
+//!
+//! A CLI that something outside stops with a signal while no turn is running
+//! loses nothing: the conversation is in its own transcript. Where the caller
+//! asked for it with [`Options::carry_on`], that stop is a notice, and
+//! [`Session::next`] says what to start a CLI with to take the conversation
+//! up again. A stop while a turn runs takes the turn with it, and still ends
+//! the session.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -207,6 +214,14 @@ pub struct Options {
     /// waits for an answer to every gated call, and a session with nothing to
     /// answer waits for ever.
     pub ask_over_stdio: bool,
+    /// Whether the caller starts the CLI again, from [`Session::next`], when
+    /// something stops it with a signal between turns.
+    ///
+    /// Nothing is lost then: the conversation is in the CLI's own transcript,
+    /// and `--resume` takes it up. With this on, such a stop is reported as a
+    /// notice that the next prompt starts the CLI again; with it off it ends
+    /// the session, since nothing would.
+    pub carry_on: bool,
 }
 
 impl Options {
@@ -227,6 +242,7 @@ impl Options {
             spent: Spent::default(),
             settings: None,
             ask_over_stdio: false,
+            carry_on: false,
         }
     }
 
@@ -404,6 +420,18 @@ pub struct Session {
     /// How long a write waits before it is said to be stalled: [`STALLED`],
     /// but for tests that cannot wait that long.
     stalled_after: Duration,
+    /// What a CLI started after this one would be started with: these options,
+    /// kept to the conversation, the mode and the model in force now.
+    next: Options,
+    /// The model in force before the last change asked for, which is what is
+    /// in force again if the CLI refuses that change.
+    model_before: Option<Option<String>>,
+    /// Whether a turn was sent that the CLI has not ended. A CLI stopped then
+    /// took the turn with it, and the session is not carried on.
+    turn_open: bool,
+    /// Whether the CLI was stopped by a signal between turns, with
+    /// [`Options::carry_on`]: the session goes on, in a CLI started again.
+    stopped_between_turns: bool,
 }
 
 impl Session {
@@ -551,6 +579,13 @@ impl Session {
             output_closed: None,
             exited: None,
             stalled_after: STALLED,
+            next: Options {
+                spent: Spent::default(),
+                ..options.clone()
+            },
+            model_before: None,
+            turn_open: false,
+            stopped_between_turns: false,
         };
         // The writer has only just been started, so the queue cannot be
         // closed yet; a CLI that has already left is reported by the next
@@ -581,7 +616,9 @@ impl Session {
     /// waits on the CLI, and the reply — or word that the turn could not be
     /// sent — arrives through [`Session::drain`].
     pub fn send(&mut self, prompt: &str, images: &[Image]) -> std::io::Result<()> {
-        self.queue(turn_line(prompt, images).to_string(), "turn")
+        self.queue(turn_line(prompt, images).to_string(), "turn")?;
+        self.turn_open = true;
+        Ok(())
     }
 
     /// Answers a permission prompt the CLI is waiting on.
@@ -648,7 +685,9 @@ impl Session {
         self.ask(&control_request(
             &id,
             serde_json::json!({ "subtype": "set_permission_mode", "mode": spelt(mode) }),
-        ))
+        ))?;
+        self.next.mode = mode;
+        Ok(())
     }
 
     /// Asks the CLI to answer with a different model from its next turn.
@@ -667,7 +706,9 @@ impl Session {
         self.ask(&control_request(
             &id,
             serde_json::json!({ "subtype": "set_model", "model": model }),
-        ))
+        ))?;
+        self.model_before = Some(self.next.model.replace(model.to_owned()));
+        Ok(())
     }
 
     /// Asks the CLI to stop the turn it is running.
@@ -734,7 +775,10 @@ impl Session {
                 // can still deliver a line after the end was reported, and
                 // it is not the CLI's.
                 Ok(_) if self.reported => {}
-                Ok(event) => events.push(event),
+                Ok(event) => {
+                    self.heard(&event);
+                    events.push(event);
+                }
                 Err(TryRecvError::Empty) => {
                     if let Some(ended) = self.left_holding_output() {
                         events.push(ended);
@@ -749,6 +793,39 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Keeps what `event` says the CLI is now in — its conversation, its mode,
+    /// its model, a turn ended — for a CLI started after it to be in too.
+    fn heard(&mut self, event: &Event) {
+        if let Event::SessionMeta(meta) = event
+            && let Some(conversation) = &meta.backend_session
+        {
+            self.next.resume = Some(conversation.clone());
+        }
+        if let Event::ModeSelected { mode } = event {
+            self.next.mode = *mode;
+        }
+        if matches!(event, Event::ModelRefused)
+            && let Some(before) = self.model_before.take()
+        {
+            self.next.model = before;
+        }
+        if matches!(event, Event::TurnEnded) {
+            self.turn_open = false;
+        }
+    }
+
+    /// What to start a CLI with to carry the session on, where the one this
+    /// session ran was stopped by a signal between turns and
+    /// [`Options::carry_on`] was asked for; nothing otherwise.
+    ///
+    /// The options are the ones this session was started with, resuming its
+    /// conversation in the mode and on the model in force when it stopped.
+    /// What the CLI will restore as already spent is left empty: it is read
+    /// from the CLI's transcript, which is the caller's to find.
+    pub fn next(&self) -> Option<Options> {
+        self.stopped_between_turns.then(|| self.next.clone())
     }
 
     /// Word that the line being written has waited on the CLI for longer
@@ -816,6 +893,19 @@ impl Session {
         let said = self.said();
         let unanswered = self.unanswered();
 
+        // Stopped from outside with nothing under way: what the conversation
+        // holds is in the CLI's transcript, and a CLI started on it again
+        // loses nothing, so the session is not over.
+        if self.next.carry_on
+            && !self.turn_open
+            && unanswered.is_empty()
+            && let Some(how) = stopped_by(status)
+        {
+            self.stopped_between_turns = true;
+            return Some(Event::Notice {
+                message: stopped_between_turns(&how, &said),
+            });
+        }
         if !status.success() || !said.is_empty() {
             return Some(Event::Error {
                 message: ended_because(status, &said),
@@ -1210,9 +1300,10 @@ fn control_response(
 /// never instead, and only when they read like an authentication failure —
 /// which is a guess about a string, so the operator sees both.
 fn ended_because(status: std::process::ExitStatus, said: &str) -> String {
+    let how = how_it_ended(status);
     let mut message = match said.is_empty() {
-        true => format!("the `claude` session ended with {status} and said nothing."),
-        false => format!("the `claude` session ended with {status}: {said}"),
+        true => format!("the `claude` session {how} and said nothing."),
+        false => format!("the `claude` session {how}: {said}"),
     };
     if looks_logged_out(said) {
         message.push_str(
@@ -1221,6 +1312,57 @@ fn ended_because(status: std::process::ExitStatus, said: &str) -> String {
         );
     }
     message
+}
+
+/// What to say about a CLI stopped between turns, `how` it was, in a session
+/// that goes on.
+fn stopped_between_turns(how: &str, said: &str) -> String {
+    let mut message = format!(
+        "the `claude` CLI {how} while no turn was running. The conversation is kept: the \
+         next prompt starts the CLI again on it."
+    );
+    if !said.is_empty() {
+        message.push_str(" It said: ");
+        message.push_str(said);
+    }
+    message
+}
+
+/// How the CLI's process ended, in words: by the signal that stopped it,
+/// where one did, and otherwise by its exit status as it stands.
+fn how_it_ended(status: std::process::ExitStatus) -> String {
+    stopped_by(status).unwrap_or_else(|| format!("ended with {status}"))
+}
+
+/// The signal that stopped the CLI, in words, or nothing where none did.
+///
+/// A process that handles a signal and then leaves — as Node does with
+/// SIGTERM — leaves with 128 and the signal's number as its exit status
+/// rather than by the signal, so a status read that way names it too. A
+/// status past 128 that is not one of those signals is left as it stands.
+fn stopped_by(status: std::process::ExitStatus) -> Option<String> {
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return Some(format!("was stopped by {}", signal_name(signal)?));
+    }
+    let code = status.code()?;
+    let name = signal_name(code.checked_sub(128)?)?;
+    Some(format!("was stopped by {name} (exit status {code})"))
+}
+
+/// The name of signal `number`, for the signals that stop a process from
+/// outside — the operator, the system, another program — and that a process
+/// is reported as stopped by. The numbers are the same on Linux and macOS.
+fn signal_name(number: i32) -> Option<&'static str> {
+    match number {
+        1 => Some("SIGHUP"),
+        2 => Some("SIGINT"),
+        3 => Some("SIGQUIT"),
+        6 => Some("SIGABRT"),
+        9 => Some("SIGKILL"),
+        15 => Some("SIGTERM"),
+        _ => None,
+    }
 }
 
 /// Why a session that left with success is reported as a failure: it left
@@ -2371,5 +2513,183 @@ mod tests {
         ));
         assert!(looks_logged_out("Invalid API key · Please run /login"));
         assert!(looks_logged_out("OAuth token has expired"));
+    }
+    /// The opening of a turn and its end, as the CLI writes them, for a
+    /// stand-in to say once it has read the turn: the conversation is `s-9`,
+    /// gated in plan mode.
+    const ONE_TURN: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"plan"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// Starts a stand-in whose caller carries a session on past a stop
+    /// between turns, sends it a turn, and drains it until the turn has ended.
+    #[cfg(unix)]
+    fn carried_on(body: &str, carry_on: bool) -> (Session, Vec<Event>, tempfile::TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let script = dir.path().join("claude");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}")).expect("the stand-in is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+        let mut options = options();
+        options.binary = script;
+        options.cwd = dir.path().to_path_buf();
+        options.carry_on = carry_on;
+        let mut session = spawn_written(&options);
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        let events = drained_until(&mut session, |event| {
+            matches!(event, Event::TurnEnded | Event::Error { fatal: true, .. })
+        });
+        (session, events, dir)
+    }
+
+    /// Drains `session` until it has reported its end.
+    #[cfg(unix)]
+    fn drained_to_the_end(session: &mut Session) -> Vec<Event> {
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        events
+    }
+
+    /// A CLI that leaves between turns the way `leave` does, after the
+    /// operator asked for another model, and what its end said.
+    #[cfg(unix)]
+    fn stopped_between_turns(leave: &str) -> (Session, Vec<Event>) {
+        let (mut session, _, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{ONE_TURN}\nread -r model\n{leave}\n"),
+            true,
+        );
+        session.set_model("haiku").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+        (session, events)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_between_turns_is_a_notice_and_carries_on_with_its_conversation() {
+        // The way Node leaves on a SIGTERM it handles: an exit status of its
+        // own, 128 and the signal's number, rather than death by the signal.
+        let (session, events) = stopped_between_turns("exit 143");
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { fatal: true, .. })),
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Notice { message })
+                if message == "the `claude` CLI was stopped by SIGTERM (exit status 143) while no turn was running. The conversation is kept: the next prompt starts the CLI again on it."),
+            "{events:#?}"
+        );
+        let next = session.next().expect("the session can carry on");
+        assert_eq!(next.resume.as_deref(), Some("s-9"));
+        assert_eq!(next.mode, Mode::Plan);
+        assert_eq!(next.model.as_deref(), Some("haiku"));
+        assert!(next.spent.is_empty(), "the spend is the caller's to read");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_killed_by_a_signal_between_turns_carries_on_too() {
+        let (session, events) = stopped_between_turns("kill -TERM $$");
+
+        assert!(
+            matches!(events.last(), Some(Event::Notice { message })
+                if message.starts_with("the `claude` CLI was stopped by SIGTERM while no turn was running.")),
+            "{events:#?}"
+        );
+        assert!(session.next().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_fails_between_turns_without_a_signal_still_ends_the_session() {
+        let (session, events) = stopped_between_turns("echo broke >&2\nexit 1");
+
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session ended with exit status: 1: broke"),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_while_a_turn_runs_ends_the_session_and_names_the_signal() {
+        let (session, events, _dir) =
+            carried_on("read -r initialize\nread -r turn\nexit 143\n", true);
+
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM (exit status 143) and said nothing."),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_between_turns_ends_the_session_where_nothing_will_start_it_again() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{ONE_TURN}\nexit 143\n"),
+            false,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM (exit status 143) and said nothing."),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_model_the_cli_refused_is_not_the_one_it_is_started_again_on() {
+        let refused = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"model refuse is not available"}}'"#;
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r model\n{refused}\nexit 143\n"
+            ),
+            true,
+        );
+        session.set_model("refuse").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(events.contains(&Event::ModelRefused), "{events:#?}");
+        assert_eq!(session.next().expect("it can carry on").model, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exit_status_past_128_is_read_as_the_signal_it_names_and_others_as_they_stand() {
+        use std::os::unix::process::ExitStatusExt;
+        let exited = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+
+        assert_eq!(
+            how_it_ended(exited(143)),
+            "was stopped by SIGTERM (exit status 143)"
+        );
+        assert_eq!(
+            how_it_ended(exited(130)),
+            "was stopped by SIGINT (exit status 130)"
+        );
+        assert_eq!(
+            how_it_ended(std::process::ExitStatus::from_raw(9)),
+            "was stopped by SIGKILL"
+        );
+        assert_eq!(how_it_ended(exited(1)), "ended with exit status: 1");
+        assert_eq!(how_it_ended(exited(200)), "ended with exit status: 200");
     }
 }
