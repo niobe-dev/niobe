@@ -982,6 +982,81 @@ fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
     );
 }
 
+/// A session whose agent edited its own notes twice in a row, after a
+/// reply: what the backend marks as the agent's memory rather than the
+/// project's.
+fn session_that_updated_its_memory() -> App {
+    use niobe_core::event::ChangeScope;
+
+    let mut app = empty_session();
+    app.apply(&Event::AssistantMessage {
+        text: "Noting the sweep's numbering for next time.".to_owned(),
+        agent: None,
+    });
+    let notes = "/home/me/notes/-w-app/memory";
+    for (id, file, line) in [("m1", "sweeps.md", 7), ("m2", "MEMORY.md", 3)] {
+        let path = format!("{notes}/{file}");
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Edit".to_owned(),
+            input: path.clone(),
+            summary: Some(path.clone()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Edit".to_owned(),
+            input: path.clone(),
+            output: String::new(),
+            bytes: 120,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some(path.clone()),
+            exit_code: None,
+            error: None,
+        });
+        app.apply(&Event::FileChange {
+            path,
+            added: Some(1),
+            removed: Some(1),
+            hunks: vec![common::hunk(
+                line,
+                line,
+                &["-modified: 2026-10-03", "+modified: 2026-10-04"],
+            )],
+            scope: ChangeScope::AgentMemory,
+        });
+    }
+    app
+}
+
+#[test]
+fn edits_to_the_agents_own_notes_are_one_row_naming_them_and_ctrl_t_shows_the_diff() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_that_updated_its_memory();
+    let frame = screen(&mut app, 120, 30);
+    let rows: Vec<&str> = frame.lines().filter(|row| row.contains("memory")).collect();
+    assert_eq!(rows.len(), 1, "{frame}");
+    assert!(
+        rows[0].contains("updated memory · sweeps.md, MEMORY.md"),
+        "{frame}"
+    );
+    assert!(
+        !frame.contains("modified: 2026"),
+        "a diff is drawn:\n{frame}"
+    );
+    assert!(!frame.contains("/home/me"), "a path is drawn:\n{frame}");
+    assert_snapshot("memory-120x30", &frame);
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let open = screen(&mut app, 120, 30);
+    assert_eq!(
+        open.matches("+ modified: 2026-10-04").count(),
+        2,
+        "Ctrl+T does not show the edits:\n{open}"
+    );
+}
+
 #[test]
 fn a_long_request_wraps_inside_the_question() {
     let mut app = running_session();

@@ -131,6 +131,9 @@ pub(crate) fn lines(
 ) -> Vec<Line<'static>> {
     let colour = entry.kind.colour(theme);
     let mut lines = match entry.calls.as_slice() {
+        calls if !detail.diffs_open && all_memory(calls) => {
+            remembered(entry, calls, width, detail, colour, theme)
+        }
         [call] => single(entry, call, width, detail, colour, theme),
         calls => group(entry, calls, width, detail, colour, theme),
     };
@@ -170,6 +173,76 @@ fn single(
     lines
 }
 
+/// Whether every call of an entry changed one of the agent's own notes, and
+/// nothing else.
+fn all_memory(calls: &[Call]) -> bool {
+    !calls.is_empty() && calls.iter().all(|call| call.memory)
+}
+
+/// What the agent's own notes changed by a call are drawn as, in place of
+/// what the call does: that it updated its memory, and which note.
+const MEMORY: &str = "updated memory";
+
+/// Calls that changed nothing but the agent's own notes, as one row:
+/// `◆ Edit ×2  updated memory · notes.md, MEMORY.md  +2 −2`.
+///
+/// The notes are how the agent works, not what is being built, so their
+/// lines are not drawn in the transcript; Ctrl+T draws them as any other
+/// change, for whoever wants to read what the agent wrote down.
+fn remembered(
+    entry: &Entry,
+    calls: &[Call],
+    width: usize,
+    detail: Detail,
+    colour: Color,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut names: Vec<&str> = Vec::new();
+    for call in calls {
+        let name = file_name(&call.what);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let what = format!("{MEMORY} · {}", names.join(", "));
+    let result = match calls {
+        [call] => result(call, theme),
+        calls => group_result(calls, theme),
+    };
+    vec![row(
+        ("◆", colour),
+        head(entry),
+        Doing {
+            agent: entry.agent.as_deref().filter(|_| !detail.grouped),
+            what: &what,
+        },
+        result,
+        width,
+        detail.columns,
+        colour,
+        theme,
+    )]
+}
+
+/// The last part of a path, which is all a note's row names: the agent's
+/// notes live outside the repository, and the directory they share says
+/// nothing the row does not.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+}
+
+/// What a call of a group is said to do: what the backend read it as, or,
+/// for one that changed the agent's own notes while the diffs are shut,
+/// that it updated its memory and which note.
+fn doing(call: &Call, detail: Detail) -> String {
+    match call.memory && !detail.diffs_open {
+        true => format!("{MEMORY} · {}", file_name(&call.what)),
+        false => call.what.clone(),
+    }
+}
+
 /// A run of calls: the group's row, then the calls under it unless the runs
 /// are folded.
 fn group(
@@ -186,7 +259,7 @@ fn group(
     };
     let what = calls
         .iter()
-        .map(|call| call.what.as_str())
+        .map(|call| doing(call, detail))
         .collect::<Vec<_>>()
         .join(", ");
     let mut lines = vec![row(
@@ -211,7 +284,7 @@ fn group(
         let last = at + 1 == calls.len();
         let branch = if last { LAST_BRANCH } else { BRANCH };
         let stem = if last { "  " } else { STEM };
-        lines.push(child(branch, call, width, theme));
+        lines.push(child(branch, call, width, detail, theme));
         lines.extend(under(call, format!("{indent}{stem}"), width, detail, theme));
     }
     lines
@@ -219,7 +292,7 @@ fn group(
 
 /// One call of a group: hung from the group's row, what it does, and its own
 /// cost on the right.
-fn child(branch: &str, call: &Call, width: usize, theme: &Theme) -> Line<'static> {
+fn child(branch: &str, call: &Call, width: usize, detail: Detail, theme: &Theme) -> Line<'static> {
     let colour = match call.failed() {
         true => theme.del,
         false => theme.fg,
@@ -229,7 +302,7 @@ fn child(branch: &str, call: &Call, width: usize, theme: &Theme) -> Line<'static
     let room = width
         .saturating_sub(GUTTER + text::width(branch) + GAP)
         .saturating_sub(spans_width(&result));
-    let what = text::truncate(&call.what, room);
+    let what = text::truncate(&doing(call, detail), room);
     let gap = room.saturating_sub(text::width(&what)) + GAP;
 
     let mut spans = vec![
@@ -277,6 +350,8 @@ fn under(
         }
         (None, Some(run), _, _) => vec![test_line(run, room, theme)],
         (None, None, true, _) => vec![reason(call, room, theme)],
+        // The agent's own notes keep their lines behind Ctrl+T.
+        (None, None, false, Some(_)) if call.memory && !detail.diffs_open => Vec::new(),
         (None, None, false, Some(change)) => {
             crate::hunks::lines(change, room, detail.diffs_open, theme)
         }
@@ -1079,6 +1154,61 @@ mod tests {
         assert_eq!(drawn(&app, true).len(), 2, "folded, the group row alone");
     }
 
+    /// In a run of edits where only some were to the agent's own notes, the
+    /// note's row says so and keeps its lines behind Ctrl+T, and the
+    /// project's edit is drawn as ever.
+    #[test]
+    fn a_note_among_the_projects_edits_is_named_as_memory_and_drawn_without_its_lines() {
+        use niobe_core::event::ChangeScope;
+
+        let mut app = app();
+        for (id, path, scope) in [
+            ("t1", "src/lib.rs", ChangeScope::Project),
+            ("t2", "/notes/memory/MEMORY.md", ChangeScope::AgentMemory),
+        ] {
+            app.apply(&start(id, "Edit"));
+            app.apply(&end(id, "Edit", ToolOutcome::Ok, None));
+            app.apply(&Event::FileChange {
+                path: path.to_owned(),
+                added: Some(1),
+                removed: Some(1),
+                hunks: vec![
+                    niobe_core::diff::Hunk::checked(
+                        1,
+                        1,
+                        1,
+                        1,
+                        vec![
+                            niobe_core::diff::Line::Removed(format!("old {id}")),
+                            niobe_core::diff::Line::Added(format!("new {id}")),
+                        ],
+                    )
+                    .expect("one line each side"),
+                ],
+                scope,
+            });
+        }
+
+        let rows = drawn(&app, false);
+        let said = rows.join("\n");
+        assert!(rows[0].starts_with("▾ Edit ×2"), "{said}");
+        assert!(
+            said.contains("new t1"),
+            "the project's edit lost its lines:\n{said}"
+        );
+        assert!(
+            !said.contains("new t2"),
+            "the note's lines are drawn:\n{said}"
+        );
+        let note = rows
+            .iter()
+            .find(|row| row.contains("└ "))
+            .expect("the note hangs last");
+        // The test's calls are read as their ids, as a backend's summary.
+        assert!(note.contains("updated memory · t2"), "{said}");
+        assert!(rows[0].contains("t1, updated memory · t2"), "{said}");
+    }
+
     #[test]
     fn a_change_whose_removal_went_unstated_reads_as_a_dash_and_its_sum_as_a_floor() {
         let mut app = app();
@@ -1090,6 +1220,7 @@ mod tests {
                 added: Some(4),
                 removed,
                 hunks: Vec::new(),
+                scope: niobe_core::event::ChangeScope::Project,
             });
         }
 

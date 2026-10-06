@@ -1646,6 +1646,7 @@ mod tests {
                     added: Some(3),
                     removed: Some(1),
                     hunks: Vec::new(),
+                    scope: niobe_core::event::ChangeScope::Project,
                 },
                 SessionEvent::AssistantMessage {
                     text: "done".to_owned(),

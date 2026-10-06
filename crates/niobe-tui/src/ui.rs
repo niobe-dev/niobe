@@ -2262,7 +2262,8 @@ fn is_row(entry: &Entry) -> bool {
 /// What an entry's lines are drawn from, as one number.
 ///
 /// Whether the diffs are open goes in only for an entry that holds a diff it
-/// would cut, so opening them lays out again those entries and no other; the
+/// would cut or hide, so opening them lays out again those entries and no
+/// other; the
 /// clock goes in only for one holding a test run still going.
 ///
 /// The body goes in whole only while the entry is streaming. A finished
@@ -2292,7 +2293,7 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64
     detail.folded.hash(&mut hasher);
     detail.columns.hash(&mut hasher);
     detail.grouped.hash(&mut hasher);
-    if holds_a_cut_diff(entry) {
+    if holds_a_cut_diff(entry) || holds_a_hidden_diff(entry) {
         detail.diffs_open.hash(&mut hasher);
     }
     testing_for(entry, detail.now).hash(&mut hasher);
@@ -2312,6 +2313,15 @@ fn testing_for(entry: &Entry, now: Option<crate::clock::Stamp>) -> Vec<u64> {
         .filter_map(|(now, began)| now.since(began))
         .map(|ran| ran.as_secs())
         .collect()
+}
+
+/// Whether any call of `entry` changed one of the agent's own notes, whose
+/// lines are drawn only while the diffs are open.
+fn holds_a_hidden_diff(entry: &Entry) -> bool {
+    entry
+        .calls
+        .iter()
+        .any(|call| call.memory && call.change.is_some())
 }
 
 /// Whether any call of `entry` changed more rows than a diff draws unopened.
@@ -6562,6 +6572,7 @@ mod tests {
             added: Some(lines as u64),
             removed: Some(0),
             hunks: vec![niobe_core::diff::Hunk::created(&written).expect("lines to write")],
+            scope: niobe_core::event::ChangeScope::Project,
         });
         app.apply(&Event::AssistantMessage {
             text: format!("wrote {id}"),

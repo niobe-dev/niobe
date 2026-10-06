@@ -289,6 +289,7 @@ fn session_events() -> Vec<Event> {
                     ],
                 ),
             ],
+            scope: niobe_core::event::ChangeScope::Project,
         },
         // The two readings a count can have besides a figure: a rewrite whose
         // previous contents the backend never showed, and a change it stated
@@ -302,6 +303,7 @@ fn session_events() -> Vec<Event> {
             added: Some(24),
             removed: None,
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         },
         Event::AssistantMessage {
             text: "The notebook that demonstrates the fetcher needs the new call shape.".to_owned(),
@@ -312,6 +314,7 @@ fn session_events() -> Vec<Event> {
             added: None,
             removed: None,
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         },
         Event::ToolCallStart {
             id: "t3".into(),
@@ -657,6 +660,7 @@ pub fn session_with_a_long_write() -> App {
         added: Some(30),
         removed: Some(0),
         hunks: vec![Hunk::created(&written).expect("thirty lines")],
+        scope: niobe_core::event::ChangeScope::Project,
     });
     app
 }

@@ -626,6 +626,10 @@ pub struct Call {
     /// started running: what it is doing is waiting, and a test run is not
     /// drawn as one until it is allowed.
     pub asked: bool,
+    /// Whether the file it changed is one of the notes the agent keeps for
+    /// itself rather than the project's, as the backend said: drawn as the
+    /// agent updating its memory, with the diff behind Ctrl+T.
+    pub memory: bool,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -651,6 +655,7 @@ impl Call {
             interrupted: false,
             gate: None,
             asked: false,
+            memory: false,
             started: at,
         }
     }
@@ -1832,6 +1837,7 @@ impl App {
                 added,
                 removed,
                 hunks,
+                scope,
                 ..
             } => {
                 if let Some((at, index, gate)) = ended
@@ -1842,6 +1848,7 @@ impl App {
                     && call.outcome == Some(ToolOutcome::Ok)
                 {
                     call.lines = Some((*added, *removed));
+                    call.memory = !scope.is_project();
                     if !hunks.is_empty() {
                         call.change = Some(Change::new(hunks.clone(), gate));
                     }
@@ -10288,6 +10295,7 @@ mod tests {
             added: Some(1),
             removed: Some(1),
             hunks,
+            scope: niobe_core::event::ChangeScope::Project,
         });
     }
 
@@ -10366,6 +10374,7 @@ mod tests {
             added: Some(1),
             removed: Some(1),
             hunks: one_hunk(),
+            scope: niobe_core::event::ChangeScope::Project,
         });
 
         let calls: Vec<_> = app
@@ -10817,6 +10826,7 @@ mod tests {
             added: Some(4),
             removed: None,
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         });
 
         let shell = &app.entries()[0].calls[0];

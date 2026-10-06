@@ -209,6 +209,7 @@ fn a_transcript_folds_into_what_the_session_said_and_did() {
             added: Some(3),
             removed: Some(1),
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         }
     );
     assert!(matches!(closing, Event::AssistantMessage { .. }));

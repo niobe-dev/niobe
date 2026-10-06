@@ -305,6 +305,7 @@ mod tests {
             added,
             removed,
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         }
     }
 

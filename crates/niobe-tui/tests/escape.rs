@@ -208,6 +208,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             added: Some(1),
             removed: Some(1),
             hunks: vec![hunk(1, 1, &[&format!("-old {p}"), &format!("+new {p}")])],
+            scope: niobe_core::event::ChangeScope::Project,
         }])
     }));
     all.extend(check("permission", |p| {

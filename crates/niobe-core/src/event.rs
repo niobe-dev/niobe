@@ -483,6 +483,36 @@ pub enum AgentOutcome {
     Cancelled,
 }
 
+/// Whose file an [`Event::FileChange`] changed.
+///
+/// An agent keeps notes for itself between sessions — what it learned about
+/// the operator and the project — in files of its own outside the
+/// repository. Writing one is part of how the agent works, not a change to
+/// what is being built, so it is told apart here, by the backend that knows
+/// where its agent keeps them, and nothing downstream has to know a path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeScope {
+    /// A file of the project's, or one the backend could not place: every
+    /// change is the project's unless the backend says otherwise.
+    #[default]
+    Project,
+    /// One of the notes the agent keeps for itself.
+    AgentMemory,
+}
+
+impl ChangeScope {
+    /// Whether this is [`ChangeScope::Project`], which a recorded event
+    /// leaves unwritten: every log written before the scope existed reads as
+    /// what it was.
+    pub fn is_project(&self) -> bool {
+        match self {
+            ChangeScope::Project => true,
+            ChangeScope::AgentMemory => false,
+        }
+    }
+}
+
 /// Everything that can happen in a session.
 ///
 /// Serialized internally tagged, so a recorded log is one JSON object per line
@@ -757,6 +787,10 @@ pub enum Event {
         /// file as it is now.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         hunks: Vec<crate::diff::Hunk>,
+        /// Whose file it is: the project's, or one of the agent's own notes,
+        /// which the session's figures leave out.
+        #[serde(default, skip_serializing_if = "ChangeScope::is_project")]
+        scope: ChangeScope,
     },
 
     /// A shell command the session ran was a test run, and this is what it
@@ -911,6 +945,29 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_change_to_the_project_is_written_as_before_and_one_to_the_agents_notes_says_so() {
+        let change = |scope| Event::FileChange {
+            path: "a.md".to_owned(),
+            added: Some(1),
+            removed: Some(0),
+            hunks: Vec::new(),
+            scope,
+        };
+        let project = serde_json::to_string(&change(ChangeScope::Project)).expect("written");
+        assert_eq!(
+            project,
+            r#"{"type":"file_change","path":"a.md","added":1,"removed":0}"#
+        );
+        let read: Event = serde_json::from_str(&project).expect("read back");
+        assert_eq!(read, change(ChangeScope::Project));
+
+        let memory = serde_json::to_string(&change(ChangeScope::AgentMemory)).expect("written");
+        assert!(memory.contains(r#""scope":"agent_memory""#), "{memory}");
+        let read: Event = serde_json::from_str(&memory).expect("read back");
+        assert_eq!(read, change(ChangeScope::AgentMemory));
+    }
 
     #[test]
     fn a_window_stored_with_a_level_that_was_not_a_number_reads_back_as_none() {

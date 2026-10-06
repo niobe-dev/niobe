@@ -751,6 +751,7 @@ mod reported_hunks {
                     )
                     .expect("the recorded header counts two lines on each side"),
                 ],
+                scope: niobe_core::event::ChangeScope::Project,
             }]
         );
     }

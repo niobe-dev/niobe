@@ -38,7 +38,8 @@ and is deliberately not part of the public repository. It never overrides §4.
 A Cargo workspace. The crate graph is the architecture: who may depend on whom is enforced in CI.
 
 - **`crates/niobe-core/`** — the shared vocabulary. `event.rs` is the event model, the one type
-  every backend produces into; `session.rs` is `SessionState`, the fold every consumer derives its
+  every backend produces into, where a file change says whether it was the project's or one of
+  the notes the agent keeps for itself, which the session's figures leave out; `session.rs` is `SessionState`, the fold every consumer derives its
   numbers from, for each turn that has ended as well as for the whole session; `permission.rs` is the standing answer to a permission prompt (`Rule`,
   `Allowlist`), which the shell matches and the config stores, and which refuses a rule copied in
   Claude Code's own `:*` or `**` form with the rule to write instead; `diff.rs` is the line arithmetic
@@ -130,7 +131,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   what a test run reported under the call that ran it, beside a bar of its counts — and while it
   runs, how long it has run against the last whole run of the same command — a sub-agent's words as a row of the same
   table, rows with nothing under them on consecutive lines, a run of calls to one tool as one
-  group that Ctrl+O folds, and — where `a` is pressed in a side pane — each turn's sub-agent rows
+  group that Ctrl+O folds, edits to the agent's own notes as one `updated memory` row whose
+  lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
   grouped under a heading per agent, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
@@ -141,7 +143,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
-  `translate.rs` turns one message of it into events and owns no process, `driver.rs` spawns the
+  `translate.rs` turns one message of it into events and owns no process — and marks an edit
+  under the CLI's `projects/<project>/memory/` as the agent's own notes — `driver.rs` spawns the
   binary, writes a turn with its attached images as base64 image blocks after the text, as the
   CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), asks it with
   `initialize` what it offers — the answer is where the slash commands a

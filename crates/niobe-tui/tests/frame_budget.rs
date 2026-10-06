@@ -284,6 +284,7 @@ fn session_of_diffs() -> App {
             added: Some(8),
             removed: Some(4),
             hunks: vec![edit_hunk(40), edit_hunk(210)],
+            scope: niobe_core::event::ChangeScope::Project,
         });
     }
     app
@@ -424,6 +425,7 @@ fn write_of(written: &str) -> Vec<Event> {
             added: Some(WRITTEN_LINES as u64),
             removed: Some(0),
             hunks: vec![niobe_core::diff::Hunk::created(written).expect("lines written")],
+            scope: niobe_core::event::ChangeScope::Project,
         },
     ]
 }

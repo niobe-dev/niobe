@@ -25,7 +25,7 @@ use crate::test_run::{self, FailedTests, TestCounts};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, Billing, Context, Event, Mode, OPERATOR_SHELL, SessionMeta,
+    AgentId, AgentOutcome, Billing, ChangeScope, Context, Event, Mode, OPERATOR_SHELL, SessionMeta,
     SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
@@ -739,8 +739,14 @@ impl SessionState {
                 path,
                 added,
                 removed,
+                scope,
                 ..
-            } => self.change_file(path, *added, *removed),
+            } => match scope {
+                ChangeScope::Project => self.change_file(path, *added, *removed),
+                // The agent's own notes are not what is being built: the
+                // session's files and their line counts are the project's.
+                ChangeScope::AgentMemory => {}
+            },
 
             Event::TestRun {
                 counts,
@@ -2198,7 +2204,28 @@ mod tests {
             added,
             removed,
             hunks: Vec::new(),
+            scope: ChangeScope::Project,
         }
+    }
+
+    #[test]
+    fn a_change_to_the_agents_own_notes_is_left_out_of_the_files_the_session_changed() {
+        let mut state = SessionState::new();
+        state.apply(&changed("src/lib.rs", Some(3), Some(1)));
+        state.apply(&Event::FileChange {
+            path: "/home/me/.claude/projects/-w-app/memory/MEMORY.md".to_owned(),
+            added: Some(2),
+            removed: Some(1),
+            hunks: Vec::new(),
+            scope: ChangeScope::AgentMemory,
+        });
+
+        let files: Vec<_> = state
+            .files()
+            .iter()
+            .map(|file| (file.path.as_str(), file.added, file.removed))
+            .collect();
+        assert_eq!(files, [("src/lib.rs", 3, 1)]);
     }
 
     fn tested(counts: Option<TestCounts>, exit_code: Option<i32>) -> Event {

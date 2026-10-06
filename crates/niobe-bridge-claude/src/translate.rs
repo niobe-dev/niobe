@@ -90,8 +90,9 @@ use std::path::{Path, PathBuf};
 
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
-    SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Backend, Billing, ChangeScope, Context, Event, Mode, PermissionDecision,
+    SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow,
+    UsageWindows,
 };
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
@@ -1443,7 +1444,45 @@ impl Translator {
             added,
             removed,
             hunks,
+            scope: self.scope_of(path),
         })
+    }
+
+    /// Whose file `path` is: one of the notes the CLI keeps for the agent,
+    /// or the project's.
+    ///
+    /// The CLI keeps an agent's notes on a project in `memory/` inside the
+    /// directory it keeps that project's transcripts in:
+    /// `<config>/projects/<working directory flattened>/memory/`, where the
+    /// flattened name is the path with every character but an ASCII letter or
+    /// digit made a `-`, so it starts with one ([`crate::transcript::directory`]
+    /// sets the rule out). Read off the 57 such directories on the machine
+    /// this was written on, 4 October 2026, under Claude Code 2.1.288.
+    ///
+    /// The flattened name is matched by its shape rather than against this
+    /// session's own: none of those 57 was named after one of the many
+    /// worktrees sessions had run in there, so a session in a worktree keeps
+    /// its notes under another directory's name, and the CLI's configuration
+    /// directory need not be `~/.claude`. A file inside the working directory is always the
+    /// project's, whatever its path says, so a repository's own `memory/`
+    /// directory is never taken for the agent's.
+    fn scope_of(&self, path: &str) -> ChangeScope {
+        let path = Path::new(path);
+        let inside = self.cwd.as_deref().is_some_and(|cwd| path.starts_with(cwd));
+        let parts: Vec<&str> = path
+            .components()
+            .filter_map(|part| part.as_os_str().to_str())
+            .collect();
+        let kept = parts.windows(4).any(|run| match run {
+            [projects, flattened, memory, _] => {
+                *projects == PROJECTS_DIR && *memory == MEMORY_DIR && is_flattened(flattened)
+            }
+            _ => false,
+        });
+        match path.is_absolute() && !inside && kept {
+            true => ChangeScope::AgentMemory,
+            false => ChangeScope::Project,
+        }
     }
 
     /// A call in the words a person would use for it: what a shell command
@@ -2372,6 +2411,19 @@ fn render(input: &serde_json::Value) -> String {
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// The directory under the CLI's configuration directory it keeps one
+/// directory per project in, and the one in each of those that holds the
+/// agent's notes on that project.
+const PROJECTS_DIR: &str = "projects";
+const MEMORY_DIR: &str = "memory";
+
+/// Whether `name` is a working directory as the CLI flattens one into a
+/// directory name: an absolute path, so it starts with the `-` its leading
+/// `/` became, and nothing but ASCII letters, digits and dashes after.
+fn is_flattened(name: &str) -> bool {
+    name.starts_with('-') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// The CLI's tools that change a file, as its `init` message lists them.
@@ -4824,6 +4876,76 @@ mod tests {
     }
     fn added(text: &str) -> Line {
         Line::Added(text.to_owned())
+    }
+
+    /// Whose file each change in the events changed.
+    fn scopes(events: &[Event]) -> Vec<niobe_core::event::ChangeScope> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::FileChange { scope, .. } => Some(*scope),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn edited(translator: &mut Translator, id: &str, path: &str) -> Vec<Event> {
+        translator.line(&call(
+            id,
+            "Edit",
+            &format!(r#"{{"file_path":"{path}","old_string":"a","new_string":"b"}}"#),
+        ));
+        translator.line(&result(
+            id,
+            &format!("The file {path} has been updated successfully."),
+            false,
+        ))
+    }
+
+    /// The CLI keeps the agent's notes on a project in `memory/` beside the
+    /// project's transcripts, under its own configuration directory.
+    #[test]
+    fn an_edit_to_the_agents_notes_is_marked_as_its_memory_and_one_to_the_repository_is_not() {
+        use niobe_core::event::ChangeScope;
+
+        let mut translator = translator().in_dir("/w/app");
+        let memory = edited(
+            &mut translator,
+            "t1",
+            "/home/me/.claude/projects/-w-app/memory/notes.md",
+        );
+        let index = edited(
+            &mut translator,
+            "t2",
+            "/home/me/.claude/projects/-w-app/memory/MEMORY.md",
+        );
+        let project = edited(&mut translator, "t3", "/w/app/src/lib.rs");
+
+        assert_eq!(scopes(&memory), [ChangeScope::AgentMemory]);
+        assert_eq!(scopes(&index), [ChangeScope::AgentMemory]);
+        assert_eq!(scopes(&project), [ChangeScope::Project]);
+    }
+
+    /// Only the CLI's own layout is memory: a `memory/` directory inside the
+    /// repository is the project's, and so is a path that only looks like
+    /// the layout from somewhere the CLI keeps nothing.
+    #[test]
+    fn a_memory_directory_anywhere_else_is_the_projects() {
+        use niobe_core::event::ChangeScope;
+
+        let mut translator = translator().in_dir("/w/app");
+        for (id, path) in [
+            ("t1", "/w/app/projects/-w-app/memory/notes.md"),
+            ("t2", "/w/app/memory/notes.md"),
+            ("t3", "/home/me/projects/my app/memory/notes.md"),
+            ("t4", "/home/me/.claude/projects/-w-app/notes.md"),
+        ] {
+            assert_eq!(
+                scopes(&edited(&mut translator, id, path)),
+                [ChangeScope::Project],
+                "{path}"
+            );
+        }
     }
 
     /// The shape recorded in `tests/fixtures/stdio-answers.jsonl` (Claude Code
