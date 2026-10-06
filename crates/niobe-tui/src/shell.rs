@@ -30,7 +30,8 @@
 //! [`STOP_KEY`] stops the newest command still running that has not already
 //! been asked to stop, and a second press the one before it, so several
 //! commands running at once can each be stopped without quitting. It is not
-//! Ctrl+C, which stops the agent's turn while one runs and quits otherwise:
+//! Ctrl+C, which stops the agent's turn while one runs and, pressed twice,
+//! quits otherwise:
 //! a key that stopped a command in one moment and ended the session in the
 //! next would end a session the operator only meant to interrupt. The command is stopped with everything it started —
 //! its shell at once, so nothing more of its line runs, and the rest asked

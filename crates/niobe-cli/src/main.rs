@@ -1320,9 +1320,11 @@ IN THE SHELL:
     The agent is not told it ran and does not see what it printed.
     Esc, Ctrl+C            While a turn runs, stop it: the call it is running
                            or the reply it is writing is cut off, and the
-                           session stays for the next prompt. A second Ctrl+C
-                           in the same turn quits; with no turn running,
-                           Ctrl+C quits at once and Esc leads to an F-key
+                           session stays for the next prompt. Ctrl+C closes
+                           an open menu or dialog as Esc does; otherwise,
+                           with no turn left to stop, a second Ctrl+C within
+                           1.5 seconds quits, and one alone leaves what is
+                           typed as it was. Esc leads to an F-key
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
 {fkeys}
     Ctrl+Q                 Quit

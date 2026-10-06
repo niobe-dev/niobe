@@ -411,7 +411,7 @@ const TRUST_UNTIL: &str =
     "Trusted, it stays in force until the file changes. Without it, none of the above is.";
 
 /// The keys the trust question answers to, on its bottom edge.
-const TRUST_KEYS: &str = " ↑↓ choose · Enter answer · Esc no · Ctrl+C quit ";
+const TRUST_KEYS: &str = " ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ";
 
 /// Columns between what a row of the trust question names and what it is set
 /// to, and the most the name may take.

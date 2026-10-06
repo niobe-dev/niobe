@@ -1272,9 +1272,20 @@ pub struct App {
     /// last asked.
     interrupt: bool,
     /// The turn a stop was asked for, counted as the turns that had ended
-    /// before it, so a second Ctrl+C in the same turn quits and one in the
-    /// next turn stops that turn.
+    /// before it, so a second Ctrl+C in the same turn leads to a quit and one
+    /// in the next turn stops that turn.
     stop_asked_in: Option<usize>,
+    /// The Ctrl+C that asked for a second one to quit, while the key after it
+    /// has not been pressed and its window has not run out.
+    quit_asked: Option<QuitAsked>,
+}
+
+/// A Ctrl+C that would quit the session had it been the second.
+#[derive(Debug, Clone, Copy)]
+struct QuitAsked {
+    /// When it was pressed, where the shell had read a clock or been told
+    /// when the key arrived.
+    at: Option<Instant>,
 }
 
 /// A search through the transcript, from Ctrl+F to Esc.
@@ -1517,6 +1528,7 @@ impl App {
             suspend: false,
             interrupt: false,
             stop_asked_in: None,
+            quit_asked: None,
         }
     }
 
@@ -3517,7 +3529,10 @@ impl App {
             ("drag", "copy what it covers".to_owned()),
             ("click", "open a link".to_owned()),
             ("Ctrl+Z", "suspend".to_owned()),
-            ("Ctrl+C", "stop the turn; again, quit".to_owned()),
+            (
+                "Ctrl+C",
+                "stop the turn or close what is open; twice, quit".to_owned(),
+            ),
         ]);
         let mut rows: Vec<String> = keys
             .into_iter()
@@ -4848,6 +4863,52 @@ impl App {
         std::mem::take(&mut self.interrupt)
     }
 
+    /// Whether something is open over the session that Esc would close: a
+    /// menu, a sheet, the history dialog, a list to pick from or a search.
+    fn closes_on_esc(&self) -> bool {
+        self.menu.is_some()
+            || self.sheet.is_some()
+            || self.browser.is_some()
+            || self.picking.is_some()
+            || self.find.is_some()
+    }
+
+    /// Ctrl+C with nothing open that Esc would close: it stops a running turn
+    /// that has not been asked to stop yet, and otherwise quits if it follows
+    /// `asked`, the Ctrl+C before it, inside [`QUIT_WINDOW`], or asks for one
+    /// that does.
+    ///
+    /// What is typed in the composer is left as it is: the second press is
+    /// there so that a slip of the hand loses nothing, and a first press that
+    /// cleared the draft would lose it all the same.
+    fn on_ctrl_c(&mut self, asked: Option<QuitAsked>) {
+        if self.working() && !self.stopping() {
+            self.stop_turn();
+            return;
+        }
+        let now = self.latest_instant();
+        if asked.is_some_and(|asked| within_quit_window(asked.at, now)) {
+            self.quit();
+            return;
+        }
+        self.quit_asked = Some(QuitAsked { at: now });
+        self.hint = Some(QUIT_AGAIN_HINT.to_owned());
+    }
+
+    /// Takes back a Ctrl+C's request for a second one once its window has run
+    /// out by `now`, and the hint that asked for it.
+    fn expire_quit(&mut self, now: Instant) {
+        if self
+            .quit_asked
+            .is_some_and(|asked| !within_quit_window(asked.at, Some(now)))
+        {
+            self.quit_asked = None;
+            if self.hint.as_deref() == Some(QUIT_AGAIN_HINT) {
+                self.hint = None;
+            }
+        }
+    }
+
     /// Asks the running turn to stop, once per turn.
     fn stop_turn(&mut self) {
         let turn = self.session.turns().len();
@@ -4873,7 +4934,7 @@ impl App {
 
     /// Says in the transcript that the backend did not take a stop, so the
     /// turn runs on. The turn counts as not asked again, so the next Esc or
-    /// Ctrl+C asks for the stop once more instead of the Ctrl+C quitting.
+    /// Ctrl+C asks for the stop once more instead of leading to a quit.
     pub fn not_stopped(&mut self, error: &str) {
         self.stop_asked_in = None;
         self.forget_stopping_hint();
@@ -5357,20 +5418,24 @@ impl App {
             self.reports_shift_enter = true;
         }
 
+        let quit_asked = self.quit_asked.take();
+        // Ctrl+C is what an operator presses to stop a thing, and is pressed
+        // by accident: it closes what is open as Esc would, stops a running
+        // turn, and only otherwise leads to a quit — on a second press.
+        let key = match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) if self.closes_on_esc() => {
+                ratatui::crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.on_ctrl_c(quit_asked);
+                return;
+            }
+            _ => key,
+        };
         // Quitting is always available: a session with a prompt up is still a
         // session the operator may need to leave, and the backend is told the
         // same way it is told about any other way out.
-        // Except that Ctrl+C is what an operator presses to stop a thing: with
-        // a turn running it stops the turn, and only a second press — or one
-        // with nothing running — ends the session.
-        if (key.code, key.modifiers) == (KeyCode::Char('c'), KeyModifiers::CONTROL)
-            && self.working()
-            && !self.stopping()
-        {
-            self.stop_turn();
-            return;
-        }
-        if let (KeyCode::F(10), _) | (KeyCode::Char('q' | 'c'), KeyModifiers::CONTROL) =
+        if let (KeyCode::F(10), _) | (KeyCode::Char('q'), KeyModifiers::CONTROL) =
             (key.code, key.modifiers)
         {
             self.quit();
@@ -5727,6 +5792,7 @@ impl App {
     pub fn tick(&mut self, now: Instant, at: Option<Stamp>) {
         self.now = Some(now);
         self.at = at;
+        self.expire_quit(now);
         // The trust question is up from the first tick, which draws it, and
         // waits from there for a quiet keyboard as a permission question does.
         if self.trusting.is_some() && self.ask_quiet_since.is_none() {
@@ -6660,7 +6726,24 @@ fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
 const CUT_OFF: &str = "cut off: the session stopped here";
 
 /// What the bar says once a stop of the running turn has been asked for.
-const STOPPING_HINT: &str = "Stopping the turn · Ctrl+C again quits";
+const STOPPING_HINT: &str = "Stopping the turn · Ctrl+C twice quits";
+
+/// What the bar says after a Ctrl+C that would have quit had it been the
+/// second: one press is too easy to make by accident to end a session on.
+const QUIT_AGAIN_HINT: &str = "Press Ctrl+C again to quit";
+
+/// How long after one Ctrl+C a second one still quits.
+const QUIT_WINDOW: Duration = Duration::from_millis(1500);
+
+/// Whether a Ctrl+C at `now` is inside the window of one pressed `at`. Where
+/// either moment is unknown the window is taken as open: two presses are the
+/// deliberate act, and the window only keeps one from long ago counting.
+fn within_quit_window(at: Option<Instant>, now: Option<Instant>) -> bool {
+    match (at, now) {
+        (Some(at), Some(now)) => now.saturating_duration_since(at) <= QUIT_WINDOW,
+        (None, _) | (_, None) => true,
+    }
+}
 
 /// What the shell says once Esc has made the next key an F-key or a menu.
 const ESCAPED_HINT: &str = "Esc — a digit now presses its F-key (1 Help … 0 Quit), a letter \
@@ -9100,27 +9183,154 @@ mod tests {
         assert!(app.escaped);
     }
 
+    /// Ctrl+C pressed at `at`, as the event loop hands it over.
+    fn ctrl_c_at(app: &mut App, at: Instant) {
+        app.on_key_read(ctrl_c(), Arrival { at, alone: true });
+    }
+
     #[test]
-    fn ctrl_c_stops_a_running_turn_first_and_quits_on_the_second_press() {
+    fn ctrl_c_stops_a_running_turn_and_then_takes_two_more_presses_to_quit() {
         let mut app = sent(app().attached(), "go");
         app.take_produced();
+        let start = Instant::now();
 
-        app.on_key(ctrl_c());
+        ctrl_c_at(&mut app, start);
         assert!(app.take_interrupt());
         assert!(!app.should_quit(), "the first Ctrl+C ended the session");
 
-        app.on_key(ctrl_c());
+        ctrl_c_at(&mut app, start + Duration::from_millis(100));
+        assert!(
+            !app.should_quit(),
+            "a Ctrl+C while the turn stops ended the session on its own"
+        );
+        assert_eq!(app.hint(), Some(QUIT_AGAIN_HINT));
+
+        ctrl_c_at(&mut app, start + Duration::from_millis(200));
         assert!(app.should_quit());
     }
 
     #[test]
-    fn ctrl_c_with_no_turn_running_quits_at_once() {
+    fn one_ctrl_c_on_an_idle_shell_says_how_to_quit_and_does_not() {
         let mut app = app().attached();
 
-        app.on_key(ctrl_c());
+        ctrl_c_at(&mut app, Instant::now());
+
+        assert!(!app.should_quit(), "one Ctrl+C ended the session");
+        assert!(!app.take_interrupt());
+        assert_eq!(app.hint(), Some(QUIT_AGAIN_HINT));
+    }
+
+    #[test]
+    fn two_ctrl_c_inside_the_window_quit() {
+        let mut app = app().attached();
+        let start = Instant::now();
+
+        ctrl_c_at(&mut app, start);
+        ctrl_c_at(&mut app, start + QUIT_WINDOW);
 
         assert!(app.should_quit());
-        assert!(!app.take_interrupt());
+    }
+
+    #[test]
+    fn two_ctrl_c_with_the_window_run_out_between_them_do_not_quit() {
+        let mut app = app().attached();
+        let start = Instant::now();
+
+        ctrl_c_at(&mut app, start);
+        ctrl_c_at(&mut app, start + QUIT_WINDOW + Duration::from_millis(1));
+
+        assert!(!app.should_quit());
+        assert_eq!(
+            app.hint(),
+            Some(QUIT_AGAIN_HINT),
+            "the late press starts the window over"
+        );
+    }
+
+    #[test]
+    fn the_quit_hint_goes_when_its_window_runs_out() {
+        let mut app = app().attached();
+        let start = Instant::now();
+        app.tick(start, None);
+        ctrl_c_at(&mut app, start);
+
+        app.tick(start + QUIT_WINDOW / 2, None);
+        assert_eq!(app.hint(), Some(QUIT_AGAIN_HINT));
+
+        app.tick(start + QUIT_WINDOW + Duration::from_millis(1), None);
+        assert_eq!(app.hint(), None);
+        ctrl_c_at(&mut app, start + QUIT_WINDOW + Duration::from_millis(2));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn another_key_between_two_ctrl_c_takes_the_quit_back() {
+        let mut app = app().attached();
+        let start = Instant::now();
+
+        ctrl_c_at(&mut app, start);
+        app.on_key_read(
+            key(KeyCode::Char('x')),
+            Arrival {
+                at: start + Duration::from_millis(100),
+                alone: true,
+            },
+        );
+        assert_eq!(app.hint(), None);
+        ctrl_c_at(&mut app, start + Duration::from_millis(200));
+
+        assert!(!app.should_quit());
+        assert_eq!(app.composer().lines(), ["x"]);
+    }
+
+    #[test]
+    fn ctrl_c_leaves_what_is_typed_in_the_composer() {
+        let mut app = app().attached();
+        app.on_key(key(KeyCode::Char('x')));
+
+        ctrl_c_at(&mut app, Instant::now());
+
+        assert_eq!(app.composer().lines(), ["x"]);
+    }
+
+    #[test]
+    fn ctrl_c_closes_an_open_menu_and_does_not_quit() {
+        let mut app = app().attached();
+        let start = Instant::now();
+        app.on_key(alt('h'));
+
+        ctrl_c_at(&mut app, start);
+        assert_eq!(app.menu(), None);
+        assert!(!app.should_quit());
+        assert_eq!(
+            app.hint(),
+            None,
+            "closing the menu is not the first press of a quit"
+        );
+
+        ctrl_c_at(&mut app, start + Duration::from_millis(100));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_c_closes_the_history_dialog_and_does_not_quit() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        app.on_key(ctrl('r'));
+        assert!(app.browser().is_some());
+
+        ctrl_c_at(&mut app, Instant::now());
+
+        assert!(app.browser().is_none());
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn f10_and_ctrl_q_still_quit_with_one_press() {
+        for quit in [key(KeyCode::F(10)), ctrl('q')] {
+            let mut app = app().attached();
+            app.on_key(quit);
+            assert!(app.should_quit(), "{quit:?}");
+        }
     }
 
     #[test]
@@ -11075,12 +11285,20 @@ mod tests {
     }
 
     #[test]
-    fn quitting_from_the_trust_question_leaves_it_unanswered() {
+    fn quitting_from_the_trust_question_takes_two_ctrl_c_and_leaves_it_unanswered() {
         let shown = Instant::now();
         let mut app = trusting_at(shown);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let at = |millis| Arrival {
+            at: shown + Duration::from_millis(millis),
+            alone: true,
+        };
 
-        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        app.on_key_read(ctrl_c, at(100));
+        assert!(!app.should_quit());
+        assert!(app.trusting().is_some());
 
+        app.on_key_read(ctrl_c, at(200));
         assert!(app.should_quit());
         assert_eq!(app.trust_answer(), None);
     }

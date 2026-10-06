@@ -20,5 +20,5 @@
 ┃   ┃  › 1. Yes, trust this config                                         ┃░░ ┃
 ┃ ──┃    2. No, open without it                                            ┃── ┃
 ┃  —┃                                                                      ┃ne ┃
-┗━━━┗━━━━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C quit ━━━━━━━━━━━┛━━━┛
+┗━━━┗━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━┛━━━┛
 EscStop 1Help 2Compact 3Clear 4Model 5Diff 6Rewind 7MCP 8Memory 9Settings 0Quit

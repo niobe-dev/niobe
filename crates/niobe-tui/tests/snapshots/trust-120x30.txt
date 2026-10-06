@@ -22,7 +22,7 @@
  ┃                ┃  › 1. Yes, trust this config                                                     ┃░░              │
  ┃                ┃    2. No, open without it                                                        ┃enied · 0 B out │
  ┃                ┃                                                                                  ┃░░              │
- ┃                ┗━━━━━━━━━━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C quit ━━━━━━━━━━━━━━━━━┛░░              │
+ ┃                ┗━━━━━━━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━━━━┛░░              │
  ┃                  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░│░░░░░░░░░░░░░░░░░░░░░░░░░              │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │
