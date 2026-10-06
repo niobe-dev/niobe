@@ -1092,3 +1092,75 @@ the CLI's own schema give it; the budget line's all-zero `usage` beside a real
 here so that the shape inventory in `tests/conformance.rs` names them, and so
 that `tests/stream.rs` folds them: the withdrawn prompt is withdrawn from the
 session, and the budget's end is a failure that says what stopped the turn.
+
+## `cut-off.jsonl`
+
+**Assembled, not recorded as a whole**, from a session on Claude Code 2.1.288
+(4 October 2026) in which one reply's stream was cut off. What the session
+showed, in the CLI's own transcript and in Niobe's store:
+
+- The reply — a thinking block and the text "Writing the six tasks now." —
+  arrived as a `message_start`, its text deltas and its `assistant` lines, and
+  then nothing: no `message_delta`, no `message_stop`. Its `assistant` lines
+  carried 2 input, 8 output, 118,070 cache read and 2,811 cache write tokens.
+- About twelve and a half minutes later the CLI carried the same turn on by
+  itself, writing a `user` message marked `isMeta` (and `turnCompanion` in its
+  transcript): "Your response above was cut off mid-stream. Resume directly
+  from where it stops — no apology, no recap. If none of it survived, answer
+  the request from the start." Whether the live stream carries that line was
+  not seen; the fixture holds it in the shape the transcript gave it, so the
+  tests show it is not taken for the operator's prompt if it does.
+- The turn's `result.usage` counted the cut reply at the figures on its
+  `assistant` lines, on top of every other message's `message_delta`: the
+  turn's per-message records fell short by exactly those 2, 8, 118,070 and
+  2,811 tokens.
+
+The fixture keeps three of that turn's messages, under their own ids and
+request ids and with their own counts: the reply before the cut, the cut reply,
+and the first reply after the CLI's prompt. Their content is shortened, the
+two complete replies are text rather than the tool calls they were, and the
+line framing — `stream_event` envelopes, `content_block_*`, `message_stop`,
+the `result` keys — follows `interrupted.jsonl`, recorded from 2.1.287, which
+is the release its `init` names. The `result` is written from those counts:
+its `usage` is their sum, `modelUsage` restates it for `claude-opus-5-5`, and
+the cost on both is the bundled price table's for that model with every cache
+write bought for the hour, not a figure the CLI printed. The tests assert no
+money from it.
+
+### The arithmetic the tests assert
+
+| message | in | out | cache read | cache write | counted from |
+| ------- | -- | --- | ---------- | ----------- | ------------ |
+| `msg_011Cfh9Bk1N5bT94HZstUJBU` | 2 | 2,291 | 113,494 | 4,576 | its `message_delta` |
+| `msg_011Cfh9DZarQmXXnvywwTKDD` | 2 | 8 | 118,070 | 2,811 | its last `assistant` line |
+| `msg_011CfhAAYqEyMTb7iECg8oEr` | 4 | 6,876 | 120,881 | 109 | its `message_delta` |
+| the turn's `result.usage` | 8 | 9,175 | 352,445 | 7,496 | |
+
+Counting each message from its `message_delta`, and a message that has none
+from its last `assistant` line, reproduces the `result`:
+
+```sh
+jq -s -c '
+  def counts: {in: .input_tokens, out: .output_tokens,
+               read: .cache_read_input_tokens, write: .cache_creation_input_tokens};
+  def plus($u): {in: (.in + $u.in), out: (.out + $u.out),
+                 read: (.read + $u.read), write: (.write + $u.write)};
+  def close: if .open == null then . else .open as $o | .sum |= plus($o) | .open = null end;
+  reduce .[] as $line ({sum: {in: 0, out: 0, read: 0, write: 0}, open: null, cut: []};
+    if $line.type == "stream_event" and $line.event.type == "message_start" then
+      (if .open != null then .cut += [.id] else . end) | close
+      | .open = {in: 0, out: 0, read: 0, write: 0} | .id = $line.event.message.id
+    elif $line.type == "assistant" and .open != null then .open = ($line.message.usage | counts)
+    elif $line.type == "stream_event" and $line.event.type == "message_delta" then
+      .open = null | .sum |= plus($line.event.usage | counts)
+    elif $line.type == "result" then
+      (if .open != null then .cut += [.id] else . end) | close
+      | .reported = ($line.usage | counts)
+    else . end)
+  | {per_message: .sum, reported, cut}' cut-off.jsonl
+```
+
+prints `per_message` and `reported` both as 8 in, 9,175 out, 352,445 cache
+read and 7,496 cache write, and `cut` as `["msg_011Cfh9DZarQmXXnvywwTKDD"]`.
+Without the cut reply, the messages come to 6 in, 9,167 out, 234,375 cache
+read and 4,685 cache write.

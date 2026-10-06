@@ -1682,3 +1682,122 @@ fn a_recorded_session_with_stopped_turns_counts_the_tokens_the_cli_reported() {
     );
     assert_eq!(state.turns().len(), 3);
 }
+
+/// A turn one of whose replies was cut off mid-stream, before its
+/// `message_delta`, after which the CLI carried the turn on by itself, as the
+/// README beside the fixture lays out.
+mod cut_off {
+    use super::{notices, translate};
+    use niobe_core::event::Event;
+    use niobe_core::session::SessionState;
+
+    const CUT_OFF: &str = include_str!("fixtures/cut-off.jsonl");
+
+    /// What the turn's `result.usage` reports, and what the three messages'
+    /// counts sum to: see the README's table.
+    /// As (input, output, cache read, cache write).
+    const REPORTED: (u64, u64, u64, u64) = (8, 9_175, 352_445, 7_496);
+
+    fn translated() -> Vec<Event> {
+        translate(CUT_OFF)
+    }
+
+    fn per_message(events: &[Event]) -> (u64, u64, u64, u64) {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) if !usage.settles_model => Some(usage),
+                _ => None,
+            })
+            .fold((0, 0, 0, 0), |sum, usage| {
+                (
+                    sum.0 + usage.input,
+                    sum.1 + usage.output,
+                    sum.2 + usage.cache_read,
+                    sum.3 + usage.cache_write,
+                )
+            })
+    }
+
+    #[test]
+    fn the_messages_add_up_to_what_the_cli_reported_for_the_turn() {
+        let events = translated();
+
+        assert_eq!(per_message(&events), REPORTED);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "{events:#?}"
+        );
+    }
+
+    #[test]
+    fn the_cut_off_message_is_counted_from_what_the_cli_recorded_for_it() {
+        let events = translated();
+        let cut = events
+            .iter()
+            .find_map(|event| match event {
+                Event::Usage(usage) if usage.cache_read == 118_070 => Some(usage),
+                _ => None,
+            })
+            .expect("the cut-off message was counted");
+
+        assert_eq!(
+            (cut.input, cut.output, cut.cache_write, cut.cache_write_1h),
+            (2, 8, 2_811, 2_811)
+        );
+        assert_eq!(cut.model, "claude-opus-5-5");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Context(context) if context.tokens == 2 + 118_070 + 2_811
+            )),
+            "the cut-off request's prompt never reached the context meter"
+        );
+        let state = SessionState::replay(&events);
+        let (input, output, cache_read, cache_write) = REPORTED;
+        assert_eq!(
+            state.totals().tokens(),
+            input + output + cache_read + cache_write
+        );
+    }
+
+    #[test]
+    fn the_cut_is_a_notice_where_it_happened_and_the_clis_own_prompt_is_not_the_operators() {
+        let events = translated();
+        let said = notices(&events);
+        let cut: Vec<&&str> = said
+            .iter()
+            .filter(|line| line.contains("cut off"))
+            .collect();
+        assert_eq!(cut.len(), 1, "{said:?}");
+        assert!(
+            cut[0].contains("msg_011Cfh9DZarQmXXnvywwTKDD")
+                && cut[0].contains("req_011Cfh9DZCJ19ME3Je89LBSJ"),
+            "the notice does not name the message: {cut:?}"
+        );
+
+        let at = |wanted: &dyn Fn(&Event) -> bool| {
+            events
+                .iter()
+                .position(wanted)
+                .expect("the event is in the stream")
+        };
+        let cut_reply = at(
+            &|event| matches!(event, Event::AssistantMessage { text, .. } if text == "Writing the six tasks now."),
+        );
+        let notice =
+            at(&|event| matches!(event, Event::Notice { message } if message.contains("cut off")));
+        let next_reply = at(
+            &|event| matches!(event, Event::AssistantMessage { text, .. } if text == "The six pages are written."),
+        );
+        assert!(cut_reply < notice && notice < next_reply, "{events:#?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::UserMessage { .. })),
+            "the CLI's prompt to carry on read as the operator's"
+        );
+    }
+}

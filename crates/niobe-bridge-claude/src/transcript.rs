@@ -861,6 +861,7 @@ impl Fold {
                 event: wire::StreamBody::MessageStart {
                     message: wire::StartMessage {
                         model: Some(model),
+                        id: None,
                         usage: None,
                     },
                 },
@@ -882,10 +883,17 @@ impl Fold {
                 content: message.content,
                 // Reported above, off the message's head, as the stream does.
                 model: None,
+                // Counted below, once per response, from the record's own
+                // figures: a transcript holds every message whole, so none of
+                // them is left to be counted from a snapshot.
+                id: None,
+                usage: None,
             },
             parent_tool_use_id: parent.clone(),
             tool_use_result: None,
             tool_result_meta: Vec::new(),
+            request_id: None,
+            aborted: false,
         }));
 
         // Counted here only where no accounting is still to come. A message
@@ -988,12 +996,16 @@ impl Fold {
             message: wire::ApiMessage {
                 content: record.message.content,
                 model: None,
+                id: None,
+                usage: None,
             },
             parent_tool_use_id: agent.map(str::to_owned),
             tool_use_result: record.tool_use_result,
             // The CLI keeps no note of why a call did not run in its own
             // transcripts; an interrupted call reads as a failed one there.
             tool_result_meta: Vec::new(),
+            request_id: None,
+            aborted: false,
         }));
     }
 

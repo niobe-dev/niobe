@@ -159,6 +159,16 @@ pub(crate) struct Envelope {
     /// CLI's own transcripts leave it out.
     #[serde(default)]
     pub(crate) tool_result_meta: Vec<ResultMeta>,
+    /// On an `assistant` line: the id of the API request the message is the
+    /// answer to, which is what a report to the provider names it by. Only
+    /// the live stream carries it under this name.
+    #[serde(default)]
+    pub(crate) request_id: Option<String>,
+    /// On an `assistant` line: set where the operator's interrupt stopped the
+    /// message as it was written. Recorded from Claude Code 2.1.285, whose
+    /// closing `result` then counts none of the message's tokens.
+    #[serde(default)]
+    pub(crate) aborted: bool,
 }
 
 /// Why one tool call did not run, as the CLI says beside its result.
@@ -269,6 +279,15 @@ pub(crate) struct ApiMessage {
     /// The model that answered, on an `assistant` message.
     #[serde(default)]
     pub(crate) model: Option<String>,
+    /// The API's id for an `assistant` message, which every line the CLI
+    /// splits one response over repeats, and its `message_start` names.
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    /// On an `assistant` line: the message's counts as they stood when the
+    /// line was written — a snapshot, not what the message finished at. See
+    /// `translate.rs` for when it is all there is.
+    #[serde(default)]
+    pub(crate) usage: Option<Usage>,
 }
 
 /// A message's content, which the CLI writes as a bare string for a plain turn
@@ -335,6 +354,9 @@ pub(crate) enum StreamBody {
 #[derive(Debug, Deserialize)]
 pub(crate) struct StartMessage {
     pub(crate) model: Option<String>,
+    /// The API's id for the message, which its `assistant` lines repeat.
+    #[serde(default)]
+    pub(crate) id: Option<String>,
     pub(crate) usage: Option<Usage>,
 }
 

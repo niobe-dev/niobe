@@ -11,7 +11,7 @@
 //!
 //! # What the recording taught, and what the protocol costs
 //!
-//! Six properties of the stream are not obvious and are the reason this file
+//! Seven properties of the stream are not obvious and are the reason this file
 //! is not a `match` over message types:
 //!
 //! * **`assistant` messages repeat their `usage`.** The CLI splits one API
@@ -23,7 +23,16 @@
 //!   17 output tokens against the 305 the turn actually billed. The count that
 //!   reconciles is the one on the `message_delta` stream event, which is why
 //!   `--include-partial-messages` is not optional for this bridge and why
-//!   usage is folded from there and nowhere else.
+//!   usage is folded from there wherever one arrives.
+//! * **A reply can be cut off before its `message_delta`.** Seen on
+//!   Claude Code 2.1.288: a reply's stream stopped after its text, no
+//!   `message_delta` came, and twelve minutes later the CLI carried the turn
+//!   on with a prompt of its own saying the reply was cut off. Its closing
+//!   `result` counted the cut reply from the snapshot on its last `assistant`
+//!   line. So a message still waiting for its count when the next one starts,
+//!   or when the turn ends, is counted from that snapshot, and the operator
+//!   is told it was cut — except where the CLI marked the line `aborted`: a
+//!   reply the operator's interrupt stopped is one the CLI counts nothing for.
 //! * **`result` totals are cumulative for the session, not for the turn.**
 //!   `modelUsage` and `total_cost_usd` grow across turns, so they are read as
 //!   running totals and reported as the difference from the last turn's.
@@ -194,6 +203,46 @@ struct InFlight {
     model: String,
     /// Whether it is served in fast mode.
     fast: bool,
+    /// The API's id for the message, where its `message_start` named one.
+    id: Option<String>,
+    /// The id of the request the message answers, off its `assistant` line.
+    request: Option<String>,
+    /// The counts its last `assistant` line carried: what the message is
+    /// counted from if its stream is cut off before its `message_delta`.
+    snapshot: Option<wire::Usage>,
+    /// Whether the operator's interrupt stopped it as it was written.
+    aborted: bool,
+}
+
+impl InFlight {
+    /// The message as a report names it: its id, and the request it answers
+    /// where that is known. `None` where the stream named neither.
+    fn name(&self) -> Option<String> {
+        match (&self.id, &self.request) {
+            (Some(id), Some(request)) => Some(format!("{id} (request {request})")),
+            (Some(id), None) => Some(id.clone()),
+            (None, Some(request)) => Some(format!("request {request}")),
+            (None, None) => None,
+        }
+    }
+
+    /// Whether an `assistant` line for the message `id` is a line of this
+    /// one. A side that names no id cannot say otherwise, and the stream it
+    /// arrived on is the same.
+    fn is(&self, id: Option<&str>) -> bool {
+        match (self.id.as_deref(), id) {
+            (Some(mine), Some(theirs)) => mine == theirs,
+            _ => true,
+        }
+    }
+}
+
+/// Whether the CLI went on with the turn after a reply was cut off, which
+/// is what the notice of the cut says it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CarriedOn {
+    Yes,
+    No,
 }
 
 /// What a `tool_use` id was called, called with, and acts on.
@@ -1046,6 +1095,7 @@ impl Translator {
     }
 
     fn assistant(&mut self, envelope: wire::Envelope, out: &mut Vec<Event>) {
+        self.note_snapshot(&envelope);
         if let (Some(agent), Some(model)) = (
             envelope.parent_tool_use_id.as_deref(),
             envelope.message.model.clone(),
@@ -1414,6 +1464,11 @@ impl Translator {
                 // settled them, and none ever does: the turn's cost is
                 // reported under the billed id, and the shell would price the
                 // same tokens a second time on top of it.
+                // The message before it on the same stream never said what it
+                // finished at: its stream was cut off.
+                if let Some(left) = self.in_flight.remove(&stream) {
+                    self.cut_off(&stream, left, CarriedOn::Yes, out);
+                }
                 let billed = match (stream.as_deref(), windowed) {
                     (None, Some(session)) => session,
                     (None, None) => {
@@ -1430,6 +1485,10 @@ impl Translator {
                     InFlight {
                         model: billed,
                         fast,
+                        id: message.id,
+                        request: None,
+                        snapshot: None,
+                        aborted: false,
                     },
                 );
             }
@@ -1437,38 +1496,7 @@ impl Translator {
             wire::StreamBody::MessageDelta { usage } => {
                 let Some(usage) = usage else { return };
                 let started = self.in_flight.remove(&stream);
-                let fast = usage.fast() || started.as_ref().is_some_and(|message| message.fast);
-                let model = started
-                    .map(|message| message.model)
-                    .or_else(|| self.model.clone());
-                let counts = Counts::from(&usage);
-                self.turn.add(counts);
-                let record = Usage {
-                    input: counts.input,
-                    output: counts.output,
-                    cache_read: counts.cache_read,
-                    cache_write: counts.cache_write,
-                    cache_write_1h: usage.cache_write_1h(),
-                    // `output_tokens_details.thinking_tokens` is a share of
-                    // `output_tokens`, not a count beside it. Reporting it as
-                    // reasoning tokens would count those tokens twice, in the
-                    // total and again in the bill.
-                    reasoning: 0,
-                    model: model.clone().unwrap_or_default(),
-                    // The CLI reports no money per message; the turn's
-                    // `result` does, for the session so far, and settles this
-                    // record along with it.
-                    cost_usd: None,
-                    settles_model: false,
-                    fast,
-                };
-                match model {
-                    Some(model) => self.file(model, record, out),
-                    None => self.unattributed.push(record),
-                }
-                if stream.is_none() {
-                    self.report_context(usage.last_prompt(), out);
-                }
+                self.count_message(&stream, started, &usage, out);
             }
 
             // A sub-agent's text is folded in when the message is complete
@@ -1480,6 +1508,101 @@ impl Translator {
             } if stream.is_none() => out.push(Event::AssistantDelta { text }),
 
             wire::StreamBody::ContentBlockDelta { .. } | wire::StreamBody::Other => {}
+        }
+    }
+
+    /// Counts one message's `usage` on `stream`, filed under the model its
+    /// `message_start` named.
+    fn count_message(
+        &mut self,
+        stream: &Option<String>,
+        started: Option<InFlight>,
+        usage: &wire::Usage,
+        out: &mut Vec<Event>,
+    ) {
+        let fast = usage.fast() || started.as_ref().is_some_and(|message| message.fast);
+        let model = started
+            .map(|message| message.model)
+            .or_else(|| self.model.clone());
+        let counts = Counts::from(usage);
+        self.turn.add(counts);
+        let record = Usage {
+            input: counts.input,
+            output: counts.output,
+            cache_read: counts.cache_read,
+            cache_write: counts.cache_write,
+            cache_write_1h: usage.cache_write_1h(),
+            // `output_tokens_details.thinking_tokens` is a share of
+            // `output_tokens`, not a count beside it. Reporting it as
+            // reasoning tokens would count those tokens twice, in the
+            // total and again in the bill.
+            reasoning: 0,
+            model: model.clone().unwrap_or_default(),
+            // The CLI reports no money per message; the turn's `result` does,
+            // for the session so far, and settles this record along with it.
+            cost_usd: None,
+            settles_model: false,
+            fast,
+        };
+        match model {
+            Some(model) => self.file(model, record, out),
+            None => self.unattributed.push(record),
+        }
+        if stream.is_none() {
+            self.report_context(usage.last_prompt(), out);
+        }
+    }
+
+    /// Keeps what an `assistant` line says about the message in flight on its
+    /// stream: the snapshot of its counts, the request it answers, and
+    /// whether an interrupt stopped it.
+    fn note_snapshot(&mut self, envelope: &wire::Envelope) {
+        let Some(message) = self.in_flight.get_mut(&envelope.parent_tool_use_id) else {
+            return;
+        };
+        if !message.is(envelope.message.id.as_deref()) {
+            return;
+        }
+        if let Some(usage) = &envelope.message.usage {
+            message.snapshot = Some(usage.clone());
+        }
+        if let Some(request) = &envelope.request_id {
+            message.request = Some(request.clone());
+        }
+        message.aborted |= envelope.aborted;
+    }
+
+    /// A message whose stream ended before its `message_delta`: counted from
+    /// the snapshot its last `assistant` line carried, which is what the CLI
+    /// counts it at.
+    ///
+    /// One the operator's interrupt stopped is left uncounted, as the CLI
+    /// leaves it. One the stream named nothing of — no id, no snapshot — is
+    /// passed over in silence: the CLI's own transcripts are folded by
+    /// starting a message for every record they hold and counting each
+    /// response once, so a start with nothing after it is how they read.
+    fn cut_off(
+        &mut self,
+        stream: &Option<String>,
+        mut message: InFlight,
+        carried_on: CarriedOn,
+        out: &mut Vec<Event>,
+    ) {
+        if message.aborted {
+            return;
+        }
+        let name = message.name();
+        let snapshot = message.snapshot.take();
+        if name.is_none() && snapshot.is_none() {
+            return;
+        }
+        if stream.is_none() {
+            out.push(Event::Notice {
+                message: cut_off_notice(name.as_deref(), snapshot.is_some(), carried_on),
+            });
+        }
+        if let Some(snapshot) = snapshot {
+            self.count_message(stream, Some(message), &snapshot, out);
         }
     }
 
@@ -1544,6 +1667,12 @@ impl Translator {
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         let interrupted = outcome.interrupted();
+        // The session's own reply still waiting for its count when the turn
+        // ends was cut off. A sub-agent's is left: one launched in the
+        // background goes on writing after the turn that launched it ends.
+        if let Some(left) = self.in_flight.remove(&None) {
+            self.cut_off(&None, left, CarriedOn::No, out);
+        }
         self.reconcile_turn(outcome.usage.as_ref(), out);
         self.report_billing(Some(&outcome.model_usage), out);
         self.attribute_held(&outcome.model_usage, out);
@@ -2116,6 +2245,30 @@ pub(crate) fn warn(message: String) -> Event {
     Event::Error {
         message,
         fatal: false,
+    }
+}
+
+/// What the transcript says where a reply's stream was cut off before the CLI
+/// said what the reply finished at: `name` is the message, where the stream
+/// named it, and `counted` whether the CLI had recorded a count to take.
+fn cut_off_notice(name: Option<&str>, counted: bool, carried_on: CarriedOn) -> String {
+    let what = match carried_on {
+        CarriedOn::Yes => {
+            "The reply above was cut off before the CLI said it was finished, and \
+                           the CLI is carrying the turn on from where it stopped."
+        }
+        CarriedOn::No => "The reply above was cut off before the CLI said it was finished.",
+    };
+    let count = match counted {
+        true => {
+            "Its tokens are counted from what the CLI recorded for it as it was written, \
+                 which is what the CLI counts it at in the turn's total."
+        }
+        false => "The CLI recorded no count for it, so its tokens are not counted.",
+    };
+    match name {
+        Some(name) => format!("{what} {count} Message {name}."),
+        None => format!("{what} {count}"),
     }
 }
 
@@ -2739,6 +2892,126 @@ mod tests {
             events.iter().all(|event| !matches!(event, Event::Usage(_))),
             "a mismatch invented a record to close the gap"
         );
+    }
+
+    fn mismatches(events: &[Event]) -> Vec<String> {
+        warnings(events)
+            .into_iter()
+            .filter(|said| said.contains("do not add up"))
+            .collect()
+    }
+
+    fn started(id: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"message_start","message":{{"model":"opus-5","id":"{id}"}}}}}}"#
+        )
+    }
+
+    fn written(id: &str, extra: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"model":"opus-5","id":"{id}","content":[{{"type":"text","text":"Writing"}}]{extra}}}}}"#
+        )
+    }
+
+    fn cut_notices(events: &[Event]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Notice { message } if message.contains("cut off") => Some(message.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reply_cut_off_with_no_count_is_said_to_be_left_uncounted() {
+        let mut translator = translator();
+        translator.line(&started("msg_cut"));
+        // The line names the request and carries no counts to take.
+        translator.line(
+            r#"{"type":"assistant","message":{"model":"opus-5","id":"msg_cut","content":[{"type":"text","text":"Writing"}]},"request_id":"req_cut"}"#,
+        );
+        let mut events = translator.line(&started("msg_next"));
+        events.extend(translator.line(&delta(2, 10)));
+        events.extend(translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":4,"output_tokens":18}}"#,
+        ));
+
+        assert_eq!(mismatches(&events).len(), 1, "{events:?}");
+        let cut = cut_notices(&events);
+        assert_eq!(cut.len(), 1, "{events:?}");
+        assert!(cut[0].contains("not counted"), "{cut:?}");
+        assert!(cut[0].contains("msg_cut (request req_cut)"), "{cut:?}");
+    }
+
+    #[test]
+    fn a_reply_cut_off_as_the_turn_ends_is_counted_from_its_last_snapshot() {
+        let mut translator = translator();
+        translator.line(&started("msg_1"));
+        translator.line(&written(
+            "msg_1",
+            r#","usage":{"input_tokens":1,"output_tokens":3}"#,
+        ));
+        translator.line(&written(
+            "msg_1",
+            r#","usage":{"input_tokens":1,"output_tokens":5}"#,
+        ));
+
+        let events = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":5}}"#,
+        );
+
+        let counted: Vec<(u64, u64)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.input, usage.output)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counted, [(1, 5)]);
+        assert!(warnings(&events).is_empty(), "{events:?}");
+        let cut = cut_notices(&events);
+        assert_eq!(cut.len(), 1, "{events:?}");
+        assert!(!cut[0].contains("carrying the turn on"), "{cut:?}");
+        assert!(cut[0].contains("msg_1"), "{cut:?}");
+    }
+
+    #[test]
+    fn a_reply_the_operator_stopped_is_not_counted_from_its_snapshot() {
+        let mut translator = translator();
+        translator.line(&started("msg_1"));
+        translator.line(
+            r#"{"type":"assistant","message":{"model":"opus-5","id":"msg_1","content":[{"type":"text","text":"Writing"}],"usage":{"input_tokens":2,"output_tokens":679}},"aborted":true}"#,
+        );
+
+        let events = translator.line(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming","usage":{"input_tokens":0,"output_tokens":0}}"#,
+        );
+
+        assert!(
+            events.iter().all(|event| !matches!(event, Event::Usage(_))),
+            "{events:?}"
+        );
+        assert!(cut_notices(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_reply_finished_with_its_message_delta_is_not_counted_again_from_its_snapshot() {
+        let mut translator = translator();
+        translator.line(&started("msg_1"));
+        translator.line(&written(
+            "msg_1",
+            r#","usage":{"input_tokens":2,"output_tokens":1}"#,
+        ));
+        let mut events = translator.line(&delta(2, 40));
+        events.extend(translator.line(&started("msg_2")));
+        events.extend(translator.line(&delta(1, 1)));
+        events.extend(translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":3,"output_tokens":41}}"#,
+        ));
+
+        assert!(cut_notices(&events).is_empty(), "{events:?}");
+        assert!(warnings(&events).is_empty(), "{events:?}");
     }
 
     #[test]
