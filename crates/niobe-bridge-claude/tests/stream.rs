@@ -211,14 +211,14 @@ fn each_message_says_which_lifetime_its_cache_writes_were_bought_for() {
 #[test]
 fn the_per_message_tokens_add_up_to_what_the_cli_reported_for_the_turn() {
     // The bridge checks this itself on every `result` and says so when it
-    // fails, so the absence of that warning is the assertion.
+    // fails, so the absence of that report is the assertion.
     let events = translated();
-    let complaints: Vec<&str> = warnings(&events)
-        .into_iter()
-        .filter(|w| w.contains("do not add up"))
+    let differs: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::TurnTotalDiffers { .. }))
         .collect();
 
-    assert!(complaints.is_empty(), "{complaints:?}");
+    assert!(differs.is_empty(), "{differs:?}");
 }
 
 #[test]
@@ -1688,35 +1688,37 @@ fn a_recorded_session_with_stopped_turns_counts_the_tokens_the_cli_reported() {
 /// README beside the fixture lays out.
 mod cut_off {
     use super::{notices, translate};
-    use niobe_core::event::Event;
+    use niobe_core::event::{Event, TokenCounts};
     use niobe_core::session::SessionState;
 
     const CUT_OFF: &str = include_str!("fixtures/cut-off.jsonl");
 
     /// What the turn's `result.usage` reports, and what the three messages'
     /// counts sum to: see the README's table.
-    /// As (input, output, cache read, cache write).
-    const REPORTED: (u64, u64, u64, u64) = (8, 9_175, 352_445, 7_496);
+    const REPORTED: TokenCounts = TokenCounts {
+        input: 8,
+        output: 9_175,
+        cache_read: 352_445,
+        cache_write: 7_496,
+    };
 
     fn translated() -> Vec<Event> {
         translate(CUT_OFF)
     }
 
-    fn per_message(events: &[Event]) -> (u64, u64, u64, u64) {
+    fn per_message(events: &[Event]) -> TokenCounts {
         events
             .iter()
             .filter_map(|event| match event {
-                Event::Usage(usage) if !usage.settles_model => Some(usage),
+                Event::Usage(usage) if !usage.settles_model => Some(TokenCounts {
+                    input: usage.input,
+                    output: usage.output,
+                    cache_read: usage.cache_read,
+                    cache_write: usage.cache_write,
+                }),
                 _ => None,
             })
-            .fold((0, 0, 0, 0), |sum, usage| {
-                (
-                    sum.0 + usage.input,
-                    sum.1 + usage.output,
-                    sum.2 + usage.cache_read,
-                    sum.3 + usage.cache_write,
-                )
-            })
+            .fold(TokenCounts::default(), |sum, counts| sum.plus(&counts))
     }
 
     #[test]
@@ -1727,7 +1729,7 @@ mod cut_off {
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, Event::Error { .. })),
+                .any(|event| matches!(event, Event::TurnTotalDiffers { .. } | Event::Error { .. })),
             "{events:#?}"
         );
     }
@@ -1756,11 +1758,7 @@ mod cut_off {
             "the cut-off request's prompt never reached the context meter"
         );
         let state = SessionState::replay(&events);
-        let (input, output, cache_read, cache_write) = REPORTED;
-        assert_eq!(
-            state.totals().tokens(),
-            input + output + cache_read + cache_write
-        );
+        assert_eq!(state.totals().tokens(), REPORTED.total());
     }
 
     #[test]

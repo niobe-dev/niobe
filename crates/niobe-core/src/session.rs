@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
     AgentId, AgentOutcome, Billing, Context, Event, Mode, OPERATOR_SHELL, SessionMeta,
-    SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -511,12 +511,22 @@ pub struct SessionState {
     ended_agents: BTreeSet<AgentId>,
     peak_running_agents: u64,
     errors: u64,
+    /// What the backend's own turn totals carried beyond what the turns'
+    /// messages reported, summed over the session.
+    beyond_messages: TokenCounts,
     fatal_error: Option<String>,
     /// The commands the backend last said it runs from a prompt.
     commands: Vec<SlashCommand>,
 }
 
 impl SessionState {
+    /// What the backend's turn totals reported beyond what the turns'
+    /// messages did, summed over the session: tokens the session's totals
+    /// hold only where a bill carried them, and no message accounts for.
+    pub fn beyond_messages(&self) -> &TokenCounts {
+        &self.beyond_messages
+    }
+
     /// An empty session.
     pub fn new() -> Self {
         Self::default()
@@ -800,6 +810,16 @@ impl SessionState {
             // A notice changes nothing that is counted: it explains the
             // numbers around it, and the transcript is where it is read.
             Event::Notice { .. } => {}
+            // Kept apart rather than added to the totals: where the backend
+            // bills what its messages did not report, the turn's bill already
+            // carries it, and adding it here would count it twice.
+            Event::TurnTotalDiffers {
+                per_message,
+                reported,
+                ..
+            } => {
+                self.beyond_messages = self.beyond_messages.plus(&per_message.short_of(reported));
+            }
             Event::Commands { commands } => self.commands = commands.clone(),
         }
     }
@@ -2877,6 +2897,36 @@ mod tests {
     fn a_turn_still_running_has_no_record() {
         let state = SessionState::replay(&[prompt(), cached(100, 10, 0, 0)]);
         assert!(state.turns().is_empty(), "{:?}", state.turns());
+    }
+
+    #[test]
+    fn what_a_turn_total_carried_beyond_its_messages_is_kept_apart_from_the_totals() {
+        let counts = |input, output, cache_read, cache_write| TokenCounts {
+            input,
+            output,
+            cache_read,
+            cache_write,
+        };
+        let differs = |per_message, reported| Event::TurnTotalDiffers {
+            per_message,
+            reported,
+            backend_session: Some("cli-session".to_owned()),
+            unfinished: vec!["msg_1".to_owned()],
+        };
+
+        let state = SessionState::replay(&[
+            differs(
+                counts(38, 19_386, 1_832_928, 117_517),
+                counts(40, 19_394, 1_950_998, 120_328),
+            ),
+            // A turn whose messages reported more than its total adds nothing:
+            // there is nothing beyond the messages to account for.
+            differs(counts(5, 5, 5, 5), counts(4, 4, 4, 4)),
+        ]);
+
+        assert_eq!(*state.beyond_messages(), counts(2, 8, 118_070, 2_811));
+        assert_eq!(state.totals().tokens(), 0);
+        assert_eq!(state.errors(), 0);
     }
 
     #[test]

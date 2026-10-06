@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Event, Mode, PermissionDecision, SlashCommand, ToolCallId,
-    ToolOutcome, UsageWindow,
+    AgentId, AgentOutcome, Backend, Event, Mode, PermissionDecision, SlashCommand, TokenCounts,
+    ToolCallId, ToolOutcome, UsageWindow,
 };
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{SessionState, TestRunRecord};
@@ -1905,6 +1905,34 @@ impl App {
                 calls: Vec::new(),
                 agent: None,
             }),
+
+            Event::TurnTotalDiffers {
+                per_message,
+                reported,
+                backend_session,
+                unfinished,
+            } => {
+                let body = turn_total_differs(
+                    &TurnPlace {
+                        number: self.session.turns().len() as u64 + 1,
+                        at: self.at.and_then(Stamp::local),
+                    },
+                    per_message,
+                    reported,
+                    backend_session.as_deref(),
+                    unfinished,
+                );
+                self.push(Entry {
+                    kind: EntryKind::Notice,
+                    head: self.agent_name(),
+                    meta: String::new(),
+                    body,
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: None,
+                });
+            }
 
             Event::Cleared => self.push(Entry {
                 kind: EntryKind::Notice,
@@ -6776,6 +6804,64 @@ fn stop_hint() -> String {
     format!("{} stops it", crate::shell::STOP_KEY)
 }
 
+/// Where in the session something happened, as the transcript names it:
+/// the turn by the number its rule carries, and the time of day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TurnPlace {
+    number: u64,
+    at: Option<LocalTime>,
+}
+
+/// What the transcript says where the backend's total for a turn was not
+/// what the turn's messages added up to: what the difference is, in words,
+/// and under it what a report of it needs — the turn, the time, the
+/// backend's own name for the conversation, the messages that never said
+/// what they finished at, and both sets of figures as reported.
+fn turn_total_differs(
+    place: &TurnPlace,
+    per_message: &TokenCounts,
+    reported: &TokenCounts,
+    backend_session: Option<&str>,
+    unfinished: &[String],
+) -> String {
+    let more = per_message.short_of(reported).total();
+    let fewer = reported.short_of(per_message).total();
+    let said = match (more, fewer) {
+        (0, 0) => {
+            "The CLI's total for this turn does not match what its messages reported.".to_owned()
+        }
+        (more, 0) => format!(
+            "The CLI counted {more} tokens for this turn beyond what its messages reported. \
+             The session's totals hold them where the CLI's bill carried them; no message \
+             accounts for them."
+        ),
+        (0, fewer) => format!(
+            "The CLI counted {fewer} tokens fewer for this turn than its messages reported."
+        ),
+        (more, fewer) => format!(
+            "The CLI's total for this turn does not match what its messages reported: \
+             {more} tokens more in some figures, {fewer} fewer in others."
+        ),
+    };
+    let mut detail = vec![format!("turn {}", place.number)];
+    detail.extend(place.at.map(|at| at.to_string()));
+    detail.extend(backend_session.map(|id| format!("CLI session {id}")));
+    if !unfinished.is_empty() {
+        detail.push(format!("no final count: {}", unfinished.join(", ")));
+    }
+    detail.push(format!("per message {}", figures(per_message)));
+    detail.push(format!("reported {}", figures(reported)));
+    format!("{said}\n{}", detail.join(" · "))
+}
+
+/// Token counts as a report gives them, each figure named.
+fn figures(counts: &TokenCounts) -> String {
+    format!(
+        "{} in, {} out, {} cache read, {} cache write",
+        counts.input, counts.output, counts.cache_read, counts.cache_write
+    )
+}
+
 /// A count of things in the transcript, as a figure.
 fn count(things: usize) -> u64 {
     u64::try_from(things).unwrap_or(u64::MAX)
@@ -7684,6 +7770,47 @@ mod tests {
         let last = app.entries().last().expect("an entry");
         assert_eq!(last.kind, EntryKind::Notice);
         assert_eq!(last.head, "cleared");
+    }
+
+    #[test]
+    fn a_turn_total_that_differs_says_so_in_words_and_names_where_to_look() {
+        let mut app = app();
+        let counts = |input, output, cache_read, cache_write| TokenCounts {
+            input,
+            output,
+            cache_read,
+            cache_write,
+        };
+        app.apply(&Event::UserMessage {
+            text: "one".to_owned(),
+        });
+        app.apply(&Event::TurnEnded);
+        app.apply(&Event::UserMessage {
+            text: "two".to_owned(),
+        });
+        app.apply(&Event::TurnTotalDiffers {
+            per_message: counts(38, 19_386, 1_832_928, 117_517),
+            reported: counts(40, 19_394, 1_950_998, 120_328),
+            backend_session: Some("506fa4fd".to_owned()),
+            unfinished: vec!["msg_cut (request req_cut)".to_owned()],
+        });
+
+        let last = app.entries().last().expect("an entry");
+        assert_eq!(last.kind, EntryKind::Notice, "{last:?}");
+        let (said, detail) = last.body.split_once('\n').expect("words, then the detail");
+        assert!(
+            said.contains("120891 tokens for this turn beyond what its messages reported"),
+            "{said}"
+        );
+        assert!(detail.starts_with("turn 2 · "), "{detail}");
+        assert!(detail.contains("CLI session 506fa4fd"), "{detail}");
+        assert!(detail.contains("msg_cut (request req_cut)"), "{detail}");
+        assert!(
+            detail.contains("per message 38 in, 19386 out, 1832928 cache read, 117517 cache write"),
+            "{detail}"
+        );
+        assert!(detail.contains("reported 40 in"), "{detail}");
+        assert_eq!(app.session().errors(), 0);
     }
 
     #[test]

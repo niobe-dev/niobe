@@ -23,7 +23,7 @@ use niobe_core::TestRunRecord;
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
-    ToolOutcome, Usage, UsageWindow, UsageWindows,
+    TokenCounts, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -855,6 +855,118 @@ pub fn session_with_finished_turns() -> App {
         app.apply_at(event, moment(began + after));
     }
     app.tick(Instant::now(), Some(moment(READ_AT)));
+    app
+}
+
+/// A turn whose CLI total came to more than its messages reported, as the
+/// Claude bridge says so: a reply whose stream was cut off with no count the
+/// CLI recorded, the notice saying so, and the turn's total beside what its
+/// messages added up to, naming the conversation and the reply.
+pub fn session_whose_turn_total_differs() -> App {
+    let clock = Clock::fixed(0).expect("UTC is an offset");
+    let mut app = App::new(read_repository()).with_clock(clock.clone());
+    let moment = |seconds| clock.at(UNIX_EPOCH + Duration::from_secs(seconds));
+    let began = READ_AT - 5 * 60;
+    let counts = |input, output, cache_read, cache_write| TokenCounts {
+        input,
+        output,
+        cache_read,
+        cache_write,
+    };
+    let events = [
+        (
+            0,
+            Event::SessionMeta(SessionMeta {
+                backend: Backend::Claude,
+                profile: "default".to_owned(),
+                model: "opus-5".to_owned(),
+                backend_session: Some("506fa4fd-8719-4564-8c62-5c6ae4b1a471".to_owned()),
+            }),
+        ),
+        (
+            0,
+            Event::Billing {
+                billing: Billing::Plan,
+            },
+        ),
+        (
+            0,
+            Event::UserMessage {
+                text: "write the six pages".to_owned(),
+            },
+        ),
+        (
+            20,
+            Event::AssistantMessage {
+                text: "Writing the six tasks now.".to_owned(),
+                agent: None,
+            },
+        ),
+        (
+            760,
+            Event::Notice {
+                message: "The reply above was cut off before the CLI said it was finished, and \
+                          the CLI is carrying the turn on from where it stopped. The CLI \
+                          recorded no count for it, so its tokens are not counted. Message \
+                          msg_011Cfh9DZarQmXXnvywwTKDD (request req_011Cfh9DZCJ19ME3Je89LBSJ)."
+                    .to_owned(),
+            },
+        ),
+        (
+            790,
+            Event::AssistantMessage {
+                text: "The six pages are written.".to_owned(),
+                agent: None,
+            },
+        ),
+        (
+            790,
+            Event::Usage(Usage {
+                input: 6,
+                output: 9_167,
+                cache_read: 234_375,
+                cache_write: 4_685,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: None,
+                settles_model: false,
+                fast: false,
+            }),
+        ),
+        (
+            792,
+            Event::TurnTotalDiffers {
+                per_message: counts(6, 9_167, 234_375, 4_685),
+                reported: counts(8, 9_175, 352_445, 7_496),
+                backend_session: Some("506fa4fd-8719-4564-8c62-5c6ae4b1a471".to_owned()),
+                unfinished: vec![
+                    "msg_011Cfh9DZarQmXXnvywwTKDD (request req_011Cfh9DZCJ19ME3Je89LBSJ)"
+                        .to_owned(),
+                ],
+            },
+        ),
+        (
+            792,
+            Event::Usage(Usage {
+                input: 2,
+                output: 8,
+                cache_read: 118_070,
+                cache_write: 2_811,
+                cache_write_1h: 0,
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: Some(0.31),
+                settles_model: true,
+                fast: false,
+            }),
+        ),
+        (792, Event::TurnEnded),
+    ];
+    for (after, event) in &events {
+        app.apply_at(event, moment(began + after));
+    }
+    app.tick(Instant::now(), Some(moment(READ_AT + 600)));
     app
 }
 

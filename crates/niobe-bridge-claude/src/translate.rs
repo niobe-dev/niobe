@@ -91,7 +91,7 @@ use std::path::{Path, PathBuf};
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
-    SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
@@ -171,6 +171,17 @@ impl Counts {
 
     fn is_empty(self) -> bool {
         self == Self::default()
+    }
+}
+
+impl From<Counts> for TokenCounts {
+    fn from(counts: Counts) -> Self {
+        Self {
+            input: counts.input,
+            output: counts.output,
+            cache_read: counts.cache_read,
+            cache_write: counts.cache_write,
+        }
     }
 }
 
@@ -417,6 +428,9 @@ pub struct Translator {
     model_requests: BTreeSet<String>,
     /// Per-message usage since the last `result`, for the turn reconciliation.
     turn: Counts,
+    /// The messages since the last `result` whose stream ended before their
+    /// `message_delta`, as a report names them, for the turn reconciliation.
+    unfinished: Vec<String>,
     /// Per model, everything reported for it so far this session.
     reported: BTreeMap<String, Reported>,
     /// Why a resumed session's earlier spend is unknown, until the notice
@@ -503,6 +517,7 @@ impl Translator {
             denied: BTreeMap::new(),
             model_requests: BTreeSet::new(),
             turn: Counts::default(),
+            unfinished: Vec::new(),
             reported: BTreeMap::new(),
             unknown_spend: None,
             restored_unknown: false,
@@ -1071,6 +1086,7 @@ impl Translator {
         self.restored_unknown = false;
         self.unattributed.clear();
         self.turn = Counts::default();
+        self.unfinished.clear();
         self.context = None;
         out.push(Event::Cleared);
     }
@@ -1574,7 +1590,7 @@ impl Translator {
 
     /// A message whose stream ended before its `message_delta`: counted from
     /// the snapshot its last `assistant` line carried, which is what the CLI
-    /// counts it at.
+    /// counts it at, and named for the turn's reconciliation.
     ///
     /// One the operator's interrupt stopped is left uncounted, as the CLI
     /// leaves it. One the stream named nothing of — no id, no snapshot — is
@@ -1595,6 +1611,9 @@ impl Translator {
         let snapshot = message.snapshot.take();
         if name.is_none() && snapshot.is_none() {
             return;
+        }
+        if let Some(name) = &name {
+            self.unfinished.push(name.clone());
         }
         if stream.is_none() {
             out.push(Event::Notice {
@@ -1799,6 +1818,7 @@ impl Translator {
     /// stop for numbers nobody contradicted.
     fn reconcile_turn(&mut self, usage: Option<&wire::Usage>, out: &mut Vec<Event>) {
         let summed = std::mem::take(&mut self.turn);
+        let unfinished = std::mem::take(&mut self.unfinished);
         let Some(reported) = usage.map(Counts::from) else {
             return;
         };
@@ -1806,19 +1826,12 @@ impl Translator {
             return;
         }
         if reported != summed {
-            out.push(warn(format!(
-                "the turn's per-message tokens do not add up to what the CLI reported for the \
-                 turn. Per message: {} in, {} out, {} cache read, {} cache write. Reported: \
-                 {} in, {} out, {} cache read, {} cache write.",
-                summed.input,
-                summed.output,
-                summed.cache_read,
-                summed.cache_write,
-                reported.input,
-                reported.output,
-                reported.cache_read,
-                reported.cache_write,
-            )));
+            out.push(Event::TurnTotalDiffers {
+                per_message: summed.into(),
+                reported: reported.into(),
+                backend_session: self.backend_session.clone(),
+                unfinished,
+            });
         }
     }
 
@@ -2883,21 +2896,42 @@ mod tests {
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":99}}"#,
         );
 
-        let said = warnings(&events);
-        assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].contains("do not add up"), "{said:?}");
-        assert!(said[0].contains("10 out"), "the summed figure: {said:?}");
-        assert!(said[0].contains("99 out"), "the reported figure: {said:?}");
+        assert!(warnings(&events).is_empty(), "{events:?}");
+        let differs = differences(&events);
+        assert_eq!(differs.len(), 1, "{events:?}");
+        let (per_message, reported, _, _) = differs[0];
+        assert_eq!((per_message.input, per_message.output), (2, 10));
+        assert_eq!((reported.input, reported.output), (2, 99));
         assert!(
             events.iter().all(|event| !matches!(event, Event::Usage(_))),
             "a mismatch invented a record to close the gap"
         );
     }
 
-    fn mismatches(events: &[Event]) -> Vec<String> {
-        warnings(events)
-            .into_iter()
-            .filter(|said| said.contains("do not add up"))
+    type Difference<'a> = (
+        &'a TokenCounts,
+        &'a TokenCounts,
+        Option<&'a str>,
+        &'a [String],
+    );
+
+    fn differences(events: &[Event]) -> Vec<Difference<'_>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::TurnTotalDiffers {
+                    per_message,
+                    reported,
+                    backend_session,
+                    unfinished,
+                } => Some((
+                    per_message,
+                    reported,
+                    backend_session.as_deref(),
+                    unfinished.as_slice(),
+                )),
+                _ => None,
+            })
             .collect()
     }
 
@@ -2924,7 +2958,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_cut_off_with_no_count_is_said_to_be_left_uncounted() {
+    fn a_mismatch_left_by_a_reply_with_no_count_names_the_conversation_and_the_reply() {
         let mut translator = translator();
         translator.line(&started("msg_cut"));
         // The line names the request and carries no counts to take.
@@ -2937,11 +2971,15 @@ mod tests {
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":4,"output_tokens":18}}"#,
         ));
 
-        assert_eq!(mismatches(&events).len(), 1, "{events:?}");
+        let differs = differences(&events);
+        assert_eq!(differs.len(), 1, "{events:?}");
+        let (_, _, backend_session, unfinished) = differs[0];
+        assert_eq!(backend_session, Some("s-1"));
+        assert_eq!(unfinished, ["msg_cut (request req_cut)"]);
         let cut = cut_notices(&events);
         assert_eq!(cut.len(), 1, "{events:?}");
         assert!(cut[0].contains("not counted"), "{cut:?}");
-        assert!(cut[0].contains("msg_cut (request req_cut)"), "{cut:?}");
+        assert!(warnings(&events).is_empty(), "{events:?}");
     }
 
     #[test]
@@ -2969,7 +3007,7 @@ mod tests {
             })
             .collect();
         assert_eq!(counted, [(1, 5)]);
-        assert!(warnings(&events).is_empty(), "{events:?}");
+        assert!(differences(&events).is_empty(), "{events:?}");
         let cut = cut_notices(&events);
         assert_eq!(cut.len(), 1, "{events:?}");
         assert!(!cut[0].contains("carrying the turn on"), "{cut:?}");
@@ -3011,7 +3049,7 @@ mod tests {
         ));
 
         assert!(cut_notices(&events).is_empty(), "{events:?}");
-        assert!(warnings(&events).is_empty(), "{events:?}");
+        assert!(differences(&events).is_empty(), "{events:?}");
     }
 
     #[test]
@@ -3028,7 +3066,7 @@ mod tests {
         );
 
         assert!(
-            warnings(&events).is_empty(),
+            differences(&events).is_empty(),
             "the second turn was measured against the first"
         );
     }
@@ -4497,8 +4535,8 @@ mod tests {
 
         let said = warnings(&events);
         assert!(
-            !said.iter().any(|line| line.contains("do not add up")),
-            "a turn the CLI totalled nothing for was reported as a mismatch: {said:?}"
+            differences(&events).is_empty(),
+            "a turn the CLI totalled nothing for was reported as a mismatch: {events:?}"
         );
         assert_eq!(said.len(), 1, "{said:?}");
     }

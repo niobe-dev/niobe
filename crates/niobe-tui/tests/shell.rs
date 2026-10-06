@@ -28,10 +28,10 @@ mod common;
 use std::path::PathBuf;
 
 use common::{
-    at_work, metered_session, paint, running_session, screen, session_with_a_long_write,
-    session_with_a_markdown_reply, session_with_a_tab_indented_reply, session_with_finished_turns,
-    session_with_test_records, session_with_two_agents_at_work, style_at, styles,
-    unmetered_session,
+    at_work, metered_session, paint, running_session, screen, session_whose_turn_total_differs,
+    session_with_a_long_write, session_with_a_markdown_reply, session_with_a_tab_indented_reply,
+    session_with_finished_turns, session_with_test_records, session_with_two_agents_at_work,
+    style_at, styles, unmetered_session,
 };
 use niobe_core::event::{
     AgentId, Backend, Event, Mode, PermissionDecision, Usage, UsageWindow, UsageWindows,
@@ -274,6 +274,25 @@ fn a_finished_turn_is_ruled_off_with_what_it_spent() {
     assert!(frame.contains("── turn 2"), "{frame}");
     assert!(!frame.contains("0% of 5h"), "{frame}");
     assert_snapshot("turns-80x24", &frame);
+}
+
+/// A turn whose CLI total came to more than its messages reported says so
+/// in words in the transcript, with the turn, the time, the CLI's session and
+/// the reply that never said what it finished at under it; and the Usage pane
+/// carries the difference on a row that says where it came from.
+#[test]
+fn a_turn_total_beyond_its_messages_is_a_notice_with_its_detail_and_a_labelled_row() {
+    let frame = screen(&mut session_whose_turn_total_differs(), 200, 60);
+    for shown in [
+        "The CLI counted 120891 tokens for this turn beyond what its messages reported.",
+        "turn 1 · 13:49 · CLI session 506fa4fd-8719-4564-8c62-5c6ae4b1a471",
+        "no final count: msg_011Cfh9DZarQmXXnvywwTKDD (request",
+        "+121k reported by the CLI, not per message",
+    ] {
+        assert!(frame.contains(shown), "{shown} is not on screen:\n{frame}");
+    }
+    assert!(!frame.contains("! error"), "{frame}");
+    assert_snapshot("turn-total-differs-200x60", &frame);
 }
 
 /// Two sub-agents of one kind at work at once: each of their calls is named

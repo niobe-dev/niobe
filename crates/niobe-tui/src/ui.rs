@@ -3124,16 +3124,36 @@ const CACHE_LABEL: &str = "cache hit";
 
 /// How many rows the tokens block takes: one per model that spent something,
 /// one for the cache, or one line saying the session has been billed for
-/// nothing yet.
+/// nothing yet — and one more where the backend's turn totals carried tokens
+/// no message reported.
 ///
 /// The pane is sized from this before it is drawn, so it has to agree with
 /// [`spend_lines`] exactly; a test holds the two together.
 fn spend_rows(app: &App) -> usize {
-    match models(app).len() {
+    let models = match models(app).len() {
         0 => 1,
         rows => rows + 1,
-    }
+    };
+    models + usize::from(beyond_messages(app) > 0)
 }
+
+/// The tokens the backend's turn totals carried beyond what the turns'
+/// messages reported, over the session.
+fn beyond_messages(app: &App) -> u64 {
+    app.session().beyond_messages().total()
+}
+
+/// The row that says how many of the session's tokens no message reported
+/// and only the backend's turn totals did, labelled for where they came
+/// from: they are in the rows above wherever the backend's bill carried
+/// them, but no per-message record accounts for them.
+fn beyond_messages_line(tokens: u64, width: usize, theme: &Theme) -> Line<'static> {
+    let row = format!("+{} {BEYOND_MESSAGES_LABEL}", compact(tokens));
+    Line::from(text::truncate(&row, width)).style(Style::new().fg(theme.dim))
+}
+
+/// What the row of tokens no message reported says they are.
+const BEYOND_MESSAGES_LABEL: &str = "reported by the CLI, not per message";
 
 /// The models that spent something, largest first, with their tokens.
 ///
@@ -3171,8 +3191,12 @@ fn models(app: &App) -> Vec<(String, u64)> {
 fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
     let spent = models(app);
+    let beyond = beyond_messages(app);
+    let beyond = (beyond > 0).then(|| beyond_messages_line(beyond, width, theme));
     if spent.is_empty() {
-        return vec![Line::from("no tokens reported yet").style(dim)];
+        let mut lines = vec![Line::from("no tokens reported yet").style(dim)];
+        lines.extend(beyond);
+        return lines;
     }
 
     let columns = usage_label_column(app, width);
@@ -3255,6 +3279,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         None,
         Style::new().fg(theme.add),
     ));
+    lines.extend(beyond);
     lines
 }
 
@@ -6223,6 +6248,34 @@ mod tests {
             let app = spending(records);
             assert_eq!(spend_rows(&app), spend_of(&app, 66).len(), "{records:?}");
         }
+    }
+
+    /// Tokens only the backend's turn totals reported get a row of their own
+    /// under the cache, saying where they came from, and the pane is sized
+    /// for it.
+    #[test]
+    fn tokens_no_message_reported_are_a_labelled_row_of_their_own() {
+        let mut app = spending(&[("opus-5", 100)]);
+        let counts = |input, cache_read| niobe_core::event::TokenCounts {
+            input,
+            output: 0,
+            cache_read,
+            cache_write: 0,
+        };
+        app.apply(&niobe_core::event::Event::TurnTotalDiffers {
+            per_message: counts(10, 0),
+            reported: counts(12, 118_070),
+            backend_session: None,
+            unfinished: Vec::new(),
+        });
+
+        let rows = spend_of(&app, 66);
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("+118k reported by the CLI, not per message")
+        );
+        assert_eq!(spend_rows(&app), rows.len());
+        assert!(rows[rows.len() - 2].starts_with(CACHE_LABEL), "{rows:?}");
     }
 
     /// A model nothing was billed under is not a model at 0%: the row is

@@ -218,6 +218,51 @@ impl Usage {
     }
 }
 
+/// Token counts with no model and no money: one side of a comparison a
+/// backend can make between two of its own figures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCounts {
+    /// Input tokens billed at the full rate.
+    pub input: u64,
+    /// Output tokens.
+    pub output: u64,
+    /// Input tokens served from the prompt cache.
+    pub cache_read: u64,
+    /// Input tokens written into the prompt cache.
+    pub cache_write: u64,
+}
+
+impl TokenCounts {
+    /// Every token counted here, cache traffic included.
+    pub fn total(&self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
+
+    /// What `other` has that this does not, field by field. A field where
+    /// `other` has less reads as nothing rather than as a negative count.
+    pub fn short_of(&self, other: &Self) -> Self {
+        Self {
+            input: other.input.saturating_sub(self.input),
+            output: other.output.saturating_sub(self.output),
+            cache_read: other.cache_read.saturating_sub(self.cache_read),
+            cache_write: other.cache_write.saturating_sub(self.cache_write),
+        }
+    }
+
+    /// These counts and `other`'s, summed field by field.
+    pub fn plus(&self, other: &Self) -> Self {
+        Self {
+            input: self.input.saturating_add(other.input),
+            output: self.output.saturating_add(other.output),
+            cache_read: self.cache_read.saturating_add(other.cache_read),
+            cache_write: self.cache_write.saturating_add(other.cache_write),
+        }
+    }
+}
+
 /// How much of one of a plan's usage windows is gone, and when it starts over.
 ///
 /// A subscription plan meters rolling windows rather than money, so on such a
@@ -816,6 +861,33 @@ pub enum Event {
     Commands {
         /// The commands, in the backend's order.
         commands: Vec<SlashCommand>,
+    },
+
+    /// The backend's own total for a turn is not what the turn's messages
+    /// added up to.
+    ///
+    /// Every pane derives its figures from the per-message records, so a
+    /// difference between them and the backend's figure is something the
+    /// operator has to be able to see, and trace: the event carries what a
+    /// report of it needs — the backend's own name for the conversation and
+    /// the messages that never said what they finished at. Which turn it was
+    /// and when are where the event stands in the session. Whatever the
+    /// backend reported beyond the messages is not added to any total by this
+    /// event; where the backend bills it, the turn's bill already carries it.
+    TurnTotalDiffers {
+        /// What the turn's messages reported, summed.
+        per_message: TokenCounts,
+        /// What the backend reported for the turn as a whole.
+        reported: TokenCounts,
+        /// The backend's own id for the conversation, where it named one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend_session: Option<String>,
+        /// The turn's messages whose stream ended before it reported the
+        /// count the message finished at, each as the backend names it.
+        /// Counted from an earlier figure where the backend gave one, and not
+        /// at all where it gave none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unfinished: Vec<String>,
     },
 
     /// Something happened in the session that is neither a message nor a

@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use niobe_core::event::{AgentId, Event, ToolCallId, Usage};
+use niobe_core::event::{AgentId, Event, TokenCounts, ToolCallId, Usage};
 use niobe_core::session::SessionState;
 use niobe_store::{Recorder, SessionId, Store, StoreError, read_log};
 
@@ -318,6 +318,46 @@ fn calls_messages_and_prompts_stored_before_they_named_an_agent_load_as_the_sess
         })
         .collect();
     assert_eq!(owners, [None, None, None, Some("toolu_a")]);
+}
+
+#[test]
+fn a_turn_total_that_differed_comes_back_with_what_a_report_of_it_needs() {
+    let (_dir, path) = scratch();
+    let counts = |input, cache_read| TokenCounts {
+        input,
+        output: 8,
+        cache_read,
+        cache_write: 0,
+    };
+    let differs = Event::TurnTotalDiffers {
+        per_message: counts(6, 234_375),
+        reported: counts(8, 352_445),
+        backend_session: Some("506fa4fd-8719-4564-8c62-5c6ae4b1a471".to_owned()),
+        unfinished: vec!["msg_cut (request req_cut)".to_owned()],
+    };
+    let events = [user("write the six pages"), differs, Event::TurnEnded];
+
+    let session = {
+        let store = Store::open(&path).expect("a store opens");
+        let session = store.create_session().expect("a session is created");
+        for event in &events {
+            store.append(session, event).expect("an append succeeds");
+        }
+        session
+    };
+
+    let loaded: Vec<Event> = Store::open(&path)
+        .expect("the store opens again")
+        .events(session)
+        .expect("the session loads")
+        .into_iter()
+        .map(|stored| stored.event)
+        .collect();
+    assert_eq!(loaded, events);
+    assert_eq!(
+        SessionState::replay(&loaded).beyond_messages().cache_read,
+        118_070
+    );
 }
 
 #[test]

@@ -17,7 +17,7 @@ pub mod test_run;
 
 pub use event::{
     AgentId, AgentOutcome, Backend, Billing, Event, Mode, OPERATOR_SHELL, PermissionDecision,
-    SessionMeta, ToolCallId, ToolOutcome, Usage,
+    SessionMeta, TokenCounts, ToolCallId, ToolOutcome, Usage,
 };
 pub use image::{Image, ImageError, MediaType};
 pub use permission::{Allowlist, Rule, RuleError};
