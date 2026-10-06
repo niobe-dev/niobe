@@ -116,10 +116,28 @@ pub struct Theme {
     /// colour for an error, so the two read as one scale.
     pub warn: Color,
 
-    /// The menu bar, and the F-key bar's background.
+    /// The menu bar, and behind an open menu.
     pub menu_bg: Color,
     /// Text on the menu bar.
     pub menu_fg: Color,
+    /// The line an open menu is framed in.
+    pub menu_border: BorderType,
+    /// An open menu's items.
+    pub pulldown_fg: Color,
+    /// An open menu's frame.
+    pub pulldown_frame: Color,
+    /// An item of an open menu that can do nothing in this session.
+    pub pulldown_dim: Color,
+    /// Behind the item an open menu has its cursor on, which Enter chooses.
+    /// A field of its own rather than [`Theme::cursor_bg`], because a theme
+    /// can draw an open menu in the colour it draws a dialog's cursor row in.
+    pub menu_cursor_bg: Color,
+    /// The text of the item an open menu has its cursor on.
+    pub menu_cursor_fg: Color,
+    /// Behind the F-key bar, and the gaps between its keys.
+    pub keybar_bg: Color,
+    /// An F-key's number, and the Esc in front of them.
+    pub keybar_fg: Color,
     /// The label half of an F-key.
     pub fkey_bg: Color,
     /// Text on an F-key label.
@@ -161,8 +179,10 @@ pub struct Theme {
     pub dialog_bg: Color,
     /// Text in a dialog.
     pub dialog_fg: Color,
-    /// A dialog's border and title.
+    /// A dialog's border, and what its bottom edge says.
     pub dialog_frame: Color,
+    /// The title on a dialog's top edge.
+    pub dialog_title: Color,
     /// The row a dialog's list has its cursor on, which Enter chooses.
     pub cursor_bg: Color,
     /// The text of the row the cursor is on.
@@ -178,14 +198,27 @@ pub struct Theme {
     pub shadow_fg: Color,
 }
 
-/// The DOS-blue theme: Turbo Vision as it shipped.
+/// The DOS-blue theme: Far Manager's default colours.
 ///
 /// The IBM CGA palette, which is exactly what the sixteen ANSI colours encode,
 /// so this theme has no truecolor table: it is drawn in the user's own
 /// sixteen at any depth. The darker navy a bar track and a diff background
 /// would want is outside those sixteen, so they use [`Color::Black`] and
-/// [`Color::Blue`]. The window with the keyboard is Turbo Vision's: a double
-/// frame, where every other window has a single one.
+/// [`Color::Blue`].
+///
+/// Each role takes the colour Far gives the same role: light cyan text on
+/// blue panels, black on cyan for the menu bar, the F-key labels and the
+/// cursor bar, white on cyan for an open menu with its item under the cursor
+/// white on black, white numbers on a black key bar, black on grey dialogs in
+/// a white double frame, and a dark grey shadow on black.
+///
+/// Three of Far's choices are not taken. Far frames every panel in a double
+/// line; here the panes are single and the one with the keyboard double,
+/// because the line is the mark of focus a terminal without colour keeps.
+/// Far draws its command line grey on black; the composer sits inside the
+/// session pane's frame rather than on a line of its own under the panels, so
+/// it keeps the pane's blue. And Far's red warning dialog has no counterpart:
+/// no dialog here asks before something that cannot be undone.
 pub const CLASSIC: Theme = Theme {
     name: "CLASSIC",
     border: BorderType::Plain,
@@ -195,15 +228,23 @@ pub const CLASSIC: Theme = Theme {
     frame: Color::LightCyan,
     frame_focus: Color::White,
     title: Color::LightYellow,
-    fg: Color::White,
+    fg: Color::LightCyan,
     dim: Color::Gray,
     hot: Color::LightYellow,
     // The one yellow in the sixteen, so a window running low takes the
     // accent's colour here: there is no amber to give it one of its own.
     warn: Color::LightYellow,
 
-    menu_bg: Color::Gray,
+    menu_bg: Color::Cyan,
     menu_fg: Color::Black,
+    menu_border: BorderType::Double,
+    pulldown_fg: Color::White,
+    pulldown_frame: Color::White,
+    pulldown_dim: Color::DarkGray,
+    menu_cursor_bg: Color::Black,
+    menu_cursor_fg: Color::White,
+    keybar_bg: Color::Black,
+    keybar_fg: Color::White,
     fkey_bg: Color::Cyan,
     fkey_fg: Color::Black,
 
@@ -218,14 +259,15 @@ pub const CLASSIC: Theme = Theme {
     user: Color::LightYellow,
     agent: Color::LightCyan,
     tool: Color::LightMagenta,
-    code: Color::LightCyan,
+    // The body text is Far's light cyan, so code is the white Far's editor
+    // keeps for what stands out of it.
+    code: Color::White,
 
-    // Turbo Vision's: a grey dialog with a white frame, a green cursor row,
-    // and a black shadow.
     dialog_bg: Color::Gray,
     dialog_fg: Color::Black,
     dialog_frame: Color::White,
-    cursor_bg: Color::LightGreen,
+    dialog_title: Color::Black,
+    cursor_bg: Color::Cyan,
     cursor_fg: Color::Black,
     shadow: Color::Black,
     shadow_fg: Color::DarkGray,
@@ -263,6 +305,14 @@ pub const NEO: Theme = Theme {
 
     menu_bg: Color::Black,
     menu_fg: Color::Green,
+    menu_border: BorderType::Plain,
+    pulldown_fg: Color::Green,
+    pulldown_frame: Color::Green,
+    pulldown_dim: Color::Green,
+    menu_cursor_bg: Color::LightGreen,
+    menu_cursor_fg: Color::Black,
+    keybar_bg: Color::Black,
+    keybar_fg: Color::LightGreen,
     fkey_bg: Color::Green,
     fkey_fg: Color::Black,
 
@@ -286,6 +336,7 @@ pub const NEO: Theme = Theme {
     dialog_bg: Color::Green,
     dialog_fg: Color::Black,
     dialog_frame: Color::Black,
+    dialog_title: Color::Black,
     cursor_bg: Color::LightGreen,
     cursor_fg: Color::Black,
     shadow: Color::Black,
@@ -327,6 +378,14 @@ pub const CYBER: Theme = Theme {
 
     menu_bg: Color::Black,
     menu_fg: Color::White,
+    menu_border: BorderType::Plain,
+    pulldown_fg: Color::White,
+    pulldown_frame: Color::White,
+    pulldown_dim: Color::Green,
+    menu_cursor_bg: Color::LightGreen,
+    menu_cursor_fg: Color::Black,
+    keybar_bg: Color::Black,
+    keybar_fg: Color::LightGreen,
     fkey_bg: Color::LightMagenta,
     fkey_fg: Color::Black,
 
@@ -347,6 +406,7 @@ pub const CYBER: Theme = Theme {
     dialog_bg: Color::Magenta,
     dialog_fg: Color::White,
     dialog_frame: Color::LightMagenta,
+    dialog_title: Color::LightMagenta,
     cursor_bg: Color::LightGreen,
     cursor_fg: Color::Black,
     shadow: Color::Black,
@@ -387,6 +447,14 @@ pub const MODERN: Theme = Theme {
 
     menu_bg: Color::DarkGray,
     menu_fg: Color::White,
+    menu_border: BorderType::Plain,
+    pulldown_fg: Color::White,
+    pulldown_frame: Color::White,
+    pulldown_dim: Color::Gray,
+    menu_cursor_bg: Color::LightBlue,
+    menu_cursor_fg: Color::Black,
+    keybar_bg: Color::DarkGray,
+    keybar_fg: Color::LightBlue,
     fkey_bg: Color::Blue,
     fkey_fg: Color::White,
 
@@ -404,6 +472,7 @@ pub const MODERN: Theme = Theme {
     dialog_bg: Color::DarkGray,
     dialog_fg: Color::White,
     dialog_frame: Color::Gray,
+    dialog_title: Color::Gray,
     cursor_bg: Color::LightBlue,
     cursor_fg: Color::Black,
     shadow: Color::Black,
@@ -465,6 +534,13 @@ pub const NEO_TRUE: Theme = Theme {
 
     menu_bg: hex(0x001a08),
     menu_fg: hex(0x00ff41),
+    pulldown_fg: hex(0x00ff41),
+    pulldown_frame: hex(0x00ff41),
+    pulldown_dim: hex(0x2e8b44),
+    menu_cursor_bg: hex(0x00ff41),
+    menu_cursor_fg: hex(0x000000),
+    keybar_bg: hex(0x001a08),
+    keybar_fg: hex(0x00ff41),
     fkey_bg: hex(0x003b12),
     fkey_fg: hex(0x00ff41),
 
@@ -482,6 +558,7 @@ pub const NEO_TRUE: Theme = Theme {
     dialog_bg: hex(0x0a2211),
     dialog_fg: hex(0x9bffb0),
     dialog_frame: hex(0x00ff41),
+    dialog_title: hex(0x00ff41),
     cursor_bg: hex(0x00ff41),
     cursor_fg: hex(0x000000),
     shadow: hex(0x000000),
@@ -511,6 +588,13 @@ pub const CYBER_TRUE: Theme = Theme {
 
     menu_bg: hex(0x0d0b16),
     menu_fg: hex(0xe6e9ff),
+    pulldown_fg: hex(0xe6e9ff),
+    pulldown_frame: hex(0xe6e9ff),
+    pulldown_dim: hex(0x6b9a7c),
+    menu_cursor_bg: hex(0x39ff7a),
+    menu_cursor_fg: hex(0x07060d),
+    keybar_bg: hex(0x0d0b16),
+    keybar_fg: hex(0x39ff7a),
     fkey_bg: hex(0xff2bd6),
     fkey_fg: hex(0x07060d),
 
@@ -528,6 +612,7 @@ pub const CYBER_TRUE: Theme = Theme {
     dialog_bg: hex(0x16121f),
     dialog_fg: hex(0xe6e9ff),
     dialog_frame: hex(0xff2bd6),
+    dialog_title: hex(0xff2bd6),
     cursor_bg: hex(0x39ff7a),
     cursor_fg: hex(0x07060d),
     shadow: hex(0x000000),
@@ -553,6 +638,13 @@ pub const MODERN_TRUE: Theme = Theme {
 
     menu_bg: hex(0x323233),
     menu_fg: hex(0xcccccc),
+    pulldown_fg: hex(0xcccccc),
+    pulldown_frame: hex(0xcccccc),
+    pulldown_dim: hex(0x858585),
+    menu_cursor_bg: hex(0x04395e),
+    menu_cursor_fg: hex(0xffffff),
+    keybar_bg: hex(0x323233),
+    keybar_fg: hex(0x4fc1ff),
     fkey_bg: hex(0x0e639c),
     fkey_fg: hex(0xffffff),
 
@@ -570,6 +662,7 @@ pub const MODERN_TRUE: Theme = Theme {
     dialog_bg: hex(0x323233),
     dialog_fg: hex(0xcccccc),
     dialog_frame: hex(0x007acc),
+    dialog_title: hex(0x007acc),
     cursor_bg: hex(0x04395e),
     cursor_fg: hex(0xffffff),
     shadow: hex(0x000000),
@@ -649,7 +742,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 28] {
+    fn colours(t: &Theme) -> [Color; 36] {
         [
             t.pane_bg,
             t.frame,
@@ -661,6 +754,13 @@ mod tests {
             t.warn,
             t.menu_bg,
             t.menu_fg,
+            t.pulldown_fg,
+            t.pulldown_frame,
+            t.pulldown_dim,
+            t.menu_cursor_bg,
+            t.menu_cursor_fg,
+            t.keybar_bg,
+            t.keybar_fg,
             t.fkey_bg,
             t.fkey_fg,
             t.add,
@@ -675,6 +775,7 @@ mod tests {
             t.dialog_bg,
             t.dialog_fg,
             t.dialog_frame,
+            t.dialog_title,
             t.cursor_bg,
             t.cursor_fg,
             t.shadow,
@@ -736,8 +837,23 @@ mod tests {
                 (t.code, t.pane_bg, "code in a reply"),
                 (t.menu_fg, t.menu_bg, "the menu bar"),
                 (t.hot, t.menu_bg, "a menu hot key"),
+                (t.pulldown_fg, t.menu_bg, "an open menu's item"),
+                (t.pulldown_frame, t.menu_bg, "an open menu's frame"),
+                (
+                    t.pulldown_dim,
+                    t.menu_bg,
+                    "an open menu's item that can do nothing",
+                ),
+                (t.hot, t.menu_bg, "an open menu's hot key"),
+                (t.menu_cursor_bg, t.menu_bg, "an open menu's cursor row"),
+                (
+                    t.menu_cursor_fg,
+                    t.menu_cursor_bg,
+                    "an open menu's cursor row's text",
+                ),
+                (t.keybar_fg, t.keybar_bg, "an F-key's number"),
                 (t.fkey_fg, t.fkey_bg, "an F-key label"),
-                (t.fkey_bg, t.menu_bg, "an F-key label block"),
+                (t.fkey_bg, t.keybar_bg, "an F-key label block"),
                 // The menu row carries the session's identity beside the
                 // menus, so what it says there is checked against the menu
                 // background as well.
@@ -745,6 +861,7 @@ mod tests {
                 (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
                 (t.dialog_fg, t.dialog_bg, "dialog text"),
                 (t.dialog_frame, t.dialog_bg, "a dialog's border"),
+                (t.dialog_title, t.dialog_bg, "a dialog's title"),
                 (t.cursor_bg, t.dialog_bg, "a dialog's cursor row"),
                 (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
                 // A question's selected answer is drawn inverted, in the pane
@@ -792,6 +909,95 @@ mod tests {
         // CGA is the sixteen: a user's own scheme is honoured at any depth.
         assert_eq!(CLASSIC.at(Depth::TrueColour), CLASSIC);
         assert_eq!(CLASSIC.at(Depth::Sixteen), CLASSIC);
+    }
+
+    /// `classic` is Far Manager's default colour table, role for role, where
+    /// the shell has the role: each pair here is the foreground and
+    /// background Far draws that part of its screen in.
+    #[test]
+    fn classic_draws_each_part_of_the_screen_in_far_managers_colours() {
+        let t = CLASSIC;
+        for (ours, far, what) in [
+            (
+                (t.fg, t.pane_bg),
+                (Color::LightCyan, Color::Blue),
+                "panel text",
+            ),
+            (
+                (t.frame, t.pane_bg),
+                (Color::LightCyan, Color::Blue),
+                "a panel's frame",
+            ),
+            (
+                (t.menu_fg, t.menu_bg),
+                (Color::Black, Color::Cyan),
+                "the menu bar",
+            ),
+            (
+                (t.hot, t.menu_bg),
+                (Color::LightYellow, Color::Cyan),
+                "a menu's hot key",
+            ),
+            (
+                (t.pulldown_fg, t.menu_bg),
+                (Color::White, Color::Cyan),
+                "an open menu",
+            ),
+            (
+                (t.pulldown_frame, t.menu_bg),
+                (Color::White, Color::Cyan),
+                "an open menu's frame",
+            ),
+            (
+                (t.pulldown_dim, t.menu_bg),
+                (Color::DarkGray, Color::Cyan),
+                "a greyed item",
+            ),
+            (
+                (t.menu_cursor_fg, t.menu_cursor_bg),
+                (Color::White, Color::Black),
+                "the selected item",
+            ),
+            (
+                (t.keybar_fg, t.keybar_bg),
+                (Color::White, Color::Black),
+                "an F-key's number",
+            ),
+            (
+                (t.fkey_fg, t.fkey_bg),
+                (Color::Black, Color::Cyan),
+                "an F-key's label",
+            ),
+            (
+                (t.cursor_fg, t.cursor_bg),
+                (Color::Black, Color::Cyan),
+                "the cursor bar",
+            ),
+            (
+                (t.dialog_fg, t.dialog_bg),
+                (Color::Black, Color::Gray),
+                "dialog text",
+            ),
+            (
+                (t.dialog_frame, t.dialog_bg),
+                (Color::White, Color::Gray),
+                "a dialog's frame",
+            ),
+            (
+                (t.dialog_title, t.dialog_bg),
+                (Color::Black, Color::Gray),
+                "a dialog's title",
+            ),
+            (
+                (t.shadow_fg, t.shadow),
+                (Color::DarkGray, Color::Black),
+                "a shadow",
+            ),
+        ] {
+            assert_eq!(ours, far, "{what}");
+        }
+        assert_eq!(t.menu_border, BorderType::Double, "an open menu's frame");
+        assert_eq!(t.border_focus, BorderType::Double, "a dialog's frame");
     }
 
     #[test]
@@ -852,6 +1058,13 @@ mod tests {
                 (t.menu_fg, t.menu_bg, "the menu bar"),
                 (t.hot, t.menu_bg, "a menu hot key"),
                 (t.fkey_fg, t.fkey_bg, "an F-key label"),
+                (t.keybar_fg, t.keybar_bg, "an F-key's number"),
+                (t.pulldown_fg, t.menu_bg, "an open menu's item"),
+                (
+                    t.menu_cursor_fg,
+                    t.menu_cursor_bg,
+                    "an open menu's cursor row's text",
+                ),
                 (t.dialog_fg, t.dialog_bg, "dialog text"),
                 (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
             ] {

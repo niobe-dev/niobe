@@ -4456,6 +4456,18 @@ fn an_open_menu_hangs_from_its_name_with_the_keys_that_do_each_item() {
     }
 }
 
+/// An open menu in `classic`, colours and all, over the transcript: Far's
+/// white-on-cyan menu with its item under the cursor white on black, and the
+/// menu's shadow redrawing what it falls on in dark grey on black.
+#[test]
+fn an_open_menu_in_classic_is_painted_in_far_managers_colours() {
+    let mut app = running_session()
+        .with_depth(Depth::Sixteen)
+        .with_theme(CLASSIC);
+    app.on_key(alt('v'));
+    assert_snapshot("menu-view-classic-120x30", &paint(&mut app, 120, 30));
+}
+
 #[test]
 fn the_settings_name_the_files_the_session_was_read_from() {
     let mut app = running_session().with_places(niobe_tui::Places {

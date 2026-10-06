@@ -864,7 +864,7 @@ fn a_settings_file_a_profile_names_and_this_machine_has_not_stops_the_session() 
 /// names the palette in force, so this is what a choice of one is read off.
 const NEO_MENU: &str = "\u{1b}[38;5;2;48;5;0m";
 const MODERN_MENU: &str = "\u{1b}[38;5;15;48;5;8m";
-const CLASSIC_MENU: &str = "\u{1b}[38;5;0;48;5;7m";
+const CLASSIC_MENU: &str = "\u{1b}[38;5;0;48;5;6m";
 
 /// The three ways a palette is chosen, on the one screen that can show it: the
 /// flag, a config key, and the View menu's list while the session runs.

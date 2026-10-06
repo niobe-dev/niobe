@@ -353,10 +353,10 @@ fn draw_menu_list(
     let area = Rect::new(x, screen.y.saturating_add(1), width, height);
 
     cast_shadow(frame, area, screen, theme);
-    let bar = Style::new().bg(theme.menu_bg).fg(theme.menu_fg);
+    let bar = Style::new().bg(theme.menu_bg).fg(theme.pulldown_fg);
     let block = Block::bordered()
-        .border_type(theme.border)
-        .border_style(bar)
+        .border_type(theme.menu_border)
+        .border_style(bar.fg(theme.pulldown_frame))
         .style(bar);
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -372,9 +372,11 @@ fn draw_menu_list(
             let on_it = at == open.item;
             let able = app.can(item.action);
             let base = match (on_it, able) {
-                (true, _) => Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg),
+                (true, _) => Style::new()
+                    .bg(theme.menu_cursor_bg)
+                    .fg(theme.menu_cursor_fg),
                 (false, true) => bar,
-                (false, false) => bar.fg(theme.dim),
+                (false, false) => bar.fg(theme.pulldown_dim),
             };
             let mut spans = vec![Span::styled(" ", base)];
             for (i, c) in label.chars().enumerate() {
@@ -595,7 +597,7 @@ pub(crate) fn dialog(
         .padding(Padding::horizontal(2))
         .title_top(
             Line::from(format!(" {title} "))
-                .style(frame_style.bold())
+                .style(frame_style.fg(theme.dialog_title).bold())
                 .centered(),
         )
         .title_bottom(Line::from(footer.to_owned()).style(frame_style).centered());
@@ -4461,8 +4463,8 @@ fn window_style(window: &UsageWindow, theme: &Theme) -> Style {
 /// [`crate::menu::fkey_widths`]. A key that cannot do anything in this
 /// session is drawn dimmed, as its menu item is.
 fn draw_fkeys(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let bar = Style::new().bg(theme.menu_bg);
-    let key_style = Style::new().fg(theme.hot).bg(theme.menu_bg).bold();
+    let bar = Style::new().bg(theme.keybar_bg);
+    let key_style = Style::new().fg(theme.keybar_fg).bg(theme.keybar_bg).bold();
     let label_style = Style::new().fg(theme.fkey_fg).bg(theme.fkey_bg);
     let (stop_key, stop_label) = crate::menu::STOP;
     let stopped = |able: bool| match able {
