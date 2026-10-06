@@ -445,7 +445,7 @@ pub struct Sheet {
 /// binary: the shell touches no filesystem.
 ///
 /// A file is handed over to be opened only where it is a regular file and not
-/// a link. A repository decides what its own files are, and a `CLAUDE.md`
+/// a link. A repository decides what its own files are, and a config file
 /// linked to something the desktop runs rather than shows would be run by the
 /// key that was meant to show it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -453,9 +453,6 @@ pub struct Places {
     /// The config files the session was read from, lowest precedence first,
     /// whether or not each is there.
     pub config_files: Vec<ConfigFile>,
-    /// The repository's instructions to the agent, where it has one that may
-    /// be opened.
-    pub memory: Option<String>,
 }
 
 /// A config file the session looked for.
@@ -1251,6 +1248,11 @@ pub struct App {
     bars: Option<(ratatui::layout::Rect, ratatui::layout::Rect)>,
     /// What the shell is saying at more length than a hint, while it is up.
     sheet: Option<Sheet>,
+    /// The Memory view, while it is open.
+    memory: Option<crate::memory::View>,
+    /// Whether the Memory view wants what the agent is given read, which the
+    /// loop does once and hands back.
+    memory_wanted: bool,
     /// The panes of the right-hand stack the operator hid.
     hidden: BTreeSet<crate::menu::SidePane>,
     /// The files outside the session the shell can name or have opened.
@@ -1570,6 +1572,8 @@ impl App {
             menu_list: None,
             bars: None,
             sheet: None,
+            memory: None,
+            memory_wanted: false,
             hidden: BTreeSet::new(),
             places: Places::default(),
             trusting: None,
@@ -3261,7 +3265,7 @@ impl App {
             Action::Hooks => self.listed("hooks"),
             Action::SignIn => false,
             Action::Resume => self.remembers,
-            Action::Memory => self.places.memory.is_some(),
+            Action::Memory => true,
             Action::SwitchModel => {
                 !self.session.models().is_empty()
                     || self
@@ -3471,20 +3475,34 @@ impl App {
         self.insert_into_composer("/");
     }
 
-    /// Hands the repository's instructions to the agent to be opened, or says
-    /// there are none.
+    /// Opens the Memory view, and asks for what the agent is given to be
+    /// read for it.
     fn open_memory(&mut self) {
-        match self.places.memory.clone() {
-            Some(path) => self.handoffs.push(crate::desktop::Handoff::Open(path)),
-            None => {
-                let init = match self.listed("init") {
-                    true => "; `/init` has the backend write one",
-                    false => "",
-                };
-                self.hint = Some(format!(
-                    "This repository has no CLAUDE.md at its root{init}"
-                ));
+        self.memory = Some(crate::memory::View::default());
+        self.memory_wanted = true;
+    }
+
+    /// One key, while the Memory view is open: it holds the keyboard as a
+    /// sheet does, and an F-key closes it and does what the key does.
+    fn on_memory_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use crate::memory::Outcome;
+        use ratatui::crossterm::event::KeyCode;
+
+        if let KeyCode::F(n) = key.code {
+            self.memory = None;
+            if let Some(action) = crate::menu::fkey(n) {
+                self.perform(action);
             }
+            return;
+        }
+        let Some(view) = self.memory.as_mut() else {
+            return;
+        };
+        match view.on_key(key) {
+            Outcome::Stay => {}
+            Outcome::Close => self.memory = None,
+            Outcome::Edit(path) => self.handoffs.push(crate::desktop::Handoff::Open(path)),
+            Outcome::Say(said) => self.hint = Some(said.to_owned()),
         }
     }
 
@@ -3815,8 +3833,9 @@ impl App {
             };
             return true;
         }
-        if self.sheet.is_some() {
+        if self.sheet.is_some() || self.memory.is_some() {
             self.sheet = None;
+            self.memory = None;
             return true;
         }
         if on_menu_bar {
@@ -5039,6 +5058,7 @@ impl App {
     fn closes_on_esc(&self) -> bool {
         self.menu.is_some()
             || self.sheet.is_some()
+            || self.memory.is_some()
             || self.browser.is_some()
             || self.picking.is_some()
             || self.find.is_some()
@@ -5447,7 +5467,7 @@ impl App {
                 AskFocus::Deferred => {}
             }
         }
-        if self.menu.is_some() || self.sheet.is_some() {
+        if self.menu.is_some() || self.sheet.is_some() || self.memory.is_some() {
             return;
         }
         if self.browser.is_some() {
@@ -5641,6 +5661,10 @@ impl App {
         }
         if self.sheet.is_some() {
             self.on_sheet_key(key);
+            return;
+        }
+        if self.memory.is_some() {
+            self.on_memory_key(key);
             return;
         }
         // The history dialog takes it the same way: what is typed there
@@ -6235,6 +6259,38 @@ impl App {
     /// is in it.
     pub fn take_history_request(&mut self) -> bool {
         std::mem::take(&mut self.history_wanted)
+    }
+
+    /// Whether the Memory view has asked for what the agent is given to be
+    /// read since this was last asked: each time it opens, so a file the
+    /// session changed is read as it is now.
+    pub fn take_memory_request(&mut self) -> bool {
+        std::mem::take(&mut self.memory_wanted)
+    }
+
+    /// What the agent is given, as it was read for the open Memory view. A
+    /// read that lands after the view was closed is dropped.
+    pub fn set_memory(&mut self, files: Vec<crate::memory::MemoryFile>) {
+        if let Some(view) = self.memory.as_mut() {
+            view.files = Some(files);
+            view.at = 0;
+            view.reading = None;
+        }
+    }
+
+    /// The Memory view, while it is open.
+    pub fn memory(&self) -> Option<&crate::memory::View> {
+        self.memory.as_ref()
+    }
+
+    /// Whether the session changed the file a backend names `path`.
+    pub(crate) fn changed_in_session(&self, path: &str) -> bool {
+        self.session.files().iter().any(|file| file.path == path)
+    }
+
+    /// Whether the backend runs `command` from a prompt, as `/command`.
+    pub(crate) fn offers(&self, command: &str) -> bool {
+        self.listed(command)
     }
 
     /// What a load of the repository's earlier sessions found.
@@ -12358,7 +12414,6 @@ mod tests {
                     openable: false,
                 },
             ],
-            memory: None,
         });
         app.on_key(key(KeyCode::F(9)));
         let sheet = app.sheet().expect("F9 opens the settings");
@@ -12400,28 +12455,70 @@ mod tests {
         );
     }
 
-    #[test]
-    fn f8_opens_the_repositorys_memory_file_or_says_there_is_none() {
-        let mut without = app();
-        let mut with = app().with_places(Places {
-            config_files: Vec::new(),
-            memory: Some("/work/repo/CLAUDE.md".to_owned()),
-        });
-        with.on_key(key(KeyCode::F(8)));
-        assert_eq!(
-            with.take_handoffs(),
-            [crate::desktop::Handoff::Open(
-                "/work/repo/CLAUDE.md".to_owned()
-            )]
-        );
+    fn remembered(
+        path: &str,
+        scope: crate::memory::Scope,
+        depth: usize,
+    ) -> crate::memory::MemoryFile {
+        crate::memory::MemoryFile {
+            scope,
+            path: path.to_owned(),
+            named: path.to_owned(),
+            depth,
+            text: Some(format!("{path} says\n")),
+            bytes: Some(9),
+            note: None,
+            editable: Some(format!("/work/repo/{path}")),
+        }
+    }
 
-        without.on_key(key(KeyCode::F(8)));
-        assert_eq!(without.take_handoffs(), []);
-        assert!(
-            without
-                .hint()
-                .is_some_and(|hint| hint.contains("CLAUDE.md"))
+    #[test]
+    fn f8_opens_the_memory_view_in_the_shell_and_hands_nothing_to_the_desktop() {
+        use crate::memory::Scope;
+        let mut app = app();
+        assert!(app.can(crate::menu::Action::Memory));
+
+        app.on_key(key(KeyCode::F(8)));
+        assert!(app.memory().is_some(), "F8 opened nothing in the shell");
+        assert_eq!(app.take_handoffs(), [], "F8 left the shell");
+        assert!(app.take_memory_request(), "nothing was asked to be read");
+
+        app.set_memory(vec![
+            remembered("CLAUDE.md", Scope::Project, 0),
+            remembered("AGENTS.md", Scope::Imported, 1),
+        ]);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.memory().and_then(|view| view.reading), Some((1, 0)));
+        assert_eq!(app.take_handoffs(), []);
+
+        app.on_key(key(KeyCode::Char('e')));
+        assert_eq!(
+            app.take_handoffs(),
+            [crate::desktop::Handoff::Open(
+                "/work/repo/AGENTS.md".to_owned()
+            )],
+            "e hands the file being read to the editor"
         );
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.memory(), None);
+        assert_eq!(app.composer().lines(), [""], "a key reached the composer");
+    }
+
+    #[test]
+    fn a_memory_file_the_session_changed_is_known_by_the_path_the_backend_named() {
+        let mut app = app();
+        assert!(!app.changed_in_session("AGENTS.md"));
+        app.apply(&Event::FileChange {
+            path: "AGENTS.md".to_owned(),
+            added: Some(1),
+            removed: Some(0),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
+        });
+        assert!(app.changed_in_session("AGENTS.md"));
+        assert!(!app.changed_in_session("CLAUDE.md"));
     }
 
     #[test]

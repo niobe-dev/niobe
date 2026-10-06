@@ -23,6 +23,7 @@ mod desktop;
 mod history;
 mod images;
 mod journal;
+mod memory;
 mod prices;
 mod printable;
 mod profiles;
@@ -264,7 +265,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         say_prices(
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
-                .with_places(places(&root, &loaded))
+                .with_places(places(&loaded))
                 .with_depth(asked.depth)
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
@@ -330,6 +331,10 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
             images: &mut images_for(&root),
             desktop: &mut desktop::System::new(),
             history: &mut history_for(&root, selected.as_ref()),
+            memory: &mut memory::Files::at(
+                root.clone(),
+                selected.as_ref().map(|selected| selected.profile.clone()),
+            ),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -412,7 +417,7 @@ fn resume(
         say_prices(
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
-                .with_places(places(&root, &loaded))
+                .with_places(places(&loaded))
                 .with_depth(asked.depth)
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
@@ -519,6 +524,10 @@ fn resume(
             images: &mut images_for(&root),
             desktop: &mut desktop::System::new(),
             history: &mut history_for(&root, selected.as_ref()),
+            memory: &mut memory::Files::at(
+                root.clone(),
+                selected.as_ref().map(|selected| selected.profile.clone()),
+            ),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -581,7 +590,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         say_prices(
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
-                .with_places(places(&root, &loaded))
+                .with_places(places(&loaded))
                 .with_depth(asked.depth)
                 .with_theme(theme),
         ),
@@ -659,6 +668,10 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             images: &mut images_for(&root),
             desktop: &mut desktop::System::new(),
             history: &mut history_for(&root, selected.as_ref()),
+            memory: &mut memory::Files::at(
+                root.clone(),
+                selected.as_ref().map(|selected| selected.profile.clone()),
+            ),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -777,15 +790,14 @@ fn say_prices(app: App) -> App {
 }
 
 /// The files the shell may name or hand to the desktop: the config files the
-/// session was looked for in, and the repository's `CLAUDE.md`.
+/// session was looked for in.
 ///
 /// Only a regular file that is not a link is offered to be opened: what a
 /// repository's file is, is the repository's choice, and the desktop runs
 /// some files rather than showing them.
-fn places(root: &Path, loaded: &config::Loaded) -> Places {
+fn places(loaded: &config::Loaded) -> Places {
     let openable =
         |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file());
-    let memory = root.join("CLAUDE.md");
     Places {
         config_files: loaded
             .searched
@@ -796,7 +808,6 @@ fn places(root: &Path, loaded: &config::Loaded) -> Places {
                 openable: openable(path),
             })
             .collect(),
-        memory: openable(&memory).then(|| memory.display().to_string()),
     }
 }
 
@@ -1046,6 +1057,7 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
             images: &mut NoImages::default(),
             desktop: &mut desktop::System::new(),
             history: &mut NoHistory::default(),
+            memory: &mut niobe_tui::NoMemory,
         },
     )
     .map_err(|e| e.to_string())

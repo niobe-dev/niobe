@@ -24,6 +24,7 @@ use crate::history::{History, NoHistory, Target};
 use crate::images::{Images, NoImages};
 use crate::input::{Input, Wait};
 use crate::journal::{Journal, Unrecorded};
+use crate::memory::{Memory, NoMemory};
 use crate::rules::{Forgotten, Reach, Rules};
 use crate::shell::{NoShell, Shell};
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued};
@@ -101,6 +102,9 @@ pub struct Around<'a> {
     /// What reads the repository's earlier sessions, for the prompts Up
     /// recalls and the history dialog lists, asked the same way.
     pub history: &'a mut dyn History,
+    /// What reads the files the agent is given as its memory, for the Memory
+    /// view, asked once each time the view opens.
+    pub memory: &'a mut dyn Memory,
 }
 
 // By hand, because not every one of them can say what it holds.
@@ -164,6 +168,7 @@ pub fn ask_trust(app: App, question: trust::Question) -> io::Result<Option<trust
             images: &mut NoImages::default(),
             desktop: &mut NoDesktop,
             history: &mut NoHistory::default(),
+            memory: &mut NoMemory,
         },
     )?;
     Ok(match ended {
@@ -296,6 +301,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         images,
         desktop,
         history,
+        memory,
     } = around;
     let mut ended = Ended::Quit;
 
@@ -309,6 +315,9 @@ fn event_loop<B: Backend<Error = io::Error>>(
         fold_commands(app, shell, watch);
         fold_images(app, images);
         fold_history(app, journal, history);
+        if app.take_memory_request() {
+            app.set_memory(memory.read());
+        }
         // Whatever a read of the repository has finished with since the last
         // tick. Nothing is waited on here: an unfinished or failed read says
         // nothing and the pane keeps what it had.

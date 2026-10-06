@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃    44 +     headers.set("If-None-Match", cached.etag);                   ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃    45 +   }                                                              ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃    46 +   const res = await fetch(url, { ...init, headers });            ┃ │ ───────────────────────────────────── │
+ ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃    48     return res;                                                    ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃       …                                                                  ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {                                               ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   116 +     etag: res.headers.get("ETag"),                               ┃ └───────────────────────────────────────┘
+ ┃   117  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Memory ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓────────┐
+ ┃   └ all┃                                                                                                  ┃        █
+ ┃        ┃  › user         ~/.claude/CLAUDE.md                                                1 line · 8 B  ┃7 −≥259 █
+ ┃ ◆ claud┃    imported       ~/.claude/RTK.md                                               3 lines · 16 B  ┃        █
+ ┃   Rewri┃    parent       ~/CLAUDE.md                                                       1 line · 21 B  ┃  +0 −0 │
+ ┃        ┃    project      CLAUDE.md                                                         1 line · 11 B  ┃        │
+ ┃ ◆ claud┃    imported       AGENTS.md                                           8 lines · 155 B · changed  ┃149 −12 │
+ ┃   The n┃    auto-memory  ~/.claude/projects/-home-me-src-niobe/memory/MEMORY.md           2 lines · 96 B  ┃+88 −41 │
+ ┃        ┃    note           priorities.md — what matters first                              1 line · 16 B  ┃ +31 −9 │
+ ┃ ✗ Bash ┃    note           facts.md — verified CLI facts                                   1 line · 13 B  ┃ +12 −0 │
+ ┃   └ 1 f┗━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ choose · Enter read · e edit · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━┛────────┘
+ ┃                                                                          █ ┌────────────── Activity ───────────────┐
+ ┃ ◆ claude                                                                 █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                        █ │   └ Reading tests/stream.rs           █
+ ┃                                                                          █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │     Read 3                            │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

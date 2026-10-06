@@ -103,7 +103,7 @@ impl Action {
             Action::Rewind => "go back to a checkpoint, as /rewind",
             Action::Stop => "stop the running turn",
             Action::Export => "copy the transcript to the clipboard",
-            Action::Memory => "open the repository's CLAUDE.md",
+            Action::Memory => "show what the agent is told and remembers",
             Action::AddFile => "name a file for the prompt",
             Action::Mcp => "the backend's MCP servers, as /mcp",
             Action::SubAgents => "the pane the sub-agents are listed in",
@@ -222,7 +222,7 @@ pub const MENUS: [Menu; 6] = [
     Menu {
         name: "Context",
         items: &[
-            item("Memory (CLAUDE.md)", 0, "F8", Action::Memory),
+            item("Memory…", 0, "F8", Action::Memory),
             item("Add file…", 0, "@", Action::AddFile),
             ruled("MCP servers", 1, "F7  /mcp", Action::Mcp),
             item("Sub-agents", 0, "", Action::SubAgents),

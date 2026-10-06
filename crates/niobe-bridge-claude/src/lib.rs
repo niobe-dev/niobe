@@ -22,6 +22,9 @@
 //!   a session started in plain Claude Code can be shown and continued here.
 //!   It writes nothing back.
 //!
+//! [`memory`] finds the files the CLI gives the agent as its memory, by the
+//! CLI's own lookup rules, since the CLI does not say which it loaded.
+//!
 //! [`conformance`] names the CLI releases those shapes were recorded from. It
 //! is what a session says when it is driving a release nobody recorded, and
 //! what the tests over `tests/fixtures/` are checked against.
@@ -49,6 +52,7 @@ mod translate;
 mod wire;
 
 pub mod conformance;
+pub mod memory;
 pub mod transcript;
 
 pub use driver::{BINARY, Options, Session, SpawnError};

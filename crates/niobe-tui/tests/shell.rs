@@ -1789,6 +1789,158 @@ fn a_profile_naming_models_shows_those_and_how_many_more_the_backend_offers() {
     assert!(frame.contains("10 more the backend offers"), "{frame}");
 }
 
+/// What the binary reads for a repository laid out as this one is: a
+/// `CLAUDE.md` that only imports `AGENTS.md`, a `CLAUDE.md` in the home
+/// directory above it, the user's own importing a second file, and the
+/// backend's notes — an index and two entries.
+fn remembered() -> Vec<niobe_tui::MemoryFile> {
+    use niobe_tui::memory::Scope;
+    let file = |scope, path: &str, named: &str, depth, text: &str, note: Option<&str>| {
+        niobe_tui::MemoryFile {
+            scope,
+            path: path.to_owned(),
+            named: named.to_owned(),
+            depth,
+            text: Some(text.to_owned()),
+            bytes: Some(text.len() as u64),
+            note: note.map(str::to_owned),
+            editable: Some(format!("/home/me/{named}")),
+        }
+    };
+    let notes = "~/.claude/projects/-home-me-src-niobe/memory";
+    vec![
+        file(
+            Scope::User,
+            "~/.claude/CLAUDE.md",
+            "/home/me/.claude/CLAUDE.md",
+            0,
+            "@RTK.md\n",
+            None,
+        ),
+        file(
+            Scope::Imported,
+            "~/.claude/RTK.md",
+            "/home/me/.claude/RTK.md",
+            1,
+            "# RTK\n\nrtk gain\n",
+            None,
+        ),
+        file(
+            Scope::Parent,
+            "~/CLAUDE.md",
+            "/home/me/CLAUDE.md",
+            0,
+            "Use the graph first.\n",
+            None,
+        ),
+        file(
+            Scope::Project,
+            "CLAUDE.md",
+            "CLAUDE.md",
+            0,
+            "@AGENTS.md\n",
+            None,
+        ),
+        file(
+            Scope::Imported,
+            "AGENTS.md",
+            "AGENTS.md",
+            1,
+            "# AI Agent Guidelines\n\nWhen working on this project, adopt the persona of a\nPrincipal Rust Engineer.\n\n## 0. The project\n\nNiobe is a terminal coding agent.\n",
+            None,
+        ),
+        file(
+            Scope::AutoMemory,
+            &format!("{notes}/MEMORY.md"),
+            "/home/me/MEMORY.md",
+            0,
+            "- [Priorities](priorities.md) — what matters first\n- [Facts](facts.md) — verified CLI facts\n",
+            None,
+        ),
+        file(
+            Scope::AutoEntry,
+            "priorities.md",
+            "/home/me/priorities.md",
+            1,
+            "awareness first\n",
+            Some("what matters first"),
+        ),
+        file(
+            Scope::AutoEntry,
+            "facts.md",
+            "/home/me/facts.md",
+            1,
+            "init repeats\n",
+            Some("verified CLI facts"),
+        ),
+    ]
+}
+
+/// F8 lists every file the agent is given, in the order it is given them,
+/// each import under the file importing it, with its size and whether the
+/// session changed it; Enter shows one's text in the shell.
+#[test]
+fn f8_shows_what_the_agent_is_told_and_remembers_in_the_shell() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = running_session();
+    app.apply(&Event::FileChange {
+        path: "AGENTS.md".to_owned(),
+        added: Some(1),
+        removed: Some(0),
+        hunks: Vec::new(),
+        scope: niobe_core::ChangeScope::Project,
+    });
+    press(&mut app, KeyCode::F(8));
+    assert!(app.take_memory_request());
+    app.set_memory(remembered());
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(" Memory "), "{frame}");
+    for said in [
+        "user",
+        "imported",
+        "parent",
+        "project",
+        "auto-memory",
+        "note",
+    ] {
+        assert!(frame.contains(said), "{said}:\n{frame}");
+    }
+    assert!(frame.contains("what matters first"), "{frame}");
+    assert!(frame.contains("changed"), "AGENTS.md was changed:\n{frame}");
+    assert_snapshot("memory-view-120x30", &frame);
+
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Enter);
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("Memory · AGENTS.md"), "{frame}");
+    assert!(frame.contains("Principal Rust Engineer"), "{frame}");
+    assert_snapshot("memory-reading-120x30", &frame);
+}
+
+/// With no memory at all the view says so, and where the backend offers
+/// `/init`, that it writes one.
+#[test]
+fn f8_with_no_memory_says_so_and_how_to_get_one() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = empty_session().attached();
+    app.apply(&Event::Commands {
+        commands: vec![niobe_core::event::SlashCommand {
+            name: "init".to_owned(),
+            description: "Initialize a new CLAUDE.md file with codebase documentation".to_owned(),
+            argument_hint: None,
+        }],
+    });
+    press(&mut app, KeyCode::F(8));
+    app.set_memory(Vec::new());
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("given no memory here"), "{frame}");
+    assert!(frame.contains("/init"), "{frame}");
+}
+
 /// A shell asking whether to trust a repository's config that sets
 /// `grants` rows of what only a trusted file may.
 fn asking_trust(grants: Vec<(String, String)>) -> App {
@@ -5024,7 +5176,6 @@ fn the_settings_name_the_files_the_session_was_read_from() {
                 openable: false,
             },
         ],
-        memory: None,
     });
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
         ratatui::crossterm::event::KeyCode::F(9),

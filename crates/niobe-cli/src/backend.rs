@@ -177,6 +177,92 @@ fn on(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Every file the backend `profile` runs gives its agent as memory, for a
+/// session at `cwd`, in the order the agent is given them, as the shell lists
+/// them.
+///
+/// Only the `claude` CLI loads memory files Niobe knows the rules of; another
+/// backend, or a shell with no profile and so no backend, has none to list. The CLI's configuration directory is
+/// found as [`transcripts`] finds it, since its auto-memory is kept beside
+/// the transcripts.
+pub fn memory(
+    profile: Option<&niobe_config::Profile>,
+    cwd: &Path,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Vec<niobe_tui::MemoryFile> {
+    let Some(profile) = profile.filter(|profile| profile.backend() == Backend::Claude) else {
+        return Vec::new();
+    };
+    let configured = profile
+        .env()
+        .get(transcript::CONFIG_DIR_VAR)
+        .map(OsString::from)
+        .or(config_dir);
+    let config = transcript::config_dir(configured.as_deref(), home.as_deref());
+    let home = home.map(PathBuf::from).filter(|home| home.is_absolute());
+    niobe_bridge_claude::memory::sources(&niobe_bridge_claude::memory::Lookup {
+        cwd,
+        config: config.as_deref(),
+        home: home.as_deref(),
+    })
+    .into_iter()
+    .map(|source| memory_file(source, cwd, home.as_deref()))
+    .collect()
+}
+
+/// One of the CLI's memory files, as the shell lists it.
+fn memory_file(
+    source: niobe_bridge_claude::memory::Source,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> niobe_tui::MemoryFile {
+    use niobe_bridge_claude::memory::Scope as Found;
+    use niobe_tui::memory::Scope;
+
+    let scope = match source.scope {
+        Found::Managed => Scope::Managed,
+        Found::User => Scope::User,
+        Found::Parent => Scope::Parent,
+        Found::Project => Scope::Project,
+        Found::Local => Scope::Local,
+        Found::Imported => Scope::Imported,
+        Found::AutoMemory => Scope::AutoMemory,
+        Found::AutoEntry => Scope::AutoEntry,
+    };
+    let inside = source.path.strip_prefix(cwd).ok();
+    let under_home = home.and_then(|home| source.path.strip_prefix(home).ok());
+    let path = match (scope, inside, under_home) {
+        // Listed under the index that names it, beside which it is kept.
+        (Scope::AutoEntry, _, _) => source.path.file_name().map_or_else(
+            || source.path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        ),
+        (_, Some(inside), _) => inside.display().to_string(),
+        (_, None, Some(under_home)) => format!("~/{}", under_home.display()),
+        (_, None, None) => source.path.display().to_string(),
+    };
+    // A change is named relative to where the session runs where the file
+    // is inside it, as the bridge names it, and absolute otherwise.
+    let named = inside.map_or_else(
+        || source.path.display().to_string(),
+        |inside| inside.display().to_string(),
+    );
+    let editable = std::fs::symlink_metadata(&source.path)
+        .is_ok_and(|meta| meta.file_type().is_file())
+        .then(|| source.path.display().to_string());
+    niobe_tui::MemoryFile {
+        scope,
+        path,
+        named,
+        depth: source.depth,
+        bytes: source.bytes,
+        text: source.text,
+        note: source.note,
+        editable,
+    }
+}
+
 /// Where the `claude` CLI keeps the transcripts of the sessions it has run in
 /// `cwd`, from the values of `CLAUDE_CONFIG_DIR` and `HOME`.
 ///
@@ -460,6 +546,98 @@ mod tests {
 
     fn config(text: &str) -> Config {
         Config::parse(text, &PathBuf::from("config.toml")).expect("the config parses")
+    }
+
+    /// The memory a `claude` profile's agent is given is listed as the shell
+    /// shows it: inside the repository relative to it, under the home
+    /// directory from `~`, and an auto-memory note by its name under its
+    /// index. A codex profile's backend loads none of it.
+    #[test]
+    fn the_memory_listed_is_named_as_the_shell_shows_it_and_only_for_claude() {
+        use niobe_tui::memory::Scope;
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let home = dir.path().join("home");
+        let repo = home.join("src").join("repo");
+        let notes = transcript::directory(&home.join(".claude"), &repo).join("memory");
+        for (path, text) in [
+            (repo.join("CLAUDE.md"), "@AGENTS.md\n"),
+            (repo.join("AGENTS.md"), "# Agents\n"),
+            (home.join(".claude").join("CLAUDE.md"), "be brief\n"),
+            (
+                notes.join("MEMORY.md"),
+                "- [Facts](facts.md) — verified facts\n",
+            ),
+            (notes.join("facts.md"), "init repeats\n"),
+        ] {
+            std::fs::create_dir_all(path.parent().expect("a file has a directory"))
+                .expect("the temporary directory is writable");
+            std::fs::write(&path, text).expect("the temporary directory is writable");
+        }
+        let claude = config("[profiles.max]\nbackend = \"claude\"\n");
+        let listed = memory(
+            claude.profiles().get("max"),
+            &repo,
+            None,
+            Some(home.clone().into_os_string()),
+        );
+        let shown: Vec<(Scope, &str, &str, usize)> = listed
+            .iter()
+            .filter(|file| file.scope != Scope::Managed)
+            .map(|file| {
+                (
+                    file.scope,
+                    file.path.as_str(),
+                    file.named.as_str(),
+                    file.depth,
+                )
+            })
+            .collect();
+        let index = format!(
+            "~/{}",
+            notes
+                .join("MEMORY.md")
+                .strip_prefix(&home)
+                .expect("under the home directory")
+                .display()
+        );
+        let absolute = |path: &Path| path.display().to_string();
+        assert_eq!(
+            shown,
+            [
+                (
+                    Scope::User,
+                    "~/.claude/CLAUDE.md",
+                    absolute(&home.join(".claude/CLAUDE.md")).as_str(),
+                    0
+                ),
+                (Scope::Project, "CLAUDE.md", "CLAUDE.md", 0),
+                (Scope::Imported, "AGENTS.md", "AGENTS.md", 1),
+                (
+                    Scope::AutoMemory,
+                    index.as_str(),
+                    absolute(&notes.join("MEMORY.md")).as_str(),
+                    0
+                ),
+                (
+                    Scope::AutoEntry,
+                    "facts.md",
+                    absolute(&notes.join("facts.md")).as_str(),
+                    1
+                ),
+            ]
+        );
+        assert!(listed.iter().all(|file| file.editable.is_some()));
+
+        let codex = config("[profiles.codex]\nbackend = \"codex\"\n");
+        assert!(
+            memory(
+                codex.profiles().get("codex"),
+                &repo,
+                None,
+                Some(home.into_os_string())
+            )
+            .is_empty()
+        );
     }
 
     /// The `claude` CLI's own settings on a machine that has none, which is
