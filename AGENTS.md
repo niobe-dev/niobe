@@ -139,7 +139,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   target for, one key to a row, with the JSON as sent behind Ctrl+T, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
-  it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow. A dialog, and a
+  it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
+  and names a turn that compacted the conversation as one, under the row that says what the
+  compaction shrank the context from and to. A dialog, and a
   permission question in the transcript, casts a shadow on what is under it. Snapshot pictures of the screen live in
   `tests/snapshots/`, and `snapshots.rs` is the one switch that has a test rewrite them —
   `UPDATE_SNAPSHOTS=1` exactly, and never on a CI runner.

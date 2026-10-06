@@ -68,7 +68,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use niobe_core::event::Event;
+use niobe_core::event::{CompactTrigger, Event};
 
 use crate::conformance;
 use crate::spilled;
@@ -795,10 +795,6 @@ fn prompt(record: &Line) -> Option<String> {
     (!CLI_WROTE_IT.iter().any(|mark| said.starts_with(mark))).then_some(said)
 }
 
-/// What an imported session says where the CLI compacted its context.
-const COMPACTED: &str = "the context was compacted; the session carried on from the CLI's own \
-                         summary of the conversation before it.";
-
 /// Folds one transcript into events.
 struct Fold {
     translator: Translator,
@@ -823,6 +819,10 @@ struct Fold {
     /// Whether the main agent has answered since the operator last spoke,
     /// so that the operator speaking again ends the turn.
     answered: bool,
+    /// Whether a compaction's boundary record has been folded and the
+    /// summary written after it has not, so that the summary does not report
+    /// the same compaction again.
+    compacted: bool,
 }
 
 impl Fold {
@@ -846,6 +846,7 @@ impl Fold {
             mode: None,
             title: None,
             answered: false,
+            compacted: false,
         }
     }
 
@@ -866,6 +867,7 @@ impl Fold {
             Ok(Line::PermissionMode(record)) => self.mode(record),
             Ok(Line::AiTitle(record)) => self.title(record),
             Ok(Line::Attachment(record)) => self.attachment(record),
+            Ok(Line::System(record)) => self.system(record),
             Ok(Line::Aside) => {}
             Ok(Line::Unknown) => self.out.push(translate::unread(format!(
                 "the transcript holds a record of type `{}`, which this version of Niobe does \
@@ -981,6 +983,17 @@ impl Fold {
         }
     }
 
+    /// One of the CLI's own notes: read only where it marks a compaction,
+    /// with what started it and how much the conversation held before it.
+    fn system(&mut self, record: SystemRecord) {
+        if record.subtype.as_deref() == Some("compact_boundary") {
+            self.out.push(translate::compacted(
+                record.compact_metadata.unwrap_or_default(),
+            ));
+            self.compacted = true;
+        }
+    }
+
     /// A turn of the session's, or where `agent` names a call, of the
     /// conversation the sub-agent that call spawned had with the session.
     fn user(&mut self, record: User, agent: Option<&str>) {
@@ -992,11 +1005,15 @@ impl Fold {
         }
         // After a compaction the CLI carries the session on from its own
         // summary of the conversation, written as a user turn. Nobody typed
-        // it; that the context was compacted is what it says.
+        // it; that the context was compacted is what it says, where the
+        // boundary record before it has not already said so.
         if record.is_compact_summary {
-            self.out.push(Event::Notice {
-                message: COMPACTED.to_owned(),
-            });
+            if !std::mem::take(&mut self.compacted) {
+                self.out.push(Event::Compacted {
+                    trigger: CompactTrigger::Unstated,
+                    before: None,
+                });
+            }
             return;
         }
         if record.transcript_only {
@@ -1236,25 +1253,27 @@ enum Line {
     /// model, and once in a while the notice that a sub-agent stopped.
     #[serde(rename = "attachment")]
     Attachment(Attachment),
+    /// The CLI's own notes to the screen, of which a compaction's boundary
+    /// is the one read.
+    #[serde(rename = "system")]
+    System(SystemRecord),
     /// Records that say nothing about what the session did, changed or cost:
     /// the name the CLI gives a sub-agent's session (`agent-name`), the prompt it offers to repeat
     /// (`last-prompt`), the file snapshots a rewind would restore (`file-history-snapshot`,
     /// `file-history-delta`), its queue (`queue-operation`), its editing mode
-    /// (`mode`, which is not the permission mode), its own notes to the screen
-    /// (`system`), its latched status line (`atis-latch`), the pull request it
+    /// (`mode`, which is not the permission mode), its latched status line (`atis-latch`), the pull request it
     /// opened from the session (`pr-link`) and the handle its own service
     /// holds the session under (`bridge-session`).
     ///
     /// Read off every record type present across the transcripts on the
     /// machine this was written on — sixteen in all — rather than off the
-    /// types one session happened to produce. Six of them are read
+    /// types one session happened to produce. Seven of them are read
     /// (`assistant`, `user`, `cost-state`, `permission-mode`, `ai-title`,
-    /// `attachment`) and the other ten are here. A type left out is a warning entry per record in front
+    /// `attachment`, `system`) and the other nine are here. A type left out is a warning entry per record in front
     /// of the operator, for a record that says nothing: `bridge-session` alone
     /// stood in fifteen thousand of them.
     #[serde(
-        rename = "system",
-        alias = "agent-name",
+        rename = "agent-name",
         alias = "atis-latch",
         alias = "bridge-session",
         alias = "file-history-delta",
@@ -1267,6 +1286,16 @@ enum Line {
     Aside,
     #[serde(other)]
     Unknown,
+}
+
+/// One of the CLI's own notes to the screen.
+#[derive(Debug, Deserialize)]
+struct SystemRecord {
+    subtype: Option<String>,
+    /// On `compact_boundary`: what started the compaction and what the
+    /// conversation held before it.
+    #[serde(rename = "compactMetadata")]
+    compact_metadata: Option<wire::CompactMetadata>,
 }
 
 /// A message from the model, as the transcript wraps it.
@@ -1665,7 +1694,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, Event::Notice { message } if message == COMPACTED)),
+                .any(|event| matches!(event, Event::Compacted { .. })),
             "{events:?}"
         );
     }

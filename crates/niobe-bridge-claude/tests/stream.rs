@@ -10,7 +10,8 @@
 
 use niobe_bridge_claude::{Translator, transcript};
 use niobe_core::event::{
-    AgentOutcome, Backend, Billing, Event, PermissionDecision, ToolOutcome, UsageWindow,
+    AgentOutcome, Backend, Billing, CompactTrigger, Event, PermissionDecision, ToolOutcome,
+    UsageWindow,
 };
 use niobe_core::session::SessionState;
 
@@ -567,15 +568,20 @@ fn a_prompt_with_no_answer_in_the_recording_waits_until_its_turn_ends() {
 }
 
 #[test]
-fn a_compaction_is_a_notice_rather_than_a_failure() {
+fn a_compaction_the_cli_started_itself_is_reported_as_automatic() {
     let events = translated();
-    let compacted: Vec<&str> = notices(&events)
-        .into_iter()
-        .filter(|notice| notice.contains("compacted"))
+    let compacted: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Compacted { .. }))
         .collect();
 
-    assert_eq!(compacted.len(), 1, "{compacted:?}");
-    assert!(compacted[0].contains("41000"), "{compacted:?}");
+    assert_eq!(
+        compacted,
+        [&Event::Compacted {
+            trigger: CompactTrigger::Auto,
+            before: Some(41_000),
+        }]
+    );
 }
 
 #[test]
@@ -1503,17 +1509,19 @@ fn a_model_moved_by_command_is_named_from_the_next_turn_and_billed_apart() {
 /// with no message of its own to count, in a `result` of no turns.
 #[test]
 fn a_compaction_asked_for_by_command_is_billed_and_explained() {
-    const COMPACT_COMMAND: &str = include_str!("fixtures/compact-command.jsonl");
     let events = translate(COMPACT_COMMAND);
     let state = SessionState::replay(&events);
 
     assert!((state.totals().reported_cost_usd - 0.115_232_2).abs() < 1e-9);
     assert_eq!(
-        notices(&events)
+        events
             .iter()
-            .filter(|notice| notice.contains("compacted (manual)") && notice.contains("23193"))
-            .count(),
-        1,
+            .filter(|event| matches!(event, Event::Compacted { .. }))
+            .collect::<Vec<_>>(),
+        [&Event::Compacted {
+            trigger: CompactTrigger::Manual,
+            before: Some(23_193),
+        }],
         "{events:?}"
     );
     assert!(warnings(&events).is_empty(), "{events:?}");
@@ -1522,7 +1530,38 @@ fn a_compaction_asked_for_by_command_is_billed_and_explained() {
         0,
         "the summary it hands the model is not a prompt"
     );
+    let compacted: Vec<_> = state.turns().iter().map(|turn| turn.compacted).collect();
+    assert_eq!(compacted, [None, Some(CompactTrigger::Manual), None]);
 }
+
+/// The CLI says when it starts compacting and when it stops, and between the
+/// two the session is compacting rather than answering. Lines 13 and 14 of
+/// the recording are the two.
+#[test]
+fn a_compaction_asked_for_by_command_is_a_phase_between_its_two_statuses() {
+    let mut translator = Translator::new("max");
+    let mut state = SessionState::new();
+    let mut compacting = Vec::new();
+    for line in COMPACT_COMMAND
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        for event in translator.line(line) {
+            state.apply(&event);
+        }
+        compacting.push(state.compacting());
+    }
+
+    let lines: Vec<usize> = compacting
+        .iter()
+        .enumerate()
+        .filter(|(_, compacting)| **compacting)
+        .map(|(at, _)| at + 1)
+        .collect();
+    assert_eq!(lines, [13]);
+}
+
+const COMPACT_COMMAND: &str = include_str!("fixtures/compact-command.jsonl");
 
 /// A turn of a session resumed with `--resume`, and the transcript that
 /// session had left behind when it was resumed.

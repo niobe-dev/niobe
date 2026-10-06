@@ -90,9 +90,9 @@ use std::path::{Path, PathBuf};
 
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Billing, ChangeScope, Context, Event, Mode, PermissionDecision,
-    SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow,
-    UsageWindows,
+    AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Context, Event, Mode,
+    PermissionDecision, SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage,
+    UsageWindow, UsageWindows,
 };
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
@@ -481,6 +481,9 @@ pub struct Translator {
     /// What reads a shell result the CLI saved to a file, where the caller
     /// handed one in. `None` leaves every such result unread.
     read_spilled: Option<ReadSpilled>,
+    /// Whether the CLI's last request state was `compacting`, so that the
+    /// state after it is reported as the compaction's end.
+    compacting: bool,
 }
 
 /// What a sub-agent's own transcript says about it that its messages, folded
@@ -537,6 +540,7 @@ impl Translator {
             api_key_source: None,
             billing: None,
             read_spilled: None,
+            compacting: false,
         }
     }
 
@@ -818,30 +822,34 @@ impl Translator {
                     }
                 }
             }
+            // The last request's size is of a conversation the model no
+            // longer has, so it is not restated with a window learnt after
+            // this: the next request's is the first figure of what is left,
+            // and the shell reads it as what the compaction shrank to.
             Some("compact_boundary") => {
-                let metadata = system.compact_metadata.unwrap_or(wire::CompactMetadata {
-                    trigger: None,
-                    pre_tokens: None,
-                });
-                let trigger = metadata.trigger.unwrap_or_else(|| "unstated".to_owned());
-                out.push(Event::Notice {
-                    message: match metadata.pre_tokens {
-                        Some(tokens) => format!(
-                            "the context was compacted ({trigger}); it held {tokens} tokens \
-                             before. Everything after this point is priced against a shorter \
-                             prompt."
-                        ),
-                        None => format!("the context was compacted ({trigger})."),
-                    },
-                });
+                self.compacting = false;
+                self.context = None;
+                out.push(compacted(system.compact_metadata.unwrap_or_default()));
             }
             Some("permission_denied") => self.denied(system, out),
             Some("task_notification") => self.task_notification(system, out),
             Some("task_progress") => self.task_progress(system, out),
-            // The CLI's own request state — `requesting`, and whatever it adds
-            // next. It says what the process is doing, not what the session is,
-            // and the shell already shows that a turn is in flight.
-            Some("status") => {}
+            // The CLI's own request state. `compacting` is the one that says
+            // what the session is doing: summarising the conversation rather
+            // than answering, and whatever state follows it — no state at
+            // all, as Claude Code 2.1.282 sends it — is that ending. The rest,
+            // `requesting` and whatever the CLI adds next, say what the
+            // process is doing, and the shell already shows that a turn is in
+            // flight.
+            Some("status") => {
+                let compacting = system.status.as_deref() == Some("compacting");
+                match (self.compacting, compacting) {
+                    (false, true) => out.push(Event::CompactionStarted),
+                    (true, false) => out.push(Event::CompactionEnded),
+                    (false, false) | (true, true) => {}
+                }
+                self.compacting = compacting;
+            }
             // A running guess at the thinking tokens of the message being
             // produced (`estimated_tokens`, and the step since the last one).
             // Deliberately not folded: it is an estimate, the measured count
@@ -2337,6 +2345,19 @@ fn titled(outcome: wire::ControlOutcome) -> Option<Event> {
             outcome.error.as_deref().unwrap_or("the CLI gave no reason")
         ),
     })
+}
+
+/// The compaction the CLI reports with `metadata`, on the live stream or in
+/// its own transcript.
+pub(crate) fn compacted(metadata: wire::CompactMetadata) -> Event {
+    Event::Compacted {
+        trigger: match metadata.trigger.as_deref() {
+            Some("manual") => CompactTrigger::Manual,
+            Some("auto") => CompactTrigger::Auto,
+            _ => CompactTrigger::Unstated,
+        },
+        before: metadata.pre_tokens,
+    }
 }
 
 /// A non-fatal entry: something the session should show and go on from.

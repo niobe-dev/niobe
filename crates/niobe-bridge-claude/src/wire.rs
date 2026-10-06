@@ -85,7 +85,7 @@ pub(crate) struct System {
     pub(crate) tool_use_id: Option<String>,
     /// On `task_notification`: how the task stopped — `completed`, `failed` or
     /// `stopped` in the CLI's own schema. On `status`, the CLI's request state,
-    /// which is not read.
+    /// which is read only for whether it is `compacting`.
     pub(crate) status: Option<String>,
     /// On `task_progress`: the step the task is on, worded by the CLI from
     /// the tool call it last made — `Reading catalog/cache.py`.
@@ -128,10 +128,12 @@ pub(crate) struct TaskUsage {
     pub(crate) total_tokens: Option<u64>,
 }
 
-/// What the CLI says about a context compaction.
-#[derive(Debug, Deserialize)]
+/// What the CLI says about a context compaction: on the live stream in
+/// `snake_case`, and in the transcript it keeps for itself in `camelCase`.
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct CompactMetadata {
     pub(crate) trigger: Option<String>,
+    #[serde(alias = "preTokens")]
     pub(crate) pre_tokens: Option<u64>,
 }
 

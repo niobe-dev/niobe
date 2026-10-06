@@ -25,8 +25,9 @@ use crate::test_run::{self, FailedTests, TestCounts};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, Billing, ChangeScope, Context, Event, Mode, OPERATOR_SHELL, SessionMeta,
-    SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Billing, ChangeScope, CompactTrigger, Context, Event, Mode,
+    OPERATOR_SHELL, SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage,
+    UsageWindow, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -409,6 +410,10 @@ pub struct TurnRecord {
     /// Whether the turn was cut off rather than ended by the backend: the
     /// session failed under it, or the process running it stopped.
     pub cut: bool,
+    /// What started the compaction of the conversation the turn ran, where it
+    /// ran one: a turn the operator opened to compact, or one the backend
+    /// compacted part-way through.
+    pub compacted: Option<CompactTrigger>,
 }
 
 /// Where a turn began: what the session had spent, and the window as last
@@ -452,6 +457,11 @@ pub struct SessionState {
     ended_tools: BTreeSet<ToolCallId>,
     /// Whether the backend is still answering the last prompt.
     turn_running: bool,
+    /// Whether the backend is compacting the conversation now.
+    compacting: bool,
+    /// What started a compaction since the last turn ended, for the record
+    /// of the turn it ran in.
+    compacted: Option<CompactTrigger>,
     /// Every turn that has ended, oldest first.
     turns: Vec<TurnRecord>,
     /// Where the running turn began. `None` between turns, and for a turn the
@@ -706,7 +716,11 @@ impl SessionState {
             // Nothing has measured the conversation that starts here, and the
             // last figure is of one the model no longer has: no figure is
             // what is true until the next request reports one.
-            Event::Cleared => self.context = None,
+            // A conversation started over is not one being compacted.
+            Event::Cleared => {
+                self.context = None;
+                self.compacting = false;
+            }
 
             // As a fatal error does, without being one: the process stopped,
             // and whatever it was running will report nothing more.
@@ -827,6 +841,14 @@ impl SessionState {
                 self.beyond_messages = self.beyond_messages.plus(&per_message.short_of(reported));
             }
             Event::Commands { commands } => self.commands = commands.clone(),
+            Event::CompactionStarted => self.compacting = true,
+            Event::CompactionEnded => self.compacting = false,
+            // The boundary is the compaction done, which a backend may report
+            // without having said it ended.
+            Event::Compacted { trigger, .. } => {
+                self.compacting = false;
+                self.compacted = Some(*trigger);
+            }
         }
     }
 
@@ -901,6 +923,7 @@ impl SessionState {
         self.pending_permissions.clear();
         self.pending_assistant.clear();
         self.interrupt_what_the_turn_left();
+        self.compacting = false;
         let ended = self.mark();
         let began = self.turn_began.take().unwrap_or(self.turn_last_ended);
         let five_hour_share = match self.window_reported {
@@ -914,6 +937,7 @@ impl SessionState {
                 .then(|| ended.tokens.saturating_sub(began.tokens)),
             five_hour_share,
             cut,
+            compacted: self.compacted.take(),
         });
         self.turn_last_ended = ended;
         self.window_reported = false;
@@ -1065,6 +1089,13 @@ impl SessionState {
     /// about a live process, which a fold of a record cannot answer.
     pub fn turn_running(&self) -> bool {
         self.turn_running
+    }
+
+    /// Whether the backend is compacting the conversation: between its word
+    /// that it began and its word that it stopped, or the end of the turn it
+    /// was compacting in.
+    pub fn compacting(&self) -> bool {
+        self.compacting
     }
 
     /// Every turn that has ended, oldest first. A turn still running is not
@@ -3284,5 +3315,70 @@ mod tests {
         let state = SessionState::replay(&[costly(), costly()]);
 
         assert!(state.totals().reported_cost_usd.is_finite());
+    }
+
+    #[test]
+    fn a_compaction_is_a_phase_from_its_start_to_its_end() {
+        let mut state = SessionState::new();
+        state.apply(&Event::UserMessage {
+            text: "/compact".to_owned(),
+        });
+        assert!(!state.compacting());
+
+        state.apply(&Event::CompactionStarted);
+        assert!(state.compacting());
+
+        state.apply(&Event::CompactionEnded);
+        assert!(!state.compacting());
+    }
+
+    #[test]
+    fn a_compaction_still_running_when_its_turn_ends_ends_with_it() {
+        for end in [
+            Event::TurnEnded,
+            Event::SessionLeft,
+            Event::Cleared,
+            Event::Error {
+                message: "gone".to_owned(),
+                fatal: true,
+            },
+        ] {
+            let state = SessionState::replay(&[
+                Event::UserMessage {
+                    text: "/compact".to_owned(),
+                },
+                Event::CompactionStarted,
+                end.clone(),
+            ]);
+            assert!(!state.compacting(), "{end:?}");
+        }
+    }
+
+    #[test]
+    fn a_turn_that_compacted_the_conversation_is_recorded_with_what_started_it() {
+        for trigger in [
+            CompactTrigger::Manual,
+            CompactTrigger::Auto,
+            CompactTrigger::Unstated,
+        ] {
+            let state = SessionState::replay(&[
+                Event::UserMessage {
+                    text: "go".to_owned(),
+                },
+                Event::CompactionStarted,
+                Event::CompactionEnded,
+                Event::Compacted {
+                    trigger,
+                    before: Some(23_193),
+                },
+                Event::TurnEnded,
+                Event::UserMessage {
+                    text: "again".to_owned(),
+                },
+                Event::TurnEnded,
+            ]);
+            let compacted: Vec<_> = state.turns().iter().map(|turn| turn.compacted).collect();
+            assert_eq!(compacted, [Some(trigger), None]);
+        }
     }
 }

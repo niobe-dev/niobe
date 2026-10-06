@@ -2249,7 +2249,8 @@ fn is_row(entry: &Entry) -> bool {
         | EntryKind::Tool
         | EntryKind::Failure
         | EntryKind::Notice
-        | EntryKind::Turn(_) => {
+        | EntryKind::Turn(_)
+        | EntryKind::Compacted(_) => {
             !entry.calls.is_empty()
                 && entry
                     .calls
@@ -2379,6 +2380,11 @@ fn draw_scrollbar(
 /// The frames of the working line's spinner, one per tenth of a second.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// The frames the spinner draws while the conversation is compacted instead:
+/// a column filling and emptying, so a compaction does not read as a turn
+/// thinking.
+const SQUEEZING: [&str; 10] = ["⣀", "⣤", "⣶", "⣿", "⣿", "⣶", "⣤", "⣀", "⠀", "⠀"];
+
 /// `⠹ running Bash  cargo test · 1m 15s`: a spinner that moves while nothing
 /// else on screen does, what the turn is doing, and for how long.
 ///
@@ -2386,7 +2392,11 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// to it: a line that loses its clock no longer says the session is alive.
 fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'static> {
     let tenths = activity.elapsed.as_millis() / 100;
-    let spinner = SPINNER[usize::try_from(tenths % 10).unwrap_or(0)];
+    let frames = match activity.compacting {
+        true => &SQUEEZING,
+        false => &SPINNER,
+    };
+    let spinner = frames[usize::try_from(tenths % 10).unwrap_or(0)];
     let clock = format!(" · {}", clock::spent(activity.elapsed));
     let room = width.saturating_sub(text::width(spinner) + 1 + text::width(&clock));
     Line::from(vec![
@@ -2801,6 +2811,7 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
     }
     match &entry.kind {
         EntryKind::Turn(rule) => return crate::turns::lines(rule, width, theme),
+        EntryKind::Compacted(row) => return crate::turns::compacted(row, width, theme),
         EntryKind::SubAgent => return crate::calls::said(entry, width, detail, theme),
         EntryKind::User
         | EntryKind::Agent
@@ -2869,8 +2880,9 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
         EntryKind::Agent | EntryKind::SubAgent => {
             crate::markdown::render(entry.body.trim_end(), width, theme)
         }
-        // The rule carries its figures on its one line and has no body.
-        EntryKind::Turn(_) => Vec::new(),
+        // The rule and the compaction's row carry their figures on their one
+        // line and have no body.
+        EntryKind::Turn(_) | EntryKind::Compacted(_) => Vec::new(),
         // The operator's words keep their own colour through the body, so a
         // prompt is found at a glance scrolling back through replies.
         EntryKind::User => plain_lines(&entry.body, width, theme.user),
@@ -6244,8 +6256,9 @@ mod tests {
     fn a_compacted_context_is_drawn_at_the_size_of_the_next_request() {
         let mut app = bare();
         sent(&mut app, 180_000, "opus-5", Some(200_000));
-        app.apply(&niobe_core::event::Event::Notice {
-            message: "the context was compacted (auto).".to_owned(),
+        app.apply(&niobe_core::event::Event::Compacted {
+            trigger: niobe_core::event::CompactTrigger::Auto,
+            before: Some(180_000),
         });
         sent(&mut app, 30_000, "opus-5", Some(200_000));
         assert_eq!(

@@ -471,6 +471,19 @@ impl std::fmt::Display for Mode {
     }
 }
 
+/// What started a compaction of the conversation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    /// The operator asked for it.
+    Manual,
+    /// The backend did it on its own, because the context was filling up.
+    Auto,
+    /// The backend did not say, or said it in a word Niobe does not know.
+    #[default]
+    Unstated,
+}
+
 /// How a sub-agent finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -670,6 +683,33 @@ pub enum Event {
     /// first request. A backend that names its conversations says what the new
     /// one is called with a fresh [`Event::SessionMeta`].
     Cleared,
+
+    /// The backend began compacting the conversation: summarising what was
+    /// said so that the requests after it carry less.
+    ///
+    /// A phase of the turn rather than a reply: until
+    /// [`Event::CompactionEnded`], what the session is waiting on is the
+    /// summary, not the model thinking about the last prompt. No backend
+    /// reports how far along a compaction is, so nothing here says.
+    CompactionStarted,
+
+    /// The backend stopped compacting, whether or not it compacted anything.
+    CompactionEnded,
+
+    /// The backend compacted the conversation: from here on the model is sent
+    /// a summary in place of what came before.
+    ///
+    /// What it shrank to is not carried: the next request's measured context
+    /// ([`Event::Context`]) is that figure.
+    Compacted {
+        /// Who started it.
+        #[serde(default)]
+        trigger: CompactTrigger,
+        /// Every prompt token the conversation held before it, as the backend
+        /// measured it. `None` where the backend did not say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+    },
 
     /// The process the session ran in stopped while a turn was running — the
     /// operator quit, or it was killed and this is recorded when the session

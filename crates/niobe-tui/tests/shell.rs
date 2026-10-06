@@ -34,7 +34,8 @@ use common::{
     style_at, styles, styles_at, unmetered_session,
 };
 use niobe_core::event::{
-    AgentId, Backend, Event, Mode, PermissionDecision, Usage, UsageWindow, UsageWindows,
+    AgentId, Backend, CompactTrigger, Event, Mode, PermissionDecision, Usage, UsageWindow,
+    UsageWindows,
 };
 use niobe_core::{FailedTests, TestCounts, TestRunRecord};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
@@ -1501,6 +1502,64 @@ fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
     app.apply(&Event::TurnEnded);
     let frame = screen(&mut app, 80, 24);
     assert!(!frame.contains("running Bash"), "{frame}");
+}
+
+/// While the backend compacts the conversation the line under the
+/// transcript says so, with a spinner of its own, rather than reading as a
+/// turn thinking; once it is done, a row says what it shrank the context from
+/// and to — an em dash until the next request measures the second — and the
+/// rule under the turn names it as a compaction.
+#[test]
+fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
+    use std::time::{Duration, Instant};
+
+    let mut app = App::new(Repo {
+        name: "example-app".to_owned(),
+        branch: Some("main".to_owned()),
+        ..Repo::default()
+    })
+    .attached();
+    for c in "/compact".chars() {
+        app.type_into_composer(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char(c),
+            ..Default::default()
+        });
+    }
+    app.submit();
+    let t0 = Instant::now();
+    app.tick(t0, None);
+    app.apply(&Event::CompactionStarted);
+    app.tick(t0 + Duration::from_secs(38), None);
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("compacting context · 38s"), "{frame}");
+    assert!(!frame.contains("thinking"), "{frame}");
+    assert_snapshot("compacting-80x24", &frame);
+
+    app.apply(&Event::CompactionEnded);
+    app.apply(&Event::Compacted {
+        trigger: CompactTrigger::Manual,
+        before: Some(192_000),
+    });
+    app.apply(&Event::TurnEnded);
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        frame.contains("⇣ context compacted · 192k → — tokens"),
+        "{frame}"
+    );
+    assert!(frame.contains("── compact"), "{frame}");
+    assert!(!frame.contains("compacting context"), "{frame}");
+
+    app.apply(&Event::Context(niobe_core::event::Context {
+        tokens: 18_000,
+        model: "opus-5".to_owned(),
+        window: None,
+    }));
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        frame.contains("⇣ context compacted · 192k → 18k tokens"),
+        "{frame}"
+    );
+    assert_snapshot("compacted-80x24", &frame);
 }
 
 #[test]

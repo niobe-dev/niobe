@@ -12,11 +12,17 @@
 //! figures give way — the time first, then the counts of agents and calls,
 //! the duration, the window's share — and the tokens last, because they are
 //! what the turn cost. A figure is never cut short.
+//!
+//! A turn that compacted the conversation says so on its rule — `compact`
+//! in place of its number where the operator asked for it — and the row the
+//! compaction left above it says how much the conversation held before and
+//! after: `⇣ context compacted · 192k → 18k tokens`.
 
+use niobe_core::event::CompactTrigger;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::app::TurnRule;
+use crate::app::{CompactionRow, TurnRule};
 use crate::clock;
 use crate::text;
 use crate::theme::Theme;
@@ -38,10 +44,7 @@ fn line(rule: &TurnRule, width: usize, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
     // A turn that was cut off says so beside its number, where it is never
     // given up for room: its figures stop where it was cut.
-    let head = match rule.cut {
-        true => format!("{OPENING}{} (cut)", rule.number),
-        false => format!("{OPENING}{}", rule.number),
-    };
+    let head = head(rule);
     let mut figures = figures(rule);
     while text::width(&head) + figures_width(&figures) + 2 > width {
         match dropped_first(&figures) {
@@ -71,6 +74,57 @@ fn line(rule: &TurnRule, width: usize, theme: &Theme) -> Line<'static> {
         spans.push(Span::styled(format!(" {}", "─".repeat(rest - 1)), dim));
     }
     Line::from(spans)
+}
+
+/// What the rule opens with: the turn's number, or `compact` for a turn the
+/// operator opened to compact the conversation, which is not a turn of the
+/// work. Whether it was cut, or compacted part-way through, is said beside
+/// it, where it is never given up for room.
+fn head(rule: &TurnRule) -> String {
+    let mut head = match rule.compacted {
+        Some(CompactTrigger::Manual) => "── compact".to_owned(),
+        Some(CompactTrigger::Auto | CompactTrigger::Unstated) | None => {
+            format!("{OPENING}{}", rule.number)
+        }
+    };
+    match rule.compacted {
+        Some(CompactTrigger::Auto) => head.push_str(" (compacted automatically)"),
+        Some(CompactTrigger::Unstated) => head.push_str(" (compacted)"),
+        Some(CompactTrigger::Manual) | None => {}
+    }
+    if rule.cut {
+        head.push_str(" (cut)");
+    }
+    head
+}
+
+/// The row a compaction leaves in the transcript, `width` cells wide, and the
+/// blank line after it: what started it, and the prompt it left against the
+/// one it took, each an em dash until something has measured it.
+pub(crate) fn compacted(row: &CompactionRow, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let what = match row.trigger {
+        CompactTrigger::Manual | CompactTrigger::Unstated => "context compacted",
+        CompactTrigger::Auto => "context compacted automatically",
+    };
+    let figure = |tokens: Option<u64>| tokens.map_or_else(|| "—".to_owned(), compact);
+    let figures = format!(
+        "{BETWEEN}{} → {} tokens",
+        figure(row.before),
+        figure(row.after)
+    );
+    let glyph = "⇣ ";
+    let room = width.saturating_sub(text::width(glyph));
+    let what = text::truncate(what, room);
+    let figures = text::truncate(&figures, room.saturating_sub(text::width(&what)));
+    vec![
+        Line::from(vec![
+            Span::styled(glyph, dim),
+            Span::styled(what, Style::new().fg(theme.fg).bold()),
+            Span::styled(figures, dim),
+        ]),
+        Line::from(""),
+    ]
 }
 
 /// Which figure a figure is, which decides what it is drawn after and the
@@ -195,6 +249,7 @@ mod tests {
             agents: 0,
             calls: 0,
             cut: false,
+            compacted: None,
         }
     }
 
@@ -357,5 +412,95 @@ mod tests {
     fn the_tokens_are_the_last_figure_to_give_way() {
         let said = drawn(&rule(), 24);
         assert!(said.starts_with("── turn 46 6400 tok"), "{said}");
+    }
+
+    #[test]
+    fn a_turn_opened_to_compact_is_ruled_off_as_a_compaction_rather_than_a_turn() {
+        let compaction = TurnRule {
+            compacted: Some(CompactTrigger::Manual),
+            ..rule()
+        };
+        let said = drawn(&compaction, 80);
+        assert!(
+            said.starts_with("── compact 14:05 · 6400 tok · 1% of 5h · 38s ─"),
+            "{said}"
+        );
+        assert!(!said.contains("turn"), "{said}");
+    }
+
+    #[test]
+    fn a_turn_the_backend_compacted_part_way_through_keeps_its_number_and_says_so() {
+        let auto = TurnRule {
+            compacted: Some(CompactTrigger::Auto),
+            cut: true,
+            ..rule()
+        };
+        let said = drawn(&auto, 80);
+        assert!(
+            said.starts_with("── turn 46 (compacted automatically) (cut) 14:05 · 6400 tok"),
+            "{said}"
+        );
+        let unstated = TurnRule {
+            compacted: Some(CompactTrigger::Unstated),
+            ..rule()
+        };
+        assert!(
+            drawn(&unstated, 80).starts_with("── turn 46 (compacted) 14:05"),
+            "{}",
+            drawn(&unstated, 80)
+        );
+    }
+
+    fn compaction(row: &CompactionRow, width: usize) -> String {
+        compacted(row, width, &Theme::default())[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn a_compaction_row_says_what_it_shrank_from_and_to_with_a_dash_until_measured() {
+        let row = CompactionRow {
+            trigger: CompactTrigger::Manual,
+            before: Some(192_000),
+            after: None,
+        };
+        assert_eq!(
+            compaction(&row, 80),
+            "⇣ context compacted · 192k → — tokens"
+        );
+        assert_eq!(
+            compaction(
+                &CompactionRow {
+                    after: Some(18_000),
+                    ..row
+                },
+                80
+            ),
+            "⇣ context compacted · 192k → 18k tokens"
+        );
+        assert_eq!(
+            compaction(
+                &CompactionRow {
+                    trigger: CompactTrigger::Auto,
+                    before: None,
+                    after: Some(18_000),
+                },
+                80
+            ),
+            "⇣ context compacted automatically · — → 18k tokens"
+        );
+    }
+
+    #[test]
+    fn a_compaction_row_is_cut_to_the_pane() {
+        let row = CompactionRow {
+            trigger: CompactTrigger::Auto,
+            before: Some(192_000),
+            after: Some(18_000),
+        };
+        let said = compaction(&row, 20);
+        assert!(text::width(&said) <= 20, "{said}");
     }
 }

@@ -15,7 +15,9 @@
 use std::path::{Path, PathBuf};
 
 use niobe_bridge_claude::transcript;
-use niobe_core::event::{AgentOutcome, Backend, Event, Mode, SessionMeta, ToolOutcome};
+use niobe_core::event::{
+    AgentOutcome, Backend, CompactTrigger, Event, Mode, SessionMeta, ToolOutcome,
+};
 use niobe_core::session::SessionState;
 use niobe_core::test_run::{FailedTests, TestCounts};
 
@@ -111,7 +113,7 @@ fn warnings(events: &[Event]) -> Vec<&str> {
 /// history says the context was compacted rather than putting the summary in
 /// the operator's mouth.
 #[test]
-fn a_compaction_is_a_notice_and_not_something_the_operator_said() {
+fn a_compaction_is_reported_as_one_and_not_as_something_the_operator_said() {
     let events = folded();
 
     let said: Vec<&str> = events
@@ -126,10 +128,14 @@ fn a_compaction_is_a_notice_and_not_something_the_operator_said() {
         "{said:?}"
     );
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            Event::Notice { message } if message.contains("the context was compacted")
-        )),
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Compacted { .. }))
+            .collect::<Vec<_>>()
+            == [&Event::Compacted {
+                trigger: CompactTrigger::Manual,
+                before: Some(48_210),
+            }],
         "{events:?}"
     );
 }

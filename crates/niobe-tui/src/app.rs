@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Event, Mode, PermissionDecision, SlashCommand, TokenCounts,
-    ToolCallId, ToolOutcome, UsageWindow,
+    AgentId, AgentOutcome, Backend, CompactTrigger, Event, Mode, PermissionDecision, SlashCommand,
+    TokenCounts, ToolCallId, ToolOutcome, UsageWindow,
 };
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{SessionState, TestRunRecord};
@@ -459,6 +459,24 @@ pub enum EntryKind {
     Notice,
     /// The rule drawn where a turn ended, with what the turn spent on it.
     Turn(TurnRule),
+    /// The row drawn where the backend compacted the conversation, with how
+    /// much it held before and after.
+    Compacted(CompactionRow),
+}
+
+/// What the row a compaction leaves in the transcript says about it.
+///
+/// Both figures are measured prompt sizes, and each is `None` until something
+/// measured it: the backend's count of the conversation it compacted, and the
+/// size of the first request the session's own agent sent after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CompactionRow {
+    /// Who started it.
+    pub trigger: CompactTrigger,
+    /// Every prompt token the conversation held before it.
+    pub before: Option<u64>,
+    /// Every prompt token of the next request, which carries what is left.
+    pub after: Option<u64>,
 }
 
 /// What the rule under a finished turn says about it.
@@ -490,6 +508,9 @@ pub struct TurnRule {
     /// Whether it was cut off rather than ended by the backend: the session
     /// failed under it, or the process running it stopped.
     pub cut: bool,
+    /// What started the compaction of the conversation it ran, where it ran
+    /// one.
+    pub compacted: Option<CompactTrigger>,
 }
 
 impl EntryKind {
@@ -503,6 +524,7 @@ impl EntryKind {
             Self::Failure => "!",
             Self::Notice => "·",
             Self::Turn(_) => "─",
+            Self::Compacted(_) => "⇣",
         }
     }
 
@@ -513,7 +535,7 @@ impl EntryKind {
             Self::Agent | Self::SubAgent => theme.agent,
             Self::Tool => theme.tool,
             Self::Failure => theme.del,
-            Self::Notice | Self::Turn(_) => theme.dim,
+            Self::Notice | Self::Turn(_) | Self::Compacted(_) => theme.dim,
         }
     }
 }
@@ -966,10 +988,16 @@ impl SubAgent {
 pub struct Activity {
     /// How long the turn has run, by the clock the event loop hands in.
     pub elapsed: Duration,
-    /// What it is doing now: `thinking`, `writing`, `running <tool>  <what>`
-    /// or `waiting on you`.
+    /// What it is doing now: `thinking`, `writing`, `running <tool>  <what>`,
+    /// `compacting context` or `waiting on you`.
     pub doing: String,
+    /// Whether the backend is compacting the conversation, which the line
+    /// draws apart from a turn at work on the prompt.
+    pub compacting: bool,
 }
+
+/// What the working line says while the backend compacts the conversation.
+const COMPACTING: &str = "compacting context";
 
 /// Whether a turn is running, and how long the session has been that way.
 ///
@@ -1050,6 +1078,9 @@ pub struct App {
     /// Held rather than looked for from the end, because a prompt sent while
     /// it streams is drawn under it before it has finished.
     reply: Option<usize>,
+    /// The row of the last compaction, while the request after it has not
+    /// yet said how much the conversation holds now.
+    compaction: Option<usize>,
     /// Whether a run of calls is drawn as its group row alone, rather than
     /// with a row for each call under it.
     calls_folded: bool,
@@ -1454,6 +1485,7 @@ impl App {
             agent_entries: BTreeMap::new(),
             run: None,
             reply: None,
+            compaction: None,
             calls_folded: false,
             by_agent: false,
             diffs_open: false,
@@ -1618,6 +1650,7 @@ impl App {
             agents: count(self.agents.len().saturating_sub(agents_before)),
             calls: count(calls),
             cut: turn.cut,
+            compacted: turn.compacted,
             ended: at.and_then(Stamp::local),
             tokens: turn.tokens,
             five_hour_points: turn.five_hour_share.map(percent),
@@ -1941,19 +1974,56 @@ impl App {
                 });
             }
 
-            Event::Cleared => self.push(Entry {
-                kind: EntryKind::Notice,
-                head: "cleared".to_owned(),
-                meta: String::new(),
-                body: "The conversation starts over here: nothing above this line is in \
+            Event::Compacted { trigger, before } => {
+                self.compaction = Some(self.entries.len());
+                self.push(Entry {
+                    kind: EntryKind::Compacted(CompactionRow {
+                        trigger: *trigger,
+                        before: *before,
+                        after: None,
+                    }),
+                    head: String::new(),
+                    meta: String::new(),
+                    body: String::new(),
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: None,
+                });
+            }
+
+            // The first request after a compaction is what it shrank the
+            // conversation to, and its row says so from then on.
+            Event::Context(context) => {
+                if let Some(at) = self.compaction.take()
+                    && let Some(entry) = self.entries.get_mut(at)
+                    && let EntryKind::Compacted(row) = &mut entry.kind
+                {
+                    row.after = Some(context.tokens);
+                }
+            }
+
+            // The working line reads the phase off the fold.
+            Event::CompactionStarted | Event::CompactionEnded => {}
+
+            // A conversation started over is not what a compaction before it
+            // shrank to, so that row keeps no figure after it.
+            Event::Cleared => {
+                self.compaction = None;
+                self.push(Entry {
+                    kind: EntryKind::Notice,
+                    head: "cleared".to_owned(),
+                    meta: String::new(),
+                    body: "The conversation starts over here: nothing above this line is in \
                        front of the model any more. What it cost stays in the session's \
                        totals."
-                    .to_owned(),
-                streaming: false,
-                at: self.at,
-                calls: Vec::new(),
-                agent: None,
-            }),
+                        .to_owned(),
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: None,
+                });
+            }
 
             Event::PermissionRequest {
                 id,
@@ -2040,7 +2110,6 @@ impl App {
             | Event::ModelRefused
             | Event::UsageWindows(_)
             | Event::Billing { .. }
-            | Event::Context(_)
             | Event::Commands { .. } => {}
 
             // Straight after its call's end, so in the same tick and at the
@@ -5916,6 +5985,7 @@ impl App {
         Some(Activity {
             elapsed,
             doing: self.doing(),
+            compacting: self.session.compacting(),
         })
     }
 
@@ -5929,6 +5999,9 @@ impl App {
     fn doing(&self) -> String {
         if !self.session.pending_permissions().is_empty() {
             return "waiting on you".to_owned();
+        }
+        if self.session.compacting() {
+            return COMPACTING.to_owned();
         }
         let running = self.tool_entries.values().max().and_then(|&(at, index)| {
             let entry = self.entries.get(at)?;
@@ -9643,6 +9716,70 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_is_what_the_turn_is_doing_until_it_ends_and_leaves_a_row_of_its_own() {
+        let mut app = sent(app().attached(), "/compact");
+        app.tick(Instant::now(), None);
+        app.apply(&Event::CompactionStarted);
+        let working = app.activity().expect("the compaction's turn is running");
+        assert_eq!(working.doing, "compacting context");
+        assert!(working.compacting);
+
+        app.apply(&Event::CompactionEnded);
+        app.apply(&Event::Compacted {
+            trigger: CompactTrigger::Manual,
+            before: Some(192_000),
+        });
+        let working = app.activity().expect("the turn has not ended yet");
+        assert_eq!(working.doing, "thinking");
+        assert!(!working.compacting);
+        app.apply(&Event::TurnEnded);
+
+        let rows: Vec<CompactionRow> = app
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                EntryKind::Compacted(row) => Some(row),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [CompactionRow {
+                trigger: CompactTrigger::Manual,
+                before: Some(192_000),
+                after: None,
+            }],
+            "nothing has measured what it left yet"
+        );
+        let Some(EntryKind::Turn(rule)) = app.entries().last().map(|entry| entry.kind) else {
+            panic!("the turn is ruled off: {:?}", app.entries());
+        };
+        assert_eq!(rule.compacted, Some(CompactTrigger::Manual));
+
+        let mut app = sent(app, "carry on");
+        for tokens in [18_000, 19_500] {
+            app.apply(&Event::Context(niobe_core::event::Context {
+                tokens,
+                model: "opus-5".to_owned(),
+                window: None,
+            }));
+        }
+        let after: Vec<Option<u64>> = app
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                EntryKind::Compacted(row) => Some(row.after),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            after,
+            [Some(18_000)],
+            "the first request after it is what it left, not a later one"
+        );
+    }
+
+    #[test]
     fn a_prompt_sent_from_here_shows_the_session_working_until_the_turn_ends() {
         let mut app = sent(app().attached(), "fix it");
         let t0 = Instant::now();
@@ -9950,6 +10087,7 @@ mod tests {
                 agents: 0,
                 calls: 0,
                 cut: false,
+                compacted: None,
             }
         );
     }

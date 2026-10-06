@@ -394,13 +394,20 @@ What they settle, and what `tests/stream.rs` expects of each:
   is priced apart in `modelUsage` from then on ($0.0218224 and $0.036321). The
   shell sends `/model <name>` as the change its model picker makes instead,
   which the CLI applies the same way and the menu row shows at once.
-- **`/compact` is a request of its own.** `system`/`status` `compacting`, then
+- **`/compact` is a request of its own.** `system`/`status` `compacting` (line
+  13), a `status` of `null` when it is done (line 14), then
   `compact_boundary` (`trigger: "manual"`, `pre_tokens: 23193`,
   `post_tokens: 4282`), the summary handed back as a plain-text `user`
   message, and a `result` of no turns whose running total rose by $0.0376034
   with no message to count it against. The test expects the session's
-  $0.1152322 whole, the compaction's notice, and no prompt of the operator's
-  made out of the summary.
+  $0.1152322 whole, the session compacting after line 13 and after no other,
+  one manual compaction from 23193 tokens, the second of the three turns
+  recorded as that compaction's, and no prompt of the operator's made out of
+  the summary. `pre_tokens` is the last request's prompt and its reply,
+  2 + 9775 + 13412 + 4; `post_tokens` is not read, because it does not count
+  what the next request is sent beside the summary: that request measured
+  2 + 8269 + 13412 = 21683, which is the figure the shell shows the
+  compaction shrank the context to.
 - **`/fast` is listed and refused.** The answer to `initialize` carries
   `fast_mode_disabled_reason: "sdk_opt_in_required"`, and `/fast on` in a
   fourth session was answered "Fast mode unavailable: Fast mode is not
@@ -814,9 +821,10 @@ It carries what the transcript does differently from the live stream:
   summary the CLI carries the session on from, written as a user turn marked
   `isCompactSummary` and `isVisibleInTranscriptOnly` rather than `isMeta`. In
   every transcript on the machine this was written on that held one, it was
-  the first user turn that was not a command. It is folded as a notice that
-  the context was compacted, and is neither in the history as something the
-  operator said nor what the session list names it by;
+  the first user turn that was not a command. The boundary is folded as a
+  manual compaction from 48210 tokens, and the summary is neither in the
+  history as something the operator said nor what the session list names it
+  by;
 - **one API response written out over two records** — `msg_1`, once for its
   thinking and once for its text and its call — with the *same* `usage` stamped
   on both. Here the two agree; elsewhere a later record of a response can carry
