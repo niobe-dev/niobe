@@ -262,6 +262,13 @@ pub struct Transcript {
     /// The first turn the CLI did not write itself, where the transcript has
     /// one.
     pub first_prompt: Option<String>,
+    /// Whether the CLI recorded the session as started by a program over its
+    /// SDK protocol rather than at a terminal: its records' `entrypoint` names
+    /// the SDK. Such a session's prompts were written by a script or an
+    /// orchestrating agent. A Niobe session is one too, since Niobe drives the
+    /// CLI the same way, and is read from Niobe's own store. A transcript that
+    /// names no entrypoint, as older releases' do not, is not marked.
+    pub scripted: bool,
 }
 
 /// Why a transcript could not be read.
@@ -335,10 +342,12 @@ pub fn list(dir: &Path) -> Result<Vec<Transcript>, TranscriptError> {
         let Some(id) = path.file_stem().and_then(OsStr::to_str) else {
             continue;
         };
+        let opening = opening(&path);
         transcripts.push(Transcript {
             id: id.to_owned(),
             last_at: entry.metadata().ok().and_then(|at| at.modified().ok()),
-            first_prompt: first_prompt(&path),
+            first_prompt: opening.first_prompt,
+            scripted: opening.entrypoint.as_deref().is_some_and(is_sdk),
             path,
         });
     }
@@ -723,19 +732,54 @@ fn release_of(text: &str) -> Option<String> {
         .find_map(|stamp| stamp.version)
 }
 
+/// What a list says of a transcript, read from its first records.
+#[derive(Debug, Default)]
+struct Opening {
+    /// The first turn the CLI did not write itself.
+    first_prompt: Option<String>,
+    /// How the CLI was started, as the first record that says spells it.
+    entrypoint: Option<String>,
+}
+
 /// The first turn of the transcript at `path` that the CLI did not write
-/// itself.
-fn first_prompt(path: &Path) -> Option<String> {
-    let file = BufReader::new(open(path).ok()?);
-    for line in file.lines() {
-        let Ok(record) = serde_json::from_str::<Line>(&line.ok()?) else {
-            continue;
+/// itself, and how the CLI that wrote it was started. Read only as far as
+/// both are known, since a list reads every transcript of the repository.
+fn opening(path: &Path) -> Opening {
+    #[derive(Deserialize)]
+    struct Entered {
+        entrypoint: Option<String>,
+    }
+
+    let mut opening = Opening::default();
+    let Ok(file) = open(path) else {
+        return opening;
+    };
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            break;
         };
-        if let Some(said) = prompt(&record) {
-            return Some(said);
+        if opening.entrypoint.is_none() {
+            opening.entrypoint = serde_json::from_str::<Entered>(&line)
+                .ok()
+                .and_then(|entered| entered.entrypoint);
+        }
+        if opening.first_prompt.is_none()
+            && let Ok(record) = serde_json::from_str::<Line>(&line)
+        {
+            opening.first_prompt = prompt(&record);
+        }
+        if opening.first_prompt.is_some() && opening.entrypoint.is_some() {
+            break;
         }
     }
-    None
+    opening
+}
+
+/// Whether `entrypoint` is the CLI started over its SDK protocol: `sdk-cli`
+/// for `claude -p` and stream-json, and the `sdk-` names of the SDKs that
+/// spawn it.
+fn is_sdk(entrypoint: &str) -> bool {
+    entrypoint.starts_with("sdk")
 }
 
 /// What the operator said in `record`, where it is a turn they typed rather
@@ -1537,6 +1581,43 @@ mod tests {
     }
 
     #[test]
+    fn a_session_a_program_started_over_the_sdk_is_told_from_one_typed_at_a_terminal() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let entered = |entrypoint: &str, text: &str| {
+            format!(
+                r#"{{"type":"user","entrypoint":"{entrypoint}","message":{{"role":"user","content":{text:?}}}}}"#
+            )
+        };
+        transcript(
+            dir.path(),
+            "typed",
+            Duration::from_secs(60),
+            &entered("cli", "rename the crate"),
+        );
+        transcript(
+            dir.path(),
+            "scripted",
+            Duration::from_secs(120),
+            &entered("sdk-cli", "Commit it now"),
+        );
+        transcript(
+            dir.path(),
+            "unsaid",
+            Duration::from_secs(180),
+            &prompt("an older release wrote no entrypoint"),
+        );
+
+        let listed = list(dir.path()).expect("the directory lists");
+        let scripted: Vec<(&str, bool)> =
+            listed.iter().map(|t| (t.id.as_str(), t.scripted)).collect();
+        assert_eq!(
+            scripted,
+            [("typed", false), ("scripted", true), ("unsaid", false)],
+            "only a record that says it came over the SDK marks a session scripted"
+        );
+    }
+
+    #[test]
     fn a_transcript_the_operator_typed_nothing_in_has_no_first_prompt() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let text = CLI_TURNS_FIRST
@@ -1713,7 +1794,7 @@ mod tests {
         let path = transcript(dir.path(), "s", Duration::ZERO, &lines.join("\n"));
 
         assert_eq!(
-            first_prompt(&path).as_deref(),
+            opening(&path).first_prompt.as_deref(),
             Some("what changed in the last commit?")
         );
     }
@@ -1728,7 +1809,7 @@ mod tests {
             r#"{"type":"mode","mode":"normal"}"#,
         );
 
-        assert_eq!(first_prompt(&path), None);
+        assert_eq!(opening(&path).first_prompt, None);
     }
 
     /// Folds `lines` as the transcript of a session in `/repo`.

@@ -18,7 +18,8 @@
 //!   Editing the prompt shown ends the walk, so the arrows move through the
 //!   edit rather than replacing it; a draft the walk set aside and did not
 //!   give back comes back to the composer, with its images, once a prompt is
-//!   sent.
+//!   sent. While the prompt shown is one the walk recalled, the composer
+//!   says so, with where it is in the history, and Esc gives the draft back.
 //! * [`SEARCH_KEY`] opens the history dialog on its prompts: typed words
 //!   filter it, and Enter puts the chosen prompt in the composer unsent, as
 //!   a step of a walk that set the draft aside and goes on from it.
@@ -187,6 +188,12 @@ impl Recall {
         self.draft
     }
 
+    /// Where the walk is: the prompt shown, counted from the newest as 1,
+    /// and how many there are to walk.
+    pub fn place(&self) -> (usize, usize) {
+        (self.at.saturating_add(1), self.prompts.len())
+    }
+
     /// The prompt the walk is on.
     pub fn current(&self) -> &str {
         self.prompts.get(self.at).map_or("", String::as_str)
@@ -324,6 +331,7 @@ mod tests {
         assert_eq!(recall.older(), Some("first"));
         assert_eq!(recall.older(), None);
         assert_eq!(recall.current(), "first");
+        assert_eq!(recall.place(), (3, 3));
     }
 
     #[test]

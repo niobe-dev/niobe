@@ -4596,6 +4596,32 @@ fn with_history() -> App {
 }
 
 #[test]
+fn a_recalled_prompt_is_labelled_on_the_rule_above_the_composer() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = with_history();
+    for c in "my draft".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(
+            frame.contains("─ history 2/4 · Esc gives your draft back ─"),
+            "{frame}"
+        );
+        assert_snapshot(&format!("history-recalled-{width}x{height}"), &frame);
+    }
+
+    press(&mut app, KeyCode::Esc);
+    let frame = screen(&mut app, 80, 24);
+    assert!(!frame.contains("history 2/4"), "{frame}");
+    assert!(frame.contains("my draft"), "{frame}");
+}
+
+#[test]
 fn ctrl_r_lists_every_prompt_and_shows_the_chosen_one_whole() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

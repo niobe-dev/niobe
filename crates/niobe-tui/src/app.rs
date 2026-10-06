@@ -5627,6 +5627,13 @@ impl App {
                 self.focus = Focus::Session;
                 self.stop_turn();
             }
+            // A recalled prompt is not the operator's until they edit it, and
+            // the draft it replaced is out of sight: Esc is the way back to it
+            // that does not depend on how far the walk went.
+            (KeyCode::Esc, _) if self.recalled().is_some() => {
+                self.focus = Focus::Session;
+                self.give_draft_back();
+            }
             (KeyCode::Esc, _) => {
                 self.focus = Focus::Session;
                 self.escaped = true;
@@ -6389,6 +6396,37 @@ impl App {
             .is_some_and(|recall| recall.current() != self.composed());
         if edited && let Some(recall) = self.recall.take() {
             self.set_aside(recall.into_draft());
+        }
+    }
+
+    /// Where the prompt in the composer is in the history, as
+    /// [`Recall::place`] counts it, while it is one a walk recalled and the
+    /// operator has not edited. `None` while the composer holds their own
+    /// text.
+    pub fn recalled(&self) -> Option<(usize, usize)> {
+        self.recall
+            .as_ref()
+            .filter(|recall| recall.current() == self.composed())
+            .map(Recall::place)
+    }
+
+    /// What the composer is labelled with while it shows a recalled prompt:
+    /// that it is one, where it is in the history, and how to get the draft
+    /// back. The prompt can be longer than the composer shows, so this is
+    /// what says the words in it are not the operator's. With a turn
+    /// running Esc stops the turn instead, and the label does not offer it.
+    pub fn recall_label(&self) -> Option<String> {
+        let (at, of) = self.recalled()?;
+        Some(match self.working() {
+            true => format!("history {at}/{of}"),
+            false => format!("history {at}/{of} · Esc gives your draft back"),
+        })
+    }
+
+    /// Ends the walk and puts back the draft it set aside, empty or not.
+    fn give_draft_back(&mut self) {
+        if let Some(recall) = self.recall.take() {
+            self.show_in_composer(&recall.into_draft(), false);
         }
     }
 
@@ -12423,6 +12461,72 @@ mod tests {
         assert_eq!(app.composed(), long);
         up(&mut app);
         assert_eq!(app.composed(), "oldest");
+    }
+
+    #[test]
+    fn up_on_the_last_wrapped_row_of_one_long_line_moves_the_cursor_and_recalls_nothing() {
+        use ratatui::widgets::Widget;
+
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        let draft = "one draft line long enough to wrap onto three rows";
+        typed(&mut app, draft);
+        let area = Rect::new(0, 0, 22, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        app.composer().render(area, &mut buf);
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.composed(),
+            draft,
+            "Up from the third row recalls nothing"
+        );
+        assert_eq!(app.composer().cursor().0, 0, "it is still the one line");
+        assert!(app.composer().cursor().1 > 0 && app.composer().cursor().1 < draft.len());
+    }
+
+    #[test]
+    fn a_recalled_prompt_says_where_it_is_in_the_history_until_it_is_edited() {
+        let mut app = remembering(&[("newest", "3"), ("oldest", "3")], &["3"]);
+        typed(&mut app, "draft");
+        assert_eq!(app.recalled(), None, "a draft is the operator's own");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.recalled(), Some((1, 2)));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.recalled(), Some((2, 2)));
+
+        typed(&mut app, " and mine");
+        assert_eq!(
+            app.recalled(),
+            None,
+            "an edit makes it the operator's text and ends the walk"
+        );
+    }
+
+    #[test]
+    fn esc_on_a_recalled_prompt_gives_the_draft_back_and_ends_the_walk() {
+        let mut app = remembering(&[("newest", "3"), ("oldest", "3")], &["3"]);
+        typed(&mut app, "my half-written draft");
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "oldest");
+
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.composed(), "my half-written draft");
+        assert_eq!(app.recalled(), None);
+        assert_eq!(app.hint(), None, "this Esc is not the F-key prefix");
+        assert!(app.take_produced().is_empty(), "nothing is sent");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "newest", "a new walk starts on the newest");
+    }
+
+    #[test]
+    fn esc_on_a_recalled_prompt_with_no_draft_set_aside_empties_the_composer() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.composed(), "");
     }
 
     #[test]

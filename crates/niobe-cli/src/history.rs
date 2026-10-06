@@ -129,13 +129,15 @@ fn read(root: &Path, transcripts: Option<&Path>, clock: &Clock) -> Past {
 
     // A conversation Niobe drove is in the CLI's store too; it is listed once,
     // as the session that recorded it, which is the one that carries it on
-    // with what Niobe saw of it.
+    // with what Niobe saw of it. One a program drove otherwise is left out:
+    // its prompts are a script's, and opening it would put them where Up
+    // recalls the operator's own. `niobe sessions` still lists it by id.
     match transcripts.map(transcript::list).transpose() {
         Ok(listed) => past.sessions.extend(
             listed
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|transcript| !carried.contains(&transcript.id))
+                .filter(|transcript| !carried.contains(&transcript.id) && !transcript.scripted)
                 .map(|transcript| PastSession {
                     target: Target::Claude(transcript.id),
                     last: transcript.last_at.and_then(dated),
@@ -261,6 +263,50 @@ mod tests {
              session with nothing in it not at all"
         );
         assert_eq!(past.unread, None);
+    }
+
+    #[test]
+    fn a_claude_session_a_program_ran_is_not_offered_unless_niobe_carried_it_on() {
+        let (root, _claude, dir) = repository();
+        let entered = |entrypoint: &str, text: &str| {
+            format!(
+                r#"{{"type":"user","entrypoint":"{entrypoint}","message":{{"role":"user","content":{text:?}}}}}"#
+            )
+        };
+        for (id, entrypoint, text) in [
+            ("typed-3", "cli", "rename the crate"),
+            (
+                "scripted-4",
+                "sdk-cli",
+                "Commit it now: stage exactly the seven files",
+            ),
+            ("conv-1", "sdk-cli", "add etag support"),
+        ] {
+            std::fs::write(dir.join(format!("{id}.jsonl")), entered(entrypoint, text))
+                .expect("the transcript is written");
+        }
+
+        let past = read(root.path(), Some(&dir), &clock());
+
+        let targets: HashSet<Target> = past.sessions.iter().map(|s| s.target.clone()).collect();
+        assert_eq!(
+            targets,
+            HashSet::from([
+                Target::Recorded("1".to_owned()),
+                Target::Claude("own-2".to_owned()),
+                Target::Claude("typed-3".to_owned()),
+            ]),
+            "the scripted session is left out, and the one Niobe drove is listed once, \
+             from the store"
+        );
+        assert!(
+            past.sessions
+                .iter()
+                .filter_map(|s| s.first_prompt.as_deref())
+                .chain(past.prompts.iter().map(|p| p.text.as_str()))
+                .all(|said| !said.starts_with("Commit it now")),
+            "nothing the program wrote is offered to recall"
+        );
     }
 
     #[test]

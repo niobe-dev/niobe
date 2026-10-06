@@ -1053,13 +1053,33 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     );
 
     frame.render_widget(
-        Paragraph::new(Line::from("─".repeat(usize::from(divider.width))))
+        Paragraph::new(divider_line(app.recall_label(), divider.width, theme))
             .style(Style::new().fg(theme.frame).bg(theme.pane_bg)),
         divider,
     );
 
     draw_ask_bar(frame, composer, said, app, theme);
     draw_mention(frame, transcript, composer, app, theme);
+}
+
+/// The rule between the transcript and the composer, `width` columns wide,
+/// with `label` set into it where the composer holds a recalled prompt.
+///
+/// The label is on the divider rather than on the bar beside the prompt: a
+/// recalled prompt can fill every column of the bar, and this is the one
+/// thing the operator must not miss about it.
+fn divider_line(label: Option<String>, width: u16, theme: &Theme) -> Line<'static> {
+    let width = usize::from(width);
+    let Some(label) = label else {
+        return Line::from("─".repeat(width));
+    };
+    let label = text::truncate(&format!(" {label} "), width.saturating_sub(1));
+    let rest = width.saturating_sub(1).saturating_sub(text::width(&label));
+    Line::from(vec![
+        Span::raw("─".repeat(width.min(1))),
+        Span::styled(label, Style::new().fg(theme.hot).bold()),
+        Span::raw("─".repeat(rest)),
+    ])
 }
 
 /// The files an `@` word could name, or the backend's commands the `/` that
