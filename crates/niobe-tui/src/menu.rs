@@ -260,6 +260,72 @@ pub const MENUS: [Menu; 6] = [
     },
 ];
 
+/// A command the shell answers itself when a prompt is that command, so that
+/// typing it does what its menu item and its F-key do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Typed {
+    /// The command, without its `/`.
+    pub name: &'static str,
+    /// What it does.
+    pub action: Action,
+    /// Whether the action is the backend's own command of that name, sent to
+    /// it: then what is typed after the name goes with it, and the command is
+    /// refused where the backend does not list it or a turn is running, as
+    /// the menu item refuses it. Otherwise the action is the shell's own, and
+    /// the name with anything after it goes to the backend as typed.
+    pub backend: bool,
+}
+
+const fn typed(name: &'static str, action: Action, backend: bool) -> Typed {
+    Typed {
+        name,
+        action,
+        backend,
+    }
+}
+
+/// Every command typed at the start of a prompt that the shell answers as
+/// one of its actions: those the menus name as an item's command, and the
+/// names Claude Code gives the dialogs the shell has instead of its own —
+/// `/model`, `/memory`, `/resume`, `/help`, `/config`, `/exit` and `/quit`.
+///
+/// One table, so a command and the menu item that does the same cannot drift
+/// apart: whichever way the operator asks, the action runs one path. A
+/// command not here goes to the backend as typed.
+pub const TYPED: [Typed; 14] = [
+    typed("clear", Action::NewSession, true),
+    typed("compact", Action::Compact, true),
+    typed("config", Action::Settings, false),
+    typed("doctor", Action::Doctor, true),
+    typed("effort", Action::Effort, true),
+    typed("exit", Action::Quit, false),
+    typed("help", Action::Shortcuts, false),
+    typed("hooks", Action::Hooks, true),
+    typed("mcp", Action::Mcp, true),
+    typed("memory", Action::Memory, false),
+    typed("model", Action::SwitchModel, false),
+    typed("quit", Action::Quit, false),
+    typed("resume", Action::Resume, false),
+    typed("rewind", Action::Rewind, true),
+];
+
+/// The command `prompt` is, where the shell answers it, with what was typed
+/// after the name: the prompt opens with `/` and a name in [`TYPED`], and
+/// holds nothing after it unless the command is the backend's own.
+pub fn typed_command(prompt: &str) -> Option<(Typed, Option<&str>)> {
+    let command = prompt.strip_prefix('/')?;
+    let (name, rest) = match command.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim()),
+        None => (command, ""),
+    };
+    let found = TYPED.into_iter().find(|typed| typed.name == name)?;
+    match (rest.is_empty(), found.backend) {
+        (true, _) => Some((found, None)),
+        (false, true) => Some((found, Some(rest))),
+        (false, false) => None,
+    }
+}
+
 /// The F-key bar, F1 to F10: the digit that follows Esc for each, `0` being
 /// F10, what the bar calls it and what it does.
 pub const FKEYS: [(&str, &str, Action); 10] = [
@@ -594,6 +660,56 @@ mod tests {
                     "{digit}{label} is cut at {width} columns"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_command_a_menu_item_names_does_what_the_item_does_when_typed() {
+        for item in MENUS.iter().flat_map(|menu| menu.items) {
+            // A bare `/` is the key that starts naming a command, not one.
+            let commands = item
+                .keys
+                .split_whitespace()
+                .filter_map(|key| key.strip_prefix('/'))
+                .filter(|command| !command.is_empty());
+            for command in commands {
+                let typed = TYPED.iter().find(|typed| typed.name == command);
+                assert_eq!(
+                    typed.map(|typed| typed.action),
+                    Some(item.action),
+                    "{} names /{command}",
+                    item.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_prompt_is_a_command_the_shell_answers_only_as_the_table_says() {
+        fn named(prompt: &str) -> Option<(Action, Option<&str>)> {
+            typed_command(prompt).map(|(typed, argument)| (typed.action, argument))
+        }
+        assert_eq!(named("/model"), Some((Action::SwitchModel, None)));
+        assert_eq!(named("/model "), Some((Action::SwitchModel, None)));
+        assert_eq!(named("/model haiku"), None, "the shell's own takes nothing");
+        assert_eq!(
+            named("/compact keep the plan "),
+            Some((Action::Compact, Some("keep the plan")))
+        );
+        assert_eq!(named("/models"), None);
+        assert_eq!(named(" /model"), None, "a command opens the prompt");
+        assert_eq!(named("/review"), None);
+        assert_eq!(named("model"), None);
+    }
+
+    #[test]
+    fn no_command_is_typed_two_ways() {
+        for (at, typed) in TYPED.iter().enumerate() {
+            assert!(
+                TYPED[at + 1..].iter().all(|other| other.name != typed.name),
+                "/{}",
+                typed.name
+            );
         }
     }
 }

@@ -140,10 +140,10 @@ pub(crate) fn named_in_prompt(
 /// Typed as a turn, the `claude` CLI moves the model and says so only when the
 /// next turn starts — recorded from Claude Code 2.1.282, the reply was a line
 /// of its own and the next `init` the first to name the new model — so the
-/// menu row would name the old model until then. Anything else `/model` is
-/// given, a bare `/model` included, goes to the backend as typed: it answers
-/// those itself, and a name the picker would have to guess at is not one it
-/// should send.
+/// menu row would name the old model until then. A bare `/model` opens the
+/// picker, as [`crate::menu::TYPED`] says; anything else `/model` is given
+/// goes to the backend as typed: it answers those itself, and a name the
+/// picker would have to guess at is not one it should send.
 pub(crate) fn model_named(prompt: &str, commands: &[SlashCommand]) -> Option<String> {
     let mut words = prompt.split_whitespace();
     let (Some("/model"), Some(model), None) = (words.next(), words.next(), words.next()) else {

@@ -6223,6 +6223,17 @@ impl App {
             self.hint = Some(IMAGE_STILL_READING_HINT.to_owned());
             return;
         }
+        if let Some((typed, argument)) = crate::menu::typed_command(&text) {
+            self.run_typed(typed, argument);
+            return;
+        }
+        if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
+            let draft = self.take_composer_for_the_shell();
+            self.produce(Event::ModelSelected { model });
+            self.give_back(&draft);
+            self.scroll_to_tail();
+            return;
+        }
 
         self.composer.clear();
         self.offer_closed = None;
@@ -6230,13 +6241,6 @@ impl App {
         let kept: Vec<&str> = std::iter::once(draft.as_str())
             .chain(self.drafts.iter().map(String::as_str))
             .collect();
-        if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
-            self.images.discard(&kept);
-            self.produce(Event::ModelSelected { model });
-            self.give_back(&draft);
-            self.scroll_to_tail();
-            return;
-        }
         self.images.send(&text, &kept);
         self.produce(Event::UserMessage { text });
         self.sent_here = self.attached;
@@ -6257,6 +6261,42 @@ impl App {
         }
         self.give_back(&draft);
         self.scroll_to_tail();
+    }
+
+    /// Does what a prompt that is one of the commands in
+    /// [`crate::menu::TYPED`] asks for, as its menu item does it.
+    ///
+    /// A command the backend runs is checked first, the way the menu item
+    /// checks it, and a refused one is left in the composer with the reason
+    /// beside it: what was typed after it is the operator's to keep.
+    fn run_typed(&mut self, typed: crate::menu::Typed, argument: Option<&str>) {
+        if typed.backend
+            && let Err(why) = self.can_send(typed.name)
+        {
+            self.hint = Some(why);
+            return;
+        }
+        let argument = argument.map(str::to_owned);
+        let draft = self.take_composer_for_the_shell();
+        match argument {
+            Some(argument) => self.send_command(typed.name, Some(&argument)),
+            None => self.perform(typed.action),
+        }
+        self.give_back(&draft);
+    }
+
+    /// Empties the composer of a prompt the shell answers itself rather than
+    /// sending, and returns the draft that is to come back after it. The
+    /// images attached to it go with it; those of drafts set aside stay.
+    fn take_composer_for_the_shell(&mut self) -> String {
+        self.composer.clear();
+        self.offer_closed = None;
+        let draft = self.take_draft();
+        let kept: Vec<&str> = std::iter::once(draft.as_str())
+            .chain(self.drafts.iter().map(String::as_str))
+            .collect();
+        self.images.discard(&kept);
+        draft
     }
 
     /// Ends a walk through earlier prompts, as sending what it shows does,
@@ -8195,7 +8235,7 @@ mod tests {
 
     #[test]
     fn a_model_command_the_picker_cannot_stand_for_goes_to_the_backend_as_typed() {
-        for text in ["/model", "/model haiku please", "/models haiku"] {
+        for text in ["/model haiku please", "/models haiku"] {
             let mut app = offering_model(app());
             assert_eq!(
                 submitted(&mut app, text),
@@ -8213,6 +8253,169 @@ mod tests {
             }],
             "a backend that lists no `/model` is sent what was typed"
         );
+    }
+
+    /// What the operator is left with once `app` has been asked for
+    /// something: what it sent, what it said, what it opened and handed over,
+    /// and whether it is ending.
+    fn outcome(app: &mut App) -> String {
+        let sent = app.take_produced();
+        let handed = app.take_handoffs();
+        format!(
+            "sent {sent:?}\nsaid {:?}\nsheet {:?}\npicking {:?}\nbrowsing {:?}\n\
+             handed {handed:?}\nquits {}",
+            app.hint(),
+            app.sheet(),
+            app.picking(),
+            app.browser(),
+            app.should_quit(),
+        )
+    }
+
+    /// Sends `text` from the composer of the app `make` builds, and asks
+    /// another the same build for `action` from the menu, and expects the
+    /// two to end alike, with nothing left in the composer.
+    fn typed_as_asked(make: impl Fn() -> App, text: &str, action: crate::menu::Action) {
+        let mut asked = make();
+        asked.perform(action);
+        let mut typed = make();
+        for c in text.chars() {
+            typed.type_into_composer(Input {
+                key: Key::Char(c),
+                ..Default::default()
+            });
+        }
+        typed.submit();
+        assert_eq!(outcome(&mut typed), outcome(&mut asked), "{text}");
+        assert_eq!(typed.composed(), "", "{text}");
+    }
+
+    #[test]
+    fn a_bare_model_command_opens_the_model_picker_and_sends_nothing() {
+        let mut picking = offering_model(under_a_profile(&["opus", "sonnet"]));
+        assert_eq!(submitted(&mut picking, "/model"), []);
+        assert_eq!(
+            picking.picking().map(|picker| picker
+                .options
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()),
+            Some(vec!["opus".to_owned(), "sonnet".to_owned()])
+        );
+        assert_eq!(picking.session().user_messages(), 0);
+
+        typed_as_asked(
+            || offering_model(under_a_profile(&["opus", "sonnet"])),
+            "/model",
+            crate::menu::Action::SwitchModel,
+        );
+        typed_as_asked(app, "/model", crate::menu::Action::SwitchModel);
+    }
+
+    #[test]
+    fn a_typed_memory_command_opens_memory_as_f8_does() {
+        typed_as_asked(app, "/memory", crate::menu::Action::Memory);
+    }
+
+    #[test]
+    fn a_typed_resume_command_opens_the_sessions_as_the_menu_item_does() {
+        typed_as_asked(
+            || remembering(&[], &["earlier"]),
+            "/resume",
+            crate::menu::Action::Resume,
+        );
+        typed_as_asked(app, "/resume", crate::menu::Action::Resume);
+    }
+
+    #[test]
+    fn a_typed_help_command_lists_the_shortcuts_as_f1_does() {
+        typed_as_asked(app, "/help", crate::menu::Action::Shortcuts);
+    }
+
+    #[test]
+    fn a_typed_config_command_shows_the_settings_as_f9_does() {
+        typed_as_asked(app, "/config", crate::menu::Action::Settings);
+    }
+
+    #[test]
+    fn a_typed_exit_or_quit_command_ends_the_session_as_f10_does() {
+        typed_as_asked(app, "/exit", crate::menu::Action::Quit);
+        typed_as_asked(app, "/quit", crate::menu::Action::Quit);
+    }
+
+    #[test]
+    fn typed_clear_and_compact_send_what_f3_and_f2_send() {
+        let both = || offering(&["compact", "clear"]);
+        typed_as_asked(both, "/clear", crate::menu::Action::NewSession);
+        typed_as_asked(both, "/compact", crate::menu::Action::Compact);
+
+        let mut app = both();
+        assert_eq!(
+            submitted(&mut app, "/compact keep the plan"),
+            [Event::UserMessage {
+                text: "/compact keep the plan".to_owned()
+            }],
+            "what the command takes goes with it"
+        );
+    }
+
+    #[test]
+    fn a_typed_command_the_backend_does_not_list_is_refused_as_its_key_refuses_it() {
+        let compact_only = || offering(&["compact"]);
+        let mut app = compact_only();
+        app.on_key(key(KeyCode::F(3)));
+        let refused = app.hint().map(str::to_owned);
+        let mut typed = compact_only();
+        assert_eq!(submitted(&mut typed, "/clear with notes"), []);
+        assert_eq!(typed.hint().map(str::to_owned), refused);
+        assert_eq!(
+            typed.composed(),
+            "/clear with notes",
+            "a refused command stays in the composer to be sent once it can be"
+        );
+    }
+
+    #[test]
+    fn a_typed_command_waits_for_the_running_turn_as_its_key_does() {
+        let working = || {
+            let mut app = offering(&["compact"]);
+            submitted(&mut app, "go on");
+            app
+        };
+        let mut app = working();
+        app.on_key(key(KeyCode::F(2)));
+        assert_eq!(app.take_produced(), []);
+        let refused = app.hint().map(str::to_owned);
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|hint| hint.contains("waits")),
+            "{refused:?}"
+        );
+
+        let mut typed = working();
+        assert_eq!(submitted(&mut typed, "/compact"), []);
+        assert_eq!(typed.hint().map(str::to_owned), refused);
+        assert_eq!(typed.composed(), "/compact");
+    }
+
+    #[test]
+    fn a_command_the_shell_has_no_action_for_goes_to_the_backend_as_typed() {
+        for text in [
+            "/review",
+            "/review the diff",
+            "/config theme dark",
+            "/help me",
+        ] {
+            let mut app = offering(&["review", "config"]);
+            assert_eq!(
+                submitted(&mut app, text),
+                [Event::UserMessage {
+                    text: text.to_owned()
+                }],
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -10190,7 +10393,16 @@ mod tests {
 
     #[test]
     fn a_compaction_is_what_the_turn_is_doing_until_it_ends_and_leaves_a_row_of_its_own() {
-        let mut app = sent(app().attached(), "/compact");
+        let mut listing = app().attached();
+        listing.apply(&Event::Commands {
+            commands: vec![SlashCommand {
+                name: "compact".to_owned(),
+                description: "Clear history but keep a summary".to_owned(),
+                argument_hint: None,
+                mid_prompt: false,
+            }],
+        });
+        let mut app = sent(listing, "/compact");
         app.tick(Instant::now(), None);
         app.apply(&Event::CompactionStarted);
         let working = app.activity().expect("the compaction's turn is running");

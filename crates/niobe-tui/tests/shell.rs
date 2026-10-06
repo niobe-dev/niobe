@@ -1534,6 +1534,14 @@ fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
         ..Repo::default()
     })
     .attached();
+    app.apply(&Event::Commands {
+        commands: vec![niobe_core::event::SlashCommand {
+            name: "compact".to_owned(),
+            description: "Clear history but keep a summary".to_owned(),
+            argument_hint: None,
+            mid_prompt: false,
+        }],
+    });
     for c in "/compact".chars() {
         app.type_into_composer(ratatui_textarea::Input {
             key: ratatui_textarea::Key::Char(c),
@@ -4453,7 +4461,7 @@ fn command_list(frame: &str) -> Vec<String> {
 fn a_slash_offers_the_backends_commands_and_enter_picks_one_to_send() {
     use ratatui::crossterm::event::KeyCode;
 
-    let mut app = session_with_commands();
+    let mut app = session_with_commands().attached();
     type_keys(&mut app, "/");
     assert!(app.finding().is_none());
     let frame = screen(&mut app, 120, 30);
