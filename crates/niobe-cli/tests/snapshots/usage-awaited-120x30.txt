@@ -1,0 +1,8 @@
+┌──────────────── Usage ────────────────┐
+│ 5h   —                                │
+│ 7d   —                                │
+│ reported with the first reply         │
+│ ───────────────────────────────────── │
+│ no tokens reported yet                │
+│ session — · billing not known         │
+└───────────────────────────────────────┘

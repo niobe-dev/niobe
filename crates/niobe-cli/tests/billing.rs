@@ -198,3 +198,83 @@ fn the_same_login_on_a_profile_billed_by_use_leads_with_money() {
     assert!(session < model, "{pane}");
     assert!(!pane.contains("API-eq"), "{pane}");
 }
+
+/// When [`fresh_on`] records the earlier sessions: two hours before the
+/// five-hour window [`MAX`] reported comes back.
+const RECORDED: u64 = 1_789_689_600 - 2 * 3_600;
+
+/// A fresh session's shell, attached under `profile`, as the binary opens it
+/// on a store that holds `earlier` — each a recording and the profile it ran
+/// under — recorded at [`RECORDED`], and read twenty minutes later on a clock
+/// at UTC: the plan's windows the newest of those sessions recorded under the
+/// same profile are carried in.
+fn fresh_on(earlier: &[(&str, &str)], profile: &str) -> App {
+    let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    let store = niobe_store::Store::open_in_memory().expect("an in-memory store opens");
+    for (recording, ran_under) in earlier {
+        let session = store.create_session().expect("a session is created");
+        let mut translator = Translator::new(*ran_under);
+        for line in recording.lines().filter(|line| !line.trim().is_empty()) {
+            for event in translator.line(line) {
+                store
+                    .append_at(session, &event, at(RECORDED))
+                    .expect("an append succeeds");
+            }
+        }
+    }
+    let clock = niobe_tui::clock::Clock::fixed(0).expect("UTC is an offset");
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        ..Repo::default()
+    })
+    .with_clock(clock.clone())
+    .attached();
+    app.tick(
+        std::time::Instant::now(),
+        Some(clock.at(at(RECORDED + 20 * 60))),
+    );
+    match store
+        .last_usage_windows(profile)
+        .expect("the store is read")
+    {
+        Some((at, windows)) => app.with_carried_windows(windows, at),
+        None => app,
+    }
+}
+
+/// A plan's windows are the account's: before its first reply, a session
+/// shows the levels the last one under the same profile saw, and says they
+/// are from before it, rather than an empty pane.
+#[test]
+fn a_fresh_session_on_a_plan_shows_the_windows_an_earlier_one_saw() {
+    let mut app = fresh_on(&[(MAX, "max")], "max");
+
+    let pane = usage_pane(&mut app);
+    assert!(pane.contains("5h  68%"), "{pane}");
+    assert!(pane.contains("7d  27%"), "{pane}");
+    assert!(pane.contains("as of 22:00, before this session"), "{pane}");
+    assert_snapshot("usage-carried-120x30", &pane);
+}
+
+/// With nothing recorded, the rows are drawn without a figure and the pane
+/// says when one arrives.
+#[test]
+fn a_fresh_session_on_an_empty_store_draws_the_windows_waiting_for_the_first_reply() {
+    let mut app = fresh_on(&[], "max");
+
+    let pane = usage_pane(&mut app);
+    assert!(pane.contains("reported with the first reply"), "{pane}");
+    assert!(!pane.contains('%'), "a share nobody reported: {pane}");
+    assert_snapshot("usage-awaited-120x30", &pane);
+}
+
+/// Another profile's account is not this one's.
+#[test]
+fn windows_recorded_under_another_profile_are_not_carried() {
+    let mut app = fresh_on(&[(MAX, "max")], "company");
+
+    let pane = usage_pane(&mut app);
+    assert!(!pane.contains("68%"), "{pane}");
+    assert!(pane.contains("reported with the first reply"), "{pane}");
+}

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, CompactTrigger, Event, Mode, PermissionDecision, SlashCommand,
-    TokenCounts, ToolCallId, ToolOutcome, UsageWindow,
+    AgentId, AgentOutcome, Backend, Billing, CompactTrigger, Event, Mode, PermissionDecision,
+    SlashCommand, TokenCounts, ToolCallId, ToolOutcome, UsageWindow, UsageWindows,
 };
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{SessionState, TestRunRecord};
@@ -264,7 +264,40 @@ pub struct SelectedProfile {
     /// where it names none, and the shell then offers what the backend lists:
     /// a model id invented here would be one the backend never heard of.
     pub models: Vec<String>,
+    /// How the profile says its account is billed, where it says. Read before
+    /// the backend has said, so that a profile known to be metered is not
+    /// drawn plan windows while the first reply is awaited.
+    pub billing: Option<Billing>,
 }
+
+/// The plan's usage windows, as the Usage pane draws them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlanWindows {
+    /// Nothing to draw: the account is metered, or nothing was reported and
+    /// nothing is coming.
+    None,
+    /// What this session's backend last reported.
+    Reported(UsageWindows),
+    /// What an earlier session under the same profile recorded, dated `at`,
+    /// until this session's backend reports. A window whose reset has come
+    /// around since is drawn as reset rather than at its stale level: see
+    /// [`App::plan_windows`].
+    Carried {
+        /// The levels, with every window that has reset since put back.
+        windows: UsageWindows,
+        /// When they were recorded.
+        at: Stamp,
+    },
+    /// Nothing reported and nothing recorded, on a session whose first reply
+    /// has not come in: the backend reports the windows with it.
+    Awaited,
+}
+
+/// How long the seven-day window is. It comes back at the same moment every
+/// week, so a recorded reset that has passed names the next one by whole
+/// weeks; the five-hour window starts again only with the next request, so it
+/// names none.
+const SEVEN_DAYS: u64 = 7 * 86_400;
 
 /// A permission prompt the shell is waiting on the operator to answer.
 ///
@@ -1083,6 +1116,9 @@ pub struct App {
     /// over yet.
     handoffs: Vec<crate::desktop::Handoff>,
     profile: Option<SelectedProfile>,
+    /// The plan's windows as an earlier session recorded them, and when: what
+    /// the Usage pane shows until this session's backend reports its own.
+    carried_windows: Option<(UsageWindows, std::time::SystemTime)>,
     theme: Theme,
     /// How many colours the terminal draws, which every theme is drawn at.
     depth: Depth,
@@ -1511,6 +1547,7 @@ impl App {
             selection: None,
             handoffs: Vec::new(),
             profile: None,
+            carried_windows: None,
             theme,
             depth: Depth::default(),
             session: SessionState::new(),
@@ -3941,6 +3978,53 @@ impl App {
     pub fn with_profile(mut self, profile: SelectedProfile) -> Self {
         self.profile = Some(profile);
         self
+    }
+
+    /// The same shell, with the plan's windows as an earlier session under
+    /// the same profile recorded them at `at`: a plan's windows belong to the
+    /// account, and the Usage pane shows the last level seen, dated, until
+    /// this session's backend reports one.
+    #[must_use]
+    pub fn with_carried_windows(
+        mut self,
+        windows: UsageWindows,
+        at: std::time::SystemTime,
+    ) -> Self {
+        self.carried_windows = Some((windows, at));
+        self
+    }
+
+    /// The plan's windows as the Usage pane draws them.
+    ///
+    /// What this session's backend reported, where it has. Before then, what
+    /// an earlier session recorded, dated, with each window whose reset has
+    /// come around since drawn at nothing used and its next reset where the
+    /// window has a fixed one; or, where nothing was ever recorded and the
+    /// first reply has not come in, rows waiting for it. None of that on an
+    /// account known to be metered, which has no plan windows.
+    pub fn plan_windows(&self) -> PlanWindows {
+        if let Some(windows) = self.session.usage_windows() {
+            return PlanWindows::Reported(*windows);
+        }
+        let metered = |billing: Option<Billing>| billing == Some(Billing::Metered);
+        if metered(self.session.billing())
+            || metered(self.profile.as_ref().and_then(|profile| profile.billing))
+        {
+            return PlanWindows::None;
+        }
+        if let Some((windows, at)) = self.carried_windows {
+            return PlanWindows::Carried {
+                windows: since_reset(windows, self.read_at()),
+                at: match &self.clock {
+                    Some(clock) => clock.at(at),
+                    None => Stamp::new(at, None),
+                },
+            };
+        }
+        match self.attached && self.session.turns().is_empty() {
+            true => PlanWindows::Awaited,
+            false => PlanWindows::None,
+        }
     }
 
     /// The same shell, drawn in `theme` at the terminal's depth.
@@ -6885,6 +6969,36 @@ fn in_force(
         })
 }
 
+/// `windows` as they stand at `now`, where they were recorded earlier: each
+/// window whose reset has come around is back at nothing used, the seven-day
+/// one with its next reset a whole number of weeks on, and the five-hour one
+/// with none, since it starts again only with the next request. The plan
+/// spending beyond its fee is a state of the windows that were full, so it
+/// is not carried past a reset.
+fn since_reset(windows: UsageWindows, now: u64) -> UsageWindows {
+    let reset = |window: Option<UsageWindow>, every: Option<u64>| {
+        window.map(|window| match window.resets_at {
+            Some(at) if at <= now => UsageWindow {
+                utilization: 0.0,
+                resets_at: every.and_then(|every| {
+                    let weeks = (now - at) / every + 1;
+                    at.checked_add(weeks.checked_mul(every)?)
+                }),
+            },
+            _ => window,
+        })
+    };
+    let five_hour = reset(windows.five_hour, None);
+    let seven_day = reset(windows.seven_day, Some(SEVEN_DAYS));
+    UsageWindows {
+        using_overage: windows.using_overage
+            && five_hour == windows.five_hour
+            && seven_day == windows.seven_day,
+        five_hour,
+        seven_day,
+    }
+}
+
 /// One window, as Cost & usage reads it out: `5h window 62%, resets in 2h 14m`.
 ///
 /// The reset is shown as the time left rather than as a wall clock, because
@@ -9161,6 +9275,7 @@ mod tests {
             name: "max".to_owned(),
             backend: Backend::Claude,
             models: models.iter().map(|m| (*m).to_owned()).collect(),
+            billing: None,
         })
     }
 

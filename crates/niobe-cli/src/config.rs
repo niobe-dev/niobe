@@ -65,14 +65,15 @@ impl Loaded {
     }
 }
 
-/// A selected profile as the shell names it: the name, the backend it runs and
-/// the models it offers. The shell is given no more, because it can use no
+/// A selected profile as the shell names it: the name, the backend it runs,
+/// the models it offers and how it says it is billed. The shell is given no more, because it can use no
 /// more.
 pub fn named(selected: Selected<'_>) -> SelectedProfile {
     SelectedProfile {
         name: selected.name.to_owned(),
         backend: selected.profile.backend(),
         models: selected.profile.models().to_vec(),
+        billing: selected.profile.billing(),
     }
 }
 

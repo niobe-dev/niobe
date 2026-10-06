@@ -290,6 +290,11 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
     // elsewhere is refused on a screen that is still the operator's, rather
     // than on the first event the session records.
     repo::store_stays_inside(&root)?;
+    let app = carry_windows(
+        app,
+        repo::read_existing_store(&root).ok().flatten().as_ref(),
+        selected.as_ref(),
+    );
 
     // Spawned after the terminal check and before the shell takes the screen:
     // a piped run starts no subprocess, and a backend that will not start says
@@ -356,6 +361,28 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         );
     }
     Ok(next)
+}
+
+/// The same shell, with the plan's windows as the newest earlier session
+/// under `selected` recorded them in `store`, where one did: a plan's windows
+/// are the account's, and the Usage pane shows the last level seen, dated,
+/// until this session's backend reports its own.
+///
+/// A store that cannot be read here leaves the pane waiting for the first
+/// reply, as an empty one does: the session records into the same store, and
+/// a store it cannot use is reported when it tries.
+fn carry_windows(
+    app: App,
+    store: Option<&niobe_store::Store>,
+    selected: Option<&niobe_config::Selected<'_>>,
+) -> App {
+    let found = store
+        .zip(selected)
+        .and_then(|(store, selected)| store.last_usage_windows(selected.name).ok().flatten());
+    match found {
+        Some((at, windows)) => app.with_carried_windows(windows, at),
+        None => app,
+    }
 }
 
 /// The earlier sessions of `root`, and the `claude` CLI's own there where the
@@ -466,6 +493,7 @@ fn resume(
         return Ok(None);
     }
     keys_can_be_read()?;
+    app = carry_windows(app, Some(&store), selected.as_ref());
     let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
     let recorded = app.session().meta().map(|meta| meta.profile.clone());
     let selected_name = selected.as_ref().map(|selected| selected.name);
@@ -637,7 +665,9 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     // started to continue it with: a piped run is a look at the transcript,
     // and a resume that failed is one nobody carried on — recorded, either
     // would put a conversation in the list, and each retry another copy.
-    let mut recorder = Recorder::new(repo::open_or_create_store(&root)?);
+    let store = repo::open_or_create_store(&root)?;
+    app = carry_windows(app, Some(&store), selected.as_ref());
+    let mut recorder = Recorder::new(store);
     for event in &events {
         recorder.record(event).map_err(|e| e.to_string())?;
     }

@@ -29,12 +29,12 @@ use ratatui::widgets::{
     Widget, Wrap,
 };
 
-use niobe_core::event::{Billing, Context, UsageWindow};
+use niobe_core::event::{Billing, Context, UsageWindow, UsageWindows};
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker, Purpose,
-    Section, SelectedProfile, SubAgent, tool_label,
+    Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker,
+    PlanWindows, Purpose, Section, SelectedProfile, SubAgent, tool_label,
 };
 use crate::calls::Detail;
 use crate::clock::{self, Stamp};
@@ -3063,8 +3063,10 @@ fn usage_label_column(app: &App, width: usize) -> usize {
 
 /// The widest label the Usage pane's rows carry.
 fn usage_label_widest(app: &App) -> usize {
-    let windows = app.session().usage_windows().map_or(0, |windows| {
-        [
+    let windows = match app.plan_windows() {
+        PlanWindows::None => 0,
+        PlanWindows::Awaited => text::width("5h"),
+        PlanWindows::Reported(windows) | PlanWindows::Carried { windows, .. } => [
             (windows.five_hour.is_some(), "5h"),
             (windows.seven_day.is_some(), "7d"),
             (windows.using_overage, "extra"),
@@ -3073,8 +3075,8 @@ fn usage_label_widest(app: &App) -> usize {
         .filter(|(shown, _)| *shown)
         .map(|(_, label)| text::width(label))
         .max()
-        .unwrap_or(0)
-    });
+        .unwrap_or(0),
+    };
     // With no model to list, the block is one line saying so, not a row.
     let spent = models(app);
     let models = match spent.is_empty() {
@@ -3100,19 +3102,23 @@ fn usage_label_widest(app: &App) -> usize {
 /// label is cut before a figure is given up.
 fn usage_figure_columns(app: &App) -> usize {
     let share = SHARE_COLUMNS + SHARE_GAP.len();
-    let windows = app.session().usage_windows().map_or(0, |windows| {
-        let reported = [windows.five_hour, windows.seven_day]
-            .into_iter()
-            .flatten()
-            .map(|window| share + reset_clause(app, &window).as_deref().map_or(0, text::width))
-            .max()
-            .unwrap_or(0);
-        let extra = match windows.using_overage {
-            true => text::width(NO_FIGURE) + text::width(OVERAGE_ON),
-            false => 0,
-        };
-        reported.max(extra)
-    });
+    let windows = match app.plan_windows() {
+        PlanWindows::None => 0,
+        PlanWindows::Awaited => SHARE_COLUMNS,
+        PlanWindows::Reported(windows) | PlanWindows::Carried { windows, .. } => {
+            let reported = [windows.five_hour, windows.seven_day]
+                .into_iter()
+                .flatten()
+                .map(|window| share + reset_clause(app, &window).as_deref().map_or(0, text::width))
+                .max()
+                .unwrap_or(0);
+            let extra = match windows.using_overage {
+                true => text::width(NO_FIGURE) + text::width(OVERAGE_ON),
+                false => 0,
+            };
+            reported.max(extra)
+        }
+    };
     let spend = match models(app).is_empty() {
         true => 0,
         false => share + MODEL_TOKENS + model_cost_columns(app),
@@ -3162,16 +3168,40 @@ fn window_share(utilization: f64) -> String {
 }
 
 /// How many rows the plan's windows take: one per window a backend reported,
-/// and one more where the plan has started spending beyond its flat fee.
+/// one more where the plan has started spending beyond its flat fee, and one
+/// that dates windows carried over from an earlier session; or, while they are
+/// awaited, a row for each window and one saying when they come.
 ///
 /// The pane is sized from this before it is drawn, so it has to agree with
 /// [`window_lines`] exactly; a test holds the two together.
 fn window_rows(app: &App) -> usize {
-    app.session().usage_windows().map_or(0, |windows| {
+    let levels = |windows: UsageWindows| {
         usize::from(windows.five_hour.is_some())
             + usize::from(windows.seven_day.is_some())
             + usize::from(windows.using_overage)
-    })
+    };
+    match app.plan_windows() {
+        PlanWindows::None => 0,
+        PlanWindows::Reported(windows) => levels(windows),
+        PlanWindows::Carried { windows, .. } => levels(windows) + 1,
+        PlanWindows::Awaited => AWAITED.len() + 1,
+    }
+}
+
+/// The windows a plan reports, labelled as their rows are, while none has
+/// been reported yet.
+const AWAITED: [&str; 2] = ["5h", "7d"];
+
+/// What the pane says under windows it has no figure for yet.
+const AWAITED_SAID: &str = "reported with the first reply";
+
+/// The line under windows carried over from an earlier session: when they
+/// were recorded, since they are not a measurement of now.
+fn carried_said(app: &App, at: Stamp) -> String {
+    match app.stamp().and_then(|now| clock::past(now, at)) {
+        Some(when) => format!("as of {when}, before this session"),
+        None => "as of an earlier session".to_owned(),
+    }
 }
 
 /// When a window comes back, as the row says it: ` resets 16:40` later today
@@ -3191,15 +3221,51 @@ fn reset_clause(app: &App, window: &UsageWindow) -> Option<String> {
 /// meter for each one a backend reported, the share beside it, and when it
 /// comes back.
 ///
+/// Before this session's backend has reported them, the levels an earlier
+/// session recorded stand in, under a line saying when they were recorded;
+/// and where none were, each window's row carries an em dash and a line says
+/// when a figure comes, rather than leaving the pane blank.
+fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let said = |text: &str| Line::from(Span::styled(text::truncate(text, width), dim));
+    match app.plan_windows() {
+        PlanWindows::None => Vec::new(),
+        PlanWindows::Reported(windows) => level_lines(app, &windows, width, theme),
+        PlanWindows::Carried { windows, at } => {
+            let mut lines = level_lines(app, &windows, width, theme);
+            lines.push(said(&carried_said(app, at)));
+            lines
+        }
+        PlanWindows::Awaited => {
+            let labels = usage_label_column(app, width);
+            let mut lines: Vec<Line<'static>> = AWAITED
+                .iter()
+                .map(|label| {
+                    Line::from(vec![
+                        Span::styled(usage_label(label, labels), dim),
+                        Span::styled(format!("{NO_FIGURE:>3}"), dim),
+                    ])
+                })
+                .collect();
+            lines.push(said(AWAITED_SAID));
+            lines
+        }
+    }
+}
+
+/// A meter for each window `windows` holds, the share beside it and when it
+/// comes back, and the row that says the plan is spending beyond its fee.
+///
 /// A window no backend reported is not a window at zero — it draws no row at
 /// all. The meter shrinks before the reset time does: how much of a window is
 /// gone is worth a cell more or less, and `resets Tue 09:00` cut to
 /// `resets Tue 09` is a different time.
-fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(windows) = app.session().usage_windows() else {
-        return Vec::new();
-    };
-
+fn level_lines(
+    app: &App,
+    windows: &UsageWindows,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let reported: Vec<(&str, UsageWindow, Option<String>)> =
         [("5h", windows.five_hour), ("7d", windows.seven_day)]
             .into_iter()
@@ -4173,19 +4239,29 @@ fn mark_cursor(rows: &mut [Line<'static>], headers: &[(Section, usize)], cursor:
 ///
 /// A directory that is not a repository has no branch and no working tree,
 /// and a section drawn empty would say it had nothing changed rather than
-/// that there is no repository to have changed anything.
+/// that there is no repository to have changed anything; the pane says so in
+/// a line instead of standing empty.
 fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let repo = app.repo();
     let mut rows = PaneRows::default();
-    if let Some(branch) = &repo.branch {
-        rows.extend([branch_row(branch, repo, width, theme)]);
-        rows.section(
-            Section::WorkingTree,
-            working_tree_rows(app, repo, width, theme),
-        );
+    match &repo.branch {
+        Some(branch) => {
+            rows.extend([branch_row(branch, repo, width, theme)]);
+            rows.section(
+                Section::WorkingTree,
+                working_tree_rows(app, repo, width, theme),
+            );
+        }
+        None => rows.extend([Line::from(Span::styled(
+            text::truncate(NOT_A_REPOSITORY, width),
+            Style::new().fg(theme.dim),
+        ))]),
     }
     rows
 }
+
+/// What the Changes pane says where the session is not in a repository.
+const NOT_A_REPOSITORY: &str = "not a git repository";
 
 /// `⎇ main  ↑3 ↓1`: the branch, and how far it has drifted from its upstream.
 ///
@@ -5367,6 +5443,7 @@ mod tests {
             name: "work".to_owned(),
             backend: Backend::Claude,
             models: Vec::new(),
+            billing: None,
         };
         assert_eq!(
             identity(&SessionState::new(), Some(&work)),
@@ -5391,6 +5468,7 @@ mod tests {
             name: "max".to_owned(),
             backend: Backend::Claude,
             models: Vec::new(),
+            billing: None,
         };
         let selected = App::new(crate::app::Repo {
             name: "niobe".to_owned(),
@@ -5421,6 +5499,7 @@ mod tests {
             name: "max".to_owned(),
             backend: Backend::Claude,
             models: Vec::new(),
+            billing: None,
         })
         .attached()
     }
@@ -5946,6 +6025,33 @@ mod tests {
         app
     }
 
+    /// A fresh session, attached, read at 13:41 on [`A_FRIDAY`] as
+    /// [`windowed`] is, whose earlier session under the same profile recorded
+    /// `windows` at 13:02 the same day, where it recorded any.
+    fn fresh(windows: Option<UsageWindows>) -> App {
+        let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
+        let mut app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+            ..Default::default()
+        })
+        .with_clock(clock.clone())
+        .attached();
+        if let Some(windows) = windows {
+            app = app.with_carried_windows(
+                windows,
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(A_FRIDAY + 13 * 3_600 + 2 * 60),
+            );
+        }
+        app.tick(
+            std::time::Instant::now(),
+            Some(clock.at(std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(A_FRIDAY + 13 * 3_600 + 41 * 60))),
+        );
+        app
+    }
+
     /// A sub-agent's messages can name the family while the CLI bills them
     /// under the 1M-window id beside it, which settles the family's row at
     /// no cost of its own. Its money is in the `[1m]` row, and the row says
@@ -6153,6 +6259,19 @@ mod tests {
                 }
             }
         }
+        let carried = UsageWindows {
+            five_hour: Some(window(0.37, None)),
+            seven_day: Some(window(0.12, None)),
+            using_overage: true,
+        };
+        for app in [fresh(None), fresh(Some(carried))] {
+            assert_eq!(
+                usize::from(usage_height(&app)),
+                usage_lines(&app, 40, &crate::theme::CLASSIC).len() + 2,
+                "{:?}",
+                app.plan_windows()
+            );
+        }
     }
 
     fn rows_of(app: &App, width: usize) -> Vec<String> {
@@ -6298,6 +6417,114 @@ mod tests {
                 .all(|row| row.contains("resets") || row.contains("extra")),
             "the reset time was dropped before the meter gave up a cell"
         );
+    }
+
+    /// A plan's windows are the account's, so a fresh session shows the last
+    /// level an earlier one saw, saying when it was seen, rather than an empty
+    /// pane until its first reply.
+    #[test]
+    fn a_fresh_session_shows_the_windows_an_earlier_one_recorded_and_when() {
+        let app = fresh(Some(UsageWindows {
+            five_hour: Some(window(0.37, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
+            seven_day: Some(window(0.12, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
+            using_overage: false,
+        }));
+
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h  37% ▓▓▓▓░░░░░░░░ resets 16:40".to_owned(),
+                "7d  12% ▓░░░░░░░░░░░ resets Tue 09:00".to_owned(),
+                "as of 13:02, before this session".to_owned(),
+            ]
+        );
+        assert_eq!(window_rows(&app), 3);
+    }
+
+    #[test]
+    fn the_first_report_replaces_what_was_carried_and_its_date() {
+        let mut app = fresh(Some(UsageWindows {
+            five_hour: Some(window(0.37, None)),
+            seven_day: None,
+            using_overage: false,
+        }));
+        app.apply(&niobe_core::event::Event::UsageWindows(UsageWindows {
+            five_hour: Some(window(0.40, None)),
+            seven_day: None,
+            using_overage: false,
+        }));
+
+        assert_eq!(rows_of(&app, 66), vec!["5h  40% ▓▓▓▓▓░░░░░░░".to_owned()]);
+    }
+
+    /// A level recorded before a window came back is not the level now. The
+    /// seven-day window comes back at the same moment every week, so its next
+    /// reset is known; the five-hour one starts again with the next request.
+    #[test]
+    fn a_carried_window_that_has_reset_since_is_drawn_reset() {
+        let app = fresh(Some(UsageWindows {
+            five_hour: Some(window(0.87, Some(A_FRIDAY + 9 * 3_600))),
+            // A week before the Tuesday the window comes back on.
+            seven_day: Some(window(0.64, Some(A_FRIDAY - 3 * 86_400 + 9 * 3_600))),
+            using_overage: true,
+        }));
+
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h   0% ░░░░░░░░░░░░".to_owned(),
+                "7d   0% ░░░░░░░░░░░░ resets Tue 09:00".to_owned(),
+                "as of 13:02, before this session".to_owned(),
+            ]
+        );
+    }
+
+    /// Nothing recorded and nothing reported yet: the rows are there, with no
+    /// figure, and say when one comes rather than leaving the pane blank.
+    #[test]
+    fn a_fresh_session_with_nothing_recorded_says_the_windows_come_with_the_first_reply() {
+        let app = fresh(None);
+
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h   —".to_owned(),
+                "7d   —".to_owned(),
+                "reported with the first reply".to_owned(),
+            ]
+        );
+        assert_eq!(window_rows(&app), 3);
+    }
+
+    /// A metered account has no plan windows, and a profile that says it is
+    /// metered is drawn none while its first reply is awaited, nor any an
+    /// earlier session recorded.
+    #[test]
+    fn a_metered_profile_draws_no_plan_rows_before_its_first_reply() {
+        let metered = || crate::app::SelectedProfile {
+            name: "api".to_owned(),
+            backend: niobe_core::event::Backend::Claude,
+            models: Vec::new(),
+            billing: Some(Billing::Metered),
+        };
+        let recorded = UsageWindows {
+            five_hour: Some(window(0.37, None)),
+            seven_day: None,
+            using_overage: false,
+        };
+        for app in [
+            fresh(None).with_profile(metered()),
+            fresh(Some(recorded)).with_profile(metered()),
+        ] {
+            assert!(rows_of(&app, 66).is_empty());
+            assert_eq!(window_rows(&app), 0);
+        }
+
+        let mut told = fresh(None);
+        told.apply(&niobe_core::event::Event::Billing {
+            billing: Billing::Metered,
+        });
+        assert!(rows_of(&told, 66).is_empty());
     }
 
     /// A session that spent tokens under three models, one of which settled.

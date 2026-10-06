@@ -1,0 +1,8 @@
+┌──────────────── Usage ────────────────┐
+│ 5h  68% ▓▓▓▓▓▓▓▓░░░░ resets Fri 00:00 │
+│ 7d  27% ▓▓▓░░░░░░░░░ resets Tue 23:00 │
+│ as of 22:00, before this session      │
+│ ───────────────────────────────────── │
+│ no tokens reported yet                │
+│ session — · billing not known         │
+└───────────────────────────────────────┘

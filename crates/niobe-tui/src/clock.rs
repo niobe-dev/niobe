@@ -345,6 +345,25 @@ pub fn upcoming(now: Stamp, at: Stamp) -> Option<String> {
     })
 }
 
+/// `14:02`, `Tue 14:02`, `12d ago`: when something that has happened did.
+///
+/// The mirror of [`upcoming`]: earlier today is a clock time, earlier this
+/// week carries its weekday, and anything older, or on a machine that named
+/// no timezone, is how long ago it was, since a weekday more than a week back
+/// names the wrong week. `None` for a moment that has not happened yet.
+pub fn past(now: Stamp, at: Stamp) -> Option<String> {
+    let gone = now.since(at)?;
+    let days = match (now.moment(), at.moment()) {
+        (Some(now), Some(at)) => Some((now.day() - at.day(), at)),
+        _ => None,
+    };
+    Some(match days {
+        Some((0, at)) => at.time().to_string(),
+        Some((1..=6, at)) => format!("{} {}", at.weekday().short(), at.time()),
+        _ => format!("{} ago", ago(gone)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +576,31 @@ mod tests {
     #[test]
     fn something_that_has_already_come_around_is_not_upcoming() {
         assert_eq!(upcoming(moment(20_000, 13, 41), moment(20_000, 9, 0)), None);
+    }
+
+    #[test]
+    fn something_earlier_today_reads_as_a_clock_time_and_earlier_this_week_with_its_weekday() {
+        assert_eq!(
+            past(moment(20_000, 13, 41), moment(20_000, 13, 2)).as_deref(),
+            Some("13:02")
+        );
+        // Day 20_004 is a Tuesday.
+        assert_eq!(
+            past(moment(20_006, 8, 0), moment(20_004, 9, 0)).as_deref(),
+            Some("Tue 09:00")
+        );
+    }
+
+    #[test]
+    fn something_more_than_a_week_back_or_on_no_clock_reads_as_how_long_ago() {
+        assert_eq!(
+            past(moment(20_012, 9, 0), moment(20_000, 9, 0)).as_deref(),
+            Some("12d ago")
+        );
+        let then = Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(100), None);
+        let now = Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(400), None);
+        assert_eq!(past(now, then).as_deref(), Some("5m ago"));
+        assert_eq!(past(then, now), None, "a moment to come is not past");
     }
 
     #[test]

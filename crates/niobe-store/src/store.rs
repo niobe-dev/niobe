@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use niobe_core::event::Event;
+use niobe_core::event::{Event, UsageWindows};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 /// The schema this build creates and reads. Stored in SQLite's `user_version`
@@ -498,6 +498,48 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The newest usage windows any session run under `profile` recorded, and
+    /// when they were recorded: what a new session shows of the plan before
+    /// its own backend has reported anything.
+    ///
+    /// A plan's windows are the account's, not a session's, so the last level
+    /// one session saw is the best figure the next one has until its backend
+    /// reports; the caller dates it, because it is not a measurement of now.
+    /// The profile is what names the account. A report that names no window
+    /// says nothing of the levels and is passed over, as is a row that is not
+    /// JSON or not an event this build reads.
+    pub fn last_usage_windows(
+        &self,
+        profile: &str,
+    ) -> Result<Option<(SystemTime, UsageWindows)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT at, event
+               FROM events
+              WHERE CASE WHEN json_valid(event)
+                         THEN json_extract(event, '$.type') = 'usage_windows'
+                    END
+                AND session_id IN (
+                    SELECT session_id
+                      FROM events
+                     WHERE CASE WHEN json_valid(event)
+                                THEN json_extract(event, '$.type') = 'session_meta'
+                                     AND json_extract(event, '$.profile') = ?1
+                           END)
+              ORDER BY at DESC, session_id DESC, seq DESC",
+        )?;
+        let mut rows = statement.query(params![profile])?;
+        while let Some(row) = rows.next()? {
+            let at = from_unix_millis(row.get(0)?);
+            let json: String = row.get(1)?;
+            if let Ok(Event::UsageWindows(windows)) = serde_json::from_str(&json)
+                && !windows.is_empty()
+            {
+                return Ok(Some((at, windows)));
+            }
+        }
+        Ok(None)
     }
 
     /// Every conversation a session carried on, by the id its backend calls

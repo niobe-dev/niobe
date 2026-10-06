@@ -717,6 +717,20 @@ fn an_empty_session_renders_at_both_sizes() {
     assert_snapshot("empty-120x30", &screen(&mut empty_session(), 120, 30));
 }
 
+/// A session with a backend attached and nothing asked yet: every side pane
+/// says what will appear in it, and the plan's windows are drawn waiting for
+/// the first reply rather than left out.
+#[test]
+fn a_fresh_attached_session_draws_every_side_pane_with_what_will_appear_there() {
+    let mut app = empty_session().attached();
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(frame.contains("reported with the first reply"), "{frame}");
+    assert!(frame.contains("none spawned"), "{frame}");
+    assert!(frame.contains("none called"), "{frame}");
+    assert_snapshot("fresh-120x30", &frame);
+}
+
 #[test]
 fn a_recorded_prompt_puts_the_question_in_the_transcript_at_both_sizes() {
     assert_snapshot(
@@ -1569,6 +1583,7 @@ fn a_selected_profile_is_named_in_the_menu_row_with_nothing_yet_listening() {
         name: "work".to_owned(),
         backend: Backend::Claude,
         models: Vec::new(),
+        billing: None,
     });
 
     // At the narrowest the shell draws in there is room for what it runs
@@ -1615,6 +1630,7 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
         name: "max".to_owned(),
         backend: Backend::Claude,
         models: vec!["opus-5".to_owned(), "sonnet-5".to_owned()],
+        billing: None,
     });
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
         ratatui::crossterm::event::KeyCode::F(4),
@@ -1752,6 +1768,7 @@ fn the_model_list_shows_every_model_the_backend_offers_by_name_and_id() {
         name: "max".to_owned(),
         backend: Backend::Claude,
         models: Vec::new(),
+        billing: None,
     });
     app.apply(&offered());
     app.on_key(f4());
@@ -1777,6 +1794,7 @@ fn a_profile_naming_models_shows_those_and_how_many_more_the_backend_offers() {
         name: "max".to_owned(),
         backend: Backend::Claude,
         models: vec!["fable".to_owned(), "claude-opus-4-8".to_owned()],
+        billing: None,
     });
     app.apply(&offered());
     app.on_key(f4());
@@ -2896,9 +2914,9 @@ fn a_test_run_is_drawn_under_its_call_with_a_bar_of_its_counts() {
 }
 
 /// A directory that is not a repository has no branch and no working tree,
-/// and the pane says nothing about either rather than drawing them empty: a
-/// `Working tree` section reading `no files` would be a claim about a
-/// repository that is not there.
+/// and the pane says that rather than drawing either empty: a `Working tree`
+/// section reading `no files` would be a claim about a repository that is not
+/// there, and an empty box says nothing at all.
 #[test]
 fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
     let mut app = App::new(Repo {
@@ -2910,6 +2928,7 @@ fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
 
     assert!(!frame.contains('⎇'), "there is no branch to name");
     assert!(!frame.contains("Working tree"), "{frame}");
+    assert!(frame.contains("not a git repository"), "{frame}");
 }
 
 /// The wheel goes to whatever the pointer is over. Two panes scroll, and a

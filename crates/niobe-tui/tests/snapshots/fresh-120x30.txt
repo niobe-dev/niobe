@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                                                                 ○ starting
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃                                                                          ┃ │ 5h   —                                │
+ ┃   niobe                                                                  ┃ │ 7d   —                                │
+ ┃   A terminal coding agent that keeps you aware of what is                ┃ │ reported with the first reply         │
+ ┃   being built and how.                                                   ┃ │ ───────────────────────────────────── │
+ ┃                                                                          ┃ │ no tokens reported yet                │
+ ┃   What the agent did, decided and touched, what it is doing now          ┃ │ session — · billing not known         │
+ ┃   and what it cost, visible while it happens and never a guess.          ┃ └───────────────────────────────────────┘
+ ┃   You stay on the loop instead of in it.                                 ┃ ┌─────────────── Changes ───────────────┐
+ ┃                                                                          ┃ │ ⎇ main                                │
+ ┃   Ask for a change; the bill is on the right.                            ┃ │ ▾ Working tree  —                     │
+ ┃                                                                          ┃ │   not read yet                        │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌────────────── Activity ───────────────┐
+ ┃                                                                          ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
+ ┃                                                                          ┃ │   none spawned                        │
+ ┃                                                                          ┃ │ ▾ Tools  0 calls · 0 denied · 0 B out │
+ ┃                                                                          ┃ │   none called                         │
+ ┃                                                                          ┃ │                                       │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
+ ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

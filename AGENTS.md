@@ -85,7 +85,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
   SQLite (`store.rs`; the triggers in its schema refuse an update or a delete), which also reads
   every prompt of every session in one statement, and the backend conversations each carried
-  on, for the shell's history. `recorder.rs` is
+  on, for the shell's history, and the newest plan usage windows a profile's sessions recorded,
+  which a new session shows, dated, until its own backend reports. `recorder.rs` is
   the write side a running session holds, and says whether another holds a session without
   taking it; `jsonl.rs` reads a JSON Lines event log.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,

@@ -714,3 +714,72 @@ fn every_conversation_a_session_carried_on_is_named_with_it() {
         ]
     );
 }
+
+fn under(profile: &str) -> Event {
+    Event::SessionMeta(niobe_core::event::SessionMeta {
+        backend: niobe_core::event::Backend::Claude,
+        profile: profile.to_owned(),
+        model: "opus-5".to_owned(),
+        backend_session: None,
+    })
+}
+
+fn five_hour(utilization: f64) -> Event {
+    Event::UsageWindows(niobe_core::event::UsageWindows {
+        five_hour: Some(niobe_core::event::UsageWindow {
+            utilization,
+            resets_at: Some(1_789_000_000),
+        }),
+        seven_day: None,
+        using_overage: false,
+    })
+}
+
+#[test]
+fn the_newest_windows_a_profile_recorded_come_back_with_when_they_were_recorded() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let epoch = SystemTime::UNIX_EPOCH;
+    let older = store.create_session().expect("a session is created");
+    let newer = store.create_session().expect("a session is created");
+    let other = store.create_session().expect("a session is created");
+    let at = |seconds| epoch + Duration::from_secs(seconds);
+
+    store
+        .append_at(older, &under("max"), at(100))
+        .expect("append");
+    store
+        .append_at(older, &five_hour(0.2), at(110))
+        .expect("append");
+    store
+        .append_at(newer, &under("max"), at(200))
+        .expect("append");
+    store
+        .append_at(newer, &five_hour(0.37), at(210))
+        .expect("append");
+    // A report that names no window is not a level, and is passed over.
+    let silent = Event::UsageWindows(niobe_core::event::UsageWindows {
+        using_overage: true,
+        ..niobe_core::event::UsageWindows::default()
+    });
+    store.append_at(newer, &silent, at(220)).expect("append");
+    // Another profile's account is not this one's.
+    store
+        .append_at(other, &under("work"), at(300))
+        .expect("append");
+    store
+        .append_at(other, &five_hour(0.9), at(310))
+        .expect("append");
+
+    let (when, windows) = store
+        .last_usage_windows("max")
+        .expect("the store is read")
+        .expect("the profile recorded windows");
+    assert_eq!(when, at(210));
+    assert_eq!(windows.five_hour.map(|w| w.utilization), Some(0.37));
+    assert_eq!(
+        store
+            .last_usage_windows("nobody")
+            .expect("the store is read"),
+        None
+    );
+}
