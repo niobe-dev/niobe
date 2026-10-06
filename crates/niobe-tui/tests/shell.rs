@@ -4644,6 +4644,95 @@ fn enter_on_a_skill_offered_mid_prompt_replaces_only_that_word() {
 }
 
 #[test]
+fn a_command_typed_in_the_composer_is_drawn_in_the_command_colour() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, "/compact zebra /review quokka /usr/bin /tidy");
+    assert_snapshot("composer-command-120x30", &paint(&mut app, 120, 30));
+
+    let theme = app.theme().to_owned();
+    let mut fg = |text: &str| {
+        style_at(&mut app, 120, 30, text)
+            .unwrap_or_else(|| panic!("{text} is drawn"))
+            .fg
+    };
+    assert_eq!(fg("/compact"), Some(theme.command));
+    assert_eq!(fg("t zebra"), Some(theme.command), "the whole name");
+    assert_eq!(fg("zebra"), Some(theme.fg));
+    assert_eq!(fg("/review"), Some(theme.command), "a skill mid-prompt");
+    assert_eq!(fg("/usr/bin"), Some(theme.fg), "a path");
+    assert_eq!(
+        fg("/tidy"),
+        Some(theme.fg),
+        "a name the backend did not list"
+    );
+}
+
+#[test]
+fn a_command_mid_prompt_is_coloured_only_where_the_backend_reads_it_there() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, "then /compact and /review it");
+    let theme = app.theme().to_owned();
+    assert_eq!(
+        style_at(&mut app, 120, 30, "/compact").and_then(|style| style.fg),
+        Some(theme.fg),
+        "a command the backend runs only where the prompt opens with it"
+    );
+    assert_eq!(
+        style_at(&mut app, 120, 30, "/review").and_then(|style| style.fg),
+        Some(theme.command)
+    );
+}
+
+#[test]
+fn a_command_that_wraps_in_the_composer_is_coloured_on_both_rows() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, &format!("{} /review it", "word ".repeat(22)));
+    let frame = screen(&mut app, 120, 30);
+    let row = frame
+        .lines()
+        .position(|line| line.contains("/review it"))
+        .unwrap_or_else(|| panic!("the skill is on its own row:\n{frame}"));
+    assert!(
+        frame
+            .lines()
+            .nth(row - 1)
+            .is_some_and(|line| line.contains("word")),
+        "the prompt wrapped before it:\n{frame}"
+    );
+    let theme = app.theme().to_owned();
+    assert_eq!(
+        style_at(&mut app, 120, 30, "/review").and_then(|style| style.fg),
+        Some(theme.command)
+    );
+}
+
+#[test]
+fn a_sent_prompt_that_opens_with_a_command_is_coloured_in_the_transcript() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_skills().attached();
+    type_keys(&mut app, "/review zebra /compact quokka");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.composed().is_empty());
+    let theme = app.theme().to_owned();
+    // The pane's title names the session by the same prompt; the two blanks
+    // after it are what only the transcript's row has.
+    let mut fg = |text: &str| {
+        style_at(&mut app, 120, 30, text)
+            .unwrap_or_else(|| panic!("{text} is drawn"))
+            .fg
+    };
+    assert_eq!(fg("/review zebra /compact quokka  "), Some(theme.command));
+    assert_eq!(fg("w zebra /compact quokka  "), Some(theme.command));
+    assert_eq!(fg("zebra /compact quokka  "), Some(theme.user));
+    assert_eq!(
+        fg("/compact quokka  "),
+        Some(theme.user),
+        "mid-prompt, a command is text"
+    );
+}
+
+#[test]
 fn a_list_the_backend_sends_again_replaces_what_is_offered() {
     let mut app = session_with_commands();
     app.apply(&listed_commands(&[(

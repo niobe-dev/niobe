@@ -115,8 +115,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   trusted file may — `run::ask_trust` asks it on a loop of its own, before any backend is
   started, because the answer decides what one starts with — `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
   backend's own commands and skills where a prompt opens with `/`, and the skills alone where a
-  later word does, from the list the backend sent — the transcript is searched with Ctrl+F —
-  `shell.rs` is the trait the loop
+  later word does, from the list the backend sent, and finds where a prompt names one, which the
+  composer and the transcript draw in the theme's command colour — the transcript is searched
+  with Ctrl+F — `shell.rs` is the trait the loop
   hands the operator's `!` commands to, and where who allows them and what they reach is written
   down, `images.rs` the one it asks for an image from — the clipboard on Ctrl+V or an empty paste,
   or the file a pasted or dropped path names — and what numbers each and sends it with the prompt

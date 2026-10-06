@@ -95,27 +95,86 @@ pub fn expand_tabs(line: &str) -> String {
 /// Explicit newlines are kept. An empty line stays an empty line, so a message
 /// with a blank line between paragraphs still reads as one.
 pub fn wrap(text: &str, columns: usize) -> Vec<String> {
+    wrap_rows(text, columns, |_| false)
+}
+
+/// [`wrap`], with each row cut into pieces that say whether they lie in one
+/// of `marked`, byte ranges of `text`: a word counts as marked where it
+/// starts inside one. The blank between two words goes with the piece before
+/// it.
+pub fn wrap_marked(
+    text: &str,
+    columns: usize,
+    marked: &[std::ops::Range<usize>],
+) -> Vec<Vec<(String, bool)>> {
+    wrap_rows(text, columns, |at| {
+        marked.iter().any(|range| range.contains(&at))
+    })
+}
+
+/// What [`wrap`] builds a row into: a plain string, or pieces that each say
+/// whether they are marked.
+trait Row: Default {
+    fn push_word(&mut self, word: &str, marked: bool);
+    fn push_blank(&mut self);
+}
+
+impl Row for String {
+    fn push_word(&mut self, word: &str, _: bool) {
+        self.push_str(word);
+    }
+
+    fn push_blank(&mut self) {
+        self.push(' ');
+    }
+}
+
+impl Row for Vec<(String, bool)> {
+    fn push_word(&mut self, word: &str, marked: bool) {
+        match self.last_mut() {
+            Some((piece, was)) if *was == marked => piece.push_str(word),
+            _ => self.push((word.to_owned(), marked)),
+        }
+    }
+
+    fn push_blank(&mut self) {
+        match self.last_mut() {
+            Some((piece, _)) => piece.push(' '),
+            None => self.push((" ".to_owned(), false)),
+        }
+    }
+}
+
+fn wrap_rows<R: Row>(text: &str, columns: usize, marked: impl Fn(usize) -> bool) -> Vec<R> {
     if columns == 0 || text.is_empty() {
         return Vec::new();
     }
 
     let mut lines = Vec::new();
+    let mut start = 0;
     for paragraph in text.split('\n') {
         let before = lines.len();
-        wrap_paragraph(paragraph, columns, &mut lines);
+        wrap_paragraph(paragraph, columns, &mut lines, |at| marked(start + at));
         if lines.len() == before {
-            lines.push(String::new());
+            lines.push(R::default());
         }
+        start += paragraph.len() + 1;
     }
     lines
 }
 
-fn wrap_paragraph(paragraph: &str, columns: usize, lines: &mut Vec<String>) {
-    let mut line = String::new();
+fn wrap_paragraph<R: Row>(
+    paragraph: &str,
+    columns: usize,
+    lines: &mut Vec<R>,
+    marked: impl Fn(usize) -> bool,
+) {
+    let mut line = R::default();
     let mut line_width = 0;
 
-    for word in paragraph.split_whitespace() {
+    for (at, word) in words(paragraph) {
         let word_width = width(word);
+        let mark = marked(at);
 
         if line_width != 0 && line_width + 1 + word_width > columns {
             lines.push(std::mem::take(&mut line));
@@ -134,22 +193,34 @@ fn wrap_paragraph(paragraph: &str, columns: usize, lines: &mut Vec<String>) {
                     lines.push(std::mem::take(&mut line));
                 }
                 line_width = width(&chunk);
-                line = chunk;
+                line.push_word(&chunk, mark);
             }
             continue;
         }
 
         if line_width != 0 {
-            line.push(' ');
+            line.push_blank();
             line_width += 1;
         }
-        line.push_str(word);
+        line.push_word(word, mark);
         line_width += word_width;
     }
 
     if line_width != 0 {
         lines.push(line);
     }
+}
+
+/// The words of `text` split at blanks, each with the byte it starts at.
+fn words(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    text.split(char::is_whitespace)
+        .scan(0, |start, word| {
+            let at = *start;
+            *start += word.len();
+            *start += text[*start..].chars().next().map_or(0, char::len_utf8);
+            Some((at, word))
+        })
+        .filter(|(_, word)| !word.is_empty())
 }
 
 /// Wraps `text` to `columns` cells keeping every character it has: each
@@ -338,6 +409,86 @@ pub fn editor_rows(line: &str, columns: usize, tab: u8) -> usize {
     rows + usize::from(row_open || rows == 0)
 }
 
+/// Where the composer draws the characters `wanted` of one line of its text —
+/// ranges of characters, in order and apart — `columns` cells wide with tabs
+/// stopping every `tab` cells: for each, the row of the line it is drawn on,
+/// the column it starts at and the cells it takes, in order.
+///
+/// The same word-or-glyph rule as [`editor_rows`], walked once for every
+/// range and only as far as the last character wanted, so a line naming
+/// many commands costs one walk of it.
+pub fn editor_spots(
+    line: &str,
+    columns: usize,
+    tab: u8,
+    wanted: &[std::ops::Range<usize>],
+) -> Vec<(usize, usize, usize)> {
+    let columns = columns.max(1);
+    let end = wanted.last().map_or(0, |range| range.end);
+    let mut spots = Vec::new();
+    let mut range = 0usize;
+    let mut place = |c: char, at: usize, row: usize, column: usize| {
+        while wanted.get(range).is_some_and(|wanted| wanted.end <= at) {
+            range += 1;
+        }
+        if wanted.get(range).is_some_and(|wanted| wanted.contains(&at)) {
+            let reached = advance(c.encode_utf8(&mut [0; 4]), column, tab);
+            spots.push((row, column, reached - column));
+        }
+    };
+    let mut at = 0usize;
+    let mut row = 0usize;
+    let mut row_width = 0usize;
+    let mut row_open = false;
+    let mut words = line.split_word_bounds().peekable();
+    while let Some(word) = words.peek().copied() {
+        if at >= end {
+            break;
+        }
+        let word_width = advance(word, row_width, tab).saturating_sub(row_width);
+        if row_width.saturating_add(word_width) <= columns {
+            for c in word.chars() {
+                place(c, at, row, row_width);
+                row_width = advance(c.encode_utf8(&mut [0; 4]), row_width, tab);
+                at += 1;
+            }
+            row_open = true;
+            words.next();
+        } else if row_open {
+            row += 1;
+            row_width = 0;
+            row_open = false;
+        } else {
+            let graphemes: Vec<&str> = word.graphemes(true).collect();
+            let mut next = 0usize;
+            while next < graphemes.len() {
+                let mut cut_width = 0usize;
+                let mut taken = 0usize;
+                while let Some(grapheme) = graphemes.get(next) {
+                    let reached = advance(grapheme, cut_width, tab);
+                    if taken > 0 && reached > columns {
+                        break;
+                    }
+                    for c in grapheme.chars() {
+                        place(c, at, row, cut_width);
+                        cut_width = advance(c.encode_utf8(&mut [0; 4]), cut_width, tab);
+                        at += 1;
+                    }
+                    cut_width = reached;
+                    next += 1;
+                    taken += 1;
+                    if cut_width > columns {
+                        break;
+                    }
+                }
+                row += 1;
+            }
+            words.next();
+        }
+    }
+    spots
+}
+
 /// The rows a word wider than the row is cut into, a grapheme at a time, as
 /// the editor cuts it: a grapheme wider than the row still takes a row alone.
 fn glyph_rows(word: &str, columns: usize, tab: u8) -> usize {
@@ -395,6 +546,70 @@ mod tests {
         editor.move_cursor(CursorMove::Bottom);
         editor.move_cursor(CursorMove::End);
         editor.screen_cursor().row + 1
+    }
+
+    /// Where a word-or-glyph editor `columns` wide draws each character of
+    /// `line`, read off what it drew: the cells holding a character's
+    /// symbol, row by row, in the order the text runs.
+    fn drawn_spots(line: &str, columns: u16) -> Vec<(usize, usize)> {
+        use ratatui::widgets::Widget as _;
+        use ratatui_textarea::{TextArea, WrapMode};
+        let mut editor = TextArea::new(vec![line.to_owned()]);
+        editor.set_wrap_mode(WrapMode::WordOrGlyph);
+        editor.set_cursor_style(ratatui::style::Style::new());
+        let area = ratatui::layout::Rect::new(0, 0, columns, 200);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        (&editor).render(area, &mut buffer);
+        let mut spots = Vec::new();
+        let mut cells = (0..area.height).flat_map(|y| (0..area.width).map(move |x| (x, y)));
+        for c in line.chars() {
+            let symbol = c.to_string();
+            let found = cells
+                .by_ref()
+                .find(|&(x, y)| buffer[(x, y)].symbol() == symbol)
+                .expect("every character is drawn");
+            spots.push((usize::from(found.1), usize::from(found.0)));
+        }
+        spots
+    }
+
+    #[test]
+    fn the_cells_spotted_in_the_composer_are_the_cells_its_editor_draws_in() {
+        let lines = [
+            "/review it".to_owned(),
+            format!("{} /review it", "word ".repeat(13)),
+            format!("see {}/review", "x".repeat(30)),
+            "short /a /b /c /d /e /f /g /h /i /j /k".to_owned(),
+        ];
+        for line in &lines {
+            for columns in [7u16, 12, 20, 33, 80] {
+                let all = 0..line.chars().count();
+                let spotted: Vec<(usize, usize)> =
+                    editor_spots(line, usize::from(columns), 4, &[all])
+                        .into_iter()
+                        .map(|(row, column, _)| (row, column))
+                        .collect();
+                let drawn = drawn_spots(line, columns);
+                // Blanks are not looked for on the screen: an empty cell
+                // reads as one too.
+                let visible: Vec<usize> = line
+                    .chars()
+                    .enumerate()
+                    .filter(|(_, c)| !c.is_whitespace())
+                    .map(|(at, _)| at)
+                    .collect();
+                for at in visible {
+                    assert_eq!(
+                        spotted[at], drawn[at],
+                        "{line:?} at {columns}, character {at}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            editor_spots("ab /cd /e", 80, 4, &[3..5, 7..9]),
+            [(0, 3, 1), (0, 4, 1), (0, 7, 1), (0, 8, 1)]
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ use ratatui::widgets::{
     Widget, Wrap,
 };
 
-use niobe_core::event::{Billing, Context, UsageWindow, UsageWindows};
+use niobe_core::event::{Billing, Context, SlashCommand, UsageWindow, UsageWindows};
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
@@ -1347,9 +1347,10 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
     };
     let detail = transcript_detail(app);
     let headings = app.grouped_by_agent().then(|| app.agent_headings());
-    let (entries, drawn) = app.entries_to_draw();
+    let (entries, commands, drawn) = app.entries_to_draw();
     drawn.update(
         entries,
+        commands,
         usize::from(width),
         detail,
         headings.as_deref(),
@@ -1469,7 +1470,75 @@ fn draw_ask_bar(
     ])
     .areas(rest);
     editing(app).render(editor, frame.buffer_mut());
+    if app.finding().is_none() {
+        colour_commands(frame.buffer_mut(), editor, app, theme);
+    }
     frame.render_widget(Paragraph::new(said).style(pane), right);
+}
+
+/// `ranges` of bytes of `line`, in order and apart, as ranges of its
+/// characters, counted in one walk of the line.
+fn in_characters(line: &str, ranges: &[std::ops::Range<usize>]) -> Vec<std::ops::Range<usize>> {
+    let mut counted = (0usize, 0usize);
+    let mut at = |byte: usize| {
+        let (from, chars) = counted;
+        let chars = chars + line.get(from..byte).map_or(0, |part| part.chars().count());
+        counted = (byte, chars);
+        chars
+    };
+    ranges
+        .iter()
+        .map(|range| {
+            let start = at(range.start);
+            start..at(range.end)
+        })
+        .collect()
+}
+
+/// Draws each command the composer names where the backend reads it in the
+/// theme's command colour, over what the editor drew.
+///
+/// The editor draws its text in one style, so the colour goes on after it,
+/// cell by cell, where [`text::editor_spots`] says the name was drawn. Only
+/// while the composer shows its first row: the editor keeps where it has
+/// scrolled to to itself, so in a prompt taller than the box the cells of a
+/// name cannot be known, and nothing is coloured rather than the wrong cells.
+/// A cell the editor drew in anything but the plain text colour — the
+/// cursor, a selection — keeps what it was drawn in.
+fn colour_commands(buffer: &mut ratatui::buffer::Buffer, editor: Rect, app: &App, theme: &Theme) {
+    let commands = app.session().commands();
+    if commands.is_empty() || !app.composer_from_its_top() {
+        return;
+    }
+    let composer = app.composer();
+    let columns = usize::from(editor.width);
+    let tab = composer.tab_length();
+    let mut top = 0usize;
+    for (row, line) in composer.lines().iter().enumerate() {
+        if top >= usize::from(editor.height) {
+            break;
+        }
+        let named = crate::slash::named(line, row == 0, commands);
+        if !named.is_empty() {
+            let chars = in_characters(line, &named);
+            for (down, column, cells) in text::editor_spots(line, columns, tab, &chars) {
+                for across in column..column + cells {
+                    let (Ok(x), Ok(y)) = (u16::try_from(across), u16::try_from(top + down)) else {
+                        continue;
+                    };
+                    if x >= editor.width || y >= editor.height {
+                        continue;
+                    }
+                    if let Some(cell) = buffer.cell_mut((editor.x + x, editor.y + y))
+                        && cell.fg == theme.fg
+                    {
+                        cell.set_fg(theme.command);
+                    }
+                }
+            }
+        }
+        top += text::editor_rows(line, columns, tab);
+    }
 }
 
 /// The columns the bar's right-hand end takes on a pane `width` wide when it
@@ -1762,8 +1831,8 @@ fn draw_transcript(
 
     let detail = transcript_detail(app);
     let headings = app.grouped_by_agent().then(|| app.agent_headings());
-    let (entries, drawn) = app.entries_to_draw();
-    drawn.update(entries, width, detail, headings.as_deref(), theme);
+    let (entries, commands, drawn) = app.entries_to_draw();
+    drawn.update(entries, commands, width, detail, headings.as_deref(), theme);
     let above = drawn.line_count();
     app.keep_view();
     let total = above + question.len();
@@ -1771,7 +1840,7 @@ fn draw_transcript(
     app.measured(total, height);
     app.reveal_found();
     let start = app.scroll().min(total);
-    let (_, drawn) = app.entries_to_draw();
+    let (_, _, drawn) = app.entries_to_draw();
     let mut visible = drawn.lines(start, height);
     if let Some((found, current)) = app.find_marks() {
         mark_found(&mut visible, start, found, current, theme);
@@ -1980,6 +2049,7 @@ impl DrawnEntries {
     fn update(
         &mut self,
         entries: &[Entry],
+        commands: &[SlashCommand],
         width: usize,
         detail: Detail,
         headings: Option<&[(String, String)]>,
@@ -1990,6 +2060,7 @@ impl DrawnEntries {
             grouped: headings.is_some(),
             ..detail
         };
+        let named = commands_key(commands);
         let order = order(entries, headings.is_some());
         self.moved |= self.drawn.len() > order.len();
         self.drawn.truncate(order.len());
@@ -2003,7 +2074,7 @@ impl DrawnEntries {
                     let packed = entries.get(index).is_some_and(is_row) && next_is_row;
                     let key = entries
                         .get(index)
-                        .map_or(0, |entry| drawn_from(entry, width, detail, theme))
+                        .map_or(0, |entry| drawn_from(entry, width, detail, theme, named))
                         ^ u64::from(packed);
                     (key, index, false)
                 }
@@ -2021,7 +2092,7 @@ impl DrawnEntries {
                     let Some(entry) = entries.get(index) else {
                         return Vec::new();
                     };
-                    let mut lines = entry_lines(entry, width, detail, theme);
+                    let mut lines = entry_lines(entry, width, detail, theme, commands);
                     if is_row(entry)
                         && next_is_row
                         && lines.last().is_some_and(|line| line.width() == 0)
@@ -2376,7 +2447,7 @@ fn is_row(entry: &Entry) -> bool {
 /// changes with it ([`Entry::body`]), so its length stands in for it: this is
 /// asked on every frame, and reading a reply of twenty megabytes to answer it
 /// is what an idle shell holding one would otherwise spend its time on.
-fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64 {
+fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme, named: u64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let Entry {
@@ -2403,6 +2474,22 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64
     }
     testing_for(entry, detail.now).hash(&mut hasher);
     theme.hash(&mut hasher);
+    // Only a prompt is drawn naming commands, so a new list lays out only
+    // the prompts again.
+    if matches!(entry.kind, EntryKind::User) {
+        named.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// The commands the backend lists, as one number: what a prompt is drawn
+/// from besides itself.
+fn commands_key(commands: &[SlashCommand]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for command in commands {
+        (&command.name, command.mid_prompt).hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -2909,7 +2996,13 @@ fn key_rows(keys: &[(String, &str)], width: usize, theme: &Theme) -> Vec<Line<'s
 }
 
 /// One transcript entry, wrapped to the pane: a head line and its body.
-fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Vec<Line<'static>> {
+fn entry_lines(
+    entry: &Entry,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+    commands: &[SlashCommand],
+) -> Vec<Line<'static>> {
     if !entry.calls.is_empty() {
         return crate::calls::lines(entry, width, detail, theme);
     }
@@ -2961,7 +3054,7 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
 
     let mut lines = vec![Line::from(head)];
     lines.extend(
-        body_lines(entry, body_width, theme)
+        body_lines(entry, body_width, theme, commands)
             .into_iter()
             .map(|line| {
                 let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
@@ -2977,9 +3070,16 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
 ///
 /// The assistant writes markdown and is drawn from it. The operator's own
 /// words and the shell's notices are shown as typed: a prompt with an asterisk
-/// in it means the asterisk. A tool call carries its whole story on the head
-/// line, so its empty body is no lines at all rather than a blank one.
-fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// in it means the asterisk, though a command it names where the backend
+/// reads one is drawn in the command colour, as it was in the composer. A
+/// tool call carries its whole story on the head line, so its empty body is
+/// no lines at all rather than a blank one.
+fn body_lines(
+    entry: &Entry,
+    width: usize,
+    theme: &Theme,
+    commands: &[SlashCommand],
+) -> Vec<Line<'static>> {
     match entry.kind {
         EntryKind::Agent | EntryKind::SubAgent => {
             crate::markdown::render(entry.body.trim_end(), width, theme)
@@ -2989,7 +3089,23 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
         EntryKind::Turn(_) | EntryKind::Compacted(_) => Vec::new(),
         // The operator's words keep their own colour through the body, so a
         // prompt is found at a glance scrolling back through replies.
-        EntryKind::User => plain_lines(&entry.body, width, theme.user),
+        EntryKind::User => {
+            let body = entry.body.trim_end();
+            let named = crate::slash::named_in_prompt(body, commands);
+            text::wrap_marked(body, width, &named)
+                .into_iter()
+                .map(|pieces| {
+                    let spans: Vec<Span<'static>> = pieces
+                        .into_iter()
+                        .map(|(piece, marked)| match marked {
+                            true => Span::styled(piece, Style::new().fg(theme.command)),
+                            false => Span::styled(piece, Style::new().fg(theme.user)),
+                        })
+                        .collect();
+                    Line::from(spans).style(Style::new().fg(theme.user))
+                })
+                .collect()
+        }
         EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
             plain_lines(&entry.body, width, theme.fg)
         }
@@ -6171,7 +6287,7 @@ mod tests {
                 .entries()
                 .iter()
                 .flat_map(|entry| {
-                    entry_lines(entry, width, Detail::default(), &crate::theme::CLASSIC)
+                    entry_lines(entry, width, Detail::default(), &crate::theme::CLASSIC, &[])
                 })
                 .collect();
             (width, lines)
@@ -7055,8 +7171,8 @@ mod tests {
         edited(&mut app, "after", 2);
 
         let theme = Theme::default();
-        let (entries, drawn) = app.entries_to_draw();
-        drawn.update(entries, 60, Detail::default(), None, &theme);
+        let (entries, commands, drawn) = app.entries_to_draw();
+        drawn.update(entries, commands, 60, Detail::default(), None, &theme);
         let rows: Vec<String> = drawn
             .lines(0, 12)
             .iter()
@@ -7118,8 +7234,15 @@ mod tests {
         let theme = Theme::default();
         let drawn_as = |app: &mut App| -> Vec<String> {
             let headings = app.grouped_by_agent().then(|| app.agent_headings());
-            let (entries, drawn) = app.entries_to_draw();
-            drawn.update(entries, 60, Detail::default(), headings.as_deref(), &theme);
+            let (entries, commands, drawn) = app.entries_to_draw();
+            drawn.update(
+                entries,
+                commands,
+                60,
+                Detail::default(),
+                headings.as_deref(),
+                &theme,
+            );
             drawn
                 .lines(0, 20)
                 .iter()
@@ -7198,7 +7321,7 @@ mod tests {
             };
             app.entries()
                 .iter()
-                .map(|entry| drawn_from(entry, 120, detail, &Theme::default()))
+                .map(|entry| drawn_from(entry, 120, detail, &Theme::default(), 0))
                 .collect()
         };
 
@@ -7217,7 +7340,7 @@ mod tests {
         let keys = |detail: Detail| -> Vec<u64> {
             app.entries()
                 .iter()
-                .map(|entry| drawn_from(entry, 120, detail, &Theme::default()))
+                .map(|entry| drawn_from(entry, 120, detail, &Theme::default(), 0))
                 .collect()
         };
 

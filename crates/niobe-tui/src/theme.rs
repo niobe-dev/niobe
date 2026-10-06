@@ -174,6 +174,10 @@ pub struct Theme {
     pub tool: Color,
     /// Code in the assistant's replies: a code span, a code block.
     pub code: Color,
+    /// A `/` command or skill the backend reads where a prompt names it, in
+    /// the composer and in a sent prompt, so what will run reads apart from
+    /// the words around it.
+    pub command: Color,
 
     /// A dialog's face: the model list, drawn on a
     /// colour of their own so they read as a question laid over the panes
@@ -264,6 +268,7 @@ pub const CLASSIC: Theme = Theme {
     // The body text is Far's light cyan, so code is the white Far's editor
     // keeps for what stands out of it.
     code: Color::White,
+    command: Color::LightMagenta,
 
     dialog_bg: Color::Gray,
     dialog_fg: Color::Black,
@@ -334,6 +339,7 @@ pub const NEO: Theme = Theme {
     // Code stands out from the green prose the way a code span stands out in
     // a rendered page: by being the one thing that is not green.
     code: Color::White,
+    command: Color::White,
 
     // Inverted, so the dialog stands off the black panes: black on green.
     // Nothing is darker than the panes' black, so the shadow only dims what
@@ -405,6 +411,7 @@ pub const CYBER: Theme = Theme {
     agent: Color::LightGreen,
     tool: Color::LightBlue,
     code: Color::LightCyan,
+    command: Color::LightMagenta,
 
     // The dialog takes the magenta the chrome keeps for the operator, so the
     // list reads as the shell asking rather than as the session reporting.
@@ -474,6 +481,7 @@ pub const MODERN: Theme = Theme {
     agent: Color::LightBlue,
     tool: Color::LightMagenta,
     code: Color::LightCyan,
+    command: Color::LightMagenta,
 
     dialog_bg: Color::DarkGray,
     dialog_fg: Color::White,
@@ -560,6 +568,7 @@ pub const NEO_TRUE: Theme = Theme {
     agent: hex(0x00ff41),
     tool: hex(0x7cff9e),
     code: hex(0xd4ff00),
+    command: hex(0xffffff),
 
     dialog_bg: hex(0x0a2211),
     dialog_fg: hex(0x9bffb0),
@@ -614,6 +623,7 @@ pub const CYBER_TRUE: Theme = Theme {
     agent: hex(0x39ff7a),
     tool: hex(0xb9c1ff),
     code: hex(0xffd23f),
+    command: hex(0xff2bd6),
 
     dialog_bg: hex(0x16121f),
     dialog_fg: hex(0xe6e9ff),
@@ -664,6 +674,7 @@ pub const MODERN_TRUE: Theme = Theme {
     agent: hex(0x4fc1ff),
     tool: hex(0xc586c0),
     code: hex(0x9cdcfe),
+    command: hex(0xc586c0),
 
     dialog_bg: hex(0x323233),
     dialog_fg: hex(0xcccccc),
@@ -748,7 +759,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 36] {
+    fn colours(t: &Theme) -> [Color; 37] {
         [
             t.pane_bg,
             t.frame,
@@ -778,6 +789,7 @@ mod tests {
             t.agent,
             t.tool,
             t.code,
+            t.command,
             t.dialog_bg,
             t.dialog_fg,
             t.dialog_frame,
@@ -841,6 +853,7 @@ mod tests {
                 (t.agent, t.pane_bg, "an assistant message"),
                 (t.tool, t.pane_bg, "a tool call"),
                 (t.code, t.pane_bg, "code in a reply"),
+                (t.command, t.pane_bg, "a command named in a prompt"),
                 (t.menu_fg, t.menu_bg, "the menu bar"),
                 (t.hot, t.menu_bg, "a menu hot key"),
                 (t.pulldown_fg, t.menu_bg, "an open menu's item"),
@@ -1096,6 +1109,7 @@ mod tests {
                 (t.agent, t.pane_bg, "an assistant message"),
                 (t.tool, t.pane_bg, "a tool call"),
                 (t.code, t.pane_bg, "code in a reply"),
+                (t.command, t.pane_bg, "a command named in a prompt"),
                 (t.fg, t.diff_bg, "a diff's unchanged line"),
                 (t.add, t.add_bg, "a diff's added line"),
                 (t.del, t.del_bg, "a diff's removed line"),
@@ -1158,6 +1172,7 @@ mod tests {
                 (t.agent, t.del, "a running agent and a failed one"),
                 (t.tool, t.del, "a tool call and a failed one"),
                 (t.fg, t.warn, "a usage window and one running low"),
+                (t.command, t.fg, "a command named in a prompt and its words"),
                 (t.warn, t.del, "a usage window running low and one run out"),
             ] {
                 assert_ne!(one, other, "{}: {what} are one colour", t.name);

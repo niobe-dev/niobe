@@ -67,6 +67,72 @@ pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Slas
     })
 }
 
+/// Where `line` names a command the backend reads there, each as the byte
+/// range of its `/` and its name.
+///
+/// A name counts only whole, as the backend lists it, and only where a `/`
+/// starts a word: at the start of `line` where it `opens_prompt`, any listed
+/// command; at the start of any other word, one the backend takes mid-prompt.
+/// So an unlisted `/word` and a path are never named. Where two listed names
+/// both fit, as `server:prompt` and `server:prompt (MCP)` would, the longer
+/// is the one read.
+pub(crate) fn named(
+    line: &str,
+    opens_prompt: bool,
+    commands: &[SlashCommand],
+) -> Vec<std::ops::Range<usize>> {
+    if commands.is_empty() {
+        return Vec::new();
+    }
+    line.match_indices('/')
+        .filter(|(at, _)| {
+            line[..*at]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+        })
+        .filter_map(|(at, _)| {
+            let rest = &line[at + 1..];
+            let opening = opens_prompt && at == 0;
+            let length = commands
+                .iter()
+                .filter(|command| opening || command.mid_prompt)
+                .map(|command| command.name.as_str())
+                .filter(|name| {
+                    !name.is_empty()
+                        && rest.starts_with(name)
+                        && rest[name.len()..]
+                            .chars()
+                            .next()
+                            .is_none_or(char::is_whitespace)
+                })
+                .map(str::len)
+                .max()?;
+            Some(at..at + 1 + length)
+        })
+        .collect()
+}
+
+/// Where `prompt`, as sent, names a command the backend read: [`named`] for
+/// each of its lines, the first of which opens it, as byte ranges of the
+/// whole prompt.
+pub(crate) fn named_in_prompt(
+    prompt: &str,
+    commands: &[SlashCommand],
+) -> Vec<std::ops::Range<usize>> {
+    let mut start = 0;
+    let mut ranges = Vec::new();
+    for line in prompt.split('\n') {
+        ranges.extend(
+            named(line, start == 0, commands)
+                .into_iter()
+                .map(|range| range.start + start..range.end + start),
+        );
+        start += line.len() + 1;
+    }
+    ranges
+}
+
 /// The model a prompt asks the session to move to, where the prompt is the
 /// backend's `/model` command with one name after it and nothing else.
 ///
@@ -255,5 +321,46 @@ mod tests {
             .collect();
 
         assert_eq!(names, ["Review", "review-pr", "pre-review"]);
+    }
+
+    #[test]
+    fn a_listed_command_is_named_where_the_backend_reads_it_and_nowhere_else() {
+        let commands = [
+            command("compact"),
+            SlashCommand {
+                mid_prompt: true,
+                ..command("review")
+            },
+            command("server:prompt (MCP)"),
+        ];
+        assert_eq!(named("/compact now", true, &commands), vec![(0..8)]);
+        assert_eq!(
+            named("/compact now", false, &commands),
+            [],
+            "a later line is not where a command is read"
+        );
+        assert_eq!(named("then /compact", true, &commands), []);
+        assert_eq!(
+            named("use /review and /review", true, &commands),
+            [4..11, 16..23]
+        );
+        assert_eq!(
+            named("/server:prompt (MCP) go", true, &commands),
+            vec![(0..20)]
+        );
+        for unnamed in [
+            "/comp",
+            "/compacted",
+            "/usr/bin",
+            "src/review",
+            "/review/x",
+            "see /etc",
+        ] {
+            assert_eq!(named(unnamed, true, &commands), [], "{unnamed}");
+        }
+        assert_eq!(
+            named_in_prompt("/compact\n/compact and /review", &commands),
+            [0..8, 22..29]
+        );
     }
 }

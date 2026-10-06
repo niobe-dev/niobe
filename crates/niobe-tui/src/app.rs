@@ -4283,6 +4283,13 @@ impl App {
         self.composer_scrolled = false;
     }
 
+    /// Whether the composer is drawn from its first row, as it is wherever
+    /// the box holds every row it wraps to and no selection keeps it
+    /// scrolled.
+    pub fn composer_from_its_top(&self) -> bool {
+        !self.composer_scrolled
+    }
+
     /// What the last frame drew the session pane as, so the mouse can tell it
     /// from the panes beside it.
     pub fn measured_session(&mut self, area: ratatui::layout::Rect) {
@@ -4482,10 +4489,13 @@ impl App {
         &self.entries
     }
 
-    /// The entries together with what the last draw made of them, for the
+    /// The entries together with the commands the backend lists, which a
+    /// prompt is drawn naming, and what the last draw made of them, for the
     /// draw to reuse.
-    pub(crate) fn entries_to_draw(&mut self) -> (&[Entry], &mut crate::ui::DrawnEntries) {
-        (&self.entries, &mut self.drawn)
+    pub(crate) fn entries_to_draw(
+        &mut self,
+    ) -> (&[Entry], &[SlashCommand], &mut crate::ui::DrawnEntries) {
+        (&self.entries, self.session.commands(), &mut self.drawn)
     }
 
     /// The composer widget, for the draw.
