@@ -31,7 +31,7 @@ use common::{
     at_work, metered_session, paint, running_session, screen, session_whose_turn_total_differs,
     session_with_a_long_write, session_with_a_markdown_reply, session_with_a_tab_indented_reply,
     session_with_finished_turns, session_with_test_records, session_with_two_agents_at_work,
-    style_at, styles, unmetered_session,
+    style_at, styles, styles_at, unmetered_session,
 };
 use niobe_core::event::{
     AgentId, Backend, Event, Mode, PermissionDecision, Usage, UsageWindow, UsageWindows,
@@ -131,6 +131,58 @@ fn every_theme_paints_the_shell_at_both_sizes() {
             assert_snapshot(
                 &format!("{name}-{width}x{height}"),
                 &paint(&mut running_session().with_theme(theme), width, height),
+            );
+        }
+    }
+}
+
+/// What the agent says reads brighter than what it ran: in every theme and
+/// at every depth, what a call does is drawn in the dim colour, the reply in
+/// the body text's, and the operator's prompt in their own colour, so the
+/// three are told apart at a glance.
+#[test]
+fn every_theme_draws_the_calls_dimmer_than_the_reply_and_the_prompt_apart() {
+    for theme in THEMES {
+        for depth in [Depth::Sixteen, Depth::TrueColour] {
+            let palette = theme.at(depth);
+            let mut app = running_session().with_depth(depth).with_theme(theme);
+            let fg = |style: Option<ratatui::style::Style>| style.and_then(|style| style.fg);
+            let name = palette.name;
+            assert_eq!(
+                fg(style_at(&mut app, 200, 60, "Reading catalog/fetch.ts")),
+                Some(palette.fg),
+                "{name} at {depth:?}: the reply"
+            );
+            assert_eq!(
+                fg(style_at(
+                    &mut app,
+                    200,
+                    60,
+                    "catalog/fetch.ts, catalog/cache.ts"
+                )),
+                Some(palette.dim),
+                "{name} at {depth:?}: what a group of calls does"
+            );
+            assert_eq!(
+                fg(style_at(&mut app, 200, 60, "catalog/fetch.ts    ")),
+                Some(palette.dim),
+                "{name} at {depth:?}: what one call of the group does"
+            );
+            assert_eq!(
+                fg(style_at(&mut app, 200, 60, "npm test -- fetch")),
+                Some(palette.dim),
+                "{name} at {depth:?}: what a failed call ran"
+            );
+            assert_eq!(
+                fg(style_at(&mut app, 200, 60, "✗ Bash")),
+                Some(palette.del),
+                "{name} at {depth:?}: a failed call keeps its failure colour"
+            );
+            let prompt = styles_at(&mut app, 200, 60, "add etag support");
+            assert_eq!(
+                fg(prompt.last().copied()),
+                Some(palette.user),
+                "{name} at {depth:?}: the prompt, under the pane's title that repeats it"
             );
         }
     }

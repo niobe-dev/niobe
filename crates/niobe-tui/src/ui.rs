@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -2855,13 +2855,24 @@ fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> 
         }
         // The rule carries its figures on its one line and has no body.
         EntryKind::Turn(_) => Vec::new(),
-        EntryKind::User | EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
-            text::wrap(entry.body.trim_end(), width)
-                .into_iter()
-                .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.fg)))
-                .collect()
+        // The operator's words keep their own colour through the body, so a
+        // prompt is found at a glance scrolling back through replies.
+        EntryKind::User => plain_lines(&entry.body, width, theme.user),
+        EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
+            plain_lines(&entry.body, width, theme.fg)
         }
     }
+}
+
+/// Text shown as typed, wrapped to `width`, in `colour`.
+///
+/// The colour is on each span rather than on the line, because the entry's
+/// lines are rebuilt behind a gutter from their spans alone.
+fn plain_lines(body: &str, width: usize, colour: Color) -> Vec<Line<'static>> {
+    text::wrap(body.trim_end(), width)
+        .into_iter()
+        .map(|wrapped| Line::from(Span::styled(wrapped, Style::new().fg(colour))))
+        .collect()
 }
 
 /// The rows the Usage pane needs: its frame, whatever windows the session has

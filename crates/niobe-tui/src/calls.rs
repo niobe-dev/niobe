@@ -293,9 +293,11 @@ fn group(
 /// One call of a group: hung from the group's row, what it does, and its own
 /// cost on the right.
 fn child(branch: &str, call: &Call, width: usize, detail: Detail, theme: &Theme) -> Line<'static> {
+    // What a call does is machinery, drawn dim beside the replies, unless
+    // it failed: a failure is never the thing that recedes.
     let colour = match call.failed() {
         true => theme.del,
-        false => theme.fg,
+        false => theme.dim,
     };
     let lead = " ".repeat(GUTTER);
     let result = result(call, theme);
@@ -405,7 +407,7 @@ fn printed_lines(
         }
         parts
             .into_iter()
-            .map(|part| Line::from(Span::styled(part, Style::new().fg(theme.fg))))
+            .map(|part| Line::from(Span::styled(part, Style::new().fg(theme.dim))))
     }));
     if lines.is_empty() && !call.running() {
         lines.push(Line::from(Span::styled("printed nothing", dim.italic())));
@@ -724,7 +726,10 @@ fn row(
             Style::new().fg(theme.dim),
         ));
     }
-    spans.push(Span::styled(what, Style::new().fg(theme.fg)));
+    // What the call does is drawn dim, so the agent's replies, in the body
+    // text's colour, are what the eye finds first; a failure says so in the
+    // glyph and the name.
+    spans.push(Span::styled(what, Style::new().fg(theme.dim)));
     spans.push(Span::raw(" ".repeat(gap)));
     spans.extend(result);
     Line::from(spans)
@@ -762,7 +767,13 @@ pub(crate) fn said(
     let span = columns.name.max(NAME_LEAST) + 1 + columns.agent;
     let lead = (span.max(text::width(tag)) + 1).min(width / 2);
     let room = width.saturating_sub(GUTTER + lead + GAP + text::width(SAYS));
-    let body = crate::markdown::render(entry.body.trim_end(), room.max(1), theme);
+    // A sub-agent's words are its report to the agent, not the agent's to
+    // the operator, so they are drawn dim with the calls they sit among.
+    let muted = Theme {
+        fg: theme.dim,
+        ..*theme
+    };
+    let body = crate::markdown::render(entry.body.trim_end(), room.max(1), &muted);
     let tag = text::truncate(tag, lead.saturating_sub(1));
     let indent = " ".repeat(GUTTER + lead);
 

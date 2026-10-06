@@ -1074,6 +1074,26 @@ pub fn style_at(app: &mut App, width: u16, height: u16, text: &str) -> Option<St
     })
 }
 
+/// Draws one frame and returns the style of the first cell of every place
+/// `text` appears on it, reading row by row: where [`style_at`] finds a
+/// pane's title, this also finds the line under it that says the same.
+pub fn styles_at(app: &mut App, width: u16, height: u16, text: &str) -> Vec<Style> {
+    let terminal = drawn(app, width, height);
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .flat_map(|y| {
+            let row: Vec<&Cell> = (0..buffer.area.width)
+                .filter_map(|x| buffer.cell((x, y)))
+                .collect();
+            let symbols: Vec<&str> = row.iter().map(|cell| cell.symbol()).collect();
+            (0..row.len())
+                .filter(|&x| symbols[x..].concat().starts_with(text))
+                .map(|x| row[x].style())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn drawn(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("a test backend cannot fail");

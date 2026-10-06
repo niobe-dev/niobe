@@ -133,7 +133,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   table, rows with nothing under them on consecutive lines, a run of calls to one tool as one
   group that Ctrl+O folds, edits to the agent's own notes as one `updated memory` row whose
   lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
-  grouped under a heading per agent, `tags.rs` names each sub-agent by one short word of the kind of agent
+  grouped under a heading per agent — what a call does, what it printed and a sub-agent's words
+  drawn dim, so the replies in the body colour and the prompts in the operator's are what the
+  eye finds, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
   it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow. A dialog, and a

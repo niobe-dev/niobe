@@ -105,9 +105,10 @@ pub struct Theme {
     pub frame_focus: Color,
     /// Pane titles.
     pub title: Color,
-    /// Body text.
+    /// Body text: the agent's replies, the brightest text in the transcript.
     pub fg: Color,
-    /// Labels and anything secondary.
+    /// Labels and anything secondary, and the machinery under the replies:
+    /// what each tool call does, what a command printed, a sub-agent's words.
     pub dim: Color,
     /// The accent: hot keys, the session cost, the selected item.
     pub hot: Color,
@@ -168,7 +169,8 @@ pub struct Theme {
     pub user: Color,
     /// The assistant's messages.
     pub agent: Color,
-    /// Tool calls.
+    /// A tool call's glyph and name: an accent of their own, never the
+    /// body text's colour, so a call does not read as a reply.
     pub tool: Color,
     /// Code in the assistant's replies: a code span, a code block.
     pub code: Color,
@@ -324,7 +326,11 @@ pub const NEO: Theme = Theme {
 
     user: Color::White,
     agent: Color::LightGreen,
-    tool: Color::Green,
+    // Not the plain green: that is what is secondary, which is what a call's
+    // own words are drawn in, and its name has to stand off them. Cyan is the
+    // nearest of the sixteen that is not a green, and the plain one, so the
+    // name stays quieter than the agent's bright green.
+    tool: Color::Cyan,
     // Code stands out from the green prose the way a code span stands out in
     // a rendered page: by being the one thing that is not green.
     code: Color::White,
@@ -882,6 +888,44 @@ mod tests {
         for t in every_palette() {
             assert_ne!(t.user, t.agent, "{}", t.name);
             assert_ne!(t.agent, t.del, "{}", t.name);
+        }
+    }
+
+    /// The transcript has four voices — the operator, the agent, the calls
+    /// it made and everything secondary — and a reader scrolling back tells
+    /// them apart by colour alone, so no two share one. A tool's name is the
+    /// machinery's accent and is never drawn as the reply's own text colour.
+    #[test]
+    fn every_theme_draws_the_transcripts_four_voices_in_four_colours() {
+        for t in every_palette() {
+            let voices = [
+                ("user", t.user),
+                ("agent", t.agent),
+                ("tool", t.tool),
+                ("dim", t.dim),
+            ];
+            for (at, (one, a)) in voices.iter().enumerate() {
+                for (other, b) in &voices[at + 1..] {
+                    assert_ne!(a, b, "{}: {one} and {other} are one colour", t.name);
+                }
+            }
+            assert_ne!(t.tool, t.fg, "{}: a tool reads as a reply", t.name);
+        }
+    }
+
+    /// On a deep terminal "not the reply's colour" is not enough: a tool's
+    /// name a shade off the body text still reads as loud as it. It is
+    /// drawn darker than the reply, so what the agent ran recedes behind
+    /// what it said.
+    #[test]
+    fn every_truecolor_palette_draws_a_tool_darker_than_a_reply() {
+        for theme in [CYBER, NEO, MODERN] {
+            let t = theme.at(Depth::TrueColour);
+            assert!(
+                contrast(t.tool, t.pane_bg) < contrast(t.fg, t.pane_bg),
+                "{}: a tool is as bright as a reply",
+                t.name
+            );
         }
     }
 
