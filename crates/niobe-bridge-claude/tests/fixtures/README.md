@@ -361,6 +361,44 @@ What it settles:
   with `num_turns: 0` and `total_cost_usd: 0`. `tests/stream.rs` expects one
   turn of zero tokens whose reply is that output.
 
+## `skill-mid-prompt.jsonl`
+
+Two turns that each name one of the repository's own commands in the middle
+of the prompt, recorded from Claude Code 2.1.288 on 4 October 2026 with
+`--setting-sources project` and `--model sonnet`, in an otherwise empty
+directory holding a skill, `.claude/skills/shout/SKILL.md`, and a command,
+`.claude/commands/whisper.md`. The session sent the `initialize` request the
+driver sends, then `please use /shout on the word hello` and `please run
+/whisper on the word BYE`. The lines are the CLI's own, in the order it
+printed them. The only edits: the answer to `initialize` cut to its
+`commands` — four of the 57, the skill, the command, one skill the CLI
+bundles (`simplify`) and one command of its own (`compact`) — and the keys
+that say what state the session is in; `system`/`init` cut down to the keys
+that say what ran and its `slash_commands` and `skills` to the same four, its
+`cwd` and the skill's base directory rewritten to `/repo`; and a
+`commands_changed` dropped from the first turn, which added a prompt of an
+MCP server the recording machine's account connects to and nothing else.
+
+What it settles, and what `tests/stream.rs` expects of it:
+
+- **A command named mid-prompt is read by the model, not by the CLI.** In
+  both turns the model's first message is a `Skill` tool call naming it —
+  `{"skill":"shout","args":"hello"}` and `{"skill":"whisper","args":"BYE"}` —
+  whose result is `Launching skill: <name>`, followed by a synthetic `user`
+  message (`isSynthetic: true`) carrying the skill's text and its arguments.
+  The reply follows that text: `SHOUTED: HELLO`, `WHISPERED: bye`. In a run
+  recorded the same way and not kept, `/shout goodbye` opening the prompt was
+  expanded by the CLI itself, with no `Skill` call.
+- **The command list does not say which entries the model can run.** It marks
+  `builtin: true` on what the CLI ships, and that covers the skills it bundles
+  (`simplify`) as well as its own commands (`compact`); neither the skill nor
+  the command of the repository's own carries the key. `skills` on `init`
+  names `shout` and `simplify` and not `whisper`, which the model ran all the
+  same, and it arrives only with the first turn. So the translator marks as
+  honoured mid-prompt exactly what carries no `builtin` and is not an MCP
+  prompt — every entry it marks was run that way here — and the test expects
+  `shout` and `whisper` marked and the other two not.
+
 ## `clear-command.jsonl`, `model-command.jsonl`, `compact-command.jsonl`
 
 Three sessions that each run one of the CLI's commands that change the session

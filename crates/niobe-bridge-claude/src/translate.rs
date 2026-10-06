@@ -2856,6 +2856,7 @@ fn listed_as_offered(commands: Vec<wire::Command>, unavailable: &[String]) -> Ev
             .into_iter()
             .filter(|command| !unavailable.contains(&command.name))
             .map(|command| SlashCommand {
+                mid_prompt: honoured_mid_prompt(&command),
                 name: command.name,
                 description: command.description,
                 argument_hint: command.argument_hint.filter(|hint| !hint.trim().is_empty()),
@@ -2880,6 +2881,21 @@ fn offered_models(models: Vec<wire::Model>) -> Event {
             })
             .collect(),
     }
+}
+
+/// Whether the CLI takes `command` named anywhere in a prompt, rather than
+/// only where the prompt opens with it.
+///
+/// Recorded in `tests/fixtures/skill-mid-prompt.jsonl`: a skill and a command
+/// of the repository's own, each named mid-prompt, were run by the model
+/// through its `Skill` tool. What the CLI ships itself is left out, though
+/// the skills it bundles would be taken too: it marks them `builtin` just as
+/// it marks `/compact`, which the model cannot run, and the one list that
+/// tells a skill from a command (`skills` on `init`) arrives only once the
+/// first turn starts. An MCP server's prompt, named `<server>:<prompt> (MCP)`,
+/// is the CLI's to expand at the start of a prompt and is no skill.
+fn honoured_mid_prompt(command: &wire::Command) -> bool {
+    !command.builtin && !command.name.ends_with(" (MCP)")
 }
 
 /// The windows one `rate_limit_event` reported.

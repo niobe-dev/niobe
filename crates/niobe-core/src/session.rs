@@ -3280,6 +3280,7 @@ mod tests {
             name: name.to_owned(),
             description: format!("what /{name} does"),
             argument_hint: None,
+            mid_prompt: false,
         }
     }
 

@@ -286,6 +286,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 name: format!("rev{p}"),
                 description: format!("desc {p}"),
                 argument_hint: Some(format!("[{p}]")),
+                mid_prompt: false,
             }],
         }]);
         typed(&mut app, "//re");

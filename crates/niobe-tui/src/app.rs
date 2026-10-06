@@ -4571,30 +4571,34 @@ impl App {
         let lines = self.composer.lines();
         let word = crate::mention::at_cursor(lines, (row, column))
             .map(|mention| (mention.row, mention.at))
-            .or_else(|| crate::slash::at_cursor(lines, (row, column)).map(|_| (0, 0)));
+            .or_else(|| {
+                crate::slash::at_cursor(lines, (row, column)).map(|slash| (slash.row, slash.at))
+            });
         if word != self.offer_closed {
             self.offer_closed = None;
         }
     }
 
-    /// What has been typed after the `/` that opens the prompt, while the
-    /// list of the backend's commands for it is open.
-    fn slash(&self) -> Option<String> {
-        if !self.typing_a_prompt() || self.offer_closed == Some((0, 0)) {
+    /// The `/` word the cursor is at the end of, while the list of the
+    /// backend's commands for it is open: only while the operator is typing
+    /// into the composer, and not for a word the list was closed for.
+    fn slash(&self) -> Option<crate::slash::Slash> {
+        if !self.typing_a_prompt() {
             return None;
         }
         let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
         crate::slash::at_cursor(self.composer.lines(), (row, column))
+            .filter(|slash| self.offer_closed != Some((slash.row, slash.at)))
     }
 
-    /// The backend's commands the `/` that opens the prompt could name, and
+    /// The backend's commands the `/` word at the cursor could name, and
     /// which of them Enter would take. Empty where no list is open, which is
-    /// also where the backend has listed none.
+    /// also where the backend has listed nothing that can be named there.
     pub fn offered_commands(&self) -> (Vec<&SlashCommand>, usize) {
-        let Some(typed) = self.slash() else {
+        let Some(slash) = self.slash() else {
             return (Vec::new(), 0);
         };
-        let commands = crate::slash::candidates(self.session.commands(), &typed, MENTION_ROWS);
+        let commands = crate::slash::candidates(self.session.commands(), &slash, MENTION_ROWS);
         let selected = self.offer_selected.min(commands.len().saturating_sub(1));
         (commands, selected)
     }
@@ -4613,7 +4617,7 @@ impl App {
         // A command already typed in full, as the backend spells it, has
         // nothing left to pick: Enter sends it, as it does in the CLI itself.
         if (key.code, key.modifiers) == (KeyCode::Enter, KeyModifiers::NONE)
-            && self.slash().as_deref() == Some(chosen.as_str())
+            && self.slash().is_some_and(|slash| slash.typed == chosen)
         {
             return false;
         }
@@ -4625,19 +4629,21 @@ impl App {
                 self.offer_selected = (selected + 1) % count;
             }
             (KeyCode::Tab | KeyCode::Enter, KeyModifiers::NONE) => self.name_command(&chosen),
-            (KeyCode::Esc, _) => self.offer_closed = Some((0, 0)),
+            (KeyCode::Esc, _) => {
+                self.offer_closed = self.slash().map(|slash| (slash.row, slash.at));
+            }
             _ => return false,
         }
         true
     }
 
-    /// Replaces what was typed after the opening `/` with `name`, and a space
-    /// after it for what the command takes.
+    /// Replaces what was typed after the `/` at the cursor with `name`, and a
+    /// space after it for what the command takes.
     fn name_command(&mut self, name: &str) {
-        let Some(typed) = self.slash() else {
+        let Some(slash) = self.slash() else {
             return;
         };
-        for _ in typed.chars() {
+        for _ in slash.typed.chars() {
             self.composer.delete_char();
         }
         self.composer.insert_str(format!("{name} "));
@@ -8143,6 +8149,7 @@ mod tests {
                 name: "model".to_owned(),
                 description: String::new(),
                 argument_hint: None,
+                mid_prompt: false,
             }],
         });
         app
@@ -12088,6 +12095,7 @@ mod tests {
                     name: (*name).to_owned(),
                     description: String::new(),
                     argument_hint: None,
+                    mid_prompt: false,
                 })
                 .collect(),
         });

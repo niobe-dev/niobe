@@ -10,29 +10,61 @@
 //! which word of the prompt names a command and which of the listed commands
 //! it could be.
 //!
-//! Only the start of the prompt names one: that is the only place the backend
-//! reads a command from. The transcript is searched with Ctrl+F rather than
-//! `/`, so a prompt opens with a command the way it does in the CLI itself.
+//! A `/` that opens the prompt can name any of them: that is where the backend
+//! reads a command from. A `/` that starts a word anywhere else — after a
+//! blank, or at the start of a later line — can name only what the backend
+//! takes there, which for the `claude` CLI is a skill the model runs through
+//! its own `Skill` tool ([`SlashCommand::mid_prompt`]); `/compact` in the middle
+//! of a prompt is just text. A `/` inside a word, as in a path, names nothing.
+//! The transcript is searched with Ctrl+F rather than `/`, so a prompt opens
+//! with a command the way it does in the CLI itself.
 
 use niobe_core::event::SlashCommand;
 
-/// What has been typed after the `/` that opens the prompt, where the cursor
-/// is at the end of that first word.
-pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<String> {
+/// The `/` word the cursor is at the end of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Slash {
+    /// The line of the prompt it is on.
+    pub(crate) row: usize,
+    /// The column of its `/`, in characters.
+    pub(crate) at: usize,
+    /// What has been typed after the `/`, up to the cursor.
+    pub(crate) typed: String,
+}
+
+impl Slash {
+    /// Whether the `/` opens the prompt, which is the one place a command
+    /// the backend runs itself is read from.
+    pub(crate) fn opens_the_prompt(&self) -> bool {
+        (self.row, self.at) == (0, 0)
+    }
+
+    /// Whether `command` can be named where this `/` is.
+    pub(crate) fn can_name(&self, command: &SlashCommand) -> bool {
+        self.opens_the_prompt() || command.mid_prompt
+    }
+}
+
+/// The `/` word the cursor at `cursor` — a line and a column in characters —
+/// is at the end of, where the `/` starts a word and nothing typed after it
+/// is a `/` too.
+///
+/// Only the word is read, back from the cursor to the blank before it, so a
+/// key typed into a long prompt does not walk the whole of it.
+pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Slash> {
     let (row, column) = cursor;
-    if row != 0 {
+    let line = lines.get(row)?;
+    let before = line.get(..crate::mention::byte_of_column(line, column)?)?;
+    let word = before.rsplit(char::is_whitespace).next()?;
+    let typed = word.strip_prefix('/')?;
+    if typed.contains('/') {
         return None;
     }
-    let length = column.checked_sub(1)?;
-    let after = lines.first()?.strip_prefix('/')?;
-    // Only the first word is read, so a key typed into a long prompt does
-    // not walk the whole of it.
-    let typed: String = after
-        .chars()
-        .take(length)
-        .take_while(|c| !c.is_whitespace())
-        .collect();
-    (typed.chars().count() == length).then_some(typed)
+    Some(Slash {
+        row,
+        at: column - word.chars().count(),
+        typed: typed.to_owned(),
+    })
 }
 
 /// The model a prompt asks the session to move to, where the prompt is the
@@ -57,7 +89,7 @@ pub(crate) fn model_named(prompt: &str, commands: &[SlashCommand]) -> Option<Str
         .then(|| model.to_owned())
 }
 
-/// Up to `limit` of `commands` that `typed` could name.
+/// Up to `limit` of the `commands` the `/` word `slash` could name.
 ///
 /// A command matches when its name holds what was typed, ignoring case. One
 /// whose name is what was typed comes first, so that Enter on a name typed in
@@ -66,13 +98,14 @@ pub(crate) fn model_named(prompt: &str, commands: &[SlashCommand]) -> Option<Str
 /// in everywhere else.
 pub(crate) fn candidates<'a>(
     commands: &'a [SlashCommand],
-    typed: &str,
+    slash: &Slash,
     limit: usize,
 ) -> Vec<&'a SlashCommand> {
-    let typed = typed.to_lowercase();
+    let typed = slash.typed.to_lowercase();
     let mut ranked: Vec<(u8, usize, &SlashCommand)> = commands
         .iter()
         .enumerate()
+        .filter(|(_, command)| slash.can_name(command))
         .filter_map(|(at, command)| {
             let name = command.name.to_lowercase();
             let rank = if name == typed {
@@ -108,32 +141,84 @@ mod tests {
             name: name.to_owned(),
             description: String::new(),
             argument_hint: None,
+            mid_prompt: false,
+        }
+    }
+
+    fn typed(text: &str, cursor: (usize, usize)) -> Option<String> {
+        at_cursor(&lines(text), cursor).map(|slash| slash.typed)
+    }
+
+    fn opening(typed: &str) -> Slash {
+        Slash {
+            row: 0,
+            at: 0,
+            typed: typed.to_owned(),
         }
     }
 
     #[test]
     fn a_slash_that_opens_the_prompt_is_a_command_being_named() {
-        assert_eq!(at_cursor(&lines("/comp"), (0, 5)), Some("comp".to_owned()));
-        assert_eq!(at_cursor(&lines("/"), (0, 1)), Some(String::new()));
+        assert_eq!(at_cursor(&lines("/comp"), (0, 5)), Some(opening("comp")));
+        assert_eq!(typed("/", (0, 1)), Some(String::new()));
         assert_eq!(
-            at_cursor(&lines("/code-review-graph:review"), (0, 25)),
+            typed("/code-review-graph:review", (0, 25)),
             Some("code-review-graph:review".to_owned())
         );
     }
 
     #[test]
-    fn a_slash_anywhere_else_or_behind_the_cursor_is_not() {
-        assert_eq!(at_cursor(&lines("see /etc"), (0, 8)), None);
-        assert_eq!(at_cursor(&lines("/compact now"), (0, 12)), None);
-        assert_eq!(at_cursor(&lines("first\n/second"), (1, 7)), None);
-        assert_eq!(at_cursor(&lines("no slash"), (0, 8)), None);
+    fn a_slash_that_starts_a_word_further_on_is_named_where_it_stands() {
+        let slash = at_cursor(&lines("fix it with /rev"), (0, 16)).expect("a slash word");
+        assert_eq!((slash.row, slash.at, slash.typed.as_str()), (0, 12, "rev"));
+        assert!(!slash.opens_the_prompt());
+
+        let slash = at_cursor(&lines("first\n/second"), (1, 7)).expect("a slash word");
+        assert_eq!((slash.row, slash.at), (1, 0));
+        assert!(
+            !slash.opens_the_prompt(),
+            "a later line is the middle of the prompt"
+        );
+        assert_eq!(typed("see\t/etc", (0, 8)), Some("etc".to_owned()));
+    }
+
+    #[test]
+    fn a_slash_inside_a_word_or_behind_the_cursor_is_not() {
+        assert_eq!(typed("src/a/b", (0, 7)), None);
+        assert_eq!(typed("see /etc/hosts", (0, 14)), None, "a path");
+        assert_eq!(typed("/compact now", (0, 12)), None);
+        assert_eq!(typed("no slash", (0, 8)), None);
     }
 
     #[test]
     fn a_command_is_read_up_to_the_cursor_in_characters() {
-        assert_eq!(at_cursor(&lines("/rév now"), (0, 3)), Some("ré".to_owned()));
-        assert_eq!(at_cursor(&lines("/rév"), (0, 0)), None);
-        assert_eq!(at_cursor(&lines("/ré"), (0, 4)), None, "past the line");
+        assert_eq!(typed("/rév now", (0, 3)), Some("ré".to_owned()));
+        assert_eq!(typed("/rév", (0, 0)), None);
+        assert_eq!(typed("/ré", (0, 4)), None, "past the line");
+        assert_eq!(typed("é /rév", (0, 5)), Some("ré".to_owned()));
+    }
+
+    #[test]
+    fn mid_prompt_only_what_the_backend_takes_there_is_offered() {
+        let commands = [
+            command("compact"),
+            SlashCommand {
+                mid_prompt: true,
+                ..command("compare")
+            },
+        ];
+        let names = |slash: &Slash| -> Vec<&str> {
+            candidates(&commands, slash, 10)
+                .into_iter()
+                .map(|command| command.name.as_str())
+                .collect()
+        };
+        assert_eq!(names(&opening("comp")), ["compact", "compare"]);
+        let further = Slash {
+            at: 4,
+            ..opening("comp")
+        };
+        assert_eq!(names(&further), ["compare"]);
     }
 
     #[test]
@@ -145,7 +230,7 @@ mod tests {
             command("fast"),
         ];
         let names = |typed: &str, limit: usize| -> Vec<String> {
-            candidates(&commands, typed, limit)
+            candidates(&commands, &opening(typed), limit)
                 .into_iter()
                 .map(|command| command.name.clone())
                 .collect()
@@ -164,7 +249,7 @@ mod tests {
             command("Review"),
             command("pre-review"),
         ];
-        let names: Vec<&str> = candidates(&commands, "review", 10)
+        let names: Vec<&str> = candidates(&commands, &opening("review"), 10)
             .into_iter()
             .map(|command| command.name.as_str())
             .collect();

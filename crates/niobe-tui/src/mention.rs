@@ -63,7 +63,7 @@ fn nameable(path: &str) -> bool {
 /// a column is a byte, is answered without walking its characters; nothing
 /// here copies the line, which would cost its length in allocations for
 /// every key typed into it.
-fn byte_of_column(line: &str, column: usize) -> Option<usize> {
+pub(crate) fn byte_of_column(line: &str, column: usize) -> Option<usize> {
     if line.is_ascii() {
         return (column <= line.len()).then_some(column);
     }

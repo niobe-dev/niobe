@@ -371,6 +371,15 @@ pub struct SlashCommand {
     /// `[on|off]`. `None` for a command that takes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
+    /// Whether naming it anywhere in a prompt, not only at its start, is
+    /// read by the backend as asking for it.
+    ///
+    /// A skill the model can be asked to run is honoured wherever the prompt
+    /// names it; a command the backend runs itself, only where the prompt
+    /// opens with it. `false` where the backend did not say, which is the
+    /// reading that offers nothing it would not run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mid_prompt: bool,
 }
 
 /// A model the backend offers to run the session on, as it listed it.

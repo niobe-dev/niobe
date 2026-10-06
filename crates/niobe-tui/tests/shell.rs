@@ -1949,6 +1949,7 @@ fn f8_with_no_memory_says_so_and_how_to_get_one() {
             name: "init".to_owned(),
             description: "Initialize a new CLAUDE.md file with codebase documentation".to_owned(),
             argument_hint: None,
+            mid_prompt: false,
         }],
     });
     press(&mut app, KeyCode::F(8));
@@ -4404,6 +4405,7 @@ fn listed_commands(names: &[(&str, &str, Option<&str>)]) -> Event {
                     name: (*name).to_owned(),
                     description: (*description).to_owned(),
                     argument_hint: hint.map(str::to_owned),
+                    mid_prompt: false,
                 },
             )
             .collect(),
@@ -4546,6 +4548,99 @@ fn enter_on_another_command_than_the_one_typed_in_full_puts_that_one_in_the_prom
         "a name typed in another case is written as the backend lists it"
     );
     assert!(app.take_produced().is_empty());
+}
+
+/// A session whose backend lists `/compact`, which it runs only where a
+/// prompt opens with it, and the skills `review` and `reveal`, which it takes
+/// named anywhere in a prompt.
+fn session_with_skills() -> App {
+    let mut app = empty_session();
+    let command = |name: &str, mid_prompt: bool| niobe_core::event::SlashCommand {
+        name: name.to_owned(),
+        description: format!("what /{name} does"),
+        argument_hint: None,
+        mid_prompt,
+    };
+    app.apply(&Event::Commands {
+        commands: vec![
+            command("compact", false),
+            command("review", true),
+            command("reveal", true),
+        ],
+    });
+    app
+}
+
+fn new_line(app: &mut App) {
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char('j'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+}
+
+#[test]
+fn a_slash_mid_prompt_offers_the_skills_and_not_the_commands_that_only_open_one() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, "fix it with /rev");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert_eq!(offered.len(), 2, "{offered:?}");
+    assert!(offered[0].starts_with("/review "), "{offered:?}");
+    assert!(offered[1].starts_with("/reveal "), "{offered:?}");
+
+    let mut app = session_with_skills();
+    type_keys(&mut app, "first");
+    new_line(&mut app);
+    type_keys(&mut app, "fix it with /");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert_eq!(offered.len(), 2, "on any row: {offered:?}");
+    assert!(
+        offered.iter().all(|row| !row.starts_with("/compact")),
+        "a command run only from the start of the prompt is not offered mid-prompt: \
+         {offered:?}"
+    );
+
+    let mut app = session_with_skills();
+    type_keys(&mut app, "/");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert_eq!(
+        offered.len(),
+        3,
+        "the start of the prompt offers them all: {offered:?}"
+    );
+}
+
+#[test]
+fn a_slash_inside_a_word_opens_no_list() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, "look at src/re");
+    assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
+
+    let mut app = session_with_skills();
+    type_keys(&mut app, "see /rev/");
+    assert!(
+        command_list(&screen(&mut app, 120, 30)).is_empty(),
+        "a path that starts a word is no skill's name"
+    );
+}
+
+#[test]
+fn enter_on_a_skill_offered_mid_prompt_replaces_only_that_word() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_skills();
+    type_keys(&mut app, "fix it with /rev");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.composed(), "fix it with /review ");
+    assert!(app.take_produced().is_empty());
+
+    type_keys(&mut app, "and /reve");
+    press(&mut app, KeyCode::Esc);
+    assert!(
+        command_list(&screen(&mut app, 120, 30)).is_empty(),
+        "Esc closes the list under the word it was open for"
+    );
+    type_keys(&mut app, "a");
+    assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
 }
 
 #[test]

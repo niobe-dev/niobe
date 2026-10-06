@@ -104,9 +104,8 @@ pub(crate) struct System {
 /// One slash command, as the CLI lists it in its answer to `initialize` and in
 /// `commands_changed`.
 ///
-/// The CLI also says whether it is one of its own (`builtin`) and what else
-/// it answers to (`aliases`). Neither is read: a command runs by its name
-/// whoever supplied it, and an alias runs what the name already offers.
+/// The CLI also says what else a command answers to (`aliases`), which is not
+/// read: an alias runs what the name already offers.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Command {
     pub(crate) name: String,
@@ -116,6 +115,11 @@ pub(crate) struct Command {
     /// command that takes nothing.
     #[serde(rename = "argumentHint")]
     pub(crate) argument_hint: Option<String>,
+    /// `true` on what the CLI ships itself: its own commands and the skills
+    /// it bundles alike. Absent on a skill or command of the repository's or
+    /// the user's own, and on an MCP server's prompt.
+    #[serde(default)]
+    pub(crate) builtin: bool,
 }
 
 /// One model the answer to `initialize` lists.

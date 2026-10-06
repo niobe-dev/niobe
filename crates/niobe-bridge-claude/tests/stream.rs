@@ -392,6 +392,62 @@ fn a_change_pushed_mid_session_replaces_the_list_the_cli_answered_with() {
     );
 }
 
+const SKILL_MID_PROMPT: &str = include_str!("fixtures/skill-mid-prompt.jsonl");
+
+/// Recorded: a skill and a command of the repository's own, each named in
+/// the middle of a prompt, were run by the model through its `Skill` tool.
+/// What the CLI marks as its own — its built-in commands and the skills it
+/// bundles alike — is offered only where a prompt opens with it.
+#[test]
+fn what_the_cli_does_not_mark_as_its_own_is_honoured_anywhere_in_a_prompt() {
+    let events = translate(SKILL_MID_PROMPT);
+    let state = SessionState::replay(&events);
+    let anywhere: Vec<(&str, bool)> = state
+        .commands()
+        .iter()
+        .map(|command| (command.name.as_str(), command.mid_prompt))
+        .collect();
+    assert_eq!(
+        anywhere,
+        [
+            ("shout", true),
+            ("whisper", true),
+            ("simplify", false),
+            ("compact", false)
+        ]
+    );
+
+    let skills: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolCallStart { name, input, .. } if name == "Skill" => {
+                serde_json::from_str::<serde_json::Value>(input)
+                    .ok()?
+                    .get("skill")?
+                    .as_str()
+                    .map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(skills, ["shout", "whisper"], "{events:?}");
+    assert!(warnings(&events).is_empty(), "{events:?}");
+    assert!(notices(&events).is_empty(), "{events:?}");
+}
+
+/// An MCP server's prompt is not marked as the CLI's own, and runs only
+/// where a prompt opens with it.
+#[test]
+fn a_servers_prompt_is_offered_only_where_a_prompt_opens_with_it() {
+    let state = SessionState::replay(&translate(SLASH_COMMAND));
+    let prompt = state
+        .commands()
+        .iter()
+        .find(|command| command.name.ends_with(" (MCP)"))
+        .expect("the recording lists one MCP prompt");
+    assert!(!prompt.mid_prompt);
+}
+
 #[test]
 fn what_the_session_ran_comes_from_the_cli_not_from_the_profile() {
     let events = translated();
