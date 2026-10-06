@@ -1067,6 +1067,11 @@ pub struct App {
     /// and the event model, which carries no time — for a pane.
     agents: Vec<SubAgent>,
     composer: TextArea<'static>,
+    /// Whether the composer has been drawn in a box too short for all of its
+    /// rows since its first row was last put back at the top. The editor keeps
+    /// the row it scrolled to after the box has room again, which would leave
+    /// the prompt's opening rows out of sight above an empty row.
+    composer_scrolled: bool,
     /// First transcript line drawn, in wrapped lines.
     scroll: usize,
     /// Whether the transcript sticks to the newest line as it grows.
@@ -1440,6 +1445,7 @@ impl App {
             just_ended: None,
             agents: Vec::new(),
             composer,
+            composer_scrolled: false,
             scroll: 0,
             follow: true,
             transcript_lines: 0,
@@ -3958,6 +3964,36 @@ impl App {
             Focus::Session => true,
             Focus::Pane(pane) => self.scroller(pane).area.is_some(),
         }
+    }
+
+    /// Told by a frame whether the composer's box holds every row of what is
+    /// typed. Where it does after a frame where it did not, the editor is
+    /// scrolled back to its first row, the cursor kept where it was: the editor
+    /// only scrolls as far as the cursor needs, never back, so the rows that
+    /// went above the box would stay hidden though the box now has room.
+    ///
+    /// A selection is left alone, since moving the cursor would drop it; the
+    /// first row comes back once it is gone.
+    pub fn composer_fits(&mut self, fits: bool) {
+        if !fits {
+            self.composer_scrolled = true;
+            return;
+        }
+        if !self.composer_scrolled || self.composer.is_selecting() {
+            return;
+        }
+        let ratatui_textarea::DataCursor(row, col) = self.composer.cursor();
+        let (Ok(row), Ok(col)) = (u16::try_from(row), u16::try_from(col)) else {
+            return;
+        };
+        // The editor keeps its top row as a `u16` and scrolls by an `i16`, so
+        // three steps of `i16::MAX` rows reach row 0 from any top it can hold.
+        for _ in 0..3 {
+            self.composer.scroll((-i16::MAX, 0));
+        }
+        self.composer
+            .move_cursor(ratatui_textarea::CursorMove::Jump(row, col));
+        self.composer_scrolled = false;
     }
 
     /// What the last frame drew the session pane as, so the mouse can tell it

@@ -2923,6 +2923,131 @@ fn a_line_opened_after_the_last_one_grows_the_composer_rather_than_hiding_it() {
     assert_eq!(bar(&after) + 1, bar(&before), "{after}");
 }
 
+/// The composer's rows on a frame, from the bar's first down to the pane's
+/// bottom border.
+fn composer_box(frame: &str) -> Vec<String> {
+    let rows: Vec<&str> = frame.lines().collect();
+    let bar = rows
+        .iter()
+        .position(|row| row.contains("  > "))
+        .unwrap_or_else(|| panic!("no ask bar on the frame:\n{frame}"));
+    rows[bar..]
+        .iter()
+        .take_while(|row| !row.starts_with(FOCUS_BOTTOM_LEFT))
+        .map(|row| (*row).to_owned())
+        .collect()
+}
+
+/// Numbered words, `w0 w1 w2 …`, to exactly `length` characters, so a test
+/// can tell from any row which part of the prompt it holds.
+fn numbered_words(length: usize) -> String {
+    let mut text = String::new();
+    for n in 0.. {
+        let word = format!("w{n} ");
+        if text.len() + word.len() > length {
+            break;
+        }
+        text.push_str(&word);
+    }
+    while text.len() < length {
+        text.push('z');
+    }
+    text
+}
+
+#[test]
+fn a_long_line_without_a_break_is_drawn_whole_from_its_first_row() {
+    let mut app = running_session();
+    let prompt = numbered_words(300);
+    type_keys(&mut app, &prompt);
+    let frame = screen(&mut app, 80, 40);
+    let rows = composer_box(&frame);
+
+    assert!(
+        rows[0].contains("> w0 w1 w2"),
+        "the prompt's first row scrolled out of the composer:\n{frame}"
+    );
+    let shown: String = rows
+        .iter()
+        .map(|row| {
+            row.split_once("> ")
+                .map_or(row.as_str(), |(_, typed)| typed)
+        })
+        .map(|row| row.trim_matches(|c| c == FOCUS_SIDE || c == ' '))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        shown.split_whitespace().collect::<Vec<_>>(),
+        prompt.split_whitespace().collect::<Vec<_>>(),
+        "every wrapped row of the prompt is on screen:\n{frame}"
+    );
+}
+
+#[test]
+fn a_prompt_past_a_third_of_the_pane_stops_the_composer_and_keeps_the_cursor_row() {
+    let mut app = running_session();
+    let prompt = numbered_words(2000);
+    type_keys(&mut app, &prompt);
+    let frame = screen(&mut app, 80, 24);
+    let rows = composer_box(&frame);
+
+    let pane_bottom = frame
+        .lines()
+        .collect::<Vec<_>>()
+        .iter()
+        .rposition(|row| row.starts_with(FOCUS_BOTTOM_LEFT))
+        .expect("the pane is closed");
+    assert_eq!(rows.len(), (pane_bottom - 2) / 3, "{frame}");
+    let last_word = prompt
+        .split_whitespace()
+        .last()
+        .expect("the prompt has words");
+    assert!(
+        rows.last().is_some_and(|row| row.contains(last_word)),
+        "the row the cursor is on is out of sight:\n{frame}"
+    );
+}
+
+#[test]
+fn a_line_of_wide_characters_grows_the_composer_by_the_rows_it_is_drawn_in() {
+    let mut app = running_session();
+    let prompt = "漢字かな交じり文、".repeat(10);
+    type_keys(&mut app, &prompt);
+    let frame = screen(&mut app, 80, 40);
+    let rows = composer_box(&frame);
+
+    // The frame holds a wide character's second cell as a space.
+    let shown: String = rows
+        .iter()
+        .map(|row| {
+            row.split_once("> ")
+                .map_or(row.as_str(), |(_, typed)| typed)
+        })
+        .flat_map(|row| row.chars().filter(|c| *c != FOCUS_SIDE && *c != ' '))
+        .collect();
+    assert!(shown.starts_with("漢字かな"), "{frame}");
+    assert_eq!(shown, prompt, "{frame}");
+}
+
+#[test]
+fn a_prompt_cut_back_under_the_cap_is_drawn_from_its_first_row() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    type_keys(&mut app, &numbered_words(1500));
+    let capped = composer_box(&screen(&mut app, 80, 24));
+    for _ in 0..1300 {
+        press(&mut app, KeyCode::Backspace);
+    }
+    let frame = screen(&mut app, 80, 24);
+    let rows = composer_box(&frame);
+    assert!(rows.len() < capped.len(), "{frame}");
+    assert!(
+        rows[0].contains("> w0 w1"),
+        "the box has room for the whole prompt but its first rows stayed scrolled away:\n{frame}"
+    );
+}
+
 #[test]
 fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
     let mut app = running_session();

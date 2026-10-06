@@ -1024,13 +1024,14 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     // so a long prompt is editable without hiding the transcript behind it.
     // The shell's own reply wraps in the bar rather than being cut, and takes
     // a row of its own only while it is too long for one.
+    // The box is as tall as the rows the editor wraps what is typed into, not
+    // its lines: a line too long for the box's width is drawn over several
+    // rows.
     let said = bar_says(app, panes, theme, bar_room(app, inner.width));
-    // Split rather than `lines`, which does not count the empty line a
-    // just-opened one is: that line would take the only row, and scroll the
-    // one above it out of sight.
-    let typed = app.composed().split('\n').count().max(said.len()).max(1);
+    let typed = editor_rows(app, &said, inner.width);
     let cap = usize::from(inner.height / 3).max(1);
-    let composer_rows = u16::try_from(typed.min(cap)).unwrap_or(1);
+    let composer_rows = u16::try_from(typed.max(said.len()).min(cap)).unwrap_or(1);
+    app.composer_fits(typed <= cap);
 
     let [transcript, divider, composer] = Layout::vertical([
         Constraint::Min(1),
@@ -1340,13 +1341,7 @@ fn draw_ask_bar(
         marker,
     );
 
-    // A reply takes every column the composer leaves it, so no part of the
-    // placeholder is left showing beside it; the key hints take only their own.
-    let said_width = match app.hint() {
-        Some(_) if !said.is_empty() => bar_room(app, area.width),
-        _ => said.iter().map(Line::width).max().unwrap_or(0),
-    };
-    let said_width = u16::try_from(said_width).unwrap_or(0);
+    let said_width = u16::try_from(said_width(app, &said, area.width)).unwrap_or(0);
     let [editor, _, right] = Layout::horizontal([
         Constraint::Min(1),
         Constraint::Length(u16::from(said_width > 0)),
@@ -1355,6 +1350,39 @@ fn draw_ask_bar(
     .areas(rest);
     editing(app).render(editor, frame.buffer_mut());
     frame.render_widget(Paragraph::new(said).style(pane), right);
+}
+
+/// The columns the bar's right-hand end takes on a pane `width` wide when it
+/// says `said`.
+///
+/// A reply takes every column the composer leaves it, so no part of the
+/// placeholder is left showing beside it; the key hints take only their own.
+fn said_width(app: &App, said: &[Line<'static>], width: u16) -> usize {
+    match app.hint() {
+        Some(_) if !said.is_empty() => bar_room(app, width),
+        _ => said.iter().map(Line::width).max().unwrap_or(0),
+    }
+}
+
+/// The rows the bar's editor draws what is in it in, on a pane `width` wide
+/// whose right-hand end says `said`: the editor's own wrapping, at the columns
+/// the badge, the marker and the right-hand end leave it.
+fn editor_rows(app: &App, said: &[Line<'static>], width: u16) -> usize {
+    let said = said_width(app, said, width);
+    let columns = usize::from(width)
+        .saturating_sub(lead_width(app))
+        .saturating_sub(match said {
+            0 => 0,
+            said => said + 1,
+        })
+        .max(1);
+    let editor = editing(app);
+    editor
+        .lines()
+        .iter()
+        .map(|line| text::editor_rows(line, columns, editor.tab_length()))
+        .sum::<usize>()
+        .max(1)
 }
 
 /// The columns the bar's right-hand end may take on a pane `width` wide.

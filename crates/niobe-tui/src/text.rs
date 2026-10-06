@@ -304,9 +304,125 @@ pub fn truncate_start(text: &str, columns: usize) -> String {
     std::iter::once("…").chain(kept.into_iter().rev()).collect()
 }
 
+/// The rows the composer draws one line of its text in, `columns` cells wide,
+/// with tabs stopping every `tab` cells.
+///
+/// The composer's height is set from this before the editor draws, and the
+/// editor scrolls whatever does not fit, so the count follows the editor's own
+/// word-or-glyph rule exactly rather than [`wrap`]'s: a line breaks before the
+/// word that would overflow the row, and only a word wider than the whole row
+/// is cut, a grapheme at a time. Widths are summed by character, as the editor
+/// sums them, since a count that disagrees with it by one row hides that row.
+pub fn editor_rows(line: &str, columns: usize, tab: u8) -> usize {
+    let columns = columns.max(1);
+    let words: Vec<&str> = line.split_word_bounds().collect();
+    let mut rows = 0usize;
+    let mut row_width = 0usize;
+    let mut row_open = false;
+    let mut next = 0usize;
+    while let Some(word) = words.get(next) {
+        let word_width = advance(word, row_width, tab).saturating_sub(row_width);
+        if row_width.saturating_add(word_width) <= columns {
+            row_width += word_width;
+            row_open = true;
+            next += 1;
+        } else if row_open {
+            rows += 1;
+            row_width = 0;
+            row_open = false;
+        } else {
+            rows += glyph_rows(word, columns, tab);
+            next += 1;
+        }
+    }
+    rows + usize::from(row_open || rows == 0)
+}
+
+/// The rows a word wider than the row is cut into, a grapheme at a time, as
+/// the editor cuts it: a grapheme wider than the row still takes a row alone.
+fn glyph_rows(word: &str, columns: usize, tab: u8) -> usize {
+    let graphemes: Vec<&str> = word.graphemes(true).collect();
+    let mut rows = 0usize;
+    let mut next = 0usize;
+    while next < graphemes.len() {
+        rows += 1;
+        let mut row_width = 0usize;
+        let mut taken = 0usize;
+        while let Some(grapheme) = graphemes.get(next) {
+            let reached = advance(grapheme, row_width, tab);
+            if taken > 0 && reached > columns {
+                break;
+            }
+            row_width = reached;
+            next += 1;
+            taken += 1;
+            if row_width > columns {
+                break;
+            }
+        }
+    }
+    rows
+}
+
+/// The column `text` ends at when it starts at column `from`: a tab runs to
+/// the next stop, and every other character takes the cells its own width says.
+fn advance(text: &str, from: usize, tab: u8) -> usize {
+    use unicode_width::UnicodeWidthChar as _;
+    text.chars().fold(from, |column, c| match (c, tab) {
+        ('\t', 0) => column,
+        ('\t', tab) => {
+            let tab = usize::from(tab);
+            column + (tab - column % tab)
+        }
+        (c, _) => column + c.width().unwrap_or(0),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rows a word-or-glyph editor `columns` wide draws `line` in, read
+    /// off the editor itself: its cursor at the end of the text sits on the
+    /// last row it drew.
+    fn drawn_rows(line: &str, columns: u16) -> usize {
+        use ratatui::widgets::Widget as _;
+        use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+        let mut editor = TextArea::new(vec![line.to_owned()]);
+        editor.set_wrap_mode(WrapMode::WordOrGlyph);
+        let area = ratatui::layout::Rect::new(0, 0, columns, 200);
+        (&editor).render(area, &mut ratatui::buffer::Buffer::empty(area));
+        editor.move_cursor(CursorMove::Bottom);
+        editor.move_cursor(CursorMove::End);
+        editor.screen_cursor().row + 1
+    }
+
+    #[test]
+    fn the_rows_counted_for_the_composer_are_the_rows_its_editor_draws() {
+        let lines = [
+            String::new(),
+            "short".to_owned(),
+            "a".repeat(20),
+            "a".repeat(21),
+            "a".repeat(300),
+            "the quick brown fox jumps over the lazy dog ".repeat(7),
+            format!("see {} for the rest of it", "https://x.example/".repeat(6)),
+            "word  \t two\tthree\t\tfour ".repeat(5),
+            "漢字かな交じり文".repeat(9),
+            "a漢".repeat(30),
+            "🦀 crabs and 🎉 parties, ❤️ and 👨‍👩‍👧 ".repeat(6),
+            "     leading and trailing spaces     ".repeat(3),
+        ];
+        for line in &lines {
+            for columns in [1u16, 2, 3, 7, 20, 33, 80] {
+                assert_eq!(
+                    editor_rows(line, usize::from(columns), 4),
+                    drawn_rows(line, columns),
+                    "{line:?} at {columns} columns"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_line_break_on_a_one_line_row_keeps_the_lines_apart() {
