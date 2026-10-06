@@ -5,25 +5,25 @@
  ┃   A terminal coding agent that keeps you aware of what is                ┃ └───────────────────────────────────────┘
  ┃   being built and how.                                                   ┃ ┌─────────────── Changes ───────────────┐
  ┃                ┏━━━━━━━━━━━━━━━━━━━━━━━━ Trust this repository's config? ━━━━━━━━━━━━━━━━━━━━━━━━━┓                │
- ┃   What the agen┃                                                                                  ┃░░              │
- ┃   and what it c┃  /home/me/src/niobe/.niobe/config.toml                                           ┃░░              │
- ┃   You stay on t┃                                                                                  ┃░░              │
- ┃                ┃  It sets what only a config you trust may:                                       ┃░░              │
- ┃   No backend at┃                                                                                  ┃░░              │
- ┃                ┃  permissions      allow Edit, Bash, mcp__claude_ai_Notion__notion-search,        ┃░░              │
- ┃                ┃                   Bash(cargo test)                                               ┃░░              │
- ┃                ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1            ┃░░              │
- ┃                ┃  work             auth_refresh aws sso login --profile work-sso                  ┃░░              │
- ┃                ┃  default_profile  work                                                           ┃░░              │
- ┃                ┃                                                                                  ┃░░              │
+ ┃   What the agen┃                                                                                  ┃                │
+ ┃   and what it c┃  /home/me/src/niobe/.niobe/config.toml                                           ┃                │
+ ┃   You stay on t┃                                                                                  ┃                │
+ ┃                ┃  It sets what only a config you trust may:                                       ┃                │
+ ┃   No backend at┃                                                                                  ┃                │
+ ┃                ┃  permissions      allow Edit, Bash, mcp__claude_ai_Notion__notion-search,        ┃                │
+ ┃                ┃                   Bash(cargo test)                                               ┃                │
+ ┃                ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1            ┃                │
+ ┃                ┃  work             auth_refresh aws sso login --profile work-sso                  ┃                │
+ ┃                ┃  default_profile  work                                                           ┃                │
+ ┃                ┃                                                                                  ┃                │
  ┃                ┃  Trusted, it stays in force until the file changes. Without it, none of the      ┃────────────────┘
- ┃                ┃  above is.                                                                       ┃░───────────────┐
- ┃                ┃                                                                                  ┃g░· 0 spawned   │
- ┃                ┃  › 1. Yes, trust this config                                                     ┃░░              │
+ ┃                ┃  above is.                                                                       ┃ ───────────────┐
+ ┃                ┃                                                                                  ┃g · 0 spawned   │
+ ┃                ┃  › 1. Yes, trust this config                                                     ┃                │
  ┃                ┃    2. No, open without it                                                        ┃enied · 0 B out │
- ┃                ┃                                                                                  ┃░░              │
- ┃                ┗━━━━━━━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━━━━┛░░              │
- ┃                  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░│░░░░░░░░░░░░░░░░░░░░░░░░░              │
+ ┃                ┃                                                                                  ┃                │
+ ┃                ┗━━━━━━━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━━━━┛                │
+ ┃                                                                          ┃ │                                       │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘

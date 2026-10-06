@@ -1,23 +1,23 @@
  Niobe  Session  Context  Model  View  Help                     ○ not attached
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃   ┏━━━━━━━━━━━━━━━━━━ Trust this repository's config? ━━━━━━━━━━━━━━━━━━━┓   ┃
-┃   ┃                                                                      ┃░░ ┃
-┃   ┃  /home/me/src/niobe/.niobe/config.toml                               ┃░░ ┃
-┃   ┃                                                                      ┃░░ ┃
-┃   ┃  It sets what only a config you trust may:                           ┃░░ ┃
-┃   ┃                                                                      ┃░░ ┃
-┃   ┃  permissions      allow Edit, Bash,                                  ┃░░ ┃
-┃   ┃                   mcp__claude_ai_Notion__notion-search, Bash(cargo   ┃░░ ┃
-┃   ┃                   test)                                              ┃░░ ┃
-┃   ┃  work             env AWS_PROFILE=work-sso,                          ┃░░ ┃
-┃   ┃                   CLAUDE_CODE_USE_BEDROCK=1                          ┃░░ ┃
-┃   ┃  work             auth_refresh aws sso login --profile work-sso      ┃░░ ┃
-┃   ┃  default_profile  work                                               ┃░░ ┃
-┃   ┃                                                                      ┃░░ ┃
-┃   ┃  Trusted, it stays in force until the file changes. Without it,      ┃░░ ┃
-┃   ┃  none of the above is.                                               ┃░░ ┃
-┃   ┃                                                                      ┃░░ ┃
-┃   ┃  › 1. Yes, trust this config                                         ┃░░ ┃
+┃   ┃                                                                      ┃   ┃
+┃   ┃  /home/me/src/niobe/.niobe/config.toml                               ┃   ┃
+┃   ┃                                                                      ┃   ┃
+┃   ┃  It sets what only a config you trust may:                           ┃   ┃
+┃   ┃                                                                      ┃   ┃
+┃   ┃  permissions      allow Edit, Bash,                                  ┃   ┃
+┃   ┃                   mcp__claude_ai_Notion__notion-search, Bash(cargo   ┃   ┃
+┃   ┃                   test)                                              ┃   ┃
+┃   ┃  work             env AWS_PROFILE=work-sso,                          ┃   ┃
+┃   ┃                   CLAUDE_CODE_USE_BEDROCK=1                          ┃   ┃
+┃   ┃  work             auth_refresh aws sso login --profile work-sso      ┃   ┃
+┃   ┃  default_profile  work                                               ┃   ┃
+┃   ┃                                                                      ┃   ┃
+┃   ┃  Trusted, it stays in force until the file changes. Without it,      ┃   ┃
+┃   ┃  none of the above is.                                               ┃   ┃
+┃   ┃                                                                      ┃   ┃
+┃   ┃  › 1. Yes, trust this config                                         ┃   ┃
 ┃ ──┃    2. No, open without it                                            ┃── ┃
 ┃  —┃                                                                      ┃ne ┃
 ┗━━━┗━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━┛━━━┛

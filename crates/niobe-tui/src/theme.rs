@@ -167,8 +167,15 @@ pub struct Theme {
     pub cursor_bg: Color,
     /// The text of the row the cursor is on.
     pub cursor_fg: Color,
-    /// What a dialog casts on what is under it.
+    /// Behind what a dialog's shadow falls on.
     pub shadow: Color,
+    /// What a dialog's shadow falls on, redrawn in this colour with its own
+    /// characters, so the text under it recedes and still reads. Where
+    /// [`Theme::shadow`] is the panes' own colour, as on a black desk in
+    /// sixteen colours, this dimming is all the shadow is; the dialog's edge
+    /// is then told by its own face, which no theme draws in the panes'
+    /// colour.
+    pub shadow_fg: Color,
 }
 
 /// The DOS-blue theme: Turbo Vision as it shipped.
@@ -221,6 +228,7 @@ pub const CLASSIC: Theme = Theme {
     cursor_bg: Color::LightGreen,
     cursor_fg: Color::Black,
     shadow: Color::Black,
+    shadow_fg: Color::DarkGray,
 };
 
 /// Green on black: the terminal every film puts in front of a hacker.
@@ -272,14 +280,16 @@ pub const NEO: Theme = Theme {
     code: Color::White,
 
     // Inverted, so the dialog stands off the black panes: black on green.
-    // Nothing is darker than the panes' black, so the shadow is the grey the
-    // design keeps for chrome.
+    // Nothing is darker than the panes' black, so the shadow only dims what
+    // it falls on, as Far's black schemes do: a grey patch beside the dialog
+    // would be lighter than the desk, which reads as a glow, not a shadow.
     dialog_bg: Color::Green,
     dialog_fg: Color::Black,
     dialog_frame: Color::Black,
     cursor_bg: Color::LightGreen,
     cursor_fg: Color::Black,
-    shadow: Color::DarkGray,
+    shadow: Color::Black,
+    shadow_fg: Color::DarkGray,
 };
 
 /// Green and magenta on near-black: the default.
@@ -340,6 +350,7 @@ pub const CYBER: Theme = Theme {
     cursor_bg: Color::LightGreen,
     cursor_fg: Color::Black,
     shadow: Color::Black,
+    shadow_fg: Color::DarkGray,
 };
 
 /// The palette of a modern editor: grey chrome, a blue accent, and syntax
@@ -396,6 +407,7 @@ pub const MODERN: Theme = Theme {
     cursor_bg: Color::LightBlue,
     cursor_fg: Color::Black,
     shadow: Color::Black,
+    shadow_fg: Color::DarkGray,
 };
 
 /// A colour written as the design writes it, `0xRRGGBB`.
@@ -428,6 +440,11 @@ const fn mix(ink: u8, paper: u8, percent: u32) -> u8 {
 /// enough to tell the line from its neighbours, little enough that the text
 /// on it stays the loudest thing in the row.
 const WASH: u32 = 14;
+
+/// How much of the body text a cell under a dialog's shadow keeps, over the
+/// shadow's black: about the grey Far redraws a shadowed cell in, tinted by
+/// the theme's own text so the shade belongs to the design.
+const SHADED: u32 = 40;
 
 /// [`NEO`] as designed, for a terminal that can draw it.
 ///
@@ -468,6 +485,7 @@ pub const NEO_TRUE: Theme = Theme {
     cursor_bg: hex(0x00ff41),
     cursor_fg: hex(0x000000),
     shadow: hex(0x000000),
+    shadow_fg: wash(0x9bffb0, 0x000000, SHADED),
 
     ..NEO
 };
@@ -513,6 +531,7 @@ pub const CYBER_TRUE: Theme = Theme {
     cursor_bg: hex(0x39ff7a),
     cursor_fg: hex(0x07060d),
     shadow: hex(0x000000),
+    shadow_fg: wash(0xe6e9ff, 0x000000, SHADED),
 
     ..CYBER
 };
@@ -554,6 +573,7 @@ pub const MODERN_TRUE: Theme = Theme {
     cursor_bg: hex(0x04395e),
     cursor_fg: hex(0xffffff),
     shadow: hex(0x000000),
+    shadow_fg: wash(0xd4d4d4, 0x000000, SHADED),
 
     ..MODERN
 };
@@ -629,7 +649,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 27] {
+    fn colours(t: &Theme) -> [Color; 28] {
         [
             t.pane_bg,
             t.frame,
@@ -658,6 +678,7 @@ mod tests {
             t.cursor_bg,
             t.cursor_fg,
             t.shadow,
+            t.shadow_fg,
         ]
     }
 
@@ -730,6 +751,7 @@ mod tests {
                 // background on the title colour.
                 (t.pane_bg, t.title, "a question's selected answer"),
                 (t.shadow, t.dialog_bg, "a dialog's shadow"),
+                (t.shadow_fg, t.shadow, "what a dialog's shadow falls on"),
             ] {
                 assert_ne!(on, over, "{}: {what} is invisible", t.name);
             }

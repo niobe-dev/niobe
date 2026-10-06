@@ -1,13 +1,13 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━ add etag support to the ca┌──────────────────────────────┐loading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃    44 +     headers.set("If-N│ Diff              F5  Ctrl+T │░░          ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
- ┃    45 +   }                  │ Group by agent             a │░░          ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
- ┃    46 +   const res = await f│ Usage pane             shown │░░          ┃ │ ───────────────────────────────────── │
+ ┃    44 +     headers.set("If-N│ Diff              F5  Ctrl+T │            ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃    45 +   }                  │ Group by agent             a │            ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃    46 +   const res = await f│ Usage pane             shown │            ┃ │ ───────────────────────────────────── │
  ┃    47 +   if (res.status === │ Changes pane           shown │y;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
- ┃    48     return res;        │ Activity pane          shown │░░          ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃       …                      │ Theme…                       │░░          ┃ │ ───────────────────────────────────── │
- ┃   115     cache.set(url, {   └──────────────────────────────┘░░          ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   116 +     etag: res.headers.get("ETag"),░░░░░░░░░░░░░░░░░░░░░          ┃ └───────────────────────────────────────┘
+ ┃    48     return res;        │ Activity pane          shown │            ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃       …                      │ Theme…                       │            ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {   └──────────────────────────────┘            ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   116 +     etag: res.headers.get("ETag"),                               ┃ └───────────────────────────────────────┘
  ┃   117       body,                                                        ┃ ┌─────────────── Changes ───────────────┐
  ┃   └ allowed by you                                                       ┃ │ ⎇ main ↑3                             █
  ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █

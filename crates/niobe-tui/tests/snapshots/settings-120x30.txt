@@ -9,19 +9,19 @@
  ┃   115     cache.s┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓░░░░░░ 25k / 200k │
  ┃   116 +     etag:┃                                                                              ┃──────────────────┘
  ┃   117       body,┃  Profile   claude · default                                                  ┃es ───────────────┐
- ┃   └ allowed by yo┃  Model     opus-5                                                            ┃░░                █
+ ┃   └ allowed by yo┃  Model     opus-5                                                            ┃                  █
  ┃                  ┃  Mode      ask                                                               ┃iles  +≥977 −≥259 █
- ┃ ◆ claude         ┃  Theme     cyber                                                             ┃░░                █
- ┃   Rewriting the 3┃                                                                              ┃░░          +0 −0 │
- ┃                  ┃  Config files, the later over the earlier:                                   ┃░░                │
- ┃ ◆ claude         ┃    /home/me/.config/niobe/config.toml                                        ┃░░       +149 −12 │
- ┃   The notebook th┃    /home/me/src/niobe/.niobe/config.toml — not there                         ┃░░        +88 −41 │
- ┃                  ┃                                                                              ┃░░         +31 −9 │
- ┃ ✗ Bash           ┃  niobe reads them as a session starts, so a change takes effect in the next  ┃░░         +12 −0 │
+ ┃ ◆ claude         ┃  Theme     cyber                                                             ┃                  █
+ ┃   Rewriting the 3┃                                                                              ┃            +0 −0 │
+ ┃                  ┃  Config files, the later over the earlier:                                   ┃                  │
+ ┃ ◆ claude         ┃    /home/me/.config/niobe/config.toml                                        ┃         +149 −12 │
+ ┃   The notebook th┃    /home/me/src/niobe/.niobe/config.toml — not there                         ┃          +88 −41 │
+ ┃                  ┃                                                                              ┃           +31 −9 │
+ ┃ ✗ Bash           ┃  niobe reads them as a session starts, so a change takes effect in the next  ┃           +12 −0 │
  ┃   └ 1 failing: fe┃  one.                                                                        ┃──────────────────┘
  ┃                  ┃                                                                              ┃ty ───────────────┐
  ┃ ◆ claude         ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ o open · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ing · 1 failed    █
- ┃   Etags cached in the░LRU;░304s░short-circuit.░One░test░still░red░—░the░░█░│░◆░test░Cover░tests/fet… sonnet 1m 42s █
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
  ┃   304 path asserts a body that is no longer sent.                        █ │   └ Reading tests/stream.rs           █
  ┃                                                                          █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       █
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       █

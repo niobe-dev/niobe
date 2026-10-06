@@ -11,13 +11,13 @@
  ┃   117       body,                                                        ┃ ┌─────────────── Changes ───────────────┐
  ┃   └ allowed by you                 ┏━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━┓main ↑3                             █
  ┃                                    ┃                                          ┃Working tree  23 files  +≥977 −≥259 █
- ┃ ◆ claude                           ┃  › opus-5                                ┃.░                                  █
- ┃   Rewriting the 304 test around the┃    sonnet-5                              ┃░░CHANGELOG.md                +0 −0 │
+ ┃ ◆ claude                           ┃  › opus-5                                ┃.                                   █
+ ┃   Rewriting the 304 test around the┃    sonnet-5                              ┃  CHANGELOG.md                +0 −0 │
  ┃                                    ┃                                          ┃catalog/                            │
- ┃ ◆ claude                           ┃  ↑↓ choose · Enter switch · Esc keep     ┃░░fetch.ts                 +149 −12 │
- ┃   The notebook that demonstrates th┃  this one                                ┃░░etag.ts                   +88 −41 │
- ┃                                    ┗━━━━━━━ applied from the next turn ━━━━━━━┛░░cache/lru.ts               +31 −9 │
- ┃ ✗ Bash           npm test -- fetch   ░░░░░░░░░░░░░░░░░░░░░░exit░1░·░0.4s░█░│░░░░░cache/index.ts             +12 −0 │
+ ┃ ◆ claude                           ┃  ↑↓ choose · Enter switch · Esc keep     ┃  fetch.ts                 +149 −12 │
+ ┃   The notebook that demonstrates th┃  this one                                ┃  etag.ts                   +88 −41 │
+ ┃                                    ┗━━━━━━━ applied from the next turn ━━━━━━━┛  cache/lru.ts               +31 −9 │
+ ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │     cache/index.ts             +12 −0 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ └───────────────────────────────────────┘
  ┃                                                                          █ ┌────────────── Activity ───────────────┐
  ┃ ◆ claude                                                                 █ │ ▾ Sub-agents  1 running · 1 failed    █

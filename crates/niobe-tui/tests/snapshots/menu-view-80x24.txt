@@ -1,13 +1,13 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ┏━━━━━ add etag support to the c┌──────────────────────────────┐nloading… ━━━━━┓
-┃   115     cache.set(url, {    │ Diff              F5  Ctrl+T │░░             ┃
-┃   116 +     etag: res.headers.│ Group by agent             a │░░             ┃
-┃   117       body,             │ Usage pane             shown │░░             ┃
-┃   └ allowed by you            │ Changes pane           shown │░░             ┃
-┃                               │ Activity pane          shown │░░             ┃
-┃ ◆ claude                      │ Theme…                       │░░             ┃
-┃   Rewriting the 304 test aroun└──────────────────────────────┘░░             ┃
-┃                                 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░             ┃
+┃   115     cache.set(url, {    │ Diff              F5  Ctrl+T │               ┃
+┃   116 +     etag: res.headers.│ Group by agent             a │               ┃
+┃   117       body,             │ Usage pane             shown │               ┃
+┃   └ allowed by you            │ Changes pane           shown │               ┃
+┃                               │ Activity pane          shown │               ┃
+┃ ◆ claude                      │ Theme…                       │               ┃
+┃   Rewriting the 304 test aroun└──────────────────────────────┘               ┃
+┃                                                                              ┃
 ┃ ◆ claude                                                                     ┃
 ┃   The notebook that demonstrates the fetcher needs the new call shape.       ┃
 ┃                                                                              ┃

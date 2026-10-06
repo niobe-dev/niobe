@@ -660,8 +660,8 @@ fn a_recorded_prompt_puts_the_question_in_the_transcript_at_both_sizes() {
 /// The question stands off the transcript the way a dialog stands off the
 /// panes: the two columns right of its frame, from its second row down, and
 /// the row under it, from its third column on, are its shadow, in every
-/// theme. A blank cell in the shadow is shaded, so the shadow still reads
-/// where its colour is as dark as the pane it falls on.
+/// theme, drawn as a dialog's is: in the shadow's colours, over the
+/// transcript's own characters, with no shading glyph laid over a blank.
 #[test]
 fn the_question_casts_a_shadow_on_the_transcript() {
     for theme in THEMES {
@@ -688,15 +688,15 @@ fn the_question_casts_a_shadow_on_the_transcript() {
         for (x, y) in shadow {
             let style = cells[y * usize::from(width) + x];
             assert_eq!(
-                style.bg,
-                Some(theme.shadow),
+                (style.bg, style.fg),
+                (Some(theme.shadow), Some(theme.shadow_fg)),
                 "{}: no shadow at column {x}, row {y}:\n{frame}",
                 theme.name
             );
-            assert_eq!(
+            assert_ne!(
                 rows[y].get(x),
                 Some(&'░'),
-                "{}: a blank cell in the shadow is not shaded at column {x}, row {y}:\n{frame}",
+                "{}: the shadow hides what is under it at column {x}, row {y}:\n{frame}",
                 theme.name
             );
         }

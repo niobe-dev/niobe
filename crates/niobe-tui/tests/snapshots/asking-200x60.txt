@@ -40,20 +40,20 @@
  ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      █ │ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    │
  ┃                                                                                                                              █ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
  ┃   ┌─ ? claude asks ─────────────────────────────────────── blocks turn 1 ┐                                                   █ │   └ Reading tests/stream.rs                                       │
- ┃   │ to run Read                                                          │░░                                                 █ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
- ┃   │ /repo/notes.txt                                                      │░░                                                 █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
- ┃   │                                                                      │░░                                                 █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
- ┃   │ {"file_path":"/repo/notes.txt"}                                      │░░                                                 █ │   Bash       1 ▓▓▓▓         ✗ 1                                   │
- ┃   │                                                                      │░░                                                 █ │   Edit       1 ▓▓▓▓                                               │
- ┃   │ ▶ 1. Allow once                                       this call only │░░                                                 █ │                                                                   │
- ┃   │   2. Always allow Read                              niobe saves Read │░░                                                 █ │                                                                   │
- ┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │░░                                                 █ │                                                                   │
- ┃   │   4. Deny                                      the call does not run │░░                                                 █ │                                                                   │
- ┃   │                                                                      │░░                                                 █ │                                                                   │
- ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │░░                                                 █ │                                                                   │
- ┃   │ Esc decide later                                                     │░░                                                 █ │                                                                   │
- ┃   └──────────────────────────────────────────────────────────────────────┘░░                                                 █ │                                                                   │
- ┃     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░                                                 █ │                                                                   │
+ ┃   │ to run Read                                                          │                                                   █ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
+ ┃   │ /repo/notes.txt                                                      │                                                   █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
+ ┃   │                                                                      │                                                   █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
+ ┃   │ {"file_path":"/repo/notes.txt"}                                      │                                                   █ │   Bash       1 ▓▓▓▓         ✗ 1                                   │
+ ┃   │                                                                      │                                                   █ │   Edit       1 ▓▓▓▓                                               │
+ ┃   │ ▶ 1. Allow once                                       this call only │                                                   █ │                                                                   │
+ ┃   │   2. Always allow Read                              niobe saves Read │                                                   █ │                                                                   │
+ ┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │                                                   █ │                                                                   │
+ ┃   │   4. Deny                                      the call does not run │                                                   █ │                                                                   │
+ ┃   │                                                                      │                                                   █ │                                                                   │
+ ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │                                                   █ │                                                                   │
+ ┃   │ Esc decide later                                                     │                                                   █ │                                                                   │
+ ┃   └──────────────────────────────────────────────────────────────────────┘                                                   █ │                                                                   │
+ ┃                                                                                                                              █ │                                                                   │
  ┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃ │                                                                   │
  ┃  ask  >  Ask for a change · @ file · Ctrl+F find                                           Shift+Tab cycles · Ctrl+J newline ┃ │                                                                   │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────────────────────────────────┘

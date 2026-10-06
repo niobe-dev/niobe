@@ -623,29 +623,27 @@ fn uncover_left_edge(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
 }
 
 /// Darkens the two columns right of `area` and the row under it, offset by
-/// one, the way a dialog in Turbo Vision stands off the screen, within
-/// `bounds`. What is under the shadow keeps its characters, so the transcript
-/// still reads through it; a blank cell is shaded, because in a theme whose
-/// panes are already black a shadow drawn in colour alone is not there.
+/// one, the way a dialog in Far Manager or Turbo Vision stands off the
+/// screen, within `bounds`.
+///
+/// Every cell under the shadow keeps its own character and is redrawn in the
+/// theme's shadow colours with no attribute of its own, so the text under it
+/// recedes and still reads. Nothing is drawn over a blank: a shading glyph
+/// there would join the words around it into one, and where the shadow is
+/// the panes' own colour the dialog's face is what marks its edge.
 fn cast_shadow(frame: &mut Frame, area: Rect, bounds: Rect, theme: &Theme) {
-    let style = Style::new().bg(theme.shadow).fg(theme.dim);
     let right = Rect::new(area.right(), area.y.saturating_add(1), 2, area.height);
     let below = Rect::new(area.x.saturating_add(2), area.bottom(), area.width, 1);
     let buffer = frame.buffer_mut();
     for strip in [right, below] {
         for at in strip.intersection(bounds).positions() {
             if let Some(cell) = buffer.cell_mut(at) {
-                if cell.symbol() == " " {
-                    cell.set_char(SHADE);
-                }
-                cell.set_style(style);
+                cell.set_fg(theme.shadow_fg).set_bg(theme.shadow);
+                cell.modifier = Modifier::empty();
             }
         }
     }
 }
-
-/// What a blank cell under a shadow is drawn as.
-const SHADE: char = '░';
 
 /// What the shell says when it has fewer than eighty by twenty-four to draw in.
 ///
@@ -5399,6 +5397,45 @@ mod tests {
                 row.contains(&format!("{key}{label}")),
                 "{key}{label} is cut: {row}"
             );
+        }
+    }
+
+    /// A shadow darkens what it falls on and hides none of it: every cell
+    /// keeps its own character, blanks included, so the words under it still
+    /// read as words, in every theme.
+    #[test]
+    fn a_shadow_keeps_every_character_under_it() {
+        for theme in crate::theme::THEMES {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 6))
+                .expect("a test terminal");
+            let under = "a b  cd e f g h i j ";
+            terminal
+                .draw(|frame| {
+                    let body = frame.area();
+                    let text = Line::from(under).style(Style::new().fg(theme.fg).bold());
+                    frame.render_widget(Paragraph::new(vec![text; 6]), body);
+                    cast_shadow(frame, Rect::new(2, 1, 10, 3), body, &theme);
+                })
+                .expect("drawing never fails on a test backend");
+            let buffer = terminal.backend().buffer();
+            let right = (2..=4).flat_map(|y| [(12, y), (13, y)]);
+            let below = (4..14).map(|x| (x, 4));
+            for (x, y) in right.chain(below) {
+                let cell = &buffer[(x, y)];
+                let kept = under.chars().nth(usize::from(x)).map(String::from);
+                assert_eq!(
+                    Some(cell.symbol().to_owned()),
+                    kept,
+                    "{}: column {x}, row {y}",
+                    theme.name
+                );
+                assert_eq!(
+                    (cell.fg, cell.bg, cell.modifier),
+                    (theme.shadow_fg, theme.shadow, Modifier::empty()),
+                    "{}: column {x}, row {y}",
+                    theme.name
+                );
+            }
         }
     }
 
