@@ -26,7 +26,7 @@
 /// test over the recordings is green, which is what makes this list a claim
 /// about evidence rather than about intent.
 pub const RECORDED: &[&str] = &[
-    "2.1.275", "2.1.277", "2.1.278", "2.1.281", "2.1.282", "2.1.285", "2.1.287",
+    "2.1.275", "2.1.277", "2.1.278", "2.1.281", "2.1.282", "2.1.285", "2.1.287", "2.1.288",
 ];
 
 /// Whether `version` is a release these recordings cover.

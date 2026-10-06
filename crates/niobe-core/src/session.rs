@@ -26,7 +26,7 @@ use crate::work::{self, Work};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, Billing, ChangeScope, CompactTrigger, Context, Event, Mode,
+    AgentId, AgentOutcome, Billing, ChangeScope, CompactTrigger, Context, Event, Mode, ModelOption,
     OPERATOR_SHELL, SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage,
     UsageWindow, UsageWindows,
 };
@@ -547,6 +547,8 @@ pub struct SessionState {
     fatal_error: Option<String>,
     /// The commands the backend last said it runs from a prompt.
     commands: Vec<SlashCommand>,
+    /// The models the backend last said it offers.
+    models: Vec<ModelOption>,
 }
 
 impl SessionState {
@@ -882,6 +884,7 @@ impl SessionState {
                 self.compacting = false;
                 self.compacted = Some(*trigger);
             }
+            Event::Models { models } => self.models = models.clone(),
         }
     }
 
@@ -1252,6 +1255,12 @@ impl SessionState {
     /// order. Empty until it has said, which is not a backend with none.
     pub fn commands(&self) -> &[SlashCommand] {
         &self.commands
+    }
+
+    /// The models the backend last said it offers, in its order. Empty until
+    /// it has said, which is not a backend with none.
+    pub fn models(&self) -> &[ModelOption] {
+        &self.models
     }
 
     /// The error that ended the session, if one did.

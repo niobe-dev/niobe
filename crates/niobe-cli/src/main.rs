@@ -1162,7 +1162,6 @@ PROFILES:
 
         [profiles.work]
         backend = \"claude\"
-        models = [\"opus\", \"sonnet\", \"haiku\"]
         env = {{ CLAUDE_CODE_USE_BEDROCK = \"1\", AWS_PROFILE = \"work-sso\" }}
         auth_refresh = \"aws sso login --profile work-sso\"
 
@@ -1173,10 +1172,12 @@ PROFILES:
     The user's config is ~/.config/niobe/config.toml ($XDG_CONFIG_HOME/niobe
     when that is set); a repository's is .niobe/config.toml at its root, and
     overrides the user's, replacing any profile of the same name whole. The
-    env of a profile is passed on exactly as written. The models of a profile
-    are the ones Model on the F-key bar offers in the shell, named the way its
-    backend takes them; a profile that names none has nothing to switch
-    between, because niobe never invents a model id.
+    env of a profile is passed on exactly as written. Model on the F-key bar
+    offers every model the backend says the signed-in account can run, each
+    by its name and the id it is taken by. A profile's models, such as
+    models = [\"fable\", \"claude-opus-4-8\"], narrow that list to those, in
+    that order, and are what is offered where the backend lists none, named
+    the way it takes them; niobe never invents a model id.
 
     billing says how the account behind a profile is billed, \"plan\" or
     \"metered\". It decides what the Usage pane leads with: a plan's usage
@@ -1358,7 +1359,8 @@ MODE AND MODEL:
     backend has said which it is. A mode a backend reports that niobe has no
     word for is carried as reported rather than forced into one of these three.
 
-    Model on the F-key bar picks one of the models the profile names. The
+    Model on the F-key bar picks one of the models the backend offers, or of
+    those the profile names. The
     switch applies from the next turn and keeps everything said so far: the
     running session is told to change, not replaced. The backend resolves the
     name it is given and says what it ended up on, which may be spelt

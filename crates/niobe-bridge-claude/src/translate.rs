@@ -91,8 +91,8 @@ use std::path::{Path, PathBuf};
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Context, Event, Mode,
-    PermissionDecision, SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage,
-    UsageWindow, UsageWindows,
+    ModelOption, PermissionDecision, SessionMeta, SlashCommand, TokenCounts, ToolCallId,
+    ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
@@ -781,6 +781,9 @@ impl Translator {
             }
             if let Some(commands) = answer.commands {
                 out.push(self.listed(commands));
+            }
+            if let Some(models) = answer.models {
+                out.push(offered_models(models));
             }
             return;
         }
@@ -2856,6 +2859,24 @@ fn listed_as_offered(commands: Vec<wire::Command>, unavailable: &[String]) -> Ev
                 name: command.name,
                 description: command.description,
                 argument_hint: command.argument_hint.filter(|hint| !hint.trim().is_empty()),
+            })
+            .collect(),
+    }
+}
+
+/// The models the CLI offers, as the event that replaces the list before
+/// them. A name or a description the CLI wrote empty is one it did not give.
+fn offered_models(models: Vec<wire::Model>) -> Event {
+    let given = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
+    Event::Models {
+        models: models
+            .into_iter()
+            .filter(|model| !model.value.trim().is_empty())
+            .map(|model| ModelOption {
+                id: model.value,
+                name: given(model.display_name),
+                description: given(model.description),
+                resolves_to: given(model.resolved_model),
             })
             .collect(),
     }

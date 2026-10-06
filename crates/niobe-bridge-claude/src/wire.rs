@@ -118,6 +118,23 @@ pub(crate) struct Command {
     pub(crate) argument_hint: Option<String>,
 }
 
+/// One model the answer to `initialize` lists.
+///
+/// Each also says which effort levels and modes it supports; nothing here
+/// offers those per model, so they are not read.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Model {
+    /// What the CLI takes it by, on `--model` and `set_model` alike.
+    pub(crate) value: String,
+    /// What the CLI's picker calls it.
+    #[serde(rename = "displayName")]
+    pub(crate) display_name: Option<String>,
+    pub(crate) description: Option<String>,
+    /// The exact model the value runs on today.
+    #[serde(rename = "resolvedModel")]
+    pub(crate) resolved_model: Option<String>,
+}
+
 /// What a background task has used, as the CLI counts it for the task alone.
 #[derive(Debug, Deserialize)]
 pub(crate) struct TaskUsage {
@@ -584,13 +601,18 @@ pub(crate) struct ControlOutcome {
 
 /// The body of a successful answer.
 ///
-/// The answer to `initialize` also says who is signed in, which models and
-/// output styles there are and the process's id. None of it is read: the
-/// account is the CLI's business, and the rest arrives again on `init`.
+/// The answer to `initialize` also says who is signed in, which output styles
+/// there are and the process's id. None of that is read: the account is the
+/// CLI's business, and the rest arrives again on `init`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ControlAnswer {
     /// Every slash command the CLI runs, as it stood when it answered.
     pub(crate) commands: Option<Vec<Command>>,
+    /// Every model the signed-in account can run the session on, in the order
+    /// the CLI's own picker lists them. Recorded from Claude Code 2.1.288 on a
+    /// Max login: its aliases (`default`, `opus`, `fable`, …) and the exact
+    /// releases beside them. Nothing else carries the list.
+    pub(crate) models: Option<Vec<Model>>,
     /// Why `/fast` will not switch fast mode on in this process, where it
     /// will not. Claude Code 2.1.282 says `sdk_opt_in_required` over
     /// stream-json and answers the command with a refusal.

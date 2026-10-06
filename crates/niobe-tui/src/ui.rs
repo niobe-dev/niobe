@@ -74,9 +74,17 @@ const ASK_INSET: usize = 4;
 /// Columns of margin a dialog leaves on each side of a narrow screen.
 pub(crate) const DIALOG_MARGIN: u16 = 4;
 
-/// Widest the model list is drawn, in columns. A model id is a word or two, so
-/// the list is narrow enough to read as a list rather than as a pane.
+/// Widest a list of bare words is drawn, in columns. An effort level or a
+/// theme is a word, so the list is narrow enough to read as a list rather
+/// than as a pane.
 const PICK_COLUMNS: u16 = 44;
+
+/// Widest a list the backend described is drawn: a model's name, its id and
+/// what it is for, side by side, with room for the last to say something.
+const DESCRIBED_PICK_COLUMNS: u16 = 84;
+
+/// What stands between a described row's columns.
+const PICK_GAP: &str = "  ";
 
 /// What marks the model the session is on, and the one the cursor is over.
 const PICK_CURSOR: &str = "› ";
@@ -206,34 +214,71 @@ fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
 
 /// A list the operator opened: what it offers, which one is in force where
 /// that is known, and the keys that work.
-fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&str>, theme: &Theme) {
-    let width = PICK_COLUMNS.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
+///
+/// A row the backend described reads as its name, the exact id choosing it
+/// sends, and what it is for, dimmed; each in a column as wide as the list's
+/// widest. Where the profile left some of what the backend offers out, a line
+/// under the rows says how many, so the list does not read as all there is.
+fn draw_pick(
+    frame: &mut Frame,
+    body: Rect,
+    picker: &Picker,
+    current: Option<usize>,
+    theme: &Theme,
+) {
+    let described = picker
+        .options
+        .iter()
+        .any(|choice| choice.name.is_some() || choice.note.is_some());
+    let widest = match described {
+        true => DESCRIBED_PICK_COLUMNS,
+        false => PICK_COLUMNS,
+    };
+    let width = widest.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
     if width < 20 {
         return;
     }
 
     let (title, footer, keys) = pick_words(picker.purpose);
     let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
+    let room = text_width.saturating_sub(2);
+    let columns = PickColumns::of(picker, described);
+    let plain = Style::new().fg(theme.dialog_fg);
     let mut lines: Vec<Line> = vec![Line::from("")];
-    for (i, option) in picker.options.iter().enumerate() {
+    for (i, choice) in picker.options.iter().enumerate() {
         let on_it = i == picker.at;
-        let marker = match (on_it, current == Some(option.as_str())) {
+        let marker = match (on_it, current == Some(i)) {
             (true, _) => PICK_CURSOR,
             (false, true) => PICK_CURRENT,
             (false, false) => "  ",
         };
-        let shown = match picker.purpose {
-            Purpose::Theme => option.to_lowercase(),
-            Purpose::Model | Purpose::Effort => option.clone(),
-        };
-        let room = text_width.saturating_sub(2);
-        let row = format!("{marker}{}", text::pad(&text::truncate(&shown, room), room));
+        let (said, note) = columns.row(choice, picker.purpose);
+        let said = text::truncate(&said, room);
+        let note = text::pad(
+            &text::truncate(&note, room.saturating_sub(text::width(&said))),
+            room.saturating_sub(text::width(&said)),
+        );
         lines.push(match on_it {
-            true => {
-                Line::from(row).style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold())
-            }
-            false => Line::from(row).style(Style::new().fg(theme.dialog_fg)),
+            true => Line::from(format!("{marker}{said}{note}"))
+                .style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold()),
+            false => Line::from(vec![
+                Span::styled(format!("{marker}{said}"), plain),
+                Span::styled(note, Style::new().fg(theme.dim)),
+            ]),
         });
+    }
+    if picker.more > 0 {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(text::truncate(
+                &format!(
+                    "  {} more the backend offers; the profile's models leave them out",
+                    picker.more
+                ),
+                text_width,
+            ))
+            .style(Style::new().fg(theme.dim)),
+        );
     }
     lines.push(Line::from(""));
     // Wrapped to the box, which is sized for what it offers: cut at its edge
@@ -241,11 +286,64 @@ fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&st
     lines.extend(
         text::wrap(keys, text_width)
             .into_iter()
-            .map(|line| Line::from(line).style(Style::new().fg(theme.dialog_fg))),
+            .map(|line| Line::from(line).style(plain)),
     );
 
     let inner = dialog(frame, body, (width, lines.len()), (title, footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// How wide a described list's name and id columns are: as wide as the widest
+/// of each, so every row's id starts in one column and its note in another.
+struct PickColumns {
+    described: bool,
+    name: usize,
+    value: usize,
+}
+
+impl PickColumns {
+    fn of(picker: &Picker, described: bool) -> Self {
+        let widest = |width: fn(&crate::app::Choice) -> usize| {
+            picker.options.iter().map(width).max().unwrap_or(0)
+        };
+        Self {
+            described,
+            name: widest(|choice| text::width(choice.name.as_deref().unwrap_or(&choice.value))),
+            value: widest(|choice| match choice.name {
+                Some(_) => text::width(&choice.value),
+                None => 0,
+            }),
+        }
+    }
+
+    /// A row's name and id, set in their columns, and its note.
+    ///
+    /// A row with no name of its own is its id, in the name column: the id
+    /// again beside it would say nothing more.
+    fn row(&self, choice: &crate::app::Choice, purpose: Purpose) -> (String, String) {
+        let value = match purpose {
+            Purpose::Theme => choice.value.to_lowercase(),
+            Purpose::Model | Purpose::Effort => choice.value.clone(),
+        };
+        if !self.described {
+            return (value, String::new());
+        }
+        let (name, id) = match &choice.name {
+            Some(name) => (name.clone(), value),
+            None => (value, String::new()),
+        };
+        let said = format!(
+            "{}{PICK_GAP}{}",
+            text::pad(&name, self.name),
+            text::pad(&id, self.value)
+        );
+        let note = choice
+            .note
+            .as_deref()
+            .map(|note| format!("{PICK_GAP}{note}"))
+            .unwrap_or_default();
+        (said, note)
+    }
 }
 
 /// Widest a sheet is drawn, in columns: a paragraph's measure, with room

@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃    44 +     headers.set("If-None-Match", cached.etag);                   ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃    45 +   }                                                              ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃    46 +   const res = await fetch(url, { ...init, headers });            ┃ │ ───────────────────────────────────── │
+ ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃    48     return res;                                                    ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃       …        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓─────────────── │
+ ┃   115     cache┃                                                                                  ┃░░░░ 25k / 200k │
+ ┃   116 +     eta┃  › Default (recommended)  default            Sonnet 5.5 · Efficient for routin…  ┃────────────────┘
+ ┃   117       bod┃    Opus 5.5               opus               For complex work and everyday tas…  ┃ ───────────────┐
+ ┃   └ allowed by ┃    Fable 5.1              fable              For your toughest challenges        ┃                █
+ ┃                ┃    Sonnet 5.5             sonnet             Most efficient for simpler tasks    ┃es  +≥977 −≥259 █
+ ┃ ◆ claude       ┃    Haiku 4.5              haiku              Fastest for quick answers           ┃                █
+ ┃   Rewriting the┃    Sonnet 5               claude-sonnet-5    Efficient for routine tasks         ┃          +0 −0 │
+ ┃                ┃    Opus 5                 claude-opus-5      Best for everyday, complex tasks    ┃                │
+ ┃ ◆ claude       ┃    Fable 5                claude-fable-5     Most capable for your hardest and…  ┃       +149 −12 │
+ ┃   The notebook ┃    Opus 4.8               claude-opus-4-8    Best for everyday, complex tasks    ┃        +88 −41 │
+ ┃                ┃    Opus 4.7               claude-opus-4-7    Best for everyday, complex tasks    ┃         +31 −9 │
+ ┃ ✗ Bash         ┃    Opus 4.6               claude-opus-4-6    Best for everyday, complex tasks    ┃         +12 −0 │
+ ┃   └ 1 failing: ┃    Sonnet 4.6             claude-sonnet-4-6  Efficient for routine tasks         ┃────────────────┘
+ ┃                ┃                                                                                  ┃ ───────────────┐
+ ┃ ◆ claude       ┃  ↑↓ choose · Enter switch · Esc keep this one                                    ┃g · 1 failed    █
+ ┃   Etags cached ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━ applied from the next turn ━━━━━━━━━━━━━━━━━━━━━━━━━━━┛… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                        █ │   └ Reading tests/stream.rs           █
+ ┃                                                                          █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │     Read 3                            │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

@@ -1643,6 +1643,152 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
     }
 }
 
+/// The twelve models the `claude` CLI listed in its answer to `initialize` on
+/// a Max login, as Claude Code 2.1.288 listed them: id, name, what it is for
+/// and the release it runs on.
+const OFFERED: &[(&str, &str, &str, &str)] = &[
+    (
+        "default",
+        "Default (recommended)",
+        "Sonnet 5.5 · Efficient for routine tasks",
+        "claude-sonnet-5-5",
+    ),
+    (
+        "opus",
+        "Opus 5.5",
+        "For complex work and everyday tasks",
+        "claude-opus-5-5",
+    ),
+    (
+        "fable",
+        "Fable 5.1",
+        "For your toughest challenges",
+        "claude-fable-5-1",
+    ),
+    (
+        "sonnet",
+        "Sonnet 5.5",
+        "Most efficient for simpler tasks",
+        "claude-sonnet-5-5",
+    ),
+    (
+        "haiku",
+        "Haiku 4.5",
+        "Fastest for quick answers",
+        "claude-haiku-4-5-20251001",
+    ),
+    (
+        "claude-sonnet-5",
+        "Sonnet 5",
+        "Efficient for routine tasks",
+        "claude-sonnet-5",
+    ),
+    (
+        "claude-opus-5",
+        "Opus 5",
+        "Best for everyday, complex tasks",
+        "claude-opus-5",
+    ),
+    (
+        "claude-fable-5",
+        "Fable 5",
+        "Most capable for your hardest and longest-running tasks",
+        "claude-fable-5",
+    ),
+    (
+        "claude-opus-4-8",
+        "Opus 4.8",
+        "Best for everyday, complex tasks",
+        "claude-opus-4-8",
+    ),
+    (
+        "claude-opus-4-7",
+        "Opus 4.7",
+        "Best for everyday, complex tasks",
+        "claude-opus-4-7",
+    ),
+    (
+        "claude-opus-4-6",
+        "Opus 4.6",
+        "Best for everyday, complex tasks",
+        "claude-opus-4-6",
+    ),
+    (
+        "claude-sonnet-4-6",
+        "Sonnet 4.6",
+        "Efficient for routine tasks",
+        "claude-sonnet-4-6",
+    ),
+];
+
+fn offered() -> Event {
+    Event::Models {
+        models: OFFERED
+            .iter()
+            .map(
+                |(id, name, description, resolves_to)| niobe_core::event::ModelOption {
+                    id: (*id).to_owned(),
+                    name: Some((*name).to_owned()),
+                    description: Some((*description).to_owned()),
+                    resolves_to: Some((*resolves_to).to_owned()),
+                },
+            )
+            .collect(),
+    }
+}
+
+fn f4() -> ratatui::crossterm::event::KeyEvent {
+    ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::F(4),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    )
+}
+
+/// The list is every model the backend offers: each one's name, the id
+/// choosing it sends, and what it is for.
+#[test]
+fn the_model_list_shows_every_model_the_backend_offers_by_name_and_id() {
+    let mut app = running_session().with_profile(SelectedProfile {
+        name: "max".to_owned(),
+        backend: Backend::Claude,
+        models: Vec::new(),
+    });
+    app.apply(&offered());
+    app.on_key(f4());
+
+    let frame = screen(&mut app, 120, 30);
+    for (id, name, _, _) in OFFERED {
+        assert!(frame.contains(id) && frame.contains(name), "{id}:\n{frame}");
+    }
+    assert!(frame.contains("For your toughest"), "{frame}");
+    for (width, height) in [(80, 24), (120, 30)] {
+        assert_snapshot(
+            &format!("model-list-offered-{width}x{height}"),
+            &screen(&mut app, width, height),
+        );
+    }
+}
+
+/// A profile that names models shows those, in its order, and says how many
+/// of the backend's it leaves out.
+#[test]
+fn a_profile_naming_models_shows_those_and_how_many_more_the_backend_offers() {
+    let mut app = running_session().with_profile(SelectedProfile {
+        name: "max".to_owned(),
+        backend: Backend::Claude,
+        models: vec!["fable".to_owned(), "claude-opus-4-8".to_owned()],
+    });
+    app.apply(&offered());
+    app.on_key(f4());
+
+    let frame = screen(&mut app, 120, 30);
+    let fable = frame.find("Fable 5.1").expect("the profile's first model");
+    let opus = frame.find("Opus 4.8").expect("the profile's second model");
+    assert!(fable < opus, "{frame}");
+    assert!(!frame.contains("Haiku 4.5"), "{frame}");
+    assert!(frame.contains("10 more the backend offers"), "{frame}");
+}
+
 /// A shell asking whether to trust a repository's config that sets
 /// `grants` rows of what only a trusted file may.
 fn asking_trust(grants: Vec<(String, String)>) -> App {

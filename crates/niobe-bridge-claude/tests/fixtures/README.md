@@ -1088,6 +1088,37 @@ did leave, the `cost-state` it wrote (not in the fixture) held 6 input,
 9 output, 34,483 cache read and 33,109 cache write, for $0.1394346: the tokens
 counted from the reply are the ones the CLI went on to bill.
 
+## `models-listed.jsonl`
+
+One turn on a Max login, recorded from Claude Code 2.1.288 on 4 October 2026
+in an empty directory with `--setting-sources project --model haiku`. Before
+the turn the session sent the `initialize` request the driver sends, and the
+prompt asked for one word. The lines are the CLI's own, in the order it
+printed them. The only edits: the answer to `initialize` cut to its
+`commands`, themselves cut to the first three, and its `models`, kept whole —
+it also names the signed-in account, the output styles, the process id and
+the session's state; `system`/`init` cut down to the keys that say what ran,
+its `cwd` rewritten to `/repo` and its `memory_paths.auto` to a home that is
+not the recording machine's; and `system`/`commands_changed`, which this
+release sent after the `result`, cut to the same three commands.
+
+What it settles is where the models a session can run on are listed:
+
+- **The answer to `initialize` lists them, under `response.response.models`**,
+  twelve here, in the order the CLI's own picker shows them: the aliases
+  `default`, `opus`, `fable`, `sonnet` and `haiku`, then exact releases from
+  `claude-sonnet-5` to `claude-sonnet-4-6`. Each is
+  `{value, resolvedModel, displayName, description}`, most with the effort
+  levels and modes the model supports beside them; `value` is what
+  `--model` and `set_model` take, and `resolvedModel` is the release an alias
+  runs on today — `fable` is `claude-fable-5-1`, `default` and `sonnet` both
+  `claude-sonnet-5-5`. Nothing else carries the list: `init` names only the
+  model the session runs on.
+- `tests/stream.rs` folds it and expects the session to hold all twelve
+  values in that order, Fable 5.1 named and described as the CLI wrote it;
+  `tests/conformance.rs` holds every listed model to carrying `value`,
+  `displayName` and `description`.
+
 ## `hand-written.jsonl`
 
 **Written by hand, not recorded**, for two shapes of the protocol no

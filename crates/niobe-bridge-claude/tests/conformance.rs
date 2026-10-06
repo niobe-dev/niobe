@@ -581,6 +581,48 @@ fn every_recorded_shell_result_carries_what_its_exit_status_is_read_from() {
     );
 }
 
+/// The keys each model the answer to `initialize` lists is read from: the id
+/// the CLI takes it by, the name it shows, and what it says it is for.
+///
+/// Recorded from Claude Code 2.1.288 under `models`. A release that renamed
+/// one would leave the model picker offering nothing the backend listed, or
+/// rows with no name, and nothing failing; here it is a recording that lacks
+/// the key, by name.
+const MODEL_KEYS: &[&str] = &["value", "displayName", "description"];
+
+#[test]
+fn every_recorded_initialize_answer_lists_its_models_by_the_keys_they_are_read_from() {
+    let mut listed = 0;
+    for path in recordings() {
+        for line in lines_of(&path) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(models) = value
+                .pointer("/response/response/models")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            for model in models {
+                for key in MODEL_KEYS {
+                    assert!(
+                        model.get(key).and_then(serde_json::Value::as_str).is_some(),
+                        "{}: a model the answer to `initialize` lists has no `{key}`, which is \
+                         where the bridge reads it from: {model}",
+                        path.display()
+                    );
+                }
+                listed += 1;
+            }
+        }
+    }
+    assert!(
+        listed > 0,
+        "no recording holds an answer to `initialize` that lists the models"
+    );
+}
+
 #[test]
 fn every_recording_says_which_cli_version_it_was_recorded_from() {
     for path in recordings() {

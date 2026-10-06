@@ -373,6 +373,28 @@ pub struct SlashCommand {
     pub argument_hint: Option<String>,
 }
 
+/// A model the backend offers to run the session on, as it listed it.
+///
+/// Only what the operator needs to choose one: the backend is what resolves
+/// the id, and a model it does not list is not one this offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOption {
+    /// What the backend takes the model by — an alias such as `opus` or an
+    /// exact release such as `claude-opus-4-8` — and what choosing it sends.
+    pub id: String,
+    /// What the backend calls it, such as `Opus 4.8`, where it names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What it is for, in the backend's words, where it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The exact model the id runs on today, where the backend said: an
+    /// alias moves as releases do, and this is what the session reports
+    /// itself running once it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves_to: Option<String>,
+}
+
 /// The tool name a command the operator ran with `!` is recorded under.
 ///
 /// No backend names a tool this way, so the operator's commands are never
@@ -942,6 +964,13 @@ pub enum Event {
     Commands {
         /// The commands, in the backend's order.
         commands: Vec<SlashCommand>,
+    },
+
+    /// Every model the backend offers to run the session on, as it now
+    /// stands. Replaces the list before it whole, as [`Event::Commands`] does.
+    Models {
+        /// The models, in the backend's order.
+        models: Vec<ModelOption>,
     },
 
     /// The backend's own total for a turn is not what the turn's messages

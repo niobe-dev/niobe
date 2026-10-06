@@ -161,7 +161,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   session starts with are listed, `commands_changed` only reports a change to them — asks it once,
   where the config leaves titles on, to title a new session from its first prompt that is not a
   command (`generate_session_title`, which the CLI answers from its small model and bills into the
-  session's running totals) — keeps its
+  session's running totals), and the only place the models the signed-in account can run are
+  listed, which the model picker offers — keeps its
   standard input open for the life of the session and writes it from a queue on a thread of its
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on, and starts it as the leader of a process group of its own, which a closing

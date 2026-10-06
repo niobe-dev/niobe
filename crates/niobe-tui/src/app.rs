@@ -259,9 +259,10 @@ pub struct SelectedProfile {
     pub name: String,
     /// The backend the profile runs.
     pub backend: Backend,
-    /// The models the profile offers, in the order it names them. Empty where
-    /// it names none, and the shell then has nothing to offer: a model id
-    /// invented here would be one the backend never heard of.
+    /// The models the profile narrows the backend's list to, in the order it
+    /// names them, and what is offered where the backend lists none. Empty
+    /// where it names none, and the shell then offers what the backend lists:
+    /// a model id invented here would be one the backend never heard of.
     pub models: Vec<String>,
 }
 
@@ -371,18 +372,46 @@ pub struct Picker {
     /// What choosing does.
     pub purpose: Purpose,
     /// What is offered, in the order it is drawn.
-    pub options: Vec<String>,
+    pub options: Vec<Choice>,
     /// Which one the cursor is on.
     pub at: usize,
+    /// How many more the backend offers than the list holds, where the
+    /// profile narrowed it: the list says so, rather than reading as all
+    /// there is.
+    pub more: usize,
+}
+
+/// One row of a [`Picker`]: what choosing it sends, and what it is called and
+/// for where the backend said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    /// What choosing sends, exactly as the backend takes it.
+    pub value: String,
+    /// What the backend calls it, where that is not the value itself.
+    pub name: Option<String>,
+    /// What it is for, in the backend's words.
+    pub note: Option<String>,
+}
+
+impl Choice {
+    /// A row that is its value and nothing more.
+    pub fn plain(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            name: None,
+            note: None,
+        }
+    }
 }
 
 /// What a [`Picker`] chooses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
-    /// The model the session runs on. The list is the profile's, in the order
-    /// it names them: the shell knows no backend and so knows no models of its
-    /// own, and offering an id the backend would refuse is worse than offering
-    /// nothing.
+    /// The model the session runs on. The list is the backend's, as it said
+    /// it offers them; where the profile names models, only those, in its
+    /// order; and where the backend has listed none, the profile's. The shell
+    /// knows no models of its own, and offering an id the backend would refuse
+    /// is worse than offering nothing.
     Model,
     /// How hard the model works on a turn, sent as the backend's `/effort`.
     Effort,
@@ -2115,7 +2144,8 @@ impl App {
             | Event::ModelRefused
             | Event::UsageWindows(_)
             | Event::Billing { .. }
-            | Event::Commands { .. } => {}
+            | Event::Commands { .. }
+            | Event::Models { .. } => {}
 
             // Straight after its call's end, so in the same tick and at the
             // same clock: the moment the call finished.
@@ -3047,29 +3077,26 @@ impl App {
 
     /// Opens the model list, or says why there is none to open.
     fn pick_model(&mut self) {
-        let models = self
+        let named: &[String] = self
             .profile
             .as_ref()
-            .map(|profile| profile.models.clone())
-            .unwrap_or_default();
-        if models.is_empty() {
+            .map_or(&[], |profile| profile.models.as_slice());
+        let (options, more) = model_choices(self.session.models(), named);
+        if options.is_empty() {
             self.hint = Some(
-                "F4 Model — this profile names no models; add `models = [\"…\"]` to it in \
-                 the config"
+                "F4 Model — the backend has not listed its models yet, and this profile names \
+                 none; add `models = [\"…\"]` to it in the config"
                     .to_owned(),
             );
             return;
         }
 
-        let at = self
-            .session
-            .model()
-            .and_then(|current| models.iter().position(|model| model == current))
-            .unwrap_or(0);
+        let at = in_force(&options, self.session.models(), self.session.model()).unwrap_or(0);
         self.picking = Some(Picker {
             purpose: Purpose::Model,
-            options: models,
+            options,
             at,
+            more,
         });
     }
 
@@ -3084,34 +3111,42 @@ impl App {
         }
         self.picking = Some(Picker {
             purpose: Purpose::Effort,
-            options: EFFORTS.iter().map(|level| (*level).to_owned()).collect(),
+            options: EFFORTS.iter().copied().map(Choice::plain).collect(),
             at: 0,
+            more: 0,
         });
     }
 
     /// Opens the list of themes, on the one in force.
     fn pick_theme(&mut self) {
-        let options: Vec<String> = crate::theme::THEMES
+        let options: Vec<Choice> = crate::theme::THEMES
             .iter()
-            .map(|theme| theme.name.to_owned())
+            .map(|theme| Choice::plain(theme.name))
             .collect();
         let at = options
             .iter()
-            .position(|name| *name == self.theme.name)
+            .position(|choice| choice.value == self.theme.name)
             .unwrap_or(0);
         self.picking = Some(Picker {
             purpose: Purpose::Theme,
             options,
             at,
+            more: 0,
         });
     }
 
-    /// What the open list marks as in force, if it can know.
-    pub fn picked(&self) -> Option<&str> {
-        match self.picking.as_ref()?.purpose {
-            Purpose::Model => self.session.model(),
+    /// Which row of the open list is in force, if it can know.
+    pub fn picked(&self) -> Option<usize> {
+        let picker = self.picking.as_ref()?;
+        match picker.purpose {
+            Purpose::Model => {
+                in_force(&picker.options, self.session.models(), self.session.model())
+            }
             Purpose::Effort => None,
-            Purpose::Theme => Some(self.theme.name),
+            Purpose::Theme => picker
+                .options
+                .iter()
+                .position(|choice| choice.value == self.theme.name),
         }
     }
 
@@ -3133,7 +3168,10 @@ impl App {
             KeyCode::Esc | KeyCode::F(4) => self.picking = None,
             KeyCode::Enter => {
                 let purpose = picker.purpose;
-                let chosen = picker.options.get(picker.at).cloned();
+                let chosen = picker
+                    .options
+                    .get(picker.at)
+                    .map(|choice| choice.value.clone());
                 self.picking = None;
                 if let Some(chosen) = chosen {
                     self.choose(purpose, chosen);
@@ -3224,10 +3262,13 @@ impl App {
             Action::SignIn => false,
             Action::Resume => self.remembers,
             Action::Memory => self.places.memory.is_some(),
-            Action::SwitchModel => self
-                .profile
-                .as_ref()
-                .is_some_and(|profile| !profile.models.is_empty()),
+            Action::SwitchModel => {
+                !self.session.models().is_empty()
+                    || self
+                        .profile
+                        .as_ref()
+                        .is_some_and(|profile| !profile.models.is_empty())
+            }
             Action::Stop => self.working(),
             Action::Commands => !self.session.commands().is_empty(),
             Action::About
@@ -6734,6 +6775,60 @@ fn now_secs() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
+/// The model list: every model the backend offers, or where the profile
+/// names models, those, in its order, described where the backend listed
+/// them; and how many the backend offers beyond what is listed.
+///
+/// A model the profile names that the backend did not list is still offered:
+/// a gateway or a backend that lists nothing takes ids it never announced,
+/// and the profile is the operator's word that this one is taken.
+fn model_choices(
+    offered: &[niobe_core::event::ModelOption],
+    named: &[String],
+) -> (Vec<Choice>, usize) {
+    let described = |model: &niobe_core::event::ModelOption| Choice {
+        value: model.id.clone(),
+        name: model.name.clone().filter(|name| *name != model.id),
+        note: model.description.clone(),
+    };
+    if named.is_empty() {
+        return (offered.iter().map(described).collect(), 0);
+    }
+    let choices = named
+        .iter()
+        .map(|id| match offered.iter().find(|model| model.id == *id) {
+            Some(model) => described(model),
+            None => Choice::plain(id.clone()),
+        })
+        .collect();
+    let more = offered
+        .iter()
+        .filter(|model| !named.contains(&model.id))
+        .count();
+    (choices, more)
+}
+
+/// Which of `options` the session runs on `model`: the row whose id it is,
+/// or else the first whose id the backend said runs on it — an alias reports
+/// itself by the release it resolves to once the backend confirms it.
+fn in_force(
+    options: &[Choice],
+    offered: &[niobe_core::event::ModelOption],
+    model: Option<&str>,
+) -> Option<usize> {
+    let model = model?;
+    options
+        .iter()
+        .position(|choice| choice.value == model)
+        .or_else(|| {
+            options.iter().position(|choice| {
+                offered.iter().any(|offer| {
+                    offer.id == choice.value && offer.resolves_to.as_deref() == Some(model)
+                })
+            })
+        })
+}
+
 /// One window, as Cost & usage reads it out: `5h window 62%, resets in 2h 14m`.
 ///
 /// The reset is shown as the time left rather than as a wall clock, because
@@ -9056,7 +9151,7 @@ mod tests {
 
         app.on_key(key(KeyCode::F(4)));
         let picker = app.picking().expect("the model list is on screen");
-        assert_eq!(picker.options, ["opus", "sonnet", "haiku"]);
+        assert_eq!(values(picker), ["opus", "sonnet", "haiku"]);
         assert_eq!(picker.at, 0);
 
         app.on_key(key(KeyCode::Down));
@@ -9074,6 +9169,146 @@ mod tests {
             Some("sonnet"),
             "the menu row would still name the model the session moved off"
         );
+    }
+
+    /// What the `claude` CLI lists in its answer to `initialize` on a Max
+    /// login, cut to five: aliases, Fable, and exact releases.
+    fn offered() -> Event {
+        let model = |id: &str, name: &str, description: &str, resolves_to: &str| {
+            niobe_core::event::ModelOption {
+                id: id.to_owned(),
+                name: Some(name.to_owned()),
+                description: Some(description.to_owned()),
+                resolves_to: Some(resolves_to.to_owned()),
+            }
+        };
+        Event::Models {
+            models: vec![
+                model(
+                    "default",
+                    "Default (recommended)",
+                    "Sonnet 5.5 · Efficient for routine tasks",
+                    "claude-sonnet-5-5",
+                ),
+                model(
+                    "opus",
+                    "Opus 5.5",
+                    "For complex work and everyday tasks",
+                    "claude-opus-5-5",
+                ),
+                model(
+                    "fable",
+                    "Fable 5.1",
+                    "For your toughest challenges",
+                    "claude-fable-5-1",
+                ),
+                model(
+                    "claude-sonnet-5",
+                    "Sonnet 5",
+                    "Efficient for routine tasks",
+                    "claude-sonnet-5",
+                ),
+                model(
+                    "claude-fable-5",
+                    "Fable 5",
+                    "Most capable for your hardest and longest-running tasks",
+                    "claude-fable-5",
+                ),
+            ],
+        }
+    }
+
+    fn values(picker: &Picker) -> Vec<&str> {
+        picker
+            .options
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn f4_offers_every_model_the_backend_lists_where_the_profile_names_none() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&[]);
+        app.apply(&offered());
+
+        assert!(app.can(crate::menu::Action::SwitchModel));
+        app.on_key(key(KeyCode::F(4)));
+        let picker = app.picking().expect("the model list is on screen");
+        assert_eq!(
+            values(picker),
+            [
+                "default",
+                "opus",
+                "fable",
+                "claude-sonnet-5",
+                "claude-fable-5"
+            ]
+        );
+        assert_eq!(picker.options[2].name.as_deref(), Some("Fable 5.1"));
+        assert_eq!(picker.more, 0);
+
+        for _ in 0..4 {
+            app.on_key(key(KeyCode::Down));
+        }
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModelSelected {
+                model: "claude-fable-5".to_owned()
+            }],
+            "the exact release was not what was asked for"
+        );
+        assert_eq!(app.session().model(), Some("claude-fable-5"));
+    }
+
+    #[test]
+    fn a_profile_that_names_models_narrows_the_backends_list_to_them_in_its_order() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&["fable", "opus", "my-gateway-model"]);
+        app.apply(&offered());
+
+        app.on_key(key(KeyCode::F(4)));
+        let picker = app.picking().expect("the model list is on screen");
+        assert_eq!(values(picker), ["fable", "opus", "my-gateway-model"]);
+        assert_eq!(picker.options[0].name.as_deref(), Some("Fable 5.1"));
+        assert_eq!(
+            picker.options[2].name, None,
+            "a model the backend did not list was given a name"
+        );
+        assert_eq!(
+            picker.more, 3,
+            "the backend offers three the profile left out"
+        );
+    }
+
+    #[test]
+    fn the_model_in_force_is_found_by_its_id_or_by_the_release_it_runs_on() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&[]);
+        app.apply(&offered());
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5-5".to_owned(),
+            backend_session: None,
+        }));
+
+        app.on_key(key(KeyCode::F(4)));
+        assert_eq!(
+            app.picked(),
+            Some(1),
+            "the alias running it is the one marked"
+        );
+        assert_eq!(app.picking().map(|picker| picker.at), Some(1));
+
+        app.on_key(key(KeyCode::Esc));
+        app.apply(&Event::ModelSelected {
+            model: "claude-fable-5".to_owned(),
+        });
+        app.on_key(key(KeyCode::F(4)));
+        assert_eq!(app.picked(), Some(4));
     }
 
     #[test]
@@ -12200,7 +12435,7 @@ mod tests {
         let picker = app.picking().expect("the theme list");
         assert_eq!(picker.purpose, Purpose::Theme);
         assert_eq!(
-            picker.options[picker.at], CYBER.name,
+            picker.options[picker.at].value, CYBER.name,
             "on the theme in force"
         );
         app.on_key(key(KeyCode::Down));
@@ -12223,7 +12458,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         let picker = app.picking().expect("the effort list");
         assert_eq!(picker.purpose, Purpose::Effort);
-        assert_eq!(picker.options, EFFORTS);
+        assert_eq!(values(picker), EFFORTS);
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Enter));
         assert_eq!(

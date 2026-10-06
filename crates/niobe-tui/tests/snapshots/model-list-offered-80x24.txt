@@ -1,0 +1,24 @@
+ Niobe  Session  Context  Model  View  Help           opus-5  claude · default
+┏━━━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━━━┓
+┃   115     cache.set(url, {                                                   ┃
+┃   116 +     etag: res.headers.get("ETag"),                                   ┃
+┃   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   ┃
+┃   ┃                                                                      ┃   ┃
+┃   ┃  › Default (recommended)  default            Sonnet 5.5 · Efficien…  ┃   ┃
+┃ ◆ ┃    Opus 5.5               opus               For complex work and …  ┃   ┃
+┃   ┃    Fable 5.1              fable              For your toughest cha…  ┃   ┃
+┃   ┃    Sonnet 5.5             sonnet             Most efficient for si…  ┃   ┃
+┃ ◆ ┃    Haiku 4.5              haiku              Fastest for quick ans…  ┃   ┃
+┃   ┃    Sonnet 5               claude-sonnet-5    Efficient for routine…  ┃   ┃
+┃   ┃    Opus 5                 claude-opus-5      Best for everyday, co…  ┃   ┃
+┃ ✗ ┃    Fable 5                claude-fable-5     Most capable for your…  ┃4s █
+┃   ┃    Opus 4.8               claude-opus-4-8    Best for everyday, co…  ┃   █
+┃   ┃    Opus 4.7               claude-opus-4-7    Best for everyday, co…  ┃   █
+┃ ◆ ┃    Opus 4.6               claude-opus-4-6    Best for everyday, co…  ┃   █
+┃   ┃    Sonnet 4.6             claude-sonnet-4-6  Efficient for routine…  ┃4  █
+┃   ┃                                                                      ┃   █
+┃   ┃  ↑↓ choose · Enter switch · Esc keep this one                        ┃   █
+┃ ──┗━━━━━━━━━━━━━━━━━━━━━ applied from the next turn ━━━━━━━━━━━━━━━━━━━━━┛── ┃
+┃  ask  >  Ask for a change · @ file · Ctrl+F find              Ctrl+J newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+EscStop 1Help 2Compact 3Clear 4Model 5Diff 6Rewind 7MCP 8Memory 9Settings 0Quit

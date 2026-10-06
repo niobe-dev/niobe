@@ -55,7 +55,7 @@ pub enum Action {
     SubAgents,
     /// The backend's hooks.
     Hooks,
-    /// Opens the list of models the profile names.
+    /// Opens the list of models the backend offers, or the profile names.
     SwitchModel,
     /// Moves the session to the next permission mode.
     CycleMode,
@@ -108,7 +108,7 @@ impl Action {
             Action::Mcp => "the backend's MCP servers, as /mcp",
             Action::SubAgents => "the pane the sub-agents are listed in",
             Action::Hooks => "the backend's hooks, as /hooks",
-            Action::SwitchModel => "pick one of the models the profile names",
+            Action::SwitchModel => "pick one of the models the backend offers",
             Action::CycleMode => "the next permission mode",
             Action::Effort => "pick an effort level",
             Action::Usage => "what the plan's usage windows stand at",

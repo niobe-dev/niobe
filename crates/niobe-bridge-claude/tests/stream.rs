@@ -1862,3 +1862,49 @@ fn a_recorded_sessions_kinds_of_work_add_up_to_its_calls() {
         assert_eq!(sum(|kind| kind.denied), tools.denied, "{:?}", tools.by_work);
     }
 }
+
+/// A turn on a Max login whose answer to `initialize` keeps the models the CLI
+/// offers, recorded from Claude Code 2.1.288.
+const MODELS_LISTED: &str = include_str!("fixtures/models-listed.jsonl");
+
+/// The CLI says which models the signed-in account can run, Fable and dated
+/// releases among them, in the answer to the `initialize` every session opens
+/// with; the session holds every one, in the CLI's order, by the id the CLI
+/// takes it by.
+#[test]
+fn the_models_the_cli_offers_come_from_the_answer_to_initialize() {
+    let events = translate(MODELS_LISTED);
+    let state = SessionState::replay(&events);
+
+    let ids: Vec<&str> = state
+        .models()
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "default",
+            "opus",
+            "fable",
+            "sonnet",
+            "haiku",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ]
+    );
+    let fable = &state.models()[2];
+    assert_eq!(fable.name.as_deref(), Some("Fable 5.1"));
+    assert_eq!(
+        fable.description.as_deref(),
+        Some("For your toughest challenges")
+    );
+    assert_eq!(fable.resolves_to.as_deref(), Some("claude-fable-5-1"));
+    assert!(warnings(&events).is_empty(), "{events:?}");
+    assert!(notices(&events).is_empty(), "{events:?}");
+}

@@ -194,9 +194,10 @@ impl Profile {
         &self.args
     }
 
-    /// The models this profile offers, in the order the shell lists them for
-    /// picking. Empty where the config names none, which is a profile whose
-    /// model is whatever the backend chooses: Niobe never invents a model id.
+    /// The models this profile narrows the shell's model list to, in the
+    /// order it lists them. Empty where the config names none, which is a
+    /// profile offered every model its backend lists: Niobe never invents a
+    /// model id.
     pub fn models(&self) -> &[String] {
         &self.models
     }
