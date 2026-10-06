@@ -426,6 +426,10 @@ pub struct Translator {
     /// not answered yet: a refusal of one of those is what puts the session
     /// back on the model it last reported.
     model_requests: BTreeSet<String>,
+    /// The `request_id`s of the titles Niobe asked for that the CLI has not
+    /// answered yet: an answer to one of those carries a title rather than a
+    /// change taking effect.
+    title_requests: BTreeSet<String>,
     /// Per-message usage since the last `result`, for the turn reconciliation.
     turn: Counts,
     /// The messages since the last `result` whose stream ended before their
@@ -516,6 +520,7 @@ impl Translator {
             recorded_agents: BTreeMap::new(),
             denied: BTreeMap::new(),
             model_requests: BTreeSet::new(),
+            title_requests: BTreeSet::new(),
             turn: Counts::default(),
             unfinished: Vec::new(),
             reported: BTreeMap::new(),
@@ -645,6 +650,16 @@ impl Translator {
         self.model_requests.insert(request_id.to_owned());
     }
 
+    /// Records that the control request `request_id` asks the CLI to title
+    /// the session (`generate_session_title`).
+    ///
+    /// The answer names the request and nothing else, so only this says that
+    /// a `title` in it is the session's, and that a refusal of it changed
+    /// nothing the session was running with.
+    pub fn asked_for_title(&mut self, request_id: &str) {
+        self.title_requests.insert(request_id.to_owned());
+    }
+
     /// The permission prompts read since the last call, oldest first.
     ///
     /// Separate from the events because an answer is addressed by an id the
@@ -727,11 +742,12 @@ impl Translator {
     }
 
     /// Reads the CLI's answer to a request of Niobe's own: the slash commands
-    /// the answer to `initialize` lists, or the refusal of a change.
+    /// the answer to `initialize` lists, the session's title, or the refusal
+    /// of a change.
     ///
     /// Only this side asks the CLI anything, so every `control_response` is an
-    /// answer to a request made here — what the CLI offers, or a mode or a
-    /// model the session was asked to move to. A refusal left unreported would
+    /// answer to a request made here — what the CLI offers, a title for the
+    /// session, or a mode or a model the session was asked to move to. A refusal left unreported would
     /// leave the shell showing a change that never happened, which for a model
     /// takes [`Event::ModelRefused`] as well as the warning: the shell shows
     /// the model the operator chose until the CLI answers otherwise.
@@ -743,6 +759,14 @@ impl Translator {
             .request_id
             .as_deref()
             .is_some_and(|id| self.model_requests.remove(id));
+        let of_title = outcome
+            .request_id
+            .as_deref()
+            .is_some_and(|id| self.title_requests.remove(id));
+        if of_title {
+            out.extend(titled(outcome));
+            return;
+        }
         if outcome.subtype.as_deref() == Some("success") {
             let Some(answer) = outcome.response else {
                 return;
@@ -2251,6 +2275,29 @@ pub(crate) fn read_mode(mode: &str) -> Option<Mode> {
         "auto" => Some(Mode::Auto),
         _ => None,
     }
+}
+
+/// What the CLI's answer to a request for the session's title says.
+///
+/// A title is the session's caption from then on. None — the CLI makes none
+/// for a prompt too short to name or one that is a command — leaves the caption
+/// on the first prompt, which is nothing to say. A refusal is said as a notice
+/// rather than a warning: nothing the session runs with was changed or kept
+/// from changing, and the caption is still the first prompt.
+fn titled(outcome: wire::ControlOutcome) -> Option<Event> {
+    if outcome.subtype.as_deref() == Some("success") {
+        let title = outcome.response?.title?;
+        let title = title.trim();
+        return (!title.is_empty()).then(|| Event::Titled {
+            title: title.to_owned(),
+        });
+    }
+    Some(Event::Notice {
+        message: format!(
+            "the CLI did not title the session, so it is captioned by its first prompt: {}",
+            outcome.error.as_deref().unwrap_or("the CLI gave no reason")
+        ),
+    })
 }
 
 /// A non-fatal entry: something the session should show and go on from.
@@ -4503,6 +4550,52 @@ mod tests {
         );
         assert_eq!(model.len(), 2, "{model:?}");
         assert_eq!(model[1], Event::ModelRefused);
+    }
+
+    #[test]
+    fn the_title_the_cli_answers_with_titles_the_session() {
+        let mut translator = translator();
+        translator.asked_for_title("niobe-2");
+
+        let events = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"title":"Static file handler etag support"}}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::Titled {
+                title: "Static file handler etag support".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_title_the_cli_did_not_make_leaves_the_caption_to_the_first_prompt() {
+        let mut translator = translator();
+        translator.asked_for_title("niobe-2");
+        translator.asked_for_title("niobe-3");
+
+        let none = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"title":null}}}"#,
+        );
+        let refused = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"Unsupported control request subtype: generate_session_title"}}"#,
+        );
+
+        assert!(none.is_empty(), "{none:?}");
+        assert!(
+            warnings(&refused).is_empty(),
+            "no change was refused, so none is said to be: {refused:?}"
+        );
+        assert!(
+            matches!(
+                refused.as_slice(),
+                [Event::Notice { message }]
+                    if message.contains("first prompt")
+                        && message.contains("Unsupported control request subtype")
+            ),
+            "{refused:?}"
+        );
     }
 
     #[test]

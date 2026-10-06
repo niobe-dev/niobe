@@ -298,6 +298,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         selected.as_ref(),
         &backend::Attach {
             budget_usd: asked.budget,
+            title: loaded.config.titles() == niobe_config::Titles::Model,
             ..backend::Attach::default()
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
@@ -489,6 +490,7 @@ fn resume(
             resume: continuing,
             mode: app.session().mode(),
             budget_usd: asked.budget,
+            title: false,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -616,6 +618,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             resume: Some(session.to_owned()),
             mode: app.session().mode(),
             budget_usd: asked.budget,
+            title: false,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),

@@ -196,6 +196,31 @@ fn sessions_are_listed_newest_first_with_their_first_prompt_and_size() {
 }
 
 #[test]
+fn a_session_is_listed_with_the_last_title_its_backend_gave_it() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let titled = store.create_session().expect("a session is created");
+    let titled_event = |title: &str| Event::Titled {
+        title: title.to_owned(),
+    };
+    for event in [
+        user("add etag support"),
+        titled_event("Etag support"),
+        titled_event("Static file handler etag support"),
+    ] {
+        store.append(titled, &event).expect("append");
+    }
+    let untitled = store.create_session().expect("a session is created");
+    store.append(untitled, &user("fix it")).expect("append");
+
+    let sessions = store.sessions().expect("listing works");
+    assert_eq!(sessions[0].title, None);
+    assert_eq!(
+        sessions[1].title.as_deref(),
+        Some("Static file handler etag support")
+    );
+}
+
+#[test]
 fn an_unknown_session_is_an_error_not_an_empty_timeline() {
     let store = Store::open_in_memory().expect("an in-memory store opens");
     let missing: SessionId = "42".parse().expect("a number is a session id");

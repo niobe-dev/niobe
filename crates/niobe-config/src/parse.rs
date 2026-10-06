@@ -17,7 +17,7 @@ use niobe_core::{Backend, Billing};
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
-use crate::{Config, ConfigError, DefaultProfile, Profile, Settings, ThemeName};
+use crate::{Config, ConfigError, DefaultProfile, Profile, Settings, ThemeName, Titles};
 
 /// What `backend` may be, in the order an error lists them.
 const BACKENDS: [Backend; 3] = [Backend::Claude, Backend::Codex, Backend::Native];
@@ -47,6 +47,7 @@ impl File<'_> {
                     config.default_profile = Some(self.default_profile(value, &at)?)
                 }
                 "theme" => config.theme = Some(self.theme(value, &at)?),
+                "titles" => config.titles = Some(self.titles(value, &at)?),
                 // The switch for the desktop's animation, which the shell no
                 // longer has. A file written to turn it off still loads.
                 "effects" => {}
@@ -56,8 +57,8 @@ impl File<'_> {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        "unknown key; expected `default_profile`, `theme`, `profiles` \
-                         or `permissions`",
+                        "unknown key; expected `default_profile`, `theme`, `titles`, \
+                         `profiles` or `permissions`",
                     ));
                 }
             }
@@ -86,6 +87,23 @@ impl File<'_> {
             path: self.path.to_path_buf(),
             line: self.line(&value.span()),
         })
+    }
+
+    fn titles(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Titles, ConfigError> {
+        let name = self.string(value, at)?;
+        [Titles::Model, Titles::FirstPrompt]
+            .into_iter()
+            .find(|titles| titles.as_str() == name)
+            .ok_or_else(|| {
+                self.invalid(
+                    &value.span(),
+                    at,
+                    &format!(
+                        "`{name}` is not a way to title a session; expected `model` or \
+                         `first-prompt`"
+                    ),
+                )
+            })
     }
 
     fn profiles(

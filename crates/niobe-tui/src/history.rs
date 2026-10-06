@@ -82,6 +82,9 @@ pub struct PastSession {
     /// The first thing it was asked. A `claude` session's other prompts are
     /// not read until it is opened, so this is all a list can say of it.
     pub first_prompt: Option<String>,
+    /// The last title its backend gave it, which the list names it by over
+    /// its first prompt.
+    pub title: Option<String>,
     /// Whether another niobe has it open, which it cannot be opened here
     /// while it does. Read with the list, so it says how things stood then.
     pub open_elsewhere: bool,
@@ -284,6 +287,8 @@ pub struct SessionRow {
     pub prompts: Vec<String>,
     /// What it was first asked, where its prompts are not known.
     pub first_prompt: Option<String>,
+    /// The title its backend gave it, where one did.
+    pub title: Option<String>,
     /// Whether another niobe has it open: see [`PastSession::open_elsewhere`].
     pub open_elsewhere: bool,
 }
@@ -297,14 +302,23 @@ impl SessionRow {
             .map(String::as_str)
     }
 
-    /// Whether the filter keeps it: every word in one of its prompts, or in
-    /// the name it is listed under.
+    /// What the list names it by: its title, or else its first prompt.
+    pub fn caption(&self) -> Option<&str> {
+        self.title.as_deref().or_else(|| self.first())
+    }
+
+    /// Whether the filter keeps it: every word in one of its prompts, in its
+    /// title, or in the name it is listed under.
     pub fn matches(&self, query: &str) -> bool {
         let label = self
             .target
             .as_ref()
             .map_or_else(|| "this session".to_owned(), Target::label);
         matches(query, &label)
+            || self
+                .title
+                .as_deref()
+                .is_some_and(|title| matches(query, title))
             || self.first().is_some_and(|first| matches(query, first))
             || self.prompts.iter().any(|prompt| matches(query, prompt))
     }
@@ -390,6 +404,7 @@ mod tests {
             last: None,
             prompts: vec!["add etag support".to_owned(), "and a 304 test".to_owned()],
             first_prompt: None,
+            title: None,
             open_elsewhere: false,
         };
 

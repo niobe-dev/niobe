@@ -187,6 +187,7 @@ mod tests {
                 last_at: Some(at(1_789_000_060)),
                 events: 200,
                 first_prompt: Some("add etag support".to_owned()),
+                title: None,
             },
             SessionSummary {
                 id: "3".parse().expect("a number is a session id"),
@@ -194,6 +195,7 @@ mod tests {
                 last_at: None,
                 events: 0,
                 first_prompt: None,
+                title: None,
             },
         ];
 

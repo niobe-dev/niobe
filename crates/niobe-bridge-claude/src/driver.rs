@@ -144,6 +144,11 @@ type Refusals = Arc<Mutex<Vec<ToolCallId>>>;
 /// before every line, as [`Refusals`] is.
 type ModelRequests = Arc<Mutex<Vec<String>>>;
 
+/// The `request_id`s of title requests the thread reading the CLI has not
+/// been told about yet, for the reason [`ModelRequests`] has: the answer names
+/// only the request it answers.
+type TitleRequests = Arc<Mutex<Vec<String>>>;
+
 /// The line being written to the CLI's standard input, what it is, and when
 /// the writing started; nothing while the writer is waiting for a line.
 ///
@@ -222,6 +227,15 @@ pub struct Options {
     /// notice that the next prompt starts the CLI again; with it off it ends
     /// the session, since nothing would.
     pub carry_on: bool,
+    /// Whether the CLI is asked to title the session from the first prompt
+    /// sent that is not a slash command.
+    ///
+    /// The CLI makes the title with its small model, on the operator's
+    /// account, and bills it into the session's running totals: about nine
+    /// hundred input tokens and a dozen output for a short prompt, measured on
+    /// Claude Code 2.1.288. It writes the title into its own transcript too,
+    /// and starts no other session to make it. Off unless asked for.
+    pub ask_title: bool,
 }
 
 impl Options {
@@ -243,6 +257,7 @@ impl Options {
             settings: None,
             ask_over_stdio: false,
             carry_on: false,
+            ask_title: false,
         }
     }
 
@@ -390,6 +405,7 @@ pub struct Session {
     waiting: Waiting,
     refusals: Refusals,
     model_requests: ModelRequests,
+    title_requests: TitleRequests,
     stderr: Arc<Mutex<Tail>>,
     /// The threads reading standard output and standard error, in that
     /// order, and the one writing standard input.
@@ -497,6 +513,8 @@ impl Session {
         let refused = Arc::clone(&refusals);
         let model_requests: ModelRequests = Arc::new(Mutex::new(Vec::new()));
         let asked_for_model = Arc::clone(&model_requests);
+        let title_requests: TitleRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_for_title = Arc::clone(&title_requests);
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             while let Some(output) = next_line(&mut stdout) {
@@ -523,6 +541,11 @@ impl Session {
                 if let Ok(mut asked) = asked_for_model.lock() {
                     for request_id in asked.drain(..) {
                         translator.asked_for_model(&request_id);
+                    }
+                }
+                if let Ok(mut asked) = asked_for_title.lock() {
+                    for request_id in asked.drain(..) {
+                        translator.asked_for_title(&request_id);
                     }
                 }
                 let events = translator.line(&line);
@@ -571,6 +594,7 @@ impl Session {
             waiting,
             refusals,
             model_requests,
+            title_requests,
             stderr: kept,
             threads: vec![reader, errors, writer],
             control_requests: 0,
@@ -618,7 +642,39 @@ impl Session {
     pub fn send(&mut self, prompt: &str, images: &[Image]) -> std::io::Result<()> {
         self.queue(turn_line(prompt, images).to_string(), "turn")?;
         self.turn_open = true;
+        // The turn went in. A title that could not follow it is no reason to
+        // say it did not, and a closed input is reported by the next drain.
+        let _ = self.ask_for_title(prompt);
         Ok(())
+    }
+
+    /// Asks the CLI to title the session from `prompt`, where
+    /// [`Options::ask_title`] says to and no prompt has been asked about yet.
+    ///
+    /// A slash command is passed over: it says what the CLI is to do, not
+    /// what the session is about, and the CLI makes no title from one. Asked
+    /// after the turn has gone in, so the turn is not held behind it, and with
+    /// `persist`, so the CLI keeps the title in its own transcript and answers
+    /// with the one it has rather than making another. Asked once a session:
+    /// a CLI started again carries the conversation on, title and all.
+    fn ask_for_title(&mut self, prompt: &str) -> std::io::Result<()> {
+        let about = prompt.trim();
+        if !self.next.ask_title || about.is_empty() || about.starts_with('/') {
+            return Ok(());
+        }
+        self.next.ask_title = false;
+        let id = self.next_request_id();
+        if let Ok(mut asked) = self.title_requests.lock() {
+            asked.push(id.clone());
+        }
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({
+                "subtype": "generate_session_title",
+                "description": about,
+                "persist": true,
+            }),
+        ))
     }
 
     /// Answers a permission prompt the CLI is waiting on.
@@ -1821,6 +1877,15 @@ mod tests {
     /// hands it back untouched, with the directory the script is in.
     #[cfg(unix)]
     fn started(body: &str) -> (Session, tempfile::TempDir) {
+        started_with(body, |_| {})
+    }
+
+    /// [`started`], with the options `configure` leaves.
+    #[cfg(unix)]
+    fn started_with(
+        body: &str,
+        configure: impl FnOnce(&mut Options),
+    ) -> (Session, tempfile::TempDir) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("a scratch directory");
         let script = dir.path().join("claude");
@@ -1831,7 +1896,92 @@ mod tests {
         let mut options = options();
         options.binary = script;
         options.cwd = dir.path().to_path_buf();
+        configure(&mut options);
         (spawn_written(&options), dir)
+    }
+
+    /// The session is titled from the first prompt that is not a command, by
+    /// asking the CLI once, after that prompt has gone in.
+    #[cfg(unix)]
+    #[test]
+    fn the_cli_is_asked_once_for_a_title_from_the_first_prompt_that_is_not_a_command() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r init\nread -r slash\nread -r turn\nread -r title\nread -r second\n\
+                 printf '%s\\n' \"$slash\" \"$turn\" \"$title\" \"$second\" > '{asked}'\n\
+                 id=$(printf '%s' \"$title\" | sed 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/')\n\
+                 printf '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{{\"title\":\"Etag support\"}}}}}}\\n' \"$id\"\n",
+                asked = asked.display()
+            ),
+            |options| options.ask_title = true,
+        );
+        for prompt in ["/model opus", "add etag support", "and a test for it"] {
+            session.send(prompt, &[]).expect("the stand-in is reading");
+        }
+
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            events.contains(&Event::Titled {
+                title: "Etag support".to_owned()
+            }),
+            "{events:#?}"
+        );
+        let written = std::fs::read_to_string(&asked).expect("the stand-in kept what it read");
+        let lines: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+            .collect();
+        assert_eq!(lines[0]["type"], "user", "{written}");
+        assert_eq!(lines[1]["type"], "user", "{written}");
+        assert_eq!(
+            lines[2]["request"],
+            serde_json::json!({
+                "subtype": "generate_session_title",
+                "description": "add etag support",
+                "persist": true,
+            }),
+            "{written}"
+        );
+        assert_eq!(lines[3]["type"], "user", "asked once: {written}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_not_asked_to_title_itself_sends_the_cli_only_its_turns() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let (mut session, _dir) = started(&format!(
+            "read -r init\nread -r turn\nread -r next\nprintf '%s\\n' \"$turn\" \"$next\" > '{asked}'\n",
+            asked = asked.display()
+        ));
+        for prompt in ["add etag support", "and a test for it"] {
+            session.send(prompt, &[]).expect("the stand-in is reading");
+        }
+        let started = Instant::now();
+        while !session.reported {
+            assert!(started.elapsed() < PATIENCE, "the stand-in never ended");
+            session.drain();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let written = std::fs::read_to_string(&asked).expect("the stand-in kept what it read");
+        assert_eq!(
+            written.matches(r#""type":"user""#).count(),
+            2,
+            "the two turns, and nothing between them: {written}"
+        );
     }
 
     #[test]

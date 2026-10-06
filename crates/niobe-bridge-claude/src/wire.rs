@@ -575,8 +575,8 @@ pub(crate) struct ControlOutcome {
     /// The request this answers, as Niobe addressed it.
     pub(crate) request_id: Option<String>,
     pub(crate) error: Option<String>,
-    /// What a request that succeeded answered with. Only the answer to
-    /// `initialize` carries anything Niobe reads.
+    /// What a request that succeeded answered with: the answers to
+    /// `initialize` and to `generate_session_title` carry what Niobe reads.
     pub(crate) response: Option<ControlAnswer>,
 }
 
@@ -593,6 +593,10 @@ pub(crate) struct ControlAnswer {
     /// will not. Claude Code 2.1.282 says `sdk_opt_in_required` over
     /// stream-json and answers the command with a refusal.
     pub(crate) fast_mode_disabled_reason: Option<String>,
+    /// The title `generate_session_title` made, or `null` where it made none.
+    /// Recorded from Claude Code 2.1.288: `{"title":"Static file handler etag
+    /// support"}` for a prompt about etags.
+    pub(crate) title: Option<String>,
 }
 
 /// `conversation_reset`: the CLI dropped the conversation and started a new

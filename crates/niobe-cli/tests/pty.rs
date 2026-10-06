@@ -1990,14 +1990,100 @@ fn a_line_from_the_cli_that_is_not_utf8_costs_neither_the_reply_nor_the_shell() 
 }
 
 /// A `claude` that writes down every turn it is sent, one line each, and
-/// answers each with the same reply.
+/// answers each with the same reply. A control request, such as the one
+/// asking for the session's title, is not a turn and is passed over.
 const WRITES_DOWN_TURNS_CLAUDE: &str = "#!/bin/sh\n\
     read -r first\n\
     while read -r turn; do\n\
+    case \"$turn\" in *'\"type\":\"control_request\"'*) continue ;; esac\n\
     printf '%s\\n' \"$turn\" >> turns.jsonl\n\
     printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
     printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
     done\n";
+
+/// A `claude` that writes down every line it is sent after `initialize`,
+/// answers a turn with a reply, and answers a request for the session's
+/// title with one, from the request's own id.
+const TITLES_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    while read -r line; do\n\
+    printf '%s\\n' \"$line\" >> sent.jsonl\n\
+    case \"$line\" in\n\
+    *generate_session_title*)\n\
+    id=$(printf '%s' \"$line\" | sed 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/')\n\
+    printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"title\":\"Etag support by the model\"}}}\\n' \"$id\" ;;\n\
+    *)\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}' ;;\n\
+    esac\n\
+    done\n";
+
+/// Types one prompt into a shell on the [`TITLES_CLAUDE`] stand-in under
+/// `config` and quits once it has the reply and, where `titled`, once the
+/// store holds a title for the session. Hands back what the stand-in was
+/// sent and the title the store lists the session by, which is what the
+/// history dialog names it by after a restart.
+fn titled_under(config: &str, titled: bool) -> (String, Option<String>) {
+    let repo = repo();
+    let home = stand_in(repo.path(), TITLES_CLAUDE);
+    std::fs::write(home.path().join("niobe").join("config.toml"), config)
+        .expect("the user config is written");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"add etag support to the static handler\r");
+    terminal.shows("answered-the-turn");
+    let title = || {
+        Store::open(&repo.path().join(".niobe").join("sessions.db"))
+            .ok()?
+            .sessions()
+            .ok()?
+            .into_iter()
+            .find_map(|session| session.title)
+    };
+    let deadline = Instant::now() + PATIENCE;
+    while titled && title().is_none() {
+        assert!(Instant::now() < deadline, "the session was never titled");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let sent = std::fs::read_to_string(repo.path().join("sent.jsonl"))
+        .expect("the stand-in wrote down what it was sent");
+    (sent, title())
+}
+
+/// A new session asks the CLI it runs for a title, once, from its first
+/// prompt, and keeps the answer; nothing else is started to make it.
+#[test]
+fn a_new_session_keeps_the_title_the_cli_made() {
+    let (sent, title) = titled_under(
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n",
+        true,
+    );
+
+    assert_eq!(title.as_deref(), Some("Etag support by the model"));
+    assert_eq!(sent.matches("generate_session_title").count(), 1, "{sent}");
+}
+
+/// With titles turned off the CLI is asked for none, and nothing titles the
+/// session but its first prompt.
+#[test]
+fn with_titles_off_the_cli_is_not_asked_for_a_title() {
+    let (sent, title) = titled_under(
+        "default_profile = \"max\"\ntitles = \"first-prompt\"\n\n[profiles.max]\nbackend = \"claude\"\n",
+        false,
+    );
+
+    assert!(!sent.contains("generate_session_title"), "{sent}");
+    assert_eq!(title, None);
+}
 
 /// A paste the terminal bracketed is one prompt with its lines in it, sent
 /// by the Enter after it: the carriage returns a terminal separates the

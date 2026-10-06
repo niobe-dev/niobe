@@ -62,8 +62,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-config/`** — the config: profiles, each a backend plus the environment,
   arguments and credential refresh it runs with (the refresh command is read and listed, and not
   run yet: nothing tells an expired login from another failure) and, where the backend cannot tell, how the
-  account behind it is billed, and the `[permissions]` rules a session answers
-  prompts with before asking. `parse.rs` walks the spanned TOML document by hand so that an
+  account behind it is billed, the `[permissions]` rules a session answers
+  prompts with before asking, and whether a new session is titled by the model (`titles`), which a
+  file nobody trusted can turn off and not on. `parse.rs` walks the spanned TOML document by hand so that an
   invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`
   array at the byte range the parser gives it, so the operator's comments and ordering survive,
   under a lock on the file's directory so two sessions adding rules at once both keep theirs;
@@ -144,7 +145,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   binary, writes a turn with its attached images as base64 image blocks after the text, as the
   CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), asks it with
   `initialize` what it offers — the answer is where the slash commands a
-  session starts with are listed, `commands_changed` only reports a change to them — keeps its
+  session starts with are listed, `commands_changed` only reports a change to them — asks it once,
+  where the config leaves titles on, to title a new session from its first prompt that is not a
+  command (`generate_session_title`, which the CLI answers from its small model and bills into the
+  session's running totals) — keeps its
   standard input open for the life of the session and writes it from a queue on a thread of its
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on, and starts it as the leader of a process group of its own, which a closing

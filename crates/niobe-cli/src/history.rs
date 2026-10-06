@@ -118,6 +118,7 @@ fn read(root: &Path, transcripts: Option<&Path>, clock: &Clock) -> Past {
                     target: Target::Recorded(session.id.to_string()),
                     last: dated(session.last_at.unwrap_or(session.started_at)),
                     first_prompt: session.first_prompt,
+                    title: session.title,
                     open_elsewhere: store.held.contains(&session.id),
                 })
                 .collect();
@@ -142,6 +143,9 @@ fn read(root: &Path, transcripts: Option<&Path>, clock: &Clock) -> Past {
                     target: Target::Claude(transcript.id),
                     last: transcript.last_at.and_then(dated),
                     first_prompt: transcript.first_prompt,
+                    // The CLI writes its title further into the file than a
+                    // list reads; opening the session reads it in.
+                    title: None,
                     open_elsewhere: false,
                 }),
         ),
@@ -340,6 +344,32 @@ mod tests {
                 (Target::Claude("own-2".to_owned()), false),
             ])
         );
+    }
+
+    #[test]
+    fn a_session_the_backend_titled_is_read_back_with_its_title() {
+        let (root, _claude, dir) = repository();
+        let store = repo::open_existing_store(root.path())
+            .expect("the store opens")
+            .expect("there is a store");
+        let session = "1".parse().expect("a number is a session id");
+        store
+            .append(
+                session,
+                &Event::Titled {
+                    title: "Etag support".to_owned(),
+                },
+            )
+            .expect("append");
+
+        let past = read(root.path(), Some(&dir), &clock());
+
+        let titled = past
+            .sessions
+            .iter()
+            .find(|s| s.target == Target::Recorded("1".to_owned()))
+            .expect("the recorded session is listed");
+        assert_eq!(titled.title.as_deref(), Some("Etag support"));
     }
 
     #[test]

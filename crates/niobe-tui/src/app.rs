@@ -6202,6 +6202,7 @@ impl App {
             last: self.entries.iter().rev().find_map(|entry| entry.at),
             prompts: self.own_prompts().map(|entry| entry.body.clone()).collect(),
             first_prompt: None,
+            title: self.session.title().map(str::to_owned),
             open_elsewhere: false,
         };
         let mut prompts: std::collections::HashMap<&Target, Vec<String>> =
@@ -6222,6 +6223,7 @@ impl App {
                 last: session.last,
                 prompts: prompts.remove(&session.target).unwrap_or_default(),
                 first_prompt: session.first_prompt.clone(),
+                title: session.title.clone(),
                 open_elsewhere: session.open_elsewhere,
             });
         std::iter::once(this)
@@ -12241,6 +12243,7 @@ mod tests {
                     target: Target::Recorded((*id).to_owned()),
                     last: None,
                     first_prompt: None,
+                    title: None,
                     open_elsewhere: false,
                 })
                 .collect(),
@@ -12633,6 +12636,30 @@ mod tests {
     }
 
     #[test]
+    fn a_titled_session_is_listed_and_found_by_its_title() {
+        let mut app = remembering(&[("add etag support", "3")], &[]);
+        app.set_past(crate::history::Past {
+            prompts: vec![earlier("add etag support", "3")],
+            sessions: vec![crate::history::PastSession {
+                target: Target::Recorded("3".to_owned()),
+                last: None,
+                first_prompt: None,
+                title: Some("Static file handler etag support".to_owned()),
+                open_elsewhere: false,
+            }],
+            unread: None,
+        });
+        app.extend(&[Event::Titled {
+            title: "Resume race fix".to_owned(),
+        }]);
+
+        let rows = app.session_rows();
+        assert_eq!(rows[0].caption(), Some("Resume race fix"));
+        assert_eq!(rows[1].caption(), Some("Static file handler etag support"));
+        assert!(rows[1].matches("handler"));
+    }
+
+    #[test]
     fn a_session_open_in_another_niobe_is_not_opened_and_the_draft_stays() {
         let mut app = remembering(&[("add etag support", "3")], &[]);
         app.set_past(crate::history::Past {
@@ -12641,6 +12668,7 @@ mod tests {
                 target: Target::Recorded("3".to_owned()),
                 last: None,
                 first_prompt: None,
+                title: None,
                 open_elsewhere: true,
             }],
             unread: None,

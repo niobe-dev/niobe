@@ -49,6 +49,13 @@
 //! theme = "neo"
 //! ```
 //!
+//! and how a session is titled — by the model, from what its first prompt
+//! asks, unless a file turns that off:
+//!
+//! ```toml
+//! titles = "first-prompt"
+//! ```
+//!
 //! Which palettes there are is the shell's business, not this crate's, so the
 //! name is carried as written and the caller resolves it; [`ThemeName`] keeps
 //! the line so that a name nothing answers to is reported where it was
@@ -318,12 +325,38 @@ impl ThemeName {
     }
 }
 
+/// How a session gets the title its pane and the history dialog name it by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Titles {
+    /// The backend is asked for a few words on what the first prompt asks.
+    /// The `claude` CLI answers from its small model: about nine hundred
+    /// input tokens and a dozen output for a short prompt, measured on Claude
+    /// Code 2.1.288, which the CLI bills into the session's running totals and
+    /// the bridge counts with the next turn.
+    #[default]
+    Model,
+    /// The first line of the first prompt, as the shell did before the
+    /// backend was asked: no tokens spent on a title.
+    FirstPrompt,
+}
+
+impl Titles {
+    /// The value a config writes for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::FirstPrompt => "first-prompt",
+        }
+    }
+}
+
 /// One config file, or several laid over one another.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     profiles: BTreeMap<String, Profile>,
     default_profile: Option<DefaultProfile>,
     theme: Option<ThemeName>,
+    titles: Option<Titles>,
     allowed: Allowlist,
     /// The `default_profile` of a file that has not been trusted, which is not
     /// in force.
@@ -440,6 +473,9 @@ impl Config {
         if over.theme.is_some() {
             self.theme = over.theme;
         }
+        if over.titles.is_some() {
+            self.titles = over.titles;
+        }
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
         // where one is taken back. An untrusted file has none left to add.
@@ -474,6 +510,11 @@ impl Config {
             let rules = std::mem::take(&mut self.allowed);
             let from = self.rules_from.clone().unwrap_or_default();
             self.withheld_rules = Some((rules, from));
+        }
+        // Asking the model for a title spends the operator's tokens, which a
+        // file nobody has read does not decide; turning it off spends nothing.
+        if self.titles == Some(Titles::Model) {
+            self.titles = None;
         }
         self.untrusted = true;
         self
@@ -536,6 +577,13 @@ impl Config {
     /// colours and no more.
     pub fn theme(&self) -> Option<&ThemeName> {
         self.theme.as_ref()
+    }
+
+    /// How a session is titled: by the model unless a config says
+    /// `titles = "first-prompt"`. A file that has not been trusted can turn
+    /// the model's titles off and cannot turn them on ([`Config::untrusted`]).
+    pub fn titles(&self) -> Titles {
+        self.titles.unwrap_or_default()
     }
 
     /// The profile a session runs under: the one `requested` names, or else
@@ -1161,6 +1209,46 @@ backend = "codex"
     }
 
     #[test]
+    fn a_session_is_titled_by_the_model_unless_a_config_says_first_prompt() {
+        assert_eq!(parsed("").titles(), Titles::Model);
+        assert_eq!(
+            parsed("titles = \"first-prompt\"\n").titles(),
+            Titles::FirstPrompt
+        );
+        assert_eq!(parsed("titles = \"model\"\n").titles(), Titles::Model);
+        assert_eq!(
+            invalid("\ntitles = \"haiku\"\n"),
+            "/configs/user/config.toml:2: titles: `haiku` is not a way to title a session; \
+             expected `model` or `first-prompt`"
+        );
+    }
+
+    #[test]
+    fn a_file_nobody_trusted_may_stop_titles_costing_tokens_and_may_not_start_them() {
+        let user = parsed("titles = \"first-prompt\"\n");
+        let spends = Config::parse("titles = \"model\"\n", &path("repo"))
+            .expect("valid")
+            .untrusted();
+        assert!(
+            !spends.needs_trust(),
+            "nothing to ask about: it is withheld"
+        );
+        assert_eq!(
+            user.clone().overlay(spends).titles(),
+            Titles::FirstPrompt,
+            "the operator's own switch stays off"
+        );
+
+        let saves = Config::parse("titles = \"first-prompt\"\n", &path("repo"))
+            .expect("valid")
+            .untrusted();
+        assert_eq!(parsed("").overlay(saves).titles(), Titles::FirstPrompt);
+
+        let trusted = Config::parse("titles = \"model\"\n", &path("repo")).expect("valid");
+        assert_eq!(user.overlay(trusted).titles(), Titles::Model);
+    }
+
+    #[test]
     fn a_theme_that_says_nothing_is_a_mistake_in_the_file() {
         assert_eq!(
             invalid("theme = \"  \"\n"),
@@ -1239,7 +1327,7 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `profiles` or `permissions`"
+             expected `default_profile`, `theme`, `titles`, `profiles` or `permissions`"
         );
     }
 

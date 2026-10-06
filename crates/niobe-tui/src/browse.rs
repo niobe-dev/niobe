@@ -138,7 +138,7 @@ fn sessions(
                 age(now, row.last),
                 text::pad(&name(row), SESSION_COLUMNS),
                 count(row),
-                row.first().map_or_else(|| "—".to_owned(), one_line),
+                row.caption().map_or_else(|| "—".to_owned(), one_line),
             );
             list_row(&said, at == browser.at, width, theme)
         })

@@ -33,6 +33,10 @@ pub struct Attach {
     pub mode: Option<Mode>,
     /// The most the session may spend, in USD.
     pub budget_usd: Option<f64>,
+    /// Whether the backend is asked to title the session from its first
+    /// prompt. Only a new session is: one carried on was titled, if it was,
+    /// when it began.
+    pub title: bool,
 }
 
 /// What a session is attached to.
@@ -342,6 +346,7 @@ fn claude_options(
     // The shell's bridge starts the CLI again on its conversation when
     // something stops it between turns: see `Claude::carry_on`.
     options.carry_on = true;
+    options.ask_title = with.title && with.resume.is_none();
     Ok(options)
 }
 
@@ -493,6 +498,7 @@ mod tests {
                 resume: Some("s-1".to_owned()),
                 mode: Some(niobe_core::event::Mode::Plan),
                 budget_usd: None,
+                title: false,
             },
             Some(claude.path().as_os_str().to_owned()),
             NO_HOME,
@@ -619,6 +625,34 @@ mod tests {
             .expect("the profile names no settings file to be missing");
 
         assert_eq!(options.billing, Some(niobe_core::Billing::Metered));
+    }
+
+    #[test]
+    fn a_new_session_asks_the_cli_for_its_title_only_where_titles_are_on() {
+        let config = config("[profiles.max]\nbackend = \"claude\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let asks = |with: &Attach| {
+            claude_options(Path::new("/repo"), &selected, with, NO_HOME)
+                .expect("the profile names no settings file to be missing")
+                .ask_title
+        };
+
+        assert!(asks(&Attach {
+            title: true,
+            ..Attach::default()
+        }));
+        assert!(!asks(&Attach::default()), "with titles off no call is made");
+        assert!(
+            !asks(&Attach {
+                title: true,
+                resume: Some("s-1".to_owned()),
+                ..Attach::default()
+            }),
+            "a session carried on was titled, if at all, when it began"
+        );
     }
 
     #[test]
@@ -758,6 +792,7 @@ mod tests {
                 resume: None,
                 mode: Some(Mode::Plan),
                 budget_usd: Some(0.5),
+                title: false,
             },
             NO_HOME,
         )

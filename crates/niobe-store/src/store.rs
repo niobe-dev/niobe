@@ -127,6 +127,8 @@ pub struct SessionSummary {
     pub events: u64,
     /// The text of its first user message, if it has one.
     pub first_prompt: Option<String>,
+    /// The last title its backend gave it, if one did.
+    pub title: Option<String>,
 }
 
 /// A prompt as it was stored.
@@ -444,6 +446,14 @@ impl Store {
                                       AND substr(json_extract(f.event, '$.text'), 1, 1) <> '/'
                             END
                       ORDER BY f.seq
+                      LIMIT 1),
+                    (SELECT json_extract(t.event, '$.title')
+                       FROM events t
+                      WHERE t.session_id = s.id
+                        AND CASE WHEN json_valid(t.event)
+                                 THEN json_extract(t.event, '$.type') = 'titled'
+                            END
+                      ORDER BY t.seq DESC
                       LIMIT 1)
                FROM sessions s
                LEFT JOIN events e ON e.session_id = s.id
@@ -458,6 +468,7 @@ impl Store {
                 events: row.get::<_, i64>(2)?.unsigned_abs(),
                 last_at: row.get::<_, Option<i64>>(3)?.map(from_unix_millis),
                 first_prompt: row.get(4)?,
+                title: row.get(5)?,
             })
         })?;
 
