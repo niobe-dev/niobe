@@ -1,0 +1,40 @@
+ Niobe  Session  Context  Model  View  Help        opus-5  claude · default  ○ not attached  13:41
+ ┏━━━━ add etag support to the catalog fetcher so we stop… ━━━━┓ ┌──────────── Usage ─────────────┐
+ ┃ ✗ Bash           npm test -- fetch            exit 1 · 0.4s ┃ │ 5h       62%  resets 16:40     │
+ ┃   └ 1 failing: fetch returns the cached body on a 304       ┃ │ 7d       18%  resets Tue 15:00 │
+ ┃                                                             ┃ │ ────────────────────────────── │
+ ┃ ◆ claude                                                    ┃ │ opus-5  100% ▓▓▓▓▓▓▓▓▓▓▓   49k │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test     ┃ │ cache …  86% ▓▓▓▓▓▓▓▓▓░░   40k │
+ ┃   still red — the 304 path asserts a body that is no longer ┃ │ ────────────────────────────── │
+ ┃   sent.                                                     ┃ │ context  13% ▓░░░░░ 25k / 200k │
+ ┃                                                             ┃ └────────────────────────────────┘
+ ┃   ┌─ ? claude asks ──────────────────────── blocks turn 1 ┐ ┃ ┌─────────── Changes ────────────┐
+ ┃   │ to run Notion·create-pages                            │ ┃ │ ⎇ main ↑3                      █
+ ┃   │ pages: 1 item                                         │ ┃ │ ▾ Working tree  +≥977 −≥259    █
+ ┃   │   content:                                            │ ┃ │   .                            █
+ ┃   │     **Severity:** High                                │ ┃ │     CHANGELOG.md         +0 −0 █
+ ┃   │     ## Report                                         │ ┃ │   catalog/                     █
+ ┃   │     The fetcher downloads every manifest again.       │ ┃ │     fetch.ts          +149 −12 █
+ ┃   │     … 5 more lines                                    │ ┃ │     etag.ts            +88 −41 │
+ ┃   │   properties:                                         │ ┃ │     cache/lru.ts        +31 −9 │
+ ┃   │     Name: Etag support                                │ ┃ │     cache/index.ts      +12 −0 │
+ ┃   │     Priority: High                                    │ ┃ │   docs/                        │
+ ┃   │     Status: Not started                               │ █ │     caching.md         +64 −22 │
+ ┃   │     date:Due:start: 2026-10-04                        │ █ │     adr/0004-etags.md   +34 −1 │
+ ┃   │     date:Due:is_datetime: 0                           │ █ │     diagrams/cache.png     — — │
+ ┃   │ … 3 more lines · Ctrl+T shows the arguments as sent   │ █ │   server/                      │
+ ┃   │                                                       │ █ └────────────────────────────────┘
+ ┃   │ ▶ 1. Allow once                        this call only │ █ ┌─────────── Activity ───────────┐
+ ┃   │   2. Always allow Notion·create-pages  saved in this… │ █ │ ▾ Sub-agents  1 running        │
+ ┃   │   3. Deny                       the call does not run │ █ │ ◆ test Cover tests/fet… 1m 42s │
+ ┃   │                                                       │ █ │   └ Reading tests/stream.rs    │
+ ┃   │ 2. saved in this repo's config                        │ █ │ ▾ Tools  8 calls ✗ 2           │
+ ┃   │                                                       │ █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
+ ┃   │ ↑↓ move · 1-3 jump · Enter confirm                    │ █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓      │
+ ┃   │ Tab type your own · Esc decide later                  │ █ │   Bash       1 ▓▓▓        ✗ 1  │
+ ┃   └───────────────────────────────────────────────────────┘ █ │   Edit       1 ▓▓▓             │
+ ┃                                                             █ │                                │
+ ┃ ─────────────────────────────────────────────────────────── ┃ │                                │
+ ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │                                │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └────────────────────────────────┘
+EscStop 1Help   2Compact   3Clear   4Model   5Diff   6Rewind   7MCP   8Memory   9Settings   0Quit

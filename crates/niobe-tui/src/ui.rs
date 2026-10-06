@@ -2551,9 +2551,17 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
         Span::styled("to run ", plain),
         Span::styled(tool_label(&ask.tool), plain.bold()),
     ]);
-    let mut call = Vec::new();
-    for wrapped in text::wrap_exact(ask.target.as_deref().unwrap_or(&ask.input), inner) {
-        call.push(Line::from(wrapped).style(plain.bold()));
+    // A call with no target has only its arguments to show, and they are
+    // laid out by key unless Ctrl+T asked for them as they are sent.
+    let laid_out = match (&ask.target, app.diffs_open()) {
+        (None, false) => crate::arguments::lines(&ask.input, inner, theme),
+        (None, true) | (Some(_), _) => None,
+    };
+    let mut call = laid_out.unwrap_or_default();
+    if call.is_empty() {
+        for wrapped in text::wrap_exact(ask.target.as_deref().unwrap_or(&ask.input), inner) {
+            call.push(Line::from(wrapped).style(plain.bold()));
+        }
     }
     if ask.target.is_some() {
         call.push(Line::from(""));
@@ -2567,10 +2575,11 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
     let mut cut = Vec::new();
     for (at, answer) in app.ask_options().into_iter().enumerate() {
         let lit = focus == AskFocus::Choosing && answer == selected;
-        let (row, whole) = option_row(at + 1, answer, ask, lit, inner, theme);
+        let (label, hint) = option_words(answer, ask, app.diffs_open());
+        let (row, whole) = option_row(at + 1, (label, hint.clone()), lit, inner, theme);
         answers.push(row);
         if !whole {
-            cut.push((at + 1, option_words(answer, ask).1));
+            cut.push((at + 1, hint));
         }
     }
     // A consequence cut off at the edge of its column is said again whole: a
@@ -2645,13 +2654,11 @@ fn question_top(app: &App, ask: &Ask, outer: usize, theme: &Theme) -> Line<'stat
 /// what makes it legible without colour.
 fn option_row(
     number: usize,
-    answer: Answer,
-    ask: &Ask,
+    (label, hint): (String, String),
     lit: bool,
     width: usize,
     theme: &Theme,
 ) -> (Line<'static>, bool) {
-    let (label, hint) = option_words(answer, ask);
     let lead = format!("{} {number}. ", if lit { "▶" } else { " " });
     let rest = width.saturating_sub(text::width(&lead));
     let label = text::truncate(&label, rest);
@@ -2685,13 +2692,22 @@ fn option_row(
 /// of its own for a permission prompt. So the consequences say what Niobe
 /// does — `niobe saves …` for a standing answer — or what happens to the call,
 /// and never what the agent will say or think about it.
-fn option_words(answer: Answer, ask: &Ask) -> (String, String) {
+///
+/// A tool whose name the transcript shows in other words — an MCP tool, as
+/// `Notion·create-pages` — has its standing answer said in those words, as
+/// what is kept and where, since the label already names the tool. The rule
+/// as it is written into the config is shown where `spelled` asks for it,
+/// which Ctrl+T does: it is for the operator who wants the exact text.
+fn option_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
     match answer {
         Answer::Once => ("Allow once".to_owned(), "this call only".to_owned()),
         Answer::AlwaysTool => (
             format!("Always allow {}", tool_label(&ask.tool)),
             ask.tool_rule()
-                .map(|rule| format!("niobe saves {rule}"))
+                .map(|rule| match spelled || tool_label(&ask.tool) == ask.tool {
+                    true => format!("niobe saves {rule}"),
+                    false => "saved in this repo's config".to_owned(),
+                })
                 .unwrap_or_default(),
         ),
         Answer::AlwaysTarget => (

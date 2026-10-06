@@ -1109,6 +1109,151 @@ fn edits_to_the_agents_own_notes_are_one_row_naming_them_and_ctrl_t_shows_the_di
     );
 }
 
+/// What an MCP tool that creates a page sends: a parent named by its id, and
+/// one page whose body is markdown with line breaks and a table in it —
+/// arguments the backend names no target in, so the question has only the
+/// arguments to show.
+const PAGE_ARGUMENTS: &str = concat!(
+    r#"{"parent":{"data_source_id":"615238cb-8caf-4c56-a853-7769d8ab7051"},"#,
+    r#""pages":[{"properties":{"Name":"Etag support","Status":"Not started","#,
+    r#""Priority":"High","date:Due:start":"2026-10-04","date:Due:is_datetime":0},"#,
+    r#""content":"**Severity:** High\n## Report\nThe fetcher downloads every manifest again.\n"#,
+    r#"| before | after |\n|---|---|\n| 200 | 304 |\n## Where\n- catalog/fetch.ts"}]}"#
+);
+
+fn session_asked_to_create_a_page() -> App {
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_page".into(),
+        tool: "mcp__claude_ai_Notion__notion-create-pages".to_owned(),
+        input: PAGE_ARGUMENTS.to_owned(),
+        target: None,
+        agent: None,
+    });
+    app
+}
+
+/// The rows of a question between what it asks and its answers: the call.
+fn call_rows(frame: &str) -> Vec<String> {
+    question_cells(frame)
+        .into_iter()
+        .skip_while(|row| !row.starts_with("to run "))
+        .skip(1)
+        .take_while(|row| !row.contains("1. Allow once"))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .skip_while(|row| row.trim().is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+#[test]
+fn a_tool_with_no_target_is_asked_about_by_its_arguments_laid_out_by_key() {
+    let frame = screen(&mut session_asked_to_create_a_page(), 100, 60);
+    let rows = question_rows(&frame);
+    let call = call_rows(&frame);
+
+    for raw in ["{", "\\\"", "\\n", "\""] {
+        assert!(
+            !call.iter().any(|row| row.contains(raw)),
+            "`{raw}` is drawn: the arguments are shown as their JSON:\n{frame}"
+        );
+    }
+    assert!(
+        rows.iter().any(|row| row == "to run Notion·create-pages"),
+        "{frame}"
+    );
+    let indent = |text: &str| {
+        call.iter()
+            .find(|row| row.trim_start().starts_with(text))
+            .map(|row| row.len() - row.trim_start().len())
+            .unwrap_or_else(|| panic!("`{text}` is not drawn:\n{frame}"))
+    };
+    assert_eq!(indent("pages: 1 item"), 0, "{frame}");
+    // The page's body as the lines it is, under its key.
+    assert!(indent("content:") > indent("pages: 1 item"), "{frame}");
+    assert!(indent("**Severity:** High") > indent("content:"), "{frame}");
+    assert!(indent("## Report") > indent("content:"), "{frame}");
+    // And its properties under the page, one to a row.
+    assert!(indent("properties:") > indent("pages: 1 item"), "{frame}");
+    assert!(
+        indent("Status: Not started") > indent("properties:"),
+        "{frame}"
+    );
+    assert!(
+        indent("Name: Etag support") > indent("properties:"),
+        "{frame}"
+    );
+}
+
+#[test]
+fn a_tool_with_no_target_is_asked_about_in_a_few_rows_and_ctrl_t_shows_what_is_sent() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_asked_to_create_a_page();
+    let frame = screen(&mut app, 100, 60);
+    let call = call_rows(&frame);
+    assert!(call.len() <= 14, "{} rows:\n{frame}", call.len());
+    assert!(
+        call.last()
+            .is_some_and(|row| row.contains("more lines") && row.contains("Ctrl+T")),
+        "nothing says the arguments were cut, or how to read them whole:\n{frame}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let open = screen(&mut app, 100, 60);
+    assert_eq!(
+        call_rows(&open).concat().trim_end(),
+        PAGE_ARGUMENTS,
+        "Ctrl+T does not show the arguments as they are sent:\n{open}"
+    );
+}
+
+#[test]
+fn a_standing_answer_for_a_tool_with_no_target_says_what_it_keeps_in_words() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_asked_to_create_a_page();
+    let frame = screen(&mut app, 120, 60);
+    let rows = question_rows(&frame);
+    let always = rows
+        .iter()
+        .find(|row| row.starts_with("2. Always allow Notion·create-pages"))
+        .unwrap_or_else(|| panic!("no standing answer for the tool:\n{frame}"));
+    assert!(
+        always.ends_with("saved in this repo's config"),
+        "`{always}` does not say what is kept and where:\n{frame}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("mcp__")),
+        "the rule's own spelling is said without being asked for:\n{frame}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.starts_with("2. saved")),
+        "a consequence that fits on its row is said again under the answers:\n{frame}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let open = screen(&mut app, 120, 60);
+    assert!(
+        question_cells(&open).iter().any(
+            |row| row.trim_end() == "2. niobe saves mcp__claude_ai_Notion__notion-create-pages"
+        ),
+        "Ctrl+T does not show the rule as it is kept:\n{open}"
+    );
+}
+
+#[test]
+fn a_question_about_a_tool_with_no_target_is_drawn_as_its_picture() {
+    assert_snapshot(
+        "asking-mcp-100x40",
+        &screen(&mut session_asked_to_create_a_page(), 100, 40),
+    );
+}
+
 #[test]
 fn a_long_request_wraps_inside_the_question() {
     let mut app = running_session();

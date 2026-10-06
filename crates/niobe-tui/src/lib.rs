@@ -24,6 +24,7 @@
 //!   that went in the moment before it.
 
 pub mod app;
+mod arguments;
 pub mod bridge;
 mod browse;
 mod calls;

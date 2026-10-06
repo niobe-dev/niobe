@@ -861,6 +861,7 @@ dependencies = [
  "ratatui",
  "ratatui-textarea",
  "rustix",
+ "serde_json",
  "signal-hook 0.4.4",
  "unicode-segmentation",
  "unicode-width",
