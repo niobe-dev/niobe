@@ -1026,7 +1026,8 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     // a row of its own only while it is too long for one.
     // The box is as tall as the rows the editor wraps what is typed into, not
     // its lines: a line too long for the box's width is drawn over several
-    // rows.
+    // rows, and a box a row short of them scrolls the prompt's first rows out
+    // of sight.
     let said = bar_says(app, panes, theme, bar_room(app, inner.width));
     let typed = editor_rows(app, &said, inner.width);
     let cap = usize::from(inner.height / 3).max(1);

@@ -2984,6 +2984,27 @@ fn a_long_line_without_a_break_is_drawn_whole_from_its_first_row() {
 }
 
 #[test]
+fn paragraphs_that_each_wrap_to_two_rows_get_a_row_for_every_row_they_wrap_to() {
+    let mut app = running_session();
+    for paragraph in ["one", "two", "three"] {
+        if paragraph != "one" {
+            app.on_key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char('j'),
+                ratatui::crossterm::event::KeyModifiers::CONTROL,
+            ));
+        }
+        type_keys(&mut app, &format!("{paragraph} {}", "word ".repeat(18)));
+    }
+    let frame = screen(&mut app, 80, 40);
+    let rows = composer_box(&frame);
+
+    assert_eq!(rows.len(), 6, "{frame}");
+    assert!(rows[0].contains("> one word"), "{frame}");
+    assert!(rows[2].contains("two word"), "{frame}");
+    assert!(rows[4].contains("three word"), "{frame}");
+}
+
+#[test]
 fn a_prompt_past_a_third_of_the_pane_stops_the_composer_and_keeps_the_cursor_row() {
     let mut app = running_session();
     let prompt = numbered_words(2000);
@@ -3027,6 +3048,65 @@ fn a_line_of_wide_characters_grows_the_composer_by_the_rows_it_is_drawn_in() {
         .collect();
     assert!(shown.starts_with("漢字かな"), "{frame}");
     assert_eq!(shown, prompt, "{frame}");
+}
+
+#[test]
+fn the_composer_grows_as_the_character_that_wraps_is_typed_and_shrinks_back() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    let mut typed = 0;
+    let rows = loop {
+        press(&mut app, KeyCode::Char('x'));
+        typed += 1;
+        let rows = composer_box(&screen(&mut app, 80, 40));
+        if rows.len() > 1 || typed > 200 {
+            break rows;
+        }
+    };
+    assert_eq!(rows.len(), 2, "{rows:#?}");
+    assert!(
+        rows[0].contains(&format!("> {}", "x".repeat(typed - 1))),
+        "the first row is the line up to the wrap:\n{rows:#?}"
+    );
+    assert_eq!(rows[1].matches('x').count(), 1, "{rows:#?}");
+
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(composer_box(&screen(&mut app, 80, 40)).len(), 1);
+}
+
+#[test]
+fn opening_a_line_after_a_wrapped_one_keeps_both_of_its_rows_in_sight() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let line = numbered_words(110);
+    for (key, terminal) in [
+        (
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            running_session().reports_shift_enter(),
+        ),
+        (
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            running_session(),
+        ),
+        (
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            running_session(),
+        ),
+    ] {
+        let mut app = terminal;
+        type_keys(&mut app, &line);
+        assert_eq!(composer_box(&screen(&mut app, 80, 40)).len(), 2);
+        app.on_key(key);
+        let frame = screen(&mut app, 80, 40);
+        let rows = composer_box(&frame);
+        assert_eq!(rows.len(), 3, "{key:?}:\n{frame}");
+        assert!(rows[0].contains("> w0 w1"), "{key:?}:\n{frame}");
+        assert!(
+            rows[1].contains(line.split_whitespace().last().expect("words")),
+            "{key:?}:\n{frame}"
+        );
+    }
 }
 
 #[test]
