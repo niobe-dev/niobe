@@ -1321,6 +1321,10 @@ impl Translator {
                 exit_code,
                 self.read_spilled,
             );
+            let command = match name == SHELL_TOOL {
+                true => string_at(&arguments, "command").map(str::to_owned),
+                false => None,
+            };
             let id = ToolCallId::new(tool_use_id);
             let tested = tested.map(|run| Event::TestRun {
                 id: id.clone(),
@@ -1339,6 +1343,7 @@ impl Translator {
                 summary,
                 exit_code,
                 error,
+                command,
             });
             out.extend(change);
             out.extend(tested);
@@ -5686,6 +5691,33 @@ mod tests {
             _ => None,
         });
         assert_eq!(summary, Some(Some("notes.txt".to_owned())), "{events:?}");
+    }
+
+    #[test]
+    fn a_finished_shell_call_carries_its_whole_command_and_no_other_call_does() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Bash",
+            r#"{"command":"cd crates\ncargo test","description":"Run the tests"}"#,
+        ));
+        translator.line(&call("t2", "Read", r#"{"file_path":"/repo/notes.txt"}"#));
+
+        let mut events = translator.line(&result("t1", "ok", false));
+        events.extend(translator.line(&result("t2", "three lines", false)));
+
+        let commands: Vec<Option<String>> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ToolCallEnd { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [Some("cd crates\ncargo test".to_owned()), None],
+            "{events:?}"
+        );
     }
 
     #[test]

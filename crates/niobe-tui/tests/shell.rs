@@ -1064,6 +1064,7 @@ fn session_that_updated_its_memory() -> App {
             bytes: 120,
             outcome: niobe_core::event::ToolOutcome::Ok,
             summary: Some(path.clone()),
+            command: None,
             exit_code: None,
             error: None,
         });
@@ -2822,7 +2823,9 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
 /// server. A backend's own tools are already the family they belong to.
 #[test]
 fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let mut app = running_session();
+    app.count_tools_by_name();
+    let frame = screen(&mut app, 200, 60);
 
     let row = frame
         .lines()
@@ -2847,6 +2850,48 @@ fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
         .find(|line| line.contains("Read"))
         .unwrap_or_default();
     assert!(!read.contains('✗'), "{read:?}");
+}
+
+/// The Tools section counts calls by the kind of work they did, with what did
+/// it on a dim line under each kind, and `t` in the Activity pane turns it to
+/// the tools' own names and back.
+#[test]
+fn the_tools_are_counted_by_kind_of_work_and_t_turns_them_to_tool_names() {
+    let mut app = running_session();
+    let wide = screen(&mut app, 200, 60);
+    assert!(!wide.contains("Notion·*"), "{wide}");
+    let notion = wide
+        .lines()
+        .position(|line| line.contains("Notion ") && line.contains("✗ 1"))
+        .expect("the server is a kind of its own, with its failure beside it");
+    let under = wide.lines().nth(notion + 1).unwrap_or_default();
+    assert!(under.contains("search"), "{under:?}");
+    assert_snapshot("tools-by-work-200x60", &wide);
+    // Drawn once so the pane knows how tall it is, then scrolled to its end,
+    // where the tools are.
+    let _ = screen(&mut app, 120, 30);
+    app.scroll_pane(Pane::Activity, 40);
+    let narrow = screen(&mut app, 120, 30);
+    assert_snapshot("tools-by-work-120x30", &narrow);
+
+    for _ in 0..2 {
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Tab,
+        ));
+    }
+    app.on_key(ratatui::crossterm::event::KeyEvent::from(
+        ratatui::crossterm::event::KeyCode::Char('t'),
+    ));
+    assert!(app.tools_by_name());
+    let raw = screen(&mut app, 200, 60);
+    assert!(raw.contains("Notion·*"), "{raw}");
+    assert!(raw.contains("t kinds of work"), "{raw}");
+
+    app.on_key(ratatui::crossterm::event::KeyEvent::from(
+        ratatui::crossterm::event::KeyCode::Char('t'),
+    ));
+    assert!(!app.tools_by_name());
+    assert!(!screen(&mut app, 200, 60).contains("Notion·*"));
 }
 
 /// Nothing having happened reads as nothing having happened — not as a figure
@@ -2887,7 +2932,7 @@ fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
     // pane shows the last rows it holds, and how many of them fit above the
     // tools depends on how tall the panes over it are.
     assert!(
-        frame.contains("Notion·*"),
+        frame.contains("Notion"),
         "the tools section is what the pane was scrolled to:\n{frame}"
     );
     assert!(

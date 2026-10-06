@@ -25,16 +25,16 @@
  ┃   │ … 3 more lines · Ctrl+T shows the arguments as sent   │ █ │   server/                      │
  ┃   │                                                       │ █ └────────────────────────────────┘
  ┃   │ ▶ 1. Allow once                        this call only │ █ ┌─────────── Activity ───────────┐
- ┃   │   2. Always allow Notion·create-pages  saved in this… │ █ │ ▾ Sub-agents  1 running        │
- ┃   │   3. Deny                       the call does not run │ █ │ ◆ test Cover tests/fet… 1m 42s │
- ┃   │                                                       │ █ │   └ Reading tests/stream.rs    │
- ┃   │ 2. saved in this repo's config                        │ █ │ ▾ Tools  8 calls ✗ 2           │
- ┃   │                                                       │ █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
- ┃   │ ↑↓ move · 1-3 jump · Enter confirm                    │ █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓      │
- ┃   │ Tab type your own · Esc decide later                  │ █ │   Bash       1 ▓▓▓        ✗ 1  │
- ┃   └───────────────────────────────────────────────────────┘ █ │   Edit       1 ▓▓▓             │
- ┃                                                             █ │                                │
- ┃ ─────────────────────────────────────────────────────────── ┃ │                                │
- ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │                                │
+ ┃   │   2. Always allow Notion·create-pages  saved in this… │ █ │ ▾ Sub-agents  1 running        █
+ ┃   │   3. Deny                       the call does not run │ █ │ ◆ test Cover tests/fet… 1m 42s █
+ ┃   │                                                       │ █ │   └ Reading tests/stream.rs    █
+ ┃   │ 2. saved in this repo's config                        │ █ │ ▾ Tools  8 calls ✗ 2           █
+ ┃   │                                                       │ █ │   Exploring code   3 ▓▓▓▓      █
+ ┃   │ ↑↓ move · 1-3 jump · Enter confirm                    │ █ │     Read 3                     █
+ ┃   │ Tab type your own · Esc decide later                  │ █ │   Notion           3 ▓▓▓▓ ✗ 1  █
+ ┃   └───────────────────────────────────────────────────────┘ █ │     fetch 1 · search 1 · …     █
+ ┃                                                             █ │   Editing files    1 ▓         █
+ ┃ ─────────────────────────────────────────────────────────── ┃ │     Edit 1                     █
+ ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │   Build and test   1 ▓    ✗ 1  █
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └────────────────────────────────┘
 EscStop 1Help   2Compact   3Clear   4Model   5Diff   6Rewind   7MCP   8Memory   9Settings   0Quit

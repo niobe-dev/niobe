@@ -14,6 +14,7 @@ pub mod image;
 pub mod permission;
 pub mod session;
 pub mod test_run;
+pub mod work;
 
 pub use event::{
     AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Event, Mode,
@@ -21,7 +22,9 @@ pub use event::{
 };
 pub use image::{Image, ImageError, MediaType};
 pub use permission::{Allowlist, Rule, RuleError};
-pub use session::{FileChanges, Owed, SessionState, TestRunRecord, ToolTotals, Totals, TurnRecord};
+pub use session::{
+    FileChanges, Owed, SessionState, TestRunRecord, ToolTotals, Totals, TurnRecord, WorkTotals,
+};
 pub use test_run::{FailedTests, TestCounts};
 
 /// The name the binary is installed as, and the directory name used under

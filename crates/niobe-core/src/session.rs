@@ -22,6 +22,7 @@
 //! records it covers stop being owed for.
 
 use crate::test_run::{self, FailedTests, TestCounts};
+use crate::work::{self, Work};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
@@ -255,12 +256,31 @@ pub struct ToolTotals {
     /// Ends that arrived without a matching start. A non-zero count means the
     /// producer is dropping events, so it is surfaced rather than swallowed.
     pub unmatched_ends: u64,
+    /// Finished calls by the kind of work they did ([`crate::work`]). Every
+    /// finished call is under exactly one kind, so the kinds' calls add up to
+    /// [`ToolTotals::finished`] and their failures to [`ToolTotals::failed`].
+    pub by_work: BTreeMap<Work, WorkTotals>,
     /// Calls the session or their turn ended under: still running when a
     /// fatal error ended the backend, or when the backend ended the turn
     /// without reporting their end, so no end will arrive for them. Neither
     /// finished nor failed — the agent did not fail them, the session stopped
     /// them.
     pub interrupted: u64,
+}
+
+/// The calls of one kind of work.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkTotals {
+    /// Calls that finished, however they finished.
+    pub calls: u64,
+    /// Of those, the calls that reported failure.
+    pub failed: u64,
+    /// Of those, the calls the operator denied.
+    pub denied: u64,
+    /// How many of the calls each program or tool took part in: once per
+    /// call however often the call ran it, so a pipeline of two `grep`s is
+    /// one call that used `grep`.
+    pub specifics: BTreeMap<String, u64>,
 }
 
 /// What a session did to one file: how much of it changed, and the model's own
@@ -651,21 +671,34 @@ impl SessionState {
             Event::ToolCallEnd {
                 id,
                 name,
+                input,
                 bytes,
                 outcome,
+                summary,
+                command,
                 ..
             } => {
                 self.ended_tools.insert(id.clone());
                 bump(&mut self.tools.finished);
                 self.tools.output_bytes = self.tools.output_bytes.saturating_add(*bytes);
                 bump(self.tools.by_name.entry(name.clone()).or_default());
+                let reading = work::of_call(name, command.as_deref(), summary.as_deref(), input);
+                let kind = self.tools.by_work.entry(reading.work).or_default();
+                bump(&mut kind.calls);
+                for specific in reading.specifics {
+                    bump(kind.specifics.entry(specific).or_default());
+                }
                 match outcome {
                     ToolOutcome::Ok => {}
                     ToolOutcome::Failed => {
                         bump(&mut self.tools.failed);
                         bump(self.tools.failed_by_name.entry(name.clone()).or_default());
+                        bump(&mut kind.failed);
                     }
-                    ToolOutcome::Denied => bump(&mut self.tools.denied),
+                    ToolOutcome::Denied => {
+                        bump(&mut self.tools.denied);
+                        bump(&mut kind.denied);
+                    }
                     // The operator's own stop: the tool neither failed nor
                     // was refused, so it counts against neither.
                     ToolOutcome::Interrupted => {}
@@ -1719,6 +1752,7 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         });
         state.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -1730,6 +1764,7 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         });
 
         let tools = state.tools();
@@ -1877,6 +1912,7 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         }
     }
 
@@ -2061,6 +2097,7 @@ mod tests {
             summary: None,
             exit_code: Some(0),
             error: None,
+            command: None,
         });
         assert!(state.in_flight_tools().is_empty());
         assert_eq!(state.tools().unmatched_ends, 0);
@@ -2489,6 +2526,7 @@ mod tests {
                 summary: None,
                 exit_code: None,
                 error: None,
+                command: None,
             },
             changed(path, Some(1), Some(1)),
         ]
@@ -3380,5 +3418,82 @@ mod tests {
             let compacted: Vec<_> = state.turns().iter().map(|turn| turn.compacted).collect();
             assert_eq!(compacted, [Some(trigger), None]);
         }
+    }
+
+    fn ended(id: &str, name: &str, command: Option<&str>, outcome: ToolOutcome) -> [Event; 2] {
+        [
+            Event::ToolCallStart {
+                id: id.into(),
+                name: name.to_owned(),
+                input: "{}".to_owned(),
+                summary: None,
+                agent: None,
+            },
+            Event::ToolCallEnd {
+                id: id.into(),
+                name: name.to_owned(),
+                input: "{}".to_owned(),
+                output: String::new(),
+                bytes: 0,
+                outcome,
+                summary: None,
+                exit_code: None,
+                error: None,
+                command: command.map(str::to_owned),
+            },
+        ]
+    }
+
+    #[test]
+    fn every_finished_call_is_counted_under_one_kind_of_work_with_what_did_it() {
+        let events: Vec<Event> = [
+            ended("a", "Bash", Some("grep -n x f | head"), ToolOutcome::Ok),
+            ended("b", "Bash", Some("grep y f"), ToolOutcome::Ok),
+            ended("c", "Read", None, ToolOutcome::Ok),
+            ended("d", "Bash", Some("cargo test"), ToolOutcome::Failed),
+            ended("e", "Bash", Some("rm -rf build"), ToolOutcome::Denied),
+            ended(
+                "f",
+                "mcp__claude_ai_Notion__notion-fetch",
+                None,
+                ToolOutcome::Ok,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let state = SessionState::replay(&events);
+        let tools = state.tools();
+
+        let exploring = &tools.by_work[&Work::Exploring];
+        assert_eq!(exploring.calls, 3);
+        assert_eq!(
+            exploring.specifics,
+            BTreeMap::from([
+                ("grep".to_owned(), 2),
+                ("head".to_owned(), 1),
+                ("Read".to_owned(), 1),
+            ])
+        );
+        let building = &tools.by_work[&Work::Building];
+        assert_eq!((building.calls, building.failed), (1, 1));
+        let editing = &tools.by_work[&Work::Editing];
+        assert_eq!((editing.calls, editing.denied), (1, 1));
+        assert_eq!(tools.by_work[&Work::Server("Notion".to_owned())].calls, 1);
+
+        let calls: u64 = tools.by_work.values().map(|kind| kind.calls).sum();
+        let failed: u64 = tools.by_work.values().map(|kind| kind.failed).sum();
+        let denied: u64 = tools.by_work.values().map(|kind| kind.denied).sum();
+        assert_eq!(
+            (calls, failed, denied),
+            (tools.finished, tools.failed, tools.denied)
+        );
+    }
+
+    #[test]
+    fn an_end_said_again_is_not_a_second_call_of_its_kind() {
+        let [start, end] = ended("a", "Bash", Some("ls"), ToolOutcome::Ok);
+        let state = SessionState::replay(&[start, end.clone(), end]);
+        assert_eq!(state.tools().by_work[&Work::Exploring].calls, 1);
     }
 }

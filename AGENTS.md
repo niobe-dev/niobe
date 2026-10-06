@@ -48,7 +48,11 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
-  every backend reads a test run the same way; `image.rs` is an image the operator attached to a
+  every backend reads a test run the same way; `work.rs` puts each tool call under the kind of
+  work it did — exploring code, editing files, building and testing, version control, the web,
+  delegating, an MCP server, housekeeping — from the tool's name or, for a shell call, from the
+  whole command the backend reports on the call's end, read with `test_run.rs`'s splitting, and
+  names the programs that did it; `image.rs` is an image the operator attached to a
   prompt — its bytes and the kind they were read as, from their signature, never from a name —
   refused past the 5 MB a model takes, and the `[Image #N]` placeholder a prompt holds where it
   went. Depends on no other workspace crate and on no wire format.
@@ -86,7 +90,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   taking it; `jsonl.rs` reads a JSON Lines event log.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
-  go to — `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
+  go to — `ui.rs` draws it, its Activity pane counting tool calls by kind of work with what
+  did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
   enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel, clicks and drags, the bracketing it
   asks pastes to arrive in, and the keyboard

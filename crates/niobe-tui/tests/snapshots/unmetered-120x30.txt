@@ -23,8 +23,8 @@
  ┃ ◆ claude                                                                 █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
  ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │   └ Reading tests/stream.rs           █
  ┃   304 path asserts a body that is no longer sent.                        █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       █
- ┃                                                                          █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       █
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           █
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │   Bash       1 ▓▓▓▓         ✗ 1       █
+ ┃                                                                          █ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │     Read 3                            │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

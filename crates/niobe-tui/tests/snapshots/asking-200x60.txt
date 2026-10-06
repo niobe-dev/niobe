@@ -41,14 +41,14 @@
  ┃                                                                                                                              █ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
  ┃   ┌─ ? claude asks ─────────────────────────────────────── blocks turn 1 ┐                                                   █ │   └ Reading tests/stream.rs                                       │
  ┃   │ to run Read                                                          │                                                   █ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
- ┃   │ /repo/notes.txt                                                      │                                                   █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
- ┃   │                                                                      │                                                   █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
- ┃   │ {"file_path":"/repo/notes.txt"}                                      │                                                   █ │   Bash       1 ▓▓▓▓         ✗ 1                                   │
- ┃   │                                                                      │                                                   █ │   Edit       1 ▓▓▓▓                                               │
- ┃   │ ▶ 1. Allow once                                       this call only │                                                   █ │                                                                   │
- ┃   │   2. Always allow Read                              niobe saves Read │                                                   █ │                                                                   │
- ┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │                                                   █ │                                                                   │
- ┃   │   4. Deny                                      the call does not run │                                                   █ │                                                                   │
+ ┃   │ /repo/notes.txt                                                      │                                                   █ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                                 │
+ ┃   │                                                                      │                                                   █ │     Read 3                                                        │
+ ┃   │ {"file_path":"/repo/notes.txt"}                                      │                                                   █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                             │
+ ┃   │                                                                      │                                                   █ │     fetch 1 · search 1 · update-page 1                            │
+ ┃   │ ▶ 1. Allow once                                       this call only │                                                   █ │   Editing files    1 ▓▓▓▓                                         │
+ ┃   │   2. Always allow Read                              niobe saves Read │                                                   █ │     Edit 1                                                        │
+ ┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │                                                   █ │   Build and test   1 ▓▓▓▓         ✗ 1                             │
+ ┃   │   4. Deny                                      the call does not run │                                                   █ │     npm test 1                                                    │
  ┃   │                                                                      │                                                   █ │                                                                   │
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │                                                   █ │                                                                   │
  ┃   │ Esc decide later                                                     │                                                   █ │                                                                   │

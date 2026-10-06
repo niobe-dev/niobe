@@ -25,16 +25,16 @@
  ┃   21 + export const etag21 = "W/\"0021\"";                               █ │   server/                             │
  ┃   22 + export const etag22 = "W/\"0022\"";                               █ └───────────────────────────────────────┘
  ┃   23 + export const etag23 = "W/\"0023\"";                               █ ┌────────────── Activity ───────────────┐
- ┃   24 + export const etag24 = "W/\"0024\"";                               █ │ ▾ Sub-agents  1 running · 1 failed    │
- ┃   25 + export const etag25 = "W/\"0025\"";                               █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
- ┃   26 + export const etag26 = "W/\"0026\"";                               █ │   └ Reading tests/stream.rs           │
- ┃   27 + export const etag27 = "W/\"0027\"";                               █ │ ▾ Tools  9 calls ✗ 2 · 0 denied       │
- ┃   28 + export const etag28 = "W/\"0028\"";                               █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃   29 + export const etag29 = "W/\"0029\"";                               █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
- ┃   30 + export const etag30 = "W/\"0030\"";                               █ │   Bash       1 ▓▓▓▓         ✗ 1       │
- ┃   ▴ the last 10 rows are shown · Ctrl+T hides them                       █ │   Edit       1 ▓▓▓▓                   │
- ┃                                                                          █ │   Write      1 ▓▓▓▓                   │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │                                       │
+ ┃   24 + export const etag24 = "W/\"0024\"";                               █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   25 + export const etag25 = "W/\"0025\"";                               █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
+ ┃   26 + export const etag26 = "W/\"0026\"";                               █ │   └ Reading tests/stream.rs           █
+ ┃   27 + export const etag27 = "W/\"0027\"";                               █ │ ▾ Tools  9 calls ✗ 2 · 0 denied       █
+ ┃   28 + export const etag28 = "W/\"0028\"";                               █ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      █
+ ┃   29 + export const etag29 = "W/\"0029\"";                               █ │     Read 3                            █
+ ┃   30 + export const etag30 = "W/\"0030\"";                               █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓ ✗ 1  █
+ ┃   ▴ the last 10 rows are shown · Ctrl+T hides them                       █ │     fetch 1 · search 1 · …            █
+ ┃                                                                          █ │   Editing files    2 ▓▓▓▓▓▓▓          █
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │     Edit 1 · Write 1                  █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │   Build and test   1 ▓▓▓         ✗ 1  █
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

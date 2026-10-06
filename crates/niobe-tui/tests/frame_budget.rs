@@ -278,6 +278,7 @@ fn session_of_diffs() -> App {
             summary: Some(path.clone()),
             exit_code: None,
             error: None,
+            command: None,
         });
         app.apply(&Event::FileChange {
             path,
@@ -419,6 +420,7 @@ fn write_of(written: &str) -> Vec<Event> {
             summary: Some(path.clone()),
             exit_code: None,
             error: None,
+            command: None,
         },
         Event::FileChange {
             path,
@@ -631,6 +633,7 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         });
     }
     let _ = screen(&mut app, 200, 60);

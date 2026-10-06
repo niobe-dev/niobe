@@ -1055,6 +1055,7 @@ mod tests {
             summary: Some(id.to_owned()),
             exit_code: None,
             error: error.map(str::to_owned),
+            command: None,
         }
     }
 
@@ -1571,6 +1572,7 @@ mod tests {
             summary: Some("cargo test".to_owned()),
             exit_code: Some(status),
             error: (status != 0).then(|| format!("Exit code {status}")),
+            command: None,
         });
         app.apply(&Event::TestRun {
             id: "t1".into(),
@@ -1833,6 +1835,7 @@ mod tests {
             summary: None,
             exit_code: Some(0),
             error: None,
+            command: None,
         });
         drawn(&app, false)
     }
@@ -1891,6 +1894,7 @@ mod tests {
                 summary: Some("cargo test".to_owned()),
                 exit_code: Some(0),
                 error: None,
+                command: None,
             },
             second(to),
         );

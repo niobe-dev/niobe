@@ -150,7 +150,7 @@ pub fn is_test_run(command: &str) -> bool {
 /// body of a here-document, which is the input of the command that opened it,
 /// nor a comment, from an unquoted `#` that starts a word to the end of its
 /// line: writing a script that runs `cargo test` is not running it.
-fn simple_commands(command: &str) -> Vec<Vec<String>> {
+pub(crate) fn simple_commands(command: &str) -> Vec<Vec<String>> {
     let chars: Vec<char> = command.chars().collect();
     let mut split = Split::default();
     let mut open: Vec<Quoted> = Vec::new();
@@ -436,7 +436,7 @@ fn runs_cargo_test(words: &[String]) -> bool {
 /// The words a shell reads as part of its own grammar at the head of a
 /// command, before the command itself: `then cargo test`, `! cargo test`,
 /// `{ cargo test; }`.
-const RESERVED: &[&str] = &[
+pub(crate) const RESERVED: &[&str] = &[
     "!", "{", "if", "then", "elif", "else", "while", "until", "do",
 ];
 
@@ -457,7 +457,7 @@ const CARGO_TAKES_A_VALUE: &[&str] = &["--color", "--config", "-Z", "-C"];
 /// A command that runs the command after it with its output and its status
 /// left as they are, so that what it runs is what is read.
 #[derive(Debug, Clone, Copy)]
-struct Wrapper {
+pub(crate) struct Wrapper {
     /// Its options that are followed by a value.
     takes_a_value: &'static [&'static str],
     /// Its options that make it run nothing after them.
@@ -468,7 +468,7 @@ struct Wrapper {
 }
 
 impl Wrapper {
-    fn named(word: &str) -> Option<Wrapper> {
+    pub(crate) fn named(word: &str) -> Option<Wrapper> {
         let (takes_a_value, runs_nothing, operands): (
             &'static [&'static str],
             &'static [&'static str],
@@ -493,7 +493,7 @@ impl Wrapper {
 
     /// Moves `words` past this wrapper's options and operands, or says there
     /// was nothing after them, or that an option made it run nothing.
-    fn skip_its_own<'a>(
+    pub(crate) fn skip_its_own<'a>(
         self,
         words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
     ) -> bool {
@@ -524,7 +524,7 @@ fn skip_options<'a>(
 }
 
 /// `NAME=value`, where the name is one a shell would take as a variable.
-fn is_assignment(word: &str) -> bool {
+pub(crate) fn is_assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')

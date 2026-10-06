@@ -22,8 +22,8 @@
  ┃ ⚙ Read           deep1 catalog/etag.py                            1.3 kB █ ┌────────────── Activity ───────────────┐
  ┃                                                                          █ │ ▾ Sub-agents  3 running · 1 failed    █
  ┃ ◆ claude                                                                 █ │ ◆ test  Cover tests/fe… sonnet 1m 42s █
- ┃   Both reviewers are working.                                            █ │   └ Reading tests/stream.rs           █
- ┃                                                                          █ │ ◆ deep1 Review fetch.py            0s █
+ ┃   Both reviewers are working.                                            █ │   └ Reading tests/stream.rs           │
+ ┃                                                                          █ │ ◆ deep1 Review fetch.py            0s │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ◆ deep2 Review cache.py            0s │
  ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │ ▾ Tools  13 calls ✗ 2 · 0 denied      │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘

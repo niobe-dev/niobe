@@ -48,6 +48,7 @@ fn mcp_call(name: &str, bytes: u64, outcome: ToolOutcome) -> Event {
         summary: None,
         exit_code: None,
         error: None,
+        command: None,
     }
 }
 
@@ -74,6 +75,7 @@ fn read_ended(id: &str, path: &str, bytes: u64) -> Event {
         summary: Some(path.to_owned()),
         exit_code: None,
         error: None,
+        command: None,
     }
 }
 
@@ -218,6 +220,7 @@ fn session_events() -> Vec<Event> {
             error: Some(
                 "404 object_not_found — the page is not shared with the integration".to_owned(),
             ),
+            command: None,
         },
         Event::AssistantMessage {
             text: "Caching the etag beside the body so a 304 can be answered from the LRU."
@@ -253,6 +256,7 @@ fn session_events() -> Vec<Event> {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         },
         // Two hunks, as the backend reports a change: what the transcript
         // draws under the call, numbered on each side, with the lines between
@@ -333,6 +337,7 @@ fn session_events() -> Vec<Event> {
             summary: None,
             exit_code: Some(1),
             error: Some("1 failing: fetch returns the cached body on a 304".to_owned()),
+            command: Some("npm test -- fetch".to_owned()),
         },
         Event::Usage(Usage {
             input: 3_400,
@@ -512,6 +517,7 @@ pub fn session_with_test_records(runs: &[TestRunRecord]) -> App {
                 summary: Some("cargo test".to_owned()),
                 exit_code: *exit_code,
                 error: None,
+                command: None,
             },
             Event::TestRun {
                 id: id.as_str().into(),
@@ -651,6 +657,7 @@ pub fn session_with_a_long_write() -> App {
         summary: Some(path.clone()),
         exit_code: None,
         error: None,
+        command: None,
     });
     let written: String = (1..=30)
         .map(|n| format!("export const etag{n:02} = \"W/\\\"{n:04}\\\"\";\n"))
@@ -733,6 +740,7 @@ pub fn session_with_two_agents_at_work() -> App {
         summary: Some(what.to_owned()),
         exit_code: None,
         error: None,
+        command: None,
     };
     let mut events = vec![Event::UserMessage {
         text: "Review fetch.py and cache.py in parallel.".to_owned(),

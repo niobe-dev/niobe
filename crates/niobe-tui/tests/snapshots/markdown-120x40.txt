@@ -25,16 +25,16 @@
  ┃   • catalog/fetch.ts keeps the etag                                      █ │   server/                             │
  ┃     • and sends If-None-Match                                            █ └───────────────────────────────────────┘
  ┃   • etag.test.ts asserts the cached body                                 █ ┌────────────── Activity ───────────────┐
- ┃                                                                          █ │ ▾ Sub-agents  1 running · 1 failed    │
- ┃   file         │ lines                                                   █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
- ┃   ─────────────┼──────                                                   █ │   └ Reading tests/stream.rs           │
- ┃   fetch.ts     │   +38                                                   █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
- ┃   etag.test.ts │   +24                                                   █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃                                                                          █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
- ┃   ╭ ts                                                                   █ │   Bash       1 ▓▓▓▓         ✗ 1       │
- ┃   │ if (res.status === 304) return cached.body;                          █ │   Edit       1 ▓▓▓▓                   │
- ┃                                                                          █ │                                       │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │                                       │
+ ┃                                                                          █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   file         │ lines                                                   █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
+ ┃   ─────────────┼──────                                                   █ │   └ Reading tests/stream.rs           █
+ ┃   fetch.ts     │   +38                                                   █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       █
+ ┃   etag.test.ts │   +24                                                   █ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      █
+ ┃                                                                          █ │     Read 3                            █
+ ┃   ╭ ts                                                                   █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓ ✗ 1  █
+ ┃   │ if (res.status === 304) return cached.body;                          █ │     fetch 1 · search 1 · …            █
+ ┃                                                                          █ │   Editing files    1 ▓▓▓              █
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │     Edit 1                            █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │   Build and test   1 ▓▓▓         ✗ 1  █
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

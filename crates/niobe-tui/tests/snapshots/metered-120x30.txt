@@ -23,8 +23,8 @@
  ┃   304 path asserts a body that is no longer sent.                        █ │ ▾ Sub-agents  1 running · 1 failed    █
  ┃                                                                          █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
  ┃ ── turn 1 13:41 · 3 sub-agents · 8 tool calls · 52k tok · 1m 42s ─────── █ │   └ Reading tests/stream.rs           █
- ┃                                                                          █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       █
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       █
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
+ ┃                                                                          █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │     Read 3                            │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

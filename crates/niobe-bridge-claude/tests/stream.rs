@@ -1839,3 +1839,26 @@ mod cut_off {
         );
     }
 }
+
+/// Every call of a recorded session is counted under one kind of work: the
+/// kinds' calls add up to the calls that finished, and their failures and
+/// refusals to the session's.
+#[test]
+fn a_recorded_sessions_kinds_of_work_add_up_to_its_calls() {
+    for recording in [FIXTURE, SUB_AGENTS, include_str!("fixtures/shell.jsonl")] {
+        let state = SessionState::replay(&translate(recording));
+        let tools = state.tools();
+        let sum = |count: fn(&niobe_core::WorkTotals) -> u64| -> u64 {
+            tools.by_work.values().map(count).sum()
+        };
+        assert!(tools.finished > 0);
+        assert_eq!(
+            sum(|kind| kind.calls),
+            tools.finished,
+            "{:?}",
+            tools.by_work
+        );
+        assert_eq!(sum(|kind| kind.failed), tools.failed, "{:?}", tools.by_work);
+        assert_eq!(sum(|kind| kind.denied), tools.denied, "{:?}", tools.by_work);
+    }
+}

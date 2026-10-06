@@ -30,7 +30,7 @@ use ratatui::widgets::{
 };
 
 use niobe_core::event::{Billing, Context, UsageWindow};
-use niobe_core::session::{SessionState, ToolTotals, Totals};
+use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
     Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker, Purpose,
@@ -1526,7 +1526,7 @@ fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
     let grouping = (!app.agents().is_empty()).then(|| app.grouped_by_agent());
     key_hints(
         app.session().mode().is_some(),
-        (app.focus(), grouping),
+        (app.focus(), grouping, app.tools_by_name()),
         panes && !question_holds,
         (app.newline_key(), app.sends_enter_for_shift_enter()),
         theme,
@@ -1549,7 +1549,7 @@ fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
 /// other keys are reminders, and give way first.
 fn key_hints(
     reported: bool,
-    (focus, grouping): (Focus, Option<bool>),
+    (focus, grouping, by_name): (Focus, Option<bool>, bool),
     panes: bool,
     newline: (&str, bool),
     theme: &Theme,
@@ -1573,12 +1573,17 @@ fn key_hints(
                 hints.push(key("Tab panes", false));
             }
         }
-        Focus::Pane(_) => {
+        Focus::Pane(pane) => {
             hints.push(key("↑↓ Enter folds", false));
             match grouping {
                 Some(false) => hints.push(key("a groups by agent", false)),
                 Some(true) => hints.push(key("a ungroups", false)),
                 None => {}
+            }
+            match (pane, by_name) {
+                (Pane::Activity, false) => hints.push(key("t tool names", false)),
+                (Pane::Activity, true) => hints.push(key("t kinds of work", false)),
+                (Pane::Changes, _) => {}
             }
             hints.push(key("Esc back", false));
         }
@@ -4320,8 +4325,8 @@ fn tool_family(name: &str) -> String {
     }
 }
 
-/// What the session called, and how often: a row per family, busiest first,
-/// with a bar for how it compares and its own failures beside it.
+/// What the session called, and how often: a row per kind of work it did,
+/// or, while the operator has asked for them, a row per family of tools.
 fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let tools = session.tools();
     let folded = app.folded(Section::Tools);
@@ -4340,6 +4345,16 @@ fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> 
         return rows;
     }
 
+    match app.tools_by_name() {
+        true => rows.extend(name_rows(tools, width, theme)),
+        false => rows.extend(work_rows(tools, width, theme)),
+    }
+    rows
+}
+
+/// A row per family of tools, busiest first, with a bar for how it compares
+/// and its own failures beside it.
+fn name_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let mut families: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for (name, count) in &tools.by_name {
         let entry = families.entry(tool_family(name)).or_default();
@@ -4361,20 +4376,82 @@ fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> 
         .max()
         .unwrap_or(0)
         .min(BAR_NAME);
-    let bar_width = width
-        .saturating_sub(text::width(ROW_INDENT) + name + BAR_COUNT + 2 + BAR_FAILED)
-        .min(BAR_CELLS);
-    for (family, (count, failed)) in mix {
-        rows.push(bar_line(
-            (family, name),
-            *count,
-            *failed,
+    let bar_width = bar_width(width, name);
+    mix.into_iter()
+        .map(|(family, (count, failed))| {
+            bar_line((family, name), *count, *failed, busiest, bar_width, theme)
+        })
+        .collect()
+}
+
+/// A row per kind of work, busiest first, with a bar for how it compares, its
+/// own failures and refusals beside it, and under it a dim line of what did
+/// the work.
+fn work_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut mix: Vec<(&niobe_core::work::Work, &WorkTotals)> = tools.by_work.iter().collect();
+    mix.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
+    let busiest = mix.first().map(|(_, kind)| kind.calls).unwrap_or(1).max(1);
+    let name = mix
+        .iter()
+        .map(|(work, _)| text::width(work.label()))
+        .max()
+        .unwrap_or(0)
+        .min(BAR_NAME);
+    let bar_width = bar_width(width, name);
+    let mut rows = Vec::with_capacity(mix.len() * 2);
+    for (work, kind) in mix {
+        let mut row = bar_line(
+            (work.label(), name),
+            kind.calls,
+            kind.failed,
             busiest,
             bar_width,
             theme,
-        ));
+        );
+        if kind.denied > 0 {
+            row.spans.push(Span::styled(
+                format!(" {} denied", kind.denied),
+                Style::new().fg(theme.dim),
+            ));
+        }
+        rows.push(row);
+        rows.push(
+            Line::from(specifics_line(&kind.specifics, width)).style(Style::new().fg(theme.dim)),
+        );
     }
     rows
+}
+
+/// `    grep 21 · sed 18 · Read 4 · …`: what did a kind of work, busiest
+/// first, as many whole as fit in `width` columns, and `…` where some did
+/// not.
+fn specifics_line(specifics: &BTreeMap<String, u64>, width: usize) -> String {
+    const INDENT: &str = "    ";
+    const BETWEEN: &str = " · ";
+    let mut busiest: Vec<(&String, &u64)> = specifics.iter().collect();
+    busiest.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let mut line = INDENT.to_owned();
+    for (at, (specific, count)) in busiest.iter().enumerate() {
+        let item = format!("{specific} {count}");
+        let between = if at == 0 { "" } else { BETWEEN };
+        let last = at + 1 == busiest.len();
+        // Room is kept for ` · …` after any item but the last.
+        let after = if last { 0 } else { text::width(BETWEEN) + 1 };
+        if text::width(&line) + text::width(between) + text::width(&item) + after > width {
+            line.push_str(if at == 0 { "…" } else { " · …" });
+            return text::truncate(&line, width);
+        }
+        line.push_str(between);
+        line.push_str(&item);
+    }
+    line
+}
+
+/// How long a tools row's bar may be beside a name column `name` wide.
+fn bar_width(width: usize, name: usize) -> usize {
+    width
+        .saturating_sub(text::width(ROW_INDENT) + name + BAR_COUNT + 2 + BAR_FAILED)
+        .min(BAR_CELLS)
 }
 
 /// The tools section's header: the calls, the failures in the error colour,
@@ -6605,6 +6682,7 @@ mod tests {
             summary: Some(path.clone()),
             exit_code: None,
             error: None,
+            command: None,
         });
         let written: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
         app.apply(&Event::FileChange {
@@ -6645,6 +6723,7 @@ mod tests {
                 summary: Some(format!("{id} does")),
                 exit_code: None,
                 error: None,
+                command: None,
             });
         }
         edited(&mut app, "after", 2);

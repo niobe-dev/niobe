@@ -632,6 +632,13 @@ pub enum Event {
         /// which is shown as exactly that rather than as a reason made up.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The whole shell command the call ran, where it ran one: what the
+        /// kind of work it did is read from ([`crate::work`]), since the
+        /// arguments are the backend's to spell and the summary is one line
+        /// of it. `None` for a call that runs no command, and in a record
+        /// kept before calls carried it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
     },
 
     /// The backend finished answering the operator's last prompt: every call
@@ -1420,6 +1427,7 @@ mod tests {
             summary: None,
             exit_code: Some(2),
             error: Some("no such file".to_owned()),
+            command: None,
         };
         let line = serde_json::to_string(&ended).expect("an event serializes");
         let read: Event = serde_json::from_str(&line).expect("what was written reads back");

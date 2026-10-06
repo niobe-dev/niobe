@@ -1087,6 +1087,9 @@ pub struct App {
     /// Whether the sub-agents' rows are drawn together under each agent
     /// rather than interleaved as they happened.
     by_agent: bool,
+    /// Whether the Activity pane counts calls per tool rather than per kind
+    /// of work.
+    tools_by_name: bool,
     diffs_open: bool,
     /// How each call the operator or a rule let through was allowed, until
     /// the call ends and its entry takes the answer.
@@ -1488,6 +1491,7 @@ impl App {
             compaction: None,
             calls_folded: false,
             by_agent: false,
+            tools_by_name: false,
             diffs_open: false,
             answered: BTreeMap::new(),
             just_ended: None,
@@ -1810,6 +1814,7 @@ impl App {
                 summary,
                 exit_code,
                 error,
+                command: _,
             } => {
                 let ending = Ending {
                     outcome: *outcome,
@@ -2405,6 +2410,21 @@ impl App {
     pub fn group_by_agent(&mut self) {
         self.hold_view();
         self.by_agent = !self.by_agent;
+    }
+
+    /// Whether the Activity pane counts calls per tool: see
+    /// [`App::count_tools_by_name`].
+    pub fn tools_by_name(&self) -> bool {
+        self.tools_by_name
+    }
+
+    /// Has the Activity pane count calls per tool, by the names the backend
+    /// calls them, or per kind of work again.
+    ///
+    /// The kinds are labels put on the calls; the tools' own names are what
+    /// the backend reported, and are kept one key away.
+    pub fn count_tools_by_name(&mut self) {
+        self.tools_by_name = !self.tools_by_name;
     }
 
     /// Each sub-agent's tag and task, for the header its rows are grouped
@@ -3626,6 +3646,10 @@ impl App {
                 "a",
                 "in a side pane, group sub-agent rows by agent".to_owned(),
             ),
+            (
+                "t",
+                "in the Activity pane, count tools by name or by kind of work".to_owned(),
+            ),
             ("Ctrl+End", "back to the newest line".to_owned()),
             ("Ctrl+O", "fold runs of tool calls".to_owned()),
             ("Ctrl+T", "open every cut diff".to_owned()),
@@ -4236,6 +4260,7 @@ impl App {
             KeyCode::Down => self.scroller_mut(pane).move_cursor(true),
             KeyCode::Enter => self.fold_under_cursor(pane),
             KeyCode::Char('a') => self.group_by_agent(),
+            KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
         }
@@ -4731,13 +4756,14 @@ impl App {
         self.produce(Event::ToolCallEnd {
             id: ran.id,
             name: crate::shell::OPERATOR_SHELL.to_owned(),
-            input: command,
+            input: command.clone(),
             output: ran.output,
             bytes: ran.bytes,
             outcome,
             summary: None,
             exit_code: ran.exit_code,
             error: ran.error,
+            command: Some(command),
         });
         if let Some(tested) = tested {
             self.produce(tested);
@@ -7195,6 +7221,27 @@ mod tests {
         assert!(!app.grouped_by_agent(), "the key groups and ungroups");
     }
 
+    /// `t` turns the Activity pane's tools between kinds of work and tool
+    /// names where that pane has the keyboard; anywhere else it is typed.
+    #[test]
+    fn t_counts_tools_by_name_from_the_activity_pane_and_is_typed_elsewhere() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Changes));
+        app.on_key(key(KeyCode::Char('t')));
+        assert!(!app.tools_by_name());
+        assert_eq!(app.composed(), "t");
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Activity));
+        app.on_key(key(KeyCode::Char('t')));
+        assert!(app.tools_by_name());
+        assert_eq!(app.composed(), "t", "nothing more was typed");
+        app.on_key(key(KeyCode::Char('t')));
+        assert!(!app.tools_by_name(), "the key turns the count back");
+    }
+
     #[test]
     fn a_pane_that_is_not_on_screen_is_never_given_the_keyboard() {
         let mut app = app();
@@ -7595,6 +7642,7 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         });
 
         assert_eq!(app.entries().len(), 1, "the end opened a second entry");
@@ -7629,6 +7677,7 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -7640,6 +7689,7 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         });
 
         assert_eq!(app.entries()[0].kind, EntryKind::Failure);
@@ -10427,6 +10477,7 @@ mod tests {
             summary: Some("a.rs".to_owned()),
             exit_code: None,
             error: None,
+            command: None,
         });
         app.apply(&Event::FileChange {
             path: "a.rs".to_owned(),
@@ -10502,6 +10553,7 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "and then".to_owned(),
@@ -10598,6 +10650,7 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
         }
     }
 
@@ -10952,6 +11005,7 @@ mod tests {
             summary: None,
             exit_code: Some(2),
             error: Some("no such file".to_owned()),
+            command: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "then".to_owned(),

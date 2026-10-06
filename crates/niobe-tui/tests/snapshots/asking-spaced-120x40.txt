@@ -25,16 +25,16 @@
  ┃   │   4. Deny                                    the call does not run │ █ │   server/                             │
  ┃   │                                                                    │ █ └───────────────────────────────────────┘
  ┃   │ 3. niobe saves Bash(python3 -c '                                   │ █ ┌────────────── Activity ───────────────┐
- ┃   │ class H:                                                           │ █ │ ▾ Sub-agents  1 running · 1 failed    │
- ┃   │     def log(self, a): pass                                         │ █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
- ┃   │     print("a    b")                                                │ █ │   └ Reading tests/stream.rs           │
- ┃   │ ' # three   spaces)                                                │ █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
- ┃   │                                                                    │ █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
- ┃   │ Esc decide later                                                   │ █ │   Bash       1 ▓▓▓▓         ✗ 1       │
- ┃   └────────────────────────────────────────────────────────────────────┘ █ │   Edit       1 ▓▓▓▓                   │
- ┃                                                                          █ │                                       │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │                                       │
+ ┃   │ class H:                                                           │ █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   │     def log(self, a): pass                                         │ █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
+ ┃   │     print("a    b")                                                │ █ │   └ Reading tests/stream.rs           █
+ ┃   │ ' # three   spaces)                                                │ █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       █
+ ┃   │                                                                    │ █ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      █
+ ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │     Read 3                            █
+ ┃   │ Esc decide later                                                   │ █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓ ✗ 1  █
+ ┃   └────────────────────────────────────────────────────────────────────┘ █ │     fetch 1 · search 1 · …            █
+ ┃                                                                          █ │   Editing files    1 ▓▓▓              █
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │     Edit 1                            █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │   Build and test   1 ▓▓▓         ✗ 1  █
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

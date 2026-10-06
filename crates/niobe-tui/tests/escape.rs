@@ -199,6 +199,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 summary: Some(format!("echo {p}")),
                 exit_code: Some(1),
                 error: Some(format!("err {p}")),
+                command: None,
             },
         ])
     }));

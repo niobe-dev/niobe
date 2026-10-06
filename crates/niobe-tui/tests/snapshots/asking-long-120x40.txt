@@ -25,16 +25,16 @@
  ┃   │ echo step 19 && \                                                  │ █ │   server/                             │
  ┃   │ echo step 20 && \                                                  │ █ └───────────────────────────────────────┘
  ┃   │ … 123 more lines · Ctrl+T shows the whole call                     │ █ ┌────────────── Activity ───────────────┐
- ┃   │                                                                    │ █ │ ▾ Sub-agents  1 running · 1 failed    │
- ┃   │ ▶ 1. Allow once                                     this call only │ █ │ ◆ test Cover tests/fet… sonnet 1m 42s │
- ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │   └ Reading tests/stream.rs           │
- ┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp … │ █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
- ┃   │   4. Deny                                    the call does not run │ █ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1       │
- ┃   │                                                                    │ █ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓           │
- ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │   Bash       1 ▓▓▓▓         ✗ 1       │
- ┃   │ Esc decide later                                                   │ █ │   Edit       1 ▓▓▓▓                   │
- ┃   └────────────────────────────────────────────────────────────────────┘ █ │                                       │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │                                       │
+ ┃   │                                                                    │ █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   │ ▶ 1. Allow once                                     this call only │ █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
+ ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │   └ Reading tests/stream.rs           █
+ ┃   │   3. Always allow this target  niobe saves Bash(set -e ↵ cd /tmp … │ █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       █
+ ┃   │   4. Deny                                    the call does not run │ █ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      █
+ ┃   │                                                                    │ █ │     Read 3                            █
+ ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓ ✗ 1  █
+ ┃   │ Esc decide later                                                   │ █ │     fetch 1 · search 1 · …            █
+ ┃   └────────────────────────────────────────────────────────────────────┘ █ │   Editing files    1 ▓▓▓              █
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │     Edit 1                            █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │   Build and test   1 ▓▓▓         ✗ 1  █
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

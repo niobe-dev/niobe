@@ -21,8 +21,8 @@
  ┃                                                                          ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
  ┃                                                                          ┃ │   none spawned                        │
  ┃                                                                          ┃ │ ▾ Tools  2 calls · 0 denied           │
- ┃                                                                          ┃ │   Edit   2 ▓▓▓▓▓▓▓▓▓▓▓▓               │
- ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │   Editing files   2 ▓▓▓▓▓▓▓▓▓▓▓▓      │
+ ┃                                                                          ┃ │     Edit 2                            │
  ┃                                                                          ┃ │                                       │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │

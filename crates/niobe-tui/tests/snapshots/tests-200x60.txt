@@ -41,14 +41,14 @@
  ┃ ◆ claude                                                                                                                     ┃ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ │   └ Reading tests/stream.rs                                       │
  ┃                                                                                                                              ┃ │ ▾ Tools  9 calls ✗ 3 · 0 denied · 81.6 kB out                     │
- ┃ ✗ Bash           npm test -- fetch                                                                             exit 1 · 0.4s ┃ │   Notion·*   3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                                   │
- ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │   Read       3 ▓▓▓▓▓▓▓▓▓▓▓▓                                       │
- ┃                                                                                                                              ┃ │   Bash       2 ▓▓▓▓▓▓▓▓     ✗ 2                                   │
- ┃ ◆ claude                                                                                                                     ┃ │   Edit       1 ▓▓▓▓                                               │
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ┃ │                                                                   │
- ┃                                                                                                                              ┃ │                                                                   │
- ┃ ✗ Bash           cargo test                                                                                  exit 101 · 0.4s ┃ │                                                                   │
- ┃   └ ━━━━━━━━━━━━━━━━━━━━  612 passed · 3 failed · a_statement_line_037_rounds_like_the_ledger in --test statement            ┃ │                                                                   │
+ ┃ ✗ Bash           npm test -- fetch                                                                             exit 1 · 0.4s ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                                 │
+ ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │     Read 3                                                        │
+ ┃                                                                                                                              ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                             │
+ ┃ ◆ claude                                                                                                                     ┃ │     fetch 1 · search 1 · update-page 1                            │
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ┃ │   Build and test   2 ▓▓▓▓▓▓▓▓     ✗ 2                             │
+ ┃                                                                                                                              ┃ │     cargo test 1 · npm test 1                                     │
+ ┃ ✗ Bash           cargo test                                                                                  exit 101 · 0.4s ┃ │   Editing files    1 ▓▓▓▓                                         │
+ ┃   └ ━━━━━━━━━━━━━━━━━━━━  612 passed · 3 failed · a_statement_line_037_rounds_like_the_ledger in --test statement            ┃ │     Edit 1                                                        │
  ┃                                                                                                                              ┃ │                                                                   │
  ┃                                                                                                                              ┃ │                                                                   │
  ┃                                                                                                                              ┃ │                                                                   │
