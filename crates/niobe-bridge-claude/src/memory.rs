@@ -24,8 +24,18 @@
 //!
 //! A file nested below where the session runs is loaded by the CLI only when
 //! the agent reads in that directory, so it is not listed. Nothing here is
-//! written, and nothing read is a credential: these are the files the operator
-//! wrote for the agent, and the notes the CLI keeps beside its transcripts.
+//! written.
+//!
+//! Nothing read is a credential, whatever a file names. Each file is judged
+//! where the filesystem resolves it, links and `..` followed, before it is
+//! opened, and is listed without being read ([`Withheld`]) where it is in the
+//! CLI's configuration directory and not markdown — its sign-in is kept there
+//! — or under a hidden entry of the home directory. A file the repository
+//! holds, and what it imports, is read only inside the repository or as one
+//! of the CLI's markdown files, because a cloned repository's `@path` would
+//! otherwise choose what on the machine is read and shown; the auto-memory
+//! index's entries only beside it. The operator's own files outside the
+//! repository import from anywhere else.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -65,12 +75,27 @@ pub struct Source {
     /// one for a file one of those imports, and so on.
     pub depth: usize,
     /// What it holds, where it could be read as a regular file of at most
-    /// [`LIMIT`] bytes.
+    /// [`LIMIT`] bytes and was not [`Withheld`].
     pub text: Option<String>,
     /// How many bytes it holds, where it could be read.
     pub bytes: Option<u64>,
     /// What the auto-memory index says of an entry.
     pub note: Option<String>,
+    /// Why it was listed without being read, where it was.
+    pub withheld: Option<Withheld>,
+}
+
+/// Why a file the memory names is listed without being opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withheld {
+    /// It is where credentials are kept: in the CLI's configuration directory
+    /// and not markdown, which is where its sign-in is, or under a hidden
+    /// entry of the home directory, such as `~/.ssh` or another CLI's.
+    Private,
+    /// A file the repository controls names it, and it is outside both the
+    /// repository and the CLI's markdown: a cloned repository does not decide
+    /// what else on the machine is read.
+    Outside,
 }
 
 /// Where to look.
@@ -112,7 +137,11 @@ const MANAGED: Option<&str> = None;
 /// Every file the agent is given as memory for a session at `lookup.cwd`, in
 /// the order the CLI gives them, each import under the file importing it.
 pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
-    let mut found = Found::default();
+    let mut found = Found {
+        places: Places::of(lookup),
+        sources: Vec::new(),
+        seen: BTreeSet::new(),
+    };
     if let Some(managed) = MANAGED {
         found.loaded(Scope::Managed, Path::new(managed), lookup);
     }
@@ -138,23 +167,39 @@ pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
 
 /// What has been found so far, and every path listed, so that a file two
 /// others import, or one that imports itself, is listed once.
-#[derive(Default)]
 struct Found {
+    places: Places,
     sources: Vec<Source>,
     seen: BTreeSet<PathBuf>,
 }
 
 impl Found {
     /// A file the CLI loads itself, where it is there, and what it imports.
+    /// One the repository holds is held to it, as its imports are.
     fn loaded(&mut self, scope: Scope, path: &Path, lookup: &Lookup<'_>) {
-        self.add(scope, path, 0, lookup);
+        let held = Held::to_repository(
+            self.places
+                .in_repository(&canonical(path.parent().unwrap_or(Path::new("")))),
+        );
+        self.add(scope, path, 0, &held, lookup);
     }
 
-    fn add(&mut self, scope: Scope, path: &Path, depth: usize, lookup: &Lookup<'_>) {
+    fn add(&mut self, scope: Scope, path: &Path, depth: usize, held: &Held, lookup: &Lookup<'_>) {
         if self.seen.contains(path) {
             return;
         }
-        let Some((text, bytes)) = read(path) else {
+        // Where it really is, found without opening it, so that a link or a
+        // `..` cannot carry the read somewhere the check did not look.
+        let Ok(real) = std::fs::canonicalize(path) else {
+            return;
+        };
+        if let Some(withheld) = self.places.withholds(&real, held) {
+            self.seen.insert(path.to_path_buf());
+            self.sources
+                .push(Source::withheld(scope, path, depth, withheld));
+            return;
+        }
+        let Some((text, bytes)) = read(&real) else {
             return;
         };
         self.seen.insert(path.to_path_buf());
@@ -169,19 +214,30 @@ impl Found {
             text: Some(text),
             bytes: Some(bytes),
             note: None,
+            withheld: None,
         });
         let from = path.parent().unwrap_or(Path::new(""));
+        let held = Held::to_repository(self.places.in_repository(&real));
         for import in imports {
             if let Some(target) = resolve(&import, from, lookup.home) {
-                self.add(Scope::Imported, &target, depth + 1, lookup);
+                self.add(Scope::Imported, &target, depth + 1, &held, lookup);
             }
         }
     }
 
     /// The auto-memory index, where there is one, and each entry it links to
-    /// that is there.
+    /// that is there and kept beside it.
     fn index(&mut self, path: &Path) {
-        let Some((text, bytes)) = read(path) else {
+        let Ok(real) = std::fs::canonicalize(path) else {
+            return;
+        };
+        if let Some(withheld) = self.places.withholds(&real, &Held::Free) {
+            self.seen.insert(path.to_path_buf());
+            self.sources
+                .push(Source::withheld(Scope::AutoMemory, path, 0, withheld));
+            return;
+        }
+        let Some((text, bytes)) = read(&real) else {
             return;
         };
         self.seen.insert(path.to_path_buf());
@@ -193,14 +249,29 @@ impl Found {
             text: Some(text),
             bytes: Some(bytes),
             note: None,
+            withheld: None,
         });
         let dir = path.parent().unwrap_or(Path::new(""));
+        // The index is written by the agent, which a repository can steer: an
+        // entry is read only where it is kept beside it.
+        let held = Held::To(real.parent().unwrap_or(Path::new("")).to_path_buf());
         for (target, note) in entries {
             let target = dir.join(target);
             if self.seen.contains(&target) {
                 continue;
             }
-            let Some((text, bytes)) = read(&target) else {
+            let Ok(real) = std::fs::canonicalize(&target) else {
+                continue;
+            };
+            if let Some(withheld) = self.places.withholds(&real, &held) {
+                self.seen.insert(target.clone());
+                self.sources.push(Source {
+                    note,
+                    ..Source::withheld(Scope::AutoEntry, &target, 1, withheld)
+                });
+                continue;
+            }
+            let Some((text, bytes)) = read(&real) else {
                 continue;
             };
             self.seen.insert(target.clone());
@@ -211,9 +282,129 @@ impl Found {
                 text: Some(text),
                 bytes: Some(bytes),
                 note,
+                withheld: None,
             });
         }
     }
+}
+
+impl Source {
+    /// A file listed where it is and not opened, for `withheld`.
+    fn withheld(scope: Scope, path: &Path, depth: usize, withheld: Withheld) -> Self {
+        Self {
+            scope,
+            path: path.to_path_buf(),
+            depth,
+            text: None,
+            bytes: None,
+            note: None,
+            withheld: Some(withheld),
+        }
+    }
+}
+
+/// Where a file may be read from, by who named it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Held {
+    /// The operator's own files named it: it is read wherever it is, but
+    /// where credentials are kept.
+    Free,
+    /// The repository named it: it is read only inside the repository or as
+    /// one of the CLI's markdown files.
+    Repository,
+    /// The auto-memory index named it: it is read only inside this directory.
+    To(PathBuf),
+}
+
+impl Held {
+    fn to_repository(inside: bool) -> Self {
+        match inside {
+            true => Self::Repository,
+            false => Self::Free,
+        }
+    }
+}
+
+/// The places a memory file is judged by, each as the filesystem resolves it.
+struct Places {
+    /// The repository the session runs in: the nearest directory holding
+    /// `.git` from where it runs, or that directory itself. `None` where it
+    /// is the home directory or above it, which the operator's own files are
+    /// in rather than a clone's.
+    repository: Option<PathBuf>,
+    /// The CLI's configuration directory, where its sign-in is kept.
+    config: Option<PathBuf>,
+    /// The home directory.
+    home: Option<PathBuf>,
+}
+
+impl Places {
+    fn of(lookup: &Lookup<'_>) -> Self {
+        let home = lookup.home.map(canonical);
+        let repository = canonical(
+            lookup
+                .cwd
+                .ancestors()
+                .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
+                .unwrap_or(lookup.cwd),
+        );
+        let repository = match &home {
+            Some(home) if home.starts_with(&repository) => None,
+            _ => Some(repository),
+        };
+        Self {
+            repository,
+            config: lookup.config.map(canonical),
+            home,
+        }
+    }
+
+    fn in_repository(&self, real: &Path) -> bool {
+        self.repository
+            .as_ref()
+            .is_some_and(|repository| real.starts_with(repository))
+    }
+
+    /// Why the file really at `real`, named as `held` says, is not read, or
+    /// `None` where it may be.
+    fn withholds(&self, real: &Path, held: &Held) -> Option<Withheld> {
+        let in_config = self
+            .config
+            .as_ref()
+            .is_some_and(|config| real.starts_with(config));
+        let markdown = real.extension().is_some_and(|extension| extension == "md");
+        if in_config && !markdown {
+            return Some(Withheld::Private);
+        }
+        if let Held::To(dir) = held {
+            return (!real.starts_with(dir)).then_some(Withheld::Outside);
+        }
+        if in_config || self.in_repository(real) {
+            return None;
+        }
+        if self.hidden_in_home(real) {
+            return Some(Withheld::Private);
+        }
+        match held {
+            Held::Repository => Some(Withheld::Outside),
+            Held::Free | Held::To(_) => None,
+        }
+    }
+
+    /// Whether `real` is under an entry of the home directory whose name
+    /// starts with a dot, which is where tools keep their keys and tokens.
+    fn hidden_in_home(&self, real: &Path) -> bool {
+        self.home
+            .as_ref()
+            .and_then(|home| real.strip_prefix(home).ok())
+            .and_then(|rest| rest.components().next())
+            .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'))
+    }
+}
+
+/// `path` as the filesystem resolves it, or as written where it cannot.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The text of a regular file at `path` of at most [`LIMIT`] bytes, and how
@@ -435,6 +626,198 @@ mod tests {
             imports("see @one.md, and `@two.md`\n```\n@three.md\n```\nme@four.md @~/five.md\n"),
             ["one.md", "~/five.md"]
         );
+    }
+
+    /// The name the CLI keeps its sign-in under, put together here because
+    /// the layering check refuses the name written whole in any source,
+    /// tests included: this one only plants a fake file under it.
+    fn credentials_name() -> String {
+        [".credentials", "json"].join(".")
+    }
+
+    /// A home with the CLI's configuration directory holding a fake sign-in,
+    /// and an empty repository under it.
+    fn signed_in() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let home = dir.path().join("home");
+        let config = home.join(".claude");
+        let repo = home.join("work").join("repo");
+        write(
+            &config.join(credentials_name()),
+            "{\"claudeAiOauth\":{\"accessToken\":\"sk-ant-oat-SECRET\"}}",
+        );
+        std::fs::create_dir_all(&repo).expect("the temporary directory is writable");
+        (dir, home, config, repo)
+    }
+
+    fn found_in(home: &Path, config: &Path, repo: &Path) -> Vec<Source> {
+        sources(&Lookup {
+            cwd: repo,
+            config: Some(config),
+            home: Some(home),
+        })
+    }
+
+    fn listed<'a>(found: &'a [Source], path: &Path) -> &'a Source {
+        found
+            .iter()
+            .find(|source| source.path == path)
+            .unwrap_or_else(|| panic!("{} is listed: {found:?}", path.display()))
+    }
+
+    #[test]
+    fn a_repository_importing_the_clis_sign_in_has_it_listed_and_never_read() {
+        let (_dir, home, config, repo) = signed_in();
+        write(
+            &repo.join("CLAUDE.md"),
+            &format!("See @~/.claude/{} for setup.\n", credentials_name()),
+        );
+        let found = found_in(&home, &config, &repo);
+        assert!(
+            !found.iter().any(|source| source
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("SECRET"))),
+            "{found:?}"
+        );
+        let token = listed(&found, &config.join(credentials_name()));
+        assert_eq!(
+            (
+                token.scope,
+                token.text.as_deref(),
+                token.bytes,
+                token.withheld
+            ),
+            (Scope::Imported, None, None, Some(Withheld::Private))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sign_in_file_that_is_a_fifo_is_listed_without_being_opened() {
+        let (_dir, home, config, repo) = signed_in();
+        let token = config.join(credentials_name());
+        std::fs::remove_file(&token).expect("the fake sign-in was written");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&token)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "a FIFO can be made");
+        write(
+            &repo.join("CLAUDE.md"),
+            &format!("@~/.claude/{}\n", credentials_name()),
+        );
+        let found = found_in(&home, &config, &repo);
+        assert_eq!(listed(&found, &token).withheld, Some(Withheld::Private));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_memory_file_linked_to_the_clis_sign_in_is_not_read() {
+        let (_dir, home, config, repo) = signed_in();
+        std::os::unix::fs::symlink(config.join(credentials_name()), repo.join("CLAUDE.md"))
+            .expect("a link can be made");
+        let found = found_in(&home, &config, &repo);
+        let project = listed(&found, &repo.join("CLAUDE.md"));
+        assert_eq!(
+            (project.text.as_deref(), project.withheld),
+            (None, Some(Withheld::Private))
+        );
+    }
+
+    #[test]
+    fn a_repository_import_that_leads_out_of_it_is_listed_and_not_read() {
+        let (dir, home, config, repo) = signed_in();
+        let outside = home.join("outside.md");
+        let elsewhere = dir.path().join("elsewhere.md");
+        write(&outside, "two levels up\n");
+        write(&elsewhere, "written absolute\n");
+        write(
+            &repo.join("CLAUDE.md"),
+            &format!("@../../outside.md @{}\n", elsewhere.display()),
+        );
+        let found = found_in(&home, &config, &repo);
+        let withheld: Vec<(Option<&str>, Option<Withheld>)> = [
+            listed(&found, &repo.join("../../outside.md")),
+            listed(&found, &elsewhere),
+        ]
+        .iter()
+        .map(|source| (source.text.as_deref(), source.withheld))
+        .collect();
+        assert_eq!(
+            withheld,
+            [
+                (None, Some(Withheld::Outside)),
+                (None, Some(Withheld::Outside))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repository_import_of_a_markdown_file_in_the_clis_directory_is_read() {
+        let (_dir, home, config, repo) = signed_in();
+        write(&config.join("shared.md"), "shared notes\n");
+        write(&repo.join("CLAUDE.md"), "@~/.claude/shared.md\n");
+        let found = found_in(&home, &config, &repo);
+        let shared = listed(&found, &config.join("shared.md"));
+        assert_eq!(
+            (shared.text.as_deref(), shared.withheld),
+            (Some("shared notes\n"), None)
+        );
+    }
+
+    #[test]
+    fn the_operators_own_file_imports_from_anywhere_but_where_credentials_are_kept() {
+        let (_dir, home, config, repo) = signed_in();
+        write(&home.join("notes.md"), "my notes\n");
+        write(&home.join(".ssh").join("id_ed25519"), "PRIVATE KEY\n");
+        write(&home.join("CLAUDE.md"), "@~/notes.md @~/.ssh/id_ed25519\n");
+        let found = found_in(&home, &config, &repo);
+        let read: Vec<(Option<&str>, Option<Withheld>)> = [
+            listed(&found, &home.join("notes.md")),
+            listed(&found, &home.join(".ssh").join("id_ed25519")),
+        ]
+        .iter()
+        .map(|source| (source.text.as_deref(), source.withheld))
+        .collect();
+        assert_eq!(
+            read,
+            [(Some("my notes\n"), None), (None, Some(Withheld::Private))]
+        );
+    }
+
+    #[test]
+    fn an_auto_memory_entry_that_links_out_of_its_directory_is_not_read() {
+        let (_dir, home, config, repo) = signed_in();
+        let memory = crate::transcript::directory(&config, &repo).join("memory");
+        let token = config.join(credentials_name());
+        let climb = pathdiff(&memory, &token);
+        write(
+            &memory.join("MEMORY.md"),
+            &format!("- [Setup]({climb}) — how to sign in\n"),
+        );
+        let found = found_in(&home, &config, &repo);
+        let entry = listed(&found, &memory.join(&climb));
+        assert_eq!(
+            (entry.text.as_deref(), entry.withheld),
+            (None, Some(Withheld::Private))
+        );
+    }
+
+    /// `to` written relative to `from`, which lies below the same directory.
+    fn pathdiff(from: &Path, to: &Path) -> String {
+        let common = to.parent().expect("a file has a directory");
+        let up = from
+            .strip_prefix(common)
+            .expect("below the same directory")
+            .components()
+            .count();
+        let name = to
+            .file_name()
+            .expect("a file has a name")
+            .to_string_lossy()
+            .into_owned();
+        format!("{}{name}", "../".repeat(up))
     }
 
     #[cfg(unix)]

@@ -248,9 +248,11 @@ fn memory_file(
         || source.path.display().to_string(),
         |inside| inside.display().to_string(),
     );
-    let editable = std::fs::symlink_metadata(&source.path)
-        .is_ok_and(|meta| meta.file_type().is_file())
-        .then(|| source.path.display().to_string());
+    // A file the bridge would not read is not handed to an editor either.
+    let editable = (source.withheld.is_none()
+        && std::fs::symlink_metadata(&source.path).is_ok_and(|meta| meta.file_type().is_file()))
+    .then(|| source.path.display().to_string());
+    let note = source.withheld.map(withheld_note).or(source.note);
     niobe_tui::MemoryFile {
         scope,
         path,
@@ -258,9 +260,20 @@ fn memory_file(
         depth: source.depth,
         bytes: source.bytes,
         text: source.text,
-        note: source.note,
+        note,
         editable,
     }
+}
+
+/// What the Memory view says beside a file the bridge listed and did not
+/// read.
+fn withheld_note(withheld: niobe_bridge_claude::memory::Withheld) -> String {
+    use niobe_bridge_claude::memory::Withheld;
+    match withheld {
+        Withheld::Private => "not read: where credentials are kept",
+        Withheld::Outside => "not read: outside the repository and the CLI's markdown",
+    }
+    .to_owned()
 }
 
 /// Where the `claude` CLI keeps the transcripts of the sessions it has run in
@@ -637,6 +650,54 @@ mod tests {
                 Some(home.into_os_string())
             )
             .is_empty()
+        );
+    }
+
+    /// A file the bridge listed without reading is shown as not read, with
+    /// why, and is not handed to the editor either.
+    #[test]
+    fn a_memory_file_the_bridge_withheld_says_why_and_cannot_be_edited() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let home = dir.path().join("home");
+        let repo = home.join("src").join("repo");
+        let outside = home.join("outside.md");
+        for (path, text) in [
+            (repo.join("CLAUDE.md"), "@../../outside.md @~/.ssh/key\n"),
+            (outside.clone(), "outside\n"),
+            (home.join(".ssh").join("key"), "PRIVATE\n"),
+        ] {
+            std::fs::create_dir_all(path.parent().expect("a file has a directory"))
+                .expect("the temporary directory is writable");
+            std::fs::write(&path, text).expect("the temporary directory is writable");
+        }
+        let claude = config("[profiles.max]\nbackend = \"claude\"\n");
+        let listed = memory(
+            claude.profiles().get("max"),
+            &repo,
+            None,
+            Some(home.into_os_string()),
+        );
+        let imported: Vec<(Option<&str>, Option<&str>, bool)> = listed
+            .iter()
+            .filter(|file| file.depth == 1)
+            .map(|file| {
+                (
+                    file.text.as_deref(),
+                    file.note.as_deref(),
+                    file.editable.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            imported,
+            [
+                (
+                    None,
+                    Some("not read: outside the repository and the CLI's markdown"),
+                    false
+                ),
+                (None, Some("not read: where credentials are kept"), false),
+            ]
         );
     }
 
