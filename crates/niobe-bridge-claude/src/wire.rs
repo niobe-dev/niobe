@@ -205,6 +205,21 @@ pub(crate) struct ResultMeta {
 }
 
 impl Envelope {
+    /// Whether this is the note the CLI writes into the conversation where
+    /// the operator's interrupt stopped the request in flight:
+    /// `[Request interrupted by user]` while a reply was written, and the
+    /// same words with ` for tool use]` while a call ran, as recorded from
+    /// 2.1.285 and 2.1.292.
+    pub(crate) fn says_interrupted(&self) -> bool {
+        let Some(Content::Blocks(blocks)) = &self.message.content else {
+            return false;
+        };
+        blocks.iter().any(|block| match block {
+            Block::Text { text } => text.starts_with("[Request interrupted by user"),
+            Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => false,
+        })
+    }
+
     /// Whether the call `id` did not run to its end because the operator
     /// stopped the turn it was in.
     pub(crate) fn interrupted(&self, id: &str) -> bool {

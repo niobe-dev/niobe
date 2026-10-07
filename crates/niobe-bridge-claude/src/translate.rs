@@ -31,8 +31,14 @@
 //!   `result` counted the cut reply from the snapshot on its last `assistant`
 //!   line. So a message still waiting for its count when the next one starts,
 //!   or when the turn ends, is counted from that snapshot, and the operator
-//!   is told it was cut — except where the CLI marked the line `aborted`: a
-//!   reply the operator's interrupt stopped is one the CLI counts nothing for.
+//!   is told it was cut — except where the operator's interrupt stopped it: a
+//!   reply stopped that way is one the CLI counts nothing for. Claude Code
+//!   2.1.285 marks its `assistant` line `aborted` and sends no
+//!   `message_delta`; 2.1.292, stopped before any `assistant` line, still
+//!   sends one after its `[Request interrupted by user]` note, and its
+//!   `result` and running totals leave that count out too. So the note, the
+//!   mark, or a turn that ends `aborted` with the reply in flight each say the
+//!   reply is not counted, and is not called cut off.
 //! * **`result` totals are cumulative for the session, not for the turn.**
 //!   `modelUsage` and `total_cost_usd` grow across turns, so they are read as
 //!   running totals and reported as the difference from the last turn's.
@@ -222,7 +228,9 @@ struct InFlight {
     /// The counts its last `assistant` line carried: what the message is
     /// counted from if its stream is cut off before its `message_delta`.
     snapshot: Option<wire::Usage>,
-    /// Whether the operator's interrupt stopped it as it was written.
+    /// Whether the operator's interrupt stopped it as it was written: its
+    /// `assistant` line said so, the CLI's note of the interrupt arrived while
+    /// it was in flight, or the turn ended on the interrupt with it in flight.
     aborted: bool,
 }
 
@@ -1223,6 +1231,9 @@ impl Translator {
     }
 
     fn user(&mut self, envelope: wire::Envelope, out: &mut Vec<Event>) {
+        if envelope.says_interrupted() {
+            self.stopped(&envelope.parent_tool_use_id);
+        }
         let background = envelope.launched_in_background();
         let interrupted: Vec<String> = envelope
             .tool_result_meta
@@ -1591,6 +1602,11 @@ impl Translator {
             wire::StreamBody::MessageDelta { usage } => {
                 let Some(usage) = usage else { return };
                 let started = self.in_flight.remove(&stream);
+                // Its count arrives after the interrupt that stopped it, and
+                // the CLI's `result` and running totals leave it out.
+                if started.as_ref().is_some_and(|message| message.aborted) {
+                    return;
+                }
                 self.count_message(&stream, started, &usage, out);
             }
 
@@ -1665,6 +1681,15 @@ impl Translator {
             message.request = Some(request.clone());
         }
         message.aborted |= envelope.aborted;
+    }
+
+    /// Marks the message in flight on `stream`, if one is, as one the
+    /// operator's interrupt stopped: the CLI counts nothing for it, whether
+    /// or not its `message_delta` still arrives.
+    fn stopped(&mut self, stream: &Option<String>) {
+        if let Some(message) = self.in_flight.get_mut(stream) {
+            message.aborted = true;
+        }
     }
 
     /// A message whose stream ended before its `message_delta`: counted from
@@ -1766,8 +1791,12 @@ impl Translator {
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         let interrupted = outcome.interrupted();
         // The session's own reply still waiting for its count when the turn
-        // ends was cut off. A sub-agent's is left: one launched in the
+        // ends was cut off, unless the turn ends on the operator's interrupt,
+        // which is what stopped it. A sub-agent's is left: one launched in the
         // background goes on writing after the turn that launched it ends.
+        if interrupted {
+            self.stopped(&None);
+        }
         if let Some(left) = self.in_flight.remove(&None) {
             self.cut_off(&None, left, CarriedOn::No, out);
         }
@@ -3193,6 +3222,64 @@ mod tests {
             "{events:?}"
         );
         assert!(cut_notices(&events).is_empty(), "{events:?}");
+    }
+
+    const STOPPED_STREAMING: &str = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming","usage":{"input_tokens":0,"output_tokens":0}}"#;
+
+    #[test]
+    fn a_reply_stopped_before_any_line_of_it_was_written_is_not_called_cut_off() {
+        let mut translator = translator();
+        translator.line(&started("msg_1"));
+
+        let events = translator.line(STOPPED_STREAMING);
+
+        assert!(cut_notices(&events).is_empty(), "{events:?}");
+        assert!(
+            events.iter().all(|event| !matches!(event, Event::Usage(_))),
+            "{events:?}"
+        );
+        assert!(differences(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_message_delta_after_the_interrupt_of_its_reply_is_not_counted() {
+        let mut translator = translator();
+        translator.line(&started("msg_1"));
+        let mut events = translator.line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"parent_tool_use_id":null}"#,
+        );
+        events.extend(translator.line(&delta(2, 4)));
+        events.extend(translator.line(STOPPED_STREAMING));
+
+        assert!(
+            events.iter().all(|event| !matches!(event, Event::Usage(_))),
+            "{events:?}"
+        );
+        assert!(cut_notices(&events).is_empty(), "{events:?}");
+        assert!(differences(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_reply_that_finished_before_the_interrupt_is_still_counted() {
+        let mut translator = translator();
+        translator.line(&started("msg_1"));
+        let mut events = translator.line(&delta(2, 40));
+        events.extend(translator.line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"parent_tool_use_id":null}"#,
+        ));
+        events.extend(translator.line(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_tools","usage":{"input_tokens":2,"output_tokens":40}}"#,
+        ));
+
+        let counted: Vec<(u64, u64)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.input, usage.output)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counted, [(2, 40)]);
+        assert!(differences(&events).is_empty(), "{events:?}");
     }
 
     #[test]

@@ -1779,6 +1779,64 @@ fn a_recorded_session_with_stopped_turns_counts_the_tokens_the_cli_reported() {
     assert_eq!(state.turns().len(), 3);
 }
 
+/// A reply the operator stopped as soon as it started, on a release whose
+/// stream still sends the reply's `message_delta` after the interrupt, as the
+/// README beside the recording lays out.
+mod interrupted_at_start {
+    use super::{notices, translate};
+    use niobe_core::event::Event;
+    use niobe_core::session::SessionState;
+
+    fn events() -> Vec<Event> {
+        translate(include_str!("fixtures/interrupted-at-start.jsonl"))
+    }
+
+    /// The CLI's `result` carries zeros, its `modelUsage` is empty and its
+    /// `total_cost_usd` is 0: it counted nothing for the stopped reply, so
+    /// neither does the fold, and nothing is left waiting for a cost.
+    #[test]
+    fn a_reply_stopped_as_it_started_counts_nothing_though_its_message_delta_arrived() {
+        let events = events();
+        let state = SessionState::replay(&events);
+        let totals = state.totals();
+
+        assert_eq!(totals.tokens(), 0, "{events:#?}");
+        assert_eq!(totals.records_unsettled, 0, "{events:#?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::TurnTotalDiffers { .. })),
+            "the fold and the CLI agree on nothing: {events:#?}"
+        );
+        assert_eq!(state.turns().len(), 1);
+    }
+
+    #[test]
+    fn a_reply_stopped_as_it_started_reads_as_stopped_and_not_as_cut_off() {
+        let events = events();
+        let notices = notices(&events);
+
+        assert!(
+            !notices.iter().any(|notice| notice.contains("cut off")),
+            "{notices:?}"
+        );
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.contains("stopped"))
+                .count(),
+            1,
+            "{notices:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "{events:#?}"
+        );
+    }
+}
+
 /// A turn one of whose replies was cut off mid-stream, before its
 /// `message_delta`, after which the CLI carried the turn on by itself, as the
 /// README beside the fixture lays out.

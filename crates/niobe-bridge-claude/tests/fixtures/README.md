@@ -743,6 +743,60 @@ The session's `modelUsage` for `claude-sonnet-5-5` after the third turn is 4
 in, 129 out, 31,168 cache read and 11,349 cache write: the sums of the
 column, which is what the fold is expected to total.
 
+## `interrupted-at-start.jsonl`
+
+One turn stopped with the CLI's `interrupt` control request as soon as its
+reply's `message_start` arrived, recorded from Claude Code 2.1.292 on
+7 October 2026 on Haiku, through the driver: `niobe-1` is the `initialize`
+it opens with and `niobe-2` the interrupt. The lines are the CLI's own, in the
+order it printed them. The only edits: the answer to `initialize` cut to an
+empty `commands` list and the keys that say what state the session is in, and
+`system`/`init` cut down to the keys that say what ran, its `cwd` rewritten to
+`/repo`.
+
+It exists because this release stops a reply differently from the one
+`interrupted.jsonl` was recorded from:
+
+- **No `assistant` line is written.** The stream has the `message_start`,
+  a `content_block_start` for a thinking block, the interrupt's answer
+  (`{"still_queued": []}`) and the CLI's `user` note
+  `[Request interrupted by user]` — and then, after the note, a
+  `content_block_stop`, a `message_delta` and a `message_stop`.
+- **The `message_delta` carries counts the CLI then leaves out.** It says 10
+  input, 4 output, 17,996 cache read and 3,739 cache write — the
+  `message_start`'s counts unchanged, 21,749 tokens — with `iterations: []`.
+  The closing `result` has `terminal_reason` `aborted_streaming`, `usage` all
+  zeros, `modelUsage` `{}` and `total_cost_usd` 0. The CLI counted nothing for
+  the stopped reply, and neither does the fold: a `message_delta` for a reply
+  the interrupt's note named while it was in flight is not counted.
+  Whether the API billed those tokens is not something the stream says.
+
+What `tests/stream.rs` expects of it: no usage record, so no tokens and none
+waiting for a cost; no `TurnTotalDiffers`, since the fold's 0 is the
+`result`'s 0; no notice that the reply was cut off; one notice that the turn
+was stopped, no error, and one turn.
+
+### The arithmetic the tests assert
+
+| line            | in | out | cache read | cache write | tokens |
+| --------------- | -- | --- | ---------- | ----------- | ------ |
+| `message_start` | 10 | 4   | 17,996     | 3,739       | 21,749 |
+| `message_delta` | 10 | 4   | 17,996     | 3,739       | 21,749 |
+| `result.usage`  | 0  | 0   | 0          | 0           | 0      |
+| counted         | 0  | 0   | 0          | 0           | 0      |
+
+10 + 4 + 17,996 + 3,739 = 21,749. Derived with:
+
+```sh
+jq -c 'select(.type == "stream_event" and .event.type == "message_delta")
+  | .event.usage
+  | [.input_tokens, .output_tokens, .cache_read_input_tokens,
+     .cache_creation_input_tokens]' interrupted-at-start.jsonl
+jq -c 'select(.type == "result")
+  | [.terminal_reason, .usage.input_tokens, .usage.output_tokens,
+     .modelUsage, .total_cost_usd]' interrupted-at-start.jsonl
+```
+
 ## `sub-agents.jsonl`
 
 The last two turns of a real session and the two turns the CLI started on its
