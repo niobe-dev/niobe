@@ -36,6 +36,11 @@
 //! otherwise choose what on the machine is read and shown; the auto-memory
 //! index's entries only beside it. The operator's own files outside the
 //! repository import from anywhere else.
+//!
+//! A file is listed once however many names reach it, and the lookup is
+//! bounded — [`LOOKUPS`] paths and [`BUDGET`] bytes in all — so that imports
+//! naming one file through many directories, or thousands of files, cannot
+//! hold up the shell that asked.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -117,6 +122,15 @@ pub const IMPORT_DEPTH: usize = 5;
 /// every request that is larger than this is not one anyone wrote for it.
 pub const LIMIT: u64 = 1024 * 1024;
 
+/// The most kept from every memory file together, in bytes, after which no
+/// more is read: a repository whose files import thousands of others is not
+/// read whole each time the view opens.
+pub const BUDGET: u64 = 16 * LIMIT;
+
+/// The most paths looked up for memory files, every import counted: a file
+/// naming thousands of others is not followed through each.
+pub const LOOKUPS: usize = 1024;
+
 /// What the memory files are called, and the local one beside them.
 const MEMORY: &str = "CLAUDE.md";
 const LOCAL: &str = "CLAUDE.local.md";
@@ -141,6 +155,9 @@ pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
         places: Places::of(lookup),
         sources: Vec::new(),
         seen: BTreeSet::new(),
+        lookups: LOOKUPS,
+        read: 0,
+        full: false,
     };
     if let Some(managed) = MANAGED {
         found.loaded(Scope::Managed, Path::new(managed), lookup);
@@ -165,12 +182,33 @@ pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
     found.sources
 }
 
-/// What has been found so far, and every path listed, so that a file two
-/// others import, or one that imports itself, is listed once.
+/// What has been found so far, and every file listed by where it really is,
+/// so that a file two others import, one that imports itself, or one named
+/// through a link or a `..` is listed once — and how much more may be looked
+/// up and read.
 struct Found {
     places: Places,
     sources: Vec<Source>,
     seen: BTreeSet<PathBuf>,
+    /// How many more paths may be looked up.
+    lookups: usize,
+    /// How many bytes have been kept, at most [`BUDGET`].
+    read: u64,
+    /// Whether a file has been passed over for the budget, after which none
+    /// is read.
+    full: bool,
+}
+
+/// A memory file found, judged and, where it may be, read.
+enum Opened {
+    /// Listed and not read.
+    Withheld(Withheld),
+    /// Read: where it really is, what it holds and how many bytes that is.
+    Read {
+        real: PathBuf,
+        text: String,
+        bytes: u64,
+    },
 }
 
 impl Found {
@@ -185,24 +223,15 @@ impl Found {
     }
 
     fn add(&mut self, scope: Scope, path: &Path, depth: usize, held: &Held, lookup: &Lookup<'_>) {
-        if self.seen.contains(path) {
-            return;
-        }
-        // Where it really is, found without opening it, so that a link or a
-        // `..` cannot carry the read somewhere the check did not look.
-        let Ok(real) = std::fs::canonicalize(path) else {
-            return;
+        let (real, text, bytes) = match self.open(path, held) {
+            None => return,
+            Some(Opened::Withheld(withheld)) => {
+                self.sources
+                    .push(Source::withheld(scope, path, depth, withheld));
+                return;
+            }
+            Some(Opened::Read { real, text, bytes }) => (real, text, bytes),
         };
-        if let Some(withheld) = self.places.withholds(&real, held) {
-            self.seen.insert(path.to_path_buf());
-            self.sources
-                .push(Source::withheld(scope, path, depth, withheld));
-            return;
-        }
-        let Some((text, bytes)) = read(&real) else {
-            return;
-        };
-        self.seen.insert(path.to_path_buf());
         let imports = match depth < IMPORT_DEPTH {
             true => imports(&text),
             false => Vec::new(),
@@ -228,19 +257,15 @@ impl Found {
     /// The auto-memory index, where there is one, and each entry it links to
     /// that is there and kept beside it.
     fn index(&mut self, path: &Path) {
-        let Ok(real) = std::fs::canonicalize(path) else {
-            return;
+        let (real, text, bytes) = match self.open(path, &Held::Free) {
+            None => return,
+            Some(Opened::Withheld(withheld)) => {
+                self.sources
+                    .push(Source::withheld(Scope::AutoMemory, path, 0, withheld));
+                return;
+            }
+            Some(Opened::Read { real, text, bytes }) => (real, text, bytes),
         };
-        if let Some(withheld) = self.places.withholds(&real, &Held::Free) {
-            self.seen.insert(path.to_path_buf());
-            self.sources
-                .push(Source::withheld(Scope::AutoMemory, path, 0, withheld));
-            return;
-        }
-        let Some((text, bytes)) = read(&real) else {
-            return;
-        };
-        self.seen.insert(path.to_path_buf());
         let entries = entries(&text);
         self.sources.push(Source {
             scope: Scope::AutoMemory,
@@ -257,34 +282,52 @@ impl Found {
         let held = Held::To(real.parent().unwrap_or(Path::new("")).to_path_buf());
         for (target, note) in entries {
             let target = dir.join(target);
-            if self.seen.contains(&target) {
-                continue;
-            }
-            let Ok(real) = std::fs::canonicalize(&target) else {
-                continue;
+            let source = match self.open(&target, &held) {
+                None => continue,
+                Some(Opened::Withheld(withheld)) => {
+                    Source::withheld(Scope::AutoEntry, &target, 1, withheld)
+                }
+                Some(Opened::Read { text, bytes, .. }) => Source {
+                    scope: Scope::AutoEntry,
+                    path: target,
+                    depth: 1,
+                    text: Some(text),
+                    bytes: Some(bytes),
+                    note: None,
+                    withheld: None,
+                },
             };
-            if let Some(withheld) = self.places.withholds(&real, &held) {
-                self.seen.insert(target.clone());
-                self.sources.push(Source {
-                    note,
-                    ..Source::withheld(Scope::AutoEntry, &target, 1, withheld)
-                });
-                continue;
-            }
-            let Some((text, bytes)) = read(&real) else {
-                continue;
-            };
-            self.seen.insert(target.clone());
-            self.sources.push(Source {
-                scope: Scope::AutoEntry,
-                path: target,
-                depth: 1,
-                text: Some(text),
-                bytes: Some(bytes),
-                note,
-                withheld: None,
-            });
+            self.sources.push(Source { note, ..source });
         }
+    }
+
+    /// The file at `path`, named as `held` says, where it is there, has not
+    /// been listed already and the budgets leave room for it.
+    fn open(&mut self, path: &Path, held: &Held) -> Option<Opened> {
+        self.lookups = self.lookups.checked_sub(1)?;
+        // Where it really is, found without opening it, so that a link or a
+        // `..` cannot carry the read somewhere the check did not look, nor
+        // list one file under many names.
+        let real = std::fs::canonicalize(path).ok()?;
+        if self.seen.contains(&real) {
+            return None;
+        }
+        if let Some(withheld) = self.places.withholds(&real, held) {
+            self.seen.insert(real);
+            return Some(Opened::Withheld(withheld));
+        }
+        if self.full {
+            return None;
+        }
+        let (text, bytes) = read(&real)?;
+        let total = self.read.saturating_add(bytes);
+        if total > BUDGET {
+            self.full = true;
+            return None;
+        }
+        self.read = total;
+        self.seen.insert(real.clone());
+        Some(Opened::Read { real, text, bytes })
     }
 }
 
@@ -818,6 +861,90 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         format!("{}{name}", "../".repeat(up))
+    }
+
+    fn in_dir(found: &[Source], dir: &Path) -> Vec<String> {
+        found
+            .iter()
+            .filter(|source| source.path.starts_with(dir))
+            .map(|source| source.path.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn an_import_that_climbs_back_through_its_parent_is_listed_once() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("repo");
+        write(&repo.join("CLAUDE.md"), "@sub/b.md\n");
+        write(&repo.join("sub").join("b.md"), "@../CLAUDE.md\n");
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+        assert_eq!(in_dir(&found, dir.path()).len(), 2, "{found:?}");
+    }
+
+    #[test]
+    fn many_names_for_one_file_list_it_once_however_deep_they_go() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("repo");
+        let aliases: Vec<String> = (0..20)
+            .map(|n| {
+                std::fs::create_dir_all(repo.join(format!("d{n}")))
+                    .expect("the temporary directory is writable");
+                format!("@d{n}/../CLAUDE.md")
+            })
+            .collect();
+        write(&repo.join("CLAUDE.md"), &aliases.join(" "));
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+        assert_eq!(in_dir(&found, dir.path()).len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn what_the_imports_read_in_all_is_bounded() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("repo");
+        let count = usize::try_from(BUDGET / LIMIT).expect("a handful") + 4;
+        let large = "x".repeat(usize::try_from(LIMIT).expect("a mebibyte fits"));
+        let names: Vec<String> = (0..count)
+            .map(|n| {
+                write(&repo.join(format!("{n}.md")), &large);
+                format!("@{n}.md")
+            })
+            .collect();
+        write(&repo.join("CLAUDE.md"), &names.join(" "));
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+        let read: u64 = found.iter().filter_map(|source| source.bytes).sum();
+        assert!(read <= BUDGET, "{read} bytes read");
+        assert!(in_dir(&found, dir.path()).len() < count);
+    }
+
+    #[test]
+    fn how_many_files_the_imports_name_in_all_is_bounded() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("repo");
+        let names: Vec<String> = (0..LOOKUPS + 50)
+            .map(|n| {
+                write(&repo.join(format!("{n}.md")), "x");
+                format!("@{n}.md")
+            })
+            .collect();
+        write(&repo.join("CLAUDE.md"), &names.join(" "));
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+        assert!(in_dir(&found, dir.path()).len() <= LOOKUPS);
     }
 
     #[cfg(unix)]
