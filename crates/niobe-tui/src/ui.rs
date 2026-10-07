@@ -6595,6 +6595,120 @@ mod tests {
         );
     }
 
+    /// A session recorded on the Tuesday before [`A_FRIDAY`], whose record
+    /// holds `windows` reported at 13:02 that day, taken up again and read at
+    /// 13:41 on the Friday, as `niobe --resume` folds it in.
+    fn resumed(windows: UsageWindows) -> App {
+        let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
+        let mut app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+            ..Default::default()
+        })
+        .with_clock(clock.clone());
+        let recorded = clock.at(std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(A_FRIDAY - 3 * 86_400 + 13 * 3_600 + 2 * 60));
+        let event = niobe_core::event::Event::UsageWindows(windows);
+        app.extend_at([(&event, recorded)]);
+        app.resumed();
+        app.leave();
+        let mut app = app.attached();
+        app.tick(
+            std::time::Instant::now(),
+            Some(clock.at(std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(A_FRIDAY + 13 * 3_600 + 41 * 60))),
+        );
+        app
+    }
+
+    /// What a resumed session's record says the windows stood at is a reading
+    /// from when it was recorded, not from now: it is dated, and a window
+    /// whose reset has come around since is drawn reset, as a level an earlier
+    /// session recorded is.
+    #[test]
+    fn a_resumed_session_draws_the_windows_it_recorded_dated_and_reset_since() {
+        let app = resumed(UsageWindows {
+            five_hour: Some(window(
+                0.83,
+                Some(A_FRIDAY - 3 * 86_400 + 13 * 3_600 + 2 * 60 + 10_000),
+            )),
+            // The Thursday before the Friday it is read on.
+            seven_day: Some(window(0.40, Some(A_FRIDAY - 86_400 + 9 * 3_600))),
+            using_overage: false,
+        });
+
+        assert!(
+            matches!(app.plan_windows(), PlanWindows::Carried { .. }),
+            "{:?}",
+            app.plan_windows()
+        );
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h   0% ░░░░░░░░░░░░".to_owned(),
+                "7d   0% ░░░░░░░░░░░░ resets Thu 09:00".to_owned(),
+                "as of Tue 13:02, before this session".to_owned(),
+            ]
+        );
+        assert_eq!(window_rows(&app), 3);
+    }
+
+    /// Once the resumed session's own backend reports, its figures are the
+    /// ones drawn, undated.
+    #[test]
+    fn a_resumed_session_draws_its_backends_first_report_as_reported() {
+        let mut app = resumed(UsageWindows {
+            five_hour: Some(window(0.83, None)),
+            seven_day: None,
+            using_overage: false,
+        });
+        let live = UsageWindows {
+            five_hour: Some(window(0.05, None)),
+            seven_day: None,
+            using_overage: false,
+        };
+        app.apply(&niobe_core::event::Event::UsageWindows(live));
+
+        assert_eq!(app.plan_windows(), PlanWindows::Reported(live));
+        assert_eq!(rows_of(&app, 66), vec!["5h   5% ▓░░░░░░░░░░░".to_owned()]);
+    }
+
+    /// An earlier session under the same profile that saw the windows later
+    /// than the resumed one's record did is the newer reading, and is the one
+    /// drawn; and the other way round.
+    #[test]
+    fn a_resumed_session_draws_the_newer_of_its_own_record_and_another_sessions() {
+        let own = UsageWindows {
+            five_hour: Some(window(0.83, None)),
+            seven_day: None,
+            using_overage: false,
+        };
+        let other = UsageWindows {
+            five_hour: Some(window(0.21, None)),
+            seven_day: None,
+            using_overage: false,
+        };
+        let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+
+        let newer = resumed(own).with_carried_windows(other, at(A_FRIDAY + 9 * 3_600));
+        assert_eq!(
+            rows_of(&newer, 66),
+            vec![
+                "5h  21% ▓▓▓░░░░░░░░░".to_owned(),
+                "as of 09:00, before this session".to_owned(),
+            ]
+        );
+
+        let older = resumed(own).with_carried_windows(other, at(A_FRIDAY - 5 * 86_400));
+        assert_eq!(
+            rows_of(&older, 66),
+            vec![
+                "5h  83% ▓▓▓▓▓▓▓▓▓▓░░".to_owned(),
+                "as of Tue 13:02, before this session".to_owned(),
+            ]
+        );
+    }
+
     /// Nothing recorded and nothing reported yet: the rows are there, with no
     /// figure, and say when one comes rather than leaving the pane blank.
     #[test]

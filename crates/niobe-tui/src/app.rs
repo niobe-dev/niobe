@@ -278,8 +278,9 @@ pub enum PlanWindows {
     None,
     /// What this session's backend last reported.
     Reported(UsageWindows),
-    /// What an earlier session under the same profile recorded, dated `at`,
-    /// until this session's backend reports. A window whose reset has come
+    /// What an earlier session under the same profile recorded, or what this
+    /// session's own record held before it was resumed, dated `at`, until
+    /// this session's backend reports. A window whose reset has come
     /// around since is drawn as reset rather than at its stale level: see
     /// [`App::plan_windows`].
     Carried {
@@ -1119,6 +1120,13 @@ pub struct App {
     /// The plan's windows as an earlier session recorded them, and when: what
     /// the Usage pane shows until this session's backend reports its own.
     carried_windows: Option<(UsageWindows, std::time::SystemTime)>,
+    /// When the windows the fold holds were reported, where the event that
+    /// reported them was folded in at a known moment.
+    windows_at: Option<Stamp>,
+    /// Whether the windows the fold holds were read back from this session's
+    /// record rather than reported since it was taken up again: a level from
+    /// days ago, which is drawn dated as a carried one is.
+    windows_recorded: bool,
     theme: Theme,
     /// How many colours the terminal draws, which every theme is drawn at.
     depth: Depth,
@@ -1548,6 +1556,8 @@ impl App {
             handoffs: Vec::new(),
             profile: None,
             carried_windows: None,
+            windows_at: None,
+            windows_recorded: false,
             theme,
             depth: Depth::default(),
             session: SessionState::new(),
@@ -1669,6 +1679,10 @@ impl App {
             }
         }
         self.session.apply(event);
+        if matches!(event, Event::UsageWindows(_)) {
+            self.windows_at = self.at;
+            self.windows_recorded = false;
+        }
         // A session left is recorded when the process stopped, or when the
         // session is taken up again after one was killed: the turn it cuts
         // ended with the last thing that happened in it, and the time between
@@ -1693,6 +1707,15 @@ impl App {
         if self.session.turn_running() {
             self.produce(Event::SessionLeft);
         }
+    }
+
+    /// Records that everything folded in so far was read back from this
+    /// session's record, and that what follows is this process's own: the
+    /// plan windows the record holds are drawn as a reading from when they
+    /// were recorded, dated and put back where their reset has come around,
+    /// until the backend reports again. See [`App::plan_windows`].
+    pub fn resumed(&mut self) {
+        self.windows_recorded = self.session.usage_windows().is_some();
     }
 
     /// Draws the rule under the turn the fold has just ended, below whatever
@@ -3996,29 +4019,43 @@ impl App {
 
     /// The plan's windows as the Usage pane draws them.
     ///
-    /// What this session's backend reported, where it has. Before then, what
-    /// an earlier session recorded, dated, with each window whose reset has
-    /// come around since drawn at nothing used and its next reset where the
-    /// window has a fixed one; or, where nothing was ever recorded and the
-    /// first reply has not come in, rows waiting for it. None of that on an
-    /// account known to be metered, which has no plan windows.
+    /// What this session's backend reported, where it has since the session
+    /// was started or [resumed](App::resumed). Before then, the newer of what
+    /// an earlier session recorded and what this session's own record held,
+    /// dated, with each window whose reset has come around since drawn at
+    /// nothing used and its next reset where the window has a fixed one; or,
+    /// where nothing was ever recorded and the first reply has not come in,
+    /// rows waiting for it. None of that on an account known to be metered,
+    /// which has no plan windows.
     pub fn plan_windows(&self) -> PlanWindows {
-        if let Some(windows) = self.session.usage_windows() {
-            return PlanWindows::Reported(*windows);
-        }
+        let folded = self.session.usage_windows().copied();
+        let recorded = match (folded, self.windows_recorded) {
+            (Some(windows), false) => return PlanWindows::Reported(windows),
+            (Some(windows), true) => self.windows_at.map(|at| (windows, at)),
+            (None, _) => None,
+        };
         let metered = |billing: Option<Billing>| billing == Some(Billing::Metered);
         if metered(self.session.billing())
             || metered(self.profile.as_ref().and_then(|profile| profile.billing))
         {
             return PlanWindows::None;
         }
-        if let Some((windows, at)) = self.carried_windows {
+        let carried = self.carried_windows.map(|(windows, at)| {
+            let at = match &self.clock {
+                Some(clock) => clock.at(at),
+                None => Stamp::new(at, None),
+            };
+            (windows, at)
+        });
+        let newest = match (recorded, carried) {
+            (Some(recorded), Some(carried)) if carried.1.at() > recorded.1.at() => Some(carried),
+            (Some(recorded), _) => Some(recorded),
+            (None, carried) => carried,
+        };
+        if let Some((windows, at)) = newest {
             return PlanWindows::Carried {
                 windows: since_reset(windows, self.read_at()),
-                at: match &self.clock {
-                    Some(clock) => clock.at(at),
-                    None => Stamp::new(at, None),
-                },
+                at,
             };
         }
         match self.attached && self.session.turns().is_empty() {

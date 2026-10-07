@@ -1700,6 +1700,55 @@ fn a_resumed_session_starts_its_cli_on_the_same_conversation_and_in_the_same_mod
     assert!(started[1].contains("--permission-mode plan"), "{started:?}");
 }
 
+/// A `claude` that writes down how it was started, reports the plan's windows
+/// with every turn it answers, and answers it.
+const REPORTS_THE_WINDOWS_CLAUDE: &str = "#!/bin/sh\n\
+    printf '%s\\n' \"$*\" >> args.log\n\
+    read -r first\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"conv-1\",\"model\":\"claude-opus-5\",\"permissionMode\":\"default\"}'\n\
+    while read -r turn; do\n\
+    printf '%s\\n' '{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":4000000000,\"rateLimitType\":\"five_hour\",\"isUsingOverage\":false,\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.83,\"resetsAt\":4000000000},\"seven_day\":{\"utilization\":0.4,\"resetsAt\":4000000000}}}}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    done\n";
+
+/// The windows a resumed session's record holds were read when it was
+/// recorded, so they are drawn dated, as the levels an earlier session saw
+/// are, rather than as a reading the backend has just taken.
+#[test]
+fn a_resumed_session_draws_the_windows_it_recorded_as_of_when_they_were_recorded() {
+    let repo = repo();
+    let home = stand_in(repo.path(), REPORTS_THE_WINDOWS_CLAUDE);
+    for (started, args) in [(1, &[][..]), (2, &["--resume", "1"][..])] {
+        let (terminal, slave) = Terminal::open();
+        rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .args(args)
+            .spawn()
+            .expect("the niobe binary runs");
+        if args.is_empty() {
+            terminal.shows("Shift+Enter newline");
+            terminal.typed(b"go\r");
+        }
+        terminal.shows("answered-the-turn");
+        terminal.shows("83%");
+        lines_written(&repo.path().join("args.log"), started);
+        if !args.is_empty() {
+            terminal.shows("before this session");
+        }
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(status.success(), "{args:?} ended with {status}: {drawn}");
+        if args.is_empty() {
+            assert!(
+                !drawn.contains("before this session"),
+                "the session's own report was dated: {drawn}"
+            );
+        }
+    }
+}
+
 /// Choosing an earlier session in the history dialog ends the one open and
 /// opens the chosen one in the same terminal, its CLI carrying on the
 /// conversation that session recorded, as `niobe --resume` would.

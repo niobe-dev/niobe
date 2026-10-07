@@ -479,6 +479,9 @@ fn resume(
     // resumed on Thursday did not happen on Thursday.
     let clock = niobe_tui::clock::Clock::system();
     app.extend_at(stored.iter().map(|s| (&s.event, clock.at(s.at))));
+    // What the record says the plan's windows stood at is a reading from
+    // when it was recorded, drawn dated until the backend reports again.
+    app.resumed();
     let elapsed = started.elapsed();
 
     if piped {
