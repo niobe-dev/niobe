@@ -19,8 +19,8 @@
  ┃                ┃  Trusted, it stays in force until the file changes. Without it, none of the      ┃────────────────┘
  ┃                ┃  above is.                                                                       ┃ ───────────────┐
  ┃                ┃                                                                                  ┃g · 0 spawned   │
- ┃                ┃  › 1. Yes, trust this config                                                     ┃                │
- ┃                ┃    2. No, open without it                                                        ┃enied · 0 B out │
+ ┃                ┃    1. Yes, trust this config                                                     ┃                │
+ ┃                ┃  › 2. No, open without it                                                        ┃enied · 0 B out │
  ┃                ┃                                                                                  ┃                │
  ┃                ┗━━━━━━━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━━━━┛                │
  ┃                                                                          ┃ │                                       │

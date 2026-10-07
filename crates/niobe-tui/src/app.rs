@@ -1501,6 +1501,11 @@ const TOO_LONG_HINT: &str =
 const TOO_SOON_HINT: &str =
     "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
 
+/// What the trust question says when a key was typed at it: the letters go
+/// nowhere, and the Enter that would have sent them answers nothing.
+const TYPED_AT_TRUST_HINT: &str =
+    "Not taken as an answer: typed at the question. Choose with ↑↓ or 1/2, then press Enter";
+
 /// What the bar says when Enter was refused because an image for the prompt
 /// is still being read.
 const IMAGE_STILL_READING_HINT: &str =
@@ -3130,12 +3135,17 @@ impl App {
         let Some(asking) = self.trusting.as_mut() else {
             return;
         };
-        if let Some(code) = answer_key(key)
-            && let Some(answer) = asking.on_key(code)
-        {
-            self.trusting = None;
-            self.trusted = Some(answer);
-            self.quit();
+        let Some(code) = answer_key(key) else {
+            return;
+        };
+        match asking.on_key(code) {
+            trust::Reply::Answered(answer) => {
+                self.trusting = None;
+                self.trusted = Some(answer);
+                self.quit();
+            }
+            trust::Reply::Typed => self.hint = Some(TYPED_AT_TRUST_HINT.to_owned()),
+            trust::Reply::Moved => {}
         }
     }
 
@@ -12255,7 +12265,8 @@ mod tests {
         let mut app = trusting_at(shown);
         assert!(app.trusting().is_some());
 
-        read(&mut app, b"\r", shown + ASK_QUIET * 2);
+        read(&mut app, b"\x1b[A", shown + ASK_QUIET * 2);
+        read(&mut app, b"\r", shown + ASK_QUIET * 3);
 
         assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
         assert!(app.trusting().is_none());
@@ -12279,8 +12290,38 @@ mod tests {
         assert_eq!(app.trust_answer(), None);
         assert_eq!(
             app.trusting().map(crate::trust::Asking::selected),
-            Some(crate::trust::Answer::Trust)
+            Some(crate::trust::Answer::NotNow)
         );
+    }
+
+    #[test]
+    fn a_prompt_typed_at_the_trust_question_and_sent_trusts_nothing() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        let mut at = shown + ASK_QUIET * 6;
+        for key in b"hello" {
+            read(&mut app, &[*key], at);
+            at += Duration::from_millis(150);
+        }
+        read(&mut app, b"\r", at + Duration::from_secs(1));
+
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
+        assert_eq!(app.hint(), Some(TYPED_AT_TRUST_HINT));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn trust_is_given_by_moving_to_it_and_pressing_enter_after_typing() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"x", shown + ASK_QUIET * 2);
+        read(&mut app, b"\x1b[A", shown + ASK_QUIET * 4);
+        read(&mut app, b"\r", shown + ASK_QUIET * 6);
+
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
     }
 
     #[test]
@@ -12296,7 +12337,7 @@ mod tests {
         assert_eq!(app.trust_answer(), None);
 
         read(&mut app, b"\r", shown + ASK_QUIET * 3);
-        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::NotNow));
     }
 
     #[test]

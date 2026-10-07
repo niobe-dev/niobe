@@ -2067,7 +2067,7 @@ fn the_trust_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the
     assert_eq!(app.trust_answer(), None);
 
     app.on_key_read(enter, alone(grown + ASK_QUIET * 3));
-    assert_eq!(app.trust_answer(), Some(Answer::Trust));
+    assert_eq!(app.trust_answer(), Some(Answer::NotNow));
 }
 
 #[test]

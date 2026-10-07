@@ -2364,6 +2364,15 @@ fn answering_the_trust_question(
 }
 
 /// Opens the shell on a repository config nobody trusted, waits for the
+/// question, and answers it by choosing to trust and pressing Enter.
+fn trusting_from_the_question() -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, home, terminal, slave, shell) = answering_the_trust_question(b"1");
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(ENTER);
+    (repo, home, terminal, slave, shell)
+}
+
+/// Opens the shell on a repository config nobody trusted, waits for the
 /// question, and checks the backend has not been started under it once the
 /// keyboard has been quiet long enough for a key to answer.
 fn asked_the_trust_question() -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
@@ -2399,7 +2408,7 @@ fn rewrite_the_untrusted_config(repo: &Path) {
 /// and the session it opens is one the file is in force for.
 #[test]
 fn an_untrusted_repository_config_is_asked_about_before_the_backend_starts() {
-    let (repo, home, terminal, slave, mut shell) = answering_the_trust_question(b"\r");
+    let (repo, home, terminal, slave, mut shell) = trusting_from_the_question();
     terminal.shows(OPENING_FRAME);
     written(&repo.path().join("started"));
     terminal.typed(CTRL_Q);
@@ -2419,6 +2428,36 @@ fn an_untrusted_repository_config_is_asked_about_before_the_backend_starts() {
     // The session the answer opened is one the file was in force for: had it
     // loaded the config still withheld, it would have said so.
     assert!(!drawn.contains("config not trusted"), "{drawn}");
+}
+
+/// A prompt typed at the question by an operator who did not read it, and
+/// sent with Enter, trusts nothing and starts nothing: the question stays up
+/// and says why the keys were not taken.
+#[test]
+fn a_prompt_typed_and_sent_at_the_trust_question_trusts_nothing() {
+    let (repo, home, terminal, slave, mut shell) = asked_the_trust_question();
+    for key in b"hello" {
+        terminal.typed(&[*key]);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(ENTER);
+    terminal.shows("typed at the question");
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back(&drawn, cooked, "a quit after typing at the trust question");
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started though nobody answered the question"
+    );
+    assert!(
+        !home.path().join("niobe").join("trusted.list").exists(),
+        "a prompt typed at the question recorded the file as trusted"
+    );
 }
 
 /// Answering no opens the session as an untrusted file always has, says so
@@ -2453,6 +2492,8 @@ fn answering_no_to_the_trust_question_opens_the_session_without_the_file() {
 fn a_config_rewritten_while_the_trust_question_waits_is_asked_about_again() {
     let (repo, home, terminal, slave, mut shell) = asked_the_trust_question();
     rewrite_the_untrusted_config(repo.path());
+    terminal.typed(b"1");
+    std::thread::sleep(PAST_THE_QUIET);
     let answered = terminal.mark();
     terminal.typed(ENTER);
     terminal.shows_since(answered, TRUST_QUESTION);
