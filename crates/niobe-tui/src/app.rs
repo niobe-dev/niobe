@@ -3571,7 +3571,7 @@ impl App {
         match view.on_key(key) {
             Outcome::Stay => {}
             Outcome::Close => self.memory = None,
-            Outcome::Edit(path) => self.handoffs.push(crate::desktop::Handoff::Open(path)),
+            Outcome::Edit(path) => self.handoffs.push(crate::desktop::Handoff::Edit(path)),
             Outcome::Say(said) => self.hint = Some(said.to_owned()),
         }
     }
@@ -5482,6 +5482,8 @@ impl App {
             (Handoff::Copy(_), Err(reason)) => format!("Nothing copied: {reason}"),
             (Handoff::Open(link), Ok(())) => format!("Opening {link}"),
             (Handoff::Open(link), Err(reason)) => format!("{link} is not opened: {reason}"),
+            (Handoff::Edit(path), Ok(())) => format!("Edited {path}"),
+            (Handoff::Edit(path), Err(reason)) => format!("{path} is not edited: {reason}"),
         });
     }
 
@@ -12918,10 +12920,10 @@ mod tests {
         app.on_key(key(KeyCode::Char('e')));
         assert_eq!(
             app.take_handoffs(),
-            [crate::desktop::Handoff::Open(
+            [crate::desktop::Handoff::Edit(
                 "/work/repo/AGENTS.md".to_owned()
             )],
-            "e hands the file being read to the editor"
+            "e hands the file being read to a text editor, never to the opener"
         );
         app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::Esc));
@@ -13062,6 +13064,7 @@ mod tests {
             .map(|handoff| match handoff {
                 crate::desktop::Handoff::Open(link) => link,
                 crate::desktop::Handoff::Copy(text) => panic!("copied {text}"),
+                crate::desktop::Handoff::Edit(path) => panic!("edited {path}"),
             })
             .collect();
         assert_eq!(opened.len(), 2);

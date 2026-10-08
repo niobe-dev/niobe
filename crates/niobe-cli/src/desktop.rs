@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! Copies the text the operator selects and opens the links they click.
+//! Copies the text the operator selects, opens the links they click, and
+//! opens the memory files they ask to edit in a text editor.
 //!
 //! What is selected, and what a click opens, is written down in
 //! [`niobe_tui::desktop`]; this is the part that runs the programs, which the
@@ -15,6 +16,16 @@
 //! its own, so a browser it starts is not ended with the session's terminal.
 //! None is waited on: a program that started is taken to do what it is for,
 //! and is reaped on a thread of its own when it ends.
+//!
+//! A file to edit is the exception to all of that. It goes to `$VISUAL` or
+//! `$EDITOR` — split on whitespace and run with no shell, the path its last
+//! argument — on the terminal the shell lends it, in the session's own
+//! process group so that it may read the terminal, and is waited on. Where
+//! neither is set it goes to `open -t` on macOS, which opens a file in the
+//! text editor whatever kind it is, and to `vi` elsewhere. It never goes to
+//! the opener: `open` and `xdg-open` dispatch on the file's kind, and run a
+//! `.command`, `.tool` or `.desktop` file a repository named rather than show
+//! it.
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -49,6 +60,47 @@ impl Program {
             .process_group(0)
             .spawn()
     }
+
+    /// The program run on the terminal as it is, with `path` as its last
+    /// argument, waited on until it ends.
+    fn run_on_the_terminal(&self, path: &str) -> Result<(), String> {
+        let status = Command::new(&self.name)
+            .args(&self.args)
+            .arg(path)
+            .status()
+            .map_err(|error| format!("{} did not start: {error}", self.name))?;
+        match status.success() {
+            true => Ok(()),
+            false => Err(format!("{} ended with {status}", self.name)),
+        }
+    }
+}
+
+/// The text editor a file is edited in: the first of `visual` and `editor`
+/// that names a program, split on whitespace, and otherwise the platform's,
+/// `open -t` on macOS and `vi` elsewhere.
+fn editor_from(visual: Option<&str>, editor: Option<&str>, macos: bool) -> Program {
+    let named = [visual, editor].into_iter().flatten().find_map(|named| {
+        let mut words = named.split_whitespace();
+        let name = words.next()?;
+        Some(Program::new(name, &words.collect::<Vec<_>>()))
+    });
+    match (named, macos) {
+        (Some(named), _) => named,
+        (None, true) => Program::new("open", &["-t"]),
+        (None, false) => Program::new("vi", &[]),
+    }
+}
+
+/// The text editor this process's environment names, or the platform's.
+fn platform_editor() -> Program {
+    let visual = std::env::var("VISUAL").ok();
+    let editor = std::env::var("EDITOR").ok();
+    editor_from(
+        visual.as_deref(),
+        editor.as_deref(),
+        cfg!(target_os = "macos"),
+    )
 }
 
 /// The programs that put text on the clipboard on this platform, in the order
@@ -79,14 +131,17 @@ fn platform_opener() -> Program {
 pub struct System {
     copiers: Vec<Program>,
     opener: Program,
+    editor: Program,
 }
 
 impl System {
-    /// The programs this platform has for the clipboard and for links.
+    /// The programs this platform has for the clipboard and for links, and
+    /// the text editor the environment names.
     pub fn new() -> Self {
         Self {
             copiers: platform_copiers(),
             opener: platform_opener(),
+            editor: platform_editor(),
         }
     }
 }
@@ -128,6 +183,15 @@ impl Desktop for System {
             .map_err(|error| format!("{} did not start: {error}", self.opener.name))?;
         std::thread::spawn(move || child.wait());
         Ok(())
+    }
+
+    fn edit(&mut self, path: &str) -> Result<(), String> {
+        // The memory view hands over a whole path, which cannot read as an
+        // option; anything else is refused rather than passed to the editor.
+        if !std::path::Path::new(path).is_absolute() {
+            return Err("it is not a file's whole path".to_owned());
+        }
+        self.editor.run_on_the_terminal(path)
     }
 }
 
@@ -197,6 +261,7 @@ mod tests {
                 )),
             ],
             opener: sh("true"),
+            editor: sh("true"),
         };
         assert_eq!(desktop.copy("line one\nline two"), Ok(()));
         assert_eq!(written(&out), "line one\nline two");
@@ -207,6 +272,7 @@ mod tests {
         let mut desktop = System {
             copiers: vec![Program::new("niobe-no-such-copier", &[])],
             opener: sh("true"),
+            editor: sh("true"),
         };
         let refused = desktop.copy("text").expect_err("nothing can copy it");
         assert!(refused.contains("niobe-no-such-copier"), "{refused}");
@@ -219,6 +285,7 @@ mod tests {
         let mut desktop = System {
             copiers: Vec::new(),
             opener: sh(&format!("printf '%s' \"$1\" > '{}'", out.display())),
+            editor: sh("true"),
         };
         assert_eq!(desktop.open("https://example.com/a b"), Ok(()));
         assert_eq!(written(&out), "https://example.com/a b");
@@ -229,7 +296,74 @@ mod tests {
         let mut desktop = System {
             copiers: Vec::new(),
             opener: sh("true"),
+            editor: sh("true"),
         };
         assert!(desktop.open("--help").is_err());
+    }
+
+    fn named(program: &Program) -> (String, Vec<String>) {
+        (program.name.clone(), program.args.clone())
+    }
+
+    #[test]
+    fn a_file_is_edited_in_the_editor_the_environment_names_and_never_by_the_opener() {
+        assert_eq!(
+            named(&editor_from(Some("code --wait"), Some("vim"), true)),
+            ("code".to_owned(), vec!["--wait".to_owned()])
+        );
+        assert_eq!(
+            named(&editor_from(Some("  "), Some("nvim"), false)),
+            ("nvim".to_owned(), Vec::new())
+        );
+        assert_eq!(
+            named(&editor_from(None, None, true)),
+            ("open".to_owned(), vec!["-t".to_owned()]),
+            "macOS's opener is asked for its text editor, whatever the file's kind"
+        );
+        assert_eq!(
+            named(&editor_from(None, None, false)),
+            ("vi".to_owned(), Vec::new())
+        );
+        for program in [
+            editor_from(None, None, true),
+            editor_from(None, None, false),
+        ] {
+            let run = named(&program);
+            assert_ne!(run, ("open".to_owned(), Vec::new()));
+            assert_ne!(run, ("xdg-open".to_owned(), Vec::new()));
+        }
+    }
+
+    #[test]
+    fn a_file_to_edit_is_the_editors_last_argument_and_is_waited_on() {
+        let scratch = Scratch::new("edit");
+        let out = scratch.0.join("edited");
+        let mut desktop = System {
+            copiers: Vec::new(),
+            opener: sh("exit 1"),
+            editor: sh(&format!("printf '%s' \"$1\" > '{}'", out.display())),
+        };
+        let path = scratch.0.join("tools").join("setup.command");
+        assert_eq!(desktop.edit(&path.display().to_string()), Ok(()));
+        // Waited on: written by the time the edit returns.
+        assert_eq!(
+            std::fs::read_to_string(&out).expect("the editor ran before edit returned"),
+            path.display().to_string()
+        );
+    }
+
+    #[test]
+    fn an_editor_that_fails_or_a_path_that_is_not_whole_says_so() {
+        let mut desktop = System {
+            copiers: Vec::new(),
+            opener: sh("true"),
+            editor: sh("exit 3"),
+        };
+        let failed = desktop
+            .edit("/work/CLAUDE.md")
+            .expect_err("the editor failed");
+        assert!(failed.contains("sh ended"), "{failed}");
+        assert!(desktop.edit("--help").is_err());
+        assert!(desktop.edit("CLAUDE.md").is_err());
     }
 }

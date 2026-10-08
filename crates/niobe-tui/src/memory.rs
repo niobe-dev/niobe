@@ -9,7 +9,10 @@
 //! file, so the binary hands it something that reads them — the way
 //! [`crate::history`] is handed something that reads earlier sessions — and
 //! F8 lists what it found, in the order the agent is given it. Enter shows a
-//! file's text, read-only; `e` hands it to the editor.
+//! file's text, read-only; `e` opens it in the operator's text editor, on the
+//! terminal the shell lends it (see [`crate::desktop`]), never with the
+//! program the system opens files with, which would run one a repository
+//! named.
 //!
 //! Which files a backend loads is the backend's own rule, and the binary is
 //! what knows it: this module names no file and no backend.
@@ -82,8 +85,8 @@ pub struct MemoryFile {
     pub bytes: Option<u64>,
     /// What the backend's own index says of it, for one of its notes.
     pub note: Option<String>,
-    /// The path the editor is handed, where it is a regular file that is
-    /// not a link: a repository decides what its own files are.
+    /// The path the text editor is handed, where it is a regular file that
+    /// is not a link: a repository decides what its own files are.
     pub editable: Option<String>,
 }
 
@@ -124,7 +127,7 @@ pub enum Outcome {
     Stay,
     /// Close the view.
     Close,
-    /// Hand this path to the editor.
+    /// Open this path in the text editor.
     Edit(String),
     /// Say this, where the key had nothing to act on.
     Say(&'static str),
@@ -185,8 +188,8 @@ impl View {
     }
 }
 
-/// What `e` says on a file the editor may not be handed.
-const NOT_EDITABLE: &str = "Only a regular file that is not a link is handed to the editor";
+/// What `e` says on a file the text editor may not be handed.
+const NOT_EDITABLE: &str = "Only a regular file that is not a link is opened in the text editor";
 
 /// What Enter says on a file that could not be read.
 const UNREAD: &str = "That file could not be read";

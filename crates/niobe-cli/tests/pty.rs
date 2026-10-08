@@ -2166,6 +2166,72 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
     assert_handed_back(&drawn, cooked, "a quit after a paste");
 }
 
+/// `e` in the Memory view on a file a repository's `CLAUDE.md` imports opens
+/// it in the text editor the environment names, on the terminal the shell
+/// lends it, and never hands it to the system's opener: an executable
+/// `.command` file the repository planted is shown, not run.
+#[test]
+fn e_in_the_memory_view_opens_an_imported_command_file_in_the_editor_and_runs_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    let ran = repo.path().join("the-command-ran");
+    let edited = repo.path().join("edited");
+    std::fs::write(repo.path().join("CLAUDE.md"), "@tools/setup.command\n")
+        .expect("the memory file is written");
+    let setup = repo.path().join("tools").join("setup.command");
+    std::fs::create_dir(repo.path().join("tools")).expect("a directory for the tool");
+    std::fs::write(&setup, format!("#!/bin/sh\ntouch '{}'\n", ran.display()))
+        .expect("the planted command is written");
+    std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o755))
+        .expect("the planted command is made executable");
+    let editor = elsewhere.path().join("editor");
+    std::fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            edited.display()
+        ),
+    )
+    .expect("the stand-in editor is written");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in editor is made executable");
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("HOME", elsewhere.path())
+        .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor)
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[19~");
+    terminal.shows("setup.command");
+    terminal.typed(b"\x1b[F");
+    terminal.typed(b"e");
+    terminal.shows("Edited");
+    // Esc read together with what follows it is Alt with that key.
+    let closing = terminal.mark();
+    terminal.typed(b"\x1b");
+    terminal.drew_since(closing);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let canonical = std::fs::canonicalize(&setup).expect("the planted command is there");
+    let handed = std::fs::read_to_string(&edited).expect("the editor was started");
+    let handed = std::fs::canonicalize(handed.trim_end()).expect("the editor was handed a file");
+    assert_eq!(handed, canonical, "the editor was handed another file");
+    assert!(!ran.exists(), "the repository's command file was run");
+    // Once for the editor, once for the quit.
+    assert_handed_back_times(&drawn, cooked, "a quit after an edit", Keys::Reported, 2);
+}
+
 /// An image file dropped on the terminal — which types its path as a paste —
 /// is attached rather than typed, and goes to the CLI as an image block after
 /// the prompt's text, which keeps the placeholder standing where it went.

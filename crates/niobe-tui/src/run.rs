@@ -72,6 +72,10 @@ enum Hold {
     Suspend,
     /// Take it again after a stop nothing caught.
     Reassert,
+    /// Hand it back for a program that runs on it, without stopping.
+    Lend,
+    /// Take it again once that program has ended.
+    Retake,
 }
 
 /// Everything the loop hands what the operator does to, and takes what
@@ -223,6 +227,8 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
                 guard.resume()
             }
             Hold::Reassert => guard.reassert(),
+            Hold::Lend => guard.suspend(),
+            Hold::Retake => guard.resume(),
         }
     };
 
@@ -304,6 +310,9 @@ fn event_loop<B: Backend<Error = io::Error>>(
         memory,
     } = around;
     let mut ended = Ended::Quit;
+    // Whether a program that ran on the terminal since the last draw left
+    // the screen as it drew it.
+    let mut owed_frame = false;
 
     while !app.should_quit() {
         // First, so that everything this pass folds in — what the backend
@@ -333,8 +342,16 @@ fn event_loop<B: Backend<Error = io::Error>>(
         app.settle_budget();
         run_commands(app, shell);
         fetch_images(app, images);
-        hand_off(app, desktop);
+        let lent = hand_off(app, desktop, machine.suspend)?;
         send_produced(app, journal, backend, rules);
+        // An editor drew on the screen while it had the terminal, and a draw
+        // sends only what changed since the last frame: a resize to the same
+        // size forgets that frame, as after a stop.
+        if lent || owed_frame {
+            let area = terminal.size()?;
+            terminal.resize(area.into())?;
+            owed_frame = false;
+        }
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         // An image asked for is looked for again soon, as a reply is: the
@@ -349,7 +366,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                 read_input(app, machine.wait)?;
                 run_commands(app, shell);
                 fetch_images(app, images);
-                hand_off(app, desktop);
+                owed_frame |= hand_off(app, desktop, machine.suspend)?;
                 send_produced(app, journal, backend, rules);
             }
             Input::Idle => {
@@ -359,7 +376,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                     hand_over(app, events);
                     run_commands(app, shell);
                     fetch_images(app, images);
-                    hand_off(app, desktop);
+                    owed_frame |= hand_off(app, desktop, machine.suspend)?;
                     send_produced(app, journal, backend, rules);
                 }
             }
@@ -602,14 +619,33 @@ fn fetch_images(app: &mut App, images: &mut dyn Images) {
 
 /// Hands what the operator asked of the desktop to `desktop`, and says on
 /// the bar how it went.
-fn hand_off(app: &mut App, desktop: &mut dyn Desktop) {
+///
+/// A file to edit goes to an editor that runs on the terminal, so the
+/// terminal is lent to it through `hold` and taken again once it ends; what
+/// the editor drew is then on the screen, which is why the loop is told, by
+/// `true`, that it owes a whole frame.
+fn hand_off(
+    app: &mut App,
+    desktop: &mut dyn Desktop,
+    hold: &mut dyn FnMut(Hold) -> io::Result<()>,
+) -> io::Result<bool> {
+    let mut lent = false;
     for handoff in app.take_handoffs() {
+        if handoff.lends_the_terminal() {
+            hold(Hold::Lend)?;
+            lent = true;
+        }
         let outcome = match &handoff {
             Handoff::Copy(text) => desktop.copy(text),
             Handoff::Open(link) => desktop.open(link),
+            Handoff::Edit(path) => desktop.edit(path),
         };
+        if handoff.lends_the_terminal() {
+            hold(Hold::Retake)?;
+        }
         app.handed_off(&handoff, outcome);
     }
+    Ok(lent)
 }
 
 /// Attaches each image fetched since the last tick, or says why it could not
@@ -1080,6 +1116,79 @@ mod tests {
             .expect_err("the loop failed");
 
         assert_eq!(error.to_string(), "the draw was refused");
+    }
+
+    /// A desktop that writes down, in `said`, what it was asked to do,
+    /// beside what was done to the terminal.
+    #[derive(Debug, Default)]
+    struct Written {
+        said: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl Desktop for Written {
+        fn copy(&mut self, text: &str) -> Result<(), String> {
+            self.said.borrow_mut().push(format!("copy {text}"));
+            Ok(())
+        }
+
+        fn open(&mut self, link: &str) -> Result<(), String> {
+            self.said.borrow_mut().push(format!("open {link}"));
+            Ok(())
+        }
+
+        fn edit(&mut self, path: &str) -> Result<(), String> {
+            self.said.borrow_mut().push(format!("edit {path}"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn e_in_the_memory_view_lends_the_terminal_to_the_editor_and_never_opens_the_file() {
+        let mut app = App::new(Repo::default());
+        app.on_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+        app.set_memory(vec![crate::memory::MemoryFile {
+            scope: crate::memory::Scope::Imported,
+            path: "tools/setup.command".to_owned(),
+            named: "tools/setup.command".to_owned(),
+            depth: 1,
+            text: Some("#!/bin/sh\n".to_owned()),
+            bytes: Some(10),
+            note: None,
+            editable: Some("/work/repo/tools/setup.command".to_owned()),
+        }]);
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let mut desktop = Written::default();
+        let said = std::rc::Rc::clone(&desktop.said);
+        let mut hold = |hold: Hold| -> io::Result<()> {
+            said.borrow_mut().push(format!("{hold:?}"));
+            Ok(())
+        };
+
+        let lent = hand_off(&mut app, &mut desktop, &mut hold).expect("the terminal is lent");
+
+        assert!(lent, "the loop was not told it owes a whole frame");
+        assert_eq!(
+            *desktop.said.borrow(),
+            ["Lend", "edit /work/repo/tools/setup.command", "Retake"]
+        );
+        assert_eq!(app.hint(), Some("Edited /work/repo/tools/setup.command"));
+    }
+
+    #[test]
+    fn a_link_opened_keeps_the_terminal() {
+        let mut app = App::new(Repo::default());
+        app.perform(crate::menu::Action::ReleaseNotes);
+        let mut desktop = Written::default();
+        let said = std::rc::Rc::clone(&desktop.said);
+        let mut hold = |hold: Hold| -> io::Result<()> {
+            said.borrow_mut().push(format!("{hold:?}"));
+            Ok(())
+        };
+        let lent = hand_off(&mut app, &mut desktop, &mut hold).expect("nothing is lent");
+        assert!(!lent);
+        let said = desktop.said.borrow();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("open "), "{said:?}");
     }
 
     #[test]
