@@ -18,7 +18,10 @@
 //! `$(…)` or a here-document's body read as a command. Each is named by its
 //! program's base name, after `cd`, `NAME=value` assignments and the wrappers
 //! that only run the command after them (`env`, `time`, `sudo`, `timeout`,
-//! `rtk`); a subcommand is added where it decides the kind — `git log` reads,
+//! `rtk`, and `xargs`, which runs it on what it reads); the shell's own
+//! grammar — `for … in`, `do`, `done`, `fi`, `}` — is never a program. A
+//! `find` is named with what its `-exec` runs, and with `-delete` it edits.
+//! A subcommand is added where it decides the kind — `git log` reads,
 //! `git commit` does not, and `cargo test` is named as such — and `-i` where
 //! `sed` or `perl` edits in place.
 //!
@@ -184,7 +187,7 @@ pub fn mcp_tool(name: &str) -> Option<(String, String)> {
 pub fn of_command(command: &str) -> Reading {
     let parts: Vec<Part> = simple_commands(command)
         .iter()
-        .filter_map(|words| part(words))
+        .flat_map(|words| parts_of(words))
         .collect();
     let strongest = parts
         .iter()
@@ -200,9 +203,15 @@ pub fn of_command(command: &str) -> Reading {
         None => Work::Other,
     };
     let mut seen = BTreeSet::new();
-    let named: Vec<&Part> = match parts.iter().any(|part| !part.quiet) {
-        true => parts.iter().filter(|part| !part.quiet).collect(),
-        false => parts.iter().collect(),
+    // A condition that is always met — `while true` — says nothing even
+    // beside other quiet programs, where there are any.
+    let named: Vec<&Part> = match (
+        parts.iter().any(|part| !part.quiet),
+        parts.iter().any(|part| !part.empty),
+    ) {
+        (true, _) => parts.iter().filter(|part| !part.quiet).collect(),
+        (false, true) => parts.iter().filter(|part| !part.empty).collect(),
+        (false, false) => parts.iter().collect(),
     };
     let mut specifics: Vec<String> = named
         .into_iter()
@@ -226,27 +235,101 @@ struct Part {
     quiet: bool,
     /// Whether it saves output to a file: `> file`, `>> file`, `tee file`.
     saves: bool,
+    /// Whether it does nothing at all — `true`, `:` — and is named only
+    /// where nothing else, quiet or not, is.
+    empty: bool,
 }
 
-/// The simple command `words`, read, or `None` where it runs no program.
-fn part(words: &[String]) -> Option<Part> {
+/// The simple command `words`, read: the program it runs and, where that
+/// runs others on what it found — `find -exec` — those too. Nothing where it
+/// runs no program.
+fn parts_of(words: &[String]) -> Vec<Part> {
     let saves = words.iter().enumerate().any(|(at, word)| {
         redirect_target(word, words.get(at + 1).map(String::as_str)).is_some_and(is_a_file)
     });
-    let words = program_words(words)?;
-    let (program, rest) = words.split_first()?;
+    let Some(words) = program_words(words) else {
+        return Vec::new();
+    };
+    let Some((program, rest)) = words.split_first() else {
+        return Vec::new();
+    };
     let program = program.rsplit('/').next().unwrap_or(program);
+    let mut parts = vec![part(program, rest, saves)];
+    if program == "find" {
+        for run in find_runs(rest) {
+            if let Some((program, rest)) = run.split_first() {
+                parts.push(part(
+                    program.rsplit('/').next().unwrap_or(program),
+                    rest,
+                    false,
+                ));
+            }
+        }
+    }
+    parts
+}
+
+/// `program`, run with `rest`, read as one part of a command.
+fn part(program: &str, rest: &[&str], saves: bool) -> Part {
     let (name, work, quiet) = classify(program, rest);
-    Some(Part {
+    Part {
         saves: saves || program == "tee",
+        empty: matches!(program, "true" | "false" | ":"),
         name,
         work,
         quiet,
-    })
+    }
 }
 
+/// The commands `find`, run with `rest`, runs on what it finds: each
+/// `-exec`, `-execdir`, `-ok` or `-okdir` up to the `;` or `+` that ends it.
+fn find_runs<'a>(rest: &[&'a str]) -> Vec<Vec<&'a str>> {
+    let mut runs = Vec::new();
+    let mut words = rest.iter().copied();
+    while let Some(word) = words.next() {
+        if matches!(word, "-exec" | "-execdir" | "-ok" | "-okdir") {
+            runs.push(
+                words
+                    .by_ref()
+                    .take_while(|word| !matches!(*word, ";" | "+"))
+                    .collect(),
+            );
+        }
+    }
+    runs
+}
+
+/// The words that close a compound command, which stand as commands of
+/// their own once a command is split into its simple commands: the shell's
+/// grammar, never a program.
+const CLOSES: &[&str] = &["fi", "done", "esac", "}"];
+
+/// The heads of a compound command that run nothing themselves — `for f in
+/// *.rs`, `case $x in` — whose whole simple command is the shell's.
+const HEADS_ONLY: &[&str] = &["for", "select", "case"];
+
+/// The options `xargs` takes that are followed by a value of their own.
+const XARGS_TAKES_A_VALUE: &[&str] = &[
+    "-n",
+    "-I",
+    "-P",
+    "-L",
+    "-d",
+    "-s",
+    "-E",
+    "-a",
+    "--max-args",
+    "--max-procs",
+    "--max-lines",
+    "--delimiter",
+    "--max-chars",
+    "--arg-file",
+];
+
 /// The words from the program on: past the shell's own words, assignments
-/// and the wrappers that run the command after them as it is.
+/// and the wrappers that run the command after them as it is — `xargs`
+/// among them, which runs it on what it reads, so that what is counted is
+/// what it ran.
 fn program_words(words: &[String]) -> Option<Vec<&str>> {
     let mut words = words
         .iter()
@@ -254,11 +337,31 @@ fn program_words(words: &[String]) -> Option<Vec<&str>> {
         .filter(|word| !is_redirection(word))
         .skip_while(|word| RESERVED.contains(word))
         .peekable();
+    if words
+        .peek()
+        .is_some_and(|word| CLOSES.contains(word) || HEADS_ONLY.contains(word))
+    {
+        return None;
+    }
+    // `function name {` opens a body whose first command follows the brace.
+    if words.next_if_eq(&"function").is_some() {
+        words.find(|word| *word == "{")?;
+    }
     loop {
         let word = *words.peek()?;
         let base = word.rsplit('/').next().unwrap_or(word);
         if is_assignment(word) {
             words.next();
+        } else if base == "xargs" {
+            // With no command after it, `xargs` runs `echo`, and is named
+            // as itself.
+            let mut after = words.clone();
+            after.next();
+            skip_xargs_options(&mut after);
+            if after.peek().is_none() {
+                break;
+            }
+            words = after;
         } else if base == "rtk" {
             words.next();
             words.next_if(|word| *word == "proxy");
@@ -274,15 +377,24 @@ fn program_words(words: &[String]) -> Option<Vec<&str>> {
     Some(words.collect())
 }
 
+/// Moves `words` past the options `xargs` takes before its command.
+fn skip_xargs_options<'a>(words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>) {
+    while let Some(option) = words.next_if(|word| word.starts_with('-')) {
+        if XARGS_TAKES_A_VALUE.contains(&option) {
+            words.next();
+        }
+    }
+}
+
 /// What `program`, run with `rest`, is named and counted as, and whether it
 /// is quiet.
 fn classify(program: &str, rest: &[&str]) -> (String, Work, bool) {
     let named = |work| (program.to_owned(), work, false);
     match program {
         "cd" | "pushd" | "popd" | "echo" | "printf" | "true" | "false" | ":" | "sleep"
-        | "export" | "set" | "unset" | "source" | "." | "exit" | "wait" | "clear" => {
-            (program.to_owned(), Work::Other, true)
-        }
+        | "export" | "set" | "unset" | "source" | "." | "exit" | "wait" | "clear" | "[" | "[["
+        | "test" => (program.to_owned(), Work::Other, true),
+        "find" if rest.contains(&"-delete") => ("find -delete".to_owned(), Work::Editing, false),
         "git" => git(rest),
         "gh" | "hub" | "glab" => (
             with_subcommand(program, rest, &[]),
@@ -593,6 +705,79 @@ mod tests {
             ("sed -n '/fn/p' f.rs", Work::Exploring, &["sed"]),
             ("node -e 'console.log(1)'", Work::Other, &["script"]),
             ("python3 scripts/check.py", Work::Other, &["python3"]),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_bulk_edit_through_xargs_or_find_is_an_edit_named_by_what_it_ran() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            (
+                "find . -name '*.rs' | xargs sed -i 's/a/b/'",
+                Work::Editing,
+                &["find", "sed -i"],
+            ),
+            (
+                "git ls-files | xargs rm",
+                Work::Editing,
+                &["git ls-files", "rm"],
+            ),
+            (
+                "find . -name '*.tmp' -delete",
+                Work::Editing,
+                &["find -delete"],
+            ),
+            (
+                "find . -name '*.rs' -exec sed -i s/a/b/ {} +",
+                Work::Editing,
+                &["find", "sed -i"],
+            ),
+            (
+                "find . -name '*.orig' -exec rm {} \\;",
+                Work::Editing,
+                &["find", "rm"],
+            ),
+            (
+                "find . -print0 | xargs -0 -n 10 -P 4 grep foo",
+                Work::Exploring,
+                &["find", "grep"],
+            ),
+            ("ls | xargs -I {} cp {} out/", Work::Editing, &["ls", "cp"]),
+            (
+                "find . -type f -exec wc -l {} +",
+                Work::Exploring,
+                &["find", "wc"],
+            ),
+            ("ls | xargs", Work::Exploring, &["ls", "xargs"]),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_shells_own_grammar_is_never_named_as_a_program() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            (
+                "for f in *.rs; do sed -i 's/a/b/' \"$f\"; done",
+                Work::Editing,
+                &["sed -i"],
+            ),
+            (
+                "if grep -q x f; then echo y; fi",
+                Work::Exploring,
+                &["grep"],
+            ),
+            ("while true; do sleep 1; done", Work::Other, &["sleep"]),
+            ("{ cargo test; }", Work::Building, &["cargo test"]),
+            ("case x in a) ls;; esac", Work::Exploring, &["ls"]),
+            ("[ -f x ] && cargo test", Work::Building, &["cargo test"]),
+            ("[[ -n $x ]] || test -d y", Work::Other, &["[[", "test"]),
+            ("select x in a b; do pwd; done", Work::Exploring, &["pwd"]),
+            ("until false; do ls; done", Work::Exploring, &["ls"]),
+            ("function f { ls; }", Work::Exploring, &["ls"]),
         ];
         for (command, work, specifics) in cases {
             assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
