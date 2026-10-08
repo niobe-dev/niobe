@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use niobe_core::event::{Event, UsageWindows};
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 /// The schema this build creates and reads. Stored in SQLite's `user_version`
@@ -435,17 +436,17 @@ impl Store {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
+                stored_bytes(row.get_ref(2)?),
             ))
         })?;
 
         rows.map(|row| {
             let (seq, at, json) = row?;
             let seq = seq.unsigned_abs();
-            // One row this build cannot read — written by a newer niobe, or
-            // torn — stands as a warning in its place rather than keeping the
-            // rest of the session from being opened.
-            let event = serde_json::from_str(&json).unwrap_or_else(|source| {
+            // One row this build cannot read — written by a newer niobe,
+            // torn, or not text at all — stands as a warning in its place
+            // rather than keeping the rest of the session from being opened.
+            let event = serde_json::from_slice(&json).unwrap_or_else(|source| {
                 unreadable(&StoreError::Decode {
                     session,
                     seq,
@@ -471,7 +472,9 @@ impl Store {
     /// prompt, because `json_extract` fails the whole statement on one: a torn
     /// row in one session would otherwise hide every session from the list.
     /// The `CASE` is what guarantees `json_extract` never sees it; SQLite may
-    /// evaluate the terms of an `AND` in either order.
+    /// evaluate the terms of an `AND` in either order. A prompt or a title
+    /// that is not text is passed over the same way, and text that is not
+    /// UTF-8 reads with U+FFFD in place of what is not, for the same reason.
     pub fn sessions(&self) -> Result<Vec<SessionSummary>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.started_at, COUNT(e.seq), MAX(e.at),
@@ -480,6 +483,7 @@ impl Store {
                       WHERE f.session_id = s.id
                         AND CASE WHEN json_valid(f.event)
                                  THEN json_extract(f.event, '$.type') = 'user_message'
+                                      AND json_type(f.event, '$.text') = 'text'
                                       AND substr(json_extract(f.event, '$.text'), 1, 1) <> '/'
                             END
                       ORDER BY f.seq
@@ -489,6 +493,7 @@ impl Store {
                       WHERE t.session_id = s.id
                         AND CASE WHEN json_valid(t.event)
                                  THEN json_extract(t.event, '$.type') = 'titled'
+                                      AND json_type(t.event, '$.title') = 'text'
                             END
                       ORDER BY t.seq DESC
                       LIMIT 1)
@@ -504,8 +509,8 @@ impl Store {
                 started_at: from_unix_millis(row.get(1)?),
                 events: row.get::<_, i64>(2)?.unsigned_abs(),
                 last_at: row.get::<_, Option<i64>>(3)?.map(from_unix_millis),
-                first_prompt: row.get(4)?,
-                title: row.get(5)?,
+                first_prompt: stored_text(row.get_ref(4)?),
+                title: stored_text(row.get_ref(5)?),
             })
         })?;
 
@@ -517,13 +522,15 @@ impl Store {
     ///
     /// Read in one statement rather than session by session, which would
     /// decode every event of every session to find a few lines of text. A row
-    /// that is not JSON is passed over, as [`Store::sessions`] passes it over.
+    /// that is not JSON, or whose prompt is not text, is passed over, as
+    /// [`Store::sessions`] passes it over.
     pub fn prompts(&self) -> Result<Vec<StoredPrompt>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT session_id, at, json_extract(event, '$.text')
                FROM events
               WHERE CASE WHEN json_valid(event)
                          THEN json_extract(event, '$.type') = 'user_message'
+                              AND json_type(event, '$.text') = 'text'
                     END
               ORDER BY at DESC, session_id DESC, seq DESC",
         )?;
@@ -531,7 +538,7 @@ impl Store {
             Ok(StoredPrompt {
                 session: SessionId(row.get(0)?),
                 at: from_unix_millis(row.get(1)?),
-                text: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                text: stored_text(row.get_ref(2)?).unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -558,8 +565,8 @@ impl Store {
         let mut rows = statement.query(params![profile])?;
         while let Some(row) = rows.next()? {
             let at = from_unix_millis(row.get(0)?);
-            let json: String = row.get(1)?;
-            if let Ok(Event::UsageWindows(windows)) = serde_json::from_str(&json)
+            let json = stored_bytes(row.get_ref(1)?);
+            if let Ok(Event::UsageWindows(windows)) = serde_json::from_slice(&json)
                 && !windows.is_empty()
             {
                 return Ok(Some((at, windows)));
@@ -579,11 +586,42 @@ impl Store {
                FROM events
               WHERE CASE WHEN json_valid(event)
                          THEN json_extract(event, '$.type') = 'session_meta'
-                              AND json_extract(event, '$.backend_session') IS NOT NULL
+                              AND json_type(event, '$.backend_session') = 'text'
                     END",
         )?;
-        let rows = statement.query_map([], |row| Ok((SessionId(row.get(0)?), row.get(1)?)))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let rows = statement.query_map([], |row| {
+            Ok((SessionId(row.get(0)?), stored_text(row.get_ref(1)?)))
+        })?;
+        let mut carried = Vec::new();
+        for row in rows {
+            if let (session, Some(id)) = row? {
+                carried.push((session, id));
+            }
+        }
+        Ok(carried)
+    }
+}
+
+/// The bytes of a stored event, whatever SQLite stored them as: text that is
+/// not UTF-8 and a blob are handed to the parser as they are, which refuses
+/// what is not an event, and a number or a null as nothing, which it refuses
+/// too.
+fn stored_bytes(cell: ValueRef<'_>) -> Vec<u8> {
+    match cell {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.to_vec(),
+        ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => Vec::new(),
+    }
+}
+
+/// A piece of text taken out of a stored event, with any byte that is not
+/// UTF-8 drawn as U+FFFD; `None` where the event held no text there.
+///
+/// Read this way rather than as a `String`, which fails the whole statement
+/// on one damaged row and so hides every session along with it.
+fn stored_text(cell: ValueRef<'_>) -> Option<String> {
+    match cell {
+        ValueRef::Text(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) | ValueRef::Blob(_) => None,
     }
 }
 

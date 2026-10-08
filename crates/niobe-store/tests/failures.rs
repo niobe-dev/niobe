@@ -333,3 +333,142 @@ fn a_row_that_is_not_json_hides_no_other_prompt() {
     );
     assert!(store.conversations().expect("nor this one").is_empty());
 }
+
+/// Writes `event` straight into the file as `session`'s first row, as a
+/// damaged store or one edited by hand holds it.
+fn plant(path: &Path, session: SessionId, event: rusqlite::types::Value) {
+    raw(path)
+        .execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (?1, 1, 0, ?2)",
+            rusqlite::params![raw_id(session), event],
+        )
+        .expect("a row can be appended directly");
+}
+
+/// A broken session beside a fine one, with `event` as the broken one's
+/// only row.
+fn beside_a_fine_session(event: rusqlite::types::Value) -> (tempfile::TempDir, Store, SessionId) {
+    let (dir, path) = scratch();
+    let broken = {
+        let store = Store::open(&path).expect("a store opens");
+        let broken = store.create_session().expect("a session is created");
+        let fine = store.create_session().expect("a session is created");
+        store.append(fine, &user("fine")).expect("append");
+        broken
+    };
+    plant(&path, broken, event);
+    (dir, Store::open(&path).expect("the store opens"), broken)
+}
+
+/// Opens `broken` and checks its one row stands as a warning in its place.
+fn reads_as_a_warning(store: &Store, broken: SessionId) {
+    let events = store
+        .events(broken)
+        .expect("the session opens despite its row");
+    assert!(
+        matches!(
+            events.as_slice(),
+            [niobe_store::StoredEvent {
+                event: Event::Error { fatal: false, .. },
+                ..
+            }]
+        ),
+        "{events:?}"
+    );
+}
+
+/// Text that is not UTF-8 is not an event either, and stands as a warning in
+/// its place as a row that is not JSON does, rather than failing the session.
+#[test]
+fn a_row_that_is_not_utf8_stands_as_a_warning_in_its_session() {
+    let mut bytes = br#"{"type":"user_message","text":""#.to_vec();
+    bytes.extend_from_slice(&[0xff, 0xfe]);
+    bytes.extend_from_slice(br#""}"#);
+    // Cast in SQL, because rusqlite binds a Rust string only as valid UTF-8.
+    let (dir, path) = scratch();
+    let broken = {
+        let store = Store::open(&path).expect("a store opens");
+        store.create_session().expect("a session is created")
+    };
+    raw(&path)
+        .execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (?1, 1, 0, CAST(?2 AS TEXT))",
+            rusqlite::params![raw_id(broken), bytes],
+        )
+        .expect("a row can be appended directly");
+    let store = Store::open(&path).expect("the store opens");
+
+    reads_as_a_warning(&store, broken);
+    assert_eq!(store.sessions().expect("the list reads").len(), 1);
+    store.prompts().expect("the prompts read");
+    drop(dir);
+}
+
+/// A row stored as a blob, as the `sqlite3` shell can write one, stands as a
+/// warning in its place where it is not an event.
+#[test]
+fn a_row_stored_as_a_blob_stands_as_a_warning_in_its_session() {
+    let (_dir, store, broken) =
+        beside_a_fine_session(rusqlite::types::Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]));
+
+    reads_as_a_warning(&store, broken);
+}
+
+/// A prompt whose text is not text is passed over in the list and in the
+/// prompts, rather than failing every session's.
+#[test]
+fn a_prompt_whose_text_is_a_number_hides_no_session_and_no_other_prompt() {
+    let (_dir, store, broken) = beside_a_fine_session(rusqlite::types::Value::Text(
+        r#"{"type":"user_message","text":5}"#.to_owned(),
+    ));
+
+    let sessions = store
+        .sessions()
+        .expect("one bad row does not fail the list");
+    assert_eq!(sessions.len(), 2);
+    let listed = sessions
+        .iter()
+        .find(|s| s.id == broken)
+        .expect("the broken session is listed");
+    assert_eq!(listed.first_prompt, None);
+    let prompts = store.prompts().expect("one bad row does not fail the read");
+    assert_eq!(
+        prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+        ["fine"]
+    );
+}
+
+/// A title that is not text is passed over as such a prompt is.
+#[test]
+fn a_title_that_is_a_number_hides_no_session() {
+    let (_dir, store, broken) = beside_a_fine_session(rusqlite::types::Value::Text(
+        r#"{"type":"titled","title":5}"#.to_owned(),
+    ));
+
+    let sessions = store
+        .sessions()
+        .expect("one bad row does not fail the list");
+    assert_eq!(sessions.len(), 2);
+    let listed = sessions
+        .iter()
+        .find(|s| s.id == broken)
+        .expect("the broken session is listed");
+    assert_eq!(listed.title, None);
+}
+
+/// A conversation id that is not text names no conversation, rather than
+/// failing the read of every session's.
+#[test]
+fn a_conversation_id_that_is_a_number_hides_no_other_conversation() {
+    let (_dir, store, _broken) = beside_a_fine_session(rusqlite::types::Value::Text(
+        r#"{"type":"session_meta","backend":"claude","profile":"max","model":"m","backend_session":5}"#
+            .to_owned(),
+    ));
+
+    assert_eq!(
+        store
+            .conversations()
+            .expect("one bad row does not fail the read"),
+        []
+    );
+}

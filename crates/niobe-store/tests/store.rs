@@ -633,6 +633,32 @@ fn a_hold_file_a_killed_niobe_left_behind_does_not_read_as_held() {
     assert!(!store.is_held(session).expect("the hold is looked at"));
 }
 
+/// Nothing a recorder makes is a FIFO, and opening one to read waits for a
+/// writer that may never come: the look at a session's hold is taken for
+/// every session the history lists, so it must not wait on one.
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_the_hold_name_is_looked_at_without_waiting_and_is_not_a_hold() {
+    let (dir, path) = scratch();
+    let store = Store::open(&path).expect("a store opens");
+    let session = store.create_session().expect("a session is created");
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.path().join(format!("sessions.db-open-{session}")))
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "a FIFO is made at the hold's name");
+
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(store.is_held(session).map_err(|e| e.to_string()));
+    });
+    let held = received
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the look returns rather than waiting for a writer");
+
+    assert_eq!(held, Ok(false));
+}
+
 #[test]
 fn a_session_that_opens_with_a_slash_command_is_listed_by_the_prompt_after_it() {
     let store = Store::open_in_memory().expect("an in-memory store opens");

@@ -189,21 +189,30 @@ impl Drop for Held {
 /// refused as a hold on a held session is: only a session the list already
 /// shows is looked at, and only a resume of that same session can be taking
 /// its hold then.
+///
+/// Opened without waiting, because a FIFO at the name would hold the open
+/// until something wrote to it, and the history looks at every session it
+/// lists; what is not a regular file is not one a holder made, so it is no
+/// hold.
 #[cfg(unix)]
 pub(crate) fn is_held(store: &Store, session: SessionId) -> Result<bool, StoreError> {
-    use rustix::fs::{FlockOperation, Mode, OFlags};
+    use rustix::fs::{FileType, FlockOperation, Mode, OFlags};
     let Some(path) = store.path() else {
         return Ok(false);
     };
     let file = match rustix::fs::open(
         hold_path(&path, session),
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
         Ok(file) => file,
         Err(rustix::io::Errno::NOENT) => return Ok(false),
         Err(e) => return Err(StoreError::Hold(e.into())),
     };
+    let stat = rustix::fs::fstat(&file).map_err(|e| StoreError::Hold(e.into()))?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Ok(false);
+    }
     match rustix::fs::flock(&file, FlockOperation::NonBlockingLockShared) {
         Ok(()) => Ok(false),
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
