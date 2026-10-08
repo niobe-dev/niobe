@@ -892,10 +892,13 @@ jq -c 'select(.type=="system" and (.subtype=="task_progress" or .subtype=="task_
 
 A directory of session transcripts in the shape the CLI writes them: one
 directory per working directory it has run in, one JSON Lines file per session,
-named by the id the CLI's own `--resume` takes. It holds two sessions recorded
-in `/repo`: `2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42`, which is described first,
-and `7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73`, which ran sub-agents and is
-described under [its own heading](#a-session-that-ran-sub-agents).
+named by the id the CLI's own `--resume` takes. It holds three sessions
+recorded in `/repo`: `2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42`, which is described
+first, `7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73`, which ran sub-agents and is
+described under [its own heading](#a-session-that-ran-sub-agents), and
+`4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36`, which the CLI closed while an agent was
+still writing and is described under
+[the heading after that](#a-session-closed-while-an-agent-was-still-writing).
 
 The **shapes** are those of twenty-five transcripts recorded by Claude Code
 2.1.277 on 18 September 2026 — every key here appeared in them, and no key of
@@ -1105,6 +1108,46 @@ for meta in transcripts/7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73/subagents/*.meta.js
   jq -c 'select(.type=="assistant") | [.message.model, [.message.content[].type]]' \
     "${meta%.meta.json}.jsonl" | tail -1
 done
+```
+
+### A session closed while an agent was still writing
+
+`4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36.jsonl` and the directory named after it,
+in the shapes of the session above, with content written by hand. The session
+spawns one background agent, says it is running and ends its turn at
+`12:00:07`; the agent's answer is stamped `12:00:30`, after the last stamped
+record in the session's file; and the `cost-state` the CLI wrote as it left
+follows. That is a session the operator quit while a background agent was
+still working.
+
+A `cost-state` carries no `timestamp` — not one of 506 on the machine this was
+written on did — so the stamps alone would put the agent's answer after it,
+once the accounting was settled, and count it a second time on top of a record
+that already holds it. The `cost-state` covers every message written before
+the CLI left, so every agent record stamped before the next stamped record
+after it, or every one left where none follows, is folded ahead of it.
+
+| Message | from | in | out | cache read | cache write |
+| ------- | ---- | -- | --- | ---------- | ----------- |
+| `msg_late1` | session | 3 | 100 | 10000 | 2000 |
+| `msg_late2` | session | 1 | 20  | 12000 | 300  |
+| `msg_late3` | agent   | 5 | 50  | 5000  | 500  |
+| **sum**     |         | **9** | **170** | **27000** | **2800** |
+
+The `cost-state` bills exactly that sum under `claude-opus-5[1m]`, at $0.25,
+and the session reads that and nothing more: 9 in, 170 out, 27000 cache read,
+2800 cache write, $0.25, with no record left unsettled. Folding the agent's
+answer after the `cost-state` reads 14, 220, 32000 and 3300, the agent's
+response twice. To re-derive the table:
+
+```sh
+jq -c 'select(.type=="assistant") | [.message.id, .message.usage.input_tokens,
+       .message.usage.output_tokens, .message.usage.cache_read_input_tokens,
+       .message.usage.cache_creation_input_tokens]' \
+  transcripts/4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36.jsonl \
+  transcripts/4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36/subagents/*.jsonl
+jq -c 'select(.type=="cost-state") | .modelUsage' \
+  transcripts/4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36.jsonl
 ```
 
 ## `resumed.jsonl`, `resumed-transcript.jsonl`

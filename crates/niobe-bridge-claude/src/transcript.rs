@@ -432,18 +432,47 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         fold.out
             .push(translate::warn(conformance::unrecorded(&version)));
     }
-    for record in read {
+    let next_stamps = next_stamps(&read);
+    for (record, next_stamp) in read.into_iter().zip(next_stamps) {
         // The session's own file is kept in the order the CLI wrote it, which
         // is not always the order of its stamps: an agent's records go in
         // before the first of the session's that was stamped after them.
         if let Some(at) = &record.at {
             threads.fold_before(Some(at), &mut fold);
         }
+        // A `cost-state` carries no stamp, and covers everything the process
+        // wrote before it left — an agent's records stamped after the
+        // session's last record before it among them, where the operator
+        // left while a background agent was still writing. Those go in ahead
+        // of it, or the accounting would be settled before them and each of
+        // their responses counted again on top of it.
+        if matches!(record.record, Ok(Line::CostState(_))) {
+            threads.fold_before(next_stamp.as_deref(), &mut fold);
+        }
         threads.spawned_in(&record.record);
         fold.record(record.line, record.record, None);
     }
     threads.fold_before(None, &mut fold);
     Ok(fold.out)
+}
+
+/// For each of `records`, the stamp of the first record after it that has
+/// one, or nothing where none after it does.
+fn next_stamps(records: &[Record<'_>]) -> Vec<Option<String>> {
+    let mut next = None;
+    let mut stamps: Vec<Option<String>> = records
+        .iter()
+        .rev()
+        .map(|record| {
+            let after = next.clone();
+            if let Some(at) = &record.at {
+                next = Some(at.clone());
+            }
+            after
+        })
+        .collect();
+    stamps.reverse();
+    stamps
 }
 
 /// The text of the transcript at `path`, with anything that is not UTF-8 in

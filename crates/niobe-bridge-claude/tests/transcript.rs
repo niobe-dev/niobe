@@ -28,6 +28,11 @@ const SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
 /// transcripts are kept beside it.
 const WITH_AGENTS: &str = "7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73";
 
+/// The session in the fixture that the CLI closed while a background agent
+/// was still writing: the agent's last response is stamped after the
+/// session's last stamped record, and before the `cost-state` that bills it.
+const CLOSED_UNDER_AN_AGENT: &str = "4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36";
+
 /// A directory of transcripts in the shape the CLI writes one.
 fn transcripts() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts")
@@ -148,7 +153,11 @@ fn a_transcript_is_listed_by_the_id_that_continues_it_and_by_what_was_asked() {
     // of its own.
     let mut ids: Vec<&str> = listed.iter().map(|found| found.id.as_str()).collect();
     ids.sort_unstable();
-    assert_eq!(ids, [SESSION, WITH_AGENTS], "{listed:?}");
+    assert_eq!(
+        ids,
+        [SESSION, CLOSED_UNDER_AN_AGENT, WITH_AGENTS],
+        "{listed:?}"
+    );
     let only = listed
         .iter()
         .find(|found| found.id == SESSION)
@@ -705,6 +714,33 @@ fn a_priced_read_back_sessions_totals_are_unchanged_by_its_agents_side_files() {
     );
     assert!((totals.reported_cost_usd - 0.5).abs() < 1e-9);
     assert_eq!(totals.records_unsettled, 0);
+}
+
+/// An agent that wrote after the session's last stamped record is still
+/// billed by the `cost-state` the CLI wrote as it left, so its response is
+/// folded before that record rather than counted again after it. The totals
+/// are the README's for this session.
+#[test]
+fn an_agent_that_wrote_after_the_sessions_last_stamp_is_billed_once_by_the_closing_cost_state() {
+    let events = folded_session(CLOSED_UNDER_AN_AGENT);
+
+    let totals = SessionState::replay(&events).totals().clone();
+    assert_eq!(
+        (
+            totals.input,
+            totals.output,
+            totals.cache_read,
+            totals.cache_write
+        ),
+        (9, 170, 27_000, 2_800)
+    );
+    assert!((totals.reported_cost_usd - 0.25).abs() < 1e-9);
+    assert_eq!(totals.records_unsettled, 0);
+    let (spawn, reports, _) = positions(&events, "toolu_late");
+    assert!(
+        spawn.is_some() && !reports.is_empty(),
+        "the agent's response is still in the timeline: {events:#?}"
+    );
 }
 
 /// An agent that edits a file changes the repository as much as the session
