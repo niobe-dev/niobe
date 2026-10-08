@@ -390,15 +390,20 @@ impl<'t> Renderer<'t> {
         let gutter = Style::new().fg(self.theme.dim);
         let style = Style::new().fg(self.theme.code);
         for line in code.trim_end_matches('\n').split('\n') {
-            let pieces = match line.is_empty() {
-                true => vec![String::new()],
-                false => text::split_to_width(&text::expand_tabs(line), room),
-            };
-            for piece in pieces {
+            if line.is_empty() {
                 self.emit(vec![
                     Span::styled(CODE_GUTTER, gutter),
-                    Span::styled(piece, style),
+                    Span::styled("", style),
                 ]);
+            } else {
+                let expanded = text::expand_tabs(line);
+                let pieces = text::split_to_width(&expanded, room);
+                for piece in pieces {
+                    self.emit(vec![
+                        Span::styled(CODE_GUTTER, gutter),
+                        Span::styled(piece.to_owned(), style),
+                    ]);
+                }
             }
         }
     }

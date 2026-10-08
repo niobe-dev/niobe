@@ -93,8 +93,8 @@ fn wrap_paragraph(paragraph: &str, columns: usize, lines: &mut Vec<String>) {
                 if line_width != 0 {
                     lines.push(std::mem::take(&mut line));
                 }
-                line_width = width(&chunk);
-                line = chunk;
+                line_width = width(chunk);
+                line = chunk.to_owned();
             }
             continue;
         }
@@ -113,23 +113,23 @@ fn wrap_paragraph(paragraph: &str, columns: usize, lines: &mut Vec<String>) {
 }
 
 /// Cuts a string into pieces no wider than `columns` cells.
-pub fn split_to_width(text: &str, columns: usize) -> Vec<String> {
+pub fn split_to_width(text: &str, columns: usize) -> Vec<&str> {
     let mut chunks = Vec::new();
-    let mut chunk = String::new();
     let mut chunk_width = 0;
+    let mut start = 0;
 
-    for c in text.chars() {
+    for (i, c) in text.char_indices() {
         let w = c.width().unwrap_or(0);
-        if chunk_width + w > columns && !chunk.is_empty() {
-            chunks.push(std::mem::take(&mut chunk));
+        if chunk_width + w > columns && start < i {
+            chunks.push(&text[start..i]);
+            start = i;
             chunk_width = 0;
         }
-        chunk.push(c);
         chunk_width += w;
     }
 
-    if !chunk.is_empty() {
-        chunks.push(chunk);
+    if start < text.len() {
+        chunks.push(&text[start..]);
     }
     chunks
 }
