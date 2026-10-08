@@ -1638,6 +1638,24 @@ mod tests {
     }
 
     #[test]
+    fn a_models_tokens_add_up_over_every_record_of_it() {
+        let state = SessionState::replay(&[
+            on_model("opus-5", 100, 10, None),
+            on_model("haiku-4-5", 300, 30, None),
+            on_model("opus-5", 200, 20, None),
+            on_model("haiku-4-5", 3, 0, None),
+        ]);
+
+        let totals = state.totals();
+        assert_eq!(totals.tokens_by_model.get("opus-5"), Some(&330));
+        assert_eq!(totals.tokens_by_model.get("haiku-4-5"), Some(&333));
+        assert_eq!(
+            totals.tokens_by_model.values().sum::<u64>(),
+            totals.tokens()
+        );
+    }
+
+    #[test]
     fn totals_sum_reported_cost_and_count_what_was_not_reported() {
         let state = SessionState::replay(&[
             usage(100, 10, Some(0.25)),
@@ -2206,6 +2224,47 @@ mod tests {
         assert_eq!(state.agents_cancelled(), 1);
         assert_eq!(state.running_agents().len(), 1);
         assert_eq!(state.peak_running_agents(), 3);
+    }
+
+    #[test]
+    fn the_peak_of_running_agents_stands_after_fewer_run_again() {
+        let spawn = |id: &str| Event::AgentSpawn {
+            id: id.into(),
+            parent: None,
+            kind: None,
+            label: "test-writer".to_owned(),
+        };
+        let state = SessionState::replay(&[
+            spawn("a1"),
+            spawn("a2"),
+            spawn("a3"),
+            exit("a1", AgentOutcome::Completed),
+            exit("a2", AgentOutcome::Completed),
+            spawn("a4"),
+        ]);
+
+        assert_eq!(state.running_agents().len(), 2);
+        assert_eq!(state.peak_running_agents(), 3);
+    }
+
+    #[test]
+    fn an_agent_spawned_again_after_its_exit_ends_again() {
+        let spawn = Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "test-writer".to_owned(),
+        };
+        let state = SessionState::replay(&[
+            spawn.clone(),
+            exit("a1", AgentOutcome::Completed),
+            spawn,
+            exit("a1", AgentOutcome::Failed),
+        ]);
+
+        assert!(state.running_agents().is_empty());
+        assert_eq!(state.agents_completed(), 1);
+        assert_eq!(state.agents_failed(), 1);
     }
 
     #[test]
@@ -3315,6 +3374,50 @@ mod tests {
         assert!((share - 0.01).abs() < 1e-9, "{share}");
     }
 
+    /// A turn that reported no window of its own has no share, even where a
+    /// report arrived between the turns: that one is where it began.
+    #[test]
+    fn a_window_reported_only_between_turns_gives_the_next_one_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            five_hour(0.14, RESET),
+            prompt(),
+            cached(100, 10, 0, 0),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns()[1].five_hour_share, None);
+    }
+
+    /// A level reported during the turn at the same height it began from is
+    /// a measured nothing, not a missing figure.
+    #[test]
+    fn a_level_that_held_through_a_turn_is_a_share_of_zero() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns()[1].five_hour_share, Some(0.0));
+    }
+
+    #[test]
+    fn a_prompt_sent_mid_turn_leaves_the_tokens_spent_before_it_in_the_turn() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(100, 10, 0, 0),
+            prompt(),
+            cached(20, 5, 0, 0),
+            Event::TurnEnded,
+        ]);
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [Some(135)]);
+    }
+
     fn command(name: &str) -> SlashCommand {
         SlashCommand {
             name: name.to_owned(),
@@ -3417,6 +3520,20 @@ mod tests {
         assert!(state.compacting());
 
         state.apply(&Event::CompactionEnded);
+        assert!(!state.compacting());
+    }
+
+    #[test]
+    fn a_compaction_reported_done_without_its_end_is_no_longer_running() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::CompactionStarted,
+            Event::Compacted {
+                trigger: CompactTrigger::Auto,
+                before: Some(23_193),
+            },
+        ]);
+        assert!(state.turn_running());
         assert!(!state.compacting());
     }
 

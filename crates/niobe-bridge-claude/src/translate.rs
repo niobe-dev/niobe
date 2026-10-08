@@ -3224,6 +3224,55 @@ mod tests {
         assert!(cut_notices(&events).is_empty(), "{events:?}");
     }
 
+    #[test]
+    fn a_stopped_reply_stays_stopped_when_a_later_line_of_it_omits_the_flag() {
+        let mut translator = translator();
+        translator.line(&started("msg_1"));
+        translator.line(
+            r#"{"type":"assistant","message":{"model":"opus-5","id":"msg_1","content":[{"type":"text","text":"Writing"}],"usage":{"input_tokens":2,"output_tokens":679}},"aborted":true}"#,
+        );
+        translator.line(&written(
+            "msg_1",
+            r#","usage":{"input_tokens":2,"output_tokens":700}"#,
+        ));
+
+        // The count that still arrives for it is one the CLI leaves out.
+        let mut events = translator.line(&delta(2, 700));
+        events.extend(translator.line(STOPPED_STREAMING));
+
+        assert!(
+            events.iter().all(|event| !matches!(event, Event::Usage(_))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_of_another_message_does_not_stand_in_for_the_snapshot_of_the_one_in_flight() {
+        let mut translator = translator();
+        translator.line(&started("msg_1"));
+        translator.line(&written(
+            "msg_1",
+            r#","usage":{"input_tokens":1,"output_tokens":5}"#,
+        ));
+        translator.line(&written(
+            "msg_other",
+            r#","usage":{"input_tokens":9,"output_tokens":900}"#,
+        ));
+
+        let events = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":5}}"#,
+        );
+
+        let counted: Vec<(u64, u64)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.input, usage.output)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counted, [(1, 5)]);
+    }
+
     const STOPPED_STREAMING: &str = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming","usage":{"input_tokens":0,"output_tokens":0}}"#;
 
     #[test]
@@ -3765,6 +3814,22 @@ mod tests {
         assert!((totals.reported_cost_usd - 0.8).abs() < 1e-9);
     }
 
+    /// Messages naming the family, billed under two ids of it, one of which
+    /// grew by tokens no message carried: the first id takes what it is
+    /// short, the second only what the family still has to spare, and the
+    /// rest of its growth is counted from the bill.
+    #[test]
+    fn a_family_split_between_two_billed_ids_gives_each_token_up_once() {
+        let totals = folded(&[
+            MAIN_START,
+            &delta(120, 0),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":150,"output_tokens":0},"modelUsage":{"opus-5[1m]":{"inputTokens":100,"costUSD":0.5,"canonicalModel":"opus-5"},"opus-5[x]":{"inputTokens":50,"costUSD":0.25,"canonicalModel":"opus-5"}},"total_cost_usd":0.75}"#,
+        ]);
+
+        assert_counted_once(&totals, 150, 0);
+        assert!((totals.reported_cost_usd - 0.75).abs() < 1e-9);
+    }
+
     fn billed_models(events: &[Event]) -> Vec<String> {
         events
             .iter()
@@ -4051,6 +4116,25 @@ mod tests {
             (second.cost_usd.unwrap_or_default() - 0.15).abs() < 1e-9,
             "the running total was reported again instead of what the turn added"
         );
+    }
+
+    /// A session total a rounding's width above what was reported is the
+    /// sum's rounding, not spend: nothing is reported for it, and the next
+    /// total, which still holds it, reports it with the rest.
+    #[test]
+    fn a_session_total_a_rounding_above_the_last_reports_nothing_until_it_grows() {
+        let mut translator = translator();
+        translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.25}"#);
+
+        let rounding = before_the_end(
+            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.25003}"#),
+        );
+        let grown = before_the_end(
+            translator.line(r#"{"type":"result","subtype":"success","total_cost_usd":0.40}"#),
+        );
+
+        assert!(rounding.is_empty(), "{rounding:?}");
+        assert!((cost_reported(&grown) - 0.15).abs() < 1e-9, "{grown:?}");
     }
 
     fn cost_reported(events: &[Event]) -> f64 {

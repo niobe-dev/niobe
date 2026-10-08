@@ -825,4 +825,112 @@ fn windows_belong_to_the_profile_in_force_when_they_were_recorded() {
         .expect("personal recorded windows before the switch");
     assert_eq!(when, at(110));
     assert_eq!(windows.five_hour.map(|w| w.utilization), Some(0.8));
+=======
+#[test]
+fn the_newest_windows_are_the_latest_recorded_whichever_session_was_opened_first() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+    let opened_first = store.create_session().expect("a session is created");
+    let opened_later = store.create_session().expect("a session is created");
+    store
+        .append_at(opened_later, &under("max"), at(100))
+        .expect("append");
+    store
+        .append_at(opened_later, &five_hour(0.2), at(110))
+        .expect("append");
+    store
+        .append_at(opened_first, &under("max"), at(200))
+        .expect("append");
+    store
+        .append_at(opened_first, &five_hour(0.37), at(210))
+        .expect("append");
+
+    let (when, windows) = store
+        .last_usage_windows("max")
+        .expect("the store is read")
+        .expect("the profile recorded windows");
+    assert_eq!(when, at(210));
+    assert_eq!(windows.five_hour.map(|w| w.utilization), Some(0.37));
+}
+
+#[test]
+fn of_two_reports_in_the_same_millisecond_the_later_one_stands() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+    let session = store.create_session().expect("a session is created");
+    store.append_at(session, &under("max"), at).expect("append");
+    store
+        .append_at(session, &five_hour(0.2), at)
+        .expect("append");
+    store
+        .append_at(session, &five_hour(0.37), at)
+        .expect("append");
+
+    let (_, windows) = store
+        .last_usage_windows("max")
+        .expect("the store is read")
+        .expect("the profile recorded windows");
+    assert_eq!(windows.five_hour.map(|w| w.utilization), Some(0.37));
+}
+
+/// Appends `event` to `session` straight into the file, as a row of a build
+/// that wrote something this one does not, or was cut off writing it.
+fn append_raw(path: &Path, session: SessionId, seq: i64, event: &str) {
+    raw(path)
+        .execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (?1, ?2, 0, ?3)",
+            rusqlite::params![
+                session.to_string().parse::<i64>().expect("ids are numbers"),
+                seq,
+                event
+            ],
+        )
+        .expect("a row can be appended directly");
+}
+
+#[test]
+fn a_row_that_is_not_json_does_not_hide_the_windows_beside_it() {
+    let (_dir, path) = scratch();
+    let session = {
+        let store = Store::open(&path).expect("a store opens");
+        let session = store.create_session().expect("a session is created");
+        store.append(session, &under("max")).expect("append");
+        store.append(session, &five_hour(0.37)).expect("append");
+        session
+    };
+    append_raw(&path, session, 3, r#"{"type":"usage_wind"#);
+
+    let (_, windows) = Store::open(&path)
+        .expect("the store opens")
+        .last_usage_windows("max")
+        .expect("one torn row does not fail the read")
+        .expect("the profile recorded windows");
+    assert_eq!(windows.five_hour.map(|w| w.utilization), Some(0.37));
+}
+
+#[test]
+fn only_a_session_meta_says_which_profile_a_session_ran_under() {
+    let (_dir, path) = scratch();
+    let session = {
+        let store = Store::open(&path).expect("a store opens");
+        let session = store.create_session().expect("a session is created");
+        store.append(session, &under("work")).expect("append");
+        store.append(session, &five_hour(0.9)).expect("append");
+        session
+    };
+    append_raw(
+        &path,
+        session,
+        3,
+        r#"{"type":"from_the_future","profile":"max"}"#,
+    );
+
+    assert_eq!(
+        Store::open(&path)
+            .expect("the store opens")
+            .last_usage_windows("max")
+            .expect("the store is read"),
+        None
+    );
+>>>>>>> f215776 (test: pin the money path's snapshots, stops, turn marks and carried-window order)
 }
