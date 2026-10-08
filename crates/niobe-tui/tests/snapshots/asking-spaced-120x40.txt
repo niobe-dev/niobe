@@ -1,7 +1,7 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
  ┃                                                                          ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
- ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃ ✗ Bash           npm test                                  exit 1 · 0.4s ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    ┃ │ ───────────────────────────────────── │
  ┃                                                                          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃ ◆ claude                                                                 ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │

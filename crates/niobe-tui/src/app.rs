@@ -753,6 +753,15 @@ pub struct Call {
     /// itself rather than the project's, as the backend said: drawn as the
     /// agent updating its memory, with the diff behind Ctrl+T.
     pub memory: bool,
+    /// The programs an agent's shell call ran, `cargo test · tail`: what its
+    /// row says in place of the command, which the operator reads behind
+    /// Ctrl+T. `None` for a call that ran no command, and for one the
+    /// operator ran, whose command is what they typed.
+    pub programs: Option<String>,
+    /// The whole command an agent's shell call ran, where the backend
+    /// reported it at the call's end. `None` before then, where it was not
+    /// reported, and for every call [`Call::programs`] is `None` for.
+    pub command: Option<String>,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -779,6 +788,8 @@ impl Call {
             gate: None,
             asked: false,
             memory: false,
+            programs: None,
+            command: None,
             started: at,
         }
     }
@@ -1972,6 +1983,7 @@ impl App {
             } => {
                 let head = tool_label(name);
                 let mut call = Call::started(what_it_does(summary.as_deref(), input), self.at);
+                call.programs = programs_of(name, None, summary.as_deref());
                 if call.testing {
                     call.last_run = self.test_times.get(&call.what).copied();
                 }
@@ -2016,7 +2028,7 @@ impl App {
                 summary,
                 exit_code,
                 error,
-                command: _,
+                command,
             } => {
                 let ending = Ending {
                     outcome: *outcome,
@@ -2065,6 +2077,12 @@ impl App {
                         .and_then(|entry| entry.calls.get_mut(index))
                 }) {
                     call.gate = gate;
+                    if let Some(programs) =
+                        programs_of(name, command.as_deref(), summary.as_deref())
+                    {
+                        call.programs = Some(programs);
+                        call.command = command.clone();
+                    }
                 }
                 // A failed call is kept too: a test run that failed ended
                 // its call with a failing status.
@@ -4053,7 +4071,7 @@ impl App {
             ),
             ("Ctrl+End", "back to the newest line".to_owned()),
             ("Ctrl+O", "fold runs of tool calls".to_owned()),
-            ("Ctrl+T", "open every cut diff".to_owned()),
+            ("Ctrl+T", "open every cut diff and whole command".to_owned()),
             ("Ctrl+V", "attach the image on the clipboard".to_owned()),
             ("drag", "copy what it covers".to_owned()),
             ("click", "open a link".to_owned()),
@@ -7882,6 +7900,16 @@ pub fn tool_label(name: &str) -> String {
         false => tool,
     };
     format!("{server}·{tool}")
+}
+
+/// The programs a call of the agent's ran, where it ran a shell command, as
+/// its row names them: see [`Call::programs`].
+fn programs_of(tool: &str, command: Option<&str>, summary: Option<&str>) -> Option<String> {
+    if tool == crate::shell::OPERATOR_SHELL {
+        return None;
+    }
+    niobe_core::work::command_of(tool, command, summary)
+        .map(|command| niobe_core::work::of_command(command).specifics.join(" · "))
 }
 
 /// The backend's one-line reading of a call, or its arguments where it had

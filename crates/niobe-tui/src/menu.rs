@@ -114,7 +114,7 @@ impl Action {
             Action::Effort => "pick an effort level",
             Action::Usage => "what the plan's usage windows stand at",
             Action::Find => "search the transcript",
-            Action::Diff => "open every cut diff, or cut them again",
+            Action::Diff => "open every cut diff and whole command, or cut them again",
             Action::GroupByAgent => "group sub-agent rows by agent",
             Action::Pane(_) => "show or hide that pane",
             Action::Theme => "pick the palette the shell draws in",

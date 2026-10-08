@@ -766,6 +766,10 @@ pub fn session_with_two_agents_at_work() -> App {
         },
         call("c1", "Read", "catalog/cache.py", agent("toolu_cache")),
         done("f1", "Read", "catalog/fetch.py", 4_100),
+        Event::AssistantMessage {
+            text: "The etag is stored but never compared on the 304 path.".to_owned(),
+            agent: agent("toolu_fetch"),
+        },
         call("f2", "Read", "catalog/etag.py", agent("toolu_fetch")),
         done("c1", "Read", "catalog/cache.py", 2_900),
         done("f2", "Read", "catalog/etag.py", 1_300),

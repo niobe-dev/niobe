@@ -3,7 +3,7 @@
 ┃ > you                                                                        ┃
 ┃   fix the etag test                                                          ┃
 ┃                                                                              ┃
-┃ ⠋ Bash npm test -- fetch                                             running ┃
+┃ ⠋ Bash npm test                                                      running ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃

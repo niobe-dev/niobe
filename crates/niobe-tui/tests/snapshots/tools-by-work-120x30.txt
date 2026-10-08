@@ -17,7 +17,7 @@
  ┃ ◆ claude                                                                 █ │     fetch.ts                 +149 −12 │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │     etag.ts                   +88 −41 │
  ┃                                                                          █ │     cache/lru.ts               +31 −9 │
- ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │     cache/index.ts             +12 −0 │
+ ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │     cache/index.ts             +12 −0 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ └───────────────────────────────────────┘
  ┃                                                                          █ ┌────────────── Activity ───────────────┐
  ┃ ◆ claude                                                                 █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓ ✗ 1  │

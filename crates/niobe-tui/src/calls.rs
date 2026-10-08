@@ -3,7 +3,15 @@
 
 //! A tool call in the transcript, drawn as a row of a table: its glyph, the
 //! tool's name, the tag of the sub-agent that made it, what it does, and on
-//! the right what it cost. A sub-agent's words are a row of the same table.
+//! the right what it cost. A sub-agent's words are drawn as the session's own
+//! reply is, under a head that names the agent.
+//!
+//! The whole row is dim but for a failure: the agents' words, in the body
+//! colour, are what the transcript is read for, and a call is an aside to
+//! them. A shell call's row names the programs it ran — `cargo test · tail`
+//! — rather than the command, which is long, mostly paths, and read in full
+//! only now and then; Ctrl+T draws the whole command under the row, every
+//! line of it, for when it is.
 //!
 //! The name and tag columns are as wide as the transcript's widest, so the
 //! rows line up and the eye can run down what each call does and what it
@@ -129,7 +137,13 @@ pub(crate) fn lines(
     detail: Detail,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let colour = entry.kind.colour(theme);
+    // A call is machinery beside the agents' words, so its whole row recedes:
+    // the reasoning, in the body colour, is what the eye finds. A failure is
+    // never the thing that recedes, and keeps its colour.
+    let colour = match entry.kind {
+        EntryKind::Failure => theme.del,
+        _ => theme.dim,
+    };
     let mut lines = match entry.calls.as_slice() {
         calls if !detail.diffs_open && all_memory(calls) => {
             remembered(entry, calls, width, detail, colour, theme)
@@ -161,7 +175,7 @@ fn single(
         entry.head.clone(),
         Doing {
             agent: entry.agent.as_deref().filter(|_| !detail.grouped),
-            what: &call.what,
+            what: &doing(call, detail),
         },
         result(call, theme),
         width,
@@ -233,10 +247,14 @@ fn file_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-/// What a call of a group is said to do: what the backend read it as, or,
-/// for one that changed the agent's own notes while the diffs are shut,
-/// that it updated its memory and which note.
+/// What a call's row says it does: the programs an agent's shell command
+/// ran, whose whole command Ctrl+T draws under the row; for one that changed
+/// the agent's own notes while the diffs are shut, that it updated its
+/// memory and which note; and otherwise what the backend read it as.
 fn doing(call: &Call, detail: Detail) -> String {
+    if let Some(programs) = &call.programs {
+        return programs.clone();
+    }
     match call.memory && !detail.diffs_open {
         true => format!("{MEMORY} · {}", file_name(&call.what)),
         false => call.what.clone(),
@@ -341,6 +359,12 @@ fn under(
         .then_some(call)
         .filter(|call| call.testing && !call.asked)
         .map(|call| progress_line(call, detail.now, room, theme));
+    let command = call
+        .programs
+        .as_ref()
+        .filter(|_| detail.diffs_open)
+        .map(|_| command_lines(call, room, theme))
+        .unwrap_or_default();
     let body = match (&call.printed, tested, call.failed(), &call.change) {
         (Some(printed), _, _, _) => {
             let mut lines: Vec<_> = tested
@@ -359,8 +383,9 @@ fn under(
         }
         (None, None, false, None) => Vec::new(),
     };
-    progress
+    command
         .into_iter()
+        .chain(progress)
         .chain(body)
         .map(|line| {
             let mut spans = vec![Span::raw(lead.clone())];
@@ -369,6 +394,37 @@ fn under(
         })
         .collect()
 }
+
+/// The whole command an agent's shell call ran, as Ctrl+T draws it under the
+/// row: `$ ` before its first line, every line of it, and each wrapped rather
+/// than cut, since this is where the operator reads the exact text. Where the
+/// backend did not report the whole command, the one line the call was read
+/// by stands for it.
+fn command_lines(call: &Call, room: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let command = call.command.as_deref().unwrap_or(&call.what);
+    let inner = room.saturating_sub(PROMPT.len()).max(1);
+    command
+        .lines()
+        .enumerate()
+        .flat_map(|(at, line)| {
+            let mut parts = text::wrap(line, inner);
+            if parts.is_empty() {
+                parts.push(String::new());
+            }
+            parts.into_iter().enumerate().map(move |(part, wrapped)| {
+                let lead = match (at, part) {
+                    (0, 0) => PROMPT,
+                    _ => "  ",
+                };
+                Line::from(Span::styled(format!("{lead}{wrapped}"), dim))
+            })
+        })
+        .collect()
+}
+
+/// What stands before a shell call's command where Ctrl+T draws it.
+const PROMPT: &str = "$ ";
 
 /// What a command the operator ran printed, the last lines of it, under its
 /// row; and above them why it ended without an exit of its own, where it did.
@@ -726,9 +782,6 @@ fn row(
             Style::new().fg(theme.dim),
         ));
     }
-    // What the call does is drawn dim, so the agent's replies, in the body
-    // text's colour, are what the eye finds first; a failure says so in the
-    // glyph and the name.
     spans.push(Span::styled(what, Style::new().fg(theme.dim)));
     spans.push(Span::raw(" ".repeat(gap)));
     spans.extend(result);
@@ -752,51 +805,47 @@ fn head(entry: &Entry) -> String {
     }
 }
 
-/// A sub-agent's words, as a row among its calls: `↳`, its tag across the
-/// name and agent columns, what it said where what a call does is drawn, and
-/// `says` where a call's cost is. What it said wraps under itself, so a long
-/// answer keeps the column its first line started in.
+/// A sub-agent's words, as the session's own reply is drawn: `↳`, its tag
+/// and, dim, what it was spawned to do, then what it said in the body
+/// colour across the pane. A sub-agent's words are how it reasons through
+/// its task, which is what the operator reads the transcript for; its calls
+/// are the rows that recede.
 pub(crate) fn said(
     entry: &Entry,
     width: usize,
     detail: Detail,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let columns = detail.columns;
     let tag = entry.agent.as_deref().unwrap_or(&entry.head);
-    let span = columns.name.max(NAME_LEAST) + 1 + columns.agent;
-    let lead = (span.max(text::width(tag)) + 1).min(width / 2);
-    let room = width.saturating_sub(GUTTER + lead + GAP + text::width(SAYS));
-    // A sub-agent's words are its report to the agent, not the agent's to
-    // the operator, so they are drawn dim with the calls they sit among.
-    let muted = Theme {
-        fg: theme.dim,
-        ..*theme
-    };
-    let body = crate::markdown::render(entry.body.trim_end(), room.max(1), &muted);
-    let tag = text::truncate(tag, lead.saturating_sub(1));
-    let indent = " ".repeat(GUTTER + lead);
-
-    let mut lines = Vec::new();
-    for (at, line) in body.into_iter().enumerate() {
-        let mut spans = match at {
-            0 => vec![
-                Span::styled(
-                    format!("{} ", EntryKind::SubAgent.glyph()),
-                    Style::new().fg(theme.agent).bold(),
-                ),
-                Span::styled(text::pad(&tag, lead), Style::new().fg(theme.agent).bold()),
-            ],
-            _ => vec![Span::raw(indent.clone())],
-        };
-        let drawn = spans_width(&line.spans);
-        spans.extend(line.spans);
-        if at == 0 {
-            spans.push(Span::raw(" ".repeat(room.saturating_sub(drawn) + GAP)));
-            spans.push(Span::styled(SAYS, Style::new().fg(theme.dim)));
-        }
-        lines.push(Line::from(spans));
+    let room = width.saturating_sub(GUTTER);
+    let tag = text::truncate(tag, room);
+    let mut head = vec![
+        Span::styled(
+            format!("{} ", EntryKind::SubAgent.glyph()),
+            Style::new().fg(theme.agent).bold(),
+        ),
+        Span::styled(tag.clone(), Style::new().fg(theme.agent).bold()),
+    ];
+    // Grouped by agent, the heading above already says what it was spawned
+    // to do.
+    let task = room.saturating_sub(text::width(&tag) + GAP);
+    if !detail.grouped && entry.agent.is_some() && task > 0 {
+        head.push(Span::raw(" ".repeat(GAP)));
+        head.push(Span::styled(
+            text::truncate(&entry.head, task),
+            Style::new().fg(theme.dim),
+        ));
     }
+    let mut lines = vec![Line::from(head)];
+    lines.extend(
+        crate::markdown::render(entry.body.trim_end(), room.max(1), theme)
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }),
+    );
     lines.push(Line::from(""));
     lines
 }
@@ -831,9 +880,6 @@ pub(crate) fn heading(
         Span::styled(count, Style::new().fg(theme.dim)),
     ])
 }
-
-/// What stands where a call's cost would, on a sub-agent's words.
-const SAYS: &str = "says";
 
 /// What a row says the call does, and which sub-agent made it, where one did.
 #[derive(Clone, Copy)]
@@ -1392,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_agent_tag_keeps_its_words_and_its_heading_in_their_columns() {
+    fn a_wide_agent_tag_heads_its_words_and_keeps_its_heading_in_its_columns() {
         let mut app = app();
         app.apply(&Event::AgentSpawn {
             id: niobe_core::event::AgentId::new("toolu_a"),
@@ -1411,13 +1457,18 @@ mod tests {
             ..Detail::default()
         };
         let theme = Theme::default();
-        let words: String = said(&app.entries()[1], 60, detail, &theme)[0]
-            .spans
+        let words: Vec<String> = said(&app.entries()[1], 60, detail, &theme)
             .iter()
-            .map(|span| span.content.as_ref())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
             .collect();
-        assert_eq!(cell_of(&words, "Done."), Some(16), "{words:?}");
-        assert_eq!(text::width(&words), 60, "{words:?}");
+        assert!(words[0].starts_with("↳ 漢字漢字"), "{words:?}");
+        assert!(text::width(&words[0]) <= 60, "{words:?}");
+        assert_eq!(words[1], "  Done.", "{words:?}");
         let head: String = heading("漢字漢字", "書く", 1, 60, detail, &theme)
             .spans
             .iter()
@@ -1456,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_agents_words_are_a_row_under_its_tag_that_wraps_in_its_own_column() {
+    fn a_sub_agents_words_are_drawn_in_the_body_colour_under_its_tag() {
         let mut app = app();
         spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
         app.apply(&start_by("t1", "Read", "toolu_a"));
@@ -1469,8 +1520,10 @@ mod tests {
             columns: Columns::of(app.entries()),
             ..Detail::default()
         };
-        let rows: Vec<String> = said(&app.entries()[1], 60, detail, &Theme::default())
-            .into_iter()
+        let theme = Theme::default();
+        let lines = said(&app.entries()[1], 40, detail, &theme);
+        let rows: Vec<String> = lines
+            .iter()
             .map(|line| {
                 line.spans
                     .iter()
@@ -1479,16 +1532,152 @@ mod tests {
             })
             .collect();
         assert!(
-            rows[0].starts_with("↳ quick      The stub is in"),
+            rows[0].starts_with("↳ quick  quick-lookup: Summarize"),
             "{rows:?}"
         );
-        assert!(rows[0].ends_with("says"), "{rows:?}");
-        assert_eq!(text::width(&rows[0]), 60, "{rows:?}");
-        let column = "↳ quick      ".chars().count();
         assert!(
-            rows[1].starts_with(&" ".repeat(column)) && !rows[1][column..].starts_with(' '),
-            "the words wrap under their own first line: {rows:?}"
+            rows[1].starts_with("  The stub is in down mode"),
+            "{rows:?}"
         );
+        assert!(
+            rows[2].starts_with("  ") && !rows[2][2..].starts_with(' '),
+            "{rows:?}"
+        );
+        assert!(rows.iter().all(|row| text::width(row) <= 40), "{rows:?}");
+        assert!(rows.last().is_some_and(String::is_empty), "{rows:?}");
+        for line in &lines[1..lines.len() - 1] {
+            for span in line
+                .spans
+                .iter()
+                .filter(|span| !span.content.trim().is_empty())
+            {
+                assert_eq!(span.style.fg, Some(theme.fg), "{span:?}");
+            }
+        }
+    }
+
+    /// A shell call of the agent's, started with the first line of `command`
+    /// as its summary and ended with the whole of it.
+    fn shell_call(app: &mut App, command: &str) {
+        let first = command.lines().next().unwrap_or_default();
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            summary: Some(first.to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            output: String::new(),
+            bytes: 2_048,
+            outcome: ToolOutcome::Ok,
+            summary: Some(first.to_owned()),
+            exit_code: Some(0),
+            error: None,
+            command: Some(command.to_owned()),
+        });
+    }
+
+    const LONG_COMMAND: &str = "cd /Users/someone/projects/catalog && cargo test -p catalog-fetch 2>&1 | tail -50\necho done";
+
+    #[test]
+    fn an_agents_shell_call_names_the_programs_it_ran_rather_than_the_command() {
+        let mut app = app();
+        shell_call(&mut app, LONG_COMMAND);
+
+        let rows = drawn(&app, false);
+        assert_eq!(
+            rows.iter().filter(|row| !row.is_empty()).count(),
+            1,
+            "{rows:?}"
+        );
+        assert!(rows[0].starts_with("⚙ Bash cargo test · tail "), "{rows:?}");
+        assert!(!rows[0].contains("/Users"), "{rows:?}");
+        assert!(rows[0].ends_with("exit 0"), "{rows:?}");
+    }
+
+    #[test]
+    fn ctrl_t_draws_a_shell_calls_whole_command_under_its_row() {
+        let mut app = app();
+        shell_call(&mut app, LONG_COMMAND);
+
+        let detail = Detail {
+            diffs_open: true,
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        let rows: Vec<String> = lines(&app.entries()[0], 60, detail, &Theme::default())
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert!(rows[0].starts_with("⚙ Bash cargo test · tail "), "{rows:?}");
+        let under = rows[1..].join("\n");
+        assert!(
+            under.starts_with("  $ cd /Users/someone/projects/catalog"),
+            "{rows:?}"
+        );
+        assert!(
+            under.contains("tail -50"),
+            "the command is wrapped, not cut: {rows:?}"
+        );
+        assert!(
+            under.contains("  echo done"),
+            "every line of it is drawn: {rows:?}"
+        );
+        assert!(rows.iter().all(|row| text::width(row) <= 60), "{rows:?}");
+    }
+
+    #[test]
+    fn a_command_the_operator_ran_keeps_its_command_on_its_row() {
+        let mut app = app();
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: crate::shell::OPERATOR_SHELL.to_owned(),
+            input: "cargo fmt --all".to_owned(),
+            summary: None,
+            agent: None,
+        });
+        let rows = drawn(&app, false);
+        assert!(rows[0].contains("cargo fmt --all"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_calls_row_is_drawn_dim_and_a_failed_one_names_its_tool_in_the_failure_colour() {
+        let theme = Theme::default();
+        let detail = |app: &App| Detail {
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        let mut app = app();
+        app.apply(&start("t1", "Read"));
+        app.apply(&end("t1", "Read", ToolOutcome::Ok, None));
+        let row = lines(&app.entries()[0], 80, detail(&app), &theme).remove(0);
+        for span in row
+            .spans
+            .iter()
+            .filter(|span| !span.content.trim().is_empty())
+        {
+            assert_eq!(span.style.fg, Some(theme.dim), "{span:?}");
+        }
+
+        let mut app = self::app();
+        app.apply(&start("t1", "Read"));
+        app.apply(&end("t1", "Read", ToolOutcome::Failed, Some("gone")));
+        let row = lines(&app.entries()[0], 80, detail(&app), &theme).remove(0);
+        let name = row
+            .spans
+            .iter()
+            .find(|span| span.content.contains("Read"))
+            .expect("the row names its tool");
+        assert_eq!(name.style.fg, Some(theme.del), "{row:?}");
     }
 
     #[test]

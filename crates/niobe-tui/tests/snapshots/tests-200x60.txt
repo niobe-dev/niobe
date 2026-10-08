@@ -41,7 +41,7 @@
  ┃ ◆ claude                                                                                                                     ┃ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ │   └ Reading tests/stream.rs                                       │
  ┃                                                                                                                              ┃ │ ▾ Tools  9 calls ✗ 3 · 0 denied · 81.6 kB out                     │
- ┃ ✗ Bash           npm test -- fetch                                                                             exit 1 · 0.4s ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                                 │
+ ┃ ✗ Bash           npm test                                                                                      exit 1 · 0.4s ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                                 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │     Read 3                                                        │
  ┃                                                                                                                              ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                             │
  ┃ ◆ claude                                                                                                                     ┃ │     fetch 1 · search 1 · update-page 1                            │

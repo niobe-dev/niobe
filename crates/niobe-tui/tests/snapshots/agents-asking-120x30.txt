@@ -1,7 +1,7 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃ ↳ deep2                Let me check how eviction is triggered.      says ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
- ┃ ⚙ Read           deep2 catalog/cache.py                           2.8 kB ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃   The etag is stored but never compared on the 304 path.                 ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃                                                                          ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
  ┃ ⚙ Read           deep1 catalog/etag.py                            1.3 kB ┃ │ ───────────────────────────────────── │
  ┃                                                                          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃ ◆ claude                                                                 ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │

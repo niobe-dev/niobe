@@ -1404,8 +1404,9 @@ IN THE SHELL:
                            kind of work
     Ctrl+End               Back to the newest line of the transcript
     Ctrl+O                 Fold each run of calls to one tool into one row
-    Ctrl+T                 Open every diff cut at twenty rows, and show a
-                           call's arguments as they were sent
+    Ctrl+T                 Open every diff cut at twenty rows, show the whole
+                           command under a shell call's row, and a call's
+                           arguments as they were sent
     Ctrl+V                 Attach the image on the clipboard to the prompt;
                            a pasted or dropped path to an image attaches it
     drag                   Copy what it covers

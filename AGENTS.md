@@ -158,15 +158,16 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   cut at twenty rows until Ctrl+T opens every cut diff in place,
   `calls.rs` draws a tool call as a row of a table — its name, the tag of the sub-agent that made
   it where one did, each in a column as wide as the transcript's widest, what it does, and on the
-  right what it cost, by what the backend reported and the shell's own clock — with
+  right what it cost, by what the backend reported and the shell's own clock — the whole row dim
+  but for a failure, so the agents' words in the body colour are what the eye finds, and a shell
+  call named by the programs it ran (`cargo test · tail`, read with `work.rs`) with the whole
+  command under the row behind Ctrl+T — with
   what a test run reported under the call that ran it, beside a bar of its counts — and while it
-  runs, how long it has run against the last whole run of the same command — a sub-agent's words as a row of the same
-  table, rows with nothing under them on consecutive lines, a run of calls to one tool as one
+  runs, how long it has run against the last whole run of the same command — a sub-agent's words as a reply under a head
+  that names the agent, rows with nothing under them on consecutive lines, a run of calls to one tool as one
   group that Ctrl+O folds, edits to the agent's own notes as one `updated memory` row whose
   lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
-  grouped under a heading per agent — what a call does, what it printed and a sub-agent's words
-  drawn dim, so the replies in the body colour and the prompts in the operator's are what the
-  eye finds — `arguments.rs` lays out the arguments of a call a permission question has no
+  grouped under a heading per agent — `arguments.rs` lays out the arguments of a call a permission question has no
   target for, one key to a row, with the JSON as sent behind Ctrl+T, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far

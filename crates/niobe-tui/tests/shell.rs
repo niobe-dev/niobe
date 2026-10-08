@@ -170,9 +170,9 @@ fn every_theme_draws_the_calls_dimmer_than_the_reply_and_the_prompt_apart() {
                 "{name} at {depth:?}: what one call of the group does"
             );
             assert_eq!(
-                fg(style_at(&mut app, 200, 60, "npm test -- fetch")),
+                fg(style_at(&mut app, 200, 60, "npm test  ")),
                 Some(palette.dim),
-                "{name} at {depth:?}: what a failed call ran"
+                "{name} at {depth:?}: the program a failed call ran"
             );
             assert_eq!(
                 fg(style_at(&mut app, 200, 60, "✗ Bash")),
@@ -391,10 +391,26 @@ fn grouped_by_agent_each_agents_rows_stand_under_its_heading() {
         .lines()
         .position(|line| line.contains("▾ deep1"))
         .expect("the heading is drawn");
-    let rows: Vec<&str> = frame.lines().skip(heading + 1).take(2).collect();
+    // Everything the first agent did and said stands under its heading, in
+    // the order it happened, and nothing of the second's does.
+    let under: Vec<&str> = frame
+        .lines()
+        .skip(heading + 1)
+        .take_while(|line| !line.contains("▾ deep2"))
+        .collect();
+    let at = |needle: &str| under.iter().position(|line| line.contains(needle));
+    let (fetch, said, etag) = (
+        at("catalog/fetch.py"),
+        at("never compared on the 304 path"),
+        at("catalog/etag.py"),
+    );
     assert!(
-        rows[0].contains("catalog/fetch.py") && rows[1].contains("catalog/etag.py"),
+        fetch.is_some() && fetch < said && said < etag,
         "the first agent's rows are not together under it:\n{frame}"
+    );
+    assert!(
+        at("catalog/cache.py").is_none() && at("eviction").is_none(),
+        "the second agent's rows are under the first's heading:\n{frame}"
     );
     assert_snapshot("agents-grouped-120x30", &frame);
 }
@@ -456,6 +472,21 @@ fn a_denied_command_of_several_lines_keeps_its_lines_apart_on_its_row() {
         "{frame}"
     );
     assert_snapshot("denied-multiline-120x30", &frame);
+}
+
+/// A shell call's row names the programs it ran, and Ctrl+T draws the whole
+/// command under it, where the operator who wants the exact text finds it.
+#[test]
+fn a_shell_calls_row_names_its_programs_and_ctrl_t_draws_its_whole_command() {
+    let mut app = running_session();
+    let closed = screen(&mut app, 120, 30);
+    assert!(closed.contains("✗ Bash           npm test "), "{closed}");
+    assert!(!closed.contains("npm test -- fetch"), "{closed}");
+
+    app.open_diffs();
+    let open = screen(&mut app, 120, 30);
+    assert!(open.contains("$ npm test -- fetch"), "{open}");
+    assert_snapshot("command-open-120x30", &open);
 }
 
 #[test]

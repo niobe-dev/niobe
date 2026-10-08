@@ -17,7 +17,7 @@
  ┃ ◆ claude                                                                 █ │     Read 3                            │
  ┃   The notebook that demonstrates the fetcher needs the new call shape.   █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
  ┃                                                                          █ │     fetch 1 · search 1 · …            │
- ┃ ✗ Bash           npm test -- fetch                         exit 1 · 0.4s █ │   Editing files    1 ▓▓▓              │
+ ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │   Editing files    1 ▓▓▓              │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │     Edit 1                            │
  ┃                                                                          █ │   Build and test   1 ▓▓▓         ✗ 1  │
  ┃ ◆ claude                                                                 █ │     npm test 1                        │

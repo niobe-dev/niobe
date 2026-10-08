@@ -2378,7 +2378,8 @@ fn grouped_turn(entries: &[Entry], turn: std::ops::Range<usize>) -> Vec<Slot> {
         let Some(entry) = entries.get(at) else {
             continue;
         };
-        match entry.agent.as_deref().filter(|_| is_row(entry)) {
+        let grouped = is_row(entry) || entry.kind == EntryKind::SubAgent;
+        match entry.agent.as_deref().filter(|_| grouped) {
             Some(tag) => match groups.iter_mut().find(|(group, _)| *group == tag) {
                 Some((_, rows)) => rows.push(at),
                 None => {
@@ -2468,16 +2469,16 @@ pub(crate) struct Anchor {
     lines: Vec<Line<'static>>,
 }
 
-/// Whether `entry` is drawn as rows of the calls table — a call, a run of
-/// calls, a sub-agent's words — with nothing under it that needs room to be
+/// Whether `entry` is drawn as rows of the calls table — a call or a run of
+/// calls — with nothing under it that needs room to be
 /// read. Two such entries in a row are drawn on consecutive lines, so a
 /// session's calls read as one table rather than a list with a gap after
 /// every line; a diff or what a command printed keeps the blank line after
 /// it, and so does everything else the transcript shows.
 fn is_row(entry: &Entry) -> bool {
     match entry.kind {
-        EntryKind::SubAgent => true,
         EntryKind::User
+        | EntryKind::SubAgent
         | EntryKind::Agent
         | EntryKind::Tool
         | EntryKind::Failure
@@ -2496,8 +2497,8 @@ fn is_row(entry: &Entry) -> bool {
 /// What an entry's lines are drawn from, as one number.
 ///
 /// Whether the diffs are open goes in only for an entry that holds a diff it
-/// would cut or hide, so opening them lays out again those entries and no
-/// other; the
+/// would cut or hide, or a shell command whose whole text it would draw, so
+/// opening them lays out again those entries and no other; the
 /// clock goes in only for one holding a test run still going.
 ///
 /// The body goes in whole only while the entry is streaming. A finished
@@ -2527,7 +2528,7 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme, named:
     detail.folded.hash(&mut hasher);
     detail.columns.hash(&mut hasher);
     detail.grouped.hash(&mut hasher);
-    if holds_a_cut_diff(entry) || holds_a_hidden_diff(entry) {
+    if holds_a_cut_diff(entry) || holds_a_hidden_diff(entry) || ran_a_command(entry) {
         detail.diffs_open.hash(&mut hasher);
     }
     testing_for(entry, detail.now).hash(&mut hasher);
@@ -2563,6 +2564,12 @@ fn testing_for(entry: &Entry, now: Option<crate::clock::Stamp>) -> Vec<u64> {
         .filter_map(|(now, began)| now.since(began))
         .map(|ran| ran.as_secs())
         .collect()
+}
+
+/// Whether any call of `entry` ran a shell command, whose whole text is drawn
+/// under its row only while the diffs are open.
+fn ran_a_command(entry: &Entry) -> bool {
+    entry.calls.iter().any(|call| call.programs.is_some())
 }
 
 /// Whether any call of `entry` changed one of the agent's own notes, whose
@@ -7633,7 +7640,8 @@ mod tests {
             .collect();
         // The name column is as wide as `Write`, the widest name drawn.
         assert!(rows[0].starts_with("⚙ Read  t1 does"), "{rows:?}");
-        assert!(rows[1].starts_with("⚙ Bash  t2 does"), "{rows:?}");
+        // A shell call names the program it ran, `t2`, not the command.
+        assert!(rows[1].starts_with("⚙ Bash  t2 "), "{rows:?}");
         assert!(rows[2].starts_with("⚙ Read  t3 does"), "{rows:?}");
         assert_eq!(rows[3], "", "a call with a diff stands apart: {rows:?}");
         assert!(rows[4].starts_with("⚙ Write after.rs"), "{rows:?}");

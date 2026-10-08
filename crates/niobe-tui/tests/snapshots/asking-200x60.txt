@@ -33,7 +33,7 @@
  ┃ ◆ claude                                                                                                                     █ │     helpers.ts                                              +5 −2 █
  ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       █ │     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 │
  ┃                                                                                                                              █ │     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 │
- ┃ ✗ Bash           npm test -- fetch                                                                             exit 1 · 0.4s █ │   web/                                                            │
+ ┃ ✗ Bash           npm test                                                                                      exit 1 · 0.4s █ │   web/                                                            │
  ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        █ │     components/Catalog.tsx                                +54 −31 │
  ┃                                                                                                                              █ └───────────────────────────────────────────────────────────────────┘
  ┃ ◆ claude                                                                                                                     █ ┌──────────────────────────── Activity ─────────────────────────────┐

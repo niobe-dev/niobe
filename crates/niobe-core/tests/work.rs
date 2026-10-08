@@ -154,3 +154,18 @@ fn an_mcp_server_named_as_a_kind_of_work_is_not_drawn_as_that_kind() {
         );
     }
 }
+
+#[test]
+fn the_command_a_call_ran_is_the_whole_one_where_reported_and_the_shells_summary_otherwise() {
+    use niobe_core::work::command_of;
+    assert_eq!(
+        command_of("Bash", Some("cd x &&\ncargo test"), Some("cd x &&…")),
+        Some("cd x &&\ncargo test")
+    );
+    assert_eq!(
+        command_of("Bash", None, Some("cargo test …")),
+        Some("cargo test")
+    );
+    assert_eq!(command_of("Read", None, Some("src/lib.rs")), None);
+    assert_eq!(command_of("Bash", None, None), None);
+}

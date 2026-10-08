@@ -122,19 +122,35 @@ pub struct Reading {
 /// which for the session's own shell tool is the command's first line; those
 /// are read instead.
 pub fn of_call(tool: &str, command: Option<&str>, summary: Option<&str>, input: &str) -> Reading {
-    if let Some(command) = command {
+    if let Some(command) = command_of(tool, command, summary) {
         return of_command(command);
     }
     if let Some(reading) = of_tool(tool) {
         return reading;
     }
-    match (tool, summary) {
-        (OPERATOR_SHELL, _) => of_command(input),
-        ("Bash", Some(summary)) => of_command(summary.trim_end_matches('…').trim_end()),
+    match tool {
+        OPERATOR_SHELL => of_command(input),
         _ => Reading {
             work: Work::Other,
             specifics: vec![tool.to_owned()],
         },
+    }
+}
+
+/// The shell command a call of the agent's ran, as far as it is known: the
+/// whole command where the backend reported it, and otherwise the one line of
+/// it its shell tool's `summary` holds, without the mark that says it was
+/// cut. `None` for a call that ran no command, and for one the operator ran
+/// with `!`, whose command is its input.
+pub fn command_of<'a>(
+    tool: &str,
+    command: Option<&'a str>,
+    summary: Option<&'a str>,
+) -> Option<&'a str> {
+    match (command, tool, summary) {
+        (Some(command), _, _) => Some(command),
+        (None, "Bash", Some(summary)) => Some(summary.trim_end_matches('…').trim_end()),
+        (None, _, _) => None,
     }
 }
 
