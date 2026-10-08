@@ -138,6 +138,14 @@ pub enum Outcome {
 const PAGE: usize = 10;
 
 impl View {
+    /// Told by the draw how far the file being read can scroll, so a key
+    /// past its end does not leave a scroll the next key has to undo first.
+    pub fn measured(&mut self, max_scroll: usize) {
+        if let Some((_, scroll)) = self.reading.as_mut() {
+            *scroll = (*scroll).min(max_scroll);
+        }
+    }
+
     /// The file the cursor is on.
     pub fn current(&self) -> Option<&MemoryFile> {
         self.files.as_ref()?.get(self.at)
@@ -218,7 +226,7 @@ const CURSOR: &str = "› ";
 const CHANGED: &str = "changed";
 
 /// Draws the Memory view over `body`, if it is open.
-pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
+pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) {
     let Some(view) = app.memory() else {
         return;
     };
@@ -229,6 +237,7 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
     // A row each for the border and the shadow, and one of room.
     let rows = usize::from(body.height).saturating_sub(4);
     let text_width = usize::from(width).saturating_sub(crate::ui::DIALOG_INSET);
+    let mut measured = None;
     let (title, lines, keys) = match view.reading {
         Some((at, scroll)) => {
             let file = view.files.as_ref().and_then(|files| files.get(at));
@@ -236,7 +245,8 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
                 || "Memory".to_owned(),
                 |file| format!("Memory · {}", file.path),
             );
-            let lines = reading(file, scroll, (text_width, rows), theme);
+            let (lines, max_scroll) = reading(file, scroll, (text_width, rows), theme);
+            measured = Some(max_scroll);
             (title, lines, " ↑↓ PgUp PgDn scroll · e edit · Esc back ")
         }
         None => (
@@ -254,6 +264,9 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
     let title = text::truncate(&title, text_width);
     let inner = crate::ui::dialog(frame, body, (width, lines.len()), (&title, &footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
+    if let Some(max_scroll) = measured {
+        app.measured_memory(max_scroll);
+    }
 }
 
 /// The list: a row a file, in the order the agent is given them.
@@ -369,13 +382,17 @@ fn sized(file: &MemoryFile) -> String {
     }
 }
 
-/// A file's text, read-only, wrapped to the view and scrolled.
+/// A file's text, read-only, wrapped to the view and scrolled, and how far
+/// it can scroll.
+///
+/// Every space is kept, as the file has it: an instructions file is markdown
+/// whose nested lists and code blocks say what they say by their indentation.
 fn reading(
     file: Option<&MemoryFile>,
     scroll: usize,
     (width, rows): (usize, usize),
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, usize) {
     let plain = Style::new().fg(theme.dialog_fg);
     let text = file
         .and_then(|file| file.text.as_deref())
@@ -384,11 +401,12 @@ fn reading(
         .lines()
         .flat_map(|line| match line.is_empty() {
             true => vec![String::new()],
-            false => text::wrap(&text::expand_tabs(line), width),
+            false => text::wrap_exact(line, width),
         })
         .collect();
     let room = rows.max(1);
-    let first = scroll.min(wrapped.len().saturating_sub(room));
+    let max_scroll = wrapped.len().saturating_sub(room);
+    let first = scroll.min(max_scroll);
     let mut lines: Vec<Line<'static>> = wrapped
         .into_iter()
         .skip(first)
@@ -401,7 +419,7 @@ fn reading(
             Style::new().fg(theme.dim),
         ));
     }
-    lines
+    (lines, max_scroll)
 }
 
 #[cfg(test)]
@@ -494,6 +512,57 @@ mod tests {
         };
         assert_eq!(view.on_key(key(KeyCode::Enter)), Outcome::Say(TOO_LARGE));
         assert_eq!(view.reading, None);
+    }
+
+    fn said(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_file_being_read_keeps_its_indentation_and_runs_of_spaces() {
+        let text = "- top\n  - nested item\n    - deeper\n\n    key   =   \"v\"\n\tx\n";
+        let read = file("CLAUDE.md", Some(text), true);
+        assert_eq!(
+            said(&reading(Some(&read), 0, (40, 20), &Theme::default()).0),
+            [
+                "- top",
+                "  - nested item",
+                "    - deeper",
+                "",
+                "    key   =   \"v\"",
+                "    x",
+            ]
+        );
+    }
+
+    #[test]
+    fn scrolling_a_file_stops_at_its_end_so_one_up_moves_it_back() {
+        let text: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+        let mut view = View {
+            files: Some(vec![file("CLAUDE.md", Some(&text), true)]),
+            ..View::default()
+        };
+        view.on_key(key(KeyCode::Enter));
+        for _ in 0..60 {
+            view.on_key(key(KeyCode::Down));
+        }
+        view.measured(30);
+        assert_eq!(view.reading, Some((0, 30)));
+        view.on_key(key(KeyCode::Up));
+        assert_eq!(view.reading, Some((0, 29)));
+        for _ in 0..5 {
+            view.on_key(key(KeyCode::PageDown));
+        }
+        view.measured(30);
+        assert_eq!(view.reading, Some((0, 30)));
     }
 
     #[test]

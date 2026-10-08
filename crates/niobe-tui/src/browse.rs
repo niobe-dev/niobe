@@ -247,12 +247,16 @@ fn list_row(said: &str, on_it: bool, width: usize, theme: &Theme) -> Line<'stati
     }
 }
 
-/// The prompt under the cursor, whole, wrapped to the dialog.
+/// The prompt under the cursor, whole, wrapped to the dialog with every space
+/// it was sent with, so an indented list or a pasted block reads as sent.
 fn prompt_detail(row: &PromptRow, width: usize, room: usize, theme: &Theme) -> Vec<Line<'static>> {
     let wrapped: Vec<String> = row
         .text
         .lines()
-        .flat_map(|line| text::wrap(line, width))
+        .flat_map(|line| match line.is_empty() {
+            true => vec![String::new()],
+            false => text::wrap_exact(line, width),
+        })
         .collect();
     cut(wrapped, room, theme)
 }
@@ -362,4 +366,34 @@ fn one_line(text: &str) -> String {
 /// The style of what a row says about itself rather than its prompt.
 fn secondary(theme: &Theme) -> Style {
     Style::new().fg(theme.dialog_fg).add_modifier(Modifier::DIM)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn said(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_prompt_shown_whole_keeps_its_indentation_and_runs_of_spaces() {
+        let row = PromptRow {
+            text: "- top\n  - nested item\n    key   =   \"v\"\n\tx".to_owned(),
+            at: None,
+            session: None,
+        };
+        assert_eq!(
+            said(&prompt_detail(&row, 40, 10, &Theme::default())),
+            ["- top", "  - nested item", "    key   =   \"v\"", "    x"]
+        );
+    }
 }

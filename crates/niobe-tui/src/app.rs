@@ -3310,6 +3310,14 @@ impl App {
         }
     }
 
+    /// Told by the draw how far the memory file being read can scroll: see
+    /// [`crate::memory::View::measured`].
+    pub(crate) fn measured_memory(&mut self, max_scroll: usize) {
+        if let Some(view) = self.memory.as_mut() {
+            view.measured(max_scroll);
+        }
+    }
+
     /// Told by the draw that it did not draw `pane`: nothing may scroll it
     /// with the mouse, and the keyboard cannot stay on it.
     pub(crate) fn pane_not_drawn(&mut self, pane: Pane) {

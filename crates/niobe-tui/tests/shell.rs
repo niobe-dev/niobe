@@ -1946,6 +1946,39 @@ fn f8_shows_what_the_agent_is_told_and_remembers_in_the_shell() {
     assert_snapshot("memory-reading-120x30", &frame);
 }
 
+/// A file read in the Memory view scrolls no further than its end, so the
+/// first Up after any number of Downs moves it back a line.
+#[test]
+fn f8_reading_a_file_scrolled_past_its_end_moves_back_on_the_first_up() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = running_session();
+    press(&mut app, KeyCode::F(8));
+    assert!(app.take_memory_request());
+    let text: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+    app.set_memory(vec![niobe_tui::MemoryFile {
+        scope: niobe_tui::memory::Scope::Project,
+        path: "CLAUDE.md".to_owned(),
+        named: "CLAUDE.md".to_owned(),
+        depth: 0,
+        bytes: Some(text.len() as u64),
+        text: Some(text),
+        note: None,
+        editable: Some("/home/me/CLAUDE.md".to_owned()),
+    }]);
+    press(&mut app, KeyCode::Enter);
+    for _ in 0..60 {
+        press(&mut app, KeyCode::Down);
+        screen(&mut app, 120, 30);
+    }
+    let at_the_end = screen(&mut app, 120, 30);
+    assert!(at_the_end.contains("line 40"), "{at_the_end}");
+
+    press(&mut app, KeyCode::Up);
+    let one_up = screen(&mut app, 120, 30);
+    assert_ne!(one_up, at_the_end, "the first Up did not move the file");
+    assert!(!one_up.contains("line 40"), "{one_up}");
+}
+
 /// A file the agent is given that is too large to read is listed with its
 /// size, and says its text is not shown, rather than being left out.
 #[test]
