@@ -1569,6 +1569,11 @@ const TYPED_AT_TRUST_HINT: &str =
 const TYPED_AT_QUESTION_HINT: &str =
     "Typed into the prompt, not taken as an answer: Esc to answer the question first";
 
+/// What the bar says when an image was asked for while the composer holds a
+/// command for `sh`, which takes text and nothing else.
+const NO_IMAGE_IN_A_COMMAND_HINT: &str =
+    "No image attached: a ! command goes to sh, which takes text. Esc leaves ! mode";
+
 /// What the bar says when a prompt chosen from the history took the composer
 /// out of `!` mode.
 const LEFT_BANG_FOR_HISTORY_HINT: &str =
@@ -5153,9 +5158,10 @@ impl App {
     /// and, where it ran `cargo test`, the run it reported.
     ///
     /// A command the operator stopped ends as [`crate::shell::STOPPED`] and
-    /// as a call that did not succeed, rather than with the signal that
-    /// stopped it — the signal is how, the operator is why — and with no
-    /// status: whatever `sh` exited with after the stop is how the shell
+    /// as interrupted — the operator's own stop, as Esc on a backend's call
+    /// is, which counts as neither a failure nor a refusal — rather than with
+    /// the signal that stopped it — the signal is how, the operator is why —
+    /// and with no status: whatever `sh` exited with after the stop is how the shell
     /// ended, not how the command did, and an `exit 0` beside "stopped"
     /// would read as a command that succeeded.
     pub fn ran(&mut self, mut ran: crate::shell::Ran) {
@@ -5175,9 +5181,10 @@ impl App {
             ran.error = Some(crate::shell::STOPPED.to_owned());
             ran.exit_code = None;
         }
-        let outcome = match ran.exit_code {
-            Some(0) if !stopped => ToolOutcome::Ok,
-            _ => ToolOutcome::Failed,
+        let outcome = match (stopped, ran.exit_code) {
+            (true, _) => ToolOutcome::Interrupted,
+            (false, Some(0)) => ToolOutcome::Ok,
+            (false, _) => ToolOutcome::Failed,
         };
         let tested = niobe_core::test_run::is_test_run(&command).then(|| {
             let whole = ran.whole.then_some(ran.output.as_str());
@@ -5872,6 +5879,12 @@ impl App {
         if self.paste_into_find(&text) {
             return;
         }
+        // A command for `sh` is text: a path pasted into it is the path, and
+        // an image has nowhere to go.
+        if self.shell_mode && text.is_empty() {
+            self.hint = Some(NO_IMAGE_IN_A_COMMAND_HINT.to_owned());
+            return;
+        }
         // A terminal that pastes an image it cannot give as text pastes
         // nothing, and a dropped image file arrives as its path. Blanks are
         // text the operator copied, and go in as typed.
@@ -5880,7 +5893,7 @@ impl App {
             self.attach_image(Source::Clipboard);
             return;
         }
-        if let Some(path) = image_path(pasted) {
+        if let Some(path) = image_path(pasted).filter(|_| !self.shell_mode) {
             self.focus = Focus::Session;
             self.images.remember_paste(path.clone(), text);
             self.attach_image(Source::File(path));
@@ -6189,6 +6202,9 @@ impl App {
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.open_diffs(),
             // A terminal's own paste hands over text, and an image on the
             // clipboard is none: this is the one way to reach it.
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) if self.shell_mode => {
+                self.hint = Some(NO_IMAGE_IN_A_COMMAND_HINT.to_owned());
+            }
             (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
                 self.focus = Focus::Session;
                 self.attach_image(Source::Clipboard);
@@ -8532,6 +8548,31 @@ mod tests {
             [Source::File("/Users/me/Desktop/Screen Shot.png".to_owned())]
         );
         assert_eq!(app.composed(), "");
+    }
+
+    #[test]
+    fn an_image_path_pasted_into_a_shell_command_is_the_path() {
+        let mut app = app().runs_commands();
+        typed(&mut app, "!open ");
+        assert!(app.shell_mode());
+
+        app.on_paste("/Users/me/Desktop/shot.png");
+
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "open /Users/me/Desktop/shot.png");
+    }
+
+    #[test]
+    fn ctrl_v_in_a_shell_command_attaches_nothing_and_says_why() {
+        let mut app = app().runs_commands();
+        typed(&mut app, "!ls");
+
+        app.on_key(ctrl('v'));
+        app.on_paste("");
+
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "ls");
+        assert_eq!(app.hint(), Some(NO_IMAGE_IN_A_COMMAND_HINT));
     }
 
     #[test]

@@ -5443,13 +5443,19 @@ fn a_command_the_operator_stopped_ends_as_stopped_with_what_it_printed_up_to_the
     assert!(
         matches!(
             produced.as_slice(),
-            [Event::ToolCallEnd { id: ended, outcome: ToolOutcome::Failed, exit_code: None, error: Some(error), output, .. }]
+            [Event::ToolCallEnd { id: ended, outcome: ToolOutcome::Interrupted, exit_code: None, error: Some(error), output, .. }]
                 if *ended == id && error == "stopped by the operator" && output == "y\ny\ny\n"
         ),
         "the end does not say the operator stopped it: {produced:?}"
     );
+    assert!(
+        app.session().tools().failed_by_name.is_empty(),
+        "a command the operator stopped was counted as one that failed"
+    );
     let frame = screen(&mut app, 120, 30);
     assert!(frame.contains("stopped by the operator"), "{frame}");
+    assert!(frame.contains("stopped"), "{frame}");
+    assert!(!frame.contains("failed"), "{frame}");
 }
 
 #[test]
@@ -5475,7 +5481,7 @@ fn a_stopped_command_whose_sh_exited_0_reads_as_stopped_and_not_as_exit_0() {
     assert!(
         matches!(
             produced.as_slice(),
-            [Event::ToolCallEnd { outcome: ToolOutcome::Failed, exit_code: None, error: Some(error), .. }]
+            [Event::ToolCallEnd { outcome: ToolOutcome::Interrupted, exit_code: None, error: Some(error), .. }]
                 if error == "stopped by the operator"
         ),
         "a stopped command read as one that succeeded: {produced:?}"
