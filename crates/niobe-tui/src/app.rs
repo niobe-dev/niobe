@@ -1537,6 +1537,11 @@ const TOO_SOON_HINT: &str =
 const TYPED_AT_TRUST_HINT: &str =
     "Not taken as an answer: typed at the question. Choose with ↑↓ or 1/2, then press Enter";
 
+/// What a permission question says when a key that answers nothing was typed
+/// at it: the key went into the prompt behind it, and the question waits.
+const TYPED_AT_QUESTION_HINT: &str =
+    "Typed into the prompt, not taken as an answer: Esc to answer the question first";
+
 /// What the bar says when Enter was refused because an image for the prompt
 /// is still being read.
 const IMAGE_STILL_READING_HINT: &str =
@@ -6103,10 +6108,12 @@ impl App {
     /// One key, while a prompt has the keyboard.
     ///
     /// Scrolling still scrolls and a cut diff still opens, because the work that led to the question is
-    /// what the operator reads to answer it. Anything else that is not about
-    /// the question is swallowed rather than passed on: a key that did
-    /// something else while a question was being asked would be a key nobody
-    /// meant.
+    /// what the operator reads to answer it. A character typed at the
+    /// numbered answers that is not one of their digits is the operator
+    /// typing, and goes into the prompt behind the question (see
+    /// [`App::type_past_the_question`]). Anything else that is not about the
+    /// question is swallowed rather than passed on: a key that did something
+    /// else while a question was being asked would be a key nobody meant.
     fn on_ask_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -6151,9 +6158,40 @@ impl App {
         if self.too_soon_to_answer() {
             return;
         }
+        if self.ask_focus == AskFocus::Choosing
+            && let Some(typed) = typed_char(key).filter(|c| !c.is_ascii_digit())
+        {
+            self.type_past_the_question(typed);
+            return;
+        }
         match self.ask_focus {
             AskFocus::Writing => self.on_writing_key(key),
             AskFocus::Choosing | AskFocus::Deferred => self.on_choosing_key(key),
+        }
+    }
+
+    /// A character typed at the numbered answers that is not one of their
+    /// digits: what an operator who has not read the question types as their
+    /// next prompt.
+    ///
+    /// It goes into the prompt behind the question, which is put aside as Esc
+    /// puts it aside, so the Enter that ends what they were typing is refused
+    /// there rather than taking the answer the cursor is on — "Allow once"
+    /// unless they moved it — and what they typed is still in front of them.
+    /// Letters, `j` and `k` among them, choose nothing: a word of them would
+    /// move the cursor and leave Enter to answer wherever it stopped. Typed
+    /// as text, a `!` opens no command.
+    fn type_past_the_question(&mut self, typed: char) {
+        self.ask_focus = AskFocus::Deferred;
+        self.focus = Focus::Session;
+        self.hint = Some(TYPED_AT_QUESTION_HINT.to_owned());
+        if !self.composer_has_room_for(typed.len_utf8()) {
+            return;
+        }
+        let mut bytes = [0; 4];
+        if self.composer.insert_str(typed.encode_utf8(&mut bytes)) {
+            self.offer_selected = 0;
+            self.reopen_offers();
         }
     }
 
@@ -6166,8 +6204,8 @@ impl App {
         };
         match code {
             KeyCode::Enter => self.answer(self.ask_selected()),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(true),
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(false),
+            KeyCode::Down => self.move_selection(true),
+            KeyCode::Up => self.move_selection(false),
             KeyCode::Char(c) => {
                 if let Some(number) = c.to_digit(10) {
                     self.select_option(number);
@@ -9100,16 +9138,30 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_takes_the_keyboard_from_the_composer() {
+    fn a_letter_typed_at_a_prompt_goes_into_the_composer_and_answers_nothing() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = app();
         app.apply(&prompt(Some("rm -rf build")));
 
-        // `x` is neither an answer nor a quit: under a question it is nothing.
+        // `x` is neither an answer nor a quit: it is the operator typing.
         app.on_key(key(KeyCode::Char('x')));
+        app.on_key(key(KeyCode::Enter));
 
-        assert_eq!(app.composed(), "");
+        assert_eq!(app.composed(), "x");
         assert!(app.asking().is_some());
+        assert_eq!(app.take_produced(), []);
+    }
+
+    #[test]
+    fn a_bang_typed_at_a_prompt_opens_no_command() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Char('!')));
+
+        assert_eq!(app.composed(), "!");
+        assert!(!app.shell_mode());
     }
 
     #[test]
@@ -10675,17 +10727,12 @@ mod tests {
     }
 
     #[test]
-    fn arrows_and_vi_keys_move_the_selection_and_wrap_at_either_end() {
+    fn arrows_move_the_selection_and_wrap_at_either_end() {
         let mut app = asked(Some("ls"));
         assert_eq!(app.ask_selected(), Answer::Once);
 
         let mut walked = Vec::new();
-        for code in [
-            KeyCode::Down,
-            KeyCode::Char('j'),
-            KeyCode::Down,
-            KeyCode::Down,
-        ] {
+        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Down] {
             press(&mut app, code);
             walked.push(app.ask_selected());
         }
@@ -10701,8 +10748,18 @@ mod tests {
 
         press(&mut app, KeyCode::Up);
         assert_eq!(app.ask_selected(), Answer::No);
-        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Up);
         assert_eq!(app.ask_selected(), Answer::AlwaysTarget);
+    }
+
+    #[test]
+    fn j_and_k_move_no_selection_and_are_typed() {
+        let mut app = asked(Some("ls"));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('k'));
+
+        assert_eq!(app.ask_selected(), Answer::Once);
+        assert_eq!(app.composed(), "jk");
     }
 
     #[test]
@@ -10744,6 +10801,97 @@ mod tests {
 
         assert_eq!(app.take_produced(), []);
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t1"));
+    }
+
+    /// An operator typing their next prompt one key at a time, past the
+    /// quiet a question waits for, and sending it.
+    fn typed_at_the_question(text: &str) -> App {
+        let shown = Instant::now();
+        let mut app = app();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("touch one.txt")));
+        let mut at = shown + ASK_QUIET * 2;
+        for c in text.chars() {
+            let mut bytes = [0; 4];
+            read(&mut app, c.encode_utf8(&mut bytes).as_bytes(), at);
+            at += Duration::from_millis(150);
+        }
+        read(&mut app, b"\r", at + Duration::from_secs(1));
+        app
+    }
+
+    #[test]
+    fn a_prompt_typed_at_a_question_and_sent_answers_nothing_and_is_kept() {
+        for text in ["hello", "keep going", "j", "jk", "ok"] {
+            let mut app = typed_at_the_question(text);
+
+            assert_eq!(app.take_produced(), [], "{text}");
+            assert!(app.asking().is_some(), "{text}");
+            assert_eq!(app.composed(), text, "{text}");
+            assert_eq!(app.ask_focus(), AskFocus::Deferred, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_letter_typed_at_a_question_says_where_it_went() {
+        let shown = Instant::now();
+        let mut app = app();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("touch one.txt")));
+
+        read(&mut app, b"h", shown + ASK_QUIET * 2);
+
+        assert_eq!(app.hint(), Some(TYPED_AT_QUESTION_HINT));
+    }
+
+    #[test]
+    fn a_question_typed_past_is_answered_again_after_esc() {
+        let shown = Instant::now();
+        let mut app = typed_at_the_question("hello");
+
+        read(&mut app, b"\x1b", shown + ASK_QUIET * 20);
+        read(&mut app, b"\r", shown + ASK_QUIET * 22);
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
+        assert_eq!(app.composed(), "hello", "the prompt typed waits to be sent");
+    }
+
+    #[test]
+    fn a_digit_or_enter_on_an_untouched_question_still_answers_it() {
+        let shown = Instant::now();
+        let mut first = app();
+        first.tick(shown, None);
+        first.apply(&prompt(Some("touch one.txt")));
+        read(&mut first, b"\r", shown + ASK_QUIET * 2);
+        assert_eq!(
+            first.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
+
+        let mut again = app();
+        again.tick(shown, None);
+        again.apply(&prompt(Some("touch one.txt")));
+        read(&mut again, b"4", shown + ASK_QUIET * 2);
+        read(&mut again, b"\r", shown + ASK_QUIET * 4);
+        assert_eq!(
+            again.take_produced(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Deny,
+                message: None,
+            }]
+        );
     }
 
     #[test]
