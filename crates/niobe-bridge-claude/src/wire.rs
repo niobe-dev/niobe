@@ -45,6 +45,9 @@ pub(crate) enum Message {
     ConversationReset(Reset),
     /// A tool call still running, or a sub-agent's request being retried.
     ToolProgress(Progress),
+    /// Where a message the operator sent stands: queued, started, completed
+    /// or cancelled.
+    CommandLifecycle(Lifecycle),
     /// The end of a turn, with the turn's totals.
     Result(Outcome),
     /// A `type` this bridge does not know.
@@ -785,6 +788,17 @@ pub(crate) struct Reset {}
 /// SDK adapter drops the heartbeat and the retry too.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Progress {}
+
+/// `command_lifecycle`: where one of the operator's messages stands, by the
+/// `uuid` it was sent with and a `state` of `queued`, `started`, `completed`
+/// or `cancelled`.
+///
+/// Sent as a top-level `type`, not as a `system` subtype, after nearly every
+/// turn. None of it is read: a turn's start and end already arrive as the
+/// stream's first event and the `result`, and a message the CLI cancelled ends
+/// its turn with an aborted `result` that is read as the operator's stop.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Lifecycle {}
 
 /// The `result` line that closes a turn.
 ///

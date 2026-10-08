@@ -102,6 +102,13 @@ const SHAPES: &[&str] = &[
     // heartbeat every thirty seconds. Passed over on purpose: it carries no
     // tokens, and the shell times a running call off its own clock.
     "tool_progress",
+    // Where the operator's message stands (`queued`, `started`, `completed`,
+    // `cancelled`) and that the permission classifier is checking a call,
+    // from Claude Code 2.1.292's own source (`lifecycle.jsonl`). Each is
+    // passed over on purpose: a turn's start and end already arrive on the
+    // stream and the `result`, and the call is on screen before its check.
+    "command_lifecycle",
+    "system/permission_check_status",
     // `/clear`, recorded from Claude Code 2.1.282: the conversation starts
     // over and the CLI's running totals with it, which the translator reads as
     // the point the totals are measured from again.

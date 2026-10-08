@@ -841,6 +841,8 @@ impl Translator {
             // Passed over: see `wire::Progress` for what it carries and why
             // none of it is counted or shown.
             wire::Message::ToolProgress(_) => {}
+            // Passed over: see `wire::Lifecycle`.
+            wire::Message::CommandLifecycle(_) => {}
             // Only the line a message arrived on says what type it was, so
             // whoever read that line is the one that can report it.
             wire::Message::Unknown => {}
@@ -1058,6 +1060,12 @@ impl Translator {
             // * `background_tasks_changed` lists what is running now, which is
             //   what the spawns and exits already fold to.
             Some("task_started" | "task_updated" | "background_tasks_changed") => {}
+            // The CLI saying its permission classifier is still deciding on a
+            // call (`status` `checking`, sent when the check has run past four
+            // seconds) and that it has (`done`). The call is already on screen
+            // and its prompt, if it comes, arrives as a `can_use_tool`
+            // request, so there is nothing to add to either.
+            Some("permission_check_status") => {}
             // The CLI's whole slash-command list, pushed when it changes after
             // the process started — an MCP server's prompts arriving late, a
             // skill found mid-session — which can be before `init`, and before
@@ -4055,11 +4063,11 @@ mod tests {
     #[test]
     fn an_unknown_message_is_reported_once_per_kind_in_a_session() {
         let mut translator = Translator::new("max");
-        let first = translator.line(r#"{"type":"command_lifecycle","uuid":"a"}"#);
+        let first = translator.line(r#"{"type":"teleport","uuid":"a"}"#);
         assert_eq!(notices(&first).len(), 1, "the first one is reported");
         assert!(
             translator
-                .line(r#"{"type":"command_lifecycle","uuid":"b"}"#)
+                .line(r#"{"type":"teleport","uuid":"b"}"#)
                 .is_empty()
         );
         assert_eq!(
@@ -4072,7 +4080,7 @@ mod tests {
     #[test]
     fn an_unknown_system_subtype_is_reported_once_per_subtype_in_a_session() {
         let mut translator = Translator::new("max");
-        let line = r#"{"type":"system","subtype":"permission_check_status"}"#;
+        let line = r#"{"type":"system","subtype":"warp_status"}"#;
         let first = translator.line(line);
         assert_eq!(notices(&first).len(), 1);
         assert!(

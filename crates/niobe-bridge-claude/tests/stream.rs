@@ -1746,6 +1746,29 @@ fn a_withdrawn_prompt_and_a_budgets_end_fold_as_the_fixtures_readme_says() {
     );
 }
 
+/// The two messages the CLI sends around ordinary work: where the operator's
+/// message stands, and that the permission classifier is checking a call.
+/// See `tests/fixtures/README.md`.
+const LIFECYCLE: &str = include_str!("fixtures/lifecycle.jsonl");
+
+#[test]
+fn a_message_lifecycle_and_a_permission_check_are_read_without_a_notice_or_an_error() {
+    let events = translate(LIFECYCLE);
+
+    assert!(
+        notices(&events).is_empty() && warnings(&events).is_empty(),
+        "{events:#?}"
+    );
+    let calls = events
+        .iter()
+        .filter(|event| matches!(event, Event::ToolCallStart { .. }))
+        .count();
+    assert_eq!(
+        calls, 1,
+        "the call between them is still folded: {events:#?}"
+    );
+}
+
 fn interrupted() -> Vec<Event> {
     translate(include_str!("fixtures/interrupted.jsonl"))
 }

@@ -1341,6 +1341,24 @@ here so that the shape inventory in `tests/conformance.rs` names them, and so
 that `tests/stream.rs` folds them: the withdrawn prompt is withdrawn from the
 session, and the budget's end is a failure that says what stopped the turn.
 
+## `lifecycle.jsonl`
+
+**Written by hand, not recorded**, for two shapes Claude Code 2.1.292 sends
+and a short headless session did not: `command_lifecycle`, a top-level `type`
+carrying the `uuid` the operator's message was sent with and a `state` of
+`queued`, `started`, `completed` or `cancelled`, and `system`/
+`permission_check_status`, carrying the `tool_use_id` of the call being
+checked and a `status` of `checking` (sent when the permission classifier has
+taken more than four seconds) or `done`. The lines follow the shapes in the
+CLI's own source, which also adds an `agent_id` to the second inside a
+sub-agent. Two live runs under the driver's flags (`--input-format
+stream-json`, `--permission-prompt-tool stdio`) sent neither, so a recording
+is still wanted.
+
+`tests/stream.rs` folds it and asserts the session says nothing about either
+shape and still holds the one `Bash` call between them; `tests/conformance.rs`
+lists both.
+
 ## `cut-off.jsonl`
 
 **Assembled, not recorded as a whole**, from a session on Claude Code 2.1.288
