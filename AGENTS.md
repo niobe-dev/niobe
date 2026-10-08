@@ -104,8 +104,11 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the F-key bar — every action the shell can be asked for, the key or backend command that
   reaches each without the menu, what each does in the words `niobe --help` lists the F-keys
   with, and where each is drawn so a click lands on it, and the commands that, typed as a
-  prompt, do what an action does — `/model`, `/memory`, `/resume`, `/help` and the rest — so
-  each action has one path however it is asked for; a backend
+  prompt, do what an action does — `/model`, `/memory`, `/mcp`, `/resume`, `/help` and the
+  rest — so each action has one path however it is asked for; F7 and `/mcp` list the MCP
+  servers the backend last reported, each with how it stands, where it is configured and its
+  tools, in a sheet that sends no turn and so opens while one runs, and say which CLI and
+  files change one; a backend
   command is sent only where the backend listed it, and an action no backend offers says why —
   `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
@@ -164,7 +167,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
-  `translate.rs` turns one message of it into events and owns no process — and marks an edit
+  `translate.rs` turns one message of it into events and owns no process — and reads the MCP
+  servers every `init` lists, each with the tools of the session's that are its own, and marks an edit
   under the CLI's `projects/<project>/memory/` as the agent's own notes — `driver.rs` spawns the
   binary, writes a turn with its attached images as base64 image blocks after the text, as the
   CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), asks it with

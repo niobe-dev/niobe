@@ -1256,6 +1256,32 @@ What it settles is where the models a session can run on are listed:
   `tests/conformance.rs` holds every listed model to carrying `value`,
   `displayName` and `description`.
 
+## `mcp-servers.jsonl`
+
+The `system`/`init` of a session on Claude Code 2.1.292, recorded on 8 October
+2026 in an empty directory with `--strict-mcp-config --setting-sources ""` and
+an `--mcp-config` naming three servers: `notes`, a stdio server that answers
+`initialize` and lists two tools, `search` and `fetch`; `broken`, whose
+command does not exist; and `remote docs`, an HTTP server at a port nothing
+listens on. The prompt was `/mcp`, which the CLI answers itself without a
+model request: `3 MCP server(s): 1 connected, 2 not connected, 0 disabled.
+Use /mcp in the terminal for details.`, at a cost of nothing. Only the `init`
+line is kept, cut down to the keys that say what ran, with its `cwd`
+rewritten to `/repo` and its `tools` cut to five of the CLI's own and the two
+of `notes`.
+
+What it settles is where the servers are listed without asking:
+
+- **`init` lists them, under `mcp_servers`**, each as `{name, status,
+  source}` — `notes` `connected`, `broken` and `remote docs` `failed`, all
+  three from the `dynamic` source a server given with `--mcp-config` comes
+  from. Why one failed is not there.
+- **A server's tools are among `init`'s `tools`**, as `mcp__notes__fetch` and
+  `mcp__notes__search`; a failed server has none.
+- `tests/stream.rs` folds it and expects the session to hold the three
+  servers in that order, `notes` with `fetch` and `search`, and no prompt
+  sent.
+
 ## `hand-written.jsonl`
 
 **Written by hand, not recorded**, for two shapes of the protocol no

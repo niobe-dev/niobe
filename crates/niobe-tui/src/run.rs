@@ -584,6 +584,7 @@ fn send_produced(
             | SessionEvent::CompactionStarted
             | SessionEvent::CompactionEnded
             | SessionEvent::Compacted { .. }
+            | SessionEvent::McpServers { .. }
             | SessionEvent::SessionLeft
             | SessionEvent::PermissionRequest { .. }
             | SessionEvent::PermissionWithdrawn { .. }

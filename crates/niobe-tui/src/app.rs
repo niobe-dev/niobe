@@ -2282,6 +2282,7 @@ impl App {
             | Event::UsageWindows(_)
             | Event::Billing { .. }
             | Event::Commands { .. }
+            | Event::McpServers { .. }
             | Event::Models { .. } => {}
 
             // Straight after its call's end, so in the same tick and at the
@@ -3408,7 +3409,7 @@ impl App {
             Action::NewSession => self.listed("clear"),
             Action::Compact => self.listed("compact"),
             Action::Doctor => self.listed("doctor"),
-            Action::Mcp => self.listed("mcp"),
+            Action::Mcp => true,
             Action::Effort => self.listed("effort"),
             Action::Rewind => self.listed("rewind"),
             Action::Hooks => self.listed("hooks"),
@@ -3479,7 +3480,7 @@ impl App {
             Action::Export => self.export(),
             Action::Memory => self.open_memory(),
             Action::AddFile => self.start_mention(),
-            Action::Mcp => self.send_command("mcp", None),
+            Action::Mcp => self.sheet = Some(self.mcp_servers()),
             Action::SubAgents => self.show_sub_agents(),
             Action::Hooks => self.send_or_say(
                 "hooks",
@@ -3806,6 +3807,86 @@ impl App {
             rows,
             link: None,
             scroll: 0,
+        }
+    }
+
+    /// The MCP servers the backend last reported, as it reported them: no
+    /// turn is sent to ask, so the view opens while one runs.
+    fn mcp_servers(&self) -> Sheet {
+        let servers = self.session.mcp_servers();
+        let mut rows = Vec::new();
+        match servers.is_empty() {
+            true => rows.push(
+                "No MCP server has been reported: the backend lists its servers as a turn \
+                 starts, and lists none where it has none."
+                    .to_owned(),
+            ),
+            false => {
+                let names = column_width(servers.iter().map(|server| server.name.as_str()));
+                let states = column_width(servers.iter().map(|server| server.status.label()));
+                let sources = column_width(
+                    servers
+                        .iter()
+                        .map(|server| server.source.as_deref().unwrap_or("—")),
+                );
+                for server in servers {
+                    rows.push(format!(
+                        "{}  {}  {}  {}",
+                        crate::text::pad(&server.name, names),
+                        crate::text::pad(server.status.label(), states),
+                        crate::text::pad(server.source.as_deref().unwrap_or("—"), sources),
+                        tool_count(server.tools.len()),
+                    ));
+                    if !server.tools.is_empty() {
+                        rows.push(format!("    {}", server.tools.join(", ")));
+                    }
+                }
+            }
+        }
+        let backend = self.backend_name();
+        rows.push(String::new());
+        rows.push(format!(
+            "Why a server failed, signing in to one, and adding, removing or turning one off \
+             are the {backend} CLI's own: run `{backend}` in a terminal and use /mcp there, or \
+             `{backend} mcp --help`. A change reaches the next session."
+        ));
+        if let Some(files) = self.mcp_config_files() {
+            rows.push(files.to_owned());
+        }
+        Sheet {
+            title: "MCP servers".to_owned(),
+            rows,
+            link: None,
+            scroll: 0,
+        }
+    }
+
+    /// The backend this session runs, as the shell names it: the one it
+    /// reported, or else the profile's.
+    fn backend(&self) -> Option<niobe_core::Backend> {
+        self.session
+            .meta()
+            .map(|meta| meta.backend)
+            .or_else(|| self.profile.as_ref().map(|profile| profile.backend))
+    }
+
+    /// The backend's name for what the operator is told to run.
+    fn backend_name(&self) -> &'static str {
+        self.backend().map_or(
+            niobe_core::Backend::Claude.as_str(),
+            niobe_core::Backend::as_str,
+        )
+    }
+
+    /// Where the backend keeps its MCP servers' configuration, where the
+    /// shell knows.
+    fn mcp_config_files(&self) -> Option<&'static str> {
+        match self.backend()? {
+            niobe_core::Backend::Claude => Some(
+                "Its servers are configured in ~/.claude.json, the user's and each \
+                 project's own, and in the repository's .mcp.json.",
+            ),
+            niobe_core::Backend::Codex | niobe_core::Backend::Native => None,
         }
     }
 
@@ -7639,6 +7720,20 @@ fn count(things: usize) -> u64 {
 
 /// A tool's name as a person reads it.
 ///
+/// How wide a column holding each of `cells` is drawn, in cells.
+fn column_width<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
+    cells.map(crate::text::width).max().unwrap_or(0)
+}
+
+/// How many tools a server gave the model, as its row says it.
+fn tool_count(tools: usize) -> String {
+    match tools {
+        0 => "no tools".to_owned(),
+        1 => "1 tool".to_owned(),
+        n => format!("{n} tools"),
+    }
+}
+
 /// An MCP tool arrives as `mcp__<server>__<tool>`, and the server as the
 /// client registered it (`claude_ai_Notion`). It reads as the server's last
 /// word and the tool, with the server's name taken off the tool's front where
@@ -13351,10 +13446,10 @@ mod tests {
     #[test]
     fn a_command_the_backend_does_not_list_is_not_sent_and_says_why() {
         let mut app = offering(&["compact"]);
-        app.on_key(key(KeyCode::F(7)));
+        app.perform(crate::menu::Action::Doctor);
         assert_eq!(app.take_produced(), []);
         assert!(
-            app.hint().is_some_and(|hint| hint.contains("/mcp")),
+            app.hint().is_some_and(|hint| hint.contains("/doctor")),
             "{:?}",
             app.hint()
         );
@@ -13483,6 +13578,73 @@ mod tests {
         app.on_key(key(KeyCode::Esc));
         assert_eq!(app.memory(), None);
         assert_eq!(app.composer().lines(), [""], "a key reached the composer");
+    }
+
+    fn mcp_server(
+        name: &str,
+        status: niobe_core::event::McpStatus,
+        tools: &[&str],
+    ) -> niobe_core::event::McpServer {
+        niobe_core::event::McpServer {
+            name: name.to_owned(),
+            status,
+            source: Some("project".to_owned()),
+            tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn f7_lists_the_mcp_servers_in_the_shell_mid_turn_and_sends_nothing() {
+        use niobe_core::event::McpStatus;
+        let mut app = offering(&["mcp"]);
+        app.apply(&Event::McpServers {
+            servers: vec![
+                mcp_server("notes", McpStatus::Connected, &["search", "fetch"]),
+                mcp_server("remote docs", McpStatus::Failed, &[]),
+            ],
+        });
+        typed_then_enter(&mut app, "go", KeyModifiers::NONE);
+        app.take_produced();
+        assert!(app.working(), "the turn is not running");
+
+        app.on_key(key(KeyCode::F(7)));
+        assert_eq!(app.take_produced(), [], "F7 sent a turn");
+        let sheet = app.sheet().expect("F7 opened no view");
+        assert_eq!(sheet.title, "MCP servers");
+        let rows = sheet.rows.join("\n");
+        for said in [
+            "notes",
+            "connected",
+            "search, fetch",
+            "remote docs",
+            "failed",
+        ] {
+            assert!(rows.contains(said), "{said}:\n{rows}");
+        }
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.sheet(), None);
+        assert!(app.working(), "Esc closed the view and stopped the turn");
+    }
+
+    #[test]
+    fn the_mcp_view_says_where_no_server_has_been_reported() {
+        let mut app = app();
+        assert!(app.can(crate::menu::Action::Mcp));
+        app.perform(crate::menu::Action::Mcp);
+        let rows = app.sheet().map(|sheet| sheet.rows.join("\n"));
+        assert!(
+            rows.as_deref()
+                .is_some_and(|rows| rows.contains("No MCP server")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_typed_mcp_command_opens_the_mcp_view_as_f7_does() {
+        typed_as_asked(|| offering(&["mcp"]), "/mcp", crate::menu::Action::Mcp);
+        let mut typed = offering(&["mcp"]);
+        assert_eq!(submitted(&mut typed, "/mcp"), []);
+        assert!(typed.sheet().is_some());
     }
 
     #[test]

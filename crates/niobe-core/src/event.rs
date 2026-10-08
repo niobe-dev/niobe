@@ -404,6 +404,60 @@ pub struct ModelOption {
     pub resolves_to: Option<String>,
 }
 
+/// A Model Context Protocol server the backend has configured for the
+/// session, as the backend last reported it.
+///
+/// Only what the backend says of it unasked: which servers there are, how
+/// each stands and the tools each gave the model. Why one failed, and how
+/// to change one, are the backend's to say on request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    /// Its name, as it is configured.
+    pub name: String,
+    /// How it stands.
+    pub status: McpStatus,
+    /// Where the backend found its configuration, in the backend's own word
+    /// — `user`, `project`, `local` — where the backend said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The tools it gave the model, by the server's own names for them, in
+    /// the backend's order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+}
+
+/// How an MCP server stands.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpStatus {
+    /// Connected: its tools are the model's.
+    Connected,
+    /// Still being connected to.
+    Pending,
+    /// Waiting for the operator to sign in to it.
+    NeedsAuth,
+    /// The backend could not connect to it.
+    Failed,
+    /// Turned off.
+    Disabled,
+    /// A state this version of Niobe has no word for, in the backend's own.
+    Other(String),
+}
+
+impl McpStatus {
+    /// What the status is called on screen.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Connected => "connected",
+            Self::Pending => "connecting",
+            Self::NeedsAuth => "needs sign-in",
+            Self::Failed => "failed",
+            Self::Disabled => "disabled",
+            Self::Other(word) => word,
+        }
+    }
+}
+
 /// The tool name a command the operator ran with `!` is recorded under.
 ///
 /// No backend names a tool this way, so the operator's commands are never
@@ -981,6 +1035,14 @@ pub enum Event {
     Commands {
         /// The commands, in the backend's order.
         commands: Vec<SlashCommand>,
+    },
+
+    /// Every MCP server the backend has configured for the session, as they
+    /// now stand. Replaces the list before it whole, as [`Event::Commands`]
+    /// does.
+    McpServers {
+        /// The servers, in the backend's order.
+        servers: Vec<McpServer>,
     },
 
     /// Every model the backend offers to run the session on, as it now

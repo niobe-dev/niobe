@@ -2053,3 +2053,39 @@ fn the_models_the_cli_offers_come_from_the_answer_to_initialize() {
     assert!(warnings(&events).is_empty(), "{events:?}");
     assert!(notices(&events).is_empty(), "{events:?}");
 }
+
+const MCP_SERVERS: &str = include_str!("fixtures/mcp-servers.jsonl");
+
+/// Every `init` the CLI sends lists the MCP servers it configured, each with
+/// how it stands, and the tools the connected ones gave the model are among
+/// the session's tools as `mcp__<server>__<tool>`. The session holds them all,
+/// each server with its own tools, without a turn being sent to ask.
+#[test]
+fn the_mcp_servers_the_cli_configured_come_from_its_init() {
+    use niobe_core::event::{McpServer, McpStatus};
+
+    let events = translate(MCP_SERVERS);
+    let state = SessionState::replay(&events);
+
+    let server = |name: &str, status: McpStatus, tools: &[&str]| McpServer {
+        name: name.to_owned(),
+        status,
+        source: Some("dynamic".to_owned()),
+        tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+    };
+    assert_eq!(
+        state.mcp_servers(),
+        [
+            server("notes", McpStatus::Connected, &["fetch", "search"]),
+            server("broken", McpStatus::Failed, &[]),
+            server("remote docs", McpStatus::Failed, &[]),
+        ]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::UserMessage { .. })),
+        "{events:?}"
+    );
+    assert!(warnings(&events).is_empty(), "{events:?}");
+}

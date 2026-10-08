@@ -50,7 +50,7 @@ pub enum Action {
     Memory,
     /// Starts naming a file for the prompt.
     AddFile,
-    /// The backend's report on its MCP servers.
+    /// Lists the backend's MCP servers, as it last reported them.
     Mcp,
     /// Gives the keyboard to the pane the sub-agents are listed in.
     SubAgents,
@@ -106,7 +106,7 @@ impl Action {
             Action::Export => "copy the transcript to the clipboard",
             Action::Memory => "show what the agent is told and remembers",
             Action::AddFile => "name a file for the prompt",
-            Action::Mcp => "the backend's MCP servers, as /mcp",
+            Action::Mcp => "list the MCP servers and how each stands",
             Action::SubAgents => "the pane the sub-agents are listed in",
             Action::Hooks => "the backend's hooks, as /hooks",
             Action::SwitchModel => "pick one of the models the backend offers",
@@ -288,7 +288,8 @@ const fn typed(name: &'static str, action: Action, backend: bool) -> Typed {
 /// Every command typed at the start of a prompt that the shell answers as
 /// one of its actions: those the menus name as an item's command, and the
 /// names Claude Code gives the dialogs the shell has instead of its own —
-/// `/model`, `/memory`, `/resume`, `/help`, `/config`, `/exit` and `/quit`.
+/// `/model`, `/memory`, `/mcp`, `/resume`, `/help`, `/config`, `/exit` and
+/// `/quit`.
 ///
 /// One table, so a command and the menu item that does the same cannot drift
 /// apart: whichever way the operator asks, the action runs one path. A
@@ -302,7 +303,7 @@ pub const TYPED: [Typed; 14] = [
     typed("exit", Action::Quit, false),
     typed("help", Action::Shortcuts, false),
     typed("hooks", Action::Hooks, true),
-    typed("mcp", Action::Mcp, true),
+    typed("mcp", Action::Mcp, false),
     typed("memory", Action::Memory, false),
     typed("model", Action::SwitchModel, false),
     typed("quit", Action::Quit, false),

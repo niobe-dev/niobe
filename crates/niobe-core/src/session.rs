@@ -26,9 +26,9 @@ use crate::work::{self, Work};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, Billing, ChangeScope, CompactTrigger, Context, Event, Mode, ModelOption,
-    OPERATOR_SHELL, SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage,
-    UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Billing, ChangeScope, CompactTrigger, Context, Event, McpServer, Mode,
+    ModelOption, OPERATOR_SHELL, SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome,
+    Usage, UsageWindow, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -553,6 +553,8 @@ pub struct SessionState {
     commands: Vec<SlashCommand>,
     /// The models the backend last said it offers.
     models: Vec<ModelOption>,
+    /// The MCP servers the backend last said it has configured.
+    mcp_servers: Vec<McpServer>,
 }
 
 impl SessionState {
@@ -894,6 +896,7 @@ impl SessionState {
                 self.beyond_messages = self.beyond_messages.plus(&per_message.short_of(reported));
             }
             Event::Commands { commands } => self.commands = commands.clone(),
+            Event::McpServers { servers } => self.mcp_servers = servers.clone(),
             Event::CompactionStarted => self.compacting = true,
             Event::CompactionEnded => self.compacting = false,
             // The boundary is the compaction done, which a backend may report
@@ -1304,6 +1307,12 @@ impl SessionState {
     /// order. Empty until it has said, which is not a backend with none.
     pub fn commands(&self) -> &[SlashCommand] {
         &self.commands
+    }
+
+    /// The MCP servers the backend last said it has configured, in its
+    /// order. Empty until it has said, or where it has none.
+    pub fn mcp_servers(&self) -> &[McpServer] {
+        &self.mcp_servers
     }
 
     /// The models the backend last said it offers, in its order. Empty until
@@ -3543,6 +3552,38 @@ mod tests {
         let names: Vec<&str> = state.commands().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["review_changes (MCP)"]);
         assert!(SessionState::new().commands().is_empty());
+    }
+
+    #[test]
+    fn the_last_mcp_server_list_the_backend_sent_replaces_the_one_before() {
+        use crate::event::{McpServer, McpStatus};
+
+        let server = |name: &str, status: McpStatus| McpServer {
+            name: name.to_owned(),
+            status,
+            source: Some("user".to_owned()),
+            tools: Vec::new(),
+        };
+        let state = SessionState::replay(&[
+            Event::McpServers {
+                servers: vec![server("notes", McpStatus::Pending)],
+            },
+            prompt(),
+            Event::McpServers {
+                servers: vec![
+                    server("notes", McpStatus::Connected),
+                    server("broken", McpStatus::Failed),
+                ],
+            },
+        ]);
+        assert_eq!(
+            state.mcp_servers(),
+            [
+                server("notes", McpStatus::Connected),
+                server("broken", McpStatus::Failed)
+            ]
+        );
+        assert!(SessionState::new().mcp_servers().is_empty());
     }
 
     #[test]

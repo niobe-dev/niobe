@@ -96,9 +96,9 @@ use std::path::{Path, PathBuf};
 
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Context, Event, Mode,
-    ModelOption, PermissionDecision, SessionMeta, SlashCommand, TokenCounts, ToolCallId,
-    ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Context, Event,
+    McpServer, McpStatus, Mode, ModelOption, PermissionDecision, SessionMeta, SlashCommand,
+    TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
@@ -818,6 +818,12 @@ impl Translator {
                     self.api_key_source = system.api_key_source;
                 }
                 self.report_billing(None, out);
+                if let Some(servers) = system.mcp_servers {
+                    out.push(mcp_servers(
+                        servers,
+                        system.tools.as_deref().unwrap_or_default(),
+                    ));
+                }
                 if let Some(mode) = system.permission_mode {
                     match read_mode(&mode) {
                         Some(mode) => out.push(Event::ModeSelected { mode }),
@@ -2895,6 +2901,57 @@ fn listed_as_offered(commands: Vec<wire::Command>, unavailable: &[String]) -> Ev
                 argument_hint: command.argument_hint.filter(|hint| !hint.trim().is_empty()),
             })
             .collect(),
+    }
+}
+
+/// The MCP servers `init` lists, as the event that replaces the list before
+/// them, each with the tools of the session's that are its own.
+fn mcp_servers(servers: Vec<wire::McpServer>, tools: &[String]) -> Event {
+    Event::McpServers {
+        servers: servers
+            .into_iter()
+            .map(|server| McpServer {
+                tools: server_tools(&server.name, tools),
+                status: mcp_status(server.status),
+                source: server.source.filter(|source| !source.trim().is_empty()),
+                name: server.name,
+            })
+            .collect(),
+    }
+}
+
+/// The tools of `server`'s among the session's: those named
+/// `mcp__<server>__<tool>`, where the server's name has every character but
+/// an ASCII letter, a digit, `_` and `-` written as `_`, as the CLI names
+/// them — `claude.ai Notion` gives `mcp__claude_ai_Notion__…`.
+fn server_tools(server: &str, tools: &[String]) -> Vec<String> {
+    let named: String = server
+        .chars()
+        .map(
+            |c| match c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                true => c,
+                false => '_',
+            },
+        )
+        .collect();
+    let prefix = format!("mcp__{named}__");
+    tools
+        .iter()
+        .filter_map(|tool| tool.strip_prefix(&prefix))
+        .filter(|tool| !tool.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A server's status, in the CLI's spelling.
+fn mcp_status(status: String) -> McpStatus {
+    match status.as_str() {
+        "connected" => McpStatus::Connected,
+        "pending" => McpStatus::Pending,
+        "needs-auth" => McpStatus::NeedsAuth,
+        "failed" => McpStatus::Failed,
+        "disabled" => McpStatus::Disabled,
+        _ => McpStatus::Other(status),
     }
 }
 
@@ -6538,5 +6595,30 @@ error: could not compile `demo` (lib test) due to 1 previous error";
         let events = translator.line(&result_with("t1", "Exit code 3", &shell_report("")));
 
         assert_eq!(ending(&events), (None, None));
+    }
+
+    #[test]
+    fn a_servers_tools_are_found_by_the_name_the_cli_writes_it_under() {
+        let tools: Vec<String> = [
+            "Read",
+            "mcp__claude_ai_Notion__notion-search",
+            "mcp__code-review-graph__query_graph",
+            "mcp__claude_ai_Notion_extra__fetch",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+
+        assert_eq!(server_tools("claude.ai Notion", &tools), ["notion-search"]);
+        assert_eq!(server_tools("code-review-graph", &tools), ["query_graph"]);
+        assert!(server_tools("Read", &tools).is_empty());
+    }
+
+    #[test]
+    fn a_server_status_niobe_has_no_word_for_is_kept_in_the_clis() {
+        assert_eq!(mcp_status("needs-auth".to_owned()), McpStatus::NeedsAuth);
+        assert_eq!(
+            mcp_status("reconnecting".to_owned()),
+            McpStatus::Other("reconnecting".to_owned())
+        );
     }
 }

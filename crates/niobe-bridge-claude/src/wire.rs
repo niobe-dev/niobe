@@ -99,6 +99,26 @@ pub(crate) struct System {
     /// On `notification`: what the CLI tells its own operator, in its words —
     /// `Fast mode disabled · usage credits exhausted`.
     pub(crate) text: Option<String>,
+    /// On `init`: every tool the model is given, an MCP server's as
+    /// `mcp__<server>__<tool>`.
+    pub(crate) tools: Option<Vec<String>>,
+    /// On `init`: every MCP server the CLI configured for the session.
+    pub(crate) mcp_servers: Option<Vec<McpServer>>,
+}
+
+/// One MCP server, as `init` lists it.
+///
+/// Why a server failed and the tools it offers are not in `init`: the CLI
+/// says those only when asked over the control channel.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpServer {
+    pub(crate) name: String,
+    /// `connected`, `pending`, `needs-auth`, `failed` or `disabled`, as
+    /// Claude Code 2.1.292 spells them.
+    pub(crate) status: String,
+    /// Where the CLI found the server's configuration: `user`, `project`,
+    /// `local`, or `dynamic` for one handed to it with `--mcp-config`.
+    pub(crate) source: Option<String>,
 }
 
 /// One slash command, as the CLI lists it in its answer to `initialize` and in

@@ -5640,6 +5640,52 @@ fn the_settings_name_the_files_the_session_was_read_from() {
     assert_snapshot("settings-120x30", &frame);
 }
 
+/// F7 lists the MCP servers the backend reported as the session started,
+/// each with how it stands, where its configuration came from and the tools
+/// it gave the model, while a turn runs and without sending one.
+#[test]
+fn f7_lists_the_mcp_servers_while_a_turn_runs() {
+    use niobe_core::event::{McpServer, McpStatus};
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    let server = |name: &str, status: McpStatus, source: &str, tools: &[&str]| McpServer {
+        name: name.to_owned(),
+        status,
+        source: Some(source.to_owned()),
+        tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+    };
+    app.apply(&Event::McpServers {
+        servers: vec![
+            server(
+                "github",
+                McpStatus::Connected,
+                "user",
+                &["create_issue", "search_code"],
+            ),
+            server("notes", McpStatus::Connected, "project", &["search"]),
+            server("linear", McpStatus::NeedsAuth, "user", &[]),
+            server("remote docs", McpStatus::Failed, "local", &[]),
+        ],
+    });
+    app.take_produced();
+    press(&mut app, KeyCode::F(7));
+    assert_eq!(app.take_produced(), [], "F7 sent a turn");
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(" MCP servers "), "{frame}");
+    for said in [
+        "github",
+        "needs sign-in",
+        "remote docs",
+        "failed",
+        "create_issue, search_code",
+    ] {
+        assert!(frame.contains(said), "{said}:\n{frame}");
+    }
+    assert_snapshot("mcp-view-120x30", &frame);
+}
+
 #[test]
 fn a_pane_hidden_from_the_view_menu_gives_its_rows_to_the_others() {
     let mut app = running_session();
