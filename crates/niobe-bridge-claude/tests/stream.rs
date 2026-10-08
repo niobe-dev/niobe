@@ -636,6 +636,7 @@ fn a_compaction_the_cli_started_itself_is_reported_as_automatic() {
         [&Event::Compacted {
             trigger: CompactTrigger::Auto,
             before: Some(41_000),
+            after: None,
         }]
     );
 }
@@ -1577,6 +1578,7 @@ fn a_compaction_asked_for_by_command_is_billed_and_explained() {
         [&Event::Compacted {
             trigger: CompactTrigger::Manual,
             before: Some(23_193),
+            after: Some(4_282),
         }],
         "{events:?}"
     );
@@ -1615,6 +1617,35 @@ fn a_compaction_asked_for_by_command_is_a_phase_between_its_two_statuses() {
         .map(|(at, _)| at + 1)
         .collect();
     assert_eq!(lines, [13]);
+}
+
+/// Once the boundary on line 16 is folded the context is what the CLI says
+/// the compaction left, a floor — through the `result` that ends the turn on
+/// line 19, where the session sits until the operator sends something — until
+/// the next request measures 2 + 8269 + 13412.
+#[test]
+fn a_compacted_context_is_the_clis_floor_until_the_next_request_measures_it() {
+    let mut translator = Translator::new("max");
+    let mut state = SessionState::new();
+    let mut contexts = Vec::new();
+    for line in COMPACT_COMMAND
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        for event in translator.line(line) {
+            state.apply(&event);
+        }
+        contexts.push((
+            state.context().map(|context| context.tokens),
+            state.context_is_a_floor(),
+        ));
+    }
+
+    assert_eq!(contexts[14], (Some(23_189), false), "before the boundary");
+    assert_eq!(contexts[15..19], [(Some(4_282), true); 4], "lines 16 to 19");
+    let mut after: Vec<_> = contexts[15..].to_vec();
+    after.dedup();
+    assert_eq!(after, [(Some(4_282), true), (Some(21_683), false)]);
 }
 
 const COMPACT_COMMAND: &str = include_str!("fixtures/compact-command.jsonl");

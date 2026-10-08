@@ -3282,9 +3282,9 @@ fn usage_label_widest(app: &App) -> usize {
             .max()
             .unwrap_or(0),
     };
-    let context = match app.session().context() {
-        Some(_) => text::width(CONTEXT_LABEL),
-        None => 0,
+    let context = match context_rows(app) {
+        0 => 0,
+        _ => text::width(CONTEXT_LABEL),
     };
     windows.max(models).max(context)
 }
@@ -3317,13 +3317,14 @@ fn usage_figure_columns(app: &App) -> usize {
         true => 0,
         false => share + MODEL_TOKENS + model_cost_columns(app),
     };
-    let context = app
-        .session()
-        .context()
-        .map_or(0, |context| match context_window(app, context) {
-            Some(window) => share + text::width(&context_figures(context.tokens, window)),
-            None => text::width(&compact(context.tokens)),
-        });
+    let floor = app.session().context_is_a_floor();
+    let context = match app.session().context() {
+        Some(context) => match context_window(app, context) {
+            Some(window) => share + text::width(&context_figures(context.tokens, window, floor)),
+            None => text::width(&context_size(context.tokens, floor)),
+        },
+        None => context_rows(app) * text::width(NO_FIGURE),
+    };
     windows.max(spend).max(context)
 }
 
@@ -3759,12 +3760,14 @@ const CONTEXT_LABEL: &str = "context";
 
 /// How many rows the context takes: one once the main agent has sent a
 /// request, and none before — nothing has been measured, and a row at `0%`
-/// would say the context is empty.
+/// would say the context is empty. A compaction that did not say what it left
+/// keeps the row, as a dash, until the next request measures it: the figure
+/// it had is of a conversation the model no longer has.
 ///
 /// The pane is sized from this before it is drawn, so it has to agree with
 /// [`context_lines`] exactly; a test holds the two together.
 fn context_rows(app: &App) -> usize {
-    usize::from(app.session().context().is_some())
+    usize::from(app.session().context().is_some() || app.compaction_unmeasured())
 }
 
 /// How big the window the last request went into is: what the backend
@@ -3790,17 +3793,29 @@ fn context_window(app: &App, context: &Context) -> Option<u64> {
 /// A model whose window nobody knows gets the size alone — no bar, and no
 /// share of a window assumed for it. A context past its window fills the bar,
 /// and the figure says by how much, up to the most its column holds.
+///
+/// Between a compaction and the next request the figure is what the backend
+/// said the compaction left, which leaves out what every request sends beside
+/// it: the share and the size are marked `≥` and rounded down, so the row
+/// claims no more than was reported.
 fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(context) = app.session().context() else {
-        return Vec::new();
-    };
     let dim = Style::new().fg(theme.dim);
     let labels = usage_label_column(app, width);
     let label = Span::styled(usage_label(CONTEXT_LABEL, labels), dim);
+    let Some(context) = app.session().context() else {
+        return match app.compaction_unmeasured() {
+            true => vec![Line::from(vec![label, Span::styled(NO_FIGURE, dim)])],
+            false => Vec::new(),
+        };
+    };
+    let floor = app.session().context_is_a_floor();
     let Some(window) = context_window(app, context) else {
         return vec![Line::from(vec![
             label,
-            Span::styled(compact(context.tokens), Style::new().fg(theme.fg)),
+            Span::styled(
+                context_size(context.tokens, floor),
+                Style::new().fg(theme.fg),
+            ),
         ])];
     };
 
@@ -3808,13 +3823,17 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     // The bar goes first and then the window's size, whole: `12k / 20` is
     // not what `12k / 200k` reads as with a cell less.
     let beside = labels + SHARE_COLUMNS + SHARE_GAP.len();
-    let figures = context_figures(context.tokens, window);
+    let figures = context_figures(context.tokens, window, floor);
     let (figures, cells) = match beside + text::width(&figures) <= width {
         true => {
             let cells = width - beside - text::width(&figures);
             (figures, cells.min(METER_CELLS))
         }
-        false => (format!(" {}", compact(context.tokens)), 0),
+        false => (format!(" {}", context_size(context.tokens, floor)), 0),
+    };
+    let shown = match floor {
+        true => floor_share(share),
+        false => window_share(share),
     };
     let (filled, track) = meter(share, cells);
     let style = match share >= BUDGET_SHOWN_HOT {
@@ -3823,7 +3842,7 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     };
     vec![Line::from(vec![
         label,
-        Span::styled(window_share(share), style.bold()),
+        Span::styled(shown, style.bold()),
         Span::raw(SHARE_GAP),
         Span::styled(filled, style),
         Span::styled(track, dim),
@@ -3833,8 +3852,33 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
 
 /// What the context row says beside its meter: the size the last request
 /// sent, and the size of the window it went into.
-fn context_figures(tokens: u64, window: u64) -> String {
-    format!(" {} / {}", compact(tokens), compact(window))
+fn context_figures(tokens: u64, window: u64, floor: bool) -> String {
+    format!(" {} / {}", context_size(tokens, floor), compact(window))
+}
+
+/// The context's size: as [`compact`] draws a measurement, or for a `floor`
+/// marked `≥` and rounded down, since rounding up would claim more than the
+/// backend reported.
+fn context_size(tokens: u64, floor: bool) -> String {
+    match floor {
+        true => format!("≥{}", compact_floor(tokens)),
+        false => compact(tokens),
+    }
+}
+
+/// A floor's share of its window, in the share's four columns: marked `≥`
+/// and rounded down. A share of no whole point is `>0%`, which is all a floor
+/// that small says; one of a whole window or more is `>99%`, the most four
+/// columns hold of a floor.
+fn floor_share(share: f64) -> String {
+    if !share.is_finite() || share < 0.0 {
+        return format!("{:>3} ", NO_FIGURE);
+    }
+    match (share * 100.0).floor() as u64 {
+        0 => " >0%".to_owned(),
+        100.. => ">99%".to_owned(),
+        percent => format!("{:>4}", format!("≥{percent}%")),
+    }
 }
 
 /// The rule the mock draws between the pane's blocks. Its blocks answer
@@ -5398,6 +5442,32 @@ fn value_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Valued {
 /// thousands — `1000k` is a million drawn in the wrong unit — and each larger
 /// unit from the count that would round to a thousand of the one below, so
 /// no count a `u64` holds takes more than six columns.
+/// `n` as [`compact`] writes it, but rounded down rather than to the
+/// nearest, for a figure that is a floor: `10,763` is `10k`, not `11k`.
+pub(crate) fn compact_floor(n: u64) -> String {
+    const LARGE: [(u64, &str); 5] = [
+        (1_000_000, "M"),
+        (1_000_000_000, "G"),
+        (1_000_000_000_000, "T"),
+        (1_000_000_000_000_000, "P"),
+        (1_000_000_000_000_000_000, "E"),
+    ];
+    match n {
+        0..=9_999 => n.to_string(),
+        10_000..=999_999 => format!("{}k", n / 1_000),
+        _ => {
+            let (size, unit) = LARGE
+                .iter()
+                .rev()
+                .find(|&&(size, _)| n >= size)
+                .copied()
+                .unwrap_or((1_000_000, "M"));
+            let tenths = n / (size / 10);
+            format!("{}.{}{unit}", tenths / 10, tenths % 10)
+        }
+    }
+}
+
 pub(crate) fn compact(n: u64) -> String {
     const LARGE: [(f64, &str); 5] = [
         (1e6, "M"),
@@ -7018,21 +7088,69 @@ mod tests {
         assert!(!rows[0].contains('%'), "{rows:?}");
     }
 
+    fn compacted(app: &mut App, after: Option<u64>) {
+        app.apply(&niobe_core::event::Event::Compacted {
+            trigger: niobe_core::event::CompactTrigger::Auto,
+            before: Some(180_000),
+            after,
+        });
+    }
+
     /// A compaction makes the next request smaller, and the row follows it
     /// down rather than keeping the largest context the session ever had.
     #[test]
     fn a_compacted_context_is_drawn_at_the_size_of_the_next_request() {
         let mut app = bare();
         sent(&mut app, 180_000, "opus-5", Some(200_000));
-        app.apply(&niobe_core::event::Event::Compacted {
-            trigger: niobe_core::event::CompactTrigger::Auto,
-            before: Some(180_000),
-        });
+        compacted(&mut app, Some(10_763));
         sent(&mut app, 30_000, "opus-5", Some(200_000));
         assert_eq!(
             context_of(&app, 39),
             ["context  15% ▓▓░░░░░░░░░░ 30k / 200k"]
         );
+    }
+
+    /// Between a compaction and the next request the row is what the backend
+    /// said is left, drawn as the floor it is: the share and the size each
+    /// say "at least", the share rounded down so that it never claims more.
+    #[test]
+    fn a_compacted_context_is_drawn_as_a_floor_until_the_next_request() {
+        let mut app = bare();
+        sent(&mut app, 180_000, "opus-5", Some(200_000));
+        compacted(&mut app, Some(10_763));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context  ≥5% ▓░░░░░░░░░░░ ≥10k / 200k"]
+        );
+    }
+
+    /// A floor is never written larger than it is: each size rounds down
+    /// where a measurement would round to the nearest.
+    #[test]
+    fn a_floor_is_written_rounded_down() {
+        for (tokens, written) in [
+            (4_282, "4282"),
+            (10_763, "10k"),
+            (999_999, "999k"),
+            (1_049_999, "1.0M"),
+            (u64::MAX, "18.4E"),
+        ] {
+            assert_eq!(compact_floor(tokens), written, "{tokens}");
+        }
+        assert_eq!(floor_share(0.004), " >0%");
+        assert_eq!(floor_share(0.059), " ≥5%");
+        assert_eq!(floor_share(1.2), ">99%");
+    }
+
+    /// A compaction that did not say what it left has no figure, and the row
+    /// says so with a dash rather than going on with the old size or a zero.
+    #[test]
+    fn a_compacted_context_with_no_figure_is_a_dash() {
+        let mut app = bare();
+        sent(&mut app, 180_000, "opus-5", Some(200_000));
+        compacted(&mut app, None);
+        assert_eq!(context_of(&app, 39), ["context —"]);
+        assert_eq!(context_rows(&app), 1);
     }
 
     /// Past the window, the bar is full and the figure says by how much.

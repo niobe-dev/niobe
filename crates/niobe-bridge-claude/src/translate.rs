@@ -2395,6 +2395,7 @@ pub(crate) fn compacted(metadata: wire::CompactMetadata) -> Event {
             _ => CompactTrigger::Unstated,
         },
         before: metadata.pre_tokens,
+        after: metadata.post_tokens,
     }
 }
 

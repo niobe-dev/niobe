@@ -140,6 +140,7 @@ fn a_compaction_is_reported_as_one_and_not_as_something_the_operator_said() {
             == [&Event::Compacted {
                 trigger: CompactTrigger::Manual,
                 before: Some(48_210),
+                after: Some(3_120),
             }],
         "{events:?}"
     );

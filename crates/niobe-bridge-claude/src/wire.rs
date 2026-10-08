@@ -156,6 +156,11 @@ pub(crate) struct CompactMetadata {
     pub(crate) trigger: Option<String>,
     #[serde(alias = "preTokens")]
     pub(crate) pre_tokens: Option<u64>,
+    /// What the CLI says the conversation holds after it: the summary and
+    /// what was kept, without the system prompt and tools the next request
+    /// sends beside them.
+    #[serde(alias = "postTokens")]
+    pub(crate) post_tokens: Option<u64>,
 }
 
 /// An `assistant` or `user` line.

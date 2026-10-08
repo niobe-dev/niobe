@@ -471,6 +471,9 @@ pub struct SessionState {
     metered: Totals,
     /// The main agent's last request. `None` until one has been reported.
     context: Option<Context>,
+    /// Whether `context` is a compaction's report of what it left rather
+    /// than a request's measurement: a floor under the next prompt.
+    context_floor: bool,
     tools: ToolTotals,
     in_flight_tools: BTreeMap<ToolCallId, String>,
     /// The calls whose end has been counted, so that an end said again for
@@ -747,7 +750,10 @@ impl SessionState {
             // A level again, and the last one stands — including after a
             // compaction, when it drops: a high-water mark would keep showing
             // a context the model no longer has.
-            Event::Context(context) => self.context = Some(context.clone()),
+            Event::Context(context) => {
+                self.context = Some(context.clone());
+                self.context_floor = false;
+            }
 
             // Nothing has measured the conversation that starts here, and the
             // last figure is of one the model no longer has: no figure is
@@ -755,6 +761,7 @@ impl SessionState {
             // A conversation started over is not one being compacted.
             Event::Cleared => {
                 self.context = None;
+                self.context_floor = false;
                 self.compacting = false;
             }
 
@@ -891,12 +898,32 @@ impl SessionState {
             Event::CompactionEnded => self.compacting = false,
             // The boundary is the compaction done, which a backend may report
             // without having said it ended.
-            Event::Compacted { trigger, .. } => {
+            Event::Compacted { trigger, after, .. } => {
                 self.compacting = false;
                 self.compacted = Some(*trigger);
+                self.context_compacted(*after);
             }
             Event::Models { models } => self.models = models.clone(),
         }
+    }
+
+    /// The context once a compaction has ended, `after` being what the
+    /// backend says it left.
+    ///
+    /// The last request's figure is of a conversation the model no longer
+    /// has, so it goes whatever happens. What the backend says is left stands
+    /// in as a floor, on the model and window that request measured; without
+    /// that request there is no window to read it against, and without the
+    /// backend's figure there is nothing, as after [`Event::Cleared`]. The
+    /// next request's measurement replaces either.
+    fn context_compacted(&mut self, after: Option<u64>) {
+        let last = self.context.take();
+        self.context = last.zip(after).map(|(last, tokens)| Context {
+            tokens,
+            model: last.model,
+            window: last.window,
+        });
+        self.context_floor = self.context.is_some();
     }
 
     /// Records every call and sub-agent the backend had running as cut short
@@ -1117,6 +1144,14 @@ impl SessionState {
     /// which is not an empty context: nothing has been measured.
     pub fn context(&self) -> Option<&Context> {
         self.context.as_ref()
+    }
+
+    /// Whether [`Self::context`] is what a compaction said it left — the
+    /// summary and what was kept, without the system prompt and tools the
+    /// next request sends beside them — rather than a request's measurement.
+    /// Such a figure is a floor, and the next request replaces it.
+    pub fn context_is_a_floor(&self) -> bool {
+        self.context_floor
     }
 
     /// Tool call counters.
@@ -2797,18 +2832,63 @@ mod tests {
         assert_eq!(SessionState::new().context(), None);
     }
 
+    fn compacted(after: Option<u64>) -> Event {
+        Event::Compacted {
+            trigger: CompactTrigger::Manual,
+            before: Some(150_000),
+            after,
+        }
+    }
+
     /// A compaction shrinks the next prompt, and the fold follows it down:
     /// the context is the last request's, never the largest one's.
     #[test]
     fn the_context_is_the_last_requests_even_when_it_shrank() {
-        let state = SessionState::replay(&[
-            context(150_000),
-            Event::Notice {
-                message: "the context was compacted (auto).".to_owned(),
-            },
-            context(20_000),
-        ]);
+        let state =
+            SessionState::replay(&[context(150_000), compacted(Some(4_282)), context(20_000)]);
         assert_eq!(state.context().map(|c| c.tokens), Some(20_000));
+        assert!(!state.context_is_a_floor());
+    }
+
+    /// Between a compaction and the next request, the size the backend says
+    /// the conversation shrank to is all there is: a floor, on the model and
+    /// window the last request measured, and never the size it had before.
+    #[test]
+    fn a_compacted_context_is_the_size_it_shrank_to_until_the_next_request() {
+        let state = SessionState::replay(&[context(150_000), compacted(Some(4_282))]);
+        let context = state.context().expect("the compaction said what it left");
+        assert_eq!(context.tokens, 4_282);
+        assert_eq!(context.model, "opus-5");
+        assert_eq!(context.window, Some(1_000_000));
+        assert!(state.context_is_a_floor());
+    }
+
+    /// A compaction that does not say what it left leaves no figure: the
+    /// last one is of a conversation the model no longer has.
+    #[test]
+    fn a_compaction_that_says_nothing_of_what_it_left_leaves_no_context() {
+        let state = SessionState::replay(&[context(150_000), compacted(None)]);
+        assert_eq!(state.context(), None);
+        assert!(!state.context_is_a_floor());
+
+        let state = SessionState::replay(&[context(150_000), compacted(None), context(9_000)]);
+        assert_eq!(state.context().map(|c| c.tokens), Some(9_000));
+    }
+
+    /// With no request before it there is no model or window to put a floor
+    /// on, and a size alone would say nothing the next request will not.
+    #[test]
+    fn a_compaction_before_any_request_leaves_no_context() {
+        let state = SessionState::replay(&[compacted(Some(4_282))]);
+        assert_eq!(state.context(), None);
+    }
+
+    #[test]
+    fn a_cleared_conversation_after_a_compaction_has_no_floor() {
+        let state =
+            SessionState::replay(&[context(150_000), compacted(Some(4_282)), Event::Cleared]);
+        assert_eq!(state.context(), None);
+        assert!(!state.context_is_a_floor());
     }
 
     #[test]
@@ -3553,6 +3633,7 @@ mod tests {
             Event::Compacted {
                 trigger: CompactTrigger::Auto,
                 before: Some(23_193),
+                after: Some(4_282),
             },
         ]);
         assert!(state.turn_running());
@@ -3597,6 +3678,7 @@ mod tests {
                 Event::Compacted {
                     trigger,
                     before: Some(23_193),
+                    after: Some(4_282),
                 },
                 Event::TurnEnded,
                 Event::UserMessage {

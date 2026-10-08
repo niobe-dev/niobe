@@ -442,10 +442,12 @@ What they settle, and what `tests/stream.rs` expects of each:
   one manual compaction from 23193 tokens, the second of the three turns
   recorded as that compaction's, and no prompt of the operator's made out of
   the summary. `pre_tokens` is the last request's prompt and its reply,
-  2 + 9775 + 13412 + 4; `post_tokens` is not read, because it does not count
-  what the next request is sent beside the summary: that request measured
-  2 + 8269 + 13412 = 21683, which is the figure the shell shows the
-  compaction shrank the context to.
+  2 + 9775 + 13412 + 4. `post_tokens` does not count what the next request
+  is sent beside the summary, so it is read as a floor: from the boundary on
+  line 16, through the `result` on line 19 where the session waits for the
+  operator, the context is 4282 and marked as a floor, and the next request
+  replaces it with its measured 2 + 8269 + 13412 = 21683, which is the
+  figure the shell shows the compaction shrank the context to.
 - **`/fast` is listed and refused.** The answer to `initialize` carries
   `fast_mode_disabled_reason: "sdk_opt_in_required"`, and `/fast on` in a
   fourth session was answered "Fast mode unavailable: Fast mode is not
@@ -917,7 +919,7 @@ It carries what the transcript does differently from the live stream:
   `isCompactSummary` and `isVisibleInTranscriptOnly` rather than `isMeta`. In
   every transcript on the machine this was written on that held one, it was
   the first user turn that was not a command. The boundary is folded as a
-  manual compaction from 48210 tokens, and the summary is neither in the
+  manual compaction from 48210 tokens to a floor of 3120, and the summary is neither in the
   history as something the operator said nor what the session list names it
   by;
 - **one API response written out over two records** — `msg_1`, once for its

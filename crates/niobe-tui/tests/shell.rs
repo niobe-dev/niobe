@@ -1601,8 +1601,9 @@ fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
 /// While the backend compacts the conversation the line under the
 /// transcript says so, with a spinner of its own, rather than reading as a
 /// turn thinking; once it is done, a row says what it shrank the context from
-/// and to — an em dash until the next request measures the second — and the
-/// rule under the turn names it as a compaction.
+/// and to — the floor the backend reported until the next request measures
+/// the second, as the Usage pane's context row does — and the rule under the
+/// turn names it as a compaction.
 #[test]
 fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
     use std::time::{Duration, Instant};
@@ -1621,6 +1622,11 @@ fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
             mid_prompt: false,
         }],
     });
+    app.apply(&Event::Context(niobe_core::event::Context {
+        tokens: 192_000,
+        model: "opus-5".to_owned(),
+        window: Some(1_000_000),
+    }));
     for c in "/compact".chars() {
         app.type_into_composer(ratatui_textarea::Input {
             key: ratatui_textarea::Key::Char(c),
@@ -1641,26 +1647,34 @@ fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
     app.apply(&Event::Compacted {
         trigger: CompactTrigger::Manual,
         before: Some(192_000),
+        after: Some(4_282),
     });
     app.apply(&Event::TurnEnded);
     let frame = screen(&mut app, 80, 24);
     assert!(
-        frame.contains("⇣ context compacted · 192k → — tokens"),
+        frame.contains("⇣ context compacted · 192k → ≥4282 tokens"),
         "{frame}"
     );
     assert!(frame.contains("── compact"), "{frame}");
     assert!(!frame.contains("compacting context"), "{frame}");
+    let wide = screen(&mut app, 120, 30);
+    assert!(wide.contains("≥4282 / 1.0M"), "{wide}");
+    assert!(!wide.contains("192k / 1.0M"), "{wide}");
+    assert_snapshot("compacted-floor-120x30", &wide);
 
     app.apply(&Event::Context(niobe_core::event::Context {
         tokens: 18_000,
         model: "opus-5".to_owned(),
-        window: None,
+        window: Some(1_000_000),
     }));
     let frame = screen(&mut app, 80, 24);
     assert!(
         frame.contains("⇣ context compacted · 192k → 18k tokens"),
         "{frame}"
     );
+    let wide = screen(&mut app, 120, 30);
+    assert!(wide.contains(" 18k / 1.0M"), "{wide}");
+    assert!(!wide.contains('≥'), "{wide}");
     assert_snapshot("compacted-80x24", &frame);
 }
 

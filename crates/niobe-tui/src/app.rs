@@ -558,15 +558,21 @@ pub enum EntryKind {
 
 /// What the row a compaction leaves in the transcript says about it.
 ///
-/// Both figures are measured prompt sizes, and each is `None` until something
-/// measured it: the backend's count of the conversation it compacted, and the
-/// size of the first request the session's own agent sent after it.
+/// `before` and `after` are measured prompt sizes, and each is `None` until
+/// something measured it: the backend's count of the conversation it
+/// compacted, and the size of the first request the session's own agent sent
+/// after it. `floor` is what the backend said it left, which that request
+/// measures more than, and is what the row shows until it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CompactionRow {
     /// Who started it.
     pub trigger: CompactTrigger,
     /// Every prompt token the conversation held before it.
     pub before: Option<u64>,
+    /// What the backend said the conversation holds after it, without the
+    /// system prompt and tools a request sends beside it. `None` where it did
+    /// not say.
+    pub floor: Option<u64>,
     /// Every prompt token of the next request, which carries what is left.
     pub after: Option<u64>,
 }
@@ -2134,12 +2140,17 @@ impl App {
                 });
             }
 
-            Event::Compacted { trigger, before } => {
+            Event::Compacted {
+                trigger,
+                before,
+                after,
+            } => {
                 self.compaction = Some(self.entries.len());
                 self.push(Entry {
                     kind: EntryKind::Compacted(CompactionRow {
                         trigger: *trigger,
                         before: *before,
+                        floor: *after,
                         after: None,
                     }),
                     head: String::new(),
@@ -4572,6 +4583,13 @@ impl App {
     /// The palette the shell draws in.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// Whether the conversation was compacted and no request has measured
+    /// what it left yet — the compaction row's figure and the context
+    /// meter's are, until one does, what the backend said or nothing.
+    pub fn compaction_unmeasured(&self) -> bool {
+        self.compaction.is_some()
     }
 
     /// The fold every pane reads its numbers from.
@@ -10747,6 +10765,7 @@ mod tests {
         app.apply(&Event::Compacted {
             trigger: CompactTrigger::Manual,
             before: Some(192_000),
+            after: Some(4_282),
         });
         let working = app.activity().expect("the turn has not ended yet");
         assert_eq!(working.doing, "thinking");
@@ -10766,9 +10785,10 @@ mod tests {
             [CompactionRow {
                 trigger: CompactTrigger::Manual,
                 before: Some(192_000),
+                floor: Some(4_282),
                 after: None,
             }],
-            "nothing has measured what it left yet"
+            "the backend's floor, and nothing has measured what it left yet"
         );
         let Some(EntryKind::Turn(rule)) = app.entries().last().map(|entry| entry.kind) else {
             panic!("the turn is ruled off: {:?}", app.entries());

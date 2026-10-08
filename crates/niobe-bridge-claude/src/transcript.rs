@@ -1041,6 +1041,7 @@ impl Fold {
                 self.out.push(Event::Compacted {
                     trigger: CompactTrigger::Unstated,
                     before: None,
+                    after: None,
                 });
             }
             return;

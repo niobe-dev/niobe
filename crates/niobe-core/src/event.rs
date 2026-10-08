@@ -737,8 +737,8 @@ pub enum Event {
     /// The backend compacted the conversation: from here on the model is sent
     /// a summary in place of what came before.
     ///
-    /// What it shrank to is not carried: the next request's measured context
-    /// ([`Event::Context`]) is that figure.
+    /// What it shrank to is measured by the next request
+    /// ([`Event::Context`]); until then `after` is the most a consumer has.
     Compacted {
         /// Who started it.
         #[serde(default)]
@@ -747,6 +747,14 @@ pub enum Event {
         /// measured it. `None` where the backend did not say.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         before: Option<u64>,
+        /// The tokens the backend says the conversation holds after it: the
+        /// summary and what was kept, without the system prompt and tools
+        /// every request sends beside them. A floor under the next request's
+        /// prompt, then, and not a measurement of one. `None` where the
+        /// backend did not say, which a session stored before it was read
+        /// is too.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
     },
 
     /// The process the session ran in stopped while a turn was running — the
