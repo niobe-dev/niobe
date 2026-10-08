@@ -1097,7 +1097,7 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
             images: &mut NoImages::default(),
             desktop: &mut desktop::System::new(),
             history: &mut NoHistory::default(),
-            memory: &mut niobe_tui::NoMemory,
+            memory: &mut niobe_tui::NoMemory::default(),
         },
     )
     .map_err(|e| e.to_string())

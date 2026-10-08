@@ -107,7 +107,7 @@ pub struct Around<'a> {
     /// recalls and the history dialog lists, asked the same way.
     pub history: &'a mut dyn History,
     /// What reads the files the agent is given as its memory, for the Memory
-    /// view, asked once each time the view opens.
+    /// view, asked once each time the view opens and never waited on.
     pub memory: &'a mut dyn Memory,
 }
 
@@ -172,7 +172,7 @@ pub fn ask_trust(app: App, question: trust::Question) -> io::Result<Option<trust
             images: &mut NoImages::default(),
             desktop: &mut NoDesktop,
             history: &mut NoHistory::default(),
-            memory: &mut NoMemory,
+            memory: &mut NoMemory::default(),
         },
     )?;
     Ok(match ended {
@@ -324,9 +324,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         fold_commands(app, shell, watch);
         fold_images(app, images);
         fold_history(app, journal, history);
-        if app.take_memory_request() {
-            app.set_memory(memory.read());
-        }
+        fold_memory(app, memory);
         // Whatever a read of the repository has finished with since the last
         // tick. Nothing is waited on here: an unfinished or failed read says
         // nothing and the pane keeps what it had.
@@ -455,6 +453,18 @@ fn fold_history(app: &mut App, journal: &dyn Journal, history: &mut dyn History)
     }
     if let Some(past) = history.drain() {
         app.set_past(past);
+    }
+}
+
+/// Passes on a read of the agent's memory the Memory view asked for, and
+/// hands the view what one found. Neither waits: the view says it is reading
+/// until the files land, and the frames go on being drawn meanwhile.
+fn fold_memory(app: &mut App, memory: &mut dyn Memory) {
+    if app.take_memory_request() {
+        memory.load();
+    }
+    if let Some(files) = memory.drain() {
+        app.set_memory(files);
     }
 }
 
@@ -1179,6 +1189,95 @@ mod tests {
             self.said.borrow_mut().push(format!("edit {path}"));
             Ok(())
         }
+    }
+
+    /// A memory lookup that takes as long as the test says: what a load
+    /// asked for is found only once `landed` is set, as a slow disk or a long
+    /// chain of imports would hand it over.
+    #[derive(Debug, Default)]
+    struct Slow {
+        loads: usize,
+        under_way: bool,
+        landed: bool,
+    }
+
+    impl Memory for Slow {
+        fn load(&mut self) {
+            if !self.under_way {
+                self.loads += 1;
+                self.under_way = true;
+            }
+        }
+
+        fn drain(&mut self) -> Option<Vec<crate::memory::MemoryFile>> {
+            if !(self.under_way && self.landed) {
+                return None;
+            }
+            self.under_way = false;
+            Some(vec![crate::memory::MemoryFile {
+                scope: crate::memory::Scope::Imported,
+                path: "CLAUDE.md".to_owned(),
+                named: "CLAUDE.md".to_owned(),
+                depth: 0,
+                text: Some("be brief\n".to_owned()),
+                bytes: Some(9),
+                note: None,
+                editable: None,
+            }])
+        }
+    }
+
+    fn drawn(app: &mut App) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+            .expect("a test backend always opens");
+        terminal
+            .draw(|frame| crate::ui::draw(frame, app))
+            .expect("a test backend always draws");
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_loop_goes_on_drawing_the_memory_view_while_a_slow_lookup_runs() {
+        let mut app = App::new(Repo::default());
+        let mut memory = Slow::default();
+        app.on_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            fold_memory(&mut app, &mut memory);
+            assert!(
+                started.elapsed() < Duration::from_millis(16),
+                "a tick waited on the lookup"
+            );
+            assert!(
+                drawn(&mut app).contains("reading…"),
+                "no frame said it was reading"
+            );
+        }
+        assert_eq!(memory.loads, 1, "each tick asked for the lookup again");
+
+        memory.landed = true;
+        fold_memory(&mut app, &mut memory);
+
+        let frame = drawn(&mut app);
+        assert!(
+            frame.contains("CLAUDE.md"),
+            "what was found is not drawn:\n{frame}"
+        );
+        assert!(
+            !frame.contains("reading…"),
+            "the view still says it is reading"
+        );
     }
 
     #[test]

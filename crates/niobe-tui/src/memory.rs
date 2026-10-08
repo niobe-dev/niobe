@@ -91,21 +91,35 @@ pub struct MemoryFile {
     pub editable: Option<String>,
 }
 
-/// Something that reads the agent's memory for the shell.
+/// Something that reads the agent's memory for the shell, asked the way
+/// [`crate::history::History`] is: the loop asks for a read when F8 opens the
+/// view and looks for what it found once a tick, so a lookup held up by a
+/// slow disk or a long chain of imports never holds up a frame.
 pub trait Memory: std::fmt::Debug {
-    /// Every file the agent is given, in the order it is given them, read as
-    /// they are now. A handful of small files, read when F8 is pressed.
-    fn read(&mut self) -> Vec<MemoryFile>;
+    /// Starts reading every file the agent is given, as they are now. Returns
+    /// at once; what was read arrives through [`Memory::drain`]. A load asked
+    /// for while one is under way is that one.
+    fn load(&mut self);
+
+    /// What the newest load that has finished found, once, in the order the
+    /// agent is given the files. Never blocks.
+    fn drain(&mut self) -> Option<Vec<MemoryFile>>;
 }
 
 /// No memory to read: a recorded log being looked at, or a session with no
-/// backend that loads any.
+/// backend that loads any. Every load finds nothing, at once.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct NoMemory;
+pub struct NoMemory {
+    asked: bool,
+}
 
 impl Memory for NoMemory {
-    fn read(&mut self) -> Vec<MemoryFile> {
-        Vec::new()
+    fn load(&mut self) {
+        self.asked = true;
+    }
+
+    fn drain(&mut self) -> Option<Vec<MemoryFile>> {
+        std::mem::take(&mut self.asked).then(Vec::new)
     }
 }
 
