@@ -331,6 +331,7 @@ mod tests {
                 mid_prompt: true,
                 ..command("review")
             },
+            command("server:prompt"),
             command("server:prompt (MCP)"),
         ];
         assert_eq!(named("/compact now", true, &commands), vec![(0..8)]);
@@ -346,8 +347,10 @@ mod tests {
         );
         assert_eq!(
             named("/server:prompt (MCP) go", true, &commands),
-            vec![(0..20)]
+            vec![(0..20)],
+            "where two listed names fit, the longer is read"
         );
+        assert_eq!(named("/server:prompt go", true, &commands), vec![(0..14)]);
         for unnamed in [
             "/comp",
             "/compacted",

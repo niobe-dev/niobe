@@ -2976,6 +2976,36 @@ mod tests {
 
     use super::*;
 
+    /// A name, a description or a model the CLI wrote empty or blank is one
+    /// it did not give, and a model with no value to ask for it by is none.
+    #[test]
+    fn a_model_offered_with_blank_words_has_them_left_out_and_one_with_no_value_is_not_offered() {
+        let model = |value: &str, words: &str| wire::Model {
+            value: value.to_owned(),
+            display_name: Some(words.to_owned()),
+            description: Some(words.to_owned()),
+            resolved_model: Some(words.to_owned()),
+        };
+        let offered = offered_models(vec![
+            model(" ", "Opus"),
+            model("opus", " "),
+            model("haiku", ""),
+        ]);
+        assert_eq!(
+            offered,
+            Event::Models {
+                models: ["opus", "haiku"]
+                    .map(|id| ModelOption {
+                        id: id.to_owned(),
+                        name: None,
+                        description: None,
+                        resolves_to: None,
+                    })
+                    .to_vec()
+            }
+        );
+    }
+
     fn translator() -> Translator {
         let mut translator = Translator::new("max");
         translator
@@ -3207,6 +3237,32 @@ mod tests {
         assert_eq!(cut.len(), 1, "{events:?}");
         assert!(!cut[0].contains("carrying the turn on"), "{cut:?}");
         assert!(cut[0].contains("msg_1"), "{cut:?}");
+    }
+
+    /// A sub-agent's reply cut off by the next one starting on its stream is
+    /// counted, but it is the sub-agent's: the main transcript is not told a
+    /// reply was cut off, as it is for one of the main agent's.
+    #[test]
+    fn a_sub_agents_reply_cut_off_puts_no_notice_in_the_main_transcript() {
+        let start = |id: &str, parent: &str| {
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"message_start","message":{{"model":"opus-5","id":"{id}"}}}}{parent}}}"#
+            )
+        };
+        let write = |id: &str, parent: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"model":"opus-5","id":"{id}","content":[{{"type":"text","text":"Writing"}}],"usage":{{"input_tokens":1,"output_tokens":3}}}}{parent}}}"#
+            )
+        };
+        for (parent, notices) in [(r#","parent_tool_use_id":"toolu_agent""#, 0), ("", 1)] {
+            let mut translator = translator();
+            translator.line(&start("msg_1", parent));
+            translator.line(&write("msg_1", parent));
+
+            let events = translator.line(&start("msg_2", parent));
+
+            assert_eq!(cut_notices(&events).len(), notices, "{parent}: {events:?}");
+        }
     }
 
     #[test]
@@ -4857,6 +4913,28 @@ mod tests {
                 title: "Static file handler etag support".to_owned()
             }]
         );
+    }
+
+    #[test]
+    fn a_title_is_trimmed_and_a_blank_one_is_none() {
+        let mut translator = translator();
+        translator.asked_for_title("niobe-2");
+        translator.asked_for_title("niobe-3");
+
+        let padded = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"title":"  Etag support\n"}}}"#,
+        );
+        let blank = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3","response":{"title":" \n "}}}"#,
+        );
+
+        assert_eq!(
+            padded,
+            [Event::Titled {
+                title: "Etag support".to_owned()
+            }]
+        );
+        assert!(blank.is_empty(), "{blank:?}");
     }
 
     #[test]

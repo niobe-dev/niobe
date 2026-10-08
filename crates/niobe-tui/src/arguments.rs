@@ -323,6 +323,49 @@ mod tests {
         );
     }
 
+    /// A camelCase identifier is one as much as a snake_case one is.
+    #[test]
+    fn a_camel_case_id_or_ids_names_something() {
+        let rows = lines(
+            r#"{"dataSourceId":"abc","pageIds":"x,y","query":"etag","Idle":"no"}"#,
+            40,
+            &CYBER,
+        )
+        .expect("the input is an object");
+        let drawn: Vec<(String, Option<_>)> = rows
+            .iter()
+            .map(|row| {
+                let said: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
+                (said, row.spans.last().and_then(|span| span.style.fg))
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                ("Idle: no".to_owned(), Some(CYBER.fg)),
+                ("query: etag".to_owned(), Some(CYBER.fg)),
+                ("dataSourceId: abc".to_owned(), Some(CYBER.dim)),
+                ("pageIds: x,y".to_owned(), Some(CYBER.dim)),
+            ]
+        );
+    }
+
+    /// An empty object says it holds nothing, dim, rather than a key with
+    /// nothing after it.
+    #[test]
+    fn an_empty_object_says_it_holds_nothing() {
+        let rows = lines(r#"{"filter":{}}"#, 40, &CYBER).expect("the input is an object");
+        let said: Vec<String> = rows
+            .iter()
+            .map(|row| row.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+        assert_eq!(said, ["filter: nothing"]);
+        assert_eq!(
+            rows[0].spans.last().and_then(|span| span.style.fg),
+            Some(CYBER.dim)
+        );
+    }
+
     #[test]
     fn keys_of_one_rank_are_drawn_in_the_order_of_their_names() {
         let rows = drawn(r#"{"subject":"hi","body":"there"}"#, 40);

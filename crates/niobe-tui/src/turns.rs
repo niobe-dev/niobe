@@ -303,6 +303,36 @@ mod tests {
         );
     }
 
+    /// The time a turn ended is the first figure to go, before how many
+    /// sub-agents it had: the clock in the menu row says the time.
+    #[test]
+    fn the_end_time_gives_way_before_the_count_of_sub_agents() {
+        let busy = TurnRule {
+            agents: 9,
+            calls: 83,
+            ..rule()
+        };
+        let without = "── turn 46 9 sub-agents · 83 tool calls · 6400 tok · 1% of 5h · 38s";
+        let said = drawn(&busy, text::width(without) + 2);
+        assert_eq!(said, format!("{without} ─"));
+    }
+
+    /// Two columns left over are a space and a run of rule; one is left
+    /// empty.
+    #[test]
+    fn the_rule_runs_on_from_two_columns_left_over_and_not_from_one() {
+        let bare = TurnRule {
+            ended: None,
+            tokens: None,
+            five_hour_points: None,
+            took: None,
+            ..rule()
+        };
+        let head = "── turn 46";
+        assert_eq!(drawn(&bare, text::width(head) + 2), format!("{head} ─"));
+        assert_eq!(drawn(&bare, text::width(head) + 1), head);
+    }
+
     #[test]
     fn a_turn_that_was_cut_off_says_so_beside_its_number() {
         let said = drawn(

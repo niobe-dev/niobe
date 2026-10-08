@@ -384,6 +384,89 @@ mod tests {
             .collect()
     }
 
+    /// A shell whose history has been read: `sessions` earlier sessions,
+    /// each recorded under its id.
+    fn read(sessions: &[&str]) -> App {
+        let mut app = App::new(crate::app::Repo::default()).remembers();
+        app.take_history_request();
+        app.set_past(crate::history::Past {
+            prompts: Vec::new(),
+            sessions: sessions
+                .iter()
+                .map(|id| crate::history::PastSession {
+                    target: crate::history::Target::Recorded((*id).to_owned()),
+                    last: None,
+                    first_prompt: None,
+                    title: None,
+                    open_elsewhere: false,
+                })
+                .collect(),
+            unread: None,
+        });
+        app
+    }
+
+    fn sessions_on(app: &App, at: usize, rows: usize) -> Vec<String> {
+        let browser = Browser {
+            view: View::Sessions,
+            query: String::new(),
+            at,
+        };
+        said(&sessions(app, &browser, (60, rows), &Theme::default()))
+    }
+
+    /// The session open now is always listed, so a list of it alone has no
+    /// other to offer and says so.
+    #[test]
+    fn a_session_list_of_this_session_alone_says_there_is_no_other() {
+        let drawn = sessions_on(&read(&[]), 0, 20);
+        assert!(
+            drawn.iter().any(|row| row.contains("this session")),
+            "{drawn:?}"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|row| row.contains("no other session to list")),
+            "{drawn:?}"
+        );
+
+        let drawn = sessions_on(&read(&["101"]), 0, 20);
+        assert!(
+            !drawn.iter().any(|row| row.contains("no other session")),
+            "{drawn:?}"
+        );
+    }
+
+    /// With the cursor below the rows that fit, the list scrolls so its row
+    /// is the last drawn, and the rows above it go first.
+    #[test]
+    fn a_list_longer_than_its_rows_scrolls_to_keep_the_cursor_drawn() {
+        let ids: Vec<String> = (101..=120).map(|id| id.to_string()).collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let app = read(&ids);
+        // 13 rows: 3 for the head and 1 for the rule leave 9, of which the
+        // list takes 5.
+        let drawn = sessions_on(&app, 10, 13);
+        let list: Vec<&String> = drawn[HEAD_ROWS..HEAD_ROWS + 5].iter().collect();
+        assert!(list[4].contains("#110"), "{drawn:?}");
+        assert!(list[0].contains("#106"), "{drawn:?}");
+        assert!(!drawn.iter().any(|row| row.contains("#105 ")), "{drawn:?}");
+    }
+
+    #[test]
+    fn lines_that_fit_are_shown_whole_and_more_are_cut_with_a_count() {
+        let lines = |n: usize| (1..=n).map(|n| format!("line {n}")).collect::<Vec<_>>();
+        assert_eq!(
+            said(&cut(lines(3), 3, &Theme::default())),
+            ["line 1", "line 2", "line 3"]
+        );
+        assert_eq!(
+            said(&cut(lines(4), 3, &Theme::default())),
+            ["line 1", "line 2", "… 2 more"]
+        );
+    }
+
     #[test]
     fn a_prompt_shown_whole_keeps_its_indentation_and_runs_of_spaces() {
         let row = PromptRow {

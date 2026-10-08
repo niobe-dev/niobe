@@ -10599,6 +10599,22 @@ mod tests {
         assert!(!app.should_quit());
     }
 
+    /// Ctrl+C in the Memory view closes it, as Esc does, rather than
+    /// stopping the turn behind it or asking for a quit while it stays open.
+    #[test]
+    fn ctrl_c_closes_the_memory_view_and_stops_nothing() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.on_key(key(KeyCode::F(8)));
+        assert!(app.memory().is_some());
+
+        ctrl_c_at(&mut app, Instant::now());
+
+        assert!(app.memory().is_none());
+        assert!(!app.take_interrupt(), "the turn is left running");
+        assert!(!app.should_quit());
+    }
+
     #[test]
     fn f10_and_ctrl_q_still_quit_with_one_press() {
         for quit in [key(KeyCode::F(10)), ctrl('q')] {

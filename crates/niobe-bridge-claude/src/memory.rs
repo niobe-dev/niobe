@@ -570,15 +570,18 @@ fn read(path: &Path) -> Option<Contents> {
     file.take(LIMIT.saturating_add(1))
         .read_to_end(&mut bytes)
         .ok()?;
+    Some(contents(&bytes))
+}
+
+/// What `bytes`, read from a file whose size was within [`LIMIT`] when it was
+/// looked at, holds: too large after all where the file grew past the limit
+/// since, which a read of one byte more than it shows.
+fn contents(bytes: &[u8]) -> Contents {
     let size = bytes.len() as u64;
-    // Grown past the limit since its size was looked at.
     if size > LIMIT {
-        return Some(Contents::TooLarge(size));
+        return Contents::TooLarge(size);
     }
-    Some(Contents::Text(
-        String::from_utf8_lossy(&bytes).into_owned(),
-        size,
-    ))
+    Contents::Text(String::from_utf8_lossy(bytes).into_owned(), size)
 }
 
 /// Every `@path` in `text` that is an import: a word that starts with `@`,
@@ -1114,6 +1117,146 @@ mod tests {
             (Scope::Imported, 1, None, Some(size), None)
         );
         assert_eq!(in_dir(&found, dir.path()).len(), 3, "{found:?}");
+    }
+
+    /// A file of exactly [`LIMIT`] bytes is read; one byte more is listed
+    /// with its size and not read.
+    #[test]
+    fn a_file_of_the_limit_is_read_and_one_byte_more_is_not() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("repo");
+        let limit = usize::try_from(LIMIT).expect("a mebibyte fits");
+        write(
+            &repo.join("CLAUDE.md"),
+            "@at.md @over.md
+",
+        );
+        write(&repo.join("at.md"), &"x".repeat(limit));
+        write(&repo.join("over.md"), &"x".repeat(limit + 1));
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+        let at = listed(&found, &repo.join("at.md"));
+        assert_eq!(
+            (at.text.as_ref().map(String::len), at.bytes),
+            (Some(limit), Some(LIMIT))
+        );
+        let over = listed(&found, &repo.join("over.md"));
+        assert_eq!((over.text.as_deref(), over.bytes), (None, Some(LIMIT + 1)));
+    }
+
+    /// A file that grew past the limit between its size being looked at and
+    /// its being read is too large all the same.
+    #[test]
+    fn a_file_read_one_byte_past_the_limit_is_too_large() {
+        let limit = usize::try_from(LIMIT).expect("a mebibyte fits");
+        assert!(matches!(
+            contents(&vec![b'x'; limit + 1]),
+            Contents::TooLarge(size) if size == LIMIT + 1
+        ));
+        assert!(matches!(
+            contents(&vec![b'x'; limit]),
+            Contents::Text(text, size) if size == LIMIT && text.len() == limit
+        ));
+    }
+
+    /// The CLI follows imports [`IMPORT_DEPTH`] deep and no further: a chain
+    /// of six lists the first five and not the sixth.
+    #[test]
+    fn imports_are_followed_five_deep_and_no_further() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("repo");
+        write(
+            &repo.join("CLAUDE.md"),
+            "@1.md
+",
+        );
+        for n in 1..=6 {
+            write(
+                &repo.join(format!("{n}.md")),
+                &format!(
+                    "@{}.md
+",
+                    n + 1
+                ),
+            );
+        }
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+        let depths: Vec<(String, usize)> = found
+            .iter()
+            .filter(|source| source.path.starts_with(dir.path()))
+            .map(|source| {
+                let name = source
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                (name.unwrap_or_default(), source.depth)
+            })
+            .collect();
+        assert_eq!(
+            depths,
+            [
+                ("CLAUDE.md".to_owned(), 0),
+                ("1.md".to_owned(), 1),
+                ("2.md".to_owned(), 2),
+                ("3.md".to_owned(), 3),
+                ("4.md".to_owned(), 4),
+                ("5.md".to_owned(), 5),
+            ]
+        );
+    }
+
+    /// Each directory's `CLAUDE.md`, then its `.claude/CLAUDE.md` in the same
+    /// scope, then its `CLAUDE.local.md`, which is the operator's own.
+    #[test]
+    fn a_directory_gives_its_claude_md_then_its_dot_claude_one_then_its_local_one() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("repo");
+        write(
+            &dir.path().join(".claude").join("CLAUDE.md"),
+            "above
+",
+        );
+        write(
+            &repo.join("CLAUDE.md"),
+            "project
+",
+        );
+        write(
+            &repo.join(".claude").join("CLAUDE.md"),
+            "dot
+",
+        );
+        write(
+            &repo.join("CLAUDE.local.md"),
+            "mine
+",
+        );
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+        let listed: Vec<(Scope, Option<&str>)> = found
+            .iter()
+            .filter(|source| source.path.starts_with(dir.path()))
+            .map(|source| (source.scope, source.text.as_deref()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (Scope::Parent, Some("above\n")),
+                (Scope::Project, Some("project\n")),
+                (Scope::Project, Some("dot\n")),
+                (Scope::Local, Some("mine\n")),
+            ]
+        );
     }
 
     /// A git worktree's `.git` is a file pointing into the main checkout's

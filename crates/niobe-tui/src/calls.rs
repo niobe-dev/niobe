@@ -1221,6 +1221,68 @@ mod tests {
         assert!(rows[0].contains("t1, updated memory · t2"), "{said}");
     }
 
+    /// Two edits to one note name it once.
+    #[test]
+    fn two_edits_to_one_note_name_it_once() {
+        use niobe_core::event::ChangeScope;
+
+        let mut app = app();
+        for id in ["t1", "t2"] {
+            let note = |event: Event| match event {
+                Event::ToolCallStart {
+                    id,
+                    name,
+                    input,
+                    agent,
+                    ..
+                } => Event::ToolCallStart {
+                    id,
+                    name,
+                    input,
+                    summary: Some("/notes/memory/notes.md".to_owned()),
+                    agent,
+                },
+                Event::ToolCallEnd {
+                    id,
+                    name,
+                    input,
+                    output,
+                    bytes,
+                    outcome,
+                    exit_code,
+                    error,
+                    command,
+                    ..
+                } => Event::ToolCallEnd {
+                    id,
+                    name,
+                    input,
+                    output,
+                    bytes,
+                    outcome,
+                    summary: Some("/notes/memory/notes.md".to_owned()),
+                    exit_code,
+                    error,
+                    command,
+                },
+                other => other,
+            };
+            app.apply(&note(start(id, "Edit")));
+            app.apply(&note(end(id, "Edit", ToolOutcome::Ok, None)));
+            app.apply(&Event::FileChange {
+                path: "/notes/memory/notes.md".to_owned(),
+                added: Some(1),
+                removed: Some(1),
+                hunks: Vec::new(),
+                scope: ChangeScope::AgentMemory,
+            });
+        }
+
+        let said = drawn(&app, false).join("\n");
+        assert!(said.contains("updated memory · notes.md"), "{said}");
+        assert!(!said.contains("notes.md, notes.md"), "{said}");
+    }
+
     #[test]
     fn a_change_whose_removal_went_unstated_reads_as_a_dash_and_its_sum_as_a_floor() {
         let mut app = app();

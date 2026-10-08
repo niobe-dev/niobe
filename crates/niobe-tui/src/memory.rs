@@ -463,6 +463,63 @@ mod tests {
     }
 
     #[test]
+    fn q_closes_the_list_as_esc_does() {
+        let mut view = View {
+            files: Some(vec![file("CLAUDE.md", Some(""), true)]),
+            ..View::default()
+        };
+        assert_eq!(view.on_key(key(KeyCode::Char('q'))), Outcome::Close);
+    }
+
+    /// Down on the last file stays on it, so Enter still reads a file rather
+    /// than finding none under the cursor and closing the view.
+    #[test]
+    fn down_past_the_last_file_stays_on_it() {
+        let mut view = View {
+            files: Some(vec![
+                file("CLAUDE.md", Some(""), true),
+                file("AGENTS.md", Some("# Agents\n"), true),
+            ]),
+            ..View::default()
+        };
+        for _ in 0..3 {
+            view.on_key(key(KeyCode::Down));
+        }
+        assert_eq!(
+            view.current().map(|file| file.path.as_str()),
+            Some("AGENTS.md")
+        );
+        assert_eq!(view.on_key(key(KeyCode::Enter)), Outcome::Stay);
+        assert_eq!(view.reading, Some((1, 0)));
+    }
+
+    /// A list longer than the view scrolls to keep the cursor's row drawn.
+    #[test]
+    fn a_long_list_scrolls_to_keep_the_cursor_in_view() {
+        let files: Vec<MemoryFile> = (0..10)
+            .map(|n| file(&format!("file{n}.md"), Some(""), true))
+            .collect();
+        let mut view = View {
+            files: Some(files),
+            ..View::default()
+        };
+        view.on_key(key(KeyCode::End));
+        let app = App::new(crate::app::Repo::default());
+        let drawn: Vec<String> = listing(&app, &view, (60, 6), &Theme::default())
+            .iter()
+            .map(Line::to_string)
+            .collect();
+        assert!(
+            drawn.iter().any(|row| row.contains("file9.md")),
+            "{drawn:?}"
+        );
+        assert!(
+            !drawn.iter().any(|row| row.contains("file0.md")),
+            "{drawn:?}"
+        );
+    }
+
+    #[test]
     fn e_hands_the_file_to_the_editor_only_where_it_may_be() {
         let mut view = View {
             files: Some(vec![
