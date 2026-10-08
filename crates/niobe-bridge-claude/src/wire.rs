@@ -491,13 +491,6 @@ where
 }
 
 impl Usage {
-    /// Of the cache writes, the ones bought for an hour rather than for the
-    /// default five minutes. Zero where the CLI reported no split.
-    ///
-    /// The split beside the total wins where there is one; otherwise it is
-    /// summed over the iterations. Reading only the first would price every
-    /// one-hour write on a 2.1.278 `message_delta` as a five-minute one — in
-    /// the session recorded on 19 September 2026, every cache write it made.
     /// Every prompt token of the last API request the message took: its
     /// uncached input, cache reads and cache writes.
     ///
@@ -520,6 +513,13 @@ impl Usage {
         input.saturating_add(read).saturating_add(write)
     }
 
+    /// Of the cache writes, the ones bought for an hour rather than for the
+    /// default five minutes. Zero where the CLI reported no split.
+    ///
+    /// The split beside the total wins where there is one; otherwise it is
+    /// summed over the iterations. Reading only the first would price every
+    /// one-hour write on a 2.1.278 `message_delta` as a five-minute one — in
+    /// the session recorded on 19 September 2026, every cache write it made.
     pub(crate) fn cache_write_1h(&self) -> u64 {
         match &self.cache_creation {
             Some(split) => split.ephemeral_1h_input_tokens,

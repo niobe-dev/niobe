@@ -1088,8 +1088,8 @@ impl Translator {
     /// alone: a warning that named no version would say nothing the operator
     /// could act on.
     ///
-    /// The CLI writes `init` again whenever the session moves model, so this
-    /// reports the first one and nothing after it.
+    /// The CLI writes `init` again at the start of every turn, so this reports
+    /// the first one and nothing after it.
     fn check_release(&mut self, version: Option<&str>, out: &mut Vec<Event>) {
         if self.checked_release {
             return;
@@ -4428,8 +4428,8 @@ mod tests {
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].contains("9.9.9"), "{said:?}");
 
-        // The CLI writes `init` again whenever the session moves model, and a
-        // release it already reported has not become news.
+        // The CLI writes `init` again at the start of every turn, on a model
+        // moved or not, and a release it already reported has not become news.
         let again = translator.line(
             r#"{"type":"system","subtype":"init","session_id":"s-1","model":"haiku-4-5","claude_code_version":"9.9.9"}"#,
         );

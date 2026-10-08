@@ -60,7 +60,11 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
   number in its comments; `parse.rs` walks it by hand like the config, `table.rs` looks a model
-  up by exact id on a day and prices a usage record against it. The same file dates each model's
+  up by exact id on a day and prices a usage record against it. `price.rs` is a model's price
+  from the day it took effect — its rates, any long-context tier and the multiple fast mode
+  costs — held as whole millionths of a dollar per million tokens, so a cost is summed in
+  integers and becomes dollars once; `date.rs` is the day a price is in force from, and
+  `error.rs` names the file, line and key of a price that cannot be used. The same file dates each model's
   context window in its `[[context]]` entries, which the shell's context meter falls back on where
   the backend has not reported one. `tests/prices.rs` checks the table against costs computed by
   hand, and `tests/contexts.rs` its windows against the published sizes.
@@ -80,7 +84,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
   `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
   profile, allow tool calls without asking, or replace one of the user's — as each file's SHA-256 under the user's own config
-  directory, because a repository's file arrives with the clone; `lib.rs` layers a repository's file over the user's, withholds
+  directory, because a repository's file arrives with the clone; `error.rs` names the file in
+  every failure, and the line and key of every invalid value; `lib.rs` layers a repository's file over the user's, withholds
   what an untrusted file may not set, and selects the profile a session runs under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
   SQLite (`store.rs`; the triggers in its schema refuse an update or a delete), which also reads
@@ -93,7 +98,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — `ui.rs` draws it, its Activity pane counting tool calls by kind of work with what
   did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
-  operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
+  operator's events to and `rules.rs` the one it hands their standing answers to, `bridge.rs`
+  the one it sends turns to and takes events from, `watch.rs` the one it asks what the
+  repository looks like now, and `prices.rs` the one it asks to value the tokens no reported
+  cost covers yet, which it shows marked as an estimate, `terminal.rs`
   enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel, clicks and drags, the bracketing it
   asks pastes to arrive in, and the keyboard
   enhancement it pushes where the terminal says it can tell Shift+Enter from Enter — or the
@@ -160,7 +168,12 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
   it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
   and names a turn that compacted the conversation as one, under the row that says what the
-  compaction shrank the context from and to. A dialog, and a
+  compaction shrank the context from and to. `usage.rs` is the arithmetic under the Usage
+  pane's breakdown — each model's share in whole percent that add up to 100, what each model
+  is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
+  pane is drawn with, `tree.rs` groups the working tree's files under the directories they
+  share, and `clock.rs` is the time the shell draws by, read by the loop once a tick and handed
+  in, and absent where the machine has no timezone or a log recorded no times. A dialog, and a
   permission question in the transcript, casts a shadow on what is under it. Snapshot pictures of the screen live in
   `tests/snapshots/`, and `snapshots.rs` is the one switch that has a test rewrite them —
   `UPDATE_SNAPSHOTS=1` exactly, and never on a CI runner.
@@ -228,6 +241,19 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   the operator is deciding on them, and records the answer as `niobe trust` does, for the text
   that was shown. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
+  `args.rs` parses the command line by hand; `config.rs` finds the user's and the repository's
+  config files, layers them under the trust record and names the selected profile to the shell;
+  `repo.rs` is where the session runs — the repository's root, name and branch, the store under
+  `.niobe/`, kept to the operator alone and refused where a link would write it elsewhere, and
+  the `git` reads of the working tree made on a thread of its own as the shell's `Watch`;
+  `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
+  operator's trust decision about that file; `prices.rs` is the price table `niobe prices`
+  prints and the sheet the shell values tokens with; `profiles.rs` and `sessions.rs` are what
+  `niobe profiles` and `niobe sessions` print; `summary.rs` is what `niobe replay` and
+  `--resume` print where standard output is not a terminal; every line the binary prints goes
+  through `printable.rs`, which shows a character that would act on the terminal as one that
+  says where it was, and `stdout.rs`, which writes it without panicking, so a reader that stops
+  reading ends the run quietly.
   `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission
   prompt from the bridge's translation to the rule in the config, which is the one path only this
@@ -283,18 +309,23 @@ These hold for every change. Breaking one is a bug even when the feature ships g
    does not replace a profile the user's file defines, until the operator has trusted that
    file's contents.
 2. **No telemetry.** Network calls go only to configured providers and the CLIs. `cargo xtask
-   layering` reads the dependency tree with every feature on and on every target, and fails on
-   a crate in it that is not a workspace member and not on its allowed list
-   (`xtask/src/network.rs`) — a crate vendored beside the workspace and depended on by path
-   included — and on a path crate outside the repository. It reads every Rust file in the
-   repository but `xtask`'s, and fails on a code line that names a CLI's credentials file
-   (`.credentials.json`, a `".credentials` literal, `auth.json`) or a user agent
-   (`user-agent`, `user_agent`, any case); and, in a crate's `src/` or a build script, on one
-   that opens or resolves a connection (`std::net`, `net` in a `std::{…}` group, `TcpStream`,
-   `TcpListener`, `UdpSocket`, `ToSocketAddrs`), reads the keychain, or spawns a network
-   program (`curl`, `wget`, `nc`, `ssh`, `security` and the rest of `NETWORK_PROGRAMS`) named
-   as a literal. It reads text, not types: a name built at run time, or a program named through
-   a variable, passes it, which is what review is for.
+   layering` checks names and text, not behaviour. It reads the tree of crates the product is
+   built from — every workspace member's normal and build dependencies, with every feature on
+   and on every target; dev-dependencies are not in it — and fails on a crate that exists to
+   talk over the network (`NETWORK_CRATES` in `xtask/src/network.rs`), on any crate that is
+   not a workspace member and not on `ALLOWED_CRATES` — a crate vendored beside the workspace
+   and depended on by path included — and on a path crate outside the repository. It reads
+   every Rust file git lists, tracked or untracked and not ignored, but `xtask`'s, and fails on
+   a line that is not a `//` comment and names a CLI's credentials file (`.credentials.json`, a
+   `".credentials` literal, `auth.json`) or a user agent (`user-agent`, `user_agent`), in any
+   case; and, in a file under a `src/` directory or a `build.rs`, on one that opens or resolves
+   a connection (`std::net`, `net` in a `std::{…}` group, `TcpStream`, `TcpListener`,
+   `UdpSocket`, `ToSocketAddrs`), names the keychain (`Keychain`, `find-generic-password`,
+   `find-internet-password`), or hands a network program (`curl`, `wget`, `nc`, `ssh`,
+   `security` and the rest of `NETWORK_PROGRAMS`) to a `new(` as a literal. A line
+   `ALLOWED_MARKS` names is passed over. A name built at run time, a program named through a
+   variable, and a connection opened under a crate's `tests/` or by a dev-dependency all pass
+   it, which is what review is for.
 3. **The terminal is restored on every exit path**, including panics and SIGTERM. This is why the
    release profile keeps `panic = "unwind"`.
 4. **Every cost number is traceable to a `usage` field, or it is labelled** "estimate" /
@@ -433,6 +464,23 @@ Where tests live:
     Each is against 50 ms, a binary of its own, and timed only in an optimised build
     (`cargo test --release -p niobe-store --test replay_budget`, and the same for `niobe-cli`):
     in the debug suite under other builds' load they took from 20 ms to over a second.
+  - `niobe-core/tests/work.rs` reads shell commands and tool names that are easy to misread as
+    the program that did the work and the kind of work it was.
+  - `niobe-store/tests/store.rs` runs the session store against a real SQLite file, a restart
+    being the store dropped and the file opened again; `tests/failures.rs` runs it with something
+    else in the way — a second `niobe` writing the same file, a lock held past the timeout, a
+    read-only file, a row that no longer decodes and a log cut off mid-line.
+  - `niobe-tui/tests/escape.rs` hands every place the shell draws content a payload of control
+    characters, escape sequences and direction marks, and checks that the bytes a real crossterm
+    backend writes hold none of them; `tests/select.rs` drags and clicks on the shell as drawn,
+    for the text a selection copies and the link a click opens.
+  - `niobe-bridge-claude/tests/undecodable.rs` runs a `Session` against stand-in CLIs that write
+    bytes that are not UTF-8, or close their output and keep running.
+  - `niobe-cli/tests/cache_lifetime.rs` and `tests/owed.rs` price recorded and constructed usage
+    against the bundled table, across the crates only the binary may name together: a cache
+    write at the lifetime the CLI reported it with, and tokens no reported cost covers at the
+    rate of each request rather than of their sum. The expected amounts are worked out by hand.
+  - The other test binaries are described with their crates in §1.
   - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached
     the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM,
     SIGINT or SIGQUIT and a panic, and around a stop — a SIGTSTP or Ctrl+Z hands the terminal
