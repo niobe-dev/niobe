@@ -228,15 +228,7 @@ fn the_installer_falls_back_to_wget_and_shasum() {
     let tools = root.path().join("tools");
     tools_without(&tools, &["curl", "wget", "sha256sum", "shasum"]);
     let used = root.path().join("used");
-    // `wget -q --https-only <url> -O <file>`, reading the `file://` release
-    // the way the real one reads a URL.
-    script(
-        &tools.join("wget"),
-        &format!(
-            "echo wget >> '{used}'\nurl=$3\ncp \"${{url#file://}}\" \"$5\"\n",
-            used = used.display()
-        ),
-    );
+    script(&tools.join("wget"), &gnu_wget(&used));
     // `shasum -a 256 <file>`, answered by whichever SHA-256 tool this machine
     // really has.
     let digest = match (system_tool(&["sha256sum"]), system_tool(&["shasum"])) {
@@ -257,28 +249,123 @@ fn the_installer_falls_back_to_wget_and_shasum() {
         &format!("echo shasum >> '{}'\n{digest}\n", used.display()),
     );
 
-    let output = Command::new("sh")
-        .arg(installer())
-        .env_clear()
-        .env("PATH", &tools)
-        .env("HOME", root.path())
-        .env("NIOBE_INSTALL_DIR", root.path().join("bin"))
-        .env(
-            "NIOBE_DOWNLOAD_URL",
-            format!("file://{}", release.display()),
-        )
-        .output()
-        .expect("sh is on every machine the tests run on");
+    let output = install_with_tools(root.path(), &release, &tools);
 
     assert!(output.status.success(), "{}", said(&output));
     let used = fs::read_to_string(&used).expect("the stand-ins were run");
     assert!(used.contains("wget"), "{used}");
     assert!(used.contains("shasum"), "{used}");
-    let version = Command::new(root.path().join("bin/niobe"))
+    assert_installed(root.path());
+}
+
+/// Runs the installer as [`install`] does, with `tools` as the whole PATH.
+fn install_with_tools(root: &Path, release: &Path, tools: &Path) -> Output {
+    Command::new("sh")
+        .arg(installer())
+        .env_clear()
+        .env("PATH", tools)
+        .env("HOME", root)
+        .env("NIOBE_INSTALL_DIR", root.join("bin"))
+        .env(
+            "NIOBE_DOWNLOAD_URL",
+            format!("file://{}", release.display()),
+        )
+        .output()
+        .expect("sh is on every machine the tests run on")
+}
+
+/// That `root/bin/niobe` is the stand-in the release holds, and runs.
+fn assert_installed(root: &Path) {
+    let version = Command::new(root.join("bin/niobe"))
         .arg("--version")
         .output()
         .expect("the installer made the binary executable");
     assert_eq!(String::from_utf8_lossy(&version.stdout), "niobe 9.9.9\n");
+}
+
+/// The body of a stand-in `wget` that reads `<url> -O <file>` among its
+/// arguments the way the real one does, fetching the `file://` release by
+/// copying it, and notes in `used` that it ran. `--help` is answered, and
+/// anything else that opens with `-` is passed over.
+fn wget_reading(used: &Path, help: &str, long_options: &str) -> String {
+    format!(
+        "case \"$1\" in --help) echo '{help}' >&2; exit 1 ;; esac
+for arg in \"$@\"; do
+    case \"$arg\" in --*) {long_options} ;; esac
+done
+echo wget >> '{used}'
+url= file=
+while [ $# -gt 0 ]; do
+    case \"$1\" in
+        -O) file=$2; shift ;;
+        -*) ;;
+        *) url=$1 ;;
+    esac
+    shift
+done
+cp \"${{url#file://}}\" \"$file\"
+",
+        used = used.display()
+    )
+}
+
+/// GNU wget, which restricts itself to HTTPS when asked.
+fn gnu_wget(used: &Path) -> String {
+    wget_reading(used, "  --https-only   only follow secure HTTPS links", ":")
+}
+
+/// BusyBox wget, which Alpine ships in place of curl: it has no
+/// `--https-only` and refuses every long option it does not know.
+fn busybox_wget(used: &Path) -> String {
+    wget_reading(
+        used,
+        "Usage: wget [-cqS] [--spider] [-O FILE] [-o LOGFILE] [--header STR] URL...",
+        "case \"$arg\" in --spider|--header) ;; *) echo \"wget: unrecognized option: ${arg#--}\" >&2; exit 1 ;; esac",
+    )
+}
+
+/// Alpine has BusyBox's `wget` and no `curl`; the installer downloads with
+/// the options that `wget` has rather than failing on one it lacks.
+#[test]
+fn the_installer_downloads_with_a_wget_that_has_no_https_only_option() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+    let tools = root.path().join("tools");
+    tools_without(&tools, &["curl", "wget"]);
+    let used = root.path().join("used");
+    script(&tools.join("wget"), &busybox_wget(&used));
+
+    let output = install_with_tools(root.path(), &release, &tools);
+
+    assert!(output.status.success(), "{}", said(&output));
+    let used = fs::read_to_string(&used).expect("the stand-in was run");
+    assert!(used.contains("wget"), "{used}");
+    assert_installed(root.path());
+}
+
+/// A download that fails says which tool failed it, since the URL is rarely
+/// what is wrong.
+#[test]
+fn a_failed_download_names_the_tool_that_failed() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let empty = root.path().join("empty");
+    fs::create_dir_all(&empty).expect("the temporary directory is writable");
+    let tools = root.path().join("tools");
+    tools_without(&tools, &["curl", "wget"]);
+    script(
+        &tools.join("wget"),
+        &busybox_wget(&root.path().join("used")),
+    );
+
+    let output = install_with_tools(root.path(), &empty, &tools);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("wget could not download"),
+        "{}",
+        said(&output)
+    );
+    assert!(!root.path().join("bin/niobe").exists());
 }
 
 /// What the install directory holds after a failed install: the staged copy

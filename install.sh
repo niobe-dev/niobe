@@ -63,14 +63,33 @@ target() {
     printf '%s-%s\n' "$arch" "$os"
 }
 
+# Fetches the URL $1 into the file $2, or ends the install saying which tool
+# could not: the URL is rarely what is wrong.
 download() {
     if command -v curl >/dev/null 2>&1; then
-        curl --proto '=https,file' --tlsv1.2 -fsSL "$1" -o "$2"
+        curl --proto '=https,file' --tlsv1.2 -fsSL "$1" -o "$2" ||
+            fail "curl could not download $1"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q --https-only "$1" -O "$2"
+        wget_secure "$1" "$2" || fail "wget could not download $1"
     else
         fail "needs curl or wget to download the release"
     fi
+}
+
+# wget restricted to HTTPS. BusyBox's wget, the one Alpine ships instead of
+# curl, has no --https-only and refuses the run where it is given one, so
+# there the URL itself is held to https:// (or file://, as with curl) before
+# it is fetched; a redirect it follows is not checked, which is what the
+# option would have added.
+wget_secure() {
+    if wget --help 2>&1 | grep -q -- '--https-only'; then
+        wget -q --https-only "$1" -O "$2"
+        return
+    fi
+    case "$1" in
+        https://* | file://*) wget -q "$1" -O "$2" ;;
+        *) fail "this wget cannot be held to HTTPS, and $1 is not an https:// URL; install curl" ;;
+    esac
 }
 
 sha256() {
@@ -104,10 +123,8 @@ main() {
     trap 'rm -rf "$scratch"' EXIT INT TERM
 
     say "downloading $archive ($version)"
-    download "$base/$archive" "$scratch/$archive" ||
-        fail "could not download $base/$archive"
-    download "$base/$archive.sha256" "$scratch/$archive.sha256" ||
-        fail "could not download $base/$archive.sha256"
+    download "$base/$archive" "$scratch/$archive"
+    download "$base/$archive.sha256" "$scratch/$archive.sha256"
 
     expected=$(cut -d ' ' -f 1 <"$scratch/$archive.sha256")
     actual=$(sha256 "$scratch/$archive")
