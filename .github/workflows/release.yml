@@ -26,11 +26,16 @@ permissions:
   contents: read
 
 jobs:
-  # The whole gate, on the commit the tag names: a tag pushed on a commit CI
-  # never saw green, or saw red, publishes nothing.
+  # The whole gate, on the commit the tag names and on both systems a binary
+  # ships for, as CI runs it: a tag pushed on a commit CI never saw green, or
+  # saw red on either, publishes nothing.
   gate:
-    name: Gate
-    runs-on: ubuntu-latest
+    name: Gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-latest, ubuntu-latest]
     env:
       RUSTFLAGS: -D warnings
     steps:

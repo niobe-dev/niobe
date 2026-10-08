@@ -583,7 +583,7 @@ cargo xtask version <patch|minor|major|X.Y.Z>
 git add Cargo.toml Cargo.lock         # a release commit carries nothing else
 git commit -m "chore: release <version>"
 git tag -a v<version> -F <notes-file> # annotated: its message is the release notes
-git push origin HEAD v<version>
+git push --atomic origin HEAD v<version>  # all or nothing: a refused branch publishes no tag
 ```
 
 `cargo xtask version <bump>` moves all eight sites — `[workspace.package]` and the seven `niobe-*`

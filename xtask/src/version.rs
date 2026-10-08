@@ -222,15 +222,20 @@ pub fn version_sites(manifest: &str) -> Result<Vec<Site>, String> {
             continue;
         }
 
-        let what = match section {
-            "[workspace.package]" if trimmed.starts_with("version") => {
+        let dotted = section
+            .strip_prefix("[workspace.dependencies.")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .filter(|name| name.starts_with("niobe-"));
+        let what = match (section, dotted) {
+            ("[workspace.package]", _) if is_version_key(trimmed) => {
                 package_seen = true;
                 "[workspace.package]".to_owned()
             }
-            "[workspace.dependencies]" if trimmed.starts_with("niobe-") => trimmed
+            ("[workspace.dependencies]", _) if trimmed.starts_with("niobe-") => trimmed
                 .split_once([' ', '='])
                 .map_or(trimmed, |(key, _)| key)
                 .to_owned(),
+            (_, Some(name)) if is_version_key(trimmed) => name.to_owned(),
             _ => continue,
         };
 
@@ -249,6 +254,12 @@ pub fn version_sites(manifest: &str) -> Result<Vec<Site>, String> {
     }
 
     Ok(sites)
+}
+
+/// Whether `line`, trimmed, sets the `version` key.
+fn is_version_key(line: &str) -> bool {
+    line.strip_prefix("version")
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
 }
 
 /// The span of the string a `version = "…"` key is set to, within `line`.
@@ -282,6 +293,81 @@ pub fn current_version(manifest: &str) -> Result<Version, String> {
     }
 
     Version::parse(&first.value)
+}
+
+/// The paths of the workspace's members, as the root manifest's `members`
+/// array lists them.
+pub fn members(manifest: &str) -> Vec<String> {
+    let Some(start) = manifest.find("\nmembers") else {
+        return Vec::new();
+    };
+    let rest = &manifest[start..];
+    let (Some(open), Some(close)) = (rest.find('['), rest.find(']')) else {
+        return Vec::new();
+    };
+    rest.get(open + 1..close)
+        .unwrap_or_default()
+        .split(',')
+        .map(|item| item.trim().trim_matches('"'))
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The package name of the member manifest `text`, read from `path`, where
+/// its version is the workspace's; an error naming `path` where it writes a
+/// version of its own or none.
+///
+/// A member that writes its own version builds a binary or a crate whose
+/// version no release moves, and the root manifest's sites cannot see it.
+pub fn member_version(text: &str, path: &str) -> Result<String, String> {
+    let mut section = "";
+    let mut name = None;
+    let mut version = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            section = trimmed;
+            continue;
+        }
+        if section != "[package]" {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("name").map(str::trim_start)
+            && let Some(value) = value.strip_prefix('=')
+        {
+            name = Some(value.trim().trim_matches('"').to_owned());
+        }
+        if trimmed.starts_with("version") {
+            version = Some(trimmed.to_owned());
+        }
+    }
+    let inherited = version.as_deref().is_some_and(|version| {
+        let compact: String = version.chars().filter(|c| !c.is_whitespace()).collect();
+        compact == "version.workspace=true" || compact == "version={workspace=true}"
+    });
+    match (inherited, version) {
+        (true, _) => Ok(name.unwrap_or_default()),
+        (false, Some(version)) => Err(format!(
+            "{path}: `{version}`; every member takes the workspace's version, \
+             `version.workspace = true`"
+        )),
+        (false, None) => Err(format!(
+            "{path}: no version; every member takes the workspace's, `version.workspace = true`"
+        )),
+    }
+}
+
+/// The library crates among `crates` that have no site in `sites`: a library
+/// another member depends on by path is listed under
+/// `[workspace.dependencies]` with the workspace version, and one missing there
+/// is a site a release would not move.
+pub fn unlisted<'a>(sites: &[Site], crates: &'a [String]) -> Vec<&'a str> {
+    crates
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !sites.iter().any(|site| site.what == *name))
+        .collect()
 }
 
 /// The manifest with every version site set to `to`.
@@ -322,13 +408,46 @@ fn manifest() -> Result<(std::path::PathBuf, String), String> {
 /// Checks that every version site carries the same version. Cheap enough to
 /// run in the gate, and it catches a hand-edited manifest before a release
 /// builds a binary whose `--version` disagrees with its tag.
+///
+/// Every member's own manifest is read too: a member that writes a version of
+/// its own, or a `niobe-*` library with no site in the root manifest, is a
+/// version no release would move.
 fn check() -> Result<(), String> {
     let (_, text) = manifest()?;
     let version = current_version(&text)?;
     let sites = version_sites(&text)?;
+
+    let root = crate::workspace_root();
+    let mut problems = Vec::new();
+    let mut crates = Vec::new();
+    for member in members(&text) {
+        let path = format!("{member}/Cargo.toml");
+        let member_text = std::fs::read_to_string(root.join(&path))
+            .map_err(|e| format!("cannot read {path}: {e}"))?;
+        match member_version(&member_text, &path) {
+            // A library is what another member depends on by path; the
+            // binary is depended on by nobody, so has no site.
+            Ok(name)
+                if name.starts_with("niobe-")
+                    && root.join(&member).join("src/lib.rs").is_file() =>
+            {
+                crates.push(name)
+            }
+            Ok(_) => {}
+            Err(problem) => problems.push(problem),
+        }
+    }
+    problems.extend(unlisted(&sites, &crates).into_iter().map(|name| {
+        format!("{name} is a library member with no `version` under [workspace.dependencies]")
+    }));
+    if !problems.is_empty() {
+        return Err(problems.join("\n"));
+    }
+
     println!(
-        "version: {version} in all {} sites of Cargo.toml",
-        sites.len()
+        "version: {version} in all {} sites of Cargo.toml, inherited by all {} members",
+        sites.len(),
+        members(&text).len()
     );
     Ok(())
 }
@@ -441,7 +560,7 @@ fn apply(target: &str) -> Result<(), String> {
     println!("{} → {next} in Cargo.toml and Cargo.lock", pending.current);
     println!(
         "\nnext:\n  git add Cargo.toml Cargo.lock\n  git commit -m \"chore: release {next}\"\n  \
-         git tag -a {tag} -F <notes>\n  git push origin HEAD {tag}"
+         git tag -a {tag} -F <notes>\n  git push --atomic origin HEAD {tag}"
     );
     Ok(())
 }
@@ -634,6 +753,66 @@ serde = { version = "0.4.0", features = ["derive"] }
     fn a_manifest_with_no_workspace_package_version_is_rejected() {
         let without = MANIFEST.replace("version = \"0.4.0\"\nedition", "edition");
         assert!(version_sites(&without).is_err());
+    }
+
+    #[test]
+    fn a_dependency_written_as_a_table_of_its_own_is_a_site() {
+        let dotted = format!(
+            "{MANIFEST}\n[workspace.dependencies.niobe-store]\npath = \"crates/niobe-store\"\n\
+             version = \"0.3.0\"\n"
+        );
+        let sites = version_sites(&dotted).expect("the manifest is well formed");
+        let what: Vec<&str> = sites.iter().map(|s| s.what.as_str()).collect();
+        assert_eq!(
+            what,
+            [
+                "[workspace.package]",
+                "niobe-core",
+                "niobe-tui",
+                "niobe-store"
+            ]
+        );
+        let error = current_version(&dotted).expect_err("the dotted site drifted");
+        assert!(error.contains("niobe-store is 0.3.0"), "{error}");
+    }
+
+    #[test]
+    fn a_member_that_writes_its_own_version_is_reported() {
+        let literal = "[package]\nname = \"niobe-core\"\nversion = \"0.1.0\"\n";
+        let error = member_version(literal, "crates/niobe-core/Cargo.toml")
+            .expect_err("the member does not inherit the version");
+        assert!(error.contains("crates/niobe-core/Cargo.toml"), "{error}");
+        assert!(error.contains("0.1.0"), "{error}");
+
+        let missing = "[package]\nname = \"niobe-core\"\n";
+        assert!(member_version(missing, "c/Cargo.toml").is_err());
+
+        for inherited in [
+            "[package]\nname = \"niobe-core\"\nversion.workspace = true\n",
+            "[package]\nname = \"niobe-core\"\nversion = { workspace = true }\n",
+        ] {
+            assert_eq!(
+                member_version(inherited, "c/Cargo.toml"),
+                Ok("niobe-core".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn a_member_crate_with_no_site_is_reported() {
+        let sites = version_sites(MANIFEST).expect("the test manifest is well formed");
+        let crates = ["niobe-core".to_owned(), "niobe-store".to_owned()];
+        assert_eq!(unlisted(&sites, &crates), ["niobe-store"]);
+    }
+
+    #[test]
+    fn the_members_are_read_from_the_workspace_table() {
+        assert_eq!(members(MANIFEST), ["crates/niobe-core"]);
+        assert_eq!(
+            members(include_str!("../../Cargo.toml")).len(),
+            9,
+            "eight crates and xtask"
+        );
     }
 
     #[test]

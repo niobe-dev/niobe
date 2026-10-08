@@ -15,9 +15,11 @@ pub const LICENSE_LINE: &str = "SPDX-License-Identifier: Apache-2.0";
 /// The second line of every header.
 pub const COPYRIGHT_LINE: &str = "Copyright (c) Viacheslav Shynkarenko";
 
-/// Files that cannot carry a header: the license text itself, a file that must
-/// hold nothing but an import, and a lockfile cargo rewrites.
-const EXEMPT_NAMES: &[&str] = &["LICENSE", "CLAUDE.md", "Cargo.lock"];
+/// Files at the workspace root that cannot carry a header: the license text
+/// itself, a file that must hold nothing but an import, and the lockfile cargo
+/// rewrites. Exempt there only: a `CLAUDE.md` anywhere else is markdown like
+/// any other.
+const EXEMPT_AT_ROOT: &[&str] = &["LICENSE", "CLAUDE.md", "Cargo.lock"];
 
 /// How a file carries the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,16 +42,13 @@ pub fn rule_for(path: &str) -> Option<Rule> {
 
     // A snapshot is a picture compared cell for cell, and a recorded output
     // under `fixtures/` is read against the byte count recorded beside it. A
-    // JSON file under `fixtures/` is one a CLI wrote, and JSON has no comments.
-    let is_recorded_text = (path.contains("/tests/snapshots/")
-        || path.contains("/tests/fixtures/"))
-        && name.ends_with(".txt");
-    let is_recorded_json = path.contains("/tests/fixtures/") && name.ends_with(".json");
-    if EXEMPT_NAMES.contains(&name)
-        || is_recorded_text
-        || is_recorded_json
-        || name.ends_with(".jsonl")
-    {
+    // JSON or JSON Lines file under `fixtures/` is one a CLI wrote, and JSON
+    // has no comments.
+    let is_fixture = path.contains("/tests/fixtures/");
+    let is_recorded_text =
+        (path.contains("/tests/snapshots/") || is_fixture) && name.ends_with(".txt");
+    let is_recorded_json = is_fixture && (name.ends_with(".json") || name.ends_with(".jsonl"));
+    if (path == name && EXEMPT_AT_ROOT.contains(&name)) || is_recorded_text || is_recorded_json {
         return Some(Rule::Exempt);
     }
     if name == ".gitignore" {
@@ -142,6 +141,17 @@ mod tests {
         );
         assert_eq!(rule_for("crates/niobe-tui/src/notes.txt"), None);
         assert_eq!(rule_for("crates/niobe-tui/src/palette.json"), None);
+    }
+
+    #[test]
+    fn an_exempt_name_is_exempt_only_where_the_exemption_is_for() {
+        assert_eq!(
+            rule_for("crates/niobe-core/CLAUDE.md"),
+            Some(Rule::HtmlComment)
+        );
+        assert_eq!(rule_for("crates/niobe-core/src/data.jsonl"), None);
+        assert_eq!(rule_for("crates/niobe-core/LICENSE"), None);
+        assert_eq!(rule_for("xtask/Cargo.lock"), None);
     }
 
     #[test]
