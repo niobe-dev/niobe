@@ -46,6 +46,16 @@ fn shell_on(recording: &str, translator: Translator) -> App {
         ..Repo::default()
     });
     app.extend(&events);
+    // Read at a moment the recording's windows have not yet come back at, with
+    // no timezone: the levels do not depend on the day the test runs on, and
+    // the reset times stay off the pane.
+    app.tick(
+        std::time::Instant::now(),
+        Some(niobe_tui::clock::Stamp::new(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(RECORDED),
+            None,
+        )),
+    );
     app
 }
 
@@ -64,9 +74,8 @@ impl niobe_tui::Prices for Bundled {
 
 /// The Usage pane, as text: the rows of its box, cut out of a 120×30 frame.
 ///
-/// The shell is drawn without a clock, so a window's reset time — which reads
-/// against the moment it is drawn at — is left off rather than changing with
-/// the day the test runs on.
+/// The shell is read at a moment with no timezone, so a window's reset time —
+/// which names a time of day — is left off.
 fn usage_pane(app: &mut App) -> String {
     let mut terminal =
         Terminal::new(TestBackend::new(120, 30)).expect("a test backend cannot fail");

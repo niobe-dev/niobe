@@ -6642,14 +6642,14 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_that_has_already_come_around_is_not_drawn_as_one_still_to_come() {
+    fn a_reset_that_has_already_come_around_leaves_the_level_unmeasured() {
         let app = windowed(UsageWindows {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 9 * 3_600))),
             seven_day: None,
             using_overage: false,
         });
 
-        assert_eq!(rows_of(&app, 66), vec!["5h  51% ▓▓▓▓▓▓░░░░░░".to_owned()]);
+        assert_eq!(rows_of(&app, 66), vec!["5h   —".to_owned()]);
     }
 
     #[test]
@@ -6812,6 +6812,53 @@ mod tests {
             "a reset window drew a level: {rows:?}"
         );
         assert_eq!(window_rows(&app), 3);
+    }
+
+    /// A window at its limit still names when it comes back, in the column the
+    /// other rows' reset times stand in.
+    #[test]
+    fn a_reported_window_at_its_limit_names_its_reset() {
+        let app = windowed(UsageWindows {
+            five_hour: Some(window(1.0, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
+            seven_day: Some(window(0.64, Some(A_FRIDAY + 4 * 86_400 + 3_600))),
+            using_overage: false,
+        });
+
+        let rows = rows_of(&app, 66);
+        assert!(rows[0].contains("100%"), "{rows:?}");
+        assert!(rows[0].ends_with("resets 16:40"), "{rows:?}");
+    }
+
+    /// A limited session hears nothing more from the CLI, so the draw clock is
+    /// what ends a reported level once its window has come back: an em dash,
+    /// never the old share.
+    #[test]
+    fn a_reported_window_whose_reset_has_passed_stops_reading_as_current() {
+        let mut app = windowed(UsageWindows {
+            five_hour: Some(window(1.0, Some(A_FRIDAY + 14 * 3_600))),
+            seven_day: Some(window(0.64, Some(A_FRIDAY + 4 * 86_400 + 3_600))),
+            using_overage: true,
+        });
+        assert!(rows_of(&app, 66)[0].contains("100%"));
+
+        let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
+        app.tick(
+            std::time::Instant::now(),
+            Some(
+                clock.at(std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(A_FRIDAY + 14 * 3_600 + 60)),
+            ),
+        );
+
+        let rows = rows_of(&app, 66);
+        assert_eq!(
+            rows[0].split_whitespace().collect::<Vec<_>>(),
+            ["5h", "—"],
+            "{rows:?}"
+        );
+        assert!(rows[1].contains("64%"), "{rows:?}");
+        assert!(rows.iter().all(|row| !row.contains("100%")), "{rows:?}");
+        assert_eq!(rows.len(), window_rows(&app), "{rows:?}");
     }
 
     /// A window that has reset since stands in the same columns as one that

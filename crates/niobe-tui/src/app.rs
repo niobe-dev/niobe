@@ -4307,7 +4307,10 @@ impl App {
     /// The plan's windows as the Usage pane draws them.
     ///
     /// What this session's backend reported, where it has since the session
-    /// was started or [resumed](App::resumed). Before then, the newer of what
+    /// was started or [resumed](App::resumed), with each window whose reset
+    /// has come around since holding a level nothing measured: a limited
+    /// session hears no more from its backend, so the draw clock is what ends
+    /// a level. Before then, the newer of what
     /// an earlier session recorded and what this session's own record held,
     /// dated, with each window whose reset has come around since holding a
     /// level nothing measured and its next reset where the window has a fixed
@@ -4318,7 +4321,9 @@ impl App {
     pub fn plan_windows(&self) -> PlanWindows {
         let folded = self.session.usage_windows().copied();
         let recorded = match (folded, self.windows_recorded) {
-            (Some(windows), false) => return PlanWindows::Reported(windows),
+            (Some(windows), false) => {
+                return PlanWindows::Reported(since_reset(windows, self.read_at()));
+            }
             (Some(windows), true) => self.windows_at.map(|at| (windows, at)),
             (None, _) => None,
         };
@@ -7538,7 +7543,7 @@ fn in_force(
         })
 }
 
-/// `windows` as they stand at `now`, where they were recorded earlier: each
+/// `windows` as they stand at `now`, where they were reported or recorded earlier: each
 /// window whose reset has come around has a level nothing measured, since
 /// other clients on the account may have spent from it since, so it holds
 /// [`UNMEASURED`] rather than the stale level or a zero; the seven-day one
