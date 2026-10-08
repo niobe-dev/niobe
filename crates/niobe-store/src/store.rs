@@ -507,27 +507,32 @@ impl Store {
     /// A plan's windows are the account's, not a session's, so the last level
     /// one session saw is the best figure the next one has until its backend
     /// reports; the caller dates it, because it is not a measurement of now.
-    /// The profile is what names the account. A report that names no window
-    /// says nothing of the levels and is passed over, as is a row that is not
-    /// JSON or not an event this build reads.
+    /// The profile is what names the account, and a report belongs to the
+    /// profile in force when it was recorded — the one its session's newest
+    /// `session_meta` before it named — since a session resumed under another
+    /// profile runs on another account from then on. A report that names no
+    /// window says nothing of the levels and is passed over, as is a row that
+    /// is not JSON or not an event this build reads.
     pub fn last_usage_windows(
         &self,
         profile: &str,
     ) -> Result<Option<(SystemTime, UsageWindows)>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT at, event
-               FROM events
-              WHERE CASE WHEN json_valid(event)
-                         THEN json_extract(event, '$.type') = 'usage_windows'
+            "SELECT windows.at, windows.event
+               FROM events AS windows
+              WHERE CASE WHEN json_valid(windows.event)
+                         THEN json_extract(windows.event, '$.type') = 'usage_windows'
                     END
-                AND session_id IN (
-                    SELECT session_id
-                      FROM events
-                     WHERE CASE WHEN json_valid(event)
-                                THEN json_extract(event, '$.type') = 'session_meta'
-                                     AND json_extract(event, '$.profile') = ?1
-                           END)
-              ORDER BY at DESC, session_id DESC, seq DESC",
+                AND (SELECT json_extract(meta.event, '$.profile')
+                       FROM events AS meta
+                      WHERE meta.session_id = windows.session_id
+                        AND meta.seq < windows.seq
+                        AND CASE WHEN json_valid(meta.event)
+                                 THEN json_extract(meta.event, '$.type') = 'session_meta'
+                            END
+                      ORDER BY meta.seq DESC
+                      LIMIT 1) = ?1
+              ORDER BY windows.at DESC, windows.session_id DESC, windows.seq DESC",
         )?;
         let mut rows = statement.query(params![profile])?;
         while let Some(row) = rows.next()? {

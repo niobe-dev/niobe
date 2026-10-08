@@ -783,3 +783,46 @@ fn the_newest_windows_a_profile_recorded_come_back_with_when_they_were_recorded(
         None
     );
 }
+
+/// A session resumed under another profile runs on another account from then
+/// on: what it recorded before the switch is the first profile's, and what it
+/// recorded after is the second's.
+#[test]
+fn windows_belong_to_the_profile_in_force_when_they_were_recorded() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+    let session = store.create_session().expect("a session is created");
+
+    store
+        .append_at(session, &under("personal"), at(100))
+        .expect("append");
+    store
+        .append_at(session, &five_hour(0.8), at(110))
+        .expect("append");
+    store
+        .append_at(session, &under("work"), at(200))
+        .expect("append");
+
+    assert_eq!(
+        store.last_usage_windows("work").expect("the store is read"),
+        None,
+        "the windows recorded under personal were shown for work"
+    );
+
+    store
+        .append_at(session, &five_hour(0.3), at(210))
+        .expect("append");
+
+    let (when, windows) = store
+        .last_usage_windows("work")
+        .expect("the store is read")
+        .expect("work recorded windows after the switch");
+    assert_eq!(when, at(210));
+    assert_eq!(windows.five_hour.map(|w| w.utilization), Some(0.3));
+    let (when, windows) = store
+        .last_usage_windows("personal")
+        .expect("the store is read")
+        .expect("personal recorded windows before the switch");
+    assert_eq!(when, at(110));
+    assert_eq!(windows.five_hour.map(|w| w.utilization), Some(0.8));
+}
