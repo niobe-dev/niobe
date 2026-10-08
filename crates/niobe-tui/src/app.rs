@@ -1368,6 +1368,10 @@ pub struct App {
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
     attached: bool,
+    /// The mode the session was in before each mode change handed out to the
+    /// backend that it has not yet taken or refused, oldest first: what the
+    /// session goes back to if the backend will not take the change.
+    modes_before: VecDeque<Option<Mode>>,
     /// Whether a prompt was sent to the backend from this process. A turn the
     /// fold says is running may be one read back from a record, which nothing
     /// is working on now; only one sent from here can be shown as working.
@@ -1696,6 +1700,7 @@ impl App {
             prices: None,
             budget_warned: false,
             attached: false,
+            modes_before: VecDeque::new(),
             sent_here: false,
             first_prompt_unsent: false,
             heard: false,
@@ -3019,10 +3024,49 @@ impl App {
         });
     }
 
+    /// Settles the oldest mode change handed out to the backend as taken.
+    pub fn mode_taken(&mut self) {
+        self.modes_before.pop_front();
+    }
+
+    /// Settles the oldest mode change handed out to the backend as refused:
+    /// says so in the transcript and returns the session to the mode it was
+    /// in before, handing back the event that does it, for the journal.
+    ///
+    /// Where a later change is still to be handed out, the session is left
+    /// on it, and it is the later one's refusal that goes back, to the mode
+    /// before this one. A session no backend had reported a mode for goes
+    /// back to `ask`, which is what the bridge spawns the CLI in and what
+    /// [`App::cycle_mode`] counts from.
+    pub fn mode_not_taken(&mut self, error: &str) -> Option<Event> {
+        self.not_changed("mode", error);
+        let before = self.modes_before.pop_front()?;
+        if let Some(later) = self.modes_before.front_mut() {
+            *later = before;
+            return None;
+        }
+        let back = Event::ModeSelected {
+            mode: before.unwrap_or(Mode::Ask),
+        };
+        self.fold_event(&back);
+        Some(back)
+    }
+
+    /// Settles a model change the backend would not take: says so in the
+    /// transcript and returns the session to the model the backend last
+    /// reported, as a refusal the backend sends does, handing back the event
+    /// that does it, for the journal.
+    pub fn model_not_taken(&mut self, error: &str) -> Event {
+        self.not_changed("model", error);
+        let back = Event::ModelRefused;
+        self.fold_event(&back);
+        back
+    }
+
     /// Says in the transcript that a change the operator made never reached the
     /// backend, so a session that is still running as it was is not read as one
     /// that moved.
-    pub fn not_changed(&mut self, what: &str, error: &str) {
+    fn not_changed(&mut self, what: &str, error: &str) {
         self.push(Entry {
             kind: EntryKind::Failure,
             head: "not changed".to_owned(),
@@ -4118,7 +4162,11 @@ impl App {
     /// what the bridge spawns the CLI in: one keypress then lands where it
     /// would have from a mode that had been reported.
     fn cycle_mode(&mut self) {
-        let mode = self.session.mode().unwrap_or(Mode::Ask).next();
+        let before = self.session.mode();
+        let mode = before.unwrap_or(Mode::Ask).next();
+        if self.attached {
+            self.modes_before.push_back(before);
+        }
         self.produce(Event::ModeSelected { mode });
     }
 

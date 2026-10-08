@@ -57,7 +57,7 @@ use niobe_core::image::Image;
 
 use crate::base64;
 use crate::spilled;
-use crate::translate::{Spent, Translator};
+use crate::translate::{ModelAnswer, Spent, Translator};
 
 /// The binary this bridge drives, as looked up on `PATH`.
 pub const BINARY: &str = "claude";
@@ -162,6 +162,19 @@ type ModelRequests = Arc<Mutex<Vec<String>>>;
 /// been told about yet, for the reason [`ModelRequests`] has: the answer names
 /// only the request it answers.
 type TitleRequests = Arc<Mutex<Vec<String>>>;
+
+/// The CLI's answers to model changes that the session has not yet seen,
+/// oldest first. Written by the thread reading the CLI before it hands on the
+/// events of the same line, and taken on every drain.
+type ModelAnswers = Arc<Mutex<Vec<ModelAnswer>>>;
+
+/// A model change asked for and not yet answered.
+#[derive(Debug)]
+struct ModelChange {
+    request_id: String,
+    /// The model a CLI started again would have run on without the change.
+    before: Option<String>,
+}
 
 /// The line being written to the CLI's standard input, what it is, and when
 /// the writing started; nothing while the writer is waiting for a line.
@@ -456,9 +469,13 @@ pub struct Session {
     /// What a CLI started after this one would be started with: these options,
     /// kept to the conversation, the mode and the model in force now.
     next: Options,
-    /// The model in force before the last change asked for, which is what is
-    /// in force again if the CLI refuses that change.
-    model_before: Option<Option<String>>,
+    /// The model changes asked for that the CLI has not answered, oldest
+    /// first, each with the model in force before it: what is in force again
+    /// if the CLI refuses that change. Kept per request, since a second
+    /// change can be asked for before the first is answered, and a refusal of
+    /// the first then leaves the second standing.
+    model_changes: Vec<ModelChange>,
+    model_answers: ModelAnswers,
     /// Whether a turn was sent that the CLI has not ended. A CLI stopped then
     /// took the turn with it, and the session is not carried on.
     turn_open: bool,
@@ -533,6 +550,8 @@ impl Session {
         let refused = Arc::clone(&refusals);
         let model_requests: ModelRequests = Arc::new(Mutex::new(Vec::new()));
         let asked_for_model = Arc::clone(&model_requests);
+        let model_answers: ModelAnswers = Arc::new(Mutex::new(Vec::new()));
+        let answered_model = Arc::clone(&model_answers);
         let title_requests: TitleRequests = Arc::new(Mutex::new(Vec::new()));
         let asked_for_title = Arc::clone(&title_requests);
         let reader = std::thread::spawn(move || {
@@ -576,6 +595,9 @@ impl Session {
                 // is let go of here too, so that no answer is written to a
                 // request it cancelled and its end is not read as one that
                 // left a question open.
+                if let Ok(mut answered) = answered_model.lock() {
+                    answered.extend(translator.take_model_answers());
+                }
                 if let Ok(mut waiting) = asked.lock() {
                     for ask in translator.take_asked() {
                         waiting.insert(ask.id.as_str().to_owned(), (ask.request_id, ask.input));
@@ -627,7 +649,8 @@ impl Session {
                 spent: Spent::default(),
                 ..options.clone()
             },
-            model_before: None,
+            model_changes: Vec::new(),
+            model_answers,
             turn_open: false,
             running_agents: BTreeSet::new(),
             stopped_between_turns: false,
@@ -786,7 +809,11 @@ impl Session {
             &id,
             serde_json::json!({ "subtype": "set_model", "model": model }),
         ))?;
-        self.model_before = Some(self.next.model.replace(model.to_owned()));
+        let before = self.next.model.replace(model.to_owned());
+        self.model_changes.push(ModelChange {
+            request_id: id,
+            before,
+        });
         Ok(())
     }
 
@@ -848,6 +875,7 @@ impl Session {
     pub fn drain(&mut self) -> Vec<Event> {
         let mut events: Vec<Event> = self.unsent.try_iter().collect();
         events.extend(self.stalled());
+        self.settle_model_changes();
         loop {
             match self.events.try_recv() {
                 // Only a pipe held by something that left the CLI's group
@@ -876,6 +904,34 @@ impl Session {
         }
     }
 
+    /// Puts the model a CLI started again would run on back where the CLI
+    /// refused a change: to the model before it, or — where a later change
+    /// was asked for since — under that later change, which is then what a
+    /// refusal of it goes back to.
+    fn settle_model_changes(&mut self) {
+        let answers = match self.model_answers.lock() {
+            Ok(mut answers) => std::mem::take(&mut *answers),
+            Err(_) => return,
+        };
+        for answer in answers {
+            let Some(at) = self
+                .model_changes
+                .iter()
+                .position(|change| change.request_id == answer.request_id)
+            else {
+                continue;
+            };
+            let change = self.model_changes.remove(at);
+            if answer.taken {
+                continue;
+            }
+            match self.model_changes.get_mut(at) {
+                Some(later) => later.before = change.before,
+                None => self.next.model = change.before,
+            }
+        }
+    }
+
     /// Keeps what `event` says the CLI is now in — its conversation, its mode,
     /// its model, a turn ended — for a CLI started after it to be in too.
     fn heard(&mut self, event: &Event) {
@@ -886,11 +942,6 @@ impl Session {
         }
         if let Event::ModeSelected { mode } = event {
             self.next.mode = *mode;
-        }
-        if matches!(event, Event::ModelRefused)
-            && let Some(before) = self.model_before.take()
-        {
-            self.next.model = before;
         }
         if matches!(event, Event::TurnEnded) {
             self.turn_open = false;
@@ -2949,6 +3000,50 @@ mod tests {
 
         assert!(events.contains(&Event::ModelRefused), "{events:#?}");
         assert_eq!(session.next().expect("it can carry on").model, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_model_change_followed_by_one_taken_carries_on_with_the_one_taken() {
+        let refused = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"model bad is not available"}}'"#;
+        let taken = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3"}}'"#;
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r first\nread -r second\n{refused}\n{taken}\nexit 143\n"
+            ),
+            true,
+        );
+        session.set_model("bad").expect("the request is queued");
+        session.set_model("good").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(events.contains(&Event::ModelRefused), "{events:#?}");
+        assert_eq!(
+            session.next().expect("it can carry on").model.as_deref(),
+            Some("good")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_model_change_refused_after_a_taken_one_carries_on_with_the_one_taken() {
+        let taken = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2"}}'"#;
+        let refused = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"model bad is not available"}}'"#;
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r first\nread -r second\n{taken}\n{refused}\nexit 143\n"
+            ),
+            true,
+        );
+        session.set_model("good").expect("the request is queued");
+        session.set_model("bad").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(events.contains(&Event::ModelRefused), "{events:#?}");
+        assert_eq!(
+            session.next().expect("it can carry on").model.as_deref(),
+            Some("good")
+        );
     }
 
     #[cfg(unix)]

@@ -556,14 +556,17 @@ fn send_produced(
                     app.not_answered(&error.to_string());
                 }
             }
-            SessionEvent::ModeSelected { mode } => {
-                if let Err(error) = backend.set_mode(*mode) {
-                    app.not_changed("mode", &error.to_string());
+            SessionEvent::ModeSelected { mode } => match backend.set_mode(*mode) {
+                Ok(()) => app.mode_taken(),
+                Err(error) => {
+                    if let Some(back) = app.mode_not_taken(&error.to_string()) {
+                        journal.append(&back);
+                    }
                 }
-            }
+            },
             SessionEvent::ModelSelected { model } => {
                 if let Err(error) = backend.set_model(model) {
-                    app.not_changed("model", &error.to_string());
+                    journal.append(&app.model_not_taken(&error.to_string()));
                 }
             }
             // Listed rather than left to a wildcard: an event the shell comes
@@ -1767,6 +1770,65 @@ mod tests {
             .expect("the failure is on screen");
         assert_eq!(entry.meta, "mode");
         assert!(entry.body.ends_with("the subprocess has gone"), "{entry:?}");
+    }
+
+    #[test]
+    fn a_mode_the_backend_would_not_take_leaves_the_session_in_the_mode_it_was_in() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Plan });
+
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(app.session().mode(), Some(Mode::Plan));
+        assert_eq!(
+            journal.events.last(),
+            Some(&SessionEvent::ModeSelected { mode: Mode::Plan }),
+            "a resumed session would read the refused mode as the one it ran in"
+        );
+    }
+
+    #[test]
+    fn a_model_the_backend_would_not_take_leaves_the_session_on_the_model_it_reported() {
+        let mut app =
+            App::new(Repo::default())
+                .attached()
+                .with_profile(crate::app::SelectedProfile {
+                    name: "max".to_owned(),
+                    backend: niobe_core::event::Backend::Claude,
+                    models: vec!["opus".to_owned(), "haiku".to_owned()],
+                    billing: None,
+                });
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+        app.apply(&SessionEvent::SessionMeta(niobe_core::event::SessionMeta {
+            backend: niobe_core::event::Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+
+        app.on_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(app.session().model(), Some("claude-opus-5"));
+        assert_eq!(journal.events.last(), Some(&SessionEvent::ModelRefused));
+        assert!(
+            app.entries()
+                .iter()
+                .any(|entry| entry.head == "not changed" && entry.meta == "model")
+        );
     }
 
     #[test]

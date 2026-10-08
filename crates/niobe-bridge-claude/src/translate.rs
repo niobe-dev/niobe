@@ -285,6 +285,15 @@ struct Call {
     agent: Option<AgentId>,
 }
 
+/// The CLI's answer to a model change Niobe asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelAnswer {
+    /// The control request the answer is to.
+    pub request_id: String,
+    /// Whether the CLI moved to the model; false where it refused.
+    pub taken: bool,
+}
+
 /// A permission prompt the CLI is waiting on an answer to.
 ///
 /// The tool call is what the shell shows and answers about; `request_id` is
@@ -435,6 +444,9 @@ pub struct Translator {
     /// not answered yet: a refusal of one of those is what puts the session
     /// back on the model it last reported.
     model_requests: BTreeSet<String>,
+    /// The model changes the CLI has answered since the last
+    /// [`Translator::take_model_answers`], oldest first.
+    model_answers: Vec<ModelAnswer>,
     /// The `request_id`s of the titles Niobe asked for that the CLI has not
     /// answered yet: an answer to one of those carries a title rather than a
     /// change taking effect.
@@ -532,6 +544,7 @@ impl Translator {
             recorded_agents: BTreeMap::new(),
             denied: BTreeMap::new(),
             model_requests: BTreeSet::new(),
+            model_answers: Vec::new(),
             title_requests: BTreeSet::new(),
             turn: Counts::default(),
             unfinished: Vec::new(),
@@ -673,6 +686,16 @@ impl Translator {
         self.title_requests.insert(request_id.to_owned());
     }
 
+    /// The model changes the CLI answered since the last call, oldest first.
+    ///
+    /// Separate from the events for the reason [`Translator::take_asked`]
+    /// is: [`Event::ModelRefused`] does not say which request it refuses, and
+    /// whatever starts the CLI again needs to know which change never took
+    /// effect when two were asked for before either was answered.
+    pub fn take_model_answers(&mut self) -> Vec<ModelAnswer> {
+        std::mem::take(&mut self.model_answers)
+    }
+
     /// The permission prompts read since the last call, oldest first.
     ///
     /// Separate from the events because an answer is addressed by an id the
@@ -772,6 +795,12 @@ impl Translator {
             .request_id
             .as_deref()
             .is_some_and(|id| self.model_requests.remove(id));
+        if of_model && let Some(request_id) = &outcome.request_id {
+            self.model_answers.push(ModelAnswer {
+                request_id: request_id.clone(),
+                taken: outcome.subtype.as_deref() == Some("success"),
+            });
+        }
         let of_title = outcome
             .request_id
             .as_deref()
