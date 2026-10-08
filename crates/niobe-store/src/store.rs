@@ -466,7 +466,9 @@ impl Store {
     ///
     /// A slash command is passed over when looking for the first prompt: it
     /// is an instruction to the CLI, such as `/clear`, and not what the
-    /// session was asked to do.
+    /// session was asked to do. A prompt that reached no backend is not one
+    /// of the session's prompts at all: it is stored as
+    /// [`Event::PromptNotSent`], which neither listing reads.
     ///
     /// A row that is not JSON is passed over when looking for the first
     /// prompt, because `json_extract` fails the whole statement on one: a torn

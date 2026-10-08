@@ -1351,7 +1351,7 @@ fn a_session_whose_terminal_went_away_is_still_there_to_resume() {
     terminal.shows(OPENING_FRAME);
 
     terminal.typed(b"etags please\r");
-    recorded(repo.path(), 2);
+    recorded(repo.path(), 1);
 
     drop(slave);
     terminal.close();
@@ -1360,14 +1360,21 @@ fn a_session_whose_terminal_went_away_is_still_there_to_resume() {
     let resumed = niobe(repo.path(), &["--resume", "1"]);
     let out = String::from_utf8(resumed.stdout).expect("stdout is UTF-8");
     assert!(resumed.status.success(), "{out}");
-    // The prompt, and the notice that no backend took it.
-    assert!(out.starts_with("session 1 · 2 events"), "{out}");
-    assert!(out.contains("1 from you"), "{out}");
+    // The prompt, kept as one that reached no backend: no backend is
+    // configured here, so nothing was asked.
+    assert!(out.starts_with("session 1 · 1 events"), "{out}");
+    assert!(out.contains("0 from you"), "{out}");
 
-    // The prompt itself, which the list shows a session by.
+    // The session is listed, but not by a prompt that asked nothing.
     let listed = niobe(repo.path(), &["sessions"]);
     let listed = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
-    assert!(listed.contains("etags please"), "{listed}");
+    assert!(
+        listed
+            .lines()
+            .any(|line| line.trim_start().starts_with("1 ")),
+        "{listed}"
+    );
+    assert!(!listed.contains("etags please"), "{listed}");
 }
 
 #[test]

@@ -627,6 +627,18 @@ pub enum Event {
         text: String,
     },
 
+    /// The operator sent a prompt that reached no backend: the session was
+    /// not attached to one.
+    ///
+    /// Its own event rather than an [`Event::UserMessage`], because nothing
+    /// was asked: it opens no turn, captions nothing, and is not one of the
+    /// session's prompts. A log written before this event existed holds such
+    /// a prompt as a user message followed by a notice, and reads as it did.
+    PromptNotSent {
+        /// The prompt as typed.
+        text: String,
+    },
+
     /// What the session is about, in a few words the backend had for it.
     ///
     /// The last one stands, so a backend that re-titles a session moves the
@@ -1472,6 +1484,17 @@ mod tests {
             let back: Event = serde_json::from_str(&line).expect("and reads back");
             assert_eq!(back, event);
         }
+    }
+
+    #[test]
+    fn a_prompt_that_reached_no_backend_survives_the_round_trip_under_a_type_of_its_own() {
+        let event = Event::PromptNotSent {
+            text: "hello".to_owned(),
+        };
+        let line = serde_json::to_string(&event).expect("an event serializes");
+        assert_eq!(line, r#"{"type":"prompt_not_sent","text":"hello"}"#);
+        let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+        assert_eq!(read, event);
     }
 
     #[test]

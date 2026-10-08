@@ -673,6 +673,25 @@ fn a_session_that_opens_with_a_slash_command_is_listed_by_the_prompt_after_it() 
     assert_eq!(listed[0].first_prompt.as_deref(), Some("add etag support"));
 }
 
+#[test]
+fn a_prompt_that_reached_no_backend_is_neither_the_first_prompt_nor_one_of_the_prompts() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let session = store.create_session().expect("a session is created");
+    store
+        .append(
+            session,
+            &Event::PromptNotSent {
+                text: "hello".to_owned(),
+            },
+        )
+        .expect("append");
+
+    let listed = store.sessions().expect("listing works");
+    assert_eq!(listed.len(), 1, "the session itself is still listed");
+    assert_eq!(listed[0].first_prompt, None);
+    assert!(store.prompts().expect("the prompts are read").is_empty());
+}
+
 fn meta(backend_session: &str) -> Event {
     Event::SessionMeta(niobe_core::event::SessionMeta {
         backend: niobe_core::event::Backend::Claude,

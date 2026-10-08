@@ -588,6 +588,12 @@ impl SessionState {
     /// the end it repeats, and a call's end or an agent's exit once that
     /// call or agent has ended.
     pub fn apply(&mut self, event: &Event) {
+        // A prompt that reached no backend is not something that happened in
+        // the session's conversation, so an end said again after it is still
+        // said again.
+        if let Event::PromptNotSent { .. } = event {
+            return;
+        }
         self.fold(event);
         self.ended_last = matches!(
             event,
@@ -617,6 +623,10 @@ impl SessionState {
             }
 
             Event::Titled { title } => self.title = Some(title.clone()),
+
+            // Nothing was asked, so nothing is counted: no turn, no prompt
+            // and no caption. `apply` passes it over before it reaches here.
+            Event::PromptNotSent { .. } => {}
 
             // A prompt sent while a turn runs joins it: the turn began with
             // the first one.
@@ -2935,6 +2945,24 @@ mod tests {
         ]);
 
         assert_eq!(state.caption().as_deref(), Some("Fix the retry loop"));
+    }
+
+    #[test]
+    fn a_prompt_that_reached_no_backend_is_no_turn_no_prompt_and_no_caption() {
+        let unsent = Event::PromptNotSent {
+            text: "hello".to_owned(),
+        };
+        let mut state = SessionState::replay(std::slice::from_ref(&unsent));
+        state.apply(&Event::SessionLeft);
+
+        assert_eq!(state.caption(), None);
+        assert_eq!(state.user_messages(), 0);
+        assert!(!state.turn_running());
+        assert!(state.turns().is_empty());
+
+        let later = SessionState::replay(&[unsent, said("fix the retry loop")]);
+        assert_eq!(later.caption().as_deref(), Some("fix the retry loop"));
+        assert_eq!(later.user_messages(), 1);
     }
 
     #[test]

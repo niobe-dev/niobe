@@ -539,15 +539,15 @@ fn send_produced(
         journal.append(&event);
         // Taken for every prompt, sent or not, so the next prompt's images
         // are never handed out with this one.
-        let images = if let SessionEvent::UserMessage { .. } = &event {
+        let images = if matches!(
+            event,
+            SessionEvent::UserMessage { .. } | SessionEvent::PromptNotSent { .. }
+        ) {
             app.take_turn_images()
         } else {
             Vec::new()
         };
         if !app.is_attached() {
-            if let SessionEvent::UserMessage { .. } = &event {
-                journal.append(&App::not_attached_notice());
-            }
             continue;
         }
         // Only what the backend is waiting on is sent on: a turn, and a
@@ -586,6 +586,7 @@ fn send_produced(
             // to produce for the backend must be sent from here, and a new
             // variant fails to compile until someone decides whether it is.
             SessionEvent::SessionMeta(_)
+            | SessionEvent::PromptNotSent { .. }
             | SessionEvent::Titled { .. }
             | SessionEvent::AssistantDelta { .. }
             | SessionEvent::AssistantMessage { .. }
@@ -1588,10 +1589,15 @@ mod tests {
 
         send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
 
-        // The turn is still recorded — it is what the operator did — and the
-        // transcript says plainly that nothing received it, as does the
-        // record, for the session read back.
-        assert_eq!(journal.events.len(), 2);
+        // The prompt is still recorded — it is what the operator did — as one
+        // that reached no backend, and the transcript says plainly that
+        // nothing received it.
+        assert_eq!(
+            journal.events,
+            [SessionEvent::PromptNotSent {
+                text: "x".to_owned()
+            }]
+        );
         let notice = app
             .entries()
             .iter()
@@ -1626,6 +1632,37 @@ mod tests {
                 .any(|entry| entry.body.contains("the prompt above was not sent")),
             "{:#?}",
             journal.events
+        );
+    }
+
+    #[test]
+    fn a_prompt_with_no_backend_is_neither_a_turn_nor_the_caption_when_the_session_is_resumed() {
+        let mut app = App::new(Repo::default());
+        for c in "hello".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut journal = Kept::default();
+        send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
+
+        let mut resumed = App::new(Repo::default());
+        for event in &journal.events {
+            resumed.apply(event);
+        }
+        resumed.leave();
+
+        assert_eq!(resumed.caption(), None, "{:#?}", journal.events);
+        assert!(
+            resumed.session().turns().is_empty(),
+            "{:#?}",
+            journal.events
+        );
+        assert!(
+            resumed
+                .entries()
+                .iter()
+                .any(|entry| entry.kind == crate::app::EntryKind::User && entry.body == "hello"),
+            "the prompt is still shown, as what the operator typed"
         );
     }
 

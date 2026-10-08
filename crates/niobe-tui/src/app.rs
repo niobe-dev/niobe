@@ -1518,8 +1518,8 @@ const BUDGET_WARNING: f64 = 0.8;
 /// the question before answering it.
 pub const ASK_QUIET: Duration = Duration::from_millis(500);
 
-/// What the transcript says, and the session keeps, under a prompt sent with
-/// no backend attached.
+/// What the transcript says under a prompt sent with no backend attached,
+/// live and when the [`Event::PromptNotSent`] it was kept as is read back.
 const NOT_ATTACHED: &str = "This session is not attached to a backend, so the prompt above was \
      not sent. `niobe profiles` shows which profiles are defined and which backend each one runs.";
 
@@ -1869,23 +1869,33 @@ impl App {
         };
     }
 
+    /// Puts a prompt the operator typed in the transcript.
+    fn push_prompt(&mut self, text: &str) {
+        self.images.seen(text);
+        self.push(Entry {
+            kind: EntryKind::User,
+            head: "you".to_owned(),
+            meta: String::new(),
+            body: text.to_owned(),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
     /// Puts what `event` says in the transcript, where it says anything there.
     /// `ended` is the call that ended with the event before it, which a file
     /// change is drawn under.
     fn fold_into_transcript(&mut self, event: &Event, ended: Option<(usize, usize, Option<Gate>)>) {
         match event {
-            Event::UserMessage { text } => {
-                self.images.seen(text);
-                self.push(Entry {
-                    kind: EntryKind::User,
-                    head: "you".to_owned(),
-                    meta: String::new(),
-                    body: text.clone(),
-                    streaming: false,
-                    at: self.at,
-                    calls: Vec::new(),
-                    agent: None,
-                });
+            Event::UserMessage { text } => self.push_prompt(text),
+
+            // Shown as it was typed, with what became of it under it, read
+            // back as it was said live.
+            Event::PromptNotSent { text } => {
+                self.push_prompt(text);
+                self.say_not_attached();
             }
 
             Event::AssistantDelta { text } => match self.streaming_agent_entry() {
@@ -6616,22 +6626,17 @@ impl App {
         let draft = self.take_draft();
         let kept = kept_with(&draft, &self.drafts);
         self.images.send(&text, &kept);
-        self.produce(Event::UserMessage { text });
         self.sent_here = self.attached;
-        if !self.attached {
-            self.not_attached();
+        match self.attached {
+            true => self.produce(Event::UserMessage { text }),
+            false => self.produce(Event::PromptNotSent { text }),
         }
         self.give_back(&draft);
         self.scroll_to_tail();
     }
 
-    /// Says in the transcript that the prompt just sent went nowhere. A first
-    /// prompt that went nowhere asked nothing, so it is not what the session
-    /// is about either.
-    fn not_attached(&mut self) {
-        if self.session.user_messages() == 1 {
-            self.first_prompt_unsent = true;
-        }
+    /// Says in the transcript that the prompt above it went nowhere.
+    fn say_not_attached(&mut self) {
         self.push(Entry {
             kind: EntryKind::Notice,
             head: "no backend".to_owned(),
@@ -6707,16 +6712,6 @@ impl App {
     fn give_back(&mut self, (id, draft): &(DraftId, String)) {
         if !draft.is_empty() {
             self.show_draft(*id, draft);
-        }
-    }
-
-    /// The notice the session keeps after a prompt sent with no backend
-    /// attached, in the words the transcript said it in, so that the session
-    /// read back says the prompt went nowhere rather than leaving it looking
-    /// like a turn that was cut off.
-    pub fn not_attached_notice() -> Event {
-        Event::Notice {
-            message: NOT_ATTACHED.to_owned(),
         }
     }
 
@@ -8632,7 +8627,7 @@ mod tests {
 
     #[test]
     fn a_prompt_waits_for_the_image_still_being_read_for_it() {
-        let mut app = app();
+        let mut app = app().attached();
         app.on_paste("/tmp/shot.png");
         let produced = submitted(&mut app, "look at this");
 
@@ -8699,7 +8694,13 @@ mod tests {
 
         app.submit();
         assert_eq!(app.composed(), "");
-        assert_eq!(app.session().user_messages(), 1);
+        assert_eq!(
+            app.take_produced(),
+            [Event::PromptNotSent {
+                text: "hi".to_owned()
+            }]
+        );
+        assert_eq!(app.session().user_messages(), 0, "nothing was asked");
         assert_eq!(app.entries()[0].kind, EntryKind::User);
         assert_eq!(app.entries()[1].kind, EntryKind::Notice);
     }
@@ -8766,7 +8767,7 @@ mod tests {
     #[test]
     fn a_model_command_the_picker_cannot_stand_for_goes_to_the_backend_as_typed() {
         for text in ["/model haiku please", "/models haiku"] {
-            let mut app = offering_model(app());
+            let mut app = offering_model(app().attached());
             assert_eq!(
                 submitted(&mut app, text),
                 [Event::UserMessage {
@@ -8775,7 +8776,7 @@ mod tests {
             );
         }
 
-        let mut app = app();
+        let mut app = app().attached();
         assert_eq!(
             submitted(&mut app, "/model haiku"),
             [Event::UserMessage {
@@ -9002,7 +9003,7 @@ mod tests {
     fn shift_enter_opens_a_line_and_enter_still_sends() {
         use ratatui::crossterm::event::KeyModifiers;
 
-        let mut app = app().reports_shift_enter();
+        let mut app = app().attached().reports_shift_enter();
         typed_then_enter(&mut app, "one", KeyModifiers::SHIFT);
         typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
@@ -9018,7 +9019,7 @@ mod tests {
     fn alt_enter_opens_a_line_on_any_terminal() {
         use ratatui::crossterm::event::KeyModifiers;
 
-        for mut app in [app(), app().reports_shift_enter()] {
+        for mut app in [app().attached(), app().attached().reports_shift_enter()] {
             typed_then_enter(&mut app, "one", KeyModifiers::ALT);
             typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
@@ -9035,7 +9036,7 @@ mod tests {
     fn ctrl_j_opens_a_line_on_any_terminal() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        for mut app in [app(), app().reports_shift_enter()] {
+        for mut app in [app().attached(), app().attached().reports_shift_enter()] {
             for c in "one".chars() {
                 app.type_into_composer(Input {
                     key: Key::Char(c),
@@ -9076,7 +9077,7 @@ mod tests {
 
     #[test]
     fn a_submitted_prompt_is_handed_out_once_to_be_kept() {
-        let mut app = app();
+        let mut app = app().attached();
         app.type_into_composer(Input {
             key: Key::Char('h'),
             ..Default::default()
@@ -12656,7 +12657,7 @@ mod tests {
 
     #[test]
     fn a_three_line_paste_is_one_three_line_prompt_and_sends_nothing() {
-        let mut app = app();
+        let mut app = app().attached();
 
         app.on_paste("here is the log:\rerror: boom\rat foo.rs:3");
 
@@ -14506,7 +14507,9 @@ mod tests {
 
     #[test]
     fn a_prompt_chosen_from_the_history_in_bang_mode_is_not_run_as_a_command() {
-        let mut app = remembering(&[("rm the build dir and rebuild", "3")], &["3"]).runs_commands();
+        let mut app = remembering(&[("rm the build dir and rebuild", "3")], &["3"])
+            .runs_commands()
+            .attached();
         typed(&mut app, "!");
         assert!(app.shell_mode());
 

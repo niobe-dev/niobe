@@ -4723,7 +4723,7 @@ fn a_slash_offers_the_backends_commands_and_enter_picks_one_to_send() {
 fn enter_on_a_command_typed_in_full_sends_it_rather_than_a_longer_one() {
     use ratatui::crossterm::event::KeyCode;
 
-    let mut app = empty_session();
+    let mut app = empty_session().attached();
     app.apply(&listed_commands(&[
         ("review-pr", "Review a pull request", None),
         ("review", "Review the changes", None),
