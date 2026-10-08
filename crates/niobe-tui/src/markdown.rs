@@ -712,22 +712,21 @@ fn words(runs: &[Run]) -> Vec<(Vec<Run>, Style)> {
     let mut word: Vec<Run> = Vec::new();
     let mut space = Style::default();
     for (text, style) in runs {
-        let mut fragment = String::new();
-        for c in text.chars() {
+        let mut start_idx = 0;
+        for (idx, c) in text.char_indices() {
             if c.is_whitespace() {
-                if !fragment.is_empty() {
-                    word.push((std::mem::take(&mut fragment), *style));
+                if idx > start_idx {
+                    word.push((text[start_idx..idx].to_owned(), *style));
                 }
                 if !word.is_empty() {
                     words.push((std::mem::take(&mut word), space));
                 }
                 space = *style;
-            } else {
-                fragment.push(c);
+                start_idx = idx + c.len_utf8();
             }
         }
-        if !fragment.is_empty() {
-            word.push((fragment, *style));
+        if start_idx < text.len() {
+            word.push((text[start_idx..].to_owned(), *style));
         }
     }
     if !word.is_empty() {
