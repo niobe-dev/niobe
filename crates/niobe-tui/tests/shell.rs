@@ -5647,31 +5647,47 @@ fn the_settings_name_the_files_the_session_was_read_from() {
 }
 
 /// F7 lists the MCP servers the backend reported as the session started,
-/// each with how it stands, where its configuration came from and the tools
-/// it gave the model, while a turn runs and without sending one.
+/// each with how it stands, where its configuration came from and how many
+/// tools it gave the model, while a turn runs and without sending one; Enter
+/// shows the one under the cursor whole, with why it failed.
 #[test]
 fn f7_lists_the_mcp_servers_while_a_turn_runs() {
     use niobe_core::event::{McpServer, McpStatus};
     use ratatui::crossterm::event::KeyCode;
 
     let mut app = running_session();
-    let server = |name: &str, status: McpStatus, source: &str, tools: &[&str]| McpServer {
+    let server = |name: &str, status: McpStatus, scope: &str, tools: &[&str]| McpServer {
         name: name.to_owned(),
         status,
-        source: Some(source.to_owned()),
+        source: None,
         tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+        scope: Some(scope.to_owned()),
+        error: None,
+        endpoint: None,
+        reports_as: None,
     };
     app.apply(&Event::McpServers {
         servers: vec![
-            server(
-                "github",
-                McpStatus::Connected,
-                "user",
-                &["create_issue", "search_code"],
-            ),
+            McpServer {
+                endpoint: Some("http · https://api.githubcopilot.com/mcp".to_owned()),
+                reports_as: Some("github-mcp-server 0.9.1".to_owned()),
+                ..server(
+                    "github",
+                    McpStatus::Connected,
+                    "user",
+                    &["create_issue", "search_code"],
+                )
+            },
             server("notes", McpStatus::Connected, "project", &["search"]),
             server("linear", McpStatus::NeedsAuth, "user", &[]),
-            server("remote docs", McpStatus::Failed, "local", &[]),
+            McpServer {
+                error: Some(
+                    "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"
+                        .to_owned(),
+                ),
+                endpoint: Some("http · http://127.0.0.1:9/mcp".to_owned()),
+                ..server("remote docs", McpStatus::Failed, "local", &[])
+            },
         ],
     });
     app.take_produced();
@@ -5685,11 +5701,26 @@ fn f7_lists_the_mcp_servers_while_a_turn_runs() {
         "needs sign-in",
         "remote docs",
         "failed",
-        "create_issue, search_code",
+        "2 tools",
     ] {
         assert!(frame.contains(said), "{said}:\n{frame}");
     }
     assert_snapshot("mcp-view-120x30", &frame);
+
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Enter);
+    let frame = screen(&mut app, 120, 30);
+    for said in [
+        " MCP servers · remote docs ",
+        "ECONNREFUSED: Unable to connect.",
+        "http · http://127.0.0.1:9/mcp",
+        "local",
+    ] {
+        assert!(frame.contains(said), "{said}:\n{frame}");
+    }
+    assert_snapshot("mcp-server-120x30", &frame);
 }
 
 #[test]

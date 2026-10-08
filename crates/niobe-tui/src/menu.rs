@@ -106,7 +106,7 @@ impl Action {
             Action::Export => "copy the transcript to the clipboard",
             Action::Memory => "show what the agent is told and remembers",
             Action::AddFile => "name a file for the prompt",
-            Action::Mcp => "list the MCP servers and how each stands",
+            Action::Mcp => "list the MCP servers, why one failed, and reconnect one",
             Action::SubAgents => "the pane the sub-agents are listed in",
             Action::Hooks => "the backend's hooks, as /hooks",
             Action::SwitchModel => "pick one of the models the backend offers",

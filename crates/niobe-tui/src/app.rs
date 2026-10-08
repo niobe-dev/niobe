@@ -397,6 +397,8 @@ enum Overlay {
     Sheet,
     /// The Memory view.
     Memory,
+    /// The MCP view.
+    Mcp,
     /// The history dialog.
     History,
     /// A list to pick from: the models, the efforts, the themes.
@@ -408,10 +410,11 @@ enum Overlay {
 impl Overlay {
     /// Every overlay there is.
     #[cfg(test)]
-    const ALL: [Overlay; 6] = [
+    const ALL: [Overlay; 7] = [
         Overlay::Menu,
         Overlay::Sheet,
         Overlay::Memory,
+        Overlay::Mcp,
         Overlay::History,
         Overlay::List,
         Overlay::Search,
@@ -1346,6 +1349,11 @@ pub struct App {
     /// Whether the Memory view wants what the agent is given read, which the
     /// loop does once and hands back.
     memory_wanted: bool,
+    /// The MCP view, while it is open.
+    mcp: Option<crate::mcp::View>,
+    /// The MCP servers the operator asked to be reconnected that the loop has
+    /// not handed to the backend yet, oldest first.
+    mcp_reconnects: Vec<String>,
     /// The panes of the right-hand stack the operator hid.
     hidden: BTreeSet<crate::menu::SidePane>,
     /// The files outside the session the shell can name or have opened.
@@ -1708,6 +1716,8 @@ impl App {
             sheet: None,
             memory: None,
             memory_wanted: false,
+            mcp: None,
+            mcp_reconnects: Vec::new(),
             hidden: BTreeSet::new(),
             places: Places::default(),
             trusting: None,
@@ -3565,7 +3575,7 @@ impl App {
             Action::Export => self.export(),
             Action::Memory => self.open_memory(),
             Action::AddFile => self.start_mention(),
-            Action::Mcp => self.sheet = Some(self.mcp_servers()),
+            Action::Mcp => self.mcp = Some(crate::mcp::View::default()),
             Action::SubAgents => self.show_sub_agents(),
             Action::Hooks => self.send_or_say(
                 "hooks",
@@ -3741,6 +3751,74 @@ impl App {
         }
     }
 
+    /// One key, while the MCP view is open: it holds the keyboard as the
+    /// Memory view does, and an F-key closes it and does what the key does.
+    fn on_mcp_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use crate::mcp::Outcome;
+        use ratatui::crossterm::event::KeyCode;
+
+        if let KeyCode::F(n) = key.code {
+            self.mcp = None;
+            if let Some(action) = crate::menu::fkey(n) {
+                self.perform(action);
+            }
+            return;
+        }
+        let Some(view) = self.mcp.as_mut() else {
+            return;
+        };
+        match view.on_key(key, self.session.mcp_servers()) {
+            Outcome::Stay => {}
+            Outcome::Close => self.mcp = None,
+            Outcome::Reconnect(server) => self.reconnect_mcp(server),
+        }
+    }
+
+    /// Asks the backend to connect to the MCP server `server` again, where a
+    /// backend is listening: the list shows how it stands once the backend
+    /// has said.
+    fn reconnect_mcp(&mut self, server: String) {
+        if !self.reconnects_mcp() {
+            self.hint = Some(
+                "No backend is attached to this session, so no server can be reconnected"
+                    .to_owned(),
+            );
+            return;
+        }
+        self.hint = Some(format!("Reconnecting `{server}`…"));
+        self.mcp_reconnects.push(server);
+    }
+
+    /// Whether `r` in the MCP view reaches a backend: only one listening can
+    /// be asked to reconnect a server.
+    pub(crate) fn reconnects_mcp(&self) -> bool {
+        self.attached
+    }
+
+    /// The MCP servers the operator asked to be reconnected since the last
+    /// call, oldest first, for the loop to hand to the backend.
+    pub fn take_mcp_reconnects(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.mcp_reconnects)
+    }
+
+    /// The backend would not take the reconnect of `server`.
+    pub fn not_reconnected(&mut self, server: &str, error: &str) {
+        self.hint = Some(format!("`{server}` was not reconnected: {error}"));
+    }
+
+    /// The MCP view, while it is open.
+    pub fn mcp(&self) -> Option<&crate::mcp::View> {
+        self.mcp.as_ref()
+    }
+
+    /// Told by the draw how far the server shown whole can scroll: see
+    /// [`crate::mcp::View::measured`].
+    pub(crate) fn measured_mcp(&mut self, max_scroll: usize) {
+        if let Some(view) = self.mcp.as_mut() {
+            view.measured(max_scroll);
+        }
+    }
+
     /// Copies the transcript, as the last frame laid it out, to the
     /// clipboard.
     fn export(&mut self) {
@@ -3895,57 +3973,6 @@ impl App {
         }
     }
 
-    /// The MCP servers the backend last reported, as it reported them: no
-    /// turn is sent to ask, so the view opens while one runs.
-    fn mcp_servers(&self) -> Sheet {
-        let servers = self.session.mcp_servers();
-        let mut rows = Vec::new();
-        match servers.is_empty() {
-            true => rows.push(
-                "No MCP server has been reported: the backend lists its servers as a turn \
-                 starts, and lists none where it has none."
-                    .to_owned(),
-            ),
-            false => {
-                let names = column_width(servers.iter().map(|server| server.name.as_str()));
-                let states = column_width(servers.iter().map(|server| server.status.label()));
-                let sources = column_width(
-                    servers
-                        .iter()
-                        .map(|server| server.source.as_deref().unwrap_or("—")),
-                );
-                for server in servers {
-                    rows.push(format!(
-                        "{}  {}  {}  {}",
-                        crate::text::pad(&server.name, names),
-                        crate::text::pad(server.status.label(), states),
-                        crate::text::pad(server.source.as_deref().unwrap_or("—"), sources),
-                        tool_count(server.tools.len()),
-                    ));
-                    if !server.tools.is_empty() {
-                        rows.push(format!("    {}", server.tools.join(", ")));
-                    }
-                }
-            }
-        }
-        let backend = self.backend_name();
-        rows.push(String::new());
-        rows.push(format!(
-            "Why a server failed, signing in to one, and adding, removing or turning one off \
-             are the {backend} CLI's own: run `{backend}` in a terminal and use /mcp there, or \
-             `{backend} mcp --help`. A change reaches the next session."
-        ));
-        if let Some(files) = self.mcp_config_files() {
-            rows.push(files.to_owned());
-        }
-        Sheet {
-            title: "MCP servers".to_owned(),
-            rows,
-            link: None,
-            scroll: 0,
-        }
-    }
-
     /// The backend this session runs, as the shell names it: the one it
     /// reported, or else the profile's.
     fn backend(&self) -> Option<niobe_core::Backend> {
@@ -3956,7 +3983,7 @@ impl App {
     }
 
     /// The backend's name for what the operator is told to run.
-    fn backend_name(&self) -> &'static str {
+    pub(crate) fn backend_name(&self) -> &'static str {
         self.backend().map_or(
             niobe_core::Backend::Claude.as_str(),
             niobe_core::Backend::as_str,
@@ -3965,7 +3992,7 @@ impl App {
 
     /// Where the backend keeps its MCP servers' configuration, where the
     /// shell knows.
-    fn mcp_config_files(&self) -> Option<&'static str> {
+    pub(crate) fn mcp_config_files(&self) -> Option<&'static str> {
         match self.backend()? {
             niobe_core::Backend::Claude => Some(
                 "Its servers are configured in ~/.claude.json, the user's and each \
@@ -4148,9 +4175,10 @@ impl App {
             };
             return true;
         }
-        if self.sheet.is_some() || self.memory.is_some() {
+        if self.sheet.is_some() || self.memory.is_some() || self.mcp.is_some() {
             self.sheet = None;
             self.memory = None;
+            self.mcp = None;
             return true;
         }
         if on_menu_bar {
@@ -5467,6 +5495,7 @@ impl App {
             (self.menu.is_some(), Overlay::Menu),
             (self.sheet.is_some(), Overlay::Sheet),
             (self.memory.is_some(), Overlay::Memory),
+            (self.mcp.is_some(), Overlay::Mcp),
             (self.browser.is_some(), Overlay::History),
             (self.picking.is_some(), Overlay::List),
             (self.find.is_some(), Overlay::Search),
@@ -5892,7 +5921,11 @@ impl App {
                 AskFocus::Deferred => {}
             }
         }
-        if self.menu.is_some() || self.sheet.is_some() || self.memory.is_some() {
+        if self.menu.is_some()
+            || self.sheet.is_some()
+            || self.memory.is_some()
+            || self.mcp.is_some()
+        {
             return;
         }
         if self.browser.is_some() {
@@ -6119,6 +6152,10 @@ impl App {
         }
         if self.memory.is_some() {
             self.on_memory_key(key);
+            return;
+        }
+        if self.mcp.is_some() {
+            self.on_mcp_key(key);
             return;
         }
         // The history dialog takes it the same way: what is typed there
@@ -7822,20 +7859,6 @@ fn count(things: usize) -> u64 {
 
 /// A tool's name as a person reads it.
 ///
-/// How wide a column holding each of `cells` is drawn, in cells.
-fn column_width<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
-    cells.map(crate::text::width).max().unwrap_or(0)
-}
-
-/// How many tools a server gave the model, as its row says it.
-fn tool_count(tools: usize) -> String {
-    match tools {
-        0 => "no tools".to_owned(),
-        1 => "1 tool".to_owned(),
-        n => format!("{n} tools"),
-    }
-}
-
 /// An MCP tool arrives as `mcp__<server>__<tool>`, and the server as the
 /// client registered it (`claude_ai_Notion`). It reads as the server's last
 /// word and the tool, with the server's name taken off the tool's front where
@@ -13232,6 +13255,7 @@ mod tests {
             (app.menu().is_some(), "a menu"),
             (app.sheet().is_some(), "a sheet"),
             (app.memory().is_some(), "the Memory view"),
+            (app.mcp().is_some(), "the MCP view"),
             (app.browser().is_some(), "the history"),
             (app.diffs_open(), "the cut diffs"),
         ]
@@ -13492,6 +13516,7 @@ mod tests {
             ),
             Overlay::Sheet => (app(), key(KeyCode::F(1)), key(KeyCode::Enter)),
             Overlay::Memory => (app(), key(KeyCode::F(8)), key(KeyCode::Esc)),
+            Overlay::Mcp => (app(), key(KeyCode::F(7)), key(KeyCode::Esc)),
             Overlay::History => (
                 remembering(&[("rm the build dir and rebuild", "3")], &["3"]),
                 ctrl('r'),
@@ -13780,11 +13805,16 @@ mod tests {
             status,
             source: Some("project".to_owned()),
             tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+            scope: None,
+            error: None,
+            endpoint: None,
+            reports_as: None,
         }
     }
 
-    #[test]
-    fn f7_lists_the_mcp_servers_in_the_shell_mid_turn_and_sends_nothing() {
+    /// A shell attached to a backend that reported a connected and a failed
+    /// server.
+    fn with_mcp_servers() -> App {
         use niobe_core::event::McpStatus;
         let mut app = offering(&["mcp"]);
         app.apply(&Event::McpServers {
@@ -13793,26 +13823,30 @@ mod tests {
                 mcp_server("remote docs", McpStatus::Failed, &[]),
             ],
         });
+        app
+    }
+
+    /// What the open MCP view shows, a line a row.
+    fn mcp_shown(app: &App) -> String {
+        crate::mcp::shown(app, 90).join("\n")
+    }
+
+    #[test]
+    fn f7_lists_the_mcp_servers_in_the_shell_mid_turn_and_sends_nothing() {
+        let mut app = with_mcp_servers();
         typed_then_enter(&mut app, "go", KeyModifiers::NONE);
         app.take_produced();
         assert!(app.working(), "the turn is not running");
 
         app.on_key(key(KeyCode::F(7)));
         assert_eq!(app.take_produced(), [], "F7 sent a turn");
-        let sheet = app.sheet().expect("F7 opened no view");
-        assert_eq!(sheet.title, "MCP servers");
-        let rows = sheet.rows.join("\n");
-        for said in [
-            "notes",
-            "connected",
-            "search, fetch",
-            "remote docs",
-            "failed",
-        ] {
-            assert!(rows.contains(said), "{said}:\n{rows}");
+        assert!(app.mcp().is_some(), "F7 opened no view");
+        let shown = mcp_shown(&app);
+        for said in ["notes", "connected", "2 tools", "remote docs", "failed"] {
+            assert!(shown.contains(said), "{said}:\n{shown}");
         }
         app.on_key(key(KeyCode::Esc));
-        assert_eq!(app.sheet(), None);
+        assert_eq!(app.mcp(), None);
         assert!(app.working(), "Esc closed the view and stopped the turn");
     }
 
@@ -13821,12 +13855,8 @@ mod tests {
         let mut app = app();
         assert!(app.can(crate::menu::Action::Mcp));
         app.perform(crate::menu::Action::Mcp);
-        let rows = app.sheet().map(|sheet| sheet.rows.join("\n"));
-        assert!(
-            rows.as_deref()
-                .is_some_and(|rows| rows.contains("No MCP server")),
-            "{rows:?}"
-        );
+        let shown = mcp_shown(&app);
+        assert!(shown.contains("No MCP server"), "{shown}");
     }
 
     #[test]
@@ -13834,7 +13864,96 @@ mod tests {
         typed_as_asked(|| offering(&["mcp"]), "/mcp", crate::menu::Action::Mcp);
         let mut typed = offering(&["mcp"]);
         assert_eq!(submitted(&mut typed, "/mcp"), []);
-        assert!(typed.sheet().is_some());
+        assert!(typed.mcp().is_some());
+    }
+
+    #[test]
+    fn enter_in_the_mcp_view_shows_why_the_server_under_the_cursor_failed() {
+        let mut app = with_mcp_servers();
+        app.apply(&Event::McpServers {
+            servers: vec![
+                mcp_server(
+                    "notes",
+                    niobe_core::event::McpStatus::Connected,
+                    &["search"],
+                ),
+                niobe_core::event::McpServer {
+                    error: Some("ECONNREFUSED: Unable to connect.".to_owned()),
+                    endpoint: Some("http · http://127.0.0.1:9/mcp".to_owned()),
+                    ..mcp_server("remote docs", niobe_core::event::McpStatus::Failed, &[])
+                },
+            ],
+        });
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        let shown = mcp_shown(&app);
+        for said in [
+            "ECONNREFUSED: Unable to connect.",
+            "http · http://127.0.0.1:9/mcp",
+            "project",
+        ] {
+            assert!(shown.contains(said), "{said}:\n{shown}");
+        }
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.mcp().is_some_and(|view| view.detail.is_none()));
+    }
+
+    #[test]
+    fn an_open_mcp_view_shows_the_newest_report_of_the_servers() {
+        use niobe_core::event::McpStatus;
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert!(mcp_shown(&app).contains("failed"));
+
+        app.apply(&Event::McpServers {
+            servers: vec![
+                mcp_server("remote docs", McpStatus::Connected, &["lookup"]),
+                mcp_server("notes", McpStatus::Connected, &["search", "fetch"]),
+            ],
+        });
+        let shown = mcp_shown(&app);
+        assert!(shown.contains("connected"), "{shown}");
+        assert!(shown.contains("lookup"), "{shown}");
+        assert!(!shown.contains("failed"), "{shown}");
+    }
+
+    #[test]
+    fn r_in_the_mcp_view_asks_the_backend_to_reconnect_the_server_and_sends_no_turn() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+        assert_eq!(app.take_mcp_reconnects(), ["remote docs"]);
+        assert_eq!(app.take_produced(), []);
+        assert!(app.mcp().is_some(), "r closed the view");
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("remote docs")),
+            "{:?}",
+            app.hint()
+        );
+
+        let mut replayed = app_with_servers_unattached();
+        replayed.on_key(key(KeyCode::F(7)));
+        replayed.on_key(key(KeyCode::Char('r')));
+        assert_eq!(replayed.take_mcp_reconnects(), Vec::<String>::new());
+        assert!(!mcp_shown(&replayed).contains("r reconnect"));
+    }
+
+    /// A shell with servers reported and no backend listening, as a recorded
+    /// session is read back.
+    fn app_with_servers_unattached() -> App {
+        let mut app = app();
+        app.apply(&Event::McpServers {
+            servers: vec![mcp_server(
+                "notes",
+                niobe_core::event::McpStatus::Connected,
+                &[],
+            )],
+        });
+        app
     }
 
     #[test]

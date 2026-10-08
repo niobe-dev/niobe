@@ -179,6 +179,7 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
         draw_sheet(frame, body, app, &theme);
     }
     crate::memory::draw(frame, body, app, &theme);
+    crate::mcp::draw(frame, body, app, &theme);
     crate::browse::draw(frame, body, app, &theme);
     // The open menu hangs from the bar over everything, a list included: it
     // was opened last.

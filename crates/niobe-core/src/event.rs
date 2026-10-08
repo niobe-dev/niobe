@@ -407,9 +407,10 @@ pub struct ModelOption {
 /// A Model Context Protocol server the backend has configured for the
 /// session, as the backend last reported it.
 ///
-/// Only what the backend says of it unasked: which servers there are, how
-/// each stands and the tools each gave the model. Why one failed, and how
-/// to change one, are the backend's to say on request.
+/// Which servers there are, how each stands and the tools each gave the
+/// model are said unasked; why one failed, the scope its configuration was
+/// found in, how it is reached and what it calls itself only where the
+/// backend was asked, and each is `None` where it was not, or did not say.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServer {
     /// Its name, as it is configured.
@@ -424,6 +425,31 @@ pub struct McpServer {
     /// the backend's order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// The scope its configuration was found in, in the backend's own word —
+    /// `user`, `project`, `local`, or `dynamic` for one handed to the backend
+    /// as it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Why the backend could not connect to it, in the backend's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// How it is reached: its transport and the program run or the address
+    /// called, as `stdio · python3` or `http · https://example.com/mcp`.
+    /// Never a program's arguments or environment, nor an address's query or
+    /// credentials, which is where a configuration keeps its secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// What the server calls itself once connected: its name and version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports_as: Option<String>,
+}
+
+impl McpServer {
+    /// Where its configuration came from: the scope where the backend was
+    /// asked, or else the source it named unasked.
+    pub fn origin(&self) -> Option<&str> {
+        self.scope.as_deref().or(self.source.as_deref())
+    }
 }
 
 /// How an MCP server stands.
@@ -1588,5 +1614,46 @@ mod tests {
         assert!(PermissionDecision::AllowAlways.allowed());
         assert!(PermissionDecision::AllowByRule.allowed());
         assert!(!PermissionDecision::Deny.allowed());
+    }
+
+    #[test]
+    fn an_mcp_server_recorded_before_its_detail_was_asked_for_reads_back_as_written() {
+        let plain = r#"{"type":"mcp_servers","servers":[{"name":"notes","status":"connected","source":"dynamic","tools":["search"]}]}"#;
+        let read: Event = serde_json::from_str(plain).expect("an older record reads");
+        let Event::McpServers { servers } = &read else {
+            panic!("the record is a server list: {read:?}");
+        };
+        let [notes] = servers.as_slice() else {
+            panic!("one server: {servers:?}");
+        };
+        assert_eq!(
+            (
+                &notes.scope,
+                &notes.error,
+                &notes.endpoint,
+                &notes.reports_as
+            ),
+            (&None, &None, &None, &None)
+        );
+        assert_eq!(notes.origin(), Some("dynamic"));
+        assert_eq!(
+            serde_json::to_string(&read).expect("an event serializes"),
+            plain
+        );
+    }
+
+    #[test]
+    fn an_mcp_servers_scope_is_its_origin_over_the_source_it_was_listed_under() {
+        let server = McpServer {
+            name: "notes".to_owned(),
+            status: McpStatus::Failed,
+            source: Some("dynamic".to_owned()),
+            tools: Vec::new(),
+            scope: Some("project".to_owned()),
+            error: None,
+            endpoint: None,
+            reports_as: None,
+        };
+        assert_eq!(server.origin(), Some("project"));
     }
 }

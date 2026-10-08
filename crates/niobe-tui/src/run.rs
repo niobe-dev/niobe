@@ -629,6 +629,14 @@ fn send_produced(
         app.not_stopped(&error.to_string());
     }
 
+    // Asked for by a key in the MCP view, which costs no turn and is said in
+    // the view: the server's new standing arrives through the drain.
+    for server in app.take_mcp_reconnects() {
+        if let Err(error) = backend.reconnect_mcp(&server) {
+            app.not_reconnected(&server, &error.to_string());
+        }
+    }
+
     // After the answers, because a rule is made by answering: a rule that
     // could not be kept is reported under the decision it came from.
     for rule in app.take_rules() {
@@ -826,6 +834,7 @@ mod tests {
         modes: Vec<Mode>,
         models: Vec<String>,
         interrupts: usize,
+        reconnects: Vec<String>,
         produces: Vec<SessionEvent>,
         refuse: bool,
     }
@@ -875,6 +884,14 @@ mod tests {
                 return Err("the subprocess has gone".into());
             }
             self.interrupts += 1;
+            Ok(())
+        }
+
+        fn reconnect_mcp(&mut self, server: &str) -> Result<(), BridgeError> {
+            if self.refuse {
+                return Err("the subprocess has gone".into());
+            }
+            self.reconnects.push(server.to_owned());
             Ok(())
         }
 
@@ -1897,6 +1914,41 @@ mod tests {
 
         assert_eq!(backend.interrupts, 1);
         assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_server_the_operator_asked_to_reconnect_reaches_the_backend_once() {
+        let mut app = App::new(Repo::default()).attached();
+        app.apply(&SessionEvent::McpServers {
+            servers: vec![niobe_core::event::McpServer {
+                name: "docs".to_owned(),
+                status: niobe_core::event::McpStatus::Failed,
+                source: None,
+                tools: Vec::new(),
+                scope: None,
+                error: None,
+                endpoint: None,
+                reports_as: None,
+            }],
+        });
+        let mut backend = Attached::default();
+
+        app.on_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+        assert_eq!(backend.reconnects, ["docs"]);
+        assert!(backend.sent.is_empty(), "a reconnect sent a turn");
+
+        backend.refuse = true;
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("the subprocess has gone")),
+            "{:?}",
+            app.hint()
+        );
     }
 
     #[test]

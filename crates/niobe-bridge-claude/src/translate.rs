@@ -451,6 +451,23 @@ pub struct Translator {
     /// answered yet: an answer to one of those carries a title rather than a
     /// change taking effect.
     title_requests: BTreeSet<String>,
+    /// The `request_id`s of the `mcp_status` requests Niobe made that the CLI
+    /// has not answered yet: a refusal of one changed nothing the session runs
+    /// with, and says only that this CLI does not answer it.
+    mcp_status_requests: BTreeSet<String>,
+    /// The reconnects Niobe asked for that the CLI has not answered yet, by
+    /// `request_id`, each with the server it names: the answer names neither.
+    reconnects: BTreeMap<String, String>,
+    /// What the CLI's last answer to `mcp_status` said of each server, by
+    /// name, which every later `init` lists again without.
+    mcp_said: BTreeMap<String, McpServer>,
+    /// Whether the servers should be asked about again: one stands otherwise
+    /// than the CLI last said, or a reconnect was answered. Taken by
+    /// [`Translator::take_mcp_status_wanted`].
+    mcp_status_wanted: bool,
+    /// Whether the CLI refused `mcp_status`, which no later request will
+    /// change: it is not asked again.
+    mcp_status_refused: bool,
     /// Per-message usage since the last `result`, for the turn reconciliation.
     turn: Counts,
     /// The messages since the last `result` whose stream ended before their
@@ -546,6 +563,11 @@ impl Translator {
             model_requests: BTreeSet::new(),
             model_answers: Vec::new(),
             title_requests: BTreeSet::new(),
+            mcp_status_requests: BTreeSet::new(),
+            reconnects: BTreeMap::new(),
+            mcp_said: BTreeMap::new(),
+            mcp_status_wanted: false,
+            mcp_status_refused: false,
             turn: Counts::default(),
             unfinished: Vec::new(),
             reported: BTreeMap::new(),
@@ -686,6 +708,34 @@ impl Translator {
         self.title_requests.insert(request_id.to_owned());
     }
 
+    /// Records that the control request `request_id` asks the CLI how its MCP
+    /// servers stand (`mcp_status`).
+    ///
+    /// The answer is known by what it carries, so this is only what tells a
+    /// refusal of it — from a CLI that does not answer the request — from the
+    /// refusal of a change: nothing the session runs with is different.
+    pub fn asked_for_mcp_status(&mut self, request_id: &str) {
+        self.mcp_status_requests.insert(request_id.to_owned());
+    }
+
+    /// Records that the control request `request_id` asks the CLI to
+    /// reconnect the MCP server `server` (`mcp_reconnect`).
+    ///
+    /// The answer names the request and nothing else, so only this says which
+    /// server a refusal is of.
+    pub fn asked_to_reconnect(&mut self, request_id: &str, server: &str) {
+        self.reconnects
+            .insert(request_id.to_owned(), server.to_owned());
+    }
+
+    /// Whether the MCP servers should be asked about again since the last
+    /// call: an `init` listed one standing otherwise than the CLI last said
+    /// — so why it failed, if it did, is not known — or a reconnect was
+    /// answered. Never once the CLI has refused to say.
+    pub fn take_mcp_status_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.mcp_status_wanted) && !self.mcp_status_refused
+    }
+
     /// The model changes the CLI answered since the last call, oldest first.
     ///
     /// Separate from the events for the reason [`Translator::take_asked`]
@@ -791,6 +841,9 @@ impl Translator {
         let Some(outcome) = response.response else {
             return;
         };
+        if self.answered_of_mcp(&outcome, out) {
+            return;
+        }
         let of_model = outcome
             .request_id
             .as_deref()
@@ -822,6 +875,9 @@ impl Translator {
             if let Some(models) = answer.models {
                 out.push(offered_models(models));
             }
+            if let Some(servers) = answer.mcp_servers {
+                out.push(self.mcp_status(servers));
+            }
             return;
         }
         out.push(warn(format!(
@@ -831,6 +887,72 @@ impl Translator {
         if of_model {
             out.push(Event::ModelRefused);
         }
+    }
+
+    /// Reads the answer to a request about the MCP servers, and says whether
+    /// it was one.
+    ///
+    /// A reconnect the CLI took says nothing: how the server now stands is
+    /// what the `mcp_status` asked after it shows. One it refused is said with
+    /// the server's name and the CLI's reason, which is why the server would
+    /// not come back. A refused `mcp_status` is a CLI that does not answer it,
+    /// and is not asked again.
+    fn answered_of_mcp(&mut self, outcome: &wire::ControlOutcome, out: &mut Vec<Event>) -> bool {
+        let Some(id) = outcome.request_id.as_deref() else {
+            return false;
+        };
+        let taken = outcome.subtype.as_deref() == Some("success");
+        if let Some(server) = self.reconnects.remove(id) {
+            self.mcp_status_wanted = true;
+            if !taken {
+                out.push(warn(format!(
+                    "the MCP server `{server}` could not be reconnected: {}",
+                    outcome.error.as_deref().unwrap_or("the CLI gave no reason")
+                )));
+            }
+            return true;
+        }
+        if self.mcp_status_requests.remove(id) && !taken {
+            self.mcp_status_refused = true;
+            return true;
+        }
+        false
+    }
+
+    /// The servers as the CLI's answer to `mcp_status` has them, kept for
+    /// every later `init` to be read against.
+    fn mcp_status(&mut self, servers: Vec<wire::McpServerStatus>) -> Event {
+        let servers: Vec<McpServer> = servers.into_iter().map(mcp_server_status).collect();
+        self.mcp_said = servers
+            .iter()
+            .map(|server| (server.name.clone(), server.clone()))
+            .collect();
+        Event::McpServers { servers }
+    }
+
+    /// The servers an `init` lists, with what the CLI last said of each in
+    /// answer to `mcp_status`: where it is configured and how it is reached
+    /// for every one it named, and why it failed for one that still stands
+    /// as it did then. One that stands otherwise is asked about again.
+    fn mcp_servers(&mut self, servers: Vec<wire::McpServer>, tools: &[String]) -> Event {
+        let mut listed = Vec::with_capacity(servers.len());
+        for server in mcp_servers(servers, tools) {
+            let said = self.mcp_said.get(&server.name);
+            if said.is_none_or(|said| said.status != server.status) {
+                self.mcp_status_wanted = true;
+            }
+            listed.push(match said {
+                Some(said) => McpServer {
+                    scope: said.scope.clone(),
+                    endpoint: said.endpoint.clone(),
+                    reports_as: said.reports_as.clone(),
+                    error: said.error.clone().filter(|_| said.status == server.status),
+                    ..server
+                },
+                None => server,
+            });
+        }
+        Event::McpServers { servers: listed }
     }
 
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
@@ -848,10 +970,9 @@ impl Translator {
                 }
                 self.report_billing(None, out);
                 if let Some(servers) = system.mcp_servers {
-                    out.push(mcp_servers(
-                        servers,
-                        system.tools.as_deref().unwrap_or_default(),
-                    ));
+                    let event =
+                        self.mcp_servers(servers, system.tools.as_deref().unwrap_or_default());
+                    out.push(event);
                 }
                 if let Some(mode) = system.permission_mode {
                     match read_mode(&mode) {
@@ -2933,20 +3054,86 @@ fn listed_as_offered(commands: Vec<wire::Command>, unavailable: &[String]) -> Ev
     }
 }
 
-/// The MCP servers `init` lists, as the event that replaces the list before
-/// them, each with the tools of the session's that are its own.
-fn mcp_servers(servers: Vec<wire::McpServer>, tools: &[String]) -> Event {
-    Event::McpServers {
-        servers: servers
+/// The MCP servers `init` lists, each with the tools of the session's that
+/// are its own.
+fn mcp_servers(servers: Vec<wire::McpServer>, tools: &[String]) -> Vec<McpServer> {
+    servers
+        .into_iter()
+        .map(|server| McpServer {
+            tools: server_tools(&server.name, tools),
+            status: mcp_status(server.status),
+            source: said(server.source),
+            name: server.name,
+            scope: None,
+            error: None,
+            endpoint: None,
+            reports_as: None,
+        })
+        .collect()
+}
+
+/// One server as the answer to `mcp_status` has it.
+fn mcp_server_status(server: wire::McpServerStatus) -> McpServer {
+    McpServer {
+        status: mcp_status(server.status),
+        source: said(server.source),
+        tools: server
+            .tools
+            .unwrap_or_default()
             .into_iter()
-            .map(|server| McpServer {
-                tools: server_tools(&server.name, tools),
-                status: mcp_status(server.status),
-                source: server.source.filter(|source| !source.trim().is_empty()),
-                name: server.name,
-            })
+            .map(|tool| tool.name)
+            .filter(|name| !name.is_empty())
             .collect(),
+        scope: said(server.scope),
+        error: said(server.error),
+        endpoint: server.config.and_then(endpoint),
+        reports_as: server.server_info.and_then(|info| {
+            let named = format!(
+                "{} {}",
+                info.name.unwrap_or_default(),
+                info.version.unwrap_or_default()
+            );
+            said(Some(named.trim().to_owned()))
+        }),
+        name: server.name,
     }
+}
+
+/// What a field the CLI wrote empty, or left out, says: nothing.
+fn said(text: Option<String>) -> Option<String> {
+    text.filter(|text| !text.trim().is_empty())
+}
+
+/// How a server is reached, from its configuration: its transport and the
+/// program run or the address called. A program's arguments and environment
+/// and an address's credentials and query are left out, being where a
+/// configuration keeps an API key, so the record of the session holds none.
+fn endpoint(config: wire::McpConfig) -> Option<String> {
+    let transport = said(config.transport);
+    let target = match (said(config.command), said(config.url)) {
+        (Some(command), _) => command,
+        (None, Some(url)) => without_secrets(&url),
+        (None, None) => return transport,
+    };
+    // A configuration with a command and no `type` is a program run over
+    // standard input and output, which is what the CLI takes it for.
+    let transport = transport.unwrap_or_else(|| "stdio".to_owned());
+    Some(format!("{transport} · {target}"))
+}
+
+/// `url` with no user, password, query or fragment.
+fn without_secrets(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    let url = &url[..end];
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(host_end);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{path}")
 }
 
 /// The tools of `server`'s among the session's: those named
@@ -6649,5 +6836,91 @@ error: could not compile `demo` (lib test) due to 1 previous error";
             mcp_status("reconnecting".to_owned()),
             McpStatus::Other("reconnecting".to_owned())
         );
+    }
+
+    #[test]
+    fn an_mcp_servers_address_is_kept_without_its_credentials_or_query() {
+        assert_eq!(
+            without_secrets("https://user:key@mcp.example.com:8443/v1/mcp?token=abc#x"),
+            "https://mcp.example.com:8443/v1/mcp"
+        );
+        assert_eq!(
+            without_secrets("http://127.0.0.1:9/mcp"),
+            "http://127.0.0.1:9/mcp"
+        );
+        let config =
+            |transport: Option<&str>, command: Option<&str>, url: Option<&str>| wire::McpConfig {
+                transport: transport.map(str::to_owned),
+                command: command.map(str::to_owned),
+                url: url.map(str::to_owned),
+            };
+        assert_eq!(
+            endpoint(config(None, Some("npx"), None)).as_deref(),
+            Some("stdio · npx")
+        );
+        assert_eq!(
+            endpoint(config(Some("sse"), None, Some("https://x.dev/sse?key=1"))).as_deref(),
+            Some("sse · https://x.dev/sse")
+        );
+        assert_eq!(endpoint(config(None, None, None)), None);
+    }
+
+    const STATUS_FAILED: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"mcpServers":[{"name":"docs","status":"failed","error":"ECONNREFUSED","scope":"project"}]}}}"#;
+
+    fn init_with(status: &str) -> String {
+        format!(
+            r#"{{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{{"name":"docs","status":"{status}","source":"project"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn a_server_that_stands_otherwise_than_the_cli_last_said_is_asked_about_again() {
+        let mut translator = Translator::new("max");
+        translator.asked_for_mcp_status("niobe-2");
+        translator.line(STATUS_FAILED);
+        assert!(!translator.take_mcp_status_wanted());
+
+        translator.line(&init_with("failed"));
+        assert!(
+            !translator.take_mcp_status_wanted(),
+            "a server that failed as it did is asked about again"
+        );
+        let events = translator.line(&init_with("connected"));
+        assert!(translator.take_mcp_status_wanted());
+        let Some(Event::McpServers { servers }) = events
+            .iter()
+            .find(|event| matches!(event, Event::McpServers { .. }))
+        else {
+            panic!("no server list: {events:?}");
+        };
+        assert_eq!(
+            servers[0].error, None,
+            "a connected server kept its failure"
+        );
+        assert_eq!(servers[0].scope.as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn a_cli_that_refuses_mcp_status_is_not_asked_again_and_nothing_is_said() {
+        let mut translator = Translator::new("max");
+        translator.asked_for_mcp_status("niobe-2");
+        let events = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"Unsupported control request subtype: mcp_status"}}"#,
+        );
+        assert_eq!(events, []);
+        translator.line(&init_with("failed"));
+        assert!(!translator.take_mcp_status_wanted());
+    }
+
+    #[test]
+    fn a_reconnect_answered_either_way_has_the_servers_asked_about_again() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_reconnect("niobe-3", "docs");
+        let events = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3"}}"#,
+        );
+        assert_eq!(events, []);
+        assert!(translator.take_mcp_status_wanted());
+        assert!(!translator.take_mcp_status_wanted(), "asked about twice");
     }
 }

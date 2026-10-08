@@ -2055,6 +2055,97 @@ fn the_models_the_cli_offers_come_from_the_answer_to_initialize() {
 }
 
 const MCP_SERVERS: &str = include_str!("fixtures/mcp-servers.jsonl");
+const MCP_STATUS: &str = include_str!("fixtures/mcp-status.jsonl");
+
+/// The recording's lines in the order given, by their place in it.
+fn lines_of(recording: &str, order: &[usize]) -> String {
+    let lines: Vec<&str> = recording.lines().collect();
+    order
+        .iter()
+        .map(|at| lines[*at])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The servers of the recorded `mcp_status` answer: why the two that failed
+/// did, the scope each came from, how each is reached and what the one that
+/// connected calls itself.
+fn recorded_status() -> Vec<niobe_core::event::McpServer> {
+    use niobe_core::event::{McpServer, McpStatus};
+
+    let server = |name: &str, status: McpStatus, endpoint: &str| McpServer {
+        name: name.to_owned(),
+        status,
+        source: Some("dynamic".to_owned()),
+        tools: Vec::new(),
+        scope: Some("dynamic".to_owned()),
+        error: None,
+        endpoint: Some(endpoint.to_owned()),
+        reports_as: None,
+    };
+    vec![
+        McpServer {
+            tools: vec!["search".to_owned(), "fetch".to_owned()],
+            reports_as: Some("notes 1.0.0".to_owned()),
+            ..server("notes", McpStatus::Connected, "stdio · python3")
+        },
+        McpServer {
+            error: Some("ENOENT: no such file or directory, posix_spawn 'stdio'".to_owned()),
+            ..server("broken", McpStatus::Failed, "stdio · /nonexistent/server")
+        },
+        McpServer {
+            error: Some(
+                "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"
+                    .to_owned(),
+            ),
+            ..server(
+                "remote docs",
+                McpStatus::Failed,
+                "http · http://127.0.0.1:9/mcp",
+            )
+        },
+    ]
+}
+
+/// The CLI answers `mcp_status` on its control channel with each server's
+/// error, scope, configuration and tools, which `init` leaves out. The
+/// session holds them; a reconnect the CLI refused is said with the server's
+/// name and the CLI's reason, and one it took says nothing.
+#[test]
+fn the_clis_mcp_status_says_why_each_server_failed_and_where_it_is_configured() {
+    let mut translator = Translator::new("max");
+    translator.asked_to_reconnect("niobe-3", "notes");
+    translator.asked_to_reconnect("niobe-4", "broken");
+    let events: Vec<Event> = MCP_STATUS
+        .lines()
+        .flat_map(|line| translator.line(line))
+        .collect();
+    let state = SessionState::replay(&events);
+
+    assert_eq!(state.mcp_servers(), recorded_status());
+    assert_eq!(
+        warnings(&events),
+        [
+            "the MCP server `broken` could not be reconnected: ENOENT: no such file or directory, posix_spawn 'stdio'"
+        ]
+    );
+    assert!(notices(&events).is_empty(), "{events:?}");
+}
+
+/// Every turn's `init` lists the servers again without what `mcp_status`
+/// said of them, so what was said is kept for a server that stands as it
+/// did: the error of one that failed and failed again is not lost to the
+/// next turn.
+#[test]
+fn a_later_init_keeps_what_mcp_status_said_of_a_server_that_stands_as_it_did() {
+    let events = translate(&lines_of(MCP_STATUS, &[1, 0]));
+    let state = SessionState::replay(&events);
+
+    // The tools are the ones `init` says the model was given, in its order.
+    let mut expected = recorded_status();
+    expected[0].tools = vec!["fetch".to_owned(), "search".to_owned()];
+    assert_eq!(state.mcp_servers(), expected);
+}
 
 /// Every `init` the CLI sends lists the MCP servers it configured, each with
 /// how it stands, and the tools the connected ones gave the model are among
@@ -2072,6 +2163,10 @@ fn the_mcp_servers_the_cli_configured_come_from_its_init() {
         status,
         source: Some("dynamic".to_owned()),
         tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+        scope: None,
+        error: None,
+        endpoint: None,
+        reports_as: None,
     };
     assert_eq!(
         state.mcp_servers(),

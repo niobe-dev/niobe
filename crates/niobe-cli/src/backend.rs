@@ -544,6 +544,13 @@ impl Bridge for Claude {
         self.session.interrupt().map_err(BridgeError::from)
     }
 
+    fn reconnect_mcp(&mut self, server: &str) -> Result<(), BridgeError> {
+        self.carry_on()?;
+        self.session
+            .reconnect_mcp(server)
+            .map_err(BridgeError::from)
+    }
+
     fn drain(&mut self) -> Vec<Event> {
         self.session.drain()
     }

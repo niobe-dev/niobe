@@ -3591,6 +3591,10 @@ mod tests {
             status,
             source: Some("user".to_owned()),
             tools: Vec::new(),
+            scope: None,
+            error: None,
+            endpoint: None,
+            reports_as: None,
         };
         let state = SessionState::replay(&[
             Event::McpServers {

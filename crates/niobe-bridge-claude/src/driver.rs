@@ -45,6 +45,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -162,6 +163,20 @@ type ModelRequests = Arc<Mutex<Vec<String>>>;
 /// been told about yet, for the reason [`ModelRequests`] has: the answer names
 /// only the request it answers.
 type TitleRequests = Arc<Mutex<Vec<String>>>;
+
+/// The requests about MCP servers the thread reading the CLI has not been told
+/// about yet, for the reason [`ModelRequests`] has.
+type McpRequests = Arc<Mutex<Vec<McpRequest>>>;
+
+/// A request about the MCP servers, as the thread reading the CLI is told of
+/// it.
+#[derive(Debug)]
+enum McpRequest {
+    /// `mcp_status`, by its `request_id`.
+    Status(String),
+    /// `mcp_reconnect`, by its `request_id`, and the server it names.
+    Reconnect { request_id: String, server: String },
+}
 
 /// The CLI's answers to model changes that the session has not yet seen,
 /// oldest first. Written by the thread reading the CLI before it hands on the
@@ -436,6 +451,11 @@ pub struct Session {
     refusals: Refusals,
     model_requests: ModelRequests,
     title_requests: TitleRequests,
+    mcp_requests: McpRequests,
+    /// Set by the thread reading the CLI where the MCP servers should be
+    /// asked about again (see [`Translator::take_mcp_status_wanted`]), and
+    /// acted on by the next drain: only this side writes to the CLI.
+    mcp_status_wanted: Arc<AtomicBool>,
     stderr: Arc<Mutex<Tail>>,
     /// The threads reading standard output and standard error, in that
     /// order, and the one writing standard input.
@@ -554,6 +574,10 @@ impl Session {
         let answered_model = Arc::clone(&model_answers);
         let title_requests: TitleRequests = Arc::new(Mutex::new(Vec::new()));
         let asked_for_title = Arc::clone(&title_requests);
+        let mcp_requests: McpRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_about_mcp = Arc::clone(&mcp_requests);
+        let mcp_status_wanted = Arc::new(AtomicBool::new(false));
+        let wants_mcp_status = Arc::clone(&mcp_status_wanted);
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             while let Some(output) = next_line(&mut stdout) {
@@ -587,7 +611,22 @@ impl Session {
                         translator.asked_for_title(&request_id);
                     }
                 }
+                if let Ok(mut asked) = asked_about_mcp.lock() {
+                    for request in asked.drain(..) {
+                        match request {
+                            McpRequest::Status(request_id) => {
+                                translator.asked_for_mcp_status(&request_id);
+                            }
+                            McpRequest::Reconnect { request_id, server } => {
+                                translator.asked_to_reconnect(&request_id, &server);
+                            }
+                        }
+                    }
+                }
                 let events = translator.line(&line);
+                if translator.take_mcp_status_wanted() {
+                    wants_mcp_status.store(true, Ordering::Relaxed);
+                }
                 // Recorded before the events go out, never after: the shell
                 // learns of a prompt by draining the events, and an answer to
                 // one this side had not yet written down would be refused for
@@ -637,6 +676,8 @@ impl Session {
             refusals,
             model_requests,
             title_requests,
+            mcp_requests,
+            mcp_status_wanted,
             stderr: kept,
             threads: vec![reader, errors, writer],
             control_requests: 0,
@@ -832,6 +873,48 @@ impl Session {
         ))
     }
 
+    /// Asks the CLI how its MCP servers stand: why one failed, where each is
+    /// configured, how each is reached and its tools, none of which `init`
+    /// says.
+    ///
+    /// Asked whenever an `init` lists a server standing otherwise than the
+    /// CLI last said, and after a reconnect: the CLI answers from what it
+    /// holds, at no cost and with no turn, which Claude Code 2.1.292 was
+    /// recorded doing in `tests/fixtures/mcp-status.jsonl`.
+    fn ask_mcp_status(&mut self) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        if let Ok(mut asked) = self.mcp_requests.lock() {
+            asked.push(McpRequest::Status(id.clone()));
+        }
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "mcp_status" }),
+        ))
+    }
+
+    /// Asks the CLI to connect to the MCP server `server` again.
+    ///
+    /// Nothing is written to any configuration: the CLI drops the connection
+    /// it has, or the failure it is holding, and connects as it did at the
+    /// start. Recorded from Claude Code 2.1.292: a server that connects is
+    /// answered with a bare success, and one that cannot with the reason, as
+    /// a refusal — which the reading thread says with the server's name.
+    /// Either way the servers are asked about again, so the list shows how
+    /// each now stands.
+    pub fn reconnect_mcp(&mut self, server: &str) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        if let Ok(mut asked) = self.mcp_requests.lock() {
+            asked.push(McpRequest::Reconnect {
+                request_id: id.clone(),
+                server: server.to_owned(),
+            });
+        }
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "mcp_reconnect", "serverName": server }),
+        ))
+    }
+
     /// Queues one control request for the CLI's standard input.
     fn ask(&mut self, request: &serde_json::Value) -> std::io::Result<()> {
         self.queue(request.to_string(), "request")
@@ -876,6 +959,10 @@ impl Session {
         let mut events: Vec<Event> = self.unsent.try_iter().collect();
         events.extend(self.stalled());
         self.settle_model_changes();
+        // A CLI whose input is closed has left, which the drain reports.
+        if self.mcp_status_wanted.swap(false, Ordering::Relaxed) {
+            let _ = self.ask_mcp_status();
+        }
         loop {
             match self.events.try_recv() {
                 // Only a pipe held by something that left the CLI's group
@@ -2016,6 +2103,77 @@ mod tests {
         options.cwd = dir.path().to_path_buf();
         configure(&mut options);
         (spawn_written(&options), dir)
+    }
+
+    /// An `init` that lists a server the CLI has said nothing more of has the
+    /// servers asked about, and the answer says why one failed; a reconnect
+    /// goes out naming the server, its refusal is said, and the servers are
+    /// asked about again.
+    #[cfg(unix)]
+    #[test]
+    fn the_cli_is_asked_why_a_server_failed_and_to_reconnect_one() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let init = r#"{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"docs","status":"failed","source":"project"}]}"#;
+        let status = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"mcpServers":[{"name":"docs","status":"failed","error":"ECONNREFUSED","scope":"project","config":{"type":"http","url":"http://127.0.0.1:9/mcp"}}]}}}"#;
+        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"ECONNREFUSED"}}"#;
+        let (mut session, _dir) = started(&format!(
+            "read -r initialize\nread -r turn\nprintf '%s\\n' '{init}'\n\
+             read -r status\nprintf '%s\\n' '{status}'\n\
+             read -r reconnect\nprintf '%s\\n' '{refused}'\n\
+             read -r again\nprintf '%s\\n' \"$status\" \"$reconnect\" \"$again\" > '{asked}'\n",
+            asked = asked.display()
+        ));
+        session.send("hello", &[]).expect("the stand-in is reading");
+
+        let started = Instant::now();
+        let mut events = Vec::new();
+        let mut reconnected = false;
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            let failed_why = events.iter().any(|event| {
+                matches!(event, Event::McpServers { servers }
+                    if servers.iter().any(|server| server.error.as_deref() == Some("ECONNREFUSED")))
+            });
+            if failed_why && !reconnected {
+                session
+                    .reconnect_mcp("docs")
+                    .expect("the stand-in is reading");
+                reconnected = true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            reconnected,
+            "no answer said why the server failed: {events:#?}"
+        );
+        let said = std::fs::read_to_string(&asked).expect("the stand-in wrote what it read");
+        let requests: Vec<serde_json::Value> = said
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each request is JSON"))
+            .collect();
+        let bodies: Vec<&serde_json::Value> =
+            requests.iter().map(|request| &request["request"]).collect();
+        assert_eq!(
+            bodies,
+            [
+                &serde_json::json!({ "subtype": "mcp_status" }),
+                &serde_json::json!({ "subtype": "mcp_reconnect", "serverName": "docs" }),
+                &serde_json::json!({ "subtype": "mcp_status" }),
+            ]
+        );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::Error { message, fatal: false }
+                if message == "the MCP server `docs` could not be reconnected: ECONNREFUSED")
+            ),
+            "{events:#?}"
+        );
     }
 
     /// The session is titled from the first prompt that is not a command, by

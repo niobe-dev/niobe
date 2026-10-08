@@ -113,10 +113,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   reaches each without the menu, what each does in the words `niobe --help` lists the F-keys
   with, and where each is drawn so a click lands on it, and the commands that, typed as a
   prompt, do what an action does — `/model`, `/memory`, `/mcp`, `/resume`, `/help` and the
-  rest — so each action has one path however it is asked for; F7 and `/mcp` list the MCP
-  servers the backend last reported, each with how it stands, where it is configured and its
-  tools, in a sheet that sends no turn and so opens while one runs, and say which CLI and
-  files change one; a backend
+  rest — so each action has one path however it is asked for; F7 and `/mcp` open the MCP
+  view; a backend
   command is sent only where the backend listed it, and an action no backend offers says why —
   `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
@@ -148,7 +146,13 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   file's scope, path and size in the order the agent is given them, imports under the file
   importing them, one the session changed marked, Enter showing a file's text read-only and
   `e` opening it in a text editor on the terminal the loop lends it, never through the system's
-  opener — `markdown.rs` draws the assistant's replies
+  opener — `mcp.rs` draws the MCP view from the servers the session's fold last holds, so a
+  newer report is what an open view shows: a server a row with how it stands, the scope it is
+  configured in and its tool count, Enter showing one whole — why it failed, how it is reached,
+  what it calls itself, its tools — and `r` asking the backend to reconnect it, the one change
+  offered, since it is the one recorded leaving nothing changed past the session; it sends no
+  turn, so it opens while one runs, and names the CLI and files that add, remove, turn off or
+  sign in to one — `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   cut at twenty rows until Ctrl+T opens every cut diff in place,
@@ -181,12 +185,17 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
   `translate.rs` turns one message of it into events and owns no process — and reads the MCP
-  servers every `init` lists, each with the tools of the session's that are its own, and marks an edit
+  servers every `init` lists, each with the tools of the session's that are its own, and the
+  CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or
+  address (never its arguments, environment or headers) — which it keeps for every later
+  `init`, and marks an edit
   under the CLI's `projects/<project>/memory/` as the agent's own notes — `driver.rs` spawns the
   binary, writes a turn with its attached images as base64 image blocks after the text, as the
   CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), asks it with
   `initialize` what it offers — the answer is where the slash commands a
-  session starts with are listed, `commands_changed` only reports a change to them — asks it once,
+  session starts with are listed, `commands_changed` only reports a change to them — asks it
+  `mcp_status` whenever an `init` lists a server standing otherwise than it last said, and after
+  `mcp_reconnect`, which it sends for the MCP view's `r` — asks it once,
   where the config leaves titles on, to title a new session from its first prompt that is not a
   command (`generate_session_title`, which the CLI answers from its small model and bills into the
   session's running totals), and the only place the models the signed-in account can run are

@@ -108,8 +108,9 @@ pub(crate) struct System {
 
 /// One MCP server, as `init` lists it.
 ///
-/// Why a server failed and the tools it offers are not in `init`: the CLI
-/// says those only when asked over the control channel.
+/// Why a server failed and where it is configured are not in `init`: the
+/// CLI says those only when asked, with `mcp_status` (see
+/// [`McpServerStatus`]).
 #[derive(Debug, Deserialize)]
 pub(crate) struct McpServer {
     pub(crate) name: String,
@@ -119,6 +120,58 @@ pub(crate) struct McpServer {
     /// Where the CLI found the server's configuration: `user`, `project`,
     /// `local`, or `dynamic` for one handed to it with `--mcp-config`.
     pub(crate) source: Option<String>,
+}
+
+/// One MCP server, as the answer to `mcp_status` has it.
+///
+/// Recorded from Claude Code 2.1.292: `{name, status, error, config, scope,
+/// source, serverInfo, tools}`, `error` only on one that failed and
+/// `serverInfo` and `tools` only on one that connected.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpServerStatus {
+    pub(crate) name: String,
+    /// As on `init`.
+    pub(crate) status: String,
+    /// Why the CLI could not connect to it, in its words: `ECONNREFUSED:
+    /// Unable to connect. …` for an address nothing listens on.
+    pub(crate) error: Option<String>,
+    /// `user`, `project`, `local`, or `dynamic` for one handed to the CLI
+    /// with `--mcp-config`.
+    pub(crate) scope: Option<String>,
+    /// As on `init`.
+    pub(crate) source: Option<String>,
+    pub(crate) config: Option<McpConfig>,
+    #[serde(rename = "serverInfo")]
+    pub(crate) server_info: Option<McpServerInfo>,
+    pub(crate) tools: Option<Vec<McpTool>>,
+}
+
+/// How a server is reached, as its configuration says.
+///
+/// Only what says where: a program's `args` and `env` and an address's
+/// `headers` are not read, being where a configuration keeps its secrets.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpConfig {
+    /// `stdio`, `http` or `sse`.
+    #[serde(rename = "type")]
+    pub(crate) transport: Option<String>,
+    /// The program a `stdio` server is.
+    pub(crate) command: Option<String>,
+    /// The address of an `http` or `sse` one.
+    pub(crate) url: Option<String>,
+}
+
+/// What a connected server calls itself.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpServerInfo {
+    pub(crate) name: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
+/// One tool a connected server offers, by its own name for it.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpTool {
+    pub(crate) name: String,
 }
 
 /// One slash command, as the CLI lists it in its answer to `initialize` and in
@@ -661,6 +714,11 @@ pub(crate) struct ControlAnswer {
     /// will not. Claude Code 2.1.282 says `sdk_opt_in_required` over
     /// stream-json and answers the command with a refusal.
     pub(crate) fast_mode_disabled_reason: Option<String>,
+    /// Every MCP server the CLI configured, with why one failed, the scope it
+    /// was found in, its configuration and its tools: the answer to
+    /// `mcp_status`, recorded from Claude Code 2.1.292.
+    #[serde(rename = "mcpServers")]
+    pub(crate) mcp_servers: Option<Vec<McpServerStatus>>,
     /// The title `generate_session_title` made, or `null` where it made none.
     /// Recorded from Claude Code 2.1.288: `{"title":"Static file handler etag
     /// support"}` for a prompt about etags.

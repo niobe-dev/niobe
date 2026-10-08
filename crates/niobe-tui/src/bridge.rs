@@ -80,6 +80,19 @@ pub trait Bridge: std::fmt::Debug {
         Err("this backend cannot be asked to stop a turn".into())
     }
 
+    /// Asks the backend to connect to the MCP server `server` again, changing
+    /// nothing it keeps past the session.
+    ///
+    /// Returns once the backend has the request; how the server then stands
+    /// arrives through [`Bridge::drain`] as a newer list of the servers. The
+    /// default refuses, for the reason [`Bridge::answer`] does: a reconnect
+    /// nobody took must be said, or the operator would wait on a server that
+    /// is not being connected to.
+    fn reconnect_mcp(&mut self, server: &str) -> Result<(), BridgeError> {
+        let _ = server;
+        Err("this backend cannot be asked to reconnect an MCP server".into())
+    }
+
     /// Everything the backend has produced since the last call, oldest first.
     /// Never blocks; an empty answer means nothing has arrived yet, never that
     /// the session is over.

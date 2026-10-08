@@ -94,6 +94,10 @@ const SHAPES: &[&str] = &[
     // recorded from Claude Code 2.1.282. Each replaces the list before it.
     "control_response/success",
     "system/commands_changed",
+    // A request of Niobe's the CLI refused, recorded from Claude Code 2.1.292
+    // as the reconnect of an MCP server that cannot be started: said with the
+    // server's name and the CLI's reason, as a refused change is said.
+    "control_response/error",
     // A tool call still running, recorded from Claude Code 2.1.287 as a
     // heartbeat every thirty seconds. Passed over on purpose: it carries no
     // tokens, and the shell times a running call off its own clock.

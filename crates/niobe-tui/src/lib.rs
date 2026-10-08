@@ -38,6 +38,7 @@ mod input;
 pub mod journal;
 mod keys;
 mod markdown;
+pub mod mcp;
 pub mod memory;
 mod mention;
 pub mod menu;

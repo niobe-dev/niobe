@@ -1282,6 +1282,52 @@ What it settles is where the servers are listed without asking:
   servers in that order, `notes` with `fetch` and `search`, and no prompt
   sent.
 
+## `mcp-status.jsonl`
+
+A session on Claude Code 2.1.292, recorded on 8 October 2026 with the same
+three servers, flags and empty directory as `mcp-servers.jsonl`, driven over
+the control channel: `initialize`, the prompt `/mcp`, then `mcp_status`
+(`niobe-2`), `mcp_reconnect` of `notes` (`niobe-3`) and of `broken`
+(`niobe-4`), and `mcp_status` again (`niobe-5`), each sent once the one
+before was answered. None of it is a model request; the session cost nothing.
+Kept are the turn's `init`, cut as in `mcp-servers.jsonl`, and the four
+answers whole, with the path of the `notes` server rewritten to
+`/repo/notes.py`. The answer to `initialize` is left out: it names the
+signed-in account.
+
+What it settles is what the CLI says of a server when asked, and that a
+reconnect changes nothing it keeps:
+
+- **`mcp_status` answers `{mcpServers: [...]}`**, a server each in `init`'s
+  order, as `{name, status, error, config, scope, source, serverInfo,
+  tools}`. `error` is on the two that failed only — `broken` `ENOENT: no such
+  file or directory, posix_spawn 'stdio'`, `remote docs` `ECONNREFUSED: Unable
+  to connect. Is the computer able to access the url?` — and `serverInfo`
+  (`notes` `1.0.0`) and `tools` (`search`, then `fetch`: the server's order,
+  where `init` sorts them) on the one that connected only. `scope` and
+  `source` are both `dynamic` for a server given with `--mcp-config`.
+  `config` is the server's configuration as written — `{type: "stdio",
+  command, args}` or `{type: "http", url}` — of which the bridge keeps the
+  transport and the command or the address, never `args`, `env` or
+  `headers`.
+- **`mcp_reconnect` takes `serverName`.** For `notes` it is answered with a
+  bare `success`; for `broken`, which cannot start, with `subtype: "error"`
+  and the same `error` as the status gives. Nothing the CLI keeps on disk is
+  named by either request, and the second `mcp_status` is byte for byte the
+  first but for its `request_id`: the reconnect left the servers as they
+  stood.
+- `tests/stream.rs` folds the recording and expects the session to hold the
+  three servers with those errors, scopes, endpoints (`stdio · python3`,
+  `stdio · /nonexistent/server`, `http · http://127.0.0.1:9/mcp`) and
+  `notes 1.0.0`; one warning, naming `broken` and its error, for the refused
+  reconnect; and, with the status read before the `init`, the same servers
+  with the tools in `init`'s order.
+
+Enabling or disabling a server (`mcp_toggle`) and signing in to one were not
+recorded, since each changes what the CLI keeps past the session — a server
+turned off stays off for the next one, and signing in stores a credential —
+and Niobe offers neither.
+
 ## `hand-written.jsonl`
 
 **Written by hand, not recorded**, for two shapes of the protocol no
