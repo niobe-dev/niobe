@@ -104,6 +104,16 @@ const STALLED: Duration = Duration::from_secs(5);
 /// that never ends a line cannot fill memory with one.
 const LINE_LIMIT: u64 = 64 * 1024 * 1024;
 
+/// The most of the first prompt, in bytes, that the CLI is asked to make a
+/// title from.
+///
+/// The CLI hands the description to its small model whole, so without a cut
+/// a long paste is billed a second time for a title of a few words: a
+/// 45,656-character first prompt cost 21,897 input tokens for the title alone
+/// on Claude Code 2.1.292. The opening kilobyte says what the session is about
+/// as well as the rest would.
+const TITLE_DESCRIPTION: usize = 1024;
+
 /// What the CLI is told when the operator refuses a call.
 ///
 /// The CLI hands it to the model as the refused call's result, where it is
@@ -231,10 +241,12 @@ pub struct Options {
     /// sent that is not a slash command.
     ///
     /// The CLI makes the title with its small model, on the operator's
-    /// account, and bills it into the session's running totals: about nine
-    /// hundred input tokens and a dozen output for a short prompt, measured on
-    /// Claude Code 2.1.288. It writes the title into its own transcript too,
-    /// and starts no other session to make it. Off unless asked for.
+    /// account, and bills it into the session's running totals: 899 input
+    /// tokens and 10 output for a short prompt, measured on Claude Code
+    /// 2.1.292 with haiku. Only the prompt's first kilobyte is sent, so a long
+    /// paste adds a few hundred input tokens to that rather than its own
+    /// length again. It writes the title into its own transcript too, and
+    /// starts no other session to make it. Off unless asked for.
     pub ask_title: bool,
 }
 
@@ -658,10 +670,12 @@ impl Session {
     /// with the one it has rather than making another. Asked once a session:
     /// a CLI started again carries the conversation on, title and all.
     fn ask_for_title(&mut self, prompt: &str) -> std::io::Result<()> {
-        let about = prompt.trim();
-        if !self.next.ask_title || about.is_empty() || about.starts_with('/') {
+        if !self.next.ask_title {
             return Ok(());
         }
+        let Some(about) = title_description(prompt) else {
+            return Ok(());
+        };
         self.next.ask_title = false;
         let id = self.next_request_id();
         if let Ok(mut asked) = self.title_requests.lock() {
@@ -1311,6 +1325,22 @@ fn turn_line(prompt: &str, images: &[Image]) -> serde_json::Value {
 /// Written as its own function for the same reason as [`control_response`]:
 /// what reaches the CLI's standard input is the whole of the protocol on this
 /// side, and it can be checked without a subprocess.
+/// What the CLI is asked to title a session from: `prompt` without the
+/// space around it, cut on a character boundary to at most
+/// [`TITLE_DESCRIPTION`] bytes, or nothing where it is empty or a slash
+/// command.
+fn title_description(prompt: &str) -> Option<&str> {
+    let about = prompt.trim();
+    if about.is_empty() || about.starts_with('/') {
+        return None;
+    }
+    let mut end = about.len().min(TITLE_DESCRIPTION);
+    while !about.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(about[..end].trim_end())
+}
+
 fn control_request(request_id: &str, body: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "type": "control_request",
@@ -1955,6 +1985,31 @@ mod tests {
             "{written}"
         );
         assert_eq!(lines[3]["type"], "user", "asked once: {written}");
+    }
+
+    #[test]
+    fn a_long_first_prompt_is_cut_on_a_character_boundary_before_it_is_sent_for_a_title() {
+        let prompt = "é".repeat(50 * 1024) + "x";
+
+        let about = title_description(&prompt).expect("the prompt says something");
+
+        assert!(about.len() <= TITLE_DESCRIPTION, "{} bytes", about.len());
+        assert!(
+            about.len() >= TITLE_DESCRIPTION - 1,
+            "{} bytes",
+            about.len()
+        );
+        assert!(prompt.starts_with(about));
+    }
+
+    #[test]
+    fn a_short_first_prompt_is_sent_for_a_title_whole() {
+        assert_eq!(
+            title_description("  add etag support\n"),
+            Some("add etag support")
+        );
+        assert_eq!(title_description("/model opus"), None);
+        assert_eq!(title_description(" \n "), None);
     }
 
     #[cfg(unix)]

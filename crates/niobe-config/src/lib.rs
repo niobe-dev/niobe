@@ -330,10 +330,11 @@ impl ThemeName {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Titles {
     /// The backend is asked for a few words on what the first prompt asks.
-    /// The `claude` CLI answers from its small model: about nine hundred
-    /// input tokens and a dozen output for a short prompt, measured on Claude
-    /// Code 2.1.288, which the CLI bills into the session's running totals and
-    /// the bridge counts with the next turn.
+    /// The `claude` CLI answers from its small model: 899 input tokens and 10
+    /// output for a short prompt, measured on Claude Code 2.1.292 with haiku,
+    /// and a few hundred more at most for a long one, since the bridge sends
+    /// only the prompt's first kilobyte. The CLI bills it into the session's
+    /// running totals and the bridge counts it with the next turn.
     #[default]
     Model,
     /// The first line of the first prompt, as the shell did before the
