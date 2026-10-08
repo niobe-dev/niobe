@@ -856,6 +856,61 @@ mod tests {
     }
 
     #[test]
+    fn output_tee_saves_is_an_edit_where_nothing_stronger_made_it() {
+        assert_eq!(
+            read("ls | tee out.txt"),
+            (Work::Editing, named(&["ls", "tee"]))
+        );
+    }
+
+    #[test]
+    fn rtk_proxy_is_read_past_to_the_program_it_runs() {
+        assert_eq!(
+            read("rtk proxy cargo test"),
+            (Work::Building, named(&["cargo test"]))
+        );
+    }
+
+    #[test]
+    fn a_long_option_or_one_with_a_value_is_not_an_in_place_edit() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            ("perl --version", Work::Other, &["perl"]),
+            ("sed --quiet -n '/fn/p' f.rs", Work::Exploring, &["sed"]),
+            (
+                "perl -I/usr/lib/perl5 scripts/check.pl",
+                Work::Other,
+                &["perl"],
+            ),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn output_sent_to_another_descriptor_saves_nothing_and_to_a_file_by_number_does() {
+        assert_eq!(read("echo oops >&2"), (Work::Other, named(&["echo"])));
+        assert_eq!(read("echo x 1>out.txt"), (Work::Editing, named(&["echo"])));
+    }
+
+    #[test]
+    fn git_show_only_reads() {
+        assert_eq!(
+            read("git show HEAD~1"),
+            (Work::Exploring, named(&["git show"]))
+        );
+    }
+
+    #[test]
+    fn the_ellipsis_an_older_records_line_ends_with_is_not_a_program() {
+        let older = of_call("Bash", None, Some("cargo test | …"), "{}");
+        assert_eq!(
+            (older.work, older.specifics),
+            (Work::Building, named(&["cargo test"]))
+        );
+    }
+
+    #[test]
     fn a_shell_call_is_read_from_its_command_or_from_the_line_an_older_record_kept() {
         let reading = of_call("Bash", Some("cd x\ncargo build"), Some("cd x …"), "{}");
         assert_eq!(reading.work, Work::Building);
