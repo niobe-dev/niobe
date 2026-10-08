@@ -28,6 +28,7 @@
 //!   marked in use, and Enter on it keeps this one open and says why.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::clock::Stamp;
 
@@ -322,6 +323,185 @@ impl SessionRow {
             || self.first().is_some_and(|first| matches(query, first))
             || self.prompts.iter().any(|prompt| matches(query, prompt))
     }
+}
+
+/// The rows the history dialog lists, as its filter leaves them: a view of
+/// every row there is, shared with the [`Index`] it was read from rather
+/// than copied out of it, so a frame over a long history copies none of it.
+#[derive(Debug, Clone)]
+pub struct Listed<T> {
+    /// A row listed before the others, whatever the filter keeps of them:
+    /// the session open now, in the dialog's sessions.
+    first: Option<T>,
+    all: Arc<[T]>,
+    /// The places in `all` of the rows the filter keeps, in order.
+    kept: Arc<[usize]>,
+}
+
+impl<T> Listed<T> {
+    /// How many rows are listed.
+    pub fn len(&self) -> usize {
+        usize::from(self.first.is_some()) + self.kept.len()
+    }
+
+    /// Whether no row is listed.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The row at `at` in the list, counted from its top.
+    pub fn get(&self, at: usize) -> Option<&T> {
+        match (&self.first, at) {
+            (Some(first), 0) => Some(first),
+            (Some(_), at) => self.at(at - 1),
+            (None, at) => self.at(at),
+        }
+    }
+
+    fn at(&self, kept: usize) -> Option<&T> {
+        self.kept.get(kept).and_then(|&row| self.all.get(row))
+    }
+
+    /// Every row listed, from the top.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.first
+            .iter()
+            .chain(self.kept.iter().filter_map(|&row| self.all.get(row)))
+    }
+}
+
+/// What the history dialog's rows are built from: the loads of the
+/// repository's history that have landed, how many prompts this session has
+/// sent, and the records that are this session. While none of them changes,
+/// neither does any row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Source {
+    /// Loads that have landed: a count that only changes, never one read
+    /// as a size.
+    pub loads: u64,
+    /// This session's prompts.
+    pub own: usize,
+    /// The number this session is recorded under.
+    pub recorded_as: Option<String>,
+    /// The conversation this session's backend is carrying on.
+    pub carrying_on: Option<String>,
+}
+
+/// Every prompt and every other session the history dialog can list, built
+/// once for a [`Source`], with the text each is filtered by lowercased once,
+/// and the rows the last filter of each kept.
+///
+/// The dialog asks for its rows on every key and every frame; built there,
+/// a history of 20,000 prompts was copied and lowercased whole each time,
+/// which took ten times a frame.
+#[derive(Debug)]
+pub(crate) struct Index {
+    source: Source,
+    prompts: Arc<[PromptRow]>,
+    /// Each prompt's text, lowercased.
+    prompt_text: Vec<String>,
+    sessions: Arc<[SessionRow]>,
+    /// Each session's label, title, first prompt and prompts, lowercased.
+    session_text: Vec<Vec<String>>,
+    prompts_kept: Option<(String, Arc<[usize]>)>,
+    sessions_kept: Option<(String, Arc<[usize]>)>,
+}
+
+impl Index {
+    /// The index of `prompts`, newest first, and of the sessions other than
+    /// this one, in the order they are listed.
+    pub(crate) fn new(source: Source, prompts: Vec<PromptRow>, sessions: Vec<SessionRow>) -> Self {
+        let prompt_text = prompts.iter().map(|row| row.text.to_lowercase()).collect();
+        let session_text = sessions.iter().map(searched).collect();
+        Self {
+            source,
+            prompts: prompts.into(),
+            prompt_text,
+            sessions: sessions.into(),
+            session_text,
+            prompts_kept: None,
+            sessions_kept: None,
+        }
+    }
+
+    /// Whether the index was built from `source`.
+    pub(crate) fn built_from(&self, source: &Source) -> bool {
+        self.source == *source
+    }
+
+    /// Every prompt, newest first, whatever the filter.
+    pub(crate) fn every_prompt(&self) -> &[PromptRow] {
+        &self.prompts
+    }
+
+    /// The prompts `query` keeps.
+    pub(crate) fn prompts(&mut self, query: &str) -> Listed<PromptRow> {
+        let text = &self.prompt_text;
+        let kept = kept(&mut self.prompts_kept, query, text.len(), |row, words| {
+            text.get(row)
+                .is_some_and(|text| words.iter().all(|word| text.contains(word.as_str())))
+        });
+        Listed {
+            first: None,
+            all: Arc::clone(&self.prompts),
+            kept,
+        }
+    }
+
+    /// The other sessions `query` keeps, after `this`, which is listed
+    /// where it matches.
+    pub(crate) fn sessions(&mut self, this: SessionRow, query: &str) -> Listed<SessionRow> {
+        let text = &self.session_text;
+        let kept = kept(&mut self.sessions_kept, query, text.len(), |row, words| {
+            text.get(row).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|field| words.iter().all(|word| field.contains(word.as_str())))
+            })
+        });
+        Listed {
+            first: this.matches(query).then_some(this),
+            all: Arc::clone(&self.sessions),
+            kept,
+        }
+    }
+}
+
+/// The rows of `rows` that `query` keeps, by `keeps`, from what the last
+/// filter kept where the query is the same.
+fn kept(
+    last: &mut Option<(String, Arc<[usize]>)>,
+    query: &str,
+    rows: usize,
+    keeps: impl Fn(usize, &[String]) -> bool,
+) -> Arc<[usize]> {
+    if let Some((filtered, kept)) = last
+        && filtered == query
+    {
+        return Arc::clone(kept);
+    }
+    let words: Vec<String> = query
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let kept: Arc<[usize]> = (0..rows).filter(|&row| keeps(row, &words)).collect();
+    *last = Some((query.to_owned(), Arc::clone(&kept)));
+    kept
+}
+
+/// What [`SessionRow::matches`] looks in, lowercased.
+fn searched(row: &SessionRow) -> Vec<String> {
+    let label = row
+        .target
+        .as_ref()
+        .map_or_else(|| "this session".to_owned(), Target::label);
+    std::iter::once(label.as_str())
+        .chain(row.title.as_deref())
+        .chain(row.first())
+        .chain(row.prompts.iter().map(String::as_str))
+        .map(str::to_lowercase)
+        .collect()
 }
 
 #[cfg(test)]

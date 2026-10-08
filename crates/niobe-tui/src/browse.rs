@@ -17,7 +17,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::App;
 use crate::clock::{self, Stamp};
-use crate::history::{Browser, PromptRow, SessionRow, View};
+use crate::history::{Browser, Listed, PromptRow, SessionRow, View};
 use crate::text;
 use crate::theme::Theme;
 
@@ -206,7 +206,7 @@ fn split(rows: usize) -> (usize, usize) {
 
 /// The rows of `listed` that fit in `room`, with the one at `at` among them,
 /// each with its place in the whole list.
-fn window<T>(listed: &[T], at: usize, room: usize) -> impl Iterator<Item = (usize, &T)> {
+fn window<T>(listed: &Listed<T>, at: usize, room: usize) -> impl Iterator<Item = (usize, &T)> {
     let first = at.saturating_sub(room.saturating_sub(1));
     listed.iter().enumerate().skip(first).take(room)
 }

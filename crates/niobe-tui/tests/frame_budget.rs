@@ -834,3 +834,118 @@ fn the_file_list_under_an_at_redraws_inside_a_frame_budget_over_a_large_reposito
          {median:?}, over the {FRAME_BUDGET:?} budget"
     );
 }
+
+/// Prompts in a repository's history that has been used for a long while.
+const REMEMBERED_PROMPTS: usize = 20_000;
+
+/// Sessions those prompts were sent in.
+const REMEMBERED_SESSIONS: usize = 400;
+
+/// A repository's history as long as [`REMEMBERED_PROMPTS`], each prompt about
+/// two kilobytes and no two alike, with the history dialog open on `view`.
+fn session_remembering_many_prompts(sessions_view: bool) -> App {
+    use niobe_tui::history::{Past, PastPrompt, PastSession, Target};
+
+    let mut app = running_session().remembers();
+    let target = |n: usize| Target::Recorded(format!("{}", n % REMEMBERED_SESSIONS + 1));
+    let body = "Refactor the catalog fetcher so a 304 answers from the cache. ".repeat(32);
+    app.set_past(Past {
+        prompts: (0..REMEMBERED_PROMPTS)
+            .map(|n| PastPrompt {
+                text: format!("Prompt {n}: {body}"),
+                at: None,
+                session: target(n),
+            })
+            .collect(),
+        sessions: (0..REMEMBERED_SESSIONS)
+            .map(|n| PastSession {
+                target: target(n),
+                last: None,
+                first_prompt: None,
+                title: None,
+                open_elsewhere: false,
+            })
+            .collect(),
+        unread: None,
+    });
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    if sessions_view {
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    let _ = screen(&mut app, 120, 30);
+    app
+}
+
+/// The median time a key in the history dialog takes to land and the frame
+/// after it to draw, over keys that filter it, unfilter it and move its
+/// cursor. The filter is a letter no prompt holds, so every prompt is read
+/// to the end to find that.
+fn median_history_key(app: &mut App) -> Duration {
+    let keys = [
+        KeyCode::Char('x'),
+        KeyCode::Backspace,
+        KeyCode::Down,
+        KeyCode::Down,
+    ];
+    let mut times: Vec<Duration> = (0..FRAMES)
+        .map(|n| {
+            let started = Instant::now();
+            app.on_key(KeyEvent::new(keys[n % keys.len()], KeyModifiers::NONE));
+            let _ = screen(app, 120, 30);
+            started.elapsed()
+        })
+        .collect();
+    times.sort_unstable();
+    times[FRAMES / 2]
+}
+
+/// The history dialog over a history of [`REMEMBERED_PROMPTS`]: each key
+/// filters or moves through every prompt there is, and has to land and be
+/// drawn inside a frame.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a key is timed in an optimised build")]
+fn a_key_in_the_history_dialog_over_twenty_thousand_prompts_lands_and_draws_inside_a_frame_budget()
+{
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = session_remembering_many_prompts(false);
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("Prompt 0: Refactor"),
+        "the history is listed, or the keys time nothing:\n{frame}"
+    );
+
+    let median = median_history_key(&mut app);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "a key in the history dialog over {REMEMBERED_PROMPTS} prompts took {median:?} to \
+         land and draw, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// The same history listed by session: each session's prompts are searched
+/// by the filter, so a key has the same prompts to go through.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a key is timed in an optimised build")]
+fn a_key_in_the_history_dialogs_sessions_over_twenty_thousand_prompts_lands_and_draws_inside_a_frame_budget()
+ {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = session_remembering_many_prompts(true);
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("#1 "),
+        "the sessions are listed, or the keys time nothing:\n{frame}"
+    );
+
+    let median = median_history_key(&mut app);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "a key in the history dialog's sessions over {REMEMBERED_PROMPTS} prompts took \
+         {median:?} to land and draw, over the {FRAME_BUDGET:?} budget"
+    );
+}

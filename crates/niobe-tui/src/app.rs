@@ -30,7 +30,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use ratatui::style::Style;
 
 use crate::clock::{Clock, LocalTime, Stamp};
-use crate::history::{Browser, Newer, PromptRow, Recall, SessionRow, Target, View};
+use crate::history::{Browser, Listed, Newer, PromptRow, Recall, SessionRow, Target, View};
 use crate::images::{Attachments, DraftId, Fetched, Source, image_path};
 use crate::prices::Prices;
 use crate::theme::{Depth, Theme};
@@ -1244,6 +1244,13 @@ pub struct App {
     /// What the last load of the repository's earlier sessions found; `None`
     /// until one has landed.
     past: Option<crate::history::Past>,
+    /// How many loads have landed, which is what tells the history dialog's
+    /// rows from those of an earlier load.
+    past_loads: u64,
+    /// The history dialog's rows, built once for what they are built from;
+    /// `None` until the dialog or a walk first asks for them. Built where
+    /// they are asked for, which a frame does through `&self`.
+    history_index: std::cell::RefCell<Option<crate::history::Index>>,
     /// Whether a load has been asked for that the loop has not passed on.
     history_wanted: bool,
     /// The number this session is recorded under, once it is.
@@ -1638,6 +1645,8 @@ impl App {
             runs_commands: false,
             remembers: false,
             past: None,
+            past_loads: 0,
+            history_index: std::cell::RefCell::new(None),
             // Asked for as the shell opens, so Up has earlier sessions'
             // prompts by the time anyone presses it.
             history_wanted: true,
@@ -6624,6 +6633,9 @@ impl App {
     /// with, so the prompt on screen does not change under the operator.
     pub fn set_past(&mut self, past: crate::history::Past) {
         self.past = Some(past);
+        // Wrapping, not saturating: the count is told apart, never read as
+        // a size, and one that stopped would stop telling loads apart.
+        self.past_loads = self.past_loads.wrapping_add(1);
         self.keep_browser_cursor();
     }
 
@@ -6710,20 +6722,59 @@ impl App {
             .collect()
     }
 
+    /// What the history dialog's rows are built from, as things stand.
+    fn history_source(&self) -> crate::history::Source {
+        crate::history::Source {
+            loads: self.past_loads,
+            own: self.own_prompts().count(),
+            recorded_as: self.recorded_as.clone(),
+            carrying_on: self
+                .session
+                .meta()
+                .and_then(|meta| meta.backend_session.clone()),
+        }
+    }
+
+    /// `read` of the history dialog's rows, built again first where what
+    /// they are built from has changed since they last were.
+    fn with_history<R>(&self, read: impl FnOnce(&mut crate::history::Index) -> R) -> R {
+        let source = self.history_source();
+        let mut index = self.history_index.borrow_mut();
+        if !index
+            .as_ref()
+            .is_some_and(|index| index.built_from(&source))
+        {
+            *index = None;
+        }
+        let index = index.get_or_insert_with(|| {
+            crate::history::Index::new(source, self.every_prompt(), self.other_sessions())
+        });
+        read(index)
+    }
+
+    /// Every prompt there is to go back to, newest first, as the walk Up
+    /// starts takes them.
+    fn every_prompt_text(&self) -> Vec<String> {
+        self.with_history(|index| {
+            index
+                .every_prompt()
+                .iter()
+                .map(|row| row.text.clone())
+                .collect()
+        })
+    }
+
     /// The prompts the history dialog lists, newest first, as its filter
     /// leaves them.
-    pub fn prompt_rows(&self) -> Vec<PromptRow> {
+    pub fn prompt_rows(&self) -> Listed<PromptRow> {
         let query = self.browser.as_ref().map_or("", |browser| &browser.query);
-        self.every_prompt()
-            .into_iter()
-            .filter(|row| crate::history::matches(query, &row.text))
-            .collect()
+        self.with_history(|index| index.prompts(query))
     }
 
     /// The sessions the history dialog lists, as its filter leaves them: this
     /// one first, then the others newest first, each with its prompts where
     /// they are known.
-    pub fn session_rows(&self) -> Vec<SessionRow> {
+    pub fn session_rows(&self) -> Listed<SessionRow> {
         let query = self.browser.as_ref().map_or("", |browser| &browser.query);
         let this = SessionRow {
             target: None,
@@ -6733,6 +6784,12 @@ impl App {
             title: self.session.title().map(str::to_owned),
             open_elsewhere: false,
         };
+        self.with_history(|index| index.sessions(this, query))
+    }
+
+    /// The sessions other than this one, newest first, each with its prompts
+    /// where they are known.
+    fn other_sessions(&self) -> Vec<SessionRow> {
         let mut prompts: std::collections::HashMap<&Target, Vec<String>> =
             std::collections::HashMap::new();
         for prompt in self.past.iter().flat_map(|past| past.prompts.iter().rev()) {
@@ -6741,8 +6798,7 @@ impl App {
                 .or_default()
                 .push(prompt.text.clone());
         }
-        let others = self
-            .past
+        self.past
             .iter()
             .flat_map(|past| &past.sessions)
             .filter(|session| !self.is_this_session(&session.target))
@@ -6753,10 +6809,7 @@ impl App {
                 first_prompt: session.first_prompt.clone(),
                 title: session.title.clone(),
                 open_elsewhere: session.open_elsewhere,
-            });
-        std::iter::once(this)
-            .chain(others)
-            .filter(|row| row.matches(query))
+            })
             .collect()
     }
 
@@ -6843,7 +6896,7 @@ impl App {
         let at = browser.at;
         match browser.view {
             View::Prompts => {
-                let Some(row) = self.prompt_rows().into_iter().nth(at) else {
+                let Some(row) = self.prompt_rows().get(at).cloned() else {
                     return;
                 };
                 self.browser = None;
@@ -6858,7 +6911,7 @@ impl App {
                 self.recall_chosen(&row.text);
             }
             View::Sessions => {
-                let Some(row) = self.session_rows().into_iter().nth(at) else {
+                let Some(row) = self.session_rows().get(at).cloned() else {
                     return;
                 };
                 self.open_session(row);
@@ -6909,11 +6962,7 @@ impl App {
             Some(draft) => draft,
             None => (self.images.composing(), self.composed()),
         };
-        let prompts: Vec<String> = self
-            .every_prompt()
-            .into_iter()
-            .map(|row| row.text)
-            .collect();
+        let prompts = self.every_prompt_text();
         let at = prompts.iter().position(|prompt| prompt == chosen);
         match at.and_then(|at| Recall::start_on(prompts, at, draft.clone())) {
             Some(recall) => {
@@ -7004,12 +7053,7 @@ impl App {
         let shown = match self.recall.as_mut() {
             Some(recall) => recall.older().map(str::to_owned),
             None => {
-                let prompts: Vec<String> = self
-                    .every_prompt()
-                    .into_iter()
-                    .map(|row| row.text)
-                    .collect();
-                let recall = Recall::start(prompts, self.composed());
+                let recall = Recall::start(self.every_prompt_text(), self.composed());
                 let shown = recall.as_ref().map(|recall| recall.current().to_owned());
                 if let Some(recall) = recall {
                     self.start_walk(recall);
@@ -14055,7 +14099,8 @@ mod tests {
         let browser = app.browser().expect("Ctrl+R opens the history");
         assert_eq!(browser.view, View::Prompts);
         typed(&mut app, "ETAG");
-        let rows = app.prompt_rows();
+        let listed = app.prompt_rows();
+        let rows: Vec<_> = listed.iter().collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "add etag support");
         assert_eq!(rows[0].session, Some(Target::Recorded("3".to_owned())));
@@ -14121,6 +14166,65 @@ mod tests {
         assert_eq!(app.composed(), "draft");
     }
 
+    fn listed_prompts(app: &App) -> Vec<String> {
+        app.prompt_rows()
+            .iter()
+            .map(|row| row.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_open_history_lists_what_changes_under_it() {
+        let mut app = remembering(&[("earlier", "3"), ("older", "4")], &["3", "4"]);
+        app.on_key(ctrl('r'));
+        assert_eq!(listed_prompts(&app), ["earlier", "older"]);
+
+        app.apply(&Event::UserMessage {
+            text: "sent while it was open".to_owned(),
+        });
+        assert_eq!(
+            listed_prompts(&app),
+            ["sent while it was open", "earlier", "older"]
+        );
+
+        app.set_recorded_as(Some("4".to_owned()));
+        assert_eq!(
+            listed_prompts(&app),
+            ["sent while it was open", "earlier"],
+            "the record of this very session is not listed as another's"
+        );
+
+        app.set_past(crate::history::Past {
+            prompts: vec![earlier("landed later", "5")],
+            ..crate::history::Past::default()
+        });
+        assert_eq!(
+            listed_prompts(&app),
+            ["sent while it was open", "landed later"]
+        );
+    }
+
+    #[test]
+    fn the_history_filter_is_read_again_as_it_changes_in_any_case() {
+        let mut app = remembering(
+            &[("Add ETag support", "3"), ("fix the resume race", "4")],
+            &["3", "4"],
+        );
+        app.on_key(ctrl('r'));
+        typed(&mut app, "etag");
+        assert_eq!(listed_prompts(&app), ["Add ETag support"]);
+        app.on_key(key(KeyCode::Backspace));
+        app.on_key(key(KeyCode::Backspace));
+        typed(&mut app, "x");
+        assert!(listed_prompts(&app).is_empty());
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(
+            listed_prompts(&app).len(),
+            2,
+            "a cleared filter keeps every prompt"
+        );
+    }
+
     #[test]
     fn the_history_lists_this_sessions_prompts_first_newest_first() {
         let mut app = remembering(&[("earlier", "3")], &["3"]);
@@ -14128,7 +14232,8 @@ mod tests {
         send_prompt(&mut app, "two");
         app.on_key(ctrl('r'));
 
-        let rows = app.prompt_rows();
+        let listed = app.prompt_rows();
+        let rows: Vec<_> = listed.iter().collect();
         let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
         assert_eq!(texts, ["two", "one", "earlier"]);
         assert_eq!(rows[0].session, None, "this session's own");
@@ -14161,7 +14266,8 @@ mod tests {
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.browser().map(|b| b.view), Some(View::Sessions));
 
-        let rows = app.session_rows();
+        let listed = app.session_rows();
+        let rows: Vec<_> = listed.iter().collect();
         assert_eq!(rows[0].target, None, "this session heads the list");
         assert_eq!(rows[1].target, Some(Target::Recorded("3".to_owned())));
         assert_eq!(rows[1].prompts, ["add etag support"]);
@@ -14179,7 +14285,8 @@ mod tests {
         app.perform(crate::menu::Action::Resume);
         assert_eq!(app.browser().map(|b| b.view), Some(View::Sessions));
 
-        let rows = app.session_rows();
+        let listed = app.session_rows();
+        let rows: Vec<_> = listed.iter().collect();
         assert_eq!(rows.len(), 1, "its record is this session, not another");
         app.on_key(key(KeyCode::Enter));
         assert!(!app.should_quit());
@@ -14204,7 +14311,8 @@ mod tests {
             title: "Resume race fix".to_owned(),
         }]);
 
-        let rows = app.session_rows();
+        let listed = app.session_rows();
+        let rows: Vec<_> = listed.iter().collect();
         assert_eq!(rows[0].caption(), Some("Resume race fix"));
         assert_eq!(rows[1].caption(), Some("Static file handler etag support"));
         assert!(rows[1].matches("handler"));
