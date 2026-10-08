@@ -46,8 +46,8 @@ sha2.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # A pty to run the binary on, for the tests that take its terminal away, and
-# `kill` for the one that asks it to stop.
-rustix = { workspace = true, features = ["event", "process", "pty", "termios"] }
+# `kill` for the one that asks it to stop, and a pipe whose reader is gone.
+rustix = { workspace = true, features = ["event", "pipe", "process", "pty", "termios"] }
 
 [lints]
 workspace = true

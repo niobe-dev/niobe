@@ -342,6 +342,61 @@ fn a_failure_reported_onto_a_closed_standard_error_ends_as_a_reported_failure() 
     );
 }
 
+/// Runs the binary with standard output a pipe whose reading end is already
+/// closed, the way `niobe prices | head -1` leaves it once `head` has its line.
+///
+/// The reading end is closed before the binary starts, so its first write
+/// fails every time rather than only when it loses a race with the reader.
+#[cfg(unix)]
+fn niobe_with_its_reader_gone(cwd: &Path, args: &[&str]) -> Output {
+    let (reader, writer) = rustix::pipe::pipe().expect("a pipe can be made");
+    drop(reader);
+    niobe_command(
+        cwd,
+        &cwd.join("no-user-config-here"),
+        &cwd.join("no-claude-sessions-here"),
+        args,
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::from(writer))
+    .stderr(Stdio::piped())
+    .output()
+    .expect("the niobe binary runs")
+}
+
+/// A reader that stopped reading is how a pipeline ends, not a failure of
+/// `niobe`: every command that prints ends as `--help` promises, with none of
+/// them panicking on the write that found nobody there.
+#[cfg(unix)]
+#[test]
+fn every_printing_command_ends_quietly_when_its_reader_has_gone() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::create_dir(dir.path().join(".git")).expect("a .git directory can be made");
+
+    for args in [
+        &["prices"][..],
+        &["--help"],
+        &["--version"],
+        &["profiles"],
+        &["sessions"],
+    ] {
+        let output = niobe_with_its_reader_gone(dir.path(), args);
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "niobe {args:?} with its reader gone ended with {}: {}",
+            output.status,
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).is_empty(),
+            "niobe {args:?} with its reader gone wrote {:?}",
+            stderr(&output)
+        );
+    }
+}
+
 /// Characters that act on a terminal rather than show: an escape, a bell and a
 /// right-to-left override.
 const ACTING: [char; 3] = ['\u{1b}', '\u{7}', '\u{202e}'];

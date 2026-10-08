@@ -31,6 +31,7 @@ mod reaper;
 mod repo;
 mod rules;
 mod sessions;
+mod stdout;
 mod summary;
 
 use std::io::{self, IsTerminal, Write};
@@ -49,10 +50,11 @@ use niobe_tui::{Detached, Ended, Forgotten, NoImages, NoShell, Theme, Unwatched}
 /// Prints a line the way `println!` does, with anything in it that would act
 /// on the terminal shown as text instead; see [`printable`]. Every line this
 /// binary prints goes through it, because most carry a name, a path or a
-/// prompt that came from a config, the store or a transcript.
+/// prompt that came from a config, the store or a transcript. Unlike
+/// `println!` it does not panic where the write fails; see [`stdout`].
 macro_rules! say {
     ($($arg:tt)*) => {
-        println!("{}", crate::printable::printable(&format!($($arg)*)))
+        crate::stdout::line(&crate::printable::printable(&format!($($arg)*)))
     };
 }
 
@@ -63,7 +65,7 @@ use crate::rules::ConfigRules;
 fn main() -> ExitCode {
     let parsed = args::utf8(std::env::args_os().skip(1)).and_then(|args| args::parse(&args));
     let result = match parsed {
-        Ok(invocation) => run(invocation),
+        Ok(invocation) => run(invocation).and_then(|()| stdout::outcome()),
         Err(usage) => Err(format!("{usage}\nRun `niobe --help` for usage.")),
     };
 
@@ -951,8 +953,11 @@ fn agreed(path: &Path) -> Result<bool, String> {
             path.display()
         ));
     }
-    print!("trust it? [y/N] ");
-    io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut out = io::stdout().lock();
+    write!(out, "trust it? [y/N] ")
+        .and_then(|()| out.flush())
+        .map_err(|e| format!("the question could not be asked: {e}"))?;
+    drop(out);
     let mut answer = String::new();
     io::stdin()
         .read_line(&mut answer)
