@@ -3432,6 +3432,9 @@ fn level_lines(
     let mut lines: Vec<Line<'static>> = reported
         .into_iter()
         .map(|(label, window, clause)| {
+            if !window.utilization.is_finite() {
+                return unmeasured_line(usage_label(label, labels), clause, cells, dim);
+            }
             let (filled, track) = meter(window.utilization, cells);
             let style = window_style(&window, theme);
             Line::from(vec![
@@ -3462,6 +3465,29 @@ fn level_lines(
     }
 
     lines
+}
+
+/// A window's row where nothing measured its level — one carried from an
+/// earlier reading whose reset has come around since: an em dash where the
+/// share stands and no meter, since an empty track would read as nothing
+/// used. Where it names a reset, blank cells hold the meter's place so the
+/// reset stands in the column the other rows' do.
+fn unmeasured_line(
+    label: String,
+    clause: Option<String>,
+    cells: usize,
+    dim: Style,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(label, dim),
+        Span::styled(format!("{NO_FIGURE:>3}"), dim),
+    ];
+    if let Some(clause) = clause {
+        let blank = " ".repeat(SHARE_COLUMNS - 3 + SHARE_GAP.len() + cells);
+        spans.push(Span::raw(blank));
+        spans.push(Span::styled(clause, dim));
+    }
+    Line::from(spans)
 }
 
 /// What the overage row draws where a figure would be: no backend reports
@@ -6599,11 +6625,14 @@ mod tests {
         assert_eq!(rows_of(&app, 66), vec!["5h  40% ▓▓▓▓▓░░░░░░░".to_owned()]);
     }
 
-    /// A level recorded before a window came back is not the level now. The
-    /// seven-day window comes back at the same moment every week, so its next
-    /// reset is known; the five-hour one starts again with the next request.
+    /// A level recorded before a window came back is not the level now, and
+    /// nothing has measured the level since: other clients on the account may
+    /// have spent from it. It reads as an em dash, never a `0%`. The seven-day
+    /// window comes back at the same moment every week, so its next reset is
+    /// still named, where a meter would stand; the five-hour one starts again
+    /// with the next request.
     #[test]
-    fn a_carried_window_that_has_reset_since_is_drawn_reset() {
+    fn a_carried_window_that_has_reset_since_has_no_level() {
         let app = fresh(Some(UsageWindows {
             five_hour: Some(window(0.87, Some(A_FRIDAY + 9 * 3_600))),
             // A week before the Tuesday the window comes back on.
@@ -6611,11 +6640,37 @@ mod tests {
             using_overage: true,
         }));
 
+        let rows = rows_of(&app, 66);
+        assert_eq!(
+            rows,
+            vec![
+                "5h   —".to_owned(),
+                "7d   —               resets Tue 09:00".to_owned(),
+                "as of 13:02, before this session".to_owned(),
+            ]
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains('%')),
+            "a reset window drew a level: {rows:?}"
+        );
+        assert_eq!(window_rows(&app), 3);
+    }
+
+    /// A window that has reset since stands in the same columns as one that
+    /// has not, so the reset times still read down one column.
+    #[test]
+    fn a_reset_carried_window_keeps_the_reset_column_of_one_that_has_not() {
+        let app = fresh(Some(UsageWindows {
+            five_hour: Some(window(0.37, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
+            seven_day: Some(window(0.64, Some(A_FRIDAY - 3 * 86_400 + 9 * 3_600))),
+            using_overage: false,
+        }));
+
         assert_eq!(
             rows_of(&app, 66),
             vec![
-                "5h   0% ░░░░░░░░░░░░".to_owned(),
-                "7d   0% ░░░░░░░░░░░░ resets Tue 09:00".to_owned(),
+                "5h  37% ▓▓▓▓░░░░░░░░ resets 16:40".to_owned(),
+                "7d   —               resets Tue 09:00".to_owned(),
                 "as of 13:02, before this session".to_owned(),
             ]
         );
@@ -6671,8 +6726,8 @@ mod tests {
         assert_eq!(
             rows_of(&app, 66),
             vec![
-                "5h   0% ░░░░░░░░░░░░".to_owned(),
-                "7d   0% ░░░░░░░░░░░░ resets Thu 09:00".to_owned(),
+                "5h   —".to_owned(),
+                "7d   —               resets Thu 09:00".to_owned(),
                 "as of Tue 13:02, before this session".to_owned(),
             ]
         );

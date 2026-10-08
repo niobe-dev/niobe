@@ -281,10 +281,11 @@ pub enum PlanWindows {
     /// What an earlier session under the same profile recorded, or what this
     /// session's own record held before it was resumed, dated `at`, until
     /// this session's backend reports. A window whose reset has come
-    /// around since is drawn as reset rather than at its stale level: see
+    /// around since holds a level that is not a number rather than its
+    /// stale one, since nothing has measured it since: see
     /// [`App::plan_windows`].
     Carried {
-        /// The levels, with every window that has reset since put back.
+        /// The levels, with every window that has reset since unmeasured.
         windows: UsageWindows,
         /// When they were recorded.
         at: Stamp,
@@ -4084,8 +4085,9 @@ impl App {
     /// What this session's backend reported, where it has since the session
     /// was started or [resumed](App::resumed). Before then, the newer of what
     /// an earlier session recorded and what this session's own record held,
-    /// dated, with each window whose reset has come around since drawn at
-    /// nothing used and its next reset where the window has a fixed one; or,
+    /// dated, with each window whose reset has come around since holding a
+    /// level nothing measured and its next reset where the window has a fixed
+    /// one; or,
     /// where nothing was ever recorded and the first reply has not come in,
     /// rows waiting for it. None of that on an account known to be metered,
     /// which has no plan windows.
@@ -7202,16 +7204,23 @@ fn in_force(
 }
 
 /// `windows` as they stand at `now`, where they were recorded earlier: each
-/// window whose reset has come around is back at nothing used, the seven-day
-/// one with its next reset a whole number of weeks on, and the five-hour one
-/// with none, since it starts again only with the next request. The plan
-/// spending beyond its fee is a state of the windows that were full, so it
-/// is not carried past a reset.
+/// window whose reset has come around has a level nothing measured, since
+/// other clients on the account may have spent from it since, so it holds
+/// [`UNMEASURED`] rather than the stale level or a zero; the seven-day one
+/// keeps its next reset a whole number of weeks on, and the five-hour one has
+/// none, since it starts again only with the next request. The plan spending
+/// beyond its fee is a state of the windows that were full, so it is not
+/// carried past a reset.
 fn since_reset(windows: UsageWindows, now: u64) -> UsageWindows {
+    let has_reset = |window: Option<UsageWindow>| {
+        window
+            .and_then(|window| window.resets_at)
+            .is_some_and(|at| at <= now)
+    };
     let reset = |window: Option<UsageWindow>, every: Option<u64>| {
         window.map(|window| match window.resets_at {
             Some(at) if at <= now => UsageWindow {
-                utilization: 0.0,
+                utilization: UNMEASURED,
                 resets_at: every.and_then(|every| {
                     let weeks = (now - at) / every + 1;
                     at.checked_add(weeks.checked_mul(every)?)
@@ -7220,16 +7229,19 @@ fn since_reset(windows: UsageWindows, now: u64) -> UsageWindows {
             _ => window,
         })
     };
-    let five_hour = reset(windows.five_hour, None);
-    let seven_day = reset(windows.seven_day, Some(SEVEN_DAYS));
     UsageWindows {
         using_overage: windows.using_overage
-            && five_hour == windows.five_hour
-            && seven_day == windows.seven_day,
-        five_hour,
-        seven_day,
+            && !has_reset(windows.five_hour)
+            && !has_reset(windows.seven_day),
+        five_hour: reset(windows.five_hour, None),
+        seven_day: reset(windows.seven_day, Some(SEVEN_DAYS)),
     }
 }
+
+/// The level of a window nothing has measured: one carried from an earlier
+/// reading whose reset has come around since. It is not a number, which is
+/// what the Usage pane draws as an em dash with no meter, never as a `0%`.
+const UNMEASURED: f64 = f64::NAN;
 
 /// One window, as Cost & usage reads it out: `5h window 62%, resets in 2h 14m`.
 ///
