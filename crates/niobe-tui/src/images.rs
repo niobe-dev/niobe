@@ -23,6 +23,11 @@
 //! numbered across the session as Claude Code numbers them, and sent with the
 //! turn. Deleting the placeholder before sending drops the image.
 //!
+//! An image belongs to the text it was attached in, not to its number: a
+//! prompt recalled from an earlier session numbered its own images from one,
+//! so its `[Image #1]` can be the number a draft's image has, and it is never
+//! sent with that draft's image.
+//!
 //! A fetch is never waited on: the clipboard is read by another program, and
 //! the loop has a terminal to draw on every tick. Its outcome arrives through
 //! [`Images::drain`], and until it has, the prompt it is for is not sent.
@@ -88,19 +93,32 @@ impl Images for NoImages {
     }
 }
 
+/// A text written in the composer, which the images attached while it was
+/// there belong to. The composer's text is set aside while a walk through
+/// earlier prompts shows one, and comes back after; what the walk shows is
+/// another text, which no image attached to the draft belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DraftId(u64);
+
 /// The images a session has attached and not yet sent, and what it has asked
 /// for and not yet been handed.
 ///
-/// An image is numbered as it is attached and sent with the next prompt that
-/// still holds its placeholder. The numbers run on across the session, and
-/// past any the session already holds when it is read back, so no two images
-/// a transcript shows share one.
+/// An image is numbered as it is attached, and belongs to the text the
+/// composer held then: it is sent with that text once it is sent still
+/// holding its placeholder. The numbers run on across the session, and past
+/// any the session already holds when it is read back, so no two images a
+/// transcript shows share one.
 #[derive(Debug, Default)]
 pub(crate) struct Attachments {
     /// The number the last image attached, or read back, was given.
     last: u32,
-    /// Attached to the prompt being written, oldest first.
-    waiting: Vec<(u32, Image)>,
+    /// The text in the composer, which an image attached now belongs to.
+    composing: DraftId,
+    /// The last text given an id.
+    drafts: u64,
+    /// Attached to a prompt not yet sent, with the text each belongs to,
+    /// oldest first.
+    waiting: Vec<(DraftId, u32, Image)>,
     /// Asked for since the event loop last looked.
     asked: Vec<Source>,
     /// Asked for and not yet handed back, so the bar can say one is coming.
@@ -151,8 +169,27 @@ impl Attachments {
     /// placeholder that stands for it there.
     pub(crate) fn attach(&mut self, image: Image) -> String {
         self.last = self.last.saturating_add(1);
-        self.waiting.push((self.last, image));
+        self.waiting.push((self.composing, self.last, image));
         placeholder(self.last)
+    }
+
+    /// The text the composer holds, which the images attached now belong to.
+    pub(crate) fn composing(&self) -> DraftId {
+        self.composing
+    }
+
+    /// Notes that the composer now holds a text no image was attached to — a
+    /// prompt recalled from the history — and that what is attached from now
+    /// on belongs to it.
+    pub(crate) fn compose_anew(&mut self) {
+        self.drafts = self.drafts.saturating_add(1);
+        self.composing = DraftId(self.drafts);
+    }
+
+    /// Notes that the composer holds `draft` again, given back after a walk
+    /// through earlier prompts set it aside.
+    pub(crate) fn compose(&mut self, draft: DraftId) {
+        self.composing = draft;
     }
 
     /// Numbers the next image past every placeholder in `text`, a prompt this
@@ -163,21 +200,25 @@ impl Attachments {
         }
     }
 
-    /// Sends the prompt `text`: the images whose placeholders it still holds
-    /// go with it, in the order they were attached, the ones a draft in
-    /// `kept` names wait on for it, and the rest are dropped.
+    /// Sends the prompt `text`, the composer's: the images attached to it
+    /// whose placeholders it still holds go with it, in the order they were
+    /// attached, the ones a draft in `kept` names wait on for it, and the
+    /// rest are dropped.
     ///
     /// A draft set aside to send a recalled prompt is still the operator's,
-    /// and comes back to the composer after; its images come back with it.
-    pub(crate) fn send(&mut self, text: &str, kept: &[&str]) {
-        let named = placeholders_in(text);
+    /// and comes back to the composer after; its images come back with it,
+    /// whatever the recalled prompt names.
+    pub(crate) fn send(&mut self, text: &str, kept: &[(DraftId, &str)]) {
+        let sent = (self.composing, text);
         let (images, waiting) = std::mem::take(&mut self.waiting)
             .into_iter()
-            .filter(|(number, _)| named.contains(number) || named_in(kept, *number))
-            .partition::<Vec<_>, _>(|(number, _)| named.contains(number));
+            .filter(|(draft, number, _)| {
+                named_in(&[sent], *draft, *number) || named_in(kept, *draft, *number)
+            })
+            .partition::<Vec<_>, _>(|(draft, number, _)| named_in(&[sent], *draft, *number));
         self.waiting = waiting;
         self.turns
-            .push_back(images.into_iter().map(|(_, image)| image).collect());
+            .push_back(images.into_iter().map(|(_, _, image)| image).collect());
     }
 
     /// Notes a turn sent with no images, so the ones attached to the prompt
@@ -188,8 +229,9 @@ impl Attachments {
 
     /// Drops what is attached to a prompt that will not be sent, keeping what
     /// a draft in `kept` names.
-    pub(crate) fn discard(&mut self, kept: &[&str]) {
-        self.waiting.retain(|(number, _)| named_in(kept, *number));
+    pub(crate) fn discard(&mut self, kept: &[(DraftId, &str)]) {
+        self.waiting
+            .retain(|(draft, number, _)| named_in(kept, *draft, *number));
     }
 
     /// The images of the oldest prompt sent and not yet handed on.
@@ -198,11 +240,12 @@ impl Attachments {
     }
 }
 
-/// Whether any of `texts` holds the placeholder of image `number`.
-fn named_in(texts: &[&str], number: u32) -> bool {
+/// Whether image `number`, attached to `draft`, is named by that draft's
+/// text among `texts`.
+fn named_in(texts: &[(DraftId, &str)], draft: DraftId, number: u32) -> bool {
     texts
         .iter()
-        .any(|text| placeholders_in(text).contains(&number))
+        .any(|(holder, text)| *holder == draft && placeholders_in(text).contains(&number))
 }
 
 /// The extensions a pasted path is taken as an image by, as Claude Code
@@ -455,8 +498,27 @@ mod tests {
         let mut attachments = Attachments::default();
         let first = attachments.attach(image(b"1"));
         let draft = format!("{first} what is this");
-        attachments.send("run the tests", &[&draft]);
-        attachments.discard(&[&draft]);
+        let set_aside = attachments.composing();
+        attachments.compose_anew();
+        attachments.send("run the tests", &[(set_aside, &draft)]);
+        attachments.compose_anew();
+        attachments.discard(&[(set_aside, &draft)]);
+        attachments.compose(set_aside);
+        attachments.send(&draft, &[]);
+
+        assert_eq!(attachments.take_turn(), Vec::new());
+        assert_eq!(attachments.take_turn(), vec![image(b"1")]);
+    }
+
+    #[test]
+    fn a_prompt_naming_a_drafts_image_by_its_number_does_not_take_it() {
+        let mut attachments = Attachments::default();
+        let first = attachments.attach(image(b"1"));
+        let draft = format!("look at {first}");
+        let set_aside = attachments.composing();
+        attachments.compose_anew();
+        attachments.send("compare [Image #1] with the mock", &[(set_aside, &draft)]);
+        attachments.compose(set_aside);
         attachments.send(&draft, &[]);
 
         assert_eq!(attachments.take_turn(), Vec::new());

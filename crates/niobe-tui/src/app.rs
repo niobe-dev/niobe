@@ -31,7 +31,7 @@ use ratatui::style::Style;
 
 use crate::clock::{Clock, LocalTime, Stamp};
 use crate::history::{Browser, Newer, PromptRow, Recall, SessionRow, Target, View};
-use crate::images::{Attachments, Fetched, Source, image_path};
+use crate::images::{Attachments, DraftId, Fetched, Source, image_path};
 use crate::prices::Prices;
 use crate::theme::{Depth, Theme};
 use crate::trust;
@@ -1250,9 +1250,12 @@ pub struct App {
     recorded_as: Option<String>,
     /// A walk back through earlier prompts with Up and Down, while one is on.
     recall: Option<Recall>,
+    /// The draft the walk on set aside, which its images belong to.
+    walk_draft: DraftId,
     /// Drafts a walk set aside and an edit ended it before giving them back,
-    /// newest last: each comes back to the composer after a prompt is sent.
-    drafts: Vec<String>,
+    /// newest last, each with what its images belong to: each comes back to
+    /// the composer after a prompt is sent.
+    drafts: Vec<(DraftId, String)>,
     /// The history dialog, while it is open.
     browser: Option<Browser>,
     /// The session the operator chose to open in place of this one, which
@@ -1640,6 +1643,7 @@ impl App {
             history_wanted: true,
             recorded_as: None,
             recall: None,
+            walk_draft: DraftId::default(),
             drafts: Vec::new(),
             browser: None,
             opening: None,
@@ -6409,9 +6413,7 @@ impl App {
         self.composer.clear();
         self.offer_closed = None;
         let draft = self.take_draft();
-        let kept: Vec<&str> = std::iter::once(draft.as_str())
-            .chain(self.drafts.iter().map(String::as_str))
-            .collect();
+        let kept = kept_with(&draft, &self.drafts);
         self.images.send(&text, &kept);
         self.produce(Event::UserMessage { text });
         self.sent_here = self.attached;
@@ -6459,13 +6461,11 @@ impl App {
     /// Empties the composer of a prompt the shell answers itself rather than
     /// sending, and returns the draft that is to come back after it. The
     /// images attached to it go with it; those of drafts set aside stay.
-    fn take_composer_for_the_shell(&mut self) -> String {
+    fn take_composer_for_the_shell(&mut self) -> (DraftId, String) {
         self.composer.clear();
         self.offer_closed = None;
         let draft = self.take_draft();
-        let kept: Vec<&str> = std::iter::once(draft.as_str())
-            .chain(self.drafts.iter().map(String::as_str))
-            .collect();
+        let kept = kept_with(&draft, &self.drafts);
         self.images.discard(&kept);
         draft
     }
@@ -6473,18 +6473,32 @@ impl App {
     /// Ends a walk through earlier prompts, as sending what it shows does,
     /// and takes the draft that is to come back after: the one it set aside,
     /// or else the newest an edit left set aside.
-    fn take_draft(&mut self) -> String {
-        let draft = self.recall.take().map(Recall::into_draft);
-        match draft.filter(|draft| !draft.is_empty()) {
+    fn take_draft(&mut self) -> (DraftId, String) {
+        let draft = self.end_walk();
+        match draft.filter(|(_, draft)| !draft.is_empty()) {
             Some(draft) => draft,
             None => self.drafts.pop().unwrap_or_default(),
         }
     }
 
+    /// Ends a walk through earlier prompts, handing back the draft it set
+    /// aside with what its images belong to.
+    fn end_walk(&mut self) -> Option<(DraftId, String)> {
+        self.recall
+            .take()
+            .map(|recall| (self.walk_draft, recall.into_draft()))
+    }
+
+    /// Starts `recall`, a walk that set aside the draft the composer held.
+    fn start_walk(&mut self, recall: Recall) {
+        self.walk_draft = self.images.composing();
+        self.recall = Some(recall);
+    }
+
     /// Puts a draft set aside back in the empty composer, where there is one.
-    fn give_back(&mut self, draft: &str) {
+    fn give_back(&mut self, (id, draft): &(DraftId, String)) {
         if !draft.is_empty() {
-            self.show_in_composer(draft, false);
+            self.show_draft(*id, draft);
         }
     }
 
@@ -6891,9 +6905,9 @@ impl App {
     /// aside, and the arrows go on from where `chosen` was sent.
     fn recall_chosen(&mut self, chosen: &str) {
         self.end_walk_if_edited();
-        let draft = match self.recall.take() {
-            Some(recall) => recall.into_draft(),
-            None => self.composed(),
+        let (id, draft) = match self.end_walk() {
+            Some(draft) => draft,
+            None => (self.images.composing(), self.composed()),
         };
         let prompts: Vec<String> = self
             .every_prompt()
@@ -6902,10 +6916,13 @@ impl App {
             .collect();
         let at = prompts.iter().position(|prompt| prompt == chosen);
         match at.and_then(|at| Recall::start_on(prompts, at, draft.clone())) {
-            Some(recall) => self.recall = Some(recall),
-            None => self.set_aside(draft),
+            Some(recall) => {
+                self.images.compose(id);
+                self.start_walk(recall);
+            }
+            None => self.set_aside((id, draft)),
         }
-        self.show_in_composer(chosen, false);
+        self.show_recalled(chosen, false);
     }
 
     /// Ends the walk where the composer no longer shows the prompt it is on:
@@ -6917,8 +6934,8 @@ impl App {
             .recall
             .as_ref()
             .is_some_and(|recall| recall.current() != self.composed());
-        if edited && let Some(recall) = self.recall.take() {
-            self.set_aside(recall.into_draft());
+        if edited && let Some(draft) = self.end_walk() {
+            self.set_aside(draft);
         }
     }
 
@@ -6948,14 +6965,14 @@ impl App {
 
     /// Ends the walk and puts back the draft it set aside, empty or not.
     fn give_draft_back(&mut self) {
-        if let Some(recall) = self.recall.take() {
-            self.show_in_composer(&recall.into_draft(), false);
+        if let Some((id, draft)) = self.end_walk() {
+            self.show_draft(id, &draft);
         }
     }
 
     /// Keeps `draft` to come back after the next prompt is sent.
-    fn set_aside(&mut self, draft: String) {
-        if !draft.is_empty() {
+    fn set_aside(&mut self, draft: (DraftId, String)) {
+        if !draft.1.is_empty() {
             self.drafts.push(draft);
         }
     }
@@ -6994,12 +7011,14 @@ impl App {
                     .collect();
                 let recall = Recall::start(prompts, self.composed());
                 let shown = recall.as_ref().map(|recall| recall.current().to_owned());
-                self.recall = recall;
+                if let Some(recall) = recall {
+                    self.start_walk(recall);
+                }
                 shown
             }
         };
         if let Some(shown) = shown {
-            self.show_in_composer(&shown, true);
+            self.show_recalled(&shown, true);
         }
     }
 
@@ -7009,14 +7028,32 @@ impl App {
         let Some(recall) = self.recall.as_mut() else {
             return;
         };
-        let shown = match recall.newer() {
-            Newer::Prompt(prompt) => prompt.to_owned(),
+        match recall.newer() {
+            Newer::Prompt(prompt) => {
+                let prompt = prompt.to_owned();
+                self.show_recalled(&prompt, false);
+            }
             Newer::Draft(draft) => {
                 self.recall = None;
-                draft
+                self.show_draft(self.walk_draft, &draft);
             }
-        };
-        self.show_in_composer(&shown, false);
+        }
+    }
+
+    /// Shows `text`, a prompt from the history, in the composer as
+    /// [`App::show_in_composer`] does. No image attached to a draft belongs
+    /// to it, whatever placeholders it holds: an earlier session numbered
+    /// its own images from one.
+    fn show_recalled(&mut self, text: &str, at_top: bool) {
+        self.images.compose_anew();
+        self.show_in_composer(text, at_top);
+    }
+
+    /// Puts `draft`, set aside earlier, back in the composer, with the images
+    /// attached to it.
+    fn show_draft(&mut self, id: DraftId, draft: &str) {
+        self.images.compose(id);
+        self.show_in_composer(draft, false);
     }
 
     /// Replaces what the composer holds with `text`, the cursor at the end of
@@ -7048,6 +7085,19 @@ impl App {
             self.offer_closed = Some((0, 0));
         }
     }
+}
+
+/// `draft`, about to come back to the composer, and every draft still set
+/// aside in `drafts`: the texts whose images stay attached when the
+/// composer's go.
+fn kept_with<'a>(
+    draft: &'a (DraftId, String),
+    drafts: &'a [(DraftId, String)],
+) -> Vec<(DraftId, &'a str)> {
+    std::iter::once(draft)
+        .chain(drafts)
+        .map(|(id, text)| (*id, text.as_str()))
+        .collect()
 }
 
 /// What opening another session says where there is no record to open one
@@ -13783,6 +13833,86 @@ mod tests {
             }]
         );
         assert_eq!(app.take_turn_images(), [png(b"a")]);
+    }
+
+    /// An earlier session numbered its images from one as this one does, so
+    /// a prompt recalled from it can name the number the draft's image has.
+    /// The image is the draft's, attached where the draft was written, and it
+    /// goes with the draft, never with a prompt that happens to name it.
+    #[test]
+    fn a_recalled_prompt_does_not_take_the_drafts_image_by_its_number() {
+        let mut app = remembering(&[("compare [Image #1] with the mock", "3")], &["3"]).attached();
+        typed(&mut app, "look at");
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "compare [Image #1] with the mock");
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "compare [Image #1] with the mock".to_owned()
+            }]
+        );
+        assert!(
+            app.take_turn_images().is_empty(),
+            "the draft's image went with a recalled prompt"
+        );
+        assert_eq!(app.composed(), "look at[Image #1] ");
+
+        app.on_key(key(KeyCode::Enter));
+        app.take_produced();
+        assert_eq!(app.take_turn_images(), [png(b"a")]);
+    }
+
+    /// An edit makes a recalled prompt the operator's, but the placeholders
+    /// it came with are still the earlier session's.
+    #[test]
+    fn an_edited_recalled_prompt_does_not_take_the_drafts_image_by_its_number() {
+        let mut app = remembering(&[("compare [Image #1] with the mock", "3")], &["3"]).attached();
+        typed(&mut app, "look at");
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " again");
+
+        app.on_key(key(KeyCode::Enter));
+        app.take_produced();
+        assert!(app.take_turn_images().is_empty());
+        assert_eq!(app.composed(), "look at[Image #1] ");
+
+        app.on_key(key(KeyCode::Enter));
+        app.take_produced();
+        assert_eq!(app.take_turn_images(), [png(b"a")]);
+    }
+
+    /// An image attached while a recalled prompt is being edited is that
+    /// prompt's, and goes with it.
+    #[test]
+    fn an_image_attached_to_an_edited_recalled_prompt_goes_with_it() {
+        let mut app = remembering(&[("compare with the mock", "3")], &["3"]).attached();
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " ");
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"b")),
+        });
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "compare with the mock [Image #1] ".to_owned()
+            }]
+        );
+        assert_eq!(app.take_turn_images(), [png(b"b")]);
+        assert_eq!(app.composed(), "draft");
     }
 
     #[test]

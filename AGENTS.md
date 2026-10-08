@@ -123,7 +123,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   hands the operator's `!` commands to, and where who allows them and what they reach is written
   down, `images.rs` the one it asks for an image from — the clipboard on Ctrl+V or an empty paste,
   or the file a pasted or dropped path names — and what numbers each and sends it with the prompt
-  that still holds its placeholder, `history.rs` the one it asks for the repository's earlier
+  it was attached in, where that still holds its placeholder — never with a recalled prompt that
+  names its number — `history.rs` the one it asks for the repository's earlier
   sessions — and the walk Up and Down take through earlier prompts from the composer's first and
   last row, the draft set aside and given back, by Down past the newest or after the prompt shown is
   sent, or by Esc while the rule above the composer says the prompt in it is a recalled one, and an
