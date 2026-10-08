@@ -1542,6 +1542,11 @@ const TYPED_AT_TRUST_HINT: &str =
 const TYPED_AT_QUESTION_HINT: &str =
     "Typed into the prompt, not taken as an answer: Esc to answer the question first";
 
+/// What the bar says when a prompt chosen from the history took the composer
+/// out of `!` mode.
+const LEFT_BANG_FOR_HISTORY_HINT: &str =
+    "Left ! mode: a prompt from the history goes to the agent, not to sh";
+
 /// What the bar says when Enter was refused because an image for the prompt
 /// is still being read.
 const IMAGE_STILL_READING_HINT: &str =
@@ -6826,6 +6831,13 @@ impl App {
                 };
                 self.browser = None;
                 self.focus = Focus::Session;
+                // What the dialog lists was sent to the agent, and the Enter
+                // that sends it in `!` mode would hand it to `sh` instead: a
+                // sentence about deleting a directory would run as one.
+                if self.shell_mode {
+                    self.shell_mode = false;
+                    self.hint = Some(LEFT_BANG_FOR_HISTORY_HINT.to_owned());
+                }
                 self.recall_chosen(&row.text);
             }
             View::Sessions => {
@@ -13833,6 +13845,46 @@ mod tests {
             app.take_produced().is_empty(),
             "choosing a prompt sends nothing"
         );
+    }
+
+    #[test]
+    fn a_prompt_chosen_from_the_history_in_bang_mode_is_not_run_as_a_command() {
+        let mut app = remembering(&[("rm the build dir and rebuild", "3")], &["3"]).runs_commands();
+        typed(&mut app, "!");
+        assert!(app.shell_mode());
+
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.composed(), "rm the build dir and rebuild");
+        assert!(!app.shell_mode(), "the prompt was left to be run by sh");
+        assert_eq!(app.hint(), Some(LEFT_BANG_FOR_HISTORY_HINT));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.take_commands(), []);
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "rm the build dir and rebuild".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_prompt_chosen_from_session_history_in_bang_mode_is_not_run_as_a_command() {
+        let mut app = remembering(&[("rm the build dir and rebuild", "3")], &["3"]).runs_commands();
+        typed(&mut app, "!");
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT));
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Down));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.browser().is_some(), "Session › History opened nothing");
+
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.take_commands(), []);
+        assert!(!app.shell_mode());
     }
 
     #[test]
