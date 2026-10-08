@@ -21,9 +21,12 @@
 //! `rtk`, and `xargs`, which runs it on what it reads); the shell's own
 //! grammar — `for … in`, `do`, `done`, `fi`, `}` — is never a program. A
 //! `find` is named with what its `-exec` runs, and with `-delete` it edits.
-//! A subcommand is added where it decides the kind — `git log` reads,
-//! `git commit` does not, and `cargo test` is named as such — and `-i` where
-//! `sed` or `perl` edits in place.
+//! A launcher is named by what it launches — `npx jest`, `pnpm exec`,
+//! `bundle exec`, `python -m pytest` — and a shell handed a command line
+//! with `-c` by the commands on that line. A subcommand is added where it
+//! decides the kind — `git log` reads, `git commit` does not, and `cargo
+//! test` is named as such, past the options and their values before it —
+//! and `-i` where `sed` or `perl` edits in place.
 //!
 //! A command of several parts goes under the strongest kind among them:
 //! editing, then version control, then building and testing, then the web,
@@ -31,7 +34,7 @@
 //! file — `>`, `>>`, `tee` — is an edit where what it saved only printed
 //! something, and part of the work where it was a build's, a commit's or a
 //! download's: `cargo test > log` is a test run. A script handed to an
-//! interpreter inline — `python3 - <<EOF`, `node -e` — is named `script`,
+//! interpreter inline — `python3 <<EOF`, `node -e` — is named `script`,
 //! since what it does is not in the command line.
 
 use std::collections::BTreeSet;
@@ -67,8 +70,10 @@ pub enum Work {
 }
 
 impl Work {
-    /// What the kind is called on screen: sixteen columns at most, so that
-    /// a pane's column of kinds is never cut.
+    /// What the kind is called on screen. A built-in kind's label is sixteen
+    /// columns at most, so that a pane's column of kinds is never cut for
+    /// one; a server's is its name, as long as that is, which the pane cuts
+    /// to its column.
     pub fn label(&self) -> &str {
         match self {
             Self::Exploring => "Exploring code",
@@ -170,17 +175,52 @@ fn of_tool(tool: &str) -> Option<Reading> {
 ///
 /// An MCP tool arrives as `mcp__<server>__<tool>`, and the server as the
 /// client registered it (`claude_ai_Notion`). It reads as the server's last
-/// word, and the tool with the server's name taken off its front where it
+/// word, or for a claude.ai connector its whole name, words apart (`Google
+/// Drive`); and the tool with the server's name taken off its front where it
 /// repeats it: `Notion` and `search`.
+///
+/// A server is never named with nothing, and never with the label of a kind
+/// of work, which its row in the Activity pane would be read as: a server
+/// named `Web` reads as `Web MCP`.
 pub fn mcp_tool(name: &str) -> Option<(String, String)> {
-    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
-    let server = server.rsplit('_').next().unwrap_or(server);
+    let (registered, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    let server = server_name(registered);
     let prefix = format!("{}-", server.to_lowercase());
     let tool = match tool.to_lowercase().starts_with(&prefix) {
         true => tool.get(prefix.len()..).unwrap_or(tool),
         false => tool,
     };
-    Some((server.to_owned(), tool.to_owned()))
+    Some((server, tool.to_owned()))
+}
+
+/// What the server `registered` is called on screen: see [`mcp_tool`].
+fn server_name(registered: &str) -> String {
+    let read = match registered.strip_prefix("claude_ai_") {
+        Some(connector) => connector.replace('_', " ").trim().to_owned(),
+        None => registered.rsplit('_').next().unwrap_or_default().to_owned(),
+    };
+    let read = match (read.is_empty(), registered.trim_matches('_')) {
+        (false, _) => read,
+        (true, "") => return "MCP".to_owned(),
+        (true, whole) => whole.to_owned(),
+    };
+    let built_in = [
+        Work::Exploring,
+        Work::Editing,
+        Work::Building,
+        Work::VersionControl,
+        Work::Web,
+        Work::Delegating,
+        Work::Housekeeping,
+        Work::Other,
+    ];
+    match built_in
+        .iter()
+        .any(|kind| kind.label().eq_ignore_ascii_case(&read))
+    {
+        true => format!("{read} MCP"),
+        false => read,
+    }
 }
 
 /// The kind of work a shell command was.
@@ -247,6 +287,9 @@ fn parts_of(words: &[String]) -> Vec<Part> {
     let saves = words.iter().enumerate().any(|(at, word)| {
         redirect_target(word, words.get(at + 1).map(String::as_str)).is_some_and(is_a_file)
     });
+    // A here-document or a here-string is what the program reads, which for
+    // an interpreter is its script.
+    let fed = words.iter().any(|word| word.starts_with("<<"));
     let Some(words) = program_words(words) else {
         return Vec::new();
     };
@@ -254,13 +297,25 @@ fn parts_of(words: &[String]) -> Vec<Part> {
         return Vec::new();
     };
     let program = program.rsplit('/').next().unwrap_or(program);
-    let mut parts = vec![part(program, rest, saves)];
+    if let Some(line) = shell_line(program, rest) {
+        return simple_commands(line)
+            .iter()
+            .flat_map(|words| parts_of(words))
+            .map(|part| Part {
+                saves: part.saves || saves,
+                ..part
+            })
+            .collect();
+    }
+    let (program, rest) = launched(program, rest);
+    let mut parts = vec![part(program, rest, saves, fed)];
     if program == "find" {
         for run in find_runs(rest) {
             if let Some((program, rest)) = run.split_first() {
                 parts.push(part(
                     program.rsplit('/').next().unwrap_or(program),
                     rest,
+                    false,
                     false,
                 ));
             }
@@ -269,15 +324,74 @@ fn parts_of(words: &[String]) -> Vec<Part> {
     parts
 }
 
-/// `program`, run with `rest`, read as one part of a command.
-fn part(program: &str, rest: &[&str], saves: bool) -> Part {
-    let (name, work, quiet) = classify(program, rest);
+/// `program`, run with `rest`, read as one part of a command; `fed` where a
+/// here-document or a here-string is its input.
+fn part(program: &str, rest: &[&str], saves: bool, fed: bool) -> Part {
+    let (name, work, quiet) = classify(program, rest, fed);
     Part {
-        saves: saves || program == "tee",
+        // `tee` with no file, or only a device, saves nothing.
+        saves: saves
+            || (program == "tee"
+                && rest
+                    .iter()
+                    .any(|word| !word.starts_with('-') && is_a_file(word))),
         empty: matches!(program, "true" | "false" | ":"),
         name,
         work,
         quiet,
+    }
+}
+
+/// The command line a shell is handed with `-c`, which is read as the
+/// command it is rather than as a script nobody can see: `bash -c 'cargo
+/// test'` runs `cargo test`.
+fn shell_line<'a>(program: &str, rest: &[&'a str]) -> Option<&'a str> {
+    if !matches!(program, "sh" | "bash" | "zsh" | "dash" | "ksh") {
+        return None;
+    }
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        let flags = word.strip_prefix(['-', '+'])?;
+        if matches!(flags, "o" | "O") {
+            words.next();
+        } else if flags.chars().all(|c| c.is_ascii_alphabetic()) && flags.contains('c') {
+            return words.next().copied();
+        }
+    }
+    None
+}
+
+/// The program a launcher runs, and what it runs it with: `npx jest`,
+/// `pnpm exec vitest`, `bundle exec rspec` and `python -m pytest` are the
+/// work of `jest`, `vitest`, `rspec` and `pytest`. Anything else is itself.
+fn launched<'a, 'b>(program: &'a str, rest: &'b [&'a str]) -> (&'a str, &'b [&'a str]) {
+    let after = |from: usize, takes_a_value: &[&str]| {
+        let mut at = from;
+        while let Some(word) = rest.get(at).filter(|word| word.starts_with('-')) {
+            at += if takes_a_value.contains(word) { 2 } else { 1 };
+        }
+        rest.get(at)
+            .map(|program| (*program, rest.get(at + 1..).unwrap_or_default()))
+    };
+    let inner = match program {
+        "npx" | "bunx" => after(0, &["-p", "--package"]),
+        "pnpm" if matches!(rest.first(), Some(&("exec" | "dlx"))) => after(1, &[]),
+        "bundle" | "yarn" if rest.first() == Some(&"exec") => after(1, &[]),
+        "python" | "python3" => {
+            let module = rest
+                .iter()
+                .take_while(|word| word.starts_with('-') && **word != "-c")
+                .position(|word| *word == "-m");
+            module.and_then(|at| {
+                rest.get(at + 1)
+                    .map(|module| (*module, rest.get(at + 2..).unwrap_or_default()))
+            })
+        }
+        _ => None,
+    };
+    match inner {
+        Some((program, rest)) => (program.rsplit('/').next().unwrap_or(program), rest),
+        None => (program, rest),
     }
 }
 
@@ -331,10 +445,22 @@ const XARGS_TAKES_A_VALUE: &[&str] = &[
 /// among them, which runs it on what it reads, so that what is counted is
 /// what it ran.
 fn program_words(words: &[String]) -> Option<Vec<&str>> {
+    // The word after a redirection operator that stands alone — `> out`,
+    // `<<EOF` — is where it goes, not a word of the command.
+    let mut target_next = false;
     let mut words = words
         .iter()
         .map(String::as_str)
-        .filter(|word| !is_redirection(word))
+        .filter(move |word| {
+            if std::mem::take(&mut target_next) {
+                return false;
+            }
+            if is_redirection(word) {
+                target_next = stands_alone(word);
+                return false;
+            }
+            true
+        })
         .skip_while(|word| RESERVED.contains(word))
         .peekable();
     if words
@@ -388,7 +514,7 @@ fn skip_xargs_options<'a>(words: &mut std::iter::Peekable<impl Iterator<Item = &
 
 /// What `program`, run with `rest`, is named and counted as, and whether it
 /// is quiet.
-fn classify(program: &str, rest: &[&str]) -> (String, Work, bool) {
+fn classify(program: &str, rest: &[&str], fed: bool) -> (String, Work, bool) {
     let named = |work| (program.to_owned(), work, false);
     match program {
         "cd" | "pushd" | "popd" | "echo" | "printf" | "true" | "false" | ":" | "sleep"
@@ -409,21 +535,38 @@ fn classify(program: &str, rest: &[&str]) -> (String, Work, bool) {
                 .skip_while(|word| word.starts_with('+'))
                 .collect();
             (
-                with_subcommand(program, &rest, &["--color", "--config", "-Z", "-C"]),
+                with_subcommand(
+                    program,
+                    &rest,
+                    &["--color", "--config", "-Z", "-C", "--manifest-path"],
+                ),
                 Work::Building,
                 false,
             )
         }
-        "npm" | "pnpm" | "yarn" | "bun" | "go" | "dotnet" | "swift" | "mix" | "uv" | "poetry" => {
+        "npm" | "pnpm" | "yarn" | "bun" | "go" | "dotnet" | "swift" | "mix" | "uv" | "poetry"
+        | "pip" | "pip3" => (
+            with_subcommand(program, rest, PACKAGE_MANAGERS_TAKE_A_VALUE),
+            Work::Building,
+            false,
+        ),
+        "deno"
+            if matches!(
+                with_subcommand(program, rest, &[]).strip_prefix("deno "),
+                Some("test" | "lint" | "fmt" | "check" | "bench" | "compile")
+            ) =>
+        {
             (with_subcommand(program, rest, &[]), Work::Building, false)
         }
         "make" | "cmake" | "ninja" | "bazel" | "mvn" | "gradle" | "gradlew" | "pytest" | "tox"
         | "jest" | "vitest" | "tsc" | "rustc" | "rustfmt" | "clippy-driver" | "gcc" | "g++"
         | "clang" | "clang++" | "javac" | "shellcheck" | "eslint" | "prettier" | "ruff"
-        | "mypy" | "black" | "xcodebuild" => named(Work::Building),
-        "sed" | "perl" if in_place(rest) => (format!("{program} -i"), Work::Editing, false),
+        | "mypy" | "black" | "xcodebuild" | "rspec" => named(Work::Building),
+        "sed" | "perl" if in_place(program, rest) => {
+            (format!("{program} -i"), Work::Editing, false)
+        }
         "python" | "python3" | "node" | "perl" | "ruby" | "bash" | "sh" | "zsh" | "deno"
-        | "osascript" => match inline_script(rest) {
+        | "osascript" => match fed || inline_script(rest) {
             true => ("script".to_owned(), Work::Other, false),
             false => named(Work::Other),
         },
@@ -444,6 +587,21 @@ fn classify(program: &str, rest: &[&str]) -> (String, Work, bool) {
         _ => named(Work::Other),
     }
 }
+
+/// The options package managers take before their subcommand that are
+/// followed by a value of their own: `npm --prefix web run build` runs `run`.
+const PACKAGE_MANAGERS_TAKE_A_VALUE: &[&str] = &[
+    "--prefix",
+    "-C",
+    "--dir",
+    "--cwd",
+    "--filter",
+    "-F",
+    "-w",
+    "--workspace",
+    "--directory",
+    "--project",
+];
 
 /// `git` and its subcommand, which decides whether it only read.
 fn git(rest: &[&str]) -> (String, Work, bool) {
@@ -489,30 +647,52 @@ fn with_subcommand(program: &str, rest: &[&str], takes_a_value: &[&str]) -> Stri
 
 /// Whether `sed` or `perl` is told to edit its files in place: `-i`, `-i ''`,
 /// `-i.bak`, `--in-place`, or `-i` among other single-letter options (`-pi`).
-fn in_place(rest: &[&str]) -> bool {
-    rest.iter().any(|word| {
-        word.starts_with("--in-place")
-            || (word.starts_with('-')
-                && !word.starts_with("--")
-                && word
-                    .trim_start_matches('-')
-                    .split('.')
-                    .next()
-                    .is_some_and(|flags| {
-                        flags.contains('i') && flags.chars().all(|c| c.is_ascii_alphabetic())
-                    }))
-    })
+///
+/// An `i` after an option that takes a value is part of the value:
+/// `perl -Mstrict` loads a module, and `perl -I lib -e …` reads its script
+/// from the word after `-e`.
+fn in_place(program: &str, rest: &[&str]) -> bool {
+    // The options whose value is the rest of the word or, where nothing is
+    // left of it, the next word; and those whose value can only be the rest.
+    let (valued, attached_only) = match program {
+        "perl" => ("eEIMm", "0CdDxF"),
+        _ => ("efl", ""),
+    };
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        if word.starts_with("--in-place") {
+            return true;
+        }
+        let Some(flags) = word
+            .strip_prefix('-')
+            .filter(|flags| !flags.starts_with('-'))
+        else {
+            continue;
+        };
+        for (at, flag) in flags.char_indices() {
+            if flag == 'i' {
+                return true;
+            }
+            if valued.contains(flag) {
+                if at + flag.len_utf8() == flags.len() {
+                    words.next();
+                }
+                break;
+            }
+            if attached_only.contains(flag) {
+                break;
+            }
+        }
+    }
+    false
 }
 
 /// Whether an interpreter is handed its script inline rather than by a file:
-/// `-c`, `-e`, or `-` with a here-document.
+/// `-c`, `-e`, or `-`, its standard input. A here-document never reaches
+/// here, being a redirection: see `fed` in [`part`].
 fn inline_script(rest: &[&str]) -> bool {
-    rest.iter().any(|word| {
-        matches!(
-            *word,
-            "-c" | "-e" | "-" | "<<" | "<<-" | "-ne" | "-pe" | "-lne"
-        )
-    })
+    rest.iter()
+        .any(|word| matches!(*word, "-c" | "-e" | "-" | "-ne" | "-pe" | "-lne"))
 }
 
 /// Whether `word` is a redirection the program never sees: `2>&1`, `>`,
@@ -520,6 +700,14 @@ fn inline_script(rest: &[&str]) -> bool {
 fn is_redirection(word: &str) -> bool {
     let rest = word.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
     rest.starts_with('>') || rest.starts_with('<')
+}
+
+/// Whether the redirection `word` is the operator alone, its target the next
+/// word: `>`, `2>>`, `&>`, `<<`, but not `2>&1` or `>out`.
+fn stands_alone(word: &str) -> bool {
+    word.trim_start_matches(|c: char| c.is_ascii_digit())
+        .chars()
+        .all(|c| matches!(c, '<' | '>' | '|' | '&' | '-'))
 }
 
 /// Where `word` sends the command's standard output, where it is a
