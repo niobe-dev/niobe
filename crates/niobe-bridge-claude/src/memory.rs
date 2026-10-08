@@ -55,7 +55,8 @@ pub enum Scope {
     Managed,
     /// The user's own, in the CLI's configuration directory: every session.
     User,
-    /// A directory above where the session runs.
+    /// A directory above where the session runs, its `CLAUDE.local.md`
+    /// included: [`Scope::Local`] is the project's own.
     Parent,
     /// The directory the session runs in.
     Project,
@@ -169,13 +170,13 @@ pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
     }
     let above: Vec<&Path> = lookup.cwd.ancestors().collect();
     for (i, dir) in above.iter().rev().enumerate() {
-        let scope = match i + 1 == above.len() {
-            true => Scope::Project,
-            false => Scope::Parent,
+        let (scope, local) = match i + 1 == above.len() {
+            true => (Scope::Project, Scope::Local),
+            false => (Scope::Parent, Scope::Parent),
         };
         found.loaded(scope, &dir.join(MEMORY), lookup);
         found.loaded(scope, &dir.join(".claude").join(MEMORY), lookup);
-        found.loaded(Scope::Local, &dir.join(LOCAL), lookup);
+        found.loaded(local, &dir.join(LOCAL), lookup);
     }
     if let Some(config) = lookup.config {
         let dir = crate::transcript::directory(config, &main_checkout(lookup.cwd)).join(AUTO_DIR);
@@ -744,6 +745,34 @@ mod tests {
         assert_eq!(
             notes,
             [Some("what matters first"), Some("verified CLI facts")]
+        );
+    }
+
+    #[test]
+    fn a_local_file_above_the_project_is_listed_as_a_parents_and_the_projects_as_local() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("work").join("repo");
+        write(&dir.path().join("work").join(LOCAL), "above\n");
+        write(&repo.join(LOCAL), "here\n");
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+
+        let listed: Vec<(Scope, String)> = found
+            .iter()
+            .filter_map(|source| {
+                let path = source.path.strip_prefix(dir.path()).ok()?;
+                Some((source.scope, path.display().to_string()))
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (Scope::Parent, "work/CLAUDE.local.md".to_owned()),
+                (Scope::Local, "work/repo/CLAUDE.local.md".to_owned()),
+            ]
         );
     }
 

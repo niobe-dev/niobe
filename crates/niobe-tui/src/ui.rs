@@ -115,9 +115,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 /// The characters that reorder the text around them rather than show
 /// anything: the embeddings and overrides U+202A–U+202E, the isolates
-/// U+2066–U+2069 and the marks U+200E and U+200F.
+/// U+2066–U+2069 and the marks U+200E, U+200F and U+061C.
 fn is_direction_mark(c: char) -> bool {
-    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{61c}')
 }
 
 /// Takes every direction mark out of what was drawn.

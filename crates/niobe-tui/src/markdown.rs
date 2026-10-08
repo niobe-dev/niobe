@@ -25,6 +25,13 @@ use ratatui::text::{Line, Span};
 use crate::text;
 use crate::theme::Theme;
 
+/// What stands before an image's alt text where the image cannot be drawn.
+///
+/// One cell wide in every terminal: a picture emoji is drawn two cells wide
+/// by some terminals and measured as one, which pushed the rest of its row out
+/// of line with the cells the shell counted for it.
+const IMAGE_MARK: &str = "\u{29c9} ";
+
 /// A piece of text in one style.
 type Run = (String, Style);
 
@@ -199,7 +206,7 @@ impl<'t> Renderer<'t> {
             // An image cannot be drawn; its alt text, which arrives as text
             // inside it, is what stands in for it.
             Tag::Image { dest_url, .. } => {
-                self.text("🖼 ", self.style());
+                self.text(IMAGE_MARK, self.style());
                 self.open_destination(&dest_url);
             }
             // Drawn where it is written, which is the end of a reply as a
@@ -365,7 +372,10 @@ impl<'t> Renderer<'t> {
             return;
         };
         let said: String = self.runs.iter().map(|(text, _)| text.as_str()).collect();
-        let own = said.get(at..).unwrap_or_default().trim_start_matches("🖼 ");
+        let own = said
+            .get(at..)
+            .unwrap_or_default()
+            .trim_start_matches(IMAGE_MARK);
         if destination.is_empty() || own == destination {
             return;
         }
@@ -983,6 +993,20 @@ mod tests {
     }
 
     #[test]
+    fn the_image_mark_is_one_cell_wide_wherever_it_is_drawn() {
+        use unicode_width::UnicodeWidthStr as _;
+
+        let mark = IMAGE_MARK.trim_end();
+        assert_eq!(mark.width(), 1);
+        assert_eq!(mark.width_cjk(), 1, "not of ambiguous width");
+        assert!(
+            mark.chars()
+                .all(|c| !matches!(u32::from(c), 0x2600..=0x27bf | 0x1f000..=0x1faff)),
+            "not a character a terminal may draw as an emoji"
+        );
+    }
+
+    #[test]
     fn a_link_and_an_image_say_where_they_lead_and_a_footnote_is_drawn_once() {
         let lines = render(
             "[link](https://example.com) and ![img](x.png) and a footnote[^1]\n\n[^1]: said below",
@@ -991,7 +1015,7 @@ mod tests {
         );
         let text = plain(&lines).join("\n");
         assert!(text.contains("link (https://example.com)"), "{text}");
-        assert!(text.contains("🖼 img (x.png)"), "{text}");
+        assert!(text.contains("\u{29c9} img (x.png)"), "{text}");
         assert_eq!(text.matches("said below").count(), 1, "{text}");
 
         let bare = plain(&render("<https://example.com>", 80, &CLASSIC)).join("\n");

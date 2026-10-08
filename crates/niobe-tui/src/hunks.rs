@@ -45,10 +45,17 @@ pub const MAX_ROWS: usize = 20;
 /// as the marker under a cut diff names it. [`crate::app::App`] binds it.
 pub const OPEN_KEY: &str = "Ctrl+T";
 
-/// Whether a change of `hunks` has more rows than [`MAX_ROWS`], and so is
-/// drawn cut unless the operator has opened the diffs.
+/// Whether a change of `hunks` is drawn cut at [`MAX_ROWS`] unless the
+/// operator has opened the diffs.
 pub(crate) fn is_cut(hunks: &[Hunk]) -> bool {
-    rows(hunks).len() > MAX_ROWS
+    cuts(rows(hunks).len())
+}
+
+/// Whether a diff of `rows` rows is cut: where it has more than one row over
+/// [`MAX_ROWS`]. One row over is drawn rather than said, since saying so would
+/// take that row and hide it besides.
+fn cuts(rows: usize) -> bool {
+    rows > MAX_ROWS + 1
 }
 
 /// One row of a diff before it is drawn.
@@ -132,8 +139,8 @@ fn lines_since_a_change(line: &DiffLine, before: Option<usize>) -> Option<usize>
 /// A change's rows, fitted to `width` cells, and the row under them that says
 /// how the call was let through.
 ///
-/// A change longer than [`MAX_ROWS`] stops there and says how many rows it
-/// left out, unless `open`, when it draws every row and says how to cut it
+/// A change more than a row longer than [`MAX_ROWS`] stops there and says
+/// how many rows it left out, unless `open`, when it draws every row and says how to cut it
 /// again.
 pub(crate) fn lines(
     change: &Change,
@@ -151,7 +158,8 @@ pub(crate) fn lines(
         .max()
         .map_or(1, digits);
 
-    let shown = match open {
+    let cut = cuts(rows.len());
+    let shown = match open || !cut {
         true => rows.len(),
         false => MAX_ROWS,
     };
@@ -161,7 +169,7 @@ pub(crate) fn lines(
         .map(|row| draw_row(*row, number_width, width, theme))
         .collect();
     let beyond = rows.len().saturating_sub(MAX_ROWS);
-    if beyond > 0 {
+    if cut {
         lines.push(marker(beyond, open, width, theme));
     }
     if let Some(gate) = change.gate() {
@@ -210,7 +218,7 @@ fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> L
     .style(Style::new().bg(bg))
 }
 
-/// The row under a diff longer than [`MAX_ROWS`]: how many rows are beyond
+/// The row under a diff that is cut (see [`is_cut`]): how many rows are beyond
 /// the cut, and the key that shows or hides them.
 ///
 /// The key gives way whole where the pane is too narrow for it, so what is
@@ -498,6 +506,29 @@ mod tests {
         assert_eq!(rows.len(), MAX_ROWS + 1);
         assert_eq!(rows[0].trim_end(), " 1 + line 1");
         assert_eq!(rows[MAX_ROWS].trim_end(), "… 10 more rows");
+    }
+
+    fn created(lines: usize) -> Change {
+        let text: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
+        change(vec![Hunk::created(&text).expect("lines of text")], None)
+    }
+
+    #[test]
+    fn a_diff_one_row_over_the_cap_is_drawn_whole_since_saying_so_takes_a_row() {
+        let rows = drawn(&created(MAX_ROWS + 1), 20);
+
+        assert!(!is_cut(created(MAX_ROWS + 1).hunks()));
+        assert_eq!(rows.len(), MAX_ROWS + 1);
+        assert_eq!(rows[MAX_ROWS].trim_end(), "21 + line 21");
+    }
+
+    #[test]
+    fn a_diff_two_rows_over_the_cap_is_cut_at_it() {
+        let rows = drawn(&created(MAX_ROWS + 2), 20);
+
+        assert!(is_cut(created(MAX_ROWS + 2).hunks()));
+        assert_eq!(rows.len(), MAX_ROWS + 1);
+        assert_eq!(rows[MAX_ROWS].trim_end(), "… 2 more rows");
     }
 
     fn thirty_lines() -> Change {

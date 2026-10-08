@@ -49,9 +49,9 @@ fn acts(c: char) -> bool {
 }
 
 /// The embeddings and overrides U+202A–U+202E, the isolates U+2066–U+2069 and
-/// the marks U+200E and U+200F: invisible, and they reverse what follows them.
+/// the marks U+200E, U+200F and U+061C: invisible, and they reverse what follows them.
 fn is_direction_mark(c: char) -> bool {
-    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{61c}')
 }
 
 /// What is printed in place of `c`.
@@ -103,5 +103,6 @@ mod tests {
     fn a_c1_control_and_a_direction_override_are_printed_as_a_replacement() {
         assert_eq!(printable("a\u{9b}2Jb"), "a\u{fffd}2Jb");
         assert_eq!(printable("safe\u{202e}txt.exe"), "safe\u{fffd}txt.exe");
+        assert_eq!(printable("T\u{61c}x"), "T\u{fffd}x");
     }
 }

@@ -93,7 +93,11 @@ fn names_something(key: &str) -> bool {
             .any(|end| key.ends_with(end))
 }
 
-/// An object's keys, by [`Rank`] and then in the order they were read.
+/// An object's keys, by [`Rank`] and then by name.
+///
+/// By name rather than in the order the backend sent them, because the JSON
+/// is read into serde_json's map, which keeps its keys sorted; the order as
+/// sent is what Ctrl+T shows.
 fn object(
     fields: &Map<String, Value>,
     indent: usize,
@@ -119,6 +123,11 @@ fn field(
 ) {
     let dim = Rank::of(key, value) == Rank::Detail;
     match value {
+        // Quoted as JSON, since nothing else would show it: a bare `key:` is
+        // an object's header with its keys under it.
+        Value::String(said) if said.trim().is_empty() => {
+            pair(key, &value.to_string(), indent, width, dim, theme, rows);
+        }
         Value::String(said) if said.contains('\n') => {
             pair(key, "", indent, width, dim, theme, rows);
             string(said, indent + INDENT, width, theme, rows);
@@ -206,7 +215,7 @@ fn pair(
     theme: &Theme,
     rows: &mut Vec<Line<'static>>,
 ) {
-    let head = format!("{key}:");
+    let head = format!("{}:", text::controls_shown(key));
     let lead = " ".repeat(indent);
     let room = width.saturating_sub(indent).max(1);
     let said = match value.is_empty() {
@@ -312,6 +321,25 @@ mod tests {
                 "page_id: abc",
             ]
         );
+    }
+
+    #[test]
+    fn keys_of_one_rank_are_drawn_in_the_order_of_their_names() {
+        let rows = drawn(r#"{"subject":"hi","body":"there"}"#, 40);
+        assert_eq!(rows, ["body: there", "subject: hi"]);
+    }
+
+    #[test]
+    fn an_empty_or_blank_string_is_drawn_quoted_and_not_as_a_header() {
+        assert_eq!(drawn(r#"{"a":""}"#, 40), [r#"a: """#]);
+        assert_eq!(drawn(r#"{"a":"\n"}"#, 40), [r#"a: "\n""#]);
+        assert_eq!(drawn(r#"{"a":{}}"#, 40), ["a: nothing"]);
+        assert_eq!(drawn(r#"{"a":{"b":1}}"#, 40), ["a:", "  b: 1"]);
+    }
+
+    #[test]
+    fn a_key_holding_a_line_break_is_drawn_on_one_row() {
+        assert_eq!(drawn(r#"{"a\nb":"x"}"#, 40), ["a\u{2424}b: x"]);
     }
 
     #[test]

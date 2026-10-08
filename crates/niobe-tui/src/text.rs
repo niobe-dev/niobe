@@ -440,9 +440,14 @@ pub fn editor_rows(line: &str, columns: usize, tab: u8) -> usize {
 /// stopping every `tab` cells: for each, the row of the line it is drawn on,
 /// the column it starts at and the cells it takes, in order.
 ///
-/// The same word-or-glyph rule as [`editor_rows`], walked once for every
-/// range and only as far as the last character wanted, so a line naming
-/// many commands costs one walk of it.
+/// The same word-or-glyph rule as [`editor_rows`] picks the row, since that is
+/// how the editor breaks its lines; the column on the row is where ratatui
+/// then draws the row, a grapheme at a time by its own measure. The two differ
+/// after a glyph made of several characters — a family joined by zero-width
+/// joiners, a flag, `❤️` — and a column summed by character put a command's
+/// colour on the cells after it. Walked once for every range and only as far
+/// as the last character wanted, so a line naming many commands costs one
+/// walk of it.
 pub fn editor_spots(
     line: &str,
     columns: usize,
@@ -453,18 +458,30 @@ pub fn editor_spots(
     let end = wanted.last().map_or(0, |range| range.end);
     let mut spots = Vec::new();
     let mut range = 0usize;
-    let mut place = |c: char, at: usize, row: usize, column: usize| {
-        while wanted.get(range).is_some_and(|wanted| wanted.end <= at) {
-            range += 1;
-        }
-        if wanted.get(range).is_some_and(|wanted| wanted.contains(&at)) {
-            let reached = advance(c.encode_utf8(&mut [0; 4]), column, tab);
-            spots.push((row, column, reached - column));
-        }
-    };
     let mut at = 0usize;
     let mut row = 0usize;
+    // Where the next grapheme goes on the row: by the editor's character sum,
+    // which its tab stops count from, and by the cells ratatui draws in.
     let mut row_width = 0usize;
+    let mut drawn = 0usize;
+    let mut place =
+        |grapheme: &str, at: &mut usize, row: usize, summed: usize, drawn: &mut usize| {
+            let cells = match grapheme {
+                "\t" => advance(grapheme, summed, tab).saturating_sub(summed),
+                _ => self::cells(grapheme),
+            };
+            for (i, _) in grapheme.chars().enumerate() {
+                while wanted.get(range).is_some_and(|wanted| wanted.end <= *at) {
+                    range += 1;
+                }
+                if wanted.get(range).is_some_and(|wanted| wanted.contains(at)) {
+                    spots.push((row, *drawn, if i == 0 { cells } else { 0 }));
+                }
+                *at += 1;
+            }
+            *drawn += cells;
+            advance(grapheme, summed, tab)
+        };
     let mut row_open = false;
     let mut words = line.split_word_bounds().peekable();
     while let Some(word) = words.peek().copied() {
@@ -473,34 +490,29 @@ pub fn editor_spots(
         }
         let word_width = advance(word, row_width, tab).saturating_sub(row_width);
         if row_width.saturating_add(word_width) <= columns {
-            for c in word.chars() {
-                place(c, at, row, row_width);
-                row_width = advance(c.encode_utf8(&mut [0; 4]), row_width, tab);
-                at += 1;
+            for grapheme in word.graphemes(true) {
+                row_width = place(grapheme, &mut at, row, row_width, &mut drawn);
             }
             row_open = true;
             words.next();
         } else if row_open {
             row += 1;
             row_width = 0;
+            drawn = 0;
             row_open = false;
         } else {
             let graphemes: Vec<&str> = word.graphemes(true).collect();
             let mut next = 0usize;
             while next < graphemes.len() {
                 let mut cut_width = 0usize;
+                let mut cut_drawn = 0usize;
                 let mut taken = 0usize;
                 while let Some(grapheme) = graphemes.get(next) {
                     let reached = advance(grapheme, cut_width, tab);
                     if taken > 0 && reached > columns {
                         break;
                     }
-                    for c in grapheme.chars() {
-                        place(c, at, row, cut_width);
-                        cut_width = advance(c.encode_utf8(&mut [0; 4]), cut_width, tab);
-                        at += 1;
-                    }
-                    cut_width = reached;
+                    cut_width = place(grapheme, &mut at, row, cut_width, &mut cut_drawn);
                     next += 1;
                     taken += 1;
                     if cut_width > columns {

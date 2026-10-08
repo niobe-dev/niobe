@@ -36,6 +36,7 @@ const PAYLOADS: &[(&str, &str)] = &[
     ("bs", "A\x08B"),
     ("del", "A\x7fB"),
     ("rlo", "A\u{202e}B"),
+    ("alm", "A\u{61c}B"),
     ("c1csi", "A\u{9b}31mB"),
     ("vt", "A\x0bB"),
     ("ff", "A\x0cB"),
@@ -45,7 +46,7 @@ const PAYLOADS: &[(&str, &str)] = &[
 
 fn is_dangerous(c: char) -> bool {
     c.is_control() && c != '\n'
-        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{61c}')
 }
 
 /// Draws into a test buffer, then hands exactly those cells to a crossterm

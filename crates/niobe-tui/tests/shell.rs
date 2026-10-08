@@ -4875,6 +4875,25 @@ fn a_command_typed_in_the_composer_is_drawn_in_the_command_colour() {
 }
 
 #[test]
+fn a_command_after_an_emoji_drawn_as_one_glyph_is_coloured_on_its_own_cells() {
+    for emoji in [
+        "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+        "\u{1f1fa}\u{1f1e6}",
+        "\u{2764}\u{fe0f}",
+    ] {
+        let mut app = session_with_skills();
+        type_keys(&mut app, &format!("{emoji} /review quokka"));
+        let theme = app.theme().to_owned();
+        let mut fg = |text: &str| style_at(&mut app, 120, 30, text).and_then(|style| style.fg);
+
+        assert_eq!(fg("/review"), Some(theme.command), "after {emoji}");
+        assert_eq!(fg("w quokka"), Some(theme.command), "after {emoji}");
+        assert_eq!(fg(" quokka"), Some(theme.fg), "after {emoji}");
+        assert_eq!(fg("quokka"), Some(theme.fg), "after {emoji}");
+    }
+}
+
+#[test]
 fn a_command_mid_prompt_is_coloured_only_where_the_backend_reads_it_there() {
     let mut app = session_with_skills();
     type_keys(&mut app, "then /compact and /review it");

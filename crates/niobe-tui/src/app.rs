@@ -979,8 +979,9 @@ impl Change {
         }
     }
 
-    /// Whether the change has more rows than [`crate::hunks::MAX_ROWS`], and
-    /// so is drawn cut unless the diffs are open.
+    /// Whether the change has more than one row over
+    /// [`crate::hunks::MAX_ROWS`], and so is drawn cut unless the diffs are
+    /// open.
     pub fn is_cut(&self) -> bool {
         self.cut
     }
