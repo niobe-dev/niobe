@@ -32,13 +32,15 @@
 //! close, and nobody would be left to see it end.
 //!
 //! A CLI that something outside stops with a signal while no turn is running
-//! loses nothing: the conversation is in its own transcript. Where the caller
+//! loses no conversation: that is in its own transcript. Where the caller
 //! asked for it with [`Options::carry_on`], that stop is a notice, and
 //! [`Session::next`] says what to start a CLI with to take the conversation
-//! up again. A stop while a turn runs takes the turn with it, and still ends
-//! the session.
+//! up again. What it does lose is any sub-agent it was running in the
+//! background, which ends with its process group; each is reported as
+//! cancelled ahead of the notice. A stop while a turn runs takes the turn with
+//! it, and still ends the session.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -48,7 +50,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use niobe_core::event::{Billing, Event, Mode, PermissionDecision, ToolCallId};
+use niobe_core::event::{
+    AgentId, AgentOutcome, Billing, Event, Mode, PermissionDecision, ToolCallId,
+};
 use niobe_core::image::Image;
 
 use crate::base64;
@@ -232,10 +236,11 @@ pub struct Options {
     /// Whether the caller starts the CLI again, from [`Session::next`], when
     /// something stops it with a signal between turns.
     ///
-    /// Nothing is lost then: the conversation is in the CLI's own transcript,
-    /// and `--resume` takes it up. With this on, such a stop is reported as a
-    /// notice that the next prompt starts the CLI again; with it off it ends
-    /// the session, since nothing would.
+    /// The conversation is not lost then: it is in the CLI's own transcript,
+    /// and `--resume` takes it up. A sub-agent the CLI was running in the
+    /// background is, and is reported cancelled. With this on, such a stop is
+    /// reported as a notice that the next prompt starts the CLI again; with
+    /// it off it ends the session, since nothing would.
     pub carry_on: bool,
     /// Whether the CLI is asked to title the session from the first prompt
     /// sent that is not a slash command.
@@ -460,6 +465,9 @@ pub struct Session {
     /// Whether the CLI was stopped by a signal between turns, with
     /// [`Options::carry_on`]: the session goes on, in a CLI started again.
     stopped_between_turns: bool,
+    /// The sub-agents the CLI has spawned and not said have ended. A CLI
+    /// stopped between turns takes those running in the background with it.
+    running_agents: BTreeSet<AgentId>,
 }
 
 impl Session {
@@ -621,6 +629,7 @@ impl Session {
             },
             model_before: None,
             turn_open: false,
+            running_agents: BTreeSet::new(),
             stopped_between_turns: false,
         };
         // The writer has only just been started, so the queue cannot be
@@ -851,12 +860,14 @@ impl Session {
                 }
                 Err(TryRecvError::Empty) => {
                     if let Some(ended) = self.left_holding_output() {
+                        events.extend(self.agents_cancelled());
                         events.push(ended);
                     }
                     return events;
                 }
                 Err(TryRecvError::Disconnected) => {
                     if let Some(ended) = self.ended() {
+                        events.extend(self.agents_cancelled());
                         events.push(ended);
                     }
                     return events;
@@ -884,6 +895,30 @@ impl Session {
         if matches!(event, Event::TurnEnded) {
             self.turn_open = false;
         }
+        if let Event::AgentSpawn { id, .. } = event {
+            self.running_agents.insert(id.clone());
+        }
+        if let Event::AgentExit { id, .. } = event {
+            self.running_agents.remove(id);
+        }
+    }
+
+    /// An exit, cancelled, for each sub-agent still running when the CLI was
+    /// stopped between turns, where the session carries on: the agents ran
+    /// in the CLI's process group, which has ended, and nothing will report
+    /// their end. Nothing where the session ends instead, since its end says
+    /// for itself that nothing it ran is running any more.
+    fn agents_cancelled(&mut self) -> Vec<Event> {
+        if !self.stopped_between_turns {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.running_agents)
+            .into_iter()
+            .map(|id| Event::AgentExit {
+                id,
+                outcome: AgentOutcome::Cancelled,
+            })
+            .collect()
     }
 
     /// What to start a CLI with to carry the session on, where the one this
@@ -965,7 +1000,9 @@ impl Session {
 
         // Stopped from outside with nothing under way: what the conversation
         // holds is in the CLI's transcript, and a CLI started on it again
-        // loses nothing, so the session is not over.
+        // carries the conversation on, so the session is not over. The
+        // background agents that ended with it are reported cancelled
+        // ahead of this end; see [`Session::agents_cancelled`].
         if self.next.carry_on
             && !self.turn_open
             && unanswered.is_empty()
@@ -2812,6 +2849,44 @@ mod tests {
                 if message.starts_with("the `claude` CLI was stopped by SIGTERM while no turn was running.")),
             "{events:#?}"
         );
+        assert!(session.next().is_some());
+    }
+
+    /// A turn that launches a sub-agent in the background and ends while it
+    /// works, as the CLI writes it: the `Agent` call, its result saying the
+    /// agent was launched, and the turn's end.
+    const BACKGROUND_AGENT: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review catalog/fetch.py for bugs."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review catalog/fetch.py"}}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// The CLI's process group ends with it, and a sub-agent it ran in the
+    /// background with that: it will send no word of its end, so the session
+    /// is told it was cancelled before it is told the CLI carries on.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_between_turns_cancels_the_agents_it_left_running() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{BACKGROUND_AGENT}\nkill -TERM $$\n"),
+            true,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        let exits: Vec<&Event> = events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentExit { .. }))
+            .collect();
+        assert_eq!(
+            exits,
+            [&Event::AgentExit {
+                id: "toolu_bg".into(),
+                outcome: AgentOutcome::Cancelled,
+            }],
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Notice { .. })),
+            "{events:#?}"
+        );
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert!(state.running_agents().is_empty(), "{events:#?}");
         assert!(session.next().is_some());
     }
 

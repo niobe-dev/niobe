@@ -2322,10 +2322,13 @@ impl App {
                     agent.latest = latest.clone().or(agent.latest.take());
                 }
             }
+            // A call the agent still had running reports no end now that it
+            // has gone, and the fold has cut it.
             Event::AgentExit { id, outcome } => {
                 if let Some(agent) = self.agents.iter_mut().find(|agent| &agent.id == id) {
                     agent.outcome = Some(*outcome);
                 }
+                self.interrupt_what_the_fold_stopped();
             }
         }
     }
@@ -2464,8 +2467,8 @@ impl App {
     }
 
     /// Marks every call and sub-agent the fold no longer counts as running as
-    /// cut short, after a fatal error ended the backend under them or a turn
-    /// ended without their ends. The fold decides which: a command the
+    /// cut short, after a fatal error ended the backend under them, a turn
+    /// ended without their ends or the agent that made them exited. The fold decides which: a command the
     /// operator ran is not the backend's, and runs on to an end of its own,
     /// and a sub-agent working in the background outlives the turn.
     fn interrupt_what_the_fold_stopped(&mut self) {
@@ -8976,6 +8979,42 @@ mod tests {
             [(None, true)]
         );
         assert!(app.activity().is_none(), "{:?}", app.activity());
+    }
+
+    #[test]
+    fn an_agent_that_exits_leaves_none_of_its_calls_running() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "review it".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "Review fetch".to_owned(),
+        });
+        app.apply(&Event::TurnEnded);
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "cargo test".to_owned(),
+            summary: None,
+            agent: Some("a1".into()),
+        });
+
+        app.apply(&Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Cancelled,
+        });
+
+        let calls: Vec<(&str, bool, bool)> = app
+            .entries()
+            .iter()
+            .flat_map(|entry| &entry.calls)
+            .map(|call| (call.what.as_str(), call.running(), call.interrupted))
+            .collect();
+        assert_eq!(calls, [("cargo test", false, true)]);
+        assert!(app.entries().iter().all(|entry| !entry.streaming));
     }
 
     #[test]

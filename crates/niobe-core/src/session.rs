@@ -831,11 +831,21 @@ impl SessionState {
 
             // An exit without a spawn is still an agent that ended. One the
             // backend's end already counted as interrupted did not also
-            // complete, and an exit reported twice is one exit.
+            // complete, and an exit reported twice is one exit. A call the
+            // agent still had running reports no end now that it has gone.
             Event::AgentExit { id, .. } if self.ended_agents.contains(id) => {}
             Event::AgentExit { id, outcome } => {
                 self.running_agents.remove(id);
                 self.ended_agents.insert(id.clone());
+                let cut: Vec<ToolCallId> = self
+                    .agent_calls
+                    .iter()
+                    .filter(|(call, agent)| {
+                        *agent == id && self.in_flight_tools.contains_key(*call)
+                    })
+                    .map(|(call, _)| call.clone())
+                    .collect();
+                self.cut_calls(cut);
                 match outcome {
                     AgentOutcome::Completed => bump(&mut self.agents_completed),
                     AgentOutcome::Failed => bump(&mut self.agents_failed),
@@ -2076,6 +2086,36 @@ mod tests {
         assert_eq!(state.tools().interrupted, 1);
         assert_eq!(state.running_agents().len(), 1);
         assert_eq!(state.agents_interrupted(), 0);
+    }
+
+    #[test]
+    fn an_agent_that_exits_cuts_the_calls_it_left_running_and_no_others() {
+        let mut state = SessionState::new();
+        for id in ["a1", "a2"] {
+            state.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: None,
+                label: "explorer".to_owned(),
+            });
+        }
+        state.apply(&Event::TurnEnded);
+        state.apply(&start("c1", "Bash", Some("a1")));
+        state.apply(&start("c2", "Read", Some("a2")));
+        state.apply(&start("c3", "Read", None));
+
+        state.apply(&Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Cancelled,
+        });
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("c2"), &ToolCallId::from("c3")],
+            "an agent that has gone reports no end for its calls"
+        );
+        assert_eq!(state.tools().interrupted, 1);
+        assert_eq!(state.agents_cancelled(), 1);
     }
 
     #[test]
