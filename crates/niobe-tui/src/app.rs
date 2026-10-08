@@ -5614,15 +5614,13 @@ impl App {
     }
 
     /// Whether keys go to the composer — the prompt or the `!` command line —
-    /// rather than to a question, a list, a menu, a sheet, the history or the
-    /// search.
+    /// rather than to a question, the trust question, or anything open over
+    /// the session: a list, a menu, a sheet, the Memory view, the history or
+    /// the search.
     fn composer_has_the_keyboard(&self) -> bool {
         self.focus() == Focus::Session
-            && self.find.is_none()
-            && self.picking.is_none()
-            && self.menu.is_none()
-            && self.sheet.is_none()
-            && self.browser.is_none()
+            && self.trusting.is_none()
+            && self.overlay().is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -5634,11 +5632,8 @@ impl App {
     fn types_into_the_prompt(&self) -> bool {
         self.focus() == Focus::Session
             && !self.escaped
-            && self.find.is_none()
-            && self.picking.is_none()
-            && self.menu.is_none()
-            && self.sheet.is_none()
-            && self.browser.is_none()
+            && self.trusting.is_none()
+            && self.overlay().is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -12764,6 +12759,7 @@ mod tests {
             (app.finding().is_some(), "the search"),
             (app.menu().is_some(), "a menu"),
             (app.sheet().is_some(), "a sheet"),
+            (app.memory().is_some(), "the Memory view"),
             (app.browser().is_some(), "the history"),
             (app.diffs_open(), "the cut diffs"),
         ]
@@ -13039,6 +13035,48 @@ mod tests {
         app.on_key(opening);
         assert_eq!(app.overlay(), Some(overlay), "{overlay:?} did not open");
         (app, closing)
+    }
+
+    #[test]
+    fn keys_read_together_under_anything_open_type_nothing_into_the_composer() {
+        for overlay in Overlay::ALL {
+            let (mut app, _) = opened(overlay);
+            app.on_paste("draft");
+            let before = app.composed();
+
+            read(&mut app, b"jj\r", Instant::now());
+
+            assert_eq!(app.composed(), before, "{overlay:?}");
+        }
+    }
+
+    #[test]
+    fn keys_read_together_under_the_memory_view_move_it_and_type_nothing() {
+        use crate::memory::Scope;
+        let mut app = app();
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::F(8)));
+        app.set_memory(vec![
+            remembered("CLAUDE.md", Scope::Project, 0),
+            remembered("AGENTS.md", Scope::Imported, 1),
+        ]);
+
+        read(&mut app, b"jj\x1b[B\r", Instant::now());
+
+        assert_eq!(app.composed(), "draft");
+        assert_eq!(app.memory().and_then(|view| view.reading), Some((1, 0)));
+    }
+
+    #[test]
+    fn keys_read_together_under_the_trust_question_type_nothing_into_the_composer() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"jj\r", shown + ASK_QUIET * 2);
+
+        assert_eq!(app.composed(), "");
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
     }
 
     #[test]
