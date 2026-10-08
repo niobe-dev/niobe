@@ -825,7 +825,8 @@ fn windows_belong_to_the_profile_in_force_when_they_were_recorded() {
         .expect("personal recorded windows before the switch");
     assert_eq!(when, at(110));
     assert_eq!(windows.five_hour.map(|w| w.utilization), Some(0.8));
-=======
+}
+
 #[test]
 fn the_newest_windows_are_the_latest_recorded_whichever_session_was_opened_first() {
     let store = Store::open_in_memory().expect("an in-memory store opens");
@@ -932,5 +933,4 @@ fn only_a_session_meta_says_which_profile_a_session_ran_under() {
             .expect("the store is read"),
         None
     );
->>>>>>> f215776 (test: pin the money path's snapshots, stops, turn marks and carried-window order)
 }

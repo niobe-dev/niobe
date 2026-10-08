@@ -77,6 +77,43 @@ WHEN NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM sessions WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'sessions are append-only'); END;
 ";
 
+/// The usage windows recorded under the profile `?1`, newest first.
+///
+/// Each condition is written as [`KIND_INDEXES`] writes it, word for word,
+/// because SQLite reads a row from a partial index only for a query whose
+/// condition is the index's own; the `+` before `session_id` keeps it from
+/// walking every event of the profile's sessions by the primary key instead.
+const LAST_USAGE_WINDOWS: &str = "
+SELECT windows.at, windows.event
+  FROM events AS windows
+ WHERE CASE WHEN json_valid(windows.event) THEN json_extract(windows.event, '$.type') END = 'usage_windows'
+   AND (SELECT CASE WHEN json_valid(meta.event) THEN json_extract(meta.event, '$.profile') END
+          FROM events AS meta
+         WHERE meta.session_id = windows.session_id
+           AND meta.seq < windows.seq
+           AND CASE WHEN json_valid(meta.event) THEN json_extract(meta.event, '$.type') END = 'session_meta'
+         ORDER BY meta.seq DESC
+         LIMIT 1) = ?1
+ ORDER BY windows.at DESC, windows.session_id DESC, windows.seq DESC";
+
+/// The events found by their kind rather than by reading every row: the
+/// usage windows, by when they were recorded, and the session headers that
+/// name each session's profile, by session — what [`LAST_USAGE_WINDOWS`]
+/// reads before the shell draws its first frame.
+///
+/// Partial, so each holds only the few rows of its kind, not one entry per
+/// streamed fragment of a reply. Created where missing on every open that
+/// can write, as [`REPLACE_GUARDS`] are, so a store an earlier build made
+/// gains them and an earlier build still reads it; a store opened only to
+/// read, from an earlier build, is read without them, row by row.
+const KIND_INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS events_usage_windows ON events (at)
+WHERE CASE WHEN json_valid(event) THEN json_extract(event, '$.type') END = 'usage_windows';
+
+CREATE INDEX IF NOT EXISTS events_session_meta ON events (session_id)
+WHERE CASE WHEN json_valid(event) THEN json_extract(event, '$.type') END = 'session_meta';
+";
+
 /// Identifies a session within one store.
 ///
 /// Allocated by the database and never reused, so the number an operator reads
@@ -517,23 +554,7 @@ impl Store {
         &self,
         profile: &str,
     ) -> Result<Option<(SystemTime, UsageWindows)>, StoreError> {
-        let mut statement = self.conn.prepare(
-            "SELECT windows.at, windows.event
-               FROM events AS windows
-              WHERE CASE WHEN json_valid(windows.event)
-                         THEN json_extract(windows.event, '$.type') = 'usage_windows'
-                    END
-                AND (SELECT json_extract(meta.event, '$.profile')
-                       FROM events AS meta
-                      WHERE meta.session_id = windows.session_id
-                        AND meta.seq < windows.seq
-                        AND CASE WHEN json_valid(meta.event)
-                                 THEN json_extract(meta.event, '$.type') = 'session_meta'
-                            END
-                      ORDER BY meta.seq DESC
-                      LIMIT 1) = ?1
-              ORDER BY windows.at DESC, windows.session_id DESC, windows.seq DESC",
-        )?;
+        let mut statement = self.conn.prepare(LAST_USAGE_WINDOWS)?;
         let mut rows = statement.query(params![profile])?;
         while let Some(row) = rows.next()? {
             let at = from_unix_millis(row.get(0)?);
@@ -635,6 +656,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         }
     }
     tx.execute_batch(REPLACE_GUARDS)?;
+    tx.execute_batch(KIND_INDEXES)?;
 
     tx.commit()?;
     Ok(())
@@ -732,6 +754,33 @@ mod tests {
             .map(|stored| stored.seq)
             .collect();
         assert_eq!(seqs, (1..=next).collect::<Vec<_>>());
+    }
+
+    /// Every step of how SQLite plans `sql`, as `EXPLAIN QUERY PLAN` words it.
+    fn plan(store: &Store, sql: &str) -> Vec<String> {
+        let mut statement = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("the statement is one SQLite plans");
+        let steps = statement
+            .query_map(params!["max"], |row| row.get::<_, String>(3))
+            .expect("the plan is read");
+        steps
+            .collect::<Result<_, _>>()
+            .expect("every step of the plan reads")
+    }
+
+    /// The carried windows are read before the shell draws its first frame,
+    /// so finding them must not read every event of every session: a store
+    /// of half a million events took a third of a second that way. A step
+    /// that walks the whole table is planned as a bare `SCAN events`.
+    #[test]
+    fn the_carried_windows_are_found_without_reading_every_event() {
+        let store = Store::open_in_memory().expect("an in-memory store opens");
+
+        let steps = plan(&store, LAST_USAGE_WINDOWS);
+
+        assert!(steps.iter().all(|step| step != "SCAN events"), "{steps:#?}");
     }
 
     #[test]
