@@ -386,6 +386,37 @@ impl Answer {
     ];
 }
 
+/// Something the operator opened over the session that takes the keyboard
+/// from the composer, and from a question waiting under it, until it closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    /// A menu from the bar.
+    Menu,
+    /// A sheet: the shortcuts, the settings, the permissions and the like.
+    Sheet,
+    /// The Memory view.
+    Memory,
+    /// The history dialog.
+    History,
+    /// A list to pick from: the models, the efforts, the themes.
+    List,
+    /// The search in the transcript.
+    Search,
+}
+
+impl Overlay {
+    /// Every overlay there is.
+    #[cfg(test)]
+    const ALL: [Overlay; 6] = [
+        Overlay::Menu,
+        Overlay::Sheet,
+        Overlay::Memory,
+        Overlay::History,
+        Overlay::List,
+        Overlay::Search,
+    ];
+}
+
 /// Where the keyboard is while a prompt is waiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskFocus {
@@ -5208,15 +5239,26 @@ impl App {
         std::mem::take(&mut self.interrupt)
     }
 
+    /// What is open over the session that Esc would close, where something
+    /// is: the one that takes the keys, as [`App::on_key`] tries them.
+    fn overlay(&self) -> Option<Overlay> {
+        [
+            (self.menu.is_some(), Overlay::Menu),
+            (self.sheet.is_some(), Overlay::Sheet),
+            (self.memory.is_some(), Overlay::Memory),
+            (self.browser.is_some(), Overlay::History),
+            (self.picking.is_some(), Overlay::List),
+            (self.find.is_some(), Overlay::Search),
+        ]
+        .into_iter()
+        .find_map(|(open, overlay)| open.then_some(overlay))
+    }
+
     /// Whether something is open over the session that Esc would close: a
-    /// menu, a sheet, the history dialog, a list to pick from or a search.
+    /// menu, a sheet, the Memory view, the history dialog, a list to pick
+    /// from or a search.
     fn closes_on_esc(&self) -> bool {
-        self.menu.is_some()
-            || self.sheet.is_some()
-            || self.memory.is_some()
-            || self.browser.is_some()
-            || self.picking.is_some()
-            || self.find.is_some()
+        self.overlay().is_some()
     }
 
     /// Ctrl+C with nothing open that Esc would close: it stops a running turn
@@ -5361,6 +5403,13 @@ impl App {
     /// itself, so the shell does. Nothing else the mouse does means anything
     /// to the shell yet.
     pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
+        let covered = self.overlay().is_some();
+        self.on_mouse_under(mouse);
+        self.after_uncovering(covered);
+    }
+
+    /// [`App::on_mouse`], before the question it may have uncovered is told.
+    fn on_mouse_under(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 
         // The wheel goes to whatever the pointer is over, and takes the focus
@@ -5753,6 +5802,29 @@ impl App {
     /// to the composer, so typing an `f` is typing an `f` even though `F1` is a
     /// menu.
     pub fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        let covered = self.overlay().is_some();
+        self.on_key_under(key);
+        self.after_uncovering(covered);
+    }
+
+    /// Starts a question's quiet wait over again where `covered`, something
+    /// open over the session before the key or click just handled, has
+    /// closed while the question waits.
+    ///
+    /// Whatever closed it — an Enter on a sheet, a prompt chosen from the
+    /// history, a menu's item, a click beside a menu — the operator was
+    /// working what was open, not reading the question it uncovered, and an
+    /// Enter pressed again or held is no answer to it. Done here, around
+    /// every key and click, rather than in each overlay's own keys, so an
+    /// overlay added later cannot forget it.
+    fn after_uncovering(&mut self, covered: bool) {
+        if covered && self.overlay().is_none() && self.asking().is_some() {
+            self.ask_quiet_since = self.latest_instant();
+        }
+    }
+
+    /// [`App::on_key`], before the question it may have uncovered is told.
+    fn on_key_under(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         self.hint = None;
@@ -6014,8 +6086,7 @@ impl App {
     /// would move something the operator was not looking at. A search with
     /// no question waiting takes its keys later, after the shell's own
     /// bindings. A question the closing uncovers waits for a quiet keyboard
-    /// again, as one that has just come up does: an Enter held on the list
-    /// is not an answer to it.
+    /// again: see [`App::after_uncovering`].
     fn on_overlay_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
         if self.picking.is_some() {
             self.on_pick_key(key);
@@ -6025,9 +6096,6 @@ impl App {
             }
         } else {
             return false;
-        }
-        if self.picking.is_none() && self.find.is_none() && self.asking().is_some() {
-            self.ask_quiet_since = self.latest_instant();
         }
         true
     }
@@ -12780,6 +12848,99 @@ mod tests {
                 message: None,
             }]
         );
+    }
+
+    /// A shell with `overlay` open, and the key that closes it: the key an
+    /// operator holds or presses twice — Enter wherever Enter closes it.
+    ///
+    /// The match is exhaustive, so an overlay added without a way to open it
+    /// here does not compile, and the tests over [`Overlay::ALL`] cover it.
+    fn opened(overlay: Overlay) -> (App, KeyEvent) {
+        let (mut app, opening, closing) = match overlay {
+            Overlay::Menu => (
+                app(),
+                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
+                key(KeyCode::Enter),
+            ),
+            Overlay::Sheet => (app(), key(KeyCode::F(1)), key(KeyCode::Enter)),
+            Overlay::Memory => (app(), key(KeyCode::F(8)), key(KeyCode::Esc)),
+            Overlay::History => (
+                remembering(&[("rm the build dir and rebuild", "3")], &["3"]),
+                ctrl('r'),
+                key(KeyCode::Enter),
+            ),
+            Overlay::List => (
+                under_a_profile(&["opus", "sonnet"]),
+                key(KeyCode::F(4)),
+                key(KeyCode::Enter),
+            ),
+            Overlay::Search => (app(), ctrl('f'), key(KeyCode::Esc)),
+        };
+        app.on_key(opening);
+        assert_eq!(app.overlay(), Some(overlay), "{overlay:?} did not open");
+        (app, closing)
+    }
+
+    #[test]
+    fn a_question_uncovered_by_closing_anything_open_over_it_waits_for_a_quiet_keyboard() {
+        for overlay in Overlay::ALL {
+            let shown = Instant::now();
+            let (mut app, closing) = opened(overlay);
+            app.tick(shown, None);
+            app.apply(&prompt(Some("rm -rf build")));
+            let alone = |at| Arrival { at, alone: true };
+
+            app.on_key_read(closing, alone(shown + ASK_QUIET * 4));
+            assert_eq!(app.overlay(), None, "{overlay:?} stayed open");
+            assert!(
+                !app.take_produced()
+                    .iter()
+                    .any(|event| matches!(event, Event::PermissionResponse { .. })),
+                "{overlay:?}"
+            );
+            app.on_key_read(
+                key(KeyCode::Enter),
+                alone(shown + ASK_QUIET * 4 + ASK_QUIET / 5),
+            );
+
+            assert_eq!(app.take_produced(), [], "{overlay:?}");
+            assert!(app.asking().is_some(), "{overlay:?}");
+            assert_eq!(app.hint(), Some(TOO_SOON_HINT), "{overlay:?}");
+            app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 7));
+            assert_eq!(
+                app.take_produced(),
+                [Event::PermissionResponse {
+                    id: "t1".into(),
+                    decision: PermissionDecision::Allow,
+                    message: None,
+                }],
+                "{overlay:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_question_uncovered_by_a_click_that_closed_a_menu_waits_for_a_quiet_keyboard() {
+        let shown = Instant::now();
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        app.tick(shown, None);
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.tick(shown + ASK_QUIET * 4, None);
+        app.on_mouse(click_at(60, 15));
+        assert_eq!(app.menu(), None);
+        app.on_key_read(
+            key(KeyCode::Enter),
+            Arrival {
+                at: shown + ASK_QUIET * 4 + ASK_QUIET / 5,
+                alone: true,
+            },
+        );
+
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.hint(), Some(TOO_SOON_HINT));
     }
 
     #[test]
