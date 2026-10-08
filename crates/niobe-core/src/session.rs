@@ -401,8 +401,9 @@ pub struct TurnRecord {
     ///
     /// `None` where no usage record landed in that span — a turn interrupted
     /// or failed before its first message was reported nothing, and a zero
-    /// would read as a measurement. `Some(0)` is a turn whose records said it
-    /// spent none.
+    /// would read as a measurement — and where the session's total had
+    /// reached the largest count there is, which it stays at whatever is
+    /// added. `Some(0)` is a turn whose records said it spent none.
     pub tokens: Option<u64>,
     /// How far the five-hour window moved across the turn, as a share of the
     /// window: `0.01` is one percent of it.
@@ -976,11 +977,14 @@ impl SessionState {
             true => window_share(began.five_hour, ended.five_hour),
             false => None,
         };
+        // A total pinned at the largest count has stopped counting, so what
+        // the turn spent cannot be read off it.
+        let counted = self.usage_reported && ended.tokens != u64::MAX;
         self.turns.push(TurnRecord {
-            number: self.turns.len() as u64 + 1,
-            tokens: self
-                .usage_reported
-                .then(|| ended.tokens.saturating_sub(began.tokens)),
+            number: u64::try_from(self.turns.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+            tokens: counted.then(|| ended.tokens.saturating_sub(began.tokens)),
             five_hour_share,
             cut,
             compacted: self.compacted.take(),
@@ -2971,6 +2975,24 @@ mod tests {
         ]);
         let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
         assert_eq!(tokens, [Some(110), None, Some(0)]);
+    }
+
+    /// A total that has reached the largest count there is stays there, so
+    /// what a later turn added cannot be told from it; that turn has no
+    /// token figure rather than a zero nothing measured.
+    #[test]
+    fn a_turn_after_the_total_is_pinned_at_its_largest_has_no_token_figure() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(u64::MAX, 0, 0, 0),
+            Event::TurnEnded,
+            prompt(),
+            cached(1_000, 0, 0, 0),
+            Event::TurnEnded,
+        ]);
+
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [None, None]);
     }
 
     /// Whether a turn's tokens were measured is decided over the same span
