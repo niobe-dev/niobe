@@ -5510,7 +5510,10 @@ impl App {
             }
             None => self
                 .transcript_drawn
-                .and_then(|(area, _)| self.drawn.link_at(pressed, usize::from(area.width)))
+                .and_then(|(area, _)| {
+                    self.drawn
+                        .link_at(pressed, usize::from(area.width), &self.entries)
+                })
                 .map(crate::desktop::Handoff::Open),
         };
         self.handoffs.extend(handoff);

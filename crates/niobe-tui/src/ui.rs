@@ -2259,14 +2259,26 @@ impl DrawnEntries {
 
     /// The link at `point` of the transcript as drawn `width` cells wide, if
     /// there is one there. A link is looked for within the one entry it is
-    /// in: two entries' lines are never one run of text.
-    pub(crate) fn link_at(&self, point: crate::select::Point, width: usize) -> Option<String> {
+    /// in: two entries' lines are never one run of text. `entries` are what
+    /// the transcript was drawn from, whose text says where a word the
+    /// drawing cut at the end of a line goes on.
+    pub(crate) fn link_at(
+        &self,
+        point: crate::select::Point,
+        width: usize,
+        entries: &[Entry],
+    ) -> Option<String> {
         let mut first = 0usize;
         for drawn in &self.drawn {
             let offset = point.line.checked_sub(first)?;
             if offset < drawn.lines.len() {
                 let lines: Vec<String> = drawn.lines.iter().map(crate::select::plain).collect();
-                return crate::select::link_at(&lines, width, offset, point.column);
+                let said = match drawn.heading {
+                    true => Vec::new(),
+                    false => entries.get(drawn.entry).map_or_else(Vec::new, said_in),
+                };
+                let said: Vec<&str> = said.iter().map(String::as_str).collect();
+                return crate::select::link_at(&lines, width, offset, point.column, &said);
             }
             first = first.saturating_add(drawn.lines.len());
         }
@@ -2283,6 +2295,20 @@ impl DrawnEntries {
             .cloned()
             .collect()
     }
+}
+
+/// The text `entry` is drawn from: its head, its detail, its body, and what
+/// each of its calls did, failed with and printed.
+fn said_in(entry: &Entry) -> Vec<String> {
+    let mut said = vec![entry.head.clone(), entry.meta.clone(), entry.body.clone()];
+    for call in &entry.calls {
+        said.push(call.what.clone());
+        said.extend(call.error.clone());
+        if let Some(printed) = &call.printed {
+            said.push(printed.tail.join("\n"));
+        }
+    }
+    said
 }
 
 /// The order the transcript draws `entries` in.

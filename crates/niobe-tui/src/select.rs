@@ -169,7 +169,20 @@ fn in_link(c: char) -> bool {
 /// at the start of the next, so a link that fills a line from where its text
 /// starts takes in the start of the next. A link that ends a line the words
 /// wrapped on is whole: the next line's first word is another word.
-pub(crate) fn link_at(lines: &[String], width: usize, row: usize, column: usize) -> Option<String> {
+///
+/// A word exactly as wide as the line fills it too, and is drawn just as the
+/// first part of a cut one is: the lines alone cannot tell the two apart. So
+/// `said`, the text the lines were drawn from, decides: two parts are one
+/// word where that text holds them together, and two where it holds the first
+/// and never the two run together. Where it holds neither — the drawing
+/// changed the text — the lines decide as above.
+pub(crate) fn link_at(
+    lines: &[String],
+    width: usize,
+    row: usize,
+    column: usize,
+    said: &[&str],
+) -> Option<String> {
     let drawn = lines.get(row)?;
     let (start, end) = word_at(drawn, column)?;
     let mut word = drawn.get(start..end)?.to_owned();
@@ -178,10 +191,19 @@ pub(crate) fn link_at(lines: &[String], width: usize, row: usize, column: usize)
     let mut from = start;
     while from == indent(lines.get(at)?) && at > 0 {
         let above = lines.get(at - 1)?;
-        if !cut_between(above, lines.get(at)?, width) {
+        let this = lines.get(at)?;
+        if !cut_between(above, this, width) {
             break;
         }
         let (before, _) = last_word(above)?;
+        let (_, after) = word_at(this, text::width(this.get(..from)?))?;
+        if !one_word(
+            said,
+            above.get(before..)?.trim_end(),
+            this.get(from..after)?,
+        ) {
+            break;
+        }
         word.insert_str(0, above.get(before..)?.trim_end());
         at -= 1;
         from = before;
@@ -199,11 +221,24 @@ pub(crate) fn link_at(lines: &[String], width: usize, row: usize, column: usize)
         let Some(next) = word_at(below, text::width(below.get(..first)?)) else {
             break;
         };
+        let (last, _) = last_word(this)?;
+        if !one_word(said, this.get(last..to)?, below.get(next.0..next.1)?) {
+            break;
+        }
         word.push_str(below.get(next.0..next.1)?);
         at += 1;
         to = next.1;
     }
     link_in(&word)
+}
+
+/// Whether `first`, which ends a line, and `then`, which starts the next, are
+/// one word cut in two, by what `said` holds: they are, unless some of it
+/// holds `first` and none of it holds the two run together.
+fn one_word(said: &[&str], first: &str, then: &str) -> bool {
+    let together = format!("{first}{then}");
+    said.iter().any(|text| text.contains(&together))
+        || !said.iter().any(|text| text.contains(first))
 }
 
 /// The link a run of link characters holds: from its scheme, without the
@@ -345,7 +380,29 @@ mod tests {
 
     fn link(lines: &[&str], width: usize, row: usize, column: usize) -> Option<String> {
         let lines: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
-        link_at(&lines, width, row, column)
+        link_at(&lines, width, row, column, &[])
+    }
+
+    #[test]
+    fn a_link_exactly_as_wide_as_its_line_is_not_joined_to_the_word_after_it() {
+        let lines = ["  https://example.com/aaaa", "  nextword here"];
+        let said = ["https://example.com/aaaa nextword here"];
+        let lines: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+        assert_eq!(
+            link_at(&lines, 26, 0, 5, &said).as_deref(),
+            Some("https://example.com/aaaa")
+        );
+        assert_eq!(link_at(&lines, 26, 1, 4, &said), None);
+    }
+
+    #[test]
+    fn a_link_its_text_holds_whole_is_joined_across_the_cut() {
+        let lines = ["  https://example.com/aaaa", "  bbb/end here"];
+        let said = ["see https://example.com/aaaabbb/end here"];
+        let lines: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+        let whole = Some("https://example.com/aaaabbb/end".to_owned());
+        assert_eq!(link_at(&lines, 26, 0, 5, &said), whole);
+        assert_eq!(link_at(&lines, 26, 1, 4, &said), whole);
     }
 
     #[test]

@@ -203,3 +203,56 @@ fn a_link_too_long_for_its_line_opens_whole_from_the_part_on_the_next() {
 
     assert_eq!(app.take_handoffs(), vec![Handoff::Open(link)], "{frame}");
 }
+
+/// A link as long as its row is wide, or anywhere near, fits on it whole, and
+/// the word after it starts the next row: that word is not part of the link,
+/// however exactly the link filled the row it ended.
+#[test]
+fn a_link_that_fills_its_row_opens_without_the_word_on_the_next() {
+    for length in 30..=120 {
+        let link = format!("https://example.com/{}", "a".repeat(length - 20));
+        let mut app = replied(&format!("{link} nextword here"));
+        let frame = screen(&mut app, WIDTH, HEIGHT);
+        let at = cell_of(&frame, "https://example.com/");
+
+        click(&mut app, at);
+
+        assert_eq!(
+            app.take_handoffs(),
+            vec![Handoff::Open(link.clone())],
+            "a link {length} long:\n{frame}"
+        );
+    }
+}
+
+/// A link wider than its row is cut where the row ends and carried on at the
+/// start of the next, and opens whole from either part, without the word
+/// after it.
+#[test]
+fn a_link_wider_than_its_row_opens_whole_from_either_part() {
+    for length in 71..=150 {
+        let link = format!("https://example.com/{}", "a".repeat(length - 20));
+        let mut app = replied(&format!("{link} nextword here"));
+        let frame = screen(&mut app, WIDTH, HEIGHT);
+
+        for part in ["https://example.com/", "a nextword"] {
+            let Some((column, row)) = frame
+                .lines()
+                .enumerate()
+                .filter_map(|(row, line)| Some((line[..line.find(part)?].chars().count(), row)))
+                .last()
+            else {
+                continue;
+            };
+            let column = u16::try_from(column).expect("the screen is 120 wide");
+            let row = u16::try_from(row).expect("the screen is 30 high");
+            click(&mut app, (column, row));
+
+            assert_eq!(
+                app.take_handoffs(),
+                vec![Handoff::Open(link.clone())],
+                "a link {length} long, clicked on {part:?}:\n{frame}"
+            );
+        }
+    }
+}
