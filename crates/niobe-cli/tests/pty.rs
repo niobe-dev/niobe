@@ -1351,7 +1351,7 @@ fn a_session_whose_terminal_went_away_is_still_there_to_resume() {
     terminal.shows(OPENING_FRAME);
 
     terminal.typed(b"etags please\r");
-    recorded(repo.path(), 1);
+    recorded(repo.path(), 2);
 
     drop(slave);
     terminal.close();
@@ -1360,7 +1360,8 @@ fn a_session_whose_terminal_went_away_is_still_there_to_resume() {
     let resumed = niobe(repo.path(), &["--resume", "1"]);
     let out = String::from_utf8(resumed.stdout).expect("stdout is UTF-8");
     assert!(resumed.status.success(), "{out}");
-    assert!(out.starts_with("session 1 · 1 events"), "{out}");
+    // The prompt, and the notice that no backend took it.
+    assert!(out.starts_with("session 1 · 2 events"), "{out}");
     assert!(out.contains("1 from you"), "{out}");
 
     // The prompt itself, which the list shows a session by.

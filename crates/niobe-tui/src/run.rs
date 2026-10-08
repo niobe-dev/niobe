@@ -535,6 +535,9 @@ fn send_produced(
             Vec::new()
         };
         if !app.is_attached() {
+            if let SessionEvent::UserMessage { .. } = &event {
+                journal.append(&App::not_attached_notice());
+            }
             continue;
         }
         // Only what the backend is waiting on is sent on: a turn, and a
@@ -1487,8 +1490,9 @@ mod tests {
         send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
 
         // The turn is still recorded — it is what the operator did — and the
-        // transcript says plainly that nothing received it.
-        assert_eq!(journal.events.len(), 1);
+        // transcript says plainly that nothing received it, as does the
+        // record, for the session read back.
+        assert_eq!(journal.events.len(), 2);
         let notice = app
             .entries()
             .iter()
@@ -1498,6 +1502,31 @@ mod tests {
         assert!(
             !app.entries().iter().any(|entry| entry.head == "not sent"),
             "a session with nothing attached reported a send that was never tried"
+        );
+    }
+
+    #[test]
+    fn a_prompt_with_no_backend_reads_as_not_sent_when_the_session_is_resumed() {
+        let mut app = App::new(Repo::default());
+        for c in "hello".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut journal = Kept::default();
+        send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
+
+        let mut resumed = App::new(Repo::default());
+        for event in &journal.events {
+            resumed.apply(event);
+        }
+
+        assert!(
+            resumed
+                .entries()
+                .iter()
+                .any(|entry| entry.body.contains("the prompt above was not sent")),
+            "{:#?}",
+            journal.events
         );
     }
 

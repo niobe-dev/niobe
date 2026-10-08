@@ -1518,6 +1518,11 @@ const BUDGET_WARNING: f64 = 0.8;
 /// the question before answering it.
 pub const ASK_QUIET: Duration = Duration::from_millis(500);
 
+/// What the transcript says, and the session keeps, under a prompt sent with
+/// no backend attached.
+const NOT_ATTACHED: &str = "This session is not attached to a backend, so the prompt above was \
+     not sent. `niobe profiles` shows which profiles are defined and which backend each one runs.";
+
 /// What the bar says when a key reached a prompt whose top is off screen.
 const TOP_OFF_SCREEN_HINT: &str =
     "Not taken as an answer: the top of the question is off screen. Ctrl+T cuts it to fit";
@@ -3272,6 +3277,14 @@ impl App {
             .as_ref()
             .map_or(&[], |profile| profile.models.as_slice());
         let (options, more) = model_choices(self.session.models(), named);
+        if options.is_empty() && !self.attached {
+            self.hint = Some(
+                "F4 Model — this session is not attached to a backend, so there is no model \
+                 to change"
+                    .to_owned(),
+            );
+            return;
+        }
         if options.is_empty() {
             self.hint = Some(
                 "F4 Model — the backend has not listed its models yet, and this profile names \
@@ -6577,22 +6590,29 @@ impl App {
         self.produce(Event::UserMessage { text });
         self.sent_here = self.attached;
         if !self.attached {
-            self.push(Entry {
-                kind: EntryKind::Notice,
-                head: "no backend".to_owned(),
-                meta: "not sent".to_owned(),
-                body: "This session is not attached to a backend, so the prompt above was \
-                       not sent. `niobe profiles` shows which profiles are defined and which \
-                       backend each one runs."
-                    .to_owned(),
-                streaming: false,
-                at: self.at,
-                calls: Vec::new(),
-                agent: None,
-            });
+            self.not_attached();
         }
         self.give_back(&draft);
         self.scroll_to_tail();
+    }
+
+    /// Says in the transcript that the prompt just sent went nowhere. A first
+    /// prompt that went nowhere asked nothing, so it is not what the session
+    /// is about either.
+    fn not_attached(&mut self) {
+        if self.session.user_messages() == 1 {
+            self.first_prompt_unsent = true;
+        }
+        self.push(Entry {
+            kind: EntryKind::Notice,
+            head: "no backend".to_owned(),
+            meta: "not sent".to_owned(),
+            body: NOT_ATTACHED.to_owned(),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
     }
 
     /// Does what a prompt that is one of the commands in
@@ -6658,6 +6678,16 @@ impl App {
     fn give_back(&mut self, (id, draft): &(DraftId, String)) {
         if !draft.is_empty() {
             self.show_draft(*id, draft);
+        }
+    }
+
+    /// The notice the session keeps after a prompt sent with no backend
+    /// attached, in the words the transcript said it in, so that the session
+    /// read back says the prompt went nowhere rather than leaving it looking
+    /// like a turn that was cut off.
+    pub fn not_attached_notice() -> Event {
+        Event::Notice {
+            message: NOT_ATTACHED.to_owned(),
         }
     }
 
@@ -10032,6 +10062,30 @@ mod tests {
     }
 
     #[test]
+    fn a_first_prompt_with_no_backend_to_send_it_to_is_not_the_caption() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+
+        typed(&mut app, "hello");
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.caption(), None);
+    }
+
+    #[test]
+    fn the_model_list_with_no_backend_says_no_backend_is_attached() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+
+        typed(&mut app, "/model");
+        app.on_key(key(KeyCode::Enter));
+
+        let hint = app.hint().expect("something is said");
+        assert!(hint.contains("not attached to a backend"), "{hint}");
+        assert!(!hint.contains("config"), "{hint}");
+    }
+
+    #[test]
     fn f4_offers_the_models_the_profile_names_and_picking_one_asks_for_it() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = under_a_profile(&["opus", "sonnet", "haiku"]);
@@ -10213,13 +10267,13 @@ mod tests {
     #[test]
     fn f4_under_a_profile_that_names_no_model_says_so_rather_than_opening_an_empty_list() {
         use ratatui::crossterm::event::KeyCode;
-        let mut app = under_a_profile(&[]);
+        let mut app = under_a_profile(&[]).attached();
 
         app.on_key(key(KeyCode::F(4)));
 
         assert!(app.picking().is_none());
         let hint = app.hint().unwrap_or_default();
-        assert!(hint.contains("models"), "{hint}");
+        assert!(hint.contains("models = ["), "{hint}");
     }
 
     #[test]
