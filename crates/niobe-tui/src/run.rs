@@ -529,9 +529,10 @@ fn send_produced(
         journal.append(&event);
         // Taken for every prompt, sent or not, so the next prompt's images
         // are never handed out with this one.
-        let images = match &event {
-            SessionEvent::UserMessage { .. } => app.take_turn_images(),
-            _ => Vec::new(),
+        let images = if let SessionEvent::UserMessage { .. } = &event {
+            app.take_turn_images()
+        } else {
+            Vec::new()
         };
         if !app.is_attached() {
             continue;
@@ -565,7 +566,38 @@ fn send_produced(
                     app.not_changed("model", &error.to_string());
                 }
             }
-            _ => {}
+            // Listed rather than left to a wildcard: an event the shell comes
+            // to produce for the backend must be sent from here, and a new
+            // variant fails to compile until someone decides whether it is.
+            SessionEvent::SessionMeta(_)
+            | SessionEvent::Titled { .. }
+            | SessionEvent::AssistantDelta { .. }
+            | SessionEvent::AssistantMessage { .. }
+            | SessionEvent::ToolCallStart { .. }
+            | SessionEvent::ToolCallEnd { .. }
+            | SessionEvent::TurnEnded
+            | SessionEvent::Usage(_)
+            | SessionEvent::UsageWindows(_)
+            | SessionEvent::Billing { .. }
+            | SessionEvent::Context(_)
+            | SessionEvent::Cleared
+            | SessionEvent::CompactionStarted
+            | SessionEvent::CompactionEnded
+            | SessionEvent::Compacted { .. }
+            | SessionEvent::SessionLeft
+            | SessionEvent::PermissionRequest { .. }
+            | SessionEvent::PermissionWithdrawn { .. }
+            | SessionEvent::ModelRefused
+            | SessionEvent::FileChange { .. }
+            | SessionEvent::TestRun { .. }
+            | SessionEvent::AgentSpawn { .. }
+            | SessionEvent::AgentProgress { .. }
+            | SessionEvent::AgentExit { .. }
+            | SessionEvent::Commands { .. }
+            | SessionEvent::Models { .. }
+            | SessionEvent::TurnTotalDiffers { .. }
+            | SessionEvent::Notice { .. }
+            | SessionEvent::Error { .. } => {}
         }
     }
     fold_journal(app, journal);

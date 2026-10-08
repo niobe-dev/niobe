@@ -77,10 +77,10 @@ pub fn load() -> Result<Loaded, String> {
         FILE_NAME,
     );
     let mut table = PriceTable::bundled().map_err(|e| e.to_string())?;
-    if let Some(path) = &user_file {
-        if let Some(user) = user_table(path)? {
-            table = table.overlay(user);
-        }
+    if let Some(path) = &user_file
+        && let Some(user) = user_table(path)?
+    {
+        table = table.overlay(user);
     }
     Ok(Loaded { table, user_file })
 }

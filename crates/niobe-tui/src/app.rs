@@ -1748,9 +1748,10 @@ impl App {
         // session is taken up again after one was killed: the turn it cuts
         // ended with the last thing that happened in it, and the time between
         // is time nothing ran.
-        let ended_at = match event {
-            Event::SessionLeft => self.last_folded_at,
-            _ => self.at,
+        let ended_at = if let Event::SessionLeft = event {
+            self.last_folded_at
+        } else {
+            self.at
         };
         self.last_folded_at = ended_at;
         let ended = self.just_ended.take();

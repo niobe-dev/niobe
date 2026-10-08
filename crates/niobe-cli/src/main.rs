@@ -139,6 +139,7 @@ fn run(
         Command::Shell => shell(profile, &asked)?,
         Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked)?,
         Command::Resume(Resume::Imported(session)) => import(&session, profile, &asked)?,
+        // Handed on whole: `run_other` matches every command itself.
         other => return run_other(other, profile, &asked),
     };
     // The operator chose another session in the history dialog: the one the

@@ -243,17 +243,17 @@ impl File<'_> {
         for (index, item) in items.iter().enumerate() {
             let at = at.index(index);
             let price = self.price(item, &at)?;
-            if let Some(previous) = prices.last() {
-                if price.from <= previous.from {
-                    return Err(self.invalid(
-                        &item.span(),
-                        &at.child("from"),
-                        &format!(
-                            "{} is not after {}, the date of the price before it; list prices oldest first",
-                            price.from, previous.from
-                        ),
-                    ));
-                }
+            if let Some(previous) = prices.last()
+                && price.from <= previous.from
+            {
+                return Err(self.invalid(
+                    &item.span(),
+                    &at.child("from"),
+                    &format!(
+                        "{} is not after {}, the date of the price before it; list prices oldest first",
+                        price.from, previous.from
+                    ),
+                ));
             }
             prices.push(price);
         }

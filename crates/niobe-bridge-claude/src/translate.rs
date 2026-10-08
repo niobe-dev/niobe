@@ -1984,11 +1984,12 @@ impl Translator {
         self.report_bill(outcome, out);
         let settled: Vec<String> = out[from..]
             .iter()
-            .filter_map(|event| match event {
-                Event::Usage(usage) if usage.settles_model && self.short.contains(&usage.model) => {
-                    Some(usage.model.clone())
-                }
-                _ => None,
+            .filter_map(|event| {
+                let Event::Usage(usage) = event else {
+                    return None;
+                };
+                (usage.settles_model && self.short.contains(&usage.model))
+                    .then(|| usage.model.clone())
             })
             .collect();
         out.extend(settled.into_iter().map(short_by_unknown));
@@ -2836,7 +2837,9 @@ fn render_content(content: wire::Content) -> String {
             .into_iter()
             .filter_map(|block| match block {
                 wire::Block::Text { text } => Some(text),
-                _ => None,
+                wire::Block::ToolUse { .. }
+                | wire::Block::ToolResult { .. }
+                | wire::Block::Other => None,
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -5869,8 +5872,8 @@ mod tests {
             ),
             (
                 "mcp__claude_ai_Notion__notion-search",
-                r#"{"query":"Niobe milestones","page_size":10,"filters":{"a":1},"ids":["x","y"]}"#,
-                "query: Niobe milestones, page_size: 10, filters: {…}, ids: [2]",
+                r#"{"query":"release notes","page_size":10,"filters":{"a":1},"ids":["x","y"]}"#,
+                "query: release notes, page_size: 10, filters: {…}, ids: [2]",
             ),
         ];
         for (name, input, expected) in cases {

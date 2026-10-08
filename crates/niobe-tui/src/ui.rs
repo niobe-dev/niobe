@@ -435,6 +435,8 @@ fn draw_menu_list(
                     true => "shown",
                     false => "hidden",
                 },
+                // Only a pane's row says something that changes; every other
+                // action's keys are fixed in its menu.
                 _ => item.keys,
             };
             (item.label.to_owned(), keys.to_owned())
@@ -5319,7 +5321,9 @@ impl CostLabel {
                 format!("<{prefix}$0.01")
             }
             Self::EstimatedFloor | Self::Floor if usd < HALF_A_CENT => ">$0.00".to_owned(),
-            _ => format!("{prefix}{}", dollars(usd)),
+            Self::Reported | Self::Estimate | Self::EstimatedFloor | Self::Floor => {
+                format!("{prefix}{}", dollars(usd))
+            }
         }
     }
 }

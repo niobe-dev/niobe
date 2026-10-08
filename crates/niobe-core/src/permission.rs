@@ -160,10 +160,10 @@ impl Rule {
             return Err(invalid());
         }
         let target = Target::parse(target);
-        if let Target::Prefix(prefix) = &target {
-            if let Some(form) = ClaudeCodeForm::of(tool, prefix) {
-                return Err(RuleError(text.to_owned(), Some(form)));
-            }
+        if let Target::Prefix(prefix) = &target
+            && let Some(form) = ClaudeCodeForm::of(tool, prefix)
+        {
+            return Err(RuleError(text.to_owned(), Some(form)));
         }
         Ok(Self {
             tool: tool.to_owned(),

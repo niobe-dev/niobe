@@ -131,18 +131,19 @@ fn status_details(
 
     // A profile whose settings file is withheld for want of trust names none
     // here, which is right: a file that is not in force runs nothing under it.
-    if let Some(path) = forcing_bedrock {
-        if profile.backend() == Backend::Claude && profile.settings().is_none() {
-            rows.push(detail_row(
-                "no settings",
-                format!(
-                    "{} sets CLAUDE_CODE_USE_BEDROCK for every session; a `settings` file \
-                     here is what would run this profile elsewhere",
-                    path.display()
-                ),
-                name_width,
-            ));
-        }
+    if let Some(path) = forcing_bedrock
+        && profile.backend() == Backend::Claude
+        && profile.settings().is_none()
+    {
+        rows.push(detail_row(
+            "no settings",
+            format!(
+                "{} sets CLAUDE_CODE_USE_BEDROCK for every session; a `settings` file \
+                 here is what would run this profile elsewhere",
+                path.display()
+            ),
+            name_width,
+        ));
     }
     if let Some(withheld) = profile.withheld() {
         rows.push(detail_row("not in force", listed(withheld), name_width));

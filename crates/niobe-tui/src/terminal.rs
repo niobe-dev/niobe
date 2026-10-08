@@ -261,6 +261,7 @@ fn reports_keys(out: &mut impl Write) -> (Answer, Vec<u8>) {
     let answered = loop {
         match answer(&heard) {
             Answer::Waiting => {}
+            // Whatever the terminal answered, it is the answer.
             known => break known,
         }
         let left = deadline.saturating_duration_since(std::time::Instant::now());

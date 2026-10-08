@@ -253,6 +253,7 @@ fn alt(inner: Step) -> Step {
             key.modifiers |= KeyModifiers::ALT;
             Step::Event(Event::Key(key))
         }
+        // Alt is held on a key only; any other step is what it was.
         other => other,
     }
 }

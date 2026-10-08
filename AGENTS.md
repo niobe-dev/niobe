@@ -307,7 +307,8 @@ These hold for every change. Breaking one is a bug even when the feature ships g
 
 ## 3. Rust coding standards
 
-- **Edition and toolchain**: edition 2024, `rust-version` from the workspace manifest. New
+- **Edition and toolchain**: edition 2024, `rust-version` from the workspace manifest — the
+  oldest compiler the workspace builds on, and CI builds it there. New
   dependencies go in `[workspace.dependencies]` and are inherited with `workspace = true`.
 - **Naming**: `UpperCamelCase` for types and traits, `snake_case` for functions and variables,
   `SCREAMING_SNAKE_CASE` for constants. Test names are sentences that state the behaviour
