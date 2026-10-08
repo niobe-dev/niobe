@@ -528,8 +528,10 @@ const TRUST_SAYS: &str = "It sets what only a config you trust may:";
 const TRUST_UNTIL: &str =
     "Trusted, it stays in force until the file changes. Without it, none of the above is.";
 
-/// The keys the trust question answers to, on its bottom edge.
-const TRUST_KEYS: &str = " ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ";
+/// The keys the trust question answers to, on its bottom edge. The pause is
+/// part of the answer: an Enter straight after trusting is chosen is taken as
+/// the end of a typed prompt (see [`trust::Asking::on_key`]).
+const TRUST_KEYS: &str = " ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ";
 
 /// Columns between what a row of the trust question names and what it is set
 /// to, and the most the name may take.

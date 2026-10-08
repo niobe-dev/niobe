@@ -1561,8 +1561,14 @@ const TOO_SOON_HINT: &str =
 
 /// What the trust question says when a key was typed at it: the letters go
 /// nowhere, and the Enter that would have sent them answers nothing.
-const TYPED_AT_TRUST_HINT: &str =
-    "Not taken as an answer: typed at the question. Choose with ↑↓ or 1/2, then press Enter";
+const TYPED_AT_TRUST_HINT: &str = "Not taken as an answer: typed at the question. Choose with \
+     ↑↓ or 1/2, pause, then press Enter";
+
+/// What the trust question says when an Enter came straight after trusting
+/// was chosen, as the one that sends a prompt of `1` does: it answers
+/// nothing, and the cursor is back on "not now".
+const HASTY_AT_TRUST_HINT: &str = "Not taken as an answer: Enter came straight after choosing, \
+     as it does at the end of a typed prompt. Choose again, pause, then press Enter";
 
 /// What a permission question says when a key that answers nothing was typed
 /// at it: the key went into the prompt behind it, and the question waits.
@@ -3258,19 +3264,26 @@ impl App {
         if self.too_soon_to_answer() {
             return;
         }
-        let Some(asking) = self.trusting.as_mut() else {
+        if self.trusting.is_none() {
             return;
-        };
+        }
         let Some(code) = answer_key(key) else {
             return;
         };
-        match asking.on_key(code) {
+        let Some(at) = self.latest_instant() else {
+            return;
+        };
+        let Some(asking) = self.trusting.as_mut() else {
+            return;
+        };
+        match asking.on_key(code, at) {
             trust::Reply::Answered(answer) => {
                 self.trusting = None;
                 self.trusted = Some(answer);
                 self.quit();
             }
             trust::Reply::Typed => self.hint = Some(TYPED_AT_TRUST_HINT.to_owned()),
+            trust::Reply::Hasty => self.hint = Some(HASTY_AT_TRUST_HINT.to_owned()),
             trust::Reply::Moved => {}
         }
     }
@@ -12968,6 +12981,39 @@ mod tests {
         assert!(app.trusting().is_some());
         assert_eq!(app.hint(), Some(TYPED_AT_TRUST_HINT));
         assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_prompt_that_is_the_digit_one_typed_and_sent_at_the_trust_question_trusts_nothing() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"1", shown + ASK_QUIET * 6);
+        read(
+            &mut app,
+            b"\r",
+            shown + ASK_QUIET * 6 + Duration::from_millis(150),
+        );
+
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
+        assert_eq!(
+            app.trusting().map(crate::trust::Asking::selected),
+            Some(crate::trust::Answer::NotNow)
+        );
+        assert_eq!(app.hint(), Some(HASTY_AT_TRUST_HINT));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn trust_chosen_with_its_digit_is_given_by_an_enter_after_a_pause() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"1", shown + ASK_QUIET * 6);
+        read(&mut app, b"\r", shown + ASK_QUIET * 7);
+
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
     }
 
     #[test]

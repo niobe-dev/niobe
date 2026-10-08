@@ -10,7 +10,11 @@
 //! its prompts — is fixed the moment it starts. The shell knows no config:
 //! what the file sets arrives as rows the caller wrote.
 
+use std::time::Instant;
+
 use ratatui::crossterm::event::KeyCode;
+
+use crate::app::ASK_QUIET;
 
 /// What a repository's config would put in force once it is trusted, as the
 /// question shows it.
@@ -58,6 +62,9 @@ pub struct Asking {
     /// Whether the operator has typed at the question since they last chose
     /// an answer: an Enter then ends what they were typing, not the question.
     typing: bool,
+    /// When the cursor was last put on trusting, which an Enter gives only
+    /// once [`ASK_QUIET`] has passed since.
+    trust_chosen: Option<Instant>,
 }
 
 /// What one key did to the question.
@@ -70,6 +77,9 @@ pub(crate) enum Reply {
     /// The key was typed at the question, or was the Enter that ended what
     /// was typed, and answered nothing.
     Typed,
+    /// The key was an Enter that came too soon after trusting was chosen to
+    /// have been meant as the answer, and answered nothing.
+    Hasty,
 }
 
 impl Asking {
@@ -83,6 +93,7 @@ impl Asking {
             question,
             at: not_now(),
             typing: false,
+            trust_chosen: None,
         }
     }
 
@@ -94,7 +105,8 @@ impl Asking {
             .unwrap_or(Answer::NotNow)
     }
 
-    /// One key: moves the cursor, gives an answer, or is taken as typing.
+    /// One key, pressed `at`: moves the cursor, gives an answer, or is taken
+    /// as typing.
     ///
     /// Only the arrows and the digits the answers are numbered with choose:
     /// a letter is what an operator who has not read the question types as
@@ -104,18 +116,32 @@ impl Asking {
     /// or a digit chooses again. A digit moves the cursor and does not
     /// answer, as it does on a permission question: Enter is the one key that
     /// gives the trust. Esc is "not now", the answer that changes nothing.
-    pub(crate) fn on_key(&mut self, code: KeyCode) -> Reply {
+    ///
+    /// Enter gives the trust only once the cursor has rested on it for
+    /// [`ASK_QUIET`]. A first prompt that is the digit `1` chooses trusting
+    /// as a deliberate `1` does, and the two differ only in what follows: the
+    /// Enter that sends a prompt comes as fast as the operator types, while
+    /// one who chose an answer looks at the cursor before confirming it. An
+    /// Enter that comes sooner is taken as the end of a typed prompt: it
+    /// answers nothing and puts the cursor back on "not now", so trusting is
+    /// chosen again, and then confirmed after a pause, or not at all.
+    pub(crate) fn on_key(&mut self, code: KeyCode, at: Instant) -> Reply {
         let last = Answer::OFFERED.len().saturating_sub(1);
         match code {
-            KeyCode::Up => self.choose(self.at.saturating_sub(1)),
-            KeyCode::Down => self.choose(self.at.saturating_add(1).min(last)),
-            KeyCode::Char(c) => match numbered(c).filter(|at| *at <= last) {
-                Some(at) => self.choose(at),
+            KeyCode::Up => self.choose(self.at.saturating_sub(1), at),
+            KeyCode::Down => self.choose(self.at.saturating_add(1).min(last), at),
+            KeyCode::Char(c) => match numbered(c).filter(|chosen| *chosen <= last) {
+                Some(chosen) => self.choose(chosen, at),
                 None => return self.typed(),
             },
             KeyCode::Enter if self.typing => {
                 self.typing = false;
                 return Reply::Typed;
+            }
+            KeyCode::Enter if self.hasty(at) => {
+                self.at = not_now();
+                self.trust_chosen = None;
+                return Reply::Hasty;
             }
             KeyCode::Enter => return Reply::Answered(self.selected()),
             KeyCode::Esc => return Reply::Answered(Answer::NotNow),
@@ -124,15 +150,26 @@ impl Asking {
         Reply::Moved
     }
 
-    fn choose(&mut self, at: usize) {
-        self.at = at;
+    fn choose(&mut self, chosen: usize, at: Instant) {
+        self.at = chosen;
         self.typing = false;
+        self.trust_chosen = (self.selected() == Answer::Trust).then_some(at);
     }
 
     fn typed(&mut self) -> Reply {
         self.at = not_now();
         self.typing = true;
+        self.trust_chosen = None;
         Reply::Typed
+    }
+
+    /// Whether an Enter `at` would give the trust before the cursor has
+    /// rested on it for [`ASK_QUIET`].
+    fn hasty(&self, at: Instant) -> bool {
+        self.selected() == Answer::Trust
+            && self
+                .trust_chosen
+                .is_none_or(|chosen| at < chosen + ASK_QUIET)
     }
 }
 
@@ -154,6 +191,7 @@ fn numbered(c: char) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn asking() -> Asking {
         Asking::new(Question {
@@ -162,24 +200,50 @@ mod tests {
         })
     }
 
+    /// Keys pressed one after another at the pace of someone typing.
+    struct Keys {
+        at: Instant,
+    }
+
+    impl Keys {
+        fn new() -> Self {
+            Self { at: Instant::now() }
+        }
+
+        /// `code`, a typist's beat after the last key.
+        fn typed(&mut self, asking: &mut Asking, code: KeyCode) -> Reply {
+            self.at += Duration::from_millis(150);
+            asking.on_key(code, self.at)
+        }
+
+        /// `code`, after a look at the question longer than its quiet.
+        fn after_a_pause(&mut self, asking: &mut Asking, code: KeyCode) -> Reply {
+            self.at += ASK_QUIET;
+            asking.on_key(code, self.at)
+        }
+    }
+
     #[test]
     fn enter_gives_the_answer_the_cursor_is_on() {
-        let mut moved = asking();
-        assert_eq!(moved.on_key(KeyCode::Up), Reply::Moved);
-        assert_eq!(moved.on_key(KeyCode::Enter), Reply::Answered(Answer::Trust));
+        let (mut moved, mut keys) = (asking(), Keys::new());
+        assert_eq!(keys.typed(&mut moved, KeyCode::Up), Reply::Moved);
+        assert_eq!(
+            keys.after_a_pause(&mut moved, KeyCode::Enter),
+            Reply::Answered(Answer::Trust)
+        );
     }
 
     #[test]
     fn a_digit_moves_the_cursor_without_answering() {
-        let mut asking = asking();
+        let (mut asking, mut keys) = (asking(), Keys::new());
 
-        assert_eq!(asking.on_key(KeyCode::Char('1')), Reply::Moved);
+        assert_eq!(keys.typed(&mut asking, KeyCode::Char('1')), Reply::Moved);
         assert_eq!(asking.selected(), Answer::Trust);
-        assert_eq!(asking.on_key(KeyCode::Char('2')), Reply::Moved);
+        assert_eq!(keys.typed(&mut asking, KeyCode::Char('2')), Reply::Moved);
         assert_eq!(asking.selected(), Answer::NotNow);
-        assert_eq!(asking.on_key(KeyCode::Char('1')), Reply::Moved);
+        assert_eq!(keys.typed(&mut asking, KeyCode::Char('1')), Reply::Moved);
         assert_eq!(
-            asking.on_key(KeyCode::Enter),
+            keys.after_a_pause(&mut asking, KeyCode::Enter),
             Reply::Answered(Answer::Trust)
         );
     }
@@ -188,45 +252,96 @@ mod tests {
     fn enter_alone_on_a_fresh_question_does_not_trust() {
         assert_eq!(asking().selected(), Answer::NotNow);
         assert_eq!(
-            asking().on_key(KeyCode::Enter),
+            asking().on_key(KeyCode::Enter, Instant::now()),
             Reply::Answered(Answer::NotNow)
         );
     }
 
     #[test]
     fn a_prompt_typed_at_the_question_and_sent_trusts_nothing() {
-        for prompt in ["hello", "make it work", "k", "1 more thing"] {
-            let mut asking = asking();
+        for prompt in [
+            "hello",
+            "make it work",
+            "k",
+            "1 more thing",
+            "1",
+            "21",
+            "2 1",
+        ] {
+            let (mut asking, mut keys) = (asking(), Keys::new());
             for c in prompt.chars() {
                 assert_ne!(
-                    asking.on_key(KeyCode::Char(c)),
+                    keys.typed(&mut asking, KeyCode::Char(c)),
                     Reply::Answered(Answer::Trust),
                     "{prompt}"
                 );
             }
-            assert_eq!(asking.on_key(KeyCode::Enter), Reply::Typed, "{prompt}");
+            assert!(
+                matches!(
+                    keys.typed(&mut asking, KeyCode::Enter),
+                    Reply::Typed | Reply::Hasty
+                ),
+                "{prompt}"
+            );
             assert_eq!(asking.selected(), Answer::NotNow, "{prompt}");
         }
     }
 
     #[test]
-    fn after_typing_enter_answers_again_once_it_has_been_held_back() {
-        let mut asking = asking();
-        assert_eq!(asking.on_key(KeyCode::Char('x')), Reply::Typed);
-        assert_eq!(asking.on_key(KeyCode::Enter), Reply::Typed);
+    fn an_enter_straight_after_choosing_trust_answers_nothing_and_puts_the_cursor_back() {
+        for choosing in [KeyCode::Char('1'), KeyCode::Up] {
+            let (mut asking, mut keys) = (asking(), Keys::new());
+            keys.typed(&mut asking, choosing);
+
+            assert_eq!(keys.typed(&mut asking, KeyCode::Enter), Reply::Hasty);
+            assert_eq!(asking.selected(), Answer::NotNow);
+            // The next Enter, however long after, gives the answer the cursor
+            // is now on: trusting has to be chosen again.
+            assert_eq!(
+                keys.after_a_pause(&mut asking, KeyCode::Enter),
+                Reply::Answered(Answer::NotNow)
+            );
+        }
+    }
+
+    #[test]
+    fn moving_back_onto_trust_starts_its_wait_again() {
+        let (mut asking, mut keys) = (asking(), Keys::new());
+        keys.typed(&mut asking, KeyCode::Up);
+        keys.after_a_pause(&mut asking, KeyCode::Down);
+        keys.after_a_pause(&mut asking, KeyCode::Up);
+
+        assert_eq!(keys.typed(&mut asking, KeyCode::Enter), Reply::Hasty);
+    }
+
+    #[test]
+    fn an_enter_straight_after_choosing_not_now_answers_it() {
+        let (mut asking, mut keys) = (asking(), Keys::new());
+        keys.typed(&mut asking, KeyCode::Char('2'));
         assert_eq!(
-            asking.on_key(KeyCode::Enter),
+            keys.typed(&mut asking, KeyCode::Enter),
+            Reply::Answered(Answer::NotNow)
+        );
+    }
+
+    #[test]
+    fn after_typing_enter_answers_again_once_it_has_been_held_back() {
+        let (mut asking, mut keys) = (asking(), Keys::new());
+        assert_eq!(keys.typed(&mut asking, KeyCode::Char('x')), Reply::Typed);
+        assert_eq!(keys.typed(&mut asking, KeyCode::Enter), Reply::Typed);
+        assert_eq!(
+            keys.typed(&mut asking, KeyCode::Enter),
             Reply::Answered(Answer::NotNow)
         );
     }
 
     #[test]
     fn an_arrow_after_typing_chooses_and_enter_then_answers() {
-        let mut asking = asking();
-        asking.on_key(KeyCode::Char('x'));
-        assert_eq!(asking.on_key(KeyCode::Up), Reply::Moved);
+        let (mut asking, mut keys) = (asking(), Keys::new());
+        keys.typed(&mut asking, KeyCode::Char('x'));
+        assert_eq!(keys.typed(&mut asking, KeyCode::Up), Reply::Moved);
         assert_eq!(
-            asking.on_key(KeyCode::Enter),
+            keys.after_a_pause(&mut asking, KeyCode::Enter),
             Reply::Answered(Answer::Trust)
         );
     }
@@ -234,18 +349,18 @@ mod tests {
     #[test]
     fn esc_opens_the_session_without_the_file() {
         assert_eq!(
-            asking().on_key(KeyCode::Esc),
+            asking().on_key(KeyCode::Esc, Instant::now()),
             Reply::Answered(Answer::NotNow)
         );
     }
 
     #[test]
     fn the_cursor_stays_on_the_answers() {
-        let mut asking = asking();
-        asking.on_key(KeyCode::Down);
+        let (mut asking, mut keys) = (asking(), Keys::new());
+        keys.typed(&mut asking, KeyCode::Down);
         assert_eq!(asking.at, 1);
-        asking.on_key(KeyCode::Up);
-        asking.on_key(KeyCode::Up);
+        keys.typed(&mut asking, KeyCode::Up);
+        keys.typed(&mut asking, KeyCode::Up);
         assert_eq!(asking.at, 0);
     }
 }

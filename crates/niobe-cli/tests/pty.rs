@@ -2527,6 +2527,36 @@ fn a_prompt_typed_and_sent_at_the_trust_question_trusts_nothing() {
     );
 }
 
+/// A first prompt that is the digit `1`, sent with Enter at the pace of
+/// typing, chooses trusting as the numbered answer does but does not give it:
+/// the Enter came before anyone could have looked at the cursor.
+#[test]
+fn a_prompt_of_the_digit_one_sent_at_the_trust_question_trusts_nothing() {
+    let (repo, home, terminal, slave, mut shell) = answering_the_trust_question(b"1");
+    std::thread::sleep(Duration::from_millis(150));
+    terminal.typed(ENTER);
+    terminal.shows("straight after choosing");
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back(
+        &drawn,
+        cooked,
+        "a quit after sending 1 at the trust question",
+    );
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started though nobody answered the question"
+    );
+    assert!(
+        !home.path().join("niobe").join("trusted.list").exists(),
+        "a prompt of 1 sent at the question recorded the file as trusted"
+    );
+}
+
 /// Answering no opens the session as an untrusted file always has, says so
 /// in a line, and records nothing.
 #[test]
