@@ -1946,6 +1946,30 @@ fn f8_shows_what_the_agent_is_told_and_remembers_in_the_shell() {
     assert_snapshot("memory-reading-120x30", &frame);
 }
 
+/// A file the agent is given that is too large to read is listed with its
+/// size, and says its text is not shown, rather than being left out.
+#[test]
+fn f8_lists_a_file_too_large_to_read_with_its_size() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = running_session();
+    press(&mut app, KeyCode::F(8));
+    assert!(app.take_memory_request());
+    app.set_memory(vec![niobe_tui::MemoryFile {
+        scope: niobe_tui::memory::Scope::Imported,
+        path: "docs/big.md".to_owned(),
+        named: "docs/big.md".to_owned(),
+        depth: 1,
+        text: None,
+        bytes: Some(5 * 1024 * 1024),
+        note: None,
+        editable: Some("/home/me/docs/big.md".to_owned()),
+    }]);
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("docs/big.md"), "{frame}");
+    assert!(frame.contains("5.0 MB · text not shown"), "{frame}");
+}
+
 /// With no memory at all the view says so, and where the backend offers
 /// `/init`, that it writes one.
 #[test]

@@ -81,7 +81,8 @@ pub struct MemoryFile {
     pub depth: usize,
     /// What it holds, where it could be read.
     pub text: Option<String>,
-    /// How large it is, in bytes, where it could be read.
+    /// How large it is, in bytes, where it could be read or was too large to
+    /// be: a size with no text is a file too large to show.
     pub bytes: Option<u64>,
     /// What the backend's own index says of it, for one of its notes.
     pub note: Option<String>,
@@ -179,6 +180,7 @@ impl View {
             KeyCode::End => self.at = last,
             KeyCode::Enter | KeyCode::Right => match self.current() {
                 Some(file) if file.text.is_some() => self.reading = Some((self.at, 0)),
+                Some(file) if file.bytes.is_some() => return Outcome::Say(TOO_LARGE),
                 Some(_) => return Outcome::Say(UNREAD),
                 None => return Outcome::Close,
             },
@@ -193,6 +195,9 @@ const NOT_EDITABLE: &str = "Only a regular file that is not a link is opened in 
 
 /// What Enter says on a file that could not be read.
 const UNREAD: &str = "That file could not be read";
+
+/// What Enter says on a file there but too large to read.
+const TOO_LARGE: &str = "That file is too large to show; `e` opens it in the text editor";
 
 /// Widest the view is drawn, in columns: a path and its figures, side by side.
 const COLUMNS: u16 = 100;
@@ -349,8 +354,9 @@ fn row(app: &App, file: &MemoryFile, on_it: bool, width: usize, theme: &Theme) -
     Line::from(spans)
 }
 
-/// `12 lines · 1.2 kB`: how large a file is, as read. An em dash where it
-/// could not be read; no token figure, which nothing measured.
+/// `12 lines · 1.2 kB`: how large a file is, as read; its bytes alone where
+/// it was too large to read, and an em dash where it could not be read at
+/// all. No token figure, which nothing measured.
 fn sized(file: &MemoryFile) -> String {
     match (&file.text, file.bytes) {
         (Some(text), Some(bytes)) => {
@@ -358,7 +364,8 @@ fn sized(file: &MemoryFile) -> String {
             let unit = if lines == 1 { "line" } else { "lines" };
             format!("{lines} {unit} · {}", crate::app::human_bytes(bytes))
         }
-        _ => "—".to_owned(),
+        (None, Some(bytes)) => format!("{} · text not shown", crate::app::human_bytes(bytes)),
+        (Some(_), None) | (None, None) => "—".to_owned(),
     }
 }
 
@@ -464,6 +471,28 @@ mod tests {
             ..View::default()
         };
         assert_eq!(view.on_key(key(KeyCode::Enter)), Outcome::Say(UNREAD));
+        assert_eq!(view.reading, None);
+    }
+
+    fn too_large(path: &str, bytes: u64) -> MemoryFile {
+        MemoryFile {
+            text: None,
+            bytes: Some(bytes),
+            ..file(path, None, true)
+        }
+    }
+
+    #[test]
+    fn a_file_too_large_to_read_shows_its_size_and_says_its_text_is_not_shown() {
+        assert_eq!(
+            sized(&too_large("big.md", 2 * 1024 * 1024)),
+            "2.0 MB · text not shown"
+        );
+        let mut view = View {
+            files: Some(vec![too_large("big.md", 2 * 1024 * 1024)]),
+            ..View::default()
+        };
+        assert_eq!(view.on_key(key(KeyCode::Enter)), Outcome::Say(TOO_LARGE));
         assert_eq!(view.reading, None);
     }
 

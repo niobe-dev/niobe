@@ -5,7 +5,8 @@
 //!
 //! The files are read when the view opens, on the loop's thread: a handful of
 //! instruction files and notes, each read only where it is a regular file and
-//! no larger than the bridge's limit, without waiting on one that is not. A
+//! no larger than the bridge's limit — a larger one is listed with its size —
+//! without waiting on one that is not. A
 //! read each time the view opens is what lets it show a file the session has
 //! just changed as it is now.
 

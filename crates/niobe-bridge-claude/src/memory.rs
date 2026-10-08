@@ -20,11 +20,12 @@
 //!   importing file, from `~` or absolute, at most [`IMPORT_DEPTH`] deep, and
 //!   not inside a code span or a fenced block;
 //! * the CLI's auto-memory index, `MEMORY.md` in the project's directory under
-//!   the configuration directory, and the entries it links to.
+//!   the configuration directory — the main checkout's, for a session in a
+//!   linked git worktree, as the CLI keeps it — and the entries it links to.
 //!
 //! A file nested below where the session runs is loaded by the CLI only when
-//! the agent reads in that directory, so it is not listed. Nothing here is
-//! written.
+//! the agent reads in that directory, so it is not listed. A file larger than
+//! [`LIMIT`] is listed with its size and not read. Nothing here is written.
 //!
 //! Nothing read is a credential, whatever a file names. Each file is judged
 //! where the filesystem resolves it, links and `..` followed, before it is
@@ -82,7 +83,8 @@ pub struct Source {
     /// What it holds, where it could be read as a regular file of at most
     /// [`LIMIT`] bytes and was not [`Withheld`].
     pub text: Option<String>,
-    /// How many bytes it holds, where it could be read.
+    /// How many bytes it holds, where it was read or is a regular file too
+    /// large to read: one with a size and no text is the latter.
     pub bytes: Option<u64>,
     /// What the auto-memory index says of an entry.
     pub note: Option<String>,
@@ -176,7 +178,7 @@ pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
         found.loaded(Scope::Local, &dir.join(LOCAL), lookup);
     }
     if let Some(config) = lookup.config {
-        let dir = crate::transcript::directory(config, lookup.cwd).join(AUTO_DIR);
+        let dir = crate::transcript::directory(config, &main_checkout(lookup.cwd)).join(AUTO_DIR);
         found.index(&dir.join(INDEX));
     }
     found.sources
@@ -203,6 +205,8 @@ struct Found {
 enum Opened {
     /// Listed and not read.
     Withheld(Withheld),
+    /// Listed with its size and not read: larger than [`LIMIT`].
+    TooLarge(u64),
     /// Read: where it really is, what it holds and how many bytes that is.
     Read {
         real: PathBuf,
@@ -228,6 +232,11 @@ impl Found {
             Some(Opened::Withheld(withheld)) => {
                 self.sources
                     .push(Source::withheld(scope, path, depth, withheld));
+                return;
+            }
+            Some(Opened::TooLarge(bytes)) => {
+                self.sources
+                    .push(Source::too_large(scope, path, depth, bytes));
                 return;
             }
             Some(Opened::Read { real, text, bytes }) => (real, text, bytes),
@@ -264,6 +273,11 @@ impl Found {
                     .push(Source::withheld(Scope::AutoMemory, path, 0, withheld));
                 return;
             }
+            Some(Opened::TooLarge(bytes)) => {
+                self.sources
+                    .push(Source::too_large(Scope::AutoMemory, path, 0, bytes));
+                return;
+            }
             Some(Opened::Read { real, text, bytes }) => (real, text, bytes),
         };
         let entries = entries(&text);
@@ -286,6 +300,9 @@ impl Found {
                 None => continue,
                 Some(Opened::Withheld(withheld)) => {
                     Source::withheld(Scope::AutoEntry, &target, 1, withheld)
+                }
+                Some(Opened::TooLarge(bytes)) => {
+                    Source::too_large(Scope::AutoEntry, &target, 1, bytes)
                 }
                 Some(Opened::Read { text, bytes, .. }) => Source {
                     scope: Scope::AutoEntry,
@@ -319,7 +336,13 @@ impl Found {
         if self.full {
             return None;
         }
-        let (text, bytes) = read(&real)?;
+        let (text, bytes) = match read(&real)? {
+            Contents::Text(text, bytes) => (text, bytes),
+            Contents::TooLarge(bytes) => {
+                self.seen.insert(real);
+                return Some(Opened::TooLarge(bytes));
+            }
+        };
         let total = self.read.saturating_add(bytes);
         if total > BUDGET {
             self.full = true;
@@ -332,6 +355,20 @@ impl Found {
 }
 
 impl Source {
+    /// A file listed where it is, with its size, and not read: it is larger
+    /// than [`LIMIT`].
+    fn too_large(scope: Scope, path: &Path, depth: usize, bytes: u64) -> Self {
+        Self {
+            scope,
+            path: path.to_path_buf(),
+            depth,
+            text: None,
+            bytes: Some(bytes),
+            note: None,
+            withheld: None,
+        }
+    }
+
     /// A file listed where it is and not opened, for `withheld`.
     fn withheld(scope: Scope, path: &Path, depth: usize, withheld: Withheld) -> Self {
         Self {
@@ -445,29 +482,102 @@ impl Places {
     }
 }
 
+/// The checkout whose auto-memory a session at `cwd` is given: the main one
+/// where `cwd` is a linked git worktree, and `cwd` itself otherwise.
+///
+/// The CLI keeps one project's notes for all of its worktrees: in a linked
+/// worktree its `init` names the main checkout's flattened directory as
+/// `memory_paths.auto` (seen live under Claude Code 2.1.288). A worktree's
+/// `.git` is a file whose `gitdir:` line names its state under the main
+/// checkout's `.git/worktrees/`, and that state's `commondir` leads back to
+/// the main `.git`, whose parent is the main checkout. The path is worked out
+/// as written, `..` taken off by hand rather than by the filesystem, because
+/// the CLI flattens the path as git writes it, links unresolved.
+fn main_checkout(cwd: &Path) -> PathBuf {
+    common_git_dir(cwd)
+        .filter(|common| common.file_name().is_some_and(|name| name == ".git"))
+        .and_then(|common| common.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+/// The `.git` directory shared by the worktree at `cwd`, where its `.git` is
+/// a worktree's pointer file.
+fn common_git_dir(cwd: &Path) -> Option<PathBuf> {
+    let pointer = small_text(&cwd.join(".git"))?;
+    let state = cwd.join(pointer.trim().strip_prefix("gitdir:")?.trim());
+    let common = small_text(&state.join("commondir"))?;
+    Some(lexical(&state.join(common.trim())))
+}
+
+/// The text of a regular file of at most a few hundred bytes, as git's own
+/// pointer files are, read without waiting on anything else.
+fn small_text(path: &Path) -> Option<String> {
+    const POINTER: u64 = 4096;
+    let file = crate::spilled::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(POINTER).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// `path` with each `.` dropped and each `..` taking off the name before it.
+fn lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                out.push(component.as_os_str());
+            }
+        }
+    }
+    out
+}
+
 /// `path` as the filesystem resolves it, or as written where it cannot.
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The text of a regular file at `path` of at most [`LIMIT`] bytes, and how
-/// many bytes it held, read without waiting on it. `None` for anything else:
-/// a memory file a repository linked to a device or a FIFO is not one the
-/// agent was given.
-fn read(path: &Path) -> Option<(String, u64)> {
+/// A regular file at `path`, read without waiting on it.
+enum Contents {
+    /// At most [`LIMIT`] bytes: its text and how many bytes it held.
+    Text(String, u64),
+    /// Larger than [`LIMIT`], and so not read: how many bytes it holds.
+    TooLarge(u64),
+}
+
+/// What the regular file at `path` holds, read without waiting on it. `None`
+/// for anything else: a memory file a repository linked to a device or a FIFO
+/// is not one the agent was given.
+fn read(path: &Path) -> Option<Contents> {
     let file = crate::spilled::open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
         return None;
+    }
+    if meta.len() > LIMIT {
+        return Some(Contents::TooLarge(meta.len()));
     }
     let mut bytes = Vec::new();
     file.take(LIMIT.saturating_add(1))
         .read_to_end(&mut bytes)
         .ok()?;
     let size = bytes.len() as u64;
+    // Grown past the limit since its size was looked at.
     if size > LIMIT {
-        return None;
+        return Some(Contents::TooLarge(size));
     }
-    Some((String::from_utf8_lossy(&bytes).into_owned(), size))
+    Some(Contents::Text(
+        String::from_utf8_lossy(&bytes).into_owned(),
+        size,
+    ))
 }
 
 /// Every `@path` in `text` that is an import: a word that starts with `@`,
@@ -945,6 +1055,95 @@ mod tests {
             home: None,
         });
         assert!(in_dir(&found, dir.path()).len() <= LOOKUPS);
+    }
+
+    #[test]
+    fn an_import_too_large_to_read_is_listed_with_its_size_and_no_text() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let repo = dir.path().join("repo");
+        let size = 2 * LIMIT;
+        write(&repo.join("CLAUDE.md"), "@big.md @after.md\n");
+        write(
+            &repo.join("big.md"),
+            &"x".repeat(usize::try_from(size).expect("two mebibytes fit")),
+        );
+        write(&repo.join("after.md"), "after\n");
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: None,
+            home: None,
+        });
+        let big = listed(&found, &repo.join("big.md"));
+        assert_eq!(
+            (
+                big.scope,
+                big.depth,
+                big.text.as_deref(),
+                big.bytes,
+                big.withheld
+            ),
+            (Scope::Imported, 1, None, Some(size), None)
+        );
+        assert_eq!(in_dir(&found, dir.path()).len(), 3, "{found:?}");
+    }
+
+    /// A git worktree's `.git` is a file pointing into the main checkout's
+    /// `.git/worktrees/`, whose `commondir` leads back to the main `.git`.
+    fn worktree_of(main: &Path, name: &str) -> PathBuf {
+        let state = main.join(".git").join("worktrees").join(name);
+        write(&state.join("commondir"), "../..\n");
+        write(&state.join("HEAD"), "ref: refs/heads/wt\n");
+        let worktree = main
+            .parent()
+            .expect("the main checkout has a parent")
+            .join(name);
+        write(
+            &worktree.join(".git"),
+            &format!("gitdir: {}\n", state.display()),
+        );
+        worktree
+    }
+
+    #[test]
+    fn a_session_in_a_git_worktree_is_given_the_main_checkouts_auto_memory() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let config = dir.path().join("config");
+        let main = dir.path().join("wtrepo");
+        write(&main.join(".git").join("HEAD"), "ref: refs/heads/main\n");
+        let worktree = worktree_of(&main, "wtrepo-wt");
+        let memory = crate::transcript::directory(&config, &main).join("memory");
+        write(&memory.join("MEMORY.md"), "- [Facts](facts.md) — kept\n");
+        write(&memory.join("facts.md"), "facts\n");
+        let found = sources(&Lookup {
+            cwd: &worktree,
+            config: Some(&config),
+            home: None,
+        });
+        let auto: Vec<(Scope, PathBuf)> = found
+            .iter()
+            .filter(|source| matches!(source.scope, Scope::AutoMemory | Scope::AutoEntry))
+            .map(|source| (source.scope, source.path.clone()))
+            .collect();
+        assert_eq!(
+            auto,
+            [
+                (Scope::AutoMemory, memory.join("MEMORY.md")),
+                (Scope::AutoEntry, memory.join("facts.md")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_checkout_whose_git_is_a_directory_is_its_own_main_checkout() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let main = dir.path().join("repo");
+        write(&main.join(".git").join("HEAD"), "ref: refs/heads/main\n");
+        assert_eq!(main_checkout(&main), main);
+        let worktree = worktree_of(&main, "wt");
+        assert_eq!(main_checkout(&worktree), main);
+        let lost = dir.path().join("lost");
+        write(&lost.join(".git"), "not a pointer\n");
+        assert_eq!(main_checkout(&lost), lost);
     }
 
     #[cfg(unix)]
