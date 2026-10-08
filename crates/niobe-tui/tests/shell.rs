@@ -1270,6 +1270,85 @@ fn a_question_about_a_tool_with_no_target_is_drawn_as_its_picture() {
     );
 }
 
+/// Every row of the question box between its top and bottom borders has its
+/// right border in the column the top border's `┐` is in.
+fn assert_the_question_box_holds(frame: &str) {
+    let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+    let top = rows
+        .iter()
+        .position(|row| row.iter().collect::<String>().contains("? claude asks"))
+        .unwrap_or_else(|| panic!("no question is drawn:\n{frame}"));
+    let column = rows[top]
+        .iter()
+        .position(|&cell| cell == '┐')
+        .unwrap_or_else(|| panic!("the question's top border has no corner:\n{frame}"));
+    let bottom = (top..rows.len())
+        .find(|&at| rows[at].get(column) == Some(&'┘'))
+        .unwrap_or_else(|| panic!("the question's bottom border is not under its top:\n{frame}"));
+    for (at, row) in rows.iter().enumerate().take(bottom).skip(top + 1) {
+        assert_eq!(
+            row.get(column),
+            Some(&'│'),
+            "row {at} breaks the question's right border:\n{frame}"
+        );
+    }
+}
+
+#[test]
+fn a_long_mcp_tool_name_keeps_the_questions_border_and_reads_whole() {
+    let name = "create_pull_request_review_comment_reply_with_a_suggested_change";
+    let label = format!("github·{name}");
+    assert!(label.chars().count() >= 64);
+    for (width, height) in [(80, 24), (100, 40)] {
+        let mut app = running_session();
+        app.apply(&Event::PermissionRequest {
+            id: "toolu_long_name".into(),
+            tool: format!("mcp__github__{name}"),
+            input: r#"{"body":"looks good"}"#.to_owned(),
+            target: None,
+            agent: None,
+        });
+        let frame = screen(&mut app, width, height);
+        assert_the_question_box_holds(&frame);
+        let head: String = question_cells(&frame)
+            .into_iter()
+            .skip_while(|row| !row.starts_with("to run "))
+            .take_while(|row| !row.trim().is_empty() && !row.contains("body"))
+            .map(|row| row.trim_end().to_owned())
+            .collect();
+        assert_eq!(
+            head,
+            format!("to run {label}"),
+            "{width}x{height}:\n{frame}"
+        );
+    }
+}
+
+#[test]
+fn a_control_character_in_a_question_does_not_move_its_border() {
+    for (target, input) in [
+        (None, "{\"cmd\":\"\u{1b}[31mred\u{1b}[0m\"}".to_owned()),
+        (
+            Some("printf 'a\rb'".to_owned()),
+            "{\"command\":\"printf 'a\rb'\"}".to_owned(),
+        ),
+        (
+            Some("echo \u{0}nul\u{7}bell".to_owned()),
+            "{\"command\":\"echo \u{0}nul\u{7}bell\"}".to_owned(),
+        ),
+    ] {
+        let mut app = running_session();
+        app.apply(&Event::PermissionRequest {
+            id: "toolu_control".into(),
+            tool: "Bash".to_owned(),
+            input,
+            target,
+            agent: None,
+        });
+        assert_the_question_box_holds(&screen(&mut app, 100, 40));
+    }
+}
+
 #[test]
 fn a_long_request_wraps_inside_the_question() {
     let mut app = running_session();

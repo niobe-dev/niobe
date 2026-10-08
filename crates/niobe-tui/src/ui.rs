@@ -2683,7 +2683,14 @@ fn question_lines(
 
     let mut lines = vec![question_top(app, ask, outer, theme)];
     lines.extend(body.into_iter().map(|line| {
-        let used = line.width();
+        // Measured as ratatui draws it: `Line::width` counts a control
+        // character as a cell, which ratatui does not draw, so a row holding
+        // one would be padded short and pull its border in.
+        let used: usize = line
+            .spans
+            .iter()
+            .map(|span| text::width(&span.content))
+            .sum();
         let mut spans = vec![Span::raw(indent.clone()), Span::styled("│ ", border)];
         spans.extend(
             line.spans
@@ -2718,8 +2725,9 @@ struct Question {
 /// What is inside a question's frame, in the parts a question too tall for
 /// its pane is cut by.
 struct QuestionBody {
-    /// `to run <tool>`.
-    head: Line<'static>,
+    /// `to run <tool>`, wrapped: a tool's name is what is being approved, so
+    /// it is read whole rather than cut at the frame.
+    head: Vec<Line<'static>>,
     /// What would run: the target, and the arguments whole under it.
     call: Vec<Line<'static>>,
     /// The numbered answers, after a blank row.
@@ -2732,11 +2740,15 @@ struct QuestionBody {
 
 impl QuestionBody {
     fn len(&self) -> usize {
-        1 + self.call.len() + self.answers.len() + self.consequences.len() + self.rest.len()
+        self.head.len()
+            + self.call.len()
+            + self.answers.len()
+            + self.consequences.len()
+            + self.rest.len()
     }
 
     fn whole(self) -> Vec<Line<'static>> {
-        let mut lines = vec![self.head];
+        let mut lines = self.head;
         lines.extend(self.call);
         lines.extend(self.answers);
         lines.extend(self.consequences);
@@ -2749,7 +2761,7 @@ impl QuestionBody {
     /// last lines, down to its first, which is kept with what is asked and
     /// every answer.
     fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let fixed = 1 + self.answers.len() + self.rest.len() + 1;
+        let fixed = self.head.len() + self.answers.len() + self.rest.len() + 1;
         let room = rows.saturating_sub(fixed);
         let hidden_consequences = std::mem::take(&mut self.consequences).len();
         let kept = room.clamp(1, self.call.len().max(1));
@@ -2774,10 +2786,7 @@ impl QuestionBody {
 fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionBody {
     let plain = Style::new().fg(theme.fg);
 
-    let head = Line::from(vec![
-        Span::styled("to run ", plain),
-        Span::styled(tool_label(&ask.tool), plain.bold()),
-    ]);
+    let head = question_head(&tool_label(&ask.tool), inner, plain);
     // A call with no target has only its arguments to show, and they are
     // laid out by key unless Ctrl+T asked for them as they are sent.
     let laid_out = match (&ask.target, app.diffs_open()) {
@@ -2839,6 +2848,23 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
         consequences,
         rest,
     }
+}
+
+/// `to run <tool>` wrapped to `inner` columns, the tool's name in bold on
+/// every row it takes.
+fn question_head(label: &str, inner: usize, plain: Style) -> Vec<Line<'static>> {
+    const TO_RUN: &str = "to run ";
+    text::wrap_exact(&format!("{TO_RUN}{label}"), inner)
+        .into_iter()
+        .enumerate()
+        .map(|(at, row)| match (at, row.strip_prefix(TO_RUN)) {
+            (0, Some(name)) => Line::from(vec![
+                Span::styled(TO_RUN, plain),
+                Span::styled(name.to_owned(), plain.bold()),
+            ]),
+            _ => Line::from(Span::styled(row, plain.bold())),
+        })
+        .collect()
 }
 
 /// `┌ ? claude asks ──── blocks turn 3 ┐`: who is asking at the left, in the
