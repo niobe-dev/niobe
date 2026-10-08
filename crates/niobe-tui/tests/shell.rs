@@ -1873,6 +1873,56 @@ fn the_model_list_shows_every_model_the_backend_offers_by_name_and_id() {
     }
 }
 
+/// A list longer than the screen is tall scrolls with the cursor: the row it
+/// is on and the keys under the list are drawn wherever it goes, so Enter
+/// never picks a model nobody can see.
+#[test]
+fn a_model_list_taller_than_the_screen_keeps_the_cursor_and_the_keys_in_view() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session().with_profile(SelectedProfile {
+        name: "max".to_owned(),
+        backend: Backend::Claude,
+        models: Vec::new(),
+        billing: None,
+    });
+    app.apply(&Event::Models {
+        models: (0..40)
+            .map(|n| niobe_core::event::ModelOption {
+                id: format!("model-{n:02}"),
+                name: Some(format!("Model {n:02}")),
+                description: Some("A model".to_owned()),
+                resolves_to: None,
+            })
+            .collect(),
+    });
+    app.on_key(f4());
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+    let steps = std::iter::repeat_n(down, 39).chain(std::iter::repeat_n(up, 39));
+    let mut at = 0_usize;
+    for (step, key) in std::iter::once(None).chain(steps.map(Some)).enumerate() {
+        if let Some(key) = key {
+            app.on_key(key);
+            at = match key.code {
+                KeyCode::Down => at + 1,
+                _ => at - 1,
+            };
+        }
+        let frame = screen(&mut app, 80, 24);
+        assert!(
+            frame
+                .lines()
+                .any(|row| row.contains(&format!("› Model {at:02}"))),
+            "step {step}: the cursor on Model {at:02} is not drawn:\n{frame}"
+        );
+        assert!(
+            frame.contains("Esc keep this one"),
+            "step {step}: the keys are not drawn:\n{frame}"
+        );
+    }
+}
+
 /// A profile that names models shows those, in its order, and says how many
 /// of the backend's it leaves out.
 #[test]

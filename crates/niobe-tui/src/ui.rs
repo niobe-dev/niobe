@@ -220,6 +220,8 @@ fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
 /// sends, and what it is for, dimmed; each in a column as wide as the list's
 /// widest. Where the profile left some of what the backend offers out, a line
 /// under the rows says how many, so the list does not read as all there is.
+/// A list taller than the screen shows the rows around the cursor, with the
+/// keys always under them.
 fn draw_pick(
     frame: &mut Frame,
     body: Rect,
@@ -245,8 +247,41 @@ fn draw_pick(
     let room = text_width.saturating_sub(2);
     let columns = PickColumns::of(picker, described);
     let plain = Style::new().fg(theme.dialog_fg);
+
+    let mut tail: Vec<Line> = Vec::new();
+    if picker.more > 0 {
+        tail.push(Line::from(""));
+        tail.push(
+            Line::from(text::truncate(
+                &format!(
+                    "  {} more the backend offers; the profile's models leave them out",
+                    picker.more
+                ),
+                text_width,
+            ))
+            .style(Style::new().fg(theme.dim)),
+        );
+    }
+    tail.push(Line::from(""));
+    // Wrapped to the box, which is sized for what it offers: cut at its edge
+    // the last key would read as a different one.
+    tail.extend(
+        text::wrap(keys, text_width)
+            .into_iter()
+            .map(|line| Line::from(line).style(plain)),
+    );
+
+    // The rows the box has once the blank row above the list and everything
+    // under it are drawn. A list longer than that shows the part of it the
+    // cursor is in, so the row Enter would pick and the keys are always on
+    // screen.
+    let rows = usize::from(body.height)
+        .saturating_sub(DIALOG_CLEARANCE)
+        .saturating_sub(1 + tail.len())
+        .max(1);
+    let first = picker.at.saturating_sub(rows - 1);
     let mut lines: Vec<Line> = vec![Line::from("")];
-    for (i, choice) in picker.options.iter().enumerate() {
+    for (i, choice) in picker.options.iter().enumerate().skip(first).take(rows) {
         let on_it = i == picker.at;
         let marker = match (on_it, current == Some(i)) {
             (true, _) => PICK_CURSOR,
@@ -268,27 +303,7 @@ fn draw_pick(
             ]),
         });
     }
-    if picker.more > 0 {
-        lines.push(Line::from(""));
-        lines.push(
-            Line::from(text::truncate(
-                &format!(
-                    "  {} more the backend offers; the profile's models leave them out",
-                    picker.more
-                ),
-                text_width,
-            ))
-            .style(Style::new().fg(theme.dim)),
-        );
-    }
-    lines.push(Line::from(""));
-    // Wrapped to the box, which is sized for what it offers: cut at its edge
-    // the last key would read as a different one.
-    lines.extend(
-        text::wrap(keys, text_width)
-            .into_iter()
-            .map(|line| Line::from(line).style(plain)),
-    );
+    lines.extend(tail);
 
     let inner = dialog(frame, body, (width, lines.len()), (title, footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
@@ -662,6 +677,10 @@ fn trust_grants(
 /// Columns a dialog's frame and padding take from its width: a border and two
 /// columns of padding on each side.
 pub(crate) const DIALOG_INSET: usize = 6;
+
+/// The rows of the body a dialog's contents cannot have: its top and bottom
+/// borders, and the row [`dialog`] leaves under it.
+const DIALOG_CLEARANCE: usize = 3;
 
 /// Draws a dialog's frame, centred in `body` over whatever is there, with its
 /// shadow, and returns the area inside it. `size` is the width and the number
