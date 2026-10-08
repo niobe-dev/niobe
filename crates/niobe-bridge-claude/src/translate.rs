@@ -489,6 +489,9 @@ pub struct Translator {
     /// nothing here knows: that of a resumed session whose transcript could
     /// not be read, until its first `result` or a `/clear`.
     restored_unknown: bool,
+    /// The message types and system subtypes already reported as unread, so a
+    /// shape the CLI repeats is said once rather than after every turn.
+    unread_said: BTreeSet<String>,
     /// The models that first bill named, whose cost from then on is short by
     /// an amount nothing here knows. Each settlement of one is followed by a
     /// record no cost covers, so the session's figure stays a floor.
@@ -582,6 +585,7 @@ impl Translator {
             reported: BTreeMap::new(),
             unknown_spend: None,
             restored_unknown: false,
+            unread_said: BTreeSet::new(),
             short: BTreeSet::new(),
             open_requests: BTreeMap::new(),
             unattributed: Vec::new(),
@@ -792,11 +796,19 @@ impl Translator {
             .into_iter()
             .collect();
         out.extend(match serde_json::from_str::<wire::Message>(line) {
-            Ok(wire::Message::Unknown) => vec![unread(format!(
-                "the CLI sent a message of type `{}`, which this version of Niobe does not \
-                 know how to read. It was not counted.",
-                kind_of(line)
-            ))],
+            Ok(wire::Message::Unknown) => {
+                let kind = kind_of(line);
+                self.unread_once(
+                    format!("type:{kind}"),
+                    format!(
+                        "the CLI sent a message of type `{kind}`, which this version of Niobe \
+                         does not know how to read. It was not counted. Later ones of this \
+                         type are not reported again."
+                    ),
+                )
+                .into_iter()
+                .collect()
+            }
             Ok(message) => self.message(message),
             Err(error) => vec![warn(format!(
                 "the CLI sent a `{}` message this version of Niobe could not read, so it was \
@@ -1067,12 +1079,23 @@ impl Translator {
                     out.push(Event::Notice { message });
                 }
             }
-            other => out.push(unread(format!(
-                "the CLI sent a system message of subtype `{}`, which this version of Niobe \
-                 does not know how to read.",
-                other.unwrap_or("(none)")
-            ))),
+            other => {
+                let subtype = other.unwrap_or("(none)");
+                out.extend(self.unread_once(
+                    format!("system:{subtype}"),
+                    format!(
+                        "the CLI sent a system message of subtype `{subtype}`, which this \
+                         version of Niobe does not know how to read. Later ones of this \
+                         subtype are not reported again."
+                    ),
+                ));
+            }
         }
+    }
+
+    /// The notice for a shape nobody has read, the first time `key` is seen.
+    fn unread_once(&mut self, key: String, message: String) -> Option<Event> {
+        self.unread_said.insert(key).then(|| unread(message))
     }
 
     /// Whether `id` is the call that spawned one of this session's
@@ -4025,6 +4048,43 @@ mod tests {
     const FIRST_TURN_ON_THE_FAMILY: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":10},"modelUsage":{"opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5,"canonicalModel":"opus-5"}},"total_cost_usd":0.5}"#;
     const SECOND_TURN_ON_THE_WINDOW: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"opus-5":{"inputTokens":100,"outputTokens":10,"costUSD":0.5,"canonicalModel":"opus-5"},"opus-5[1m]":{"inputTokens":40,"outputTokens":4,"costUSD":0.3,"canonicalModel":"opus-5"}},"total_cost_usd":0.8}"#;
     const MAIN_ON_THE_WINDOW_AGENT_ON_THE_FAMILY: &str = r#"{"type":"result","subtype":"success","usage":{"input_tokens":150,"output_tokens":15},"modelUsage":{"opus-5[1m]":{"inputTokens":100,"outputTokens":10,"costUSD":0.6,"canonicalModel":"opus-5"},"opus-5":{"inputTokens":50,"outputTokens":5,"costUSD":0.3,"canonicalModel":"opus-5"}},"total_cost_usd":0.9}"#;
+
+    /// A shape the CLI repeats after nearly every turn would otherwise fill
+    /// the transcript with the same sentence; once says that Niobe is not
+    /// reading it, and a second kind is still news.
+    #[test]
+    fn an_unknown_message_is_reported_once_per_kind_in_a_session() {
+        let mut translator = Translator::new("max");
+        let first = translator.line(r#"{"type":"command_lifecycle","uuid":"a"}"#);
+        assert_eq!(notices(&first).len(), 1, "the first one is reported");
+        assert!(
+            translator
+                .line(r#"{"type":"command_lifecycle","uuid":"b"}"#)
+                .is_empty()
+        );
+        assert_eq!(
+            notices(&translator.line(r#"{"type":"another_kind"}"#)).len(),
+            1,
+            "a different type is a different shape"
+        );
+    }
+
+    #[test]
+    fn an_unknown_system_subtype_is_reported_once_per_subtype_in_a_session() {
+        let mut translator = Translator::new("max");
+        let line = r#"{"type":"system","subtype":"permission_check_status"}"#;
+        let first = translator.line(line);
+        assert_eq!(notices(&first).len(), 1);
+        assert!(
+            warnings(&first).is_empty(),
+            "a shape nobody read is not an error"
+        );
+        assert!(translator.line(line).is_empty());
+        assert_eq!(
+            notices(&translator.line(r#"{"type":"system","subtype":"other_status"}"#)).len(),
+            1
+        );
+    }
 
     /// The CLI restores a resumed session's running totals whether or not
     /// its transcript could be read here, so its first bill carries the
