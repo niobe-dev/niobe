@@ -684,3 +684,59 @@ fn the_installed_cli_is_a_release_these_recordings_cover() {
         conformance::RECORDED
     );
 }
+
+/// The tools a recorded `init` lists that are put under no kind of work on
+/// purpose, each with why.
+const OTHER_ON_PURPOSE: &[&str] = &[
+    // A shell: what it did is read from the command each call ran, not from
+    // the tool's name, and a call with no command is put under what nothing
+    // else says.
+    "Bash",
+    // What these do is not in their names, and no recording holds a call to
+    // either to read it from: each is shown by its own name.
+    "DesignSync",
+    "ReportFindings",
+];
+
+/// Every tool the CLI says it offers is put under the kind of work its name
+/// says, so that a release adding tools of its own does not leave the
+/// Activity pane counting the agent's ordinary work as `Other`.
+#[test]
+fn every_tool_a_recorded_init_lists_is_put_under_a_kind_of_work() {
+    use niobe_core::work::{Work, of_call};
+
+    let mut listed = BTreeSet::new();
+    for path in recordings() {
+        for line in lines_of(&path) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if value.get("type").and_then(serde_json::Value::as_str) != Some("system")
+                || value.get("subtype").and_then(serde_json::Value::as_str) != Some("init")
+            {
+                continue;
+            }
+            let tools = value.get("tools").and_then(serde_json::Value::as_array);
+            listed.extend(
+                tools
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    assert!(!listed.is_empty(), "no recorded `init` lists its tools");
+
+    let unread: Vec<&str> = listed
+        .iter()
+        .map(String::as_str)
+        .filter(|tool| of_call(tool, None, None, "{}").work == Work::Other)
+        .filter(|tool| !OTHER_ON_PURPOSE.contains(tool))
+        .collect();
+    assert!(
+        unread.is_empty(),
+        "the CLI offers tools that read as `Other`: {unread:?}. Put each under the kind of work \
+         it does in `niobe_core::work`, or list it in OTHER_ON_PURPOSE with why."
+    );
+}

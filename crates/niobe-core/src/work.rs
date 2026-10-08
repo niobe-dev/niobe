@@ -47,16 +47,16 @@ pub enum Work {
     Editing,
     /// Compiling, testing, linting, formatting.
     Building,
-    /// Commits, branches, pushes, pull requests.
+    /// Commits, branches, worktrees, pushes, pull requests.
     VersionControl,
     /// Fetching from or searching the web.
     Web,
-    /// Handing work to a sub-agent.
+    /// Handing work to a sub-agent, or to one already running.
     Delegating,
     /// The tools of one MCP server, named as a person reads it: `Notion`.
     Server(String),
     /// The agent's own bookkeeping: finding a tool, keeping a to-do list,
-    /// scheduling itself.
+    /// scheduling itself, watching what it left running.
     Housekeeping,
     /// A command or a tool none of the above recognises. Never a guess at
     /// one of them: its own names are what is shown for it.
@@ -138,14 +138,23 @@ fn of_tool(tool: &str) -> Option<Reading> {
             specifics: vec![name],
         });
     }
+    // The CLI renames and adds tools of its own between releases: its to-do
+    // list went from `TodoWrite` to the `Task…` tools and its scheduling to
+    // the `Cron…` ones. The names here are those its `init` lists, which the
+    // bridge's conformance test holds every recorded list to.
     let work = match tool {
-        "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" => Work::Exploring,
+        "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "LSP" => Work::Exploring,
         "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => Work::Editing,
+        "EnterWorktree" | "ExitWorktree" => Work::VersionControl,
         "WebFetch" | "WebSearch" => Work::Web,
-        "Agent" | "Task" => Work::Delegating,
-        "ToolSearch" | "TodoWrite" | "TodoRead" | "ScheduleWakeup" | "BashOutput" | "KillShell"
-        | "KillBash" | "TaskOutput" | "TaskStop" | "ExitPlanMode" | "EnterPlanMode" | "Skill"
-        | "SlashCommand" | "AskUserQuestion" => Work::Housekeeping,
+        "Agent" | "Task" | "SendMessage" | "ListAgents" | "Workflow" | "RemoteTrigger" => {
+            Work::Delegating
+        }
+        "ToolSearch" | "TodoWrite" | "TodoRead" | "TaskCreate" | "TaskGet" | "TaskList"
+        | "TaskUpdate" | "ScheduleWakeup" | "CronCreate" | "CronDelete" | "CronList"
+        | "BashOutput" | "KillShell" | "KillBash" | "TaskOutput" | "TaskStop" | "Monitor"
+        | "PushNotification" | "ExitPlanMode" | "EnterPlanMode" | "Skill" | "SlashCommand"
+        | "AskUserQuestion" => Work::Housekeeping,
         _ => return None,
     };
     Some(Reading {
@@ -624,6 +633,38 @@ mod tests {
             assert_eq!(
                 (reading.work, reading.specifics),
                 (work.clone(), named(&[specific])),
+                "{tool}"
+            );
+        }
+    }
+
+    /// The CLI's own tools as its `init` lists them from 2.1.278 on, where
+    /// its to-do list and its scheduling moved to tools of other names.
+    #[test]
+    fn the_clis_newer_tools_are_put_under_the_work_they_do() {
+        let cases: &[(&str, Work)] = &[
+            ("TaskCreate", Work::Housekeeping),
+            ("TaskUpdate", Work::Housekeeping),
+            ("TaskList", Work::Housekeeping),
+            ("TaskGet", Work::Housekeeping),
+            ("CronCreate", Work::Housekeeping),
+            ("CronDelete", Work::Housekeeping),
+            ("CronList", Work::Housekeeping),
+            ("Monitor", Work::Housekeeping),
+            ("PushNotification", Work::Housekeeping),
+            ("LSP", Work::Exploring),
+            ("SendMessage", Work::Delegating),
+            ("ListAgents", Work::Delegating),
+            ("Workflow", Work::Delegating),
+            ("RemoteTrigger", Work::Delegating),
+            ("EnterWorktree", Work::VersionControl),
+            ("ExitWorktree", Work::VersionControl),
+        ];
+        for (tool, work) in cases {
+            let reading = of_call(tool, None, None, "{}");
+            assert_eq!(
+                (reading.work, reading.specifics),
+                (work.clone(), named(&[tool])),
                 "{tool}"
             );
         }
