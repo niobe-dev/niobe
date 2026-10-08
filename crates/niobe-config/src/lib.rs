@@ -365,6 +365,9 @@ pub struct Config {
     /// The `[permissions]` rules of a file that has not been trusted, and that
     /// file. They answer no prompt.
     withheld_rules: Option<(Allowlist, PathBuf)>,
+    /// Whether a file that has not been trusted says `titles = "model"`,
+    /// which is not in force.
+    withheld_model_titles: bool,
     /// The file this config's `[permissions]` rules were read from, where it
     /// is one file that has some, which is what a withheld rule is named by.
     rules_from: Option<PathBuf>,
@@ -470,6 +473,7 @@ impl Config {
         if over.withheld_rules.is_some() {
             self.withheld_rules = over.withheld_rules;
         }
+        self.withheld_model_titles |= over.withheld_model_titles;
         self.rules_from = None;
         if over.theme.is_some() {
             self.theme = over.theme;
@@ -488,7 +492,8 @@ impl Config {
     /// trusted: every profile keeps its backend and the models it offers, and
     /// loses its `env`, its `args`, its `settings`, its `auth_refresh` and
     /// what it says about billing; the `default_profile` is not in force;
-    /// its `[permissions]` rules answer no prompt; and laid over another
+    /// its `[permissions]` rules answer no prompt; a `titles = "model"` does
+    /// not turn the model's titles on; and laid over another
     /// config it adds profiles without replacing any (see [`trust`] and
     /// [`Config::overlay`]).
     ///
@@ -516,6 +521,7 @@ impl Config {
         // file nobody has read does not decide; turning it off spends nothing.
         if self.titles == Some(Titles::Model) {
             self.titles = None;
+            self.withheld_model_titles = true;
         }
         self.untrusted = true;
         self
@@ -533,6 +539,15 @@ impl Config {
             || self.withheld_default.is_some()
             || !self.allowed.is_empty()
             || self.withheld_rules.is_some()
+            || self.titles == Some(Titles::Model)
+            || self.withheld_model_titles
+    }
+
+    /// Whether a file that has not been trusted says `titles = "model"`, which
+    /// it may not turn on: asking the model for a title spends the operator's
+    /// tokens on every new session.
+    pub fn withholds_model_titles(&self) -> bool {
+        self.withheld_model_titles
     }
 
     /// Whether `over` defines a profile this config defines too, which it
@@ -1231,8 +1246,8 @@ backend = "codex"
             .expect("valid")
             .untrusted();
         assert!(
-            !spends.needs_trust(),
-            "nothing to ask about: it is withheld"
+            spends.needs_trust(),
+            "withheld until it is trusted, and so asked about"
         );
         assert_eq!(
             user.clone().overlay(spends).titles(),
@@ -1247,6 +1262,23 @@ backend = "codex"
 
         let trusted = Config::parse("titles = \"model\"\n", &path("repo")).expect("valid");
         assert_eq!(user.overlay(trusted).titles(), Titles::Model);
+    }
+
+    #[test]
+    fn a_file_that_turns_the_models_titles_on_is_one_to_trust_and_says_so() {
+        let spends = Config::parse("titles = \"model\"\n", &path("repo")).expect("valid");
+        assert!(spends.needs_trust(), "read whole, it would spend tokens");
+        assert!(!spends.withholds_model_titles());
+
+        let withheld = spends.untrusted();
+        assert!(withheld.needs_trust(), "still asked about once withheld");
+        assert!(withheld.withholds_model_titles());
+
+        let saves = Config::parse("titles = \"first-prompt\"\n", &path("repo"))
+            .expect("valid")
+            .untrusted();
+        assert!(!saves.needs_trust(), "turning titles off is not gated");
+        assert!(!saves.withholds_model_titles());
     }
 
     #[test]

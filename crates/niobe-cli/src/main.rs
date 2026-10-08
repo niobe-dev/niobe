@@ -936,8 +936,9 @@ fn trust(yes: bool) -> Result<(), String> {
     say!("trusted {}", path.display());
     say!(
         "the profiles it defines are in force here as it defines them, env, args, settings, \
-         auth_refresh and billing included, and so are its default_profile and its \
-         permissions; `niobe profiles` lists them, and editing the file asks again"
+         auth_refresh and billing included, and so are its default_profile, its \
+         permissions and its titles; `niobe profiles` lists them, and editing the file asks \
+         again"
     );
     Ok(())
 }
@@ -983,8 +984,8 @@ fn untrust() -> Result<(), String> {
     }
     say!(
         "{} is no longer trusted; the env, args, settings, auth_refresh and billing of the \
-         profiles it defines are not in force, nor its default_profile, nor a profile it \
-         names like one of yours",
+         profiles it defines are not in force, nor its default_profile, nor a titles = \
+         \"model\", nor a profile it names like one of yours",
         path.display()
     );
     Ok(())

@@ -29,7 +29,8 @@ pub fn question(untrusted: &Untrusted) -> Question {
 }
 
 /// What `config`, read whole, sets that takes effect only once it is trusted:
-/// its `[permissions]` rules, its `default_profile`, and for each profile what
+/// its `[permissions]` rules, its `default_profile`, a `titles = "model"`
+/// that has the model title each new session, and for each profile what
 /// it starts the backend with, how it says the account is billed, and whether
 /// it replaces one of `replaces`, the user's profiles.
 fn grants(config: &Config, replaces: &[String]) -> Vec<(String, String)> {
@@ -43,10 +44,18 @@ fn grants(config: &Config, replaces: &[String]) -> Vec<(String, String)> {
     if !rules.is_empty() {
         rows.push(row("permissions", format!("allow {}", rules.join(", "))));
     }
-    // What the file names as the default, read the way the file's own
-    // withholding reads it, so that the two cannot disagree on what it is.
-    if let Some((name, _)) = config.clone().untrusted().withheld_default() {
+    // What the file names as the default, and whether it turns the model's
+    // titles on, read the way the file's own withholding reads them, so that
+    // the two cannot disagree on what is withheld.
+    let withheld = config.clone().untrusted();
+    if let Some((name, _)) = withheld.withheld_default() {
         rows.push(row("default_profile", name.to_owned()));
+    }
+    if withheld.withholds_model_titles() {
+        rows.push(row(
+            "titles",
+            "model, which spends tokens titling every new session".to_owned(),
+        ));
     }
     for (name, profile) in config.profiles() {
         if replaces.contains(name) {
@@ -237,6 +246,47 @@ backend = "claude"
             listing(&untrusted),
             ["/r/.niobe/config.toml sets nothing that takes effect only once it is trusted"]
         );
+    }
+
+    #[test]
+    fn a_file_that_turns_the_models_titles_on_says_so_in_the_question_and_the_listing() {
+        let path = PathBuf::from("/r/.niobe/config.toml");
+        let text = "titles = \"model\"\n";
+        let untrusted = Untrusted {
+            config: Config::parse(text, &path).expect("the config is valid"),
+            text: text.to_owned(),
+            path,
+            replaces: Vec::new(),
+        };
+
+        assert_eq!(
+            question(&untrusted).grants,
+            [(
+                "titles".to_owned(),
+                "model, which spends tokens titling every new session".to_owned()
+            )]
+        );
+        assert_eq!(
+            listing(&untrusted),
+            [
+                "/r/.niobe/config.toml puts in force once trusted:",
+                "  titles  model, which spends tokens titling every new session",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_that_turns_the_models_titles_off_is_not_a_row() {
+        let path = PathBuf::from("/r/.niobe/config.toml");
+        let text = "titles = \"first-prompt\"\n";
+        let untrusted = Untrusted {
+            config: Config::parse(text, &path).expect("the config is valid"),
+            text: text.to_owned(),
+            path,
+            replaces: Vec::new(),
+        };
+
+        assert!(question(&untrusted).grants.is_empty());
     }
 
     #[test]

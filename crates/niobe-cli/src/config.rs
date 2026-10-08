@@ -503,4 +503,23 @@ mod tests {
         assert_eq!(untrusted.path, config);
         assert_eq!(untrusted.replaces, ["max"]);
     }
+    /// A repository file that says only `titles = "model"` would, trusted,
+    /// have the model title every new session on the operator's tokens; so it
+    /// is offered for trust, and until then the operator's own switch holds.
+    #[test]
+    fn a_repository_file_that_only_turns_the_models_titles_on_is_untrusted() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let user = dir.path().join("user.toml");
+        std::fs::write(&user, "titles = \"first-prompt\"\n").expect("written");
+        let root = dir.path().join("repo");
+        let config = repo::config_path(&root);
+        std::fs::create_dir_all(config.parent().expect("a directory")).expect("made");
+        std::fs::write(&config, "titles = \"model\"\n").expect("written");
+
+        let loaded = load_from(Some(user), &root).expect("both configs load");
+
+        assert_eq!(loaded.config.titles(), niobe_config::Titles::FirstPrompt);
+        let untrusted = loaded.untrusted.expect("the file is named as untrusted");
+        assert_eq!(untrusted.path, config);
+    }
 }
