@@ -4619,6 +4619,7 @@ impl App {
             .and_then(|agent| agent.at)
     }
 
+    /// The transcript, oldest first: every row the shell draws in it.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }

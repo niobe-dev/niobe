@@ -1259,6 +1259,13 @@ PROFILES:
     running a login before every session would ask you to sign in each time.
     Run it yourself when a session will not sign in.
 
+    titles = \"first-prompt\", at the top of a config, leaves a new session
+    captioned by the first line of its first prompt. Left out, or \"model\",
+    the backend is asked once, at that prompt, for a few words on what it
+    asks, which the claude CLI answers from its small model and bills into
+    the session: some nine hundred tokens. A repository's config nobody has
+    trusted can turn it off and not on.
+
 TRUST:
     A repository's config arrives with the clone, and env, args, settings and
     auth_refresh are what a backend is started with — enough to point the
@@ -1337,7 +1344,7 @@ IN THE SHELL:
                            extended-keys on (the bar names it only there)
     Ctrl+J                 Open a new line in the composer, on any terminal
     Alt+Enter              The same, where the terminal sends Option as Meta
-    PgUp / PgDn            Scroll the transcript
+    PgUp / PgDn            Scroll the pane that has the keyboard
     Up / Down              On the composer's first row, the prompt sent before
                            the one shown, from this session and then earlier
                            ones; on its last row, the one after, and past the
@@ -1350,9 +1357,10 @@ IN THE SHELL:
                            match above, Down to the one below, Esc puts the
                            view back where it was
     /                      At the start of a prompt, offer the commands and
-                           skills the backend listed: Up / Down choose, Tab or
-                           Enter put the name in the prompt, Esc leaves it as
-                           typed
+                           skills the backend listed; at the start of a later
+                           word, a skill the backend takes anywhere in a
+                           prompt: Up / Down choose, Tab or Enter put the
+                           name in the prompt, Esc leaves it as typed
     @                      At the start of a word, offer the files git lists
                            in the repository, by their paths from its root,
                            where the agent runs: Up / Down choose,
@@ -1382,8 +1390,34 @@ IN THE SHELL:
                            1.5 seconds quits, and one alone leaves what is
                            typed as it was. Esc leads to an F-key
     Shift+Tab              Cycle how tool calls are gated: plan, ask, auto
+    Esc, then a digit      Press that F-key, 0 for the tenth; Esc and a menu's
+                           letter opens that menu
+    Alt+letter             Open the menu that starts with that letter
+    Ctrl+W                 Delete the word before the cursor
+    Ctrl+U, Ctrl+K         Delete to the start, or to the end, of the line
+    Tab                    Move the keyboard between the transcript and the
+                           side panes
+    Up / Down, Enter       In a side pane, move the cursor and fold the
+                           section under it
+    a                      In a side pane, group sub-agent rows by agent
+    t                      In the Activity pane, count tools by name or by
+                           kind of work
+    Ctrl+End               Back to the newest line of the transcript
+    Ctrl+O                 Fold each run of calls to one tool into one row
+    Ctrl+T                 Open every diff cut at twenty rows, and show a
+                           call's arguments as they were sent
+    Ctrl+V                 Attach the image on the clipboard to the prompt;
+                           a pasted or dropped path to an image attaches it
+    drag                   Copy what it covers
+    click                  Open the link under it
+    Ctrl+Z                 Suspend niobe, handing the terminal back
 {fkeys}
     Ctrl+Q                 Quit
+
+    Typed as a prompt, /model, /memory, /resume, /help, /config, /exit and
+    /quit do what the shell has for them — the model list, the Memory view,
+    the history's sessions, this list of keys, Settings and quitting — rather
+    than go to the backend.
 
     Every F-key is also Esc and then its digit, 0 for the tenth, which is how
     the bar at the foot of the shell names them: on a Mac the top row is media

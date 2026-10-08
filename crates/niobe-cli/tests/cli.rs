@@ -947,6 +947,71 @@ fn the_help_says_how_the_mode_the_model_the_budget_and_the_theme_are_changed() {
     }
 }
 
+/// The help names every key the shell's own Shortcuts sheet lists, each as
+/// a row of its own, and what the config and a typed command can do that the
+/// sheet does not show: the `titles` key that turns off the request a new
+/// session's title costs, the commands the shell answers itself, and the
+/// skills a `/` later in a prompt offers.
+#[test]
+fn the_help_names_every_shortcut_the_shell_lists_and_the_typed_commands() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    // The key column of every row of a table in the help: four spaces in,
+    // then the key, then a run of spaces before what it does.
+    let keys: Vec<&str> = out
+        .lines()
+        .filter_map(|line| line.strip_prefix("    "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_once("   ").map(|(key, _)| key.trim()))
+        .collect();
+    let mut app = niobe_tui::App::new(niobe_tui::Repo::default());
+    app.perform(niobe_tui::menu::Action::Shortcuts);
+    let sheet = app.sheet().expect("the Shortcuts sheet opens");
+    let listed: Vec<&str> = sheet
+        .rows
+        .iter()
+        .take_while(|row| !row.is_empty())
+        .filter_map(|row| row.get(..row.char_indices().nth(12).map_or(row.len(), |(at, _)| at)))
+        .map(str::trim)
+        .collect();
+    assert!(listed.len() > 20, "{listed:?}");
+    // The sheet draws some keys as glyphs, which the help spells out.
+    fn spelt(key: &str) -> &str {
+        match key {
+            "⇧Tab" => "Shift+Tab",
+            "↑↓" => "Up / Down",
+            "↑↓ Enter" => "Up / Down, Enter",
+            "PgUp PgDn" => "PgUp / PgDn",
+            key => key,
+        }
+    }
+    for key in listed.iter().map(|key| spelt(key)) {
+        assert!(
+            keys.iter()
+                .any(|row| row.starts_with(key) || row.split(", ").any(|part| part == key)),
+            "the help has no row for {key}: {keys:?}"
+        );
+    }
+
+    for said in [
+        "titles = \"first-prompt\"",
+        "/model",
+        "/memory",
+        "/resume",
+        "/help",
+        "/config",
+        "/exit",
+        "/quit",
+        "a skill the backend takes anywhere",
+    ] {
+        assert!(
+            out.contains(said),
+            "the help does not mention {said}:\n{out}"
+        );
+    }
+}
+
 /// The help names the F-keys the shell's bar draws: each against its digit,
 /// with the bar's label and what it does, and names no F-key anywhere else, so
 /// nothing in it can claim a key the bar has given to something else.

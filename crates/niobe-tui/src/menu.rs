@@ -45,7 +45,8 @@ pub enum Action {
     Stop,
     /// Copies the transcript to the clipboard.
     Export,
-    /// Opens the repository's instructions to the agent.
+    /// Opens the Memory view: every file the agent is given as memory —
+    /// the user's, each directory's, their imports and the backend's notes.
     Memory,
     /// Starts naming a file for the prompt.
     AddFile,

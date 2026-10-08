@@ -27,17 +27,24 @@ pub struct Version {
 /// the last tag call for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Bump {
+    /// Nothing to release: docs, tests, chores and refactors.
     None,
+    /// Fixes only.
     Patch,
+    /// A feature.
     Minor,
+    /// A breaking change, marked with `!` or a `BREAKING CHANGE:` trailer.
     Major,
 }
 
 /// One place the workspace version is written in the root manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Site {
+    /// Which it is: `[workspace.package]`, or the path dependency it pins.
     pub what: String,
+    /// Its line in the manifest, counted from one.
     pub line: usize,
+    /// The version written there.
     pub value: String,
     span: Range<usize>,
 }

@@ -58,6 +58,10 @@ impl fmt::Display for LocalTime {
 
 /// A day of the week, so a moment further off than today can be named by one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(
+    missing_docs,
+    reason = "the variants are the days of the week, which their names say whole"
+)]
 pub enum Weekday {
     Monday,
     Tuesday,
