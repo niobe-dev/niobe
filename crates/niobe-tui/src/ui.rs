@@ -559,7 +559,10 @@ fn draw_trust(
     };
 
     let mut head = vec![Line::from("")];
-    head.extend(wrapped(&asking.question.path, plain.bold()));
+    head.extend(wrapped(
+        &text::controls_shown(&asking.question.path),
+        plain.bold(),
+    ));
     head.push(Line::from(""));
     head.extend(wrapped(TRUST_SAYS, plain));
     head.push(Line::from(""));
@@ -611,6 +614,8 @@ fn draw_trust(
 /// The rows of what a config sets, in `columns`, the name of each in a column
 /// of its own and its value wrapped beside it, in no more than `room` lines.
 ///
+/// A value is drawn as it was written — every space kept and every control
+/// character shown — since what is asked for is what the operator agrees to.
 /// Rows are kept whole: half a permission rule reads as a different rule.
 /// What is left out is counted on the last line.
 fn trust_grants(
@@ -632,7 +637,7 @@ fn trust_grants(
     let rows: Vec<Vec<Line<'static>>> = grants
         .iter()
         .map(|(name, value)| {
-            text::wrap(value, value_width)
+            text::wrap_exact(&text::controls_shown(value), value_width)
                 .into_iter()
                 .enumerate()
                 .map(|(i, part)| {

@@ -2215,6 +2215,19 @@ fn a_config_that_sets_more_than_fits_keeps_the_answers_on_screen() {
 }
 
 #[test]
+fn a_trust_value_is_drawn_with_its_control_characters_shown_and_its_spacing_kept() {
+    let mut app = asking_trust(vec![
+        row("titles", "Repo\u{1b}[31m title"),
+        row("work", "args --x \"a    b\""),
+    ]);
+
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(frame.contains("Repo\u{241b}[31m title"), "{frame}");
+    assert!(frame.contains("--x \"a    b\""), "{frame}");
+}
+
+#[test]
 fn the_trust_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the_window_grows() {
     use niobe_tui::app::ASK_QUIET;
     use niobe_tui::trust::Answer;

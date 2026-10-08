@@ -10,8 +10,8 @@
  ┃   You stay on t┃                                                                                  ┃                │
  ┃                ┃  It sets what only a config you trust may:                                       ┃                │
  ┃   No backend at┃                                                                                  ┃                │
- ┃                ┃  permissions      allow Edit, Bash, mcp__claude_ai_Notion__notion-search,        ┃                │
- ┃                ┃                   Bash(cargo test)                                               ┃                │
+ ┃                ┃  permissions      allow Edit, Bash, mcp__claude_ai_Notion__notion-search, Bash(  ┃                │
+ ┃                ┃                   cargo test)                                                    ┃                │
  ┃                ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1            ┃                │
  ┃                ┃  work             auth_refresh aws sso login --profile work-sso                  ┃                │
  ┃                ┃  default_profile  work                                                           ┃                │

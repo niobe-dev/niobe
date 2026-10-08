@@ -26,6 +26,19 @@ pub fn printable(text: &str) -> Cow<'_, str> {
     Cow::Owned(text.chars().map(stand_in).collect())
 }
 
+/// [`printable`], with line breaks and tabs shown too (`␤`, `␉`), so that
+/// `text` prints on the one line it is given.
+///
+/// For a value the operator is asked to agree to: a value that breaks the line
+/// it is printed on can print lines of its own under it, which read as rows of
+/// the listing or as niobe's own words.
+pub fn on_one_line(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(|c| matches!(c, '\n' | '\t') || acts(c)) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.chars().map(picture).collect())
+}
+
 /// Whether `c` does something to the terminal rather than show.
 fn acts(c: char) -> bool {
     match c {
@@ -43,13 +56,20 @@ fn is_direction_mark(c: char) -> bool {
 
 /// What is printed in place of `c`.
 fn stand_in(c: char) -> char {
-    if !acts(c) {
-        return c;
+    match acts(c) {
+        true => picture(c),
+        false => c,
     }
+}
+
+/// What shows where `c` was, for any `c` that is not plain text.
+fn picture(c: char) -> char {
     match c {
+        '\n' => '\u{2424}',
         '\u{0}'..='\u{1f}' => char::from_u32(0x2400 + u32::from(c)).unwrap_or('\u{fffd}'),
         '\u{7f}' => '\u{2421}',
-        _ => '\u{fffd}',
+        c if c.is_control() || is_direction_mark(c) => '\u{fffd}',
+        c => c,
     }
 }
 
@@ -71,6 +91,12 @@ mod tests {
         assert_eq!(printable("x\u{1b}]0;PWNED\u{7}"), "x␛]0;PWNED␇");
         assert_eq!(printable("m\u{1b}[2J"), "m␛[2J");
         assert_eq!(printable("a\rb\u{7f}"), "a␍b␡");
+    }
+
+    #[test]
+    fn a_value_on_one_line_shows_its_line_breaks_and_tabs_too() {
+        assert!(matches!(on_one_line("--model opus"), Cow::Borrowed(_)));
+        assert_eq!(on_one_line("a\nb\tc\u{1b}[2J"), "a␤b␉c␛[2J");
     }
 
     #[test]

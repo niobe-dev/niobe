@@ -18,6 +18,7 @@ use niobe_config::trust::Trusted;
 use niobe_tui::trust::Question;
 
 use crate::config::{self, Untrusted};
+use crate::printable::on_one_line;
 
 /// The question about `untrusted`: the file, and a row for each thing in it
 /// that takes effect only once it is trusted.
@@ -65,12 +66,13 @@ fn grants(config: &Config, replaces: &[String]) -> Vec<(String, String)> {
             let env: Vec<String> = profile
                 .env()
                 .iter()
-                .map(|(key, value)| format!("{key}={value}"))
+                .map(|(key, value)| format!("{}={}", one_word(key), one_word(value)))
                 .collect();
             rows.push(row(name, format!("env {}", env.join(", "))));
         }
         if !profile.args().is_empty() {
-            rows.push(row(name, format!("args {}", profile.args().join(" "))));
+            let args: Vec<String> = profile.args().iter().map(|arg| one_word(arg)).collect();
+            rows.push(row(name, format!("args {}", args.join(" "))));
         }
         if let Some(settings) = profile.settings() {
             rows.push(row(name, format!("settings {}", settings.path())));
@@ -88,7 +90,8 @@ fn grants(config: &Config, replaces: &[String]) -> Vec<(String, String)> {
 /// What `niobe trust` prints before it asks: the file, and the same rows the
 /// question in the shell shows, values included, one line each under it.
 pub fn listing(untrusted: &Untrusted) -> Vec<String> {
-    let path = untrusted.path.display();
+    let path = untrusted.path.display().to_string();
+    let path = on_one_line(&path);
     let rows = grants(&untrusted.config, &untrusted.replaces);
     if rows.is_empty() {
         return vec![format!(
@@ -108,8 +111,38 @@ pub fn listing(untrusted: &Untrusted) -> Vec<String> {
         .collect()
 }
 
+/// One row, its name and value each on one line with every control in it
+/// shown, so that neither can print lines of its own under it.
 fn row(name: &str, value: String) -> (String, String) {
-    (name.to_owned(), value)
+    (
+        on_one_line(name).into_owned(),
+        on_one_line(&value).into_owned(),
+    )
+}
+
+/// `value` as one word of a row: as it is where it reads as one, and quoted
+/// the way TOML quotes a string where it is empty or holds a space, a comma, a
+/// quote, a backslash or a control. Otherwise `["--x", "a b"]` and `["--x",
+/// "a", "b"]` would read alike, and an `env` value holding `, B=2` as a second
+/// variable.
+fn one_word(value: &str) -> String {
+    let plain = !value.is_empty()
+        && !value
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, ',' | '"' | '\\'));
+    if plain {
+        return value.to_owned();
+    }
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for c in value.chars() {
+        if matches!(c, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Records `path`, holding `text`, as a config the operator has read, so that
@@ -287,6 +320,68 @@ backend = "claude"
         };
 
         assert!(question(&untrusted).grants.is_empty());
+    }
+
+    fn untrusted_text(text: &str) -> Untrusted {
+        let path = PathBuf::from("/r/.niobe/config.toml");
+        Untrusted {
+            config: Config::parse(text, &path).expect("the config is valid"),
+            text: text.to_owned(),
+            path,
+            replaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_value_with_line_breaks_is_listed_on_one_line_with_the_breaks_shown() {
+        let untrusted = untrusted_text(
+            "[profiles.p]\nbackend = \"claude\"\nargs = [\"--x\\n\\n\\nx sets nothing\"]\n\
+             env = { A = \"1\\n2\\u001b[31m\" }\n",
+        );
+
+        let listing = listing(&untrusted);
+
+        assert_eq!(listing.len(), 1 + question(&untrusted).grants.len());
+        assert!(
+            listing.iter().all(|line| !line.contains('\n')),
+            "{listing:?}"
+        );
+        assert!(
+            listing
+                .iter()
+                .any(|line| line.contains("--x␤␤␤x sets nothing")),
+            "{listing:?}"
+        );
+        assert!(
+            listing.iter().any(|line| line.contains("1␤2␛[31m")),
+            "{listing:?}"
+        );
+    }
+
+    #[test]
+    fn args_that_split_a_value_differently_are_listed_differently_and_keep_their_spacing() {
+        let one =
+            untrusted_text("[profiles.p]\nbackend = \"claude\"\nargs = [\"--x\", \"a  b\"]\n");
+        let two =
+            untrusted_text("[profiles.p]\nbackend = \"claude\"\nargs = [\"--x\", \"a\", \"b\"]\n");
+
+        let one = question(&one).grants;
+        let two = question(&two).grants;
+
+        assert_eq!(one, [("p".to_owned(), "args --x \"a  b\"".to_owned())]);
+        assert_eq!(two, [("p".to_owned(), "args --x a b".to_owned())]);
+    }
+
+    #[test]
+    fn an_env_value_that_reads_as_more_than_one_variable_is_quoted() {
+        let untrusted = untrusted_text(
+            "[profiles.p]\nbackend = \"claude\"\nenv = { A = \"1, B=2\", C = \"\" }\n",
+        );
+
+        assert_eq!(
+            question(&untrusted).grants,
+            [("p".to_owned(), "env A=\"1, B=2\", C=\"\"".to_owned())]
+        );
     }
 
     #[test]

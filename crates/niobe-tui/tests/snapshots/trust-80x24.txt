@@ -6,11 +6,10 @@
 ┃   ┃                                                                      ┃   ┃
 ┃   ┃  It sets what only a config you trust may:                           ┃   ┃
 ┃   ┃                                                                      ┃   ┃
-┃   ┃  permissions      allow Edit, Bash,                                  ┃   ┃
-┃   ┃                   mcp__claude_ai_Notion__notion-search, Bash(cargo   ┃   ┃
-┃   ┃                   test)                                              ┃   ┃
-┃   ┃  work             env AWS_PROFILE=work-sso,                          ┃   ┃
-┃   ┃                   CLAUDE_CODE_USE_BEDROCK=1                          ┃   ┃
+┃   ┃  permissions      allow Edit, Bash, mcp__claude_ai_Notion__notion-s  ┃   ┃
+┃   ┃                   earch, Bash(cargo test)                            ┃   ┃
+┃   ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK  ┃   ┃
+┃   ┃                   =1                                                 ┃   ┃
 ┃   ┃  work             auth_refresh aws sso login --profile work-sso      ┃   ┃
 ┃   ┃  default_profile  work                                               ┃   ┃
 ┃   ┃                                                                      ┃   ┃
@@ -18,7 +17,8 @@
 ┃   ┃  none of the above is.                                               ┃   ┃
 ┃   ┃                                                                      ┃   ┃
 ┃   ┃    1. Yes, trust this config                                         ┃   ┃
-┃ ──┃  › 2. No, open without it                                            ┃── ┃
-┃  —┃                                                                      ┃ne ┃
-┗━━━┗━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━┛━━━┛
+┃   ┃  › 2. No, open without it                                            ┃   ┃
+┃ ──┃                                                                      ┃── ┃
+┃  —┗━━━━━━━ ↑↓ choose · Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━┛ne ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 EscStop 1Help 2Compact 3Clear 4Model 5Diff 6Rewind 7MCP 8Memory 9Settings 0Quit

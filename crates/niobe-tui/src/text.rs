@@ -42,6 +42,32 @@ fn cells(grapheme: &str) -> usize {
     }
 }
 
+/// `text` with every control character in it shown rather than dropped: a C0
+/// control by its Control Pictures glyph (`␛` for an escape, `␤` for a line
+/// break, `␉` for a tab), DEL by `␡` and a C1 control by `�`.
+///
+/// For text the operator decides on, drawn on one line. Ratatui drops a
+/// control character without a trace, so a value holding an escape would read
+/// as the text around it, and a line break would start a row that looks like
+/// one of the shell's own.
+pub fn controls_shown(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(text.chars().map(control_shown).collect())
+}
+
+/// What [`controls_shown`] draws in place of `c`.
+fn control_shown(c: char) -> char {
+    match c {
+        '\n' => '\u{2424}',
+        '\u{0}'..='\u{1f}' => char::from_u32(0x2400 + u32::from(c)).unwrap_or('\u{fffd}'),
+        '\u{7f}' => '\u{2421}',
+        c if c.is_control() => '\u{fffd}',
+        c => c,
+    }
+}
+
 /// `text` followed by the spaces that make it `columns` cells wide, or
 /// `text` alone where it is already as wide or wider.
 ///
