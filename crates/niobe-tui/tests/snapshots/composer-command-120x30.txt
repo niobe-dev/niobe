@@ -7,7 +7,7 @@
   g  LightGreen on Black, bold
   h  LightBlue on Black
   i  Black on LightGreen, bold
-  j  LightMagenta on Black
+  j  LightCyan on Black
   k  Black on LightGreen
   l  Black on LightMagenta, dim
   m  Black on LightMagenta

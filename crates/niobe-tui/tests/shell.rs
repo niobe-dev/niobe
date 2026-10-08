@@ -4780,6 +4780,12 @@ fn a_sent_prompt_that_opens_with_a_command_is_coloured_in_the_transcript() {
     press(&mut app, KeyCode::Enter);
     assert!(app.composed().is_empty());
     let theme = app.theme().to_owned();
+    assert_eq!(theme, Theme::default());
+    assert_ne!(
+        theme.command, theme.user,
+        "the default theme draws the command apart from the prompt around it"
+    );
+    assert_snapshot("transcript-command-120x30", &paint(&mut app, 120, 30));
     // The pane's title names the session by the same prompt; the two blanks
     // after it are what only the transcript's row has.
     let mut fg = |text: &str| {

@@ -339,7 +339,11 @@ pub const NEO: Theme = Theme {
     // Code stands out from the green prose the way a code span stands out in
     // a rendered page: by being the one thing that is not green.
     code: Color::White,
-    command: Color::White,
+    // Not the operator's white: a command is drawn inside a sent prompt, so
+    // it has to stand off the prompt as well as off the green prose. The
+    // bright cyan is the call name's hue made louder, which is what it is: a
+    // name the backend runs.
+    command: Color::LightCyan,
 
     // Inverted, so the dialog stands off the black panes: black on green.
     // Nothing is darker than the panes' black, so the shadow only dims what
@@ -411,7 +415,10 @@ pub const CYBER: Theme = Theme {
     agent: Color::LightGreen,
     tool: Color::LightBlue,
     code: Color::LightCyan,
-    command: Color::LightMagenta,
+    // Not the operator's magenta: a command is drawn inside a sent prompt,
+    // which is magenta, so it takes the cyan code is drawn in — it is a name
+    // the backend runs, and the two are never on the same row.
+    command: Color::LightCyan,
 
     // The dialog takes the magenta the chrome keeps for the operator, so the
     // list reads as the shell asking rather than as the session reporting.
@@ -568,7 +575,7 @@ pub const NEO_TRUE: Theme = Theme {
     agent: hex(0x00ff41),
     tool: hex(0x7cff9e),
     code: hex(0xd4ff00),
-    command: hex(0xffffff),
+    command: hex(0x5ce1ff),
 
     dialog_bg: hex(0x0a2211),
     dialog_fg: hex(0x9bffb0),
@@ -623,7 +630,7 @@ pub const CYBER_TRUE: Theme = Theme {
     agent: hex(0x39ff7a),
     tool: hex(0xb9c1ff),
     code: hex(0xffd23f),
-    command: hex(0xff2bd6),
+    command: hex(0x2de2ff),
 
     dialog_bg: hex(0x16121f),
     dialog_fg: hex(0xe6e9ff),
@@ -1173,6 +1180,11 @@ mod tests {
                 (t.tool, t.del, "a tool call and a failed one"),
                 (t.fg, t.warn, "a usage window and one running low"),
                 (t.command, t.fg, "a command named in a prompt and its words"),
+                (
+                    t.command,
+                    t.user,
+                    "a command named in a sent prompt and the prompt around it",
+                ),
                 (t.warn, t.del, "a usage window running low and one run out"),
             ] {
                 assert_ne!(one, other, "{}: {what} are one colour", t.name);
