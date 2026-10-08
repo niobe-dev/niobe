@@ -419,6 +419,13 @@ pub struct Translator {
     /// its `tool_result` took the call out of `tool_calls`, and the refusal is
     /// that agent's.
     ended_agents: BTreeMap<String, AgentId>,
+    /// The words of the usage limit the session itself ran into this turn,
+    /// kept so that the turn's closing `result`, which repeats them as an
+    /// error, folds into the one notice already shown.
+    usage_limit: Option<String>,
+    /// The sub-agent calls whose agent ran into the usage limit: they ended
+    /// because the plan stopped them, not because they failed.
+    limited_agents: BTreeMap<String, ()>,
     /// The permission prompts read since the last drain, for whatever owns the
     /// CLI's standard input to answer.
     asked: Vec<Asked>,
@@ -554,6 +561,8 @@ impl Translator {
             in_flight: BTreeMap::new(),
             tool_calls: BTreeMap::new(),
             ended_agents: BTreeMap::new(),
+            usage_limit: None,
+            limited_agents: BTreeMap::new(),
             asked: Vec::new(),
             withdrawn: Vec::new(),
             agents: BTreeMap::new(),
@@ -1318,6 +1327,20 @@ impl Translator {
         ) {
             self.agent_model(agent, model, out);
         }
+        // The CLI answers a request the plan's usage limit refused with a
+        // message of its own, and repeats the words in the turn's `result`
+        // and in every sub-agent's last message. They are one event: said
+        // once, by the session, and not at all by an agent, which is shown as
+        // stopped by it.
+        if let Some(words) = envelope.usage_limit() {
+            match envelope.parent_tool_use_id {
+                Some(call) => {
+                    self.limited_agents.insert(call, ());
+                }
+                None => self.usage_limit_hit(words, out),
+            }
+            return;
+        }
         // A message that names the sub-agent call it belongs to is that
         // agent's: its words and its calls are the agent's, not the session's.
         let agent = envelope.parent_tool_use_id.map(AgentId::new);
@@ -1384,6 +1407,18 @@ impl Translator {
             out.push(Event::AssistantMessage { text, agent });
         }
         out.append(&mut calls);
+    }
+
+    /// Says once a turn that the plan's usage limit stopped it, in the CLI's
+    /// words, which carry when the window starts over in the operator's zone.
+    fn usage_limit_hit(&mut self, words: String, out: &mut Vec<Event>) {
+        if self.usage_limit.is_some() {
+            return;
+        }
+        out.push(Event::Notice {
+            message: words.clone(),
+        });
+        self.usage_limit = Some(words);
     }
 
     fn user(&mut self, envelope: wire::Envelope, out: &mut Vec<Event>) {
@@ -1457,9 +1492,11 @@ impl Translator {
             // in the foreground, or never started, ends with its call.
             let background = outcome == ToolOutcome::Ok && background;
             if !background {
+                let stopped_by_limit = self.limited_agents.remove(&tool_use_id).is_some();
                 self.agent_ended(
                     &tool_use_id,
                     match outcome {
+                        _ if stopped_by_limit => AgentOutcome::Cancelled,
                         ToolOutcome::Ok => AgentOutcome::Completed,
                         ToolOutcome::Failed | ToolOutcome::Denied => AgentOutcome::Failed,
                         ToolOutcome::Interrupted => AgentOutcome::Cancelled,
@@ -1946,6 +1983,8 @@ impl Translator {
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         let interrupted = outcome.interrupted();
+        let shown_limit = self.usage_limit.take();
+        let limit_words = limit_in(&outcome, shown_limit.as_deref());
         // The session's own reply still waiting for its count when the turn
         // ends was cut off, unless the turn ends on the operator's interrupt,
         // which is what stopped it. A sub-agent's is left: one launched in the
@@ -1998,6 +2037,13 @@ impl Translator {
             out.push(Event::Notice {
                 message: STOPPED_TURN.to_owned(),
             });
+        } else if let Some(words) = limit_words {
+            // The turn ended on the plan's usage limit. The session has said
+            // so already when the CLI sent the message; a result that repeats
+            // it as a failure would show the same event as an error.
+            if shown_limit.is_none() {
+                out.push(Event::Notice { message: words });
+            }
         } else if outcome.is_error || outcome.subtype.as_deref() != Some("success") {
             // `result` carries the reason for most failures and `errors` for
             // the rest — a budget the CLI stopped on says why only there — so
@@ -3202,6 +3248,22 @@ fn offered_models(models: Vec<wire::Model>) -> Event {
 /// is the CLI's to expand at the start of a prompt and is no skill.
 fn honoured_mid_prompt(command: &wire::Command) -> bool {
     !command.builtin && !command.name.ends_with(" (MCP)")
+}
+
+/// The usage limit a closing `result` ended its turn on, if it did: the words
+/// the session already showed, or, where none arrived as a message, the
+/// result's own where they open the way the CLI words the limit.
+fn limit_in(outcome: &wire::Outcome, shown: Option<&str>) -> Option<String> {
+    if !outcome.is_error {
+        return None;
+    }
+    let result = outcome.result.as_deref().unwrap_or_default();
+    match shown {
+        Some(words) => (outcome.errors.is_empty() && (result.is_empty() || result == words))
+            .then(|| words.to_owned()),
+        None => (outcome.errors.is_empty() && wire::is_usage_limit_text(result))
+            .then(|| result.to_owned()),
+    }
 }
 
 /// The windows one `rate_limit_event` reported.
@@ -5273,6 +5335,92 @@ mod tests {
             "a turn the CLI totalled nothing for was reported as a mismatch: {events:?}"
         );
         assert_eq!(said.len(), 1, "{said:?}");
+    }
+
+    const LIMIT_WORDS: &str = "You've hit your session limit · resets 11:10pm (Europe/Berlin)";
+
+    /// The shape of the CLI's own note when a plan's window is spent, from the
+    /// transcripts of 2.1.292 on 7 October 2026: a message no model wrote,
+    /// with the failure named beside it.
+    fn limit_message(parent: Option<&str>) -> String {
+        let parent = parent.map_or("null".to_owned(), |id| format!("\"{id}\""));
+        format!(
+            r#"{{"type":"assistant","parent_tool_use_id":{parent},"error":"rate_limit","apiError":"usage_limit_reached","message":{{"model":"<synthetic>","id":"m-limit","role":"assistant","content":[{{"type":"text","text":"{LIMIT_WORDS}"}}],"usage":{{"input_tokens":0,"output_tokens":0}}}}}}"#
+        )
+    }
+
+    fn limit_result() -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","is_error":true,"result":"{LIMIT_WORDS}","usage":{{"input_tokens":0,"output_tokens":0}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_usage_limit_hit_is_one_notice_and_no_error() {
+        let mut translator = translator();
+
+        let mut events = translator.line(&limit_message(None));
+        events.extend(translator.line(&limit_result()));
+
+        let said: Vec<_> = notices(&events)
+            .into_iter()
+            .filter(|message| message.contains("session limit"))
+            .collect();
+        assert_eq!(said, [LIMIT_WORDS.to_owned()], "{events:?}");
+        assert!(warnings(&events).is_empty(), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::AssistantMessage { .. })),
+            "the limit was also shown as a reply: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::TurnEnded)),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_limit_hit_the_cli_names_only_in_the_result_is_still_one_notice() {
+        let mut translator = translator();
+
+        let events = translator.line(&limit_result());
+
+        assert_eq!(notices(&events), [LIMIT_WORDS.to_owned()], "{events:?}");
+        assert!(warnings(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_sub_agent_the_limit_stopped_is_stopped_and_says_nothing_of_its_own() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+
+        let mut events = translator.line(&limit_message(Some("toolu_a")));
+        events.extend(translator.line(&result("toolu_a", &format!("\"{LIMIT_WORDS}\""), true)));
+
+        assert!(notices(&events).is_empty(), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::AssistantMessage { .. })),
+            "{events:?}"
+        );
+        assert_eq!(
+            exits(&events),
+            [("toolu_a".to_owned(), AgentOutcome::Cancelled)]
+        );
+    }
+
+    #[test]
+    fn a_failure_that_is_not_the_limit_still_reports_as_one() {
+        let mut translator = translator();
+        translator.line(&limit_message(None));
+
+        let events = translator.line(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"the provider refused"}"#,
+        );
+
+        assert_eq!(warnings(&events).len(), 1, "{events:?}");
     }
 
     #[test]

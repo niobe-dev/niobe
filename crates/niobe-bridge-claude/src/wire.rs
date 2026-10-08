@@ -270,6 +270,14 @@ pub(crate) struct Envelope {
     /// closing `result` then counts none of the message's tokens.
     #[serde(default)]
     pub(crate) aborted: bool,
+    /// On an `assistant` line the CLI wrote itself after a request failed:
+    /// the kind of failure, `rate_limit` for a plan's usage limit.
+    #[serde(default)]
+    pub(crate) error: Option<String>,
+    /// On the same line, the API's own name for the failure —
+    /// `usage_limit_reached` when a plan's window is spent.
+    #[serde(rename = "apiError", default)]
+    pub(crate) api_error: Option<String>,
 }
 
 /// Why one tool call did not run, as the CLI says beside its result.
@@ -298,6 +306,29 @@ impl Envelope {
         })
     }
 
+    /// The words the CLI wrote where a plan's usage limit stopped a request,
+    /// if this line is that note: `You've hit your session limit · resets
+    /// 11:10pm (Europe/Berlin)`.
+    ///
+    /// Read from the failure the CLI names on the line (`rate_limit`,
+    /// `usage_limit_reached`) and, for a release that names none, from the
+    /// opening words of a message no model wrote — the transcripts of 2.1.292
+    /// carry both.
+    pub(crate) fn usage_limit(&self) -> Option<String> {
+        let Some(Content::Blocks(blocks)) = &self.message.content else {
+            return None;
+        };
+        let text = blocks.iter().find_map(|block| match block {
+            Block::Text { text } => Some(text.clone()),
+            Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => None,
+        })?;
+        let named = self.error.as_deref() == Some("rate_limit")
+            || self.api_error.as_deref() == Some("usage_limit_reached");
+        let written_by_the_cli =
+            self.message.model.as_deref() == Some("<synthetic>") && is_usage_limit_text(&text);
+        (named || written_by_the_cli).then_some(text)
+    }
+
     /// Whether the call `id` did not run to its end because the operator
     /// stopped the turn it was in.
     pub(crate) fn interrupted(&self, id: &str) -> bool {
@@ -317,6 +348,11 @@ impl Envelope {
             .and_then(serde_json::Value::as_str)
             == Some("async_launched")
     }
+}
+
+/// Whether `text` opens the way the CLI words a spent usage limit.
+pub(crate) fn is_usage_limit_text(text: &str) -> bool {
+    text.starts_with("You've hit your ")
 }
 
 /// What a file tool — `Edit`, `Write` — reports about itself beside its

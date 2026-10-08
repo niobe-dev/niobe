@@ -574,7 +574,7 @@ fn records(text: &str) -> Vec<Record<'_>> {
 fn last_usage<'a>(records: impl Iterator<Item = &'a Record<'a>>) -> BTreeMap<String, wire::Usage> {
     let mut last = BTreeMap::new();
     for record in records {
-        if let Ok(Line::Assistant(Assistant { message })) = &record.record
+        if let Ok(Line::Assistant(Assistant { message, .. })) = &record.record
             && let (Some(id), Some(usage)) = (&message.id, &message.usage)
         {
             last.insert(id.clone(), usage.clone());
@@ -618,7 +618,7 @@ impl<'a> Threads<'a> {
 
     /// Notes each agent whose spawning call `record` makes.
     fn spawned_in(&mut self, record: &Result<Line, serde_json::Error>) {
-        let Ok(Line::Assistant(Assistant { message })) = record else {
+        let Ok(Line::Assistant(Assistant { message, .. })) = record else {
             return;
         };
         let Some(wire::Content::Blocks(blocks)) = &message.content else {
@@ -727,7 +727,8 @@ fn side_files(path: &Path) -> Vec<SideFile> {
 fn recorded_agent(text: &str) -> RecordedAgent {
     let mut agent = RecordedAgent::default();
     for line in text.lines() {
-        let Ok(Line::Assistant(Assistant { message })) = serde_json::from_str::<Line>(line) else {
+        let Ok(Line::Assistant(Assistant { message, .. })) = serde_json::from_str::<Line>(line)
+        else {
             continue;
         };
         let Some(wire::Content::Blocks(blocks)) = message.content else {
@@ -917,7 +918,11 @@ impl Fold {
     /// the agent's rather than the session's, its tokens under that model,
     /// and the session's context meter left where it was.
     fn assistant(&mut self, record: Assistant, agent: Option<&str>) {
-        let Assistant { message } = record;
+        let Assistant {
+            message,
+            error,
+            api_error,
+        } = record;
         let parent = agent.map(str::to_owned);
         if agent.is_none() {
             self.answered = true;
@@ -969,6 +974,8 @@ impl Fold {
             tool_result_meta: Vec::new(),
             request_id: None,
             aborted: false,
+            error,
+            api_error,
         }));
 
         // Counted here only where no accounting is still to come. A message
@@ -1097,6 +1104,8 @@ impl Fold {
             tool_result_meta: Vec::new(),
             request_id: None,
             aborted: false,
+            error: None,
+            api_error: None,
         }));
     }
 
@@ -1332,6 +1341,14 @@ struct SystemRecord {
 #[derive(Debug, Deserialize)]
 struct Assistant {
     message: AssistantBody,
+    /// Set on a message the CLI wrote itself after a request failed: the kind
+    /// of failure, `rate_limit` for a plan's usage limit.
+    #[serde(default)]
+    error: Option<String>,
+    /// The API's name for that failure, `usage_limit_reached` for a spent
+    /// window.
+    #[serde(rename = "apiError", default)]
+    api_error: Option<String>,
 }
 
 /// The message itself: the same API message the live stream carries, with the
