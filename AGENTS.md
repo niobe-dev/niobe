@@ -278,9 +278,18 @@ These hold for every change. Breaking one is a bug even when the feature ships g
    does not replace a profile the user's file defines, until the operator has trusted that
    file's contents.
 2. **No telemetry.** Network calls go only to configured providers and the CLIs. `cargo xtask
-   layering` fails on a crate in the dependency tree, on any target, that is not on its allowed
-   list (`xtask/src/network.rs`), and on code that reads a CLI's credentials file, sets a user
-   agent, opens a connection of its own or reads the keychain.
+   layering` reads the dependency tree with every feature on and on every target, and fails on
+   a crate in it that is not a workspace member and not on its allowed list
+   (`xtask/src/network.rs`) — a crate vendored beside the workspace and depended on by path
+   included — and on a path crate outside the repository. It reads every Rust file in the
+   repository but `xtask`'s, and fails on a code line that names a CLI's credentials file
+   (`.credentials.json`, a `".credentials` literal, `auth.json`) or a user agent
+   (`user-agent`, `user_agent`, any case); and, in a crate's `src/` or a build script, on one
+   that opens or resolves a connection (`std::net`, `net` in a `std::{…}` group, `TcpStream`,
+   `TcpListener`, `UdpSocket`, `ToSocketAddrs`), reads the keychain, or spawns a network
+   program (`curl`, `wget`, `nc`, `ssh`, `security` and the rest of `NETWORK_PROGRAMS`) named
+   as a literal. It reads text, not types: a name built at run time, or a program named through
+   a variable, passes it, which is what review is for.
 3. **The terminal is restored on every exit path**, including panics and SIGTERM. This is why the
    release profile keeps `panic = "unwind"`.
 4. **Every cost number is traceable to a `usage` field, or it is labelled** "estimate" /

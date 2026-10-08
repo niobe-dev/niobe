@@ -13,7 +13,7 @@ mod network;
 mod version;
 
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use headers::Rule;
@@ -189,25 +189,36 @@ fn layering() -> Result<(), String> {
         "layering: {} crates, no forbidden edges",
         ALLOWED_WORKSPACE_DEPS.len()
     );
-    off_the_network()
+    let member_paths: Vec<&str> = members.lines().filter_map(network::package_path).collect();
+    off_the_network(&member_paths)
 }
 
-/// Checks that nothing in the workspace can talk over the network or reach
-/// for a CLI's credentials: see [`network`].
-fn off_the_network() -> Result<(), String> {
-    let tree = cargo_output(&[
-        "tree",
-        "--workspace",
-        // Every target, so the check says the same on macOS and on Linux.
-        "--target",
-        "all",
+/// What every `cargo tree` the checks run reads: every feature switched on and
+/// every target's dependencies, because an edge behind a feature or a
+/// `cfg(windows)` is an edge the next build can take.
+const WHOLE_TREE: &[&str] = &["--all-features", "--target", "all"];
+
+/// The arguments of the `cargo tree` that lists every crate the product can
+/// be built from.
+fn product_tree_args() -> Vec<&'static str> {
+    let mut args = vec!["tree", "--workspace"];
+    args.extend(WHOLE_TREE);
+    args.extend([
         "--edges",
         "normal,build",
         "--prefix",
         "none",
         "--format",
         "{p}",
-    ])?;
+    ]);
+    args
+}
+
+/// Checks that nothing in the workspace can talk over the network or reach
+/// for a CLI's credentials: see [`network`]. `members` are the directories of
+/// the workspace's own crates.
+fn off_the_network(members: &[&str]) -> Result<(), String> {
+    let tree = cargo_output(&product_tree_args())?;
     let crates = network::network_crates_in(&tree);
     if !crates.is_empty() {
         return Err(format!(
@@ -217,12 +228,31 @@ fn off_the_network() -> Result<(), String> {
         ));
     }
 
-    let unlisted = network::unlisted_crates_in(&tree);
+    let unlisted = network::unlisted_crates_in(&tree, members);
     if !unlisted.is_empty() {
         return Err(format!(
-            "crates in the dependency tree that are not on the allowed list: {}
-add each to              ALLOWED_CRATES in xtask/src/network.rs once you have read what it does, and say              why in the commit",
+            "crates in the dependency tree that are not on the allowed list: {}\nadd each to \
+             ALLOWED_CRATES in xtask/src/network.rs once you have read what it does, and say \
+             why in the commit",
             unlisted.join(", ")
+        ));
+    }
+
+    // Canonical, as `cargo tree` prints a package's directory: the root is
+    // written with a `..` in it, which no directory starts with.
+    let root = std::fs::canonicalize(workspace_root())
+        .map_err(|e| format!("cannot find the workspace root: {e}"))?;
+    let mut outside: Vec<&str> = tree
+        .lines()
+        .filter_map(network::package_path)
+        .filter(|path| !Path::new(path).starts_with(&root))
+        .collect();
+    outside.sort_unstable();
+    outside.dedup();
+    if !outside.is_empty() {
+        return Err(format!(
+            "path crates outside the repository, whose source cannot be checked: {}",
+            outside.join(", ")
         ));
     }
 
@@ -234,11 +264,10 @@ add each to              ALLOWED_CRATES in xtask/src/network.rs once you have re
             "--cached",
             "--others",
             "--exclude-standard",
-            "crates",
         ],
     )?;
     let mut marks = Vec::new();
-    for path in listing.split('\0').filter(|path| path.ends_with(".rs")) {
+    for path in listing.split('\0').filter(|path| scanned_for_marks(path)) {
         let source = match std::fs::read_to_string(workspace_root().join(path)) {
             Ok(source) => source,
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
@@ -312,20 +341,34 @@ fn headers() -> Result<(), String> {
     ))
 }
 
-/// Every `niobe-*` crate reachable from `package`, across normal, build and dev
-/// edges.
-fn workspace_dependencies_of(package: &str) -> Result<Vec<String>, String> {
-    let output = cargo_output(&[
-        "tree",
-        "--package",
-        package,
+/// Whether the file at `path`, relative to the workspace root, is Rust the
+/// network check reads: every one in the repository — a crate vendored beside
+/// the workspace and its build scripts included — but `xtask`'s, which is the
+/// check, names every mark it looks for, and is built into nothing.
+fn scanned_for_marks(path: &str) -> bool {
+    path.ends_with(".rs") && !path.starts_with("xtask/")
+}
+
+/// The arguments of the `cargo tree` that lists every crate reachable from
+/// `package`.
+fn dependency_tree_args(package: &str) -> Vec<&str> {
+    let mut args = vec!["tree", "--package", package];
+    args.extend(WHOLE_TREE);
+    args.extend([
         "--edges",
         "normal,build,dev",
         "--prefix",
         "none",
         "--format",
         "{p}",
-    ])?;
+    ]);
+    args
+}
+
+/// Every `niobe-*` crate reachable from `package`, across normal, build and dev
+/// edges, under every feature and on every target.
+fn workspace_dependencies_of(package: &str) -> Result<Vec<String>, String> {
+    let output = cargo_output(&dependency_tree_args(package))?;
 
     Ok(names_in(&output)
         .into_iter()
@@ -504,6 +547,29 @@ fn cargo_with(args: &[&str], rustflags: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `args` holds `--all-features` and `--target all`.
+    fn reads_the_whole_tree(args: &[&str]) -> bool {
+        args.contains(&"--all-features") && args.windows(2).any(|pair| pair == ["--target", "all"])
+    }
+
+    #[test]
+    fn a_dependency_behind_a_feature_or_another_target_is_in_the_layering_tree() {
+        assert!(reads_the_whole_tree(&dependency_tree_args("niobe-tui")));
+    }
+
+    #[test]
+    fn a_dependency_behind_a_feature_or_another_target_is_in_the_network_tree() {
+        assert!(reads_the_whole_tree(&product_tree_args()));
+    }
+
+    #[test]
+    fn a_build_script_and_a_vendored_crate_are_read_for_marks_and_the_checker_is_not() {
+        assert!(scanned_for_marks("crates/niobe-cli/build.rs"));
+        assert!(scanned_for_marks("vendor/telemetry/src/lib.rs"));
+        assert!(!scanned_for_marks("xtask/src/network.rs"));
+        assert!(!scanned_for_marks("vendor/telemetry/Cargo.toml"));
+    }
 
     #[test]
     fn the_gate_denies_warnings_whatever_rustflags_already_hold() {
