@@ -1592,6 +1592,68 @@ mod tests {
         assert!(app.entries().is_empty());
     }
 
+    /// A store holding windows a session under `max` recorded, at `at`.
+    fn store_with_windows_under_max(at: SystemTime) -> niobe_store::Store {
+        use niobe_core::event::{Backend, Event, SessionMeta, UsageWindow, UsageWindows};
+        let store = niobe_store::Store::open_in_memory().expect("an in-memory store opens");
+        let session = store.create_session().expect("a session is created");
+        let meta = Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "opus-5".to_owned(),
+            backend_session: None,
+        });
+        let windows = Event::UsageWindows(UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: 0.68,
+                resets_at: None,
+            }),
+            seven_day: None,
+            using_overage: false,
+        });
+        for event in [meta, windows] {
+            store
+                .append_at(session, &event, at)
+                .expect("an append succeeds");
+        }
+        store
+    }
+
+    fn carried_under(profile: &str) -> niobe_tui::app::PlanWindows {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_789_000_000);
+        let store = store_with_windows_under_max(at);
+        let config = niobe_config::Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\n[profiles.work]\nbackend = \"claude\"\n",
+            Path::new("config.toml"),
+        )
+        .expect("the config parses");
+        let selected = config
+            .select(Some(profile))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let app = App::new(niobe_tui::app::Repo::default()).attached();
+
+        carry_windows(app, Some(&store), Some(&selected)).plan_windows()
+    }
+
+    #[test]
+    fn a_new_session_carries_the_windows_an_earlier_one_under_its_profile_recorded() {
+        match carried_under("max") {
+            niobe_tui::app::PlanWindows::Carried { windows, .. } => {
+                assert_eq!(
+                    windows.five_hour.map(|window| window.utilization),
+                    Some(0.68)
+                );
+            }
+            other => panic!("the recorded windows were not carried: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_new_session_carries_no_windows_another_profile_recorded() {
+        assert_eq!(carried_under("work"), niobe_tui::app::PlanWindows::Awaited);
+    }
+
     #[test]
     fn durations_print_in_milliseconds_to_two_decimals() {
         assert_eq!(millis(Duration::from_micros(412)), "0.41 ms");
