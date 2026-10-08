@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                         ○ starting
+ Niobe  Session  Context  Model  View  Help                             ○ idle
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ /compact ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ > you                                                                        ┃
 ┃   /compact                                                                   ┃

@@ -940,7 +940,10 @@ fn state_label(app: &App) -> String {
     if app.session().fatal_error().is_some() {
         return "\u{25cb} ended".to_owned();
     }
-    if app.session().meta().is_none() {
+    // The CLI says what it runs only when a turn starts, but it answers what
+    // it offers — its commands, its models — as soon as it is up: anything it
+    // has said means it is no longer starting.
+    if app.session().meta().is_none() && !app.heard() {
         return "\u{25cb} starting".to_owned();
     }
     pulse_label(pulse)
@@ -5130,11 +5133,13 @@ fn identity(
                 false => format!("{} · {}", meta.backend, meta.profile),
             }),
         ),
+        // Before the backend has said what it runs, a model the operator
+        // chose is what its first turn will run on.
         (None, Some(profile)) => (
-            None,
+            session.model().map(str::to_owned),
             Some(format!("{} · {}", profile.backend, profile.name)),
         ),
-        (None, None) => (None, None),
+        (None, None) => (session.model().map(str::to_owned), None),
     }
 }
 
@@ -5825,6 +5830,32 @@ mod tests {
             session_caption(app.caption(), &app.repo().name, 80),
             "Session ─ niobe"
         );
+    }
+
+    /// A CLI that has answered what it offers has spoken, though it says what
+    /// it runs only when a turn starts: the row no longer says it is
+    /// starting.
+    #[test]
+    fn a_backend_that_listed_its_models_is_not_starting() {
+        let mut app = started_on_max();
+        assert_eq!(row_of(&app).last(), Some(&"○ starting".to_owned()));
+
+        app.apply(&niobe_core::event::Event::Models { models: Vec::new() });
+
+        assert_ne!(row_of(&app).last(), Some(&"○ starting".to_owned()));
+    }
+
+    /// A model chosen before the first turn is what that turn will run on,
+    /// and the row names it rather than nothing.
+    #[test]
+    fn a_model_chosen_before_the_backend_said_what_it_runs_is_named_in_the_row() {
+        let mut app = started_on_max();
+
+        app.apply(&niobe_core::event::Event::ModelSelected {
+            model: "haiku".to_owned(),
+        });
+
+        assert_eq!(row_of(&app).first(), Some(&"haiku".to_owned()));
     }
 
     /// A turn sent to a CLI that has not said a word since it started — not
