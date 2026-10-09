@@ -25,7 +25,9 @@ use serde::Deserialize;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Message {
     /// The CLI talking about the session rather than about the conversation.
-    System(System),
+    /// Boxed because it holds a field for every subtype read, which makes it
+    /// twice the size of any other message.
+    System(Box<System>),
     /// A message from the model, complete.
     Assistant(Envelope),
     /// A turn from the operator, or a tool result the CLI is feeding back.
@@ -107,6 +109,28 @@ pub(crate) struct System {
     pub(crate) tools: Option<Vec<String>>,
     /// On `init`: every MCP server the CLI configured for the session.
     pub(crate) mcp_servers: Option<Vec<McpServer>>,
+    /// On `api_retry`: the kind of failure in the CLI's own words
+    /// (`overloaded`, `rate_limit`, `server_error`, …). Held as any value
+    /// because another subtype may one day carry an `error` of another
+    /// shape, and that must not cost the whole line.
+    pub(crate) error: Option<serde_json::Value>,
+    /// On `api_retry`: the HTTP status the request failed with, absent for a
+    /// failure that had no response, such as a dropped connection.
+    pub(crate) error_status: Option<u64>,
+    /// On `api_retry`: which retry this is, of how many the CLI will make,
+    /// and how long it waits before making it.
+    pub(crate) attempt: Option<u64>,
+    pub(crate) max_retries: Option<u64>,
+    pub(crate) retry_delay_ms: Option<u64>,
+    /// On `informational`: the line the CLI shows, and the level it shows it
+    /// at — `notice`, `warning` — as recorded from Claude Code 2.1.296.
+    pub(crate) content: Option<serde_json::Value>,
+    pub(crate) level: Option<String>,
+    /// On `model_refusal_no_fallback`: the model that declined, and the
+    /// API's category and words for why, where it gave them.
+    pub(crate) original_model: Option<String>,
+    pub(crate) api_refusal_category: Option<String>,
+    pub(crate) api_refusal_explanation: Option<String>,
 }
 
 /// One MCP server, as `init` lists it.

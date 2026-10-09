@@ -1430,3 +1430,91 @@ prints `per_message` and `reported` both as 8 in, 9,175 out, 352,445 cache
 read and 7,496 cache write, and `cut` as `["msg_011Cfh9DZarQmXXnvywwTKDD"]`.
 Without the cut reply, the messages come to 6 in, 9,167 out, 234,375 cache
 read and 4,685 cache write.
+
+## `api-errors.jsonl`, `api-errors-transcript.jsonl`
+
+One session of six turns, recorded from Claude Code 2.1.296 on 9 October 2026
+on both carriers: the live stream under the driver's flags (`--input-format
+stream-json --output-format stream-json --verbose --include-partial-messages
+--permission-mode default`, plus `--setting-sources project --model
+claude-sonnet-5`), and the transcript the CLI kept of it.
+
+**The requests went to a stand-in for the API, not to Anthropic's.** The CLI
+was pointed at a local server with `ANTHROPIC_BASE_URL` and a placeholder
+`ANTHROPIC_API_KEY`, and `CLAUDE_CODE_MAX_RETRIES=2`. The server answered by
+the operator's words: `Say hello.` with a one-word reply; `RETRY please` with
+a `529 overloaded_error` twice and then the reply; `REFUSE this` with a reply
+whose `stop_reason` is `refusal` (twice, since the CLI asks once more after
+its safeguards stop a reply); `FAIL now` with a 529 on every attempt; and
+`DENIED now` with a `400 invalid_request_error` the CLI files as
+`billing_error`. `/context` made no request. The project's settings ran a
+`Stop` hook and a `UserPromptSubmit` hook that each echo a word. So the
+tokens, costs and model names are the stand-in's and the CLI's arithmetic on
+them, and the tests assert no money from either file; what the recording is
+for is which `system` messages the CLI writes, on which carrier, around a
+failing request. Nothing else was provoked this way that a real account could
+not produce: a request that is retried, one that is refused, one that runs out
+of retries.
+
+The edits: in `api-errors.jsonl`, `system`/`init` cut down to the keys that
+say what ran, with its `cwd` rewritten to `/repo`, and the answer to
+`initialize`, `system`/`status`, `content_block_start`, `content_block_stop`
+and `message_stop` left out. In `api-errors-transcript.jsonl`, only the
+`user`, `assistant`, `system` and `cost-state` records kept — the
+`attachment` records alone were 215 KB of skill and tool listings — with
+every `cwd` rewritten to `/repo`. The lines kept are the CLI's own.
+
+### Which `system` subtypes each carrier holds
+
+| subtype | live stream | transcript | what the bridge does |
+| ------- | ----------- | ---------- | -------------------- |
+| `init` | every turn | — | read |
+| `api_retry` | 4 | — | an error entry per retry: the status and the CLI's kind of failure, the attempt and the wait |
+| `api_error` | — | 4 | the same entry, with the CLI's own sentence for the failure (`error.formatted`) |
+| `informational` | 1 | 1 | shown in the CLI's words at its `level`: `notice` a notice, `warning` or `error` a warning |
+| `model_refusal_no_fallback` | 1 | 1 | a warning naming the model, and the API's category and words where it gave them |
+| `stop_hook_summary` | — | 2 | passed over in the transcript: the hooks ran and nothing failed |
+| `local_command` | — | 1 | the command's output, a notice, as the user-turn form it replaced is read |
+
+The live stream carries the retries under another name than the transcript:
+the CLI writes `api_error` for itself and sends the operator `api_retry`,
+with `attempt`, `max_retries`, `retry_delay_ms`, `error_status` and `error`
+(its kind of failure — `overloaded`) but no sentence. The `/context` turn is
+on the live stream as a `<synthetic>` reply and a `result`; neither hook is.
+The request that ran out of retries and the one the API refused outright end
+the same way on both carriers: a `<synthetic>` reply in the CLI's words, which
+the live `result` repeats with `is_error: true`.
+
+**Not observed on the live stream**, from Claude Code 2.1.296, though the
+transcripts on the machine this was written on carry them: `turn_duration`,
+`away_summary` (a recap written for an operator who stepped away from the
+CLI's own screen), `scheduled_task_fire` (a `/loop` or scheduled prompt
+firing) and `agents_killed`. The transcript reader passes over
+`turn_duration`, `away_summary` and `agents_killed` and shows
+`scheduled_task_fire` as a notice, each with its reason in `transcript.rs`;
+on the live stream any of them would arrive as the one notice a subtype
+nobody has read gets.
+
+### What the tests assert
+
+The four retries, in order, from either file:
+
+```sh
+jq -c 'select(.subtype == "api_retry") | [.error_status, .error, .attempt, .max_retries, .retry_delay_ms]' api-errors.jsonl
+# [529,"overloaded",1,2,544]
+# [529,"overloaded",2,2,1234]
+# [529,"overloaded",1,2,592]
+# [529,"overloaded",2,2,1141]
+jq -c 'select(.subtype == "api_error") | [.error.formatted, .retryAttempt, .maxRetries, .retryInMs]' api-errors-transcript.jsonl
+# ["529 Overloaded",1,2,544]
+# ["529 Overloaded",2,2,1234]
+# ["529 Overloaded",1,2,592]
+# ["529 Overloaded",2,2,1141]
+```
+
+Each wait is shown to the tenth of a second, rounded half up: 0.5, 1.2, 0.6
+and 1.1 s. `tests/stream.rs` folds the live file and asserts those four
+entries, the refusal of `claude-sonnet-5`, the banner as a notice, and no
+notice that a subtype could not be read; `tests/transcript.rs` folds the
+transcript and asserts the same entries in the CLI's sentence, and that its
+only notices are the banner and the output of `/context`.

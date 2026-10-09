@@ -2216,3 +2216,66 @@ fn the_mcp_servers_the_cli_configured_come_from_its_init() {
     );
     assert!(warnings(&events).is_empty(), "{events:?}");
 }
+
+/// A session run against a stand-in for the API that fails on cue; see
+/// `tests/fixtures/README.md`.
+const API_ERRORS: &str = include_str!("fixtures/api-errors.jsonl");
+
+#[test]
+fn a_recorded_retry_refusal_and_banner_are_each_read_rather_than_reported_as_unknown() {
+    let events = translate(API_ERRORS);
+
+    let unknown: Vec<&str> = notices(&events)
+        .into_iter()
+        .filter(|notice| notice.contains("does not know how to read"))
+        .collect();
+    assert!(unknown.is_empty(), "{unknown:?}");
+}
+
+#[test]
+fn every_retry_of_a_recorded_failed_request_is_an_error_saying_what_failed_and_which_attempt() {
+    let events = translate(API_ERRORS);
+
+    let retries: Vec<&str> = warnings(&events)
+        .into_iter()
+        .filter(|warning| warning.contains("retrying"))
+        .collect();
+    assert_eq!(
+        retries,
+        [
+            "a request failed (529 overloaded), and the CLI is retrying it: attempt 1 of 2, in 0.5 s",
+            "a request failed (529 overloaded), and the CLI is retrying it: attempt 2 of 2, in 1.2 s",
+            "a request failed (529 overloaded), and the CLI is retrying it: attempt 1 of 2, in 0.6 s",
+            "a request failed (529 overloaded), and the CLI is retrying it: attempt 2 of 2, in 1.1 s",
+        ]
+    );
+}
+
+#[test]
+fn a_recorded_refusal_with_no_model_to_fall_back_on_is_a_warning_naming_the_model() {
+    let events = translate(API_ERRORS);
+
+    let refusals: Vec<&str> = warnings(&events)
+        .into_iter()
+        .filter(|warning| warning.contains("declined"))
+        .collect();
+    assert_eq!(
+        refusals,
+        [
+            "`claude-sonnet-5` declined to answer, and the CLI has no other model to give the \
+             request to"
+        ]
+    );
+}
+
+#[test]
+fn a_recorded_banner_at_the_notice_level_is_a_notice_in_the_clis_words() {
+    let events = translate(API_ERRORS);
+
+    assert!(
+        notices(&events).contains(
+            &"Sonnet 5's safeguards stopped the response above · continuing once with that noted"
+        ),
+        "{events:#?}"
+    );
+}

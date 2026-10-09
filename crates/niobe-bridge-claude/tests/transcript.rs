@@ -1035,3 +1035,77 @@ fn a_resumed_session_still_open_is_counted_whole_and_its_bill_reads_as_a_floor()
     assert_eq!(totals.records_unsettled, 1);
     assert!(!totals.cost_fully_reported());
 }
+
+/// The CLI's own transcript of the session `api-errors.jsonl` recorded; see
+/// `tests/fixtures/README.md`.
+fn api_errors() -> Vec<Event> {
+    transcript::events(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/api-errors-transcript.jsonl"),
+        "max",
+        Path::new("/repo"),
+    )
+    .expect("the transcript reads")
+}
+
+fn notices(events: &[Event]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Notice { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn every_retry_in_a_read_back_session_is_an_error_saying_what_the_cli_said_and_which_attempt() {
+    let events = api_errors();
+
+    let retries: Vec<&str> = warnings(&events)
+        .into_iter()
+        .filter(|warning| warning.contains("retrying"))
+        .collect();
+    assert_eq!(
+        retries,
+        [
+            "a request failed (529 Overloaded), and the CLI is retrying it: attempt 1 of 2, in 0.5 s",
+            "a request failed (529 Overloaded), and the CLI is retrying it: attempt 2 of 2, in 1.2 s",
+            "a request failed (529 Overloaded), and the CLI is retrying it: attempt 1 of 2, in 0.6 s",
+            "a request failed (529 Overloaded), and the CLI is retrying it: attempt 2 of 2, in 1.1 s",
+        ]
+    );
+}
+
+#[test]
+fn a_read_back_refusal_and_banner_are_shown_at_the_level_the_cli_gave_them() {
+    let events = api_errors();
+
+    assert!(
+        warnings(&events).contains(
+            &"`claude-sonnet-5` declined to answer, and the CLI has no other model to give the \
+              request to"
+        ),
+        "{events:#?}"
+    );
+    assert!(
+        notices(&events).contains(
+            &"Sonnet 5's safeguards stopped the response above · continuing once with that noted"
+        ),
+        "{events:#?}"
+    );
+}
+
+#[test]
+fn a_read_back_local_commands_output_is_its_answer_and_a_stop_hook_says_nothing() {
+    let events = api_errors();
+
+    let said = notices(&events);
+    assert!(
+        said.iter()
+            .any(|notice| notice.starts_with("## Context Usage")),
+        "{said:?}"
+    );
+    // Its two stop hooks ran and say nothing; the only notices are the
+    // banner and the output of `/context`.
+    assert_eq!(said.len(), 2, "{said:?}");
+}

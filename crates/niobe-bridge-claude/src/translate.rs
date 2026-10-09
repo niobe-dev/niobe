@@ -828,7 +828,7 @@ impl Translator {
     pub(crate) fn message(&mut self, message: wire::Message) -> Vec<Event> {
         let mut out = Vec::new();
         match message {
-            wire::Message::System(system) => self.system(system, &mut out),
+            wire::Message::System(system) => self.system(*system, &mut out),
             wire::Message::Assistant(envelope) => self.assistant(envelope, &mut out),
             wire::Message::User(envelope) => self.user(envelope, &mut out),
             wire::Message::StreamEvent(event) => self.stream(event, &mut out),
@@ -1087,6 +1087,47 @@ impl Translator {
                     out.push(Event::Notice { message });
                 }
             }
+            // A request that failed and that the CLI is about to make again,
+            // as Claude Code 2.1.296 puts on the live stream what its own
+            // transcript calls `api_error`. The wire carries no sentence of
+            // the CLI's for it, so the failure is said by its status and the
+            // CLI's name for its kind.
+            Some("api_retry") => {
+                let kind = system.error.as_ref().and_then(|error| error.as_str());
+                let failure = match (system.error_status, kind) {
+                    (Some(status), Some(kind)) => format!("{status} {kind}"),
+                    (Some(status), None) => status.to_string(),
+                    (None, Some(kind)) => kind.to_owned(),
+                    (None, None) => "no reason given".to_owned(),
+                };
+                out.push(retrying(
+                    &failure,
+                    Retry {
+                        attempt: system.attempt,
+                        of: system.max_retries,
+                        in_ms: system.retry_delay_ms,
+                    },
+                ));
+            }
+            // A line the CLI shows its own operator, at the level it names:
+            // a reply its safeguards stopped, a usage limit it is waiting
+            // out, a command it did not know.
+            Some("informational") => {
+                let content = system.content.as_ref().and_then(|content| content.as_str());
+                out.extend(content.and_then(|said| informed(said, system.level.as_deref())));
+            }
+            Some("model_refusal_no_fallback") => out.push(declined(
+                system.original_model.as_deref(),
+                system.api_refusal_category.as_deref(),
+                system.api_refusal_explanation.as_deref(),
+            )),
+            // Not observed on the live stream from a session that provoked
+            // each (README, `api-errors.jsonl`), though the CLI writes them
+            // into its own transcript, where `transcript.rs` decides on each:
+            // `api_error` (sent here as `api_retry`), `turn_duration`,
+            // `stop_hook_summary`, `local_command`, `away_summary`,
+            // `scheduled_task_fire` and `agents_killed`. One that arrives is
+            // reported below, once, as a shape nobody has read here.
             other => {
                 let subtype = other.unwrap_or("(none)");
                 out.extend(self.unread_once(
@@ -2677,6 +2718,79 @@ fn unknown_spend(why: String) -> Event {
     }
 }
 
+/// Which retry of a failed request the CLI is making, and when, each as far as
+/// the CLI said.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Retry {
+    pub(crate) attempt: Option<u64>,
+    pub(crate) of: Option<u64>,
+    pub(crate) in_ms: Option<u64>,
+}
+
+/// The entry for a request that failed and that the CLI is making again:
+/// what failed, in `failure`, and which retry this is.
+///
+/// An error entry, because the CLI files it as one (`level: "error"` in its
+/// own transcript), and not the end of the session: the turn waits on the
+/// retry, and if the retries run out it ends on the failure.
+pub(crate) fn retrying(failure: &str, retry: Retry) -> Event {
+    let mut message = format!("a request failed ({failure}), and the CLI is retrying it");
+    let attempt = match (retry.attempt, retry.of) {
+        (Some(attempt), Some(of)) => Some(format!("attempt {attempt} of {of}")),
+        (Some(attempt), None) => Some(format!("attempt {attempt}")),
+        (None, Some(_) | None) => None,
+    };
+    let delay = retry.in_ms.map(|ms| {
+        let tenths = ms.saturating_add(50) / 100;
+        format!("in {}.{} s", tenths / 10, tenths % 10)
+    });
+    let when: Vec<String> = attempt.into_iter().chain(delay).collect();
+    if !when.is_empty() {
+        message.push_str(": ");
+        message.push_str(&when.join(", "));
+    }
+    warn(message)
+}
+
+/// The entry for a line the CLI shows its operator at `level`: a warning
+/// where the CLI says `warning` or `error`, and a notice otherwise — `notice`
+/// is the level recorded, and a level a later release adds is not an alarm
+/// until it says so. A line with nothing in it is nothing to show.
+pub(crate) fn informed(said: &str, level: Option<&str>) -> Option<Event> {
+    if said.trim().is_empty() {
+        return None;
+    }
+    let message = said.to_owned();
+    Some(match level {
+        Some("warning" | "error") => warn(message),
+        _ => Event::Notice { message },
+    })
+}
+
+/// The entry for a model that declined to answer where the CLI had no other
+/// model to give the request to: a warning, as the CLI files it, since the
+/// turn ends without the answer it asked for. The CLI's own sentence about it
+/// follows as a reply.
+pub(crate) fn declined(
+    model: Option<&str>,
+    category: Option<&str>,
+    explanation: Option<&str>,
+) -> Event {
+    let who = model.map_or_else(|| "the model".to_owned(), |model| format!("`{model}`"));
+    let mut message =
+        format!("{who} declined to answer, and the CLI has no other model to give the request to");
+    let why: Vec<&str> = [category, explanation]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.trim().is_empty())
+        .collect();
+    if !why.is_empty() {
+        message.push_str(": ");
+        message.push_str(&why.join(" — "));
+    }
+    warn(message)
+}
+
 /// The entry for a shape this bridge has not read: visible, so that a shape a
 /// new release added cannot pass unnoticed, and a notice, because the CLI did
 /// not say that anything failed.
@@ -3930,6 +4044,56 @@ mod tests {
             })
             .collect();
         assert_eq!(billed, [("opus-5", 0, 0), ("opus-5[1m]", 2, 3)]);
+    }
+
+    #[test]
+    fn a_retry_after_a_failure_with_no_response_is_said_by_the_kind_of_failure_alone() {
+        let events = Translator::new("max").line(
+            r#"{"type":"system","subtype":"api_retry","attempt":3,"max_retries":10,"retry_delay_ms":4049,"error_status":null,"error":"unknown"}"#,
+        );
+
+        assert_eq!(
+            events,
+            [warn(
+                "a request failed (unknown), and the CLI is retrying it: attempt 3 of 10, in 4.0 s"
+                    .to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_banner_the_cli_shows_as_a_warning_is_a_warning_and_an_empty_one_is_nothing() {
+        let mut translator = Translator::new("max");
+
+        let warned = translator.line(
+            r#"{"type":"system","subtype":"informational","content":"Unknown command: /clar. Did you mean /clear?","level":"warning"}"#,
+        );
+        let empty = translator
+            .line(r#"{"type":"system","subtype":"informational","content":" ","level":"notice"}"#);
+
+        assert_eq!(
+            warned,
+            [warn(
+                "Unknown command: /clar. Did you mean /clear?".to_owned()
+            )]
+        );
+        assert!(empty.is_empty(), "{empty:?}");
+    }
+
+    #[test]
+    fn a_refusal_that_says_why_carries_the_apis_category_and_words() {
+        let events = Translator::new("max").line(
+            r#"{"type":"system","subtype":"model_refusal_no_fallback","original_model":"claude-opus-5-5","api_refusal_category":"cyber","api_refusal_explanation":"The request was declined.","content":""}"#,
+        );
+
+        assert_eq!(
+            events,
+            [warn(
+                "`claude-opus-5-5` declined to answer, and the CLI has no other model to give \
+                 the request to: cyber — The request was declined."
+                    .to_owned()
+            )]
+        );
     }
 
     /// The session is on the id with the window and its messages name the

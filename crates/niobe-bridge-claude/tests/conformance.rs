@@ -141,6 +141,18 @@ const SHAPES: &[&str] = &[
     "pr-link",
     "queue-operation",
     "system/local_command",
+    // A session against a stand-in for the API that fails on cue, recorded
+    // from Claude Code 2.1.296 on both carriers (`api-errors.jsonl` and its
+    // transcript). A retried request is `api_retry` on the live stream and
+    // `api_error` in the transcript, each an error entry saying which retry
+    // it is; a refusal with no model to fall back on is a warning, and the
+    // CLI's banner is shown at the level it names. The stop hook the session
+    // ran is written only into the transcript, and passed over there.
+    "system/api_error",
+    "system/api_retry",
+    "system/informational",
+    "system/model_refusal_no_fallback",
+    "system/stop_hook_summary",
 ];
 
 fn fixtures() -> PathBuf {

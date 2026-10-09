@@ -1019,14 +1019,85 @@ impl Fold {
         }
     }
 
-    /// One of the CLI's own notes: read only where it marks a compaction,
-    /// with what started it and how much the conversation held before it.
+    /// One of the CLI's own notes, each subtype read or passed over for its
+    /// own reason. The subtypes are every one the transcripts on the machine
+    /// this was written on carry, releases up to 2.1.296; the README names
+    /// which of them the live stream carries too.
     fn system(&mut self, record: SystemRecord) {
-        if record.subtype.as_deref() == Some("compact_boundary") {
-            self.out.push(translate::compacted(
-                record.compact_metadata.unwrap_or_default(),
-            ));
-            self.compacted = true;
+        let content = record.content.as_ref().and_then(|content| content.as_str());
+        match record.subtype.as_deref() {
+            Some("compact_boundary") => {
+                self.out.push(translate::compacted(
+                    record.compact_metadata.unwrap_or_default(),
+                ));
+                self.compacted = true;
+            }
+            // A request that failed and was made again, which the live stream
+            // reports as `api_retry`. Said in the CLI's own sentence for the
+            // failure, so that a session read back does not look as though
+            // every request went through.
+            Some("api_error") => {
+                let error = record.error.unwrap_or_default();
+                let failure = error
+                    .formatted
+                    .or(error.message)
+                    .unwrap_or_else(|| "no reason given".to_owned());
+                self.out.push(translate::retrying(
+                    &failure,
+                    translate::Retry {
+                        attempt: record.retry_attempt,
+                        of: record.max_retries,
+                        in_ms: record.retry_in_ms,
+                    },
+                ));
+            }
+            Some("model_refusal_no_fallback") => self.out.push(translate::declined(
+                record.original_model.as_deref(),
+                record.api_refusal_category.as_deref(),
+                record.api_refusal_explanation.as_deref(),
+            )),
+            Some("informational") => {
+                self.out.extend(
+                    content.and_then(|said| translate::informed(said, record.level.as_deref())),
+                );
+            }
+            // What a slash command printed, which a release before 2.1.296
+            // wrote as a user turn and which is read the same way here: the
+            // CLI's answer to the command, from inside its markup.
+            Some("local_command") => {
+                if let Some(printed) = content.and_then(local_output)
+                    && !printed.is_empty()
+                {
+                    self.out.push(Event::Notice {
+                        message: printed.to_owned(),
+                    });
+                }
+            }
+            // A scheduled prompt firing — a `/loop` waking up — which is why
+            // the turn after it starts with nobody having typed.
+            Some("scheduled_task_fire") => {
+                if let Some(said) = content.filter(|said| !said.trim().is_empty()) {
+                    self.out.push(Event::Notice {
+                        message: said.to_owned(),
+                    });
+                }
+            }
+            // Passed over, each on purpose:
+            //
+            // * `turn_duration` is the CLI's own timing of a turn, which its
+            //   screen draws as `Done in Ns`; the turn is in the history
+            //   either way.
+            // * `stop_hook_summary` lists the hooks the CLI ran as a turn
+            //   stopped, at the CLI's `suggestion` level; every one of the
+            //   750 on the machine this was written on said nothing failed.
+            // * `away_summary` is a model's recap of the session for an
+            //   operator who stepped away, restating the history being read.
+            // * `agents_killed` names no agent and no call, so there is
+            //   nothing to end by it.
+            //
+            // And any subtype a later release adds, which in a history is the
+            // CLI's furniture until it is read.
+            Some(_) | None => {}
         }
     }
 
@@ -1292,8 +1363,9 @@ enum Line {
     /// model, and once in a while the notice that a sub-agent stopped.
     #[serde(rename = "attachment")]
     Attachment(Attachment),
-    /// The CLI's own notes to the screen, of which a compaction's boundary
-    /// is the one read.
+    /// The CLI's own notes to the screen: a compaction's boundary, a retried
+    /// request, a refusal, a banner, a command's output and a scheduled
+    /// prompt firing are read, and the rest passed over (`Fold::system`).
     #[serde(rename = "system")]
     System(SystemRecord),
     /// Records that say nothing about what the session did, changed or cost:
@@ -1335,6 +1407,36 @@ struct SystemRecord {
     /// conversation held before it.
     #[serde(rename = "compactMetadata")]
     compact_metadata: Option<wire::CompactMetadata>,
+    /// On `informational`, `local_command` and `scheduled_task_fire`: what
+    /// the CLI showed. Held as any value so that a subtype whose `content`
+    /// has another shape does not cost the record.
+    content: Option<serde_json::Value>,
+    /// On `informational`: the level the CLI shows `content` at.
+    level: Option<String>,
+    /// On `api_error`: the failure, and which retry of it the CLI made.
+    error: Option<ApiErrorRecord>,
+    #[serde(rename = "retryAttempt")]
+    retry_attempt: Option<u64>,
+    #[serde(rename = "maxRetries")]
+    max_retries: Option<u64>,
+    #[serde(rename = "retryInMs")]
+    retry_in_ms: Option<u64>,
+    /// On `model_refusal_no_fallback`: the model that declined and why.
+    #[serde(rename = "originalModel")]
+    original_model: Option<String>,
+    #[serde(rename = "apiRefusalCategory")]
+    api_refusal_category: Option<String>,
+    #[serde(rename = "apiRefusalExplanation")]
+    api_refusal_explanation: Option<String>,
+}
+
+/// A failed request, as an `api_error` record holds it.
+#[derive(Debug, Default, Deserialize)]
+struct ApiErrorRecord {
+    /// The sentence the CLI shows for the failure: `529 Overloaded`.
+    formatted: Option<String>,
+    /// The failure as the API client put it, for a record with no sentence.
+    message: Option<String>,
 }
 
 /// A message from the model, as the transcript wraps it.
@@ -2112,6 +2214,49 @@ mod tests {
         };
         assert_eq!(side.call, "toolu_a");
         assert_eq!(recorded_agent(&side.text).answer.as_deref(), Some("Done."));
+    }
+
+    #[test]
+    fn the_clis_timing_hooks_recap_and_stopped_agents_are_passed_over_in_silence() {
+        let events = folded(&[
+            r#"{"type":"system","subtype":"turn_duration","durationMs":12}"#,
+            r#"{"type":"system","subtype":"stop_hook_summary","hookCount":1,"hookInfos":[{"command":"echo","durationMs":40}],"hookErrors":[],"preventedContinuation":false,"level":"suggestion"}"#,
+            r#"{"type":"system","subtype":"away_summary","content":"Fixed the parser; the gate is green."}"#,
+            r#"{"type":"system","subtype":"agents_killed"}"#,
+        ]);
+
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_scheduled_prompt_firing_says_why_the_next_turn_began_with_nobody_typing() {
+        let events = folded(&[
+            r#"{"type":"system","subtype":"scheduled_task_fire","content":"Claude resuming /loop wakeup (Oct 3 5:56pm)","taskKind":"loop"}"#,
+        ]);
+
+        assert_eq!(
+            events,
+            [Event::Notice {
+                message: "Claude resuming /loop wakeup (Oct 3 5:56pm)".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_retry_recorded_with_no_sentence_of_the_clis_is_said_in_the_api_clients_words() {
+        let events = folded(&[
+            r#"{"type":"system","subtype":"api_error","level":"error","error":{"message":"Connection error."},"retryAttempt":1,"maxRetries":10}"#,
+        ]);
+
+        assert_eq!(
+            events,
+            [Event::Error {
+                message: "a request failed (Connection error.), and the CLI is retrying it: \
+                          attempt 1 of 10"
+                    .to_owned(),
+                fatal: false,
+            }]
+        );
     }
 
     #[test]
