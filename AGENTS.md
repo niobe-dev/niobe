@@ -217,7 +217,9 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   auto-memory index and its notes — since the CLI does not say which it loaded;
   `transcript.rs` reads the session files the CLI keeps for
   itself, so a session started in plain Claude Code can be listed and carried on — it writes
-  nothing back, and folds through the same `translate.rs` as the live stream — and a resumed
+  nothing back, and folds through the same `translate.rs` as the live stream, each event beside
+  the time its record was stamped (`stamp.rs` reads the CLI's UTC stamps and nothing else), which
+  is what an import shows it at and stores it at — and a resumed
   session's translator starts from the spend its last `cost-state` records, because the CLI
   restores those running totals on `--resume` — where the file cannot be read, that spend is
   unknown, the session says so and counts nothing of its first bill, rather than bill the

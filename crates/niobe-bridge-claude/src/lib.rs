@@ -48,6 +48,7 @@
 mod base64;
 mod driver;
 mod spilled;
+mod stamp;
 mod translate;
 mod wire;
 

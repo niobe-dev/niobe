@@ -13,6 +13,7 @@
 )]
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use niobe_bridge_claude::transcript;
 use niobe_core::event::{
@@ -51,6 +52,23 @@ fn folded_session(id: &str) -> Vec<Event> {
         Path::new("/repo"),
     )
     .expect("the transcript reads")
+}
+
+/// Every event the fixture folds to, in order, with the time each was
+/// recorded at.
+fn timed() -> Vec<transcript::Timed> {
+    transcript::timed(
+        &transcripts().join(format!("{SESSION}.jsonl")),
+        "max",
+        Path::new("/repo"),
+    )
+    .expect("the transcript reads")
+}
+
+/// The moment the fixture's records write as `2026-09-18T09:00:<secs>.000Z`:
+/// `date -u -d 2026-09-18T09:00:00Z +%s` is 1789722000.
+fn at_second(secs: u64) -> Option<SystemTime> {
+    Some(UNIX_EPOCH + Duration::from_secs(1_789_722_000 + secs))
 }
 
 /// What was reported about sub-agent `id`, in order: each report's model,
@@ -1108,4 +1126,106 @@ fn a_read_back_local_commands_output_is_its_answer_and_a_stop_hook_says_nothing(
     // Its two stop hooks ran and say nothing; the only notices are the
     // banner and the output of `/context`.
     assert_eq!(said.len(), 2, "{said:?}");
+}
+
+#[test]
+fn an_imported_prompt_is_at_the_time_its_record_was_written() {
+    // The record holding the prompt is stamped `2026-09-18T09:00:02.000Z`.
+    let prompt = timed()
+        .into_iter()
+        .find(|timed| {
+            matches!(&timed.event, Event::UserMessage { text } if text == "add an etag to the catalog response")
+        })
+        .expect("the fixture's prompt is read");
+    assert_eq!(prompt.at, at_second(2));
+}
+
+#[test]
+fn every_event_one_record_folds_to_has_that_records_time() {
+    // The assistant record stamped `09:00:06.000Z` says a line and starts the
+    // call `toolu_1`, both in one message.
+    let timed = timed();
+    let said = timed
+        .iter()
+        .find(|timed| matches!(&timed.event, Event::AssistantMessage { text, .. } if text == "I will add the header."))
+        .expect("the line before the call is read");
+    let call = timed
+        .iter()
+        .find(|timed| matches!(&timed.event, Event::ToolCallStart { id, .. } if id.as_str() == "toolu_1"))
+        .expect("the call is read");
+    assert_eq!(said.at, at_second(6));
+    assert_eq!(call.at, at_second(6));
+}
+
+#[test]
+fn no_imported_event_is_given_a_time_its_records_do_not_hold() {
+    // `jq -r 'select(.timestamp) | .timestamp'` over the fixture, less the
+    // line that is not JSON: every stamp it holds is a whole second but one.
+    let recorded: Vec<Option<SystemTime>> = [0, 1, 2, 5, 6, 7, 12, 13]
+        .into_iter()
+        .map(at_second)
+        .chain([
+            at_second(1).map(|at| at + Duration::from_millis(200)),
+            at_second(1).map(|at| at + Duration::from_millis(400)),
+        ])
+        .collect();
+    for timed in timed() {
+        assert!(
+            timed.at.is_none() || recorded.contains(&timed.at),
+            "{:?} at {:?}",
+            timed.event,
+            timed.at
+        );
+    }
+}
+
+#[test]
+fn a_record_with_no_stamp_leaves_its_events_with_no_time() {
+    // The `permission-mode` record that puts the session in plan mode carries
+    // no `timestamp`, and the line that is not JSON has none to read.
+    let timed = timed();
+    let mode = timed
+        .iter()
+        .find(|timed| matches!(timed.event, Event::ModeSelected { mode: Mode::Plan }))
+        .expect("the mode is read");
+    assert_eq!(mode.at, None);
+    let unreadable = timed
+        .iter()
+        .find(|timed| matches!(&timed.event, Event::Notice { .. }))
+        .expect("the line that is not JSON is reported");
+    assert_eq!(unreadable.at, None);
+}
+
+#[test]
+fn a_record_whose_stamp_does_not_parse_still_reads_with_no_time() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let path = dir
+        .path()
+        .join("0d1f6e2a-1b3c-4d5e-8f70-112233445566.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"first"},"timestamp":"the eighteenth of September","cwd":"/repo"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"second"},"timestamp":"2026-09-18T09:00:02.000Z","cwd":"/repo"}"#,
+            "\n",
+        ),
+    )
+    .expect("the transcript is written");
+    let prompts: Vec<(String, Option<SystemTime>)> =
+        transcript::timed(&path, "max", Path::new("/repo"))
+            .expect("a stamp that does not parse does not fail the read")
+            .into_iter()
+            .filter_map(|timed| match timed.event {
+                Event::UserMessage { text } => Some((text, timed.at)),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(
+        prompts,
+        vec![
+            ("first".to_owned(), None),
+            ("second".to_owned(), at_second(2))
+        ]
+    );
 }

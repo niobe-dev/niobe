@@ -780,6 +780,57 @@ fn a_claude_session_read_in_is_a_niobe_session_from_then_on() {
     assert!(out.contains("1 changed — +3 −1"), "{out}");
 }
 
+/// A session read in from the CLI's transcript is stored at the times the
+/// CLI recorded, so that resuming it shows when it happened rather than when
+/// it was read in.
+#[test]
+fn a_claude_session_read_in_is_stored_at_the_times_its_transcript_records() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows("Done: the catalog response carries an etag.");
+    recorded(repo.path(), 13);
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    assert!(status.success(), "the imported session ended with {status}");
+
+    let store =
+        Store::open(&repo.path().join(".niobe").join("sessions.db")).expect("the store opens");
+    let session: SessionId = "1".parse().expect("1 is a session id");
+    let stored = store.events(session).expect("the session reads");
+    let at = |text: &str| {
+        stored
+            .iter()
+            .find(|s| matches!(&s.event, niobe_core::event::Event::UserMessage { text: said } if said == text))
+            .map(|s| s.at)
+            .expect("the prompt was stored")
+    };
+    // The record holding the prompt is stamped `2026-09-18T09:00:02.000Z`,
+    // which `date -u -d 2026-09-18T09:00:02Z +%s` gives as 1789722002.
+    assert_eq!(
+        at("add an etag to the catalog response"),
+        std::time::UNIX_EPOCH + Duration::from_secs(1_789_722_002)
+    );
+    // Nothing of the transcript is dated by the import: its records span
+    // 09:00:00 to 09:00:13 that morning.
+    let first = std::time::UNIX_EPOCH + Duration::from_secs(1_789_722_000);
+    let last = std::time::UNIX_EPOCH + Duration::from_secs(1_789_722_013);
+    for s in stored.iter().take(13) {
+        assert!(
+            (first..=last).contains(&s.at),
+            "{:?} stored at {:?}",
+            s.event,
+            s.at
+        );
+    }
+}
+
 /// A resume whose backend will not start is a session nobody carried on, and
 /// is not left in the list: every retry would add another copy.
 #[test]

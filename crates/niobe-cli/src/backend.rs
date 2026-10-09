@@ -324,7 +324,9 @@ pub fn recorded(
         .collect())
 }
 
-/// Everything one of those sessions says happened, as events.
+/// Everything one of those sessions says happened, as events, each beside the
+/// time the CLI recorded the record it was read from — `None` where that
+/// record carries none, or for what the reader says itself.
 ///
 /// The transcript is read and nothing is written back: the CLI's store stays
 /// the CLI's, and the id is handed to its own `--resume` to carry the
@@ -335,7 +337,7 @@ pub fn history(
     session: &str,
     config_dir: Option<OsString>,
     home: Option<OsString>,
-) -> Result<Vec<Event>, String> {
+) -> Result<Vec<(Event, Option<SystemTime>)>, String> {
     let dir = transcripts(profile, cwd, config_dir, home).ok_or_else(|| {
         format!(
             "cannot look for claude session {session}: neither {} nor HOME says where the \
@@ -354,7 +356,11 @@ pub fn history(
     // what goes on the session is the profile it is being continued under —
     // and nothing, where none was selected.
     let name = profile.map_or("", |selected| selected.name);
-    transcript::events(&path, name, cwd).map_err(|e| e.to_string())
+    let read = transcript::timed(&path, name, cwd).map_err(|e| e.to_string())?;
+    Ok(read
+        .into_iter()
+        .map(|timed| (timed.event, timed.at))
+        .collect())
 }
 
 /// What the `claude` CLI had recorded session `id` as spending when it last

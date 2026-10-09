@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 
+use niobe_core::event::Event;
 use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_log};
 use niobe_tui::app::{App, ConfigFile, Places};
@@ -596,6 +597,30 @@ fn say_unsaved(finished: &journal::Finished) {
     );
 }
 
+/// The time each of `events` read from a transcript is stored at: the time
+/// its record was written, so that `niobe --resume` shows the session when it
+/// happened rather than when it was imported.
+///
+/// The store dates every event, and an event the transcript gave no time —
+/// the CLI's bookkeeping records, what the reader says itself — is stored at
+/// the last recorded time before it, or where none comes before it, the first
+/// after it: beside the records it was read among, which keeps the stored
+/// times in the transcript's order. A transcript that records no time at all
+/// is stored at `now`, as it was read.
+fn stored_at(events: &[(Event, Option<SystemTime>)], now: SystemTime) -> Vec<SystemTime> {
+    let first = events.iter().find_map(|(_, at)| *at).unwrap_or(now);
+    let mut last = first;
+    events
+        .iter()
+        .map(|(_, at)| {
+            if let Some(at) = at {
+                last = *at;
+            }
+            last
+        })
+        .collect()
+}
+
 /// Opens the shell on a session the `claude` CLI recorded, reading its history
 /// into a session of Niobe's own and asking the CLI to carry the conversation
 /// on. Without a terminal, prints what the transcript folds to.
@@ -636,7 +661,16 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     if let Some(budget) = asked.budget {
         app = app.with_budget(budget);
     }
-    app.extend(&events);
+    // At the times the CLI recorded, as a stored session is resumed at the
+    // times the store recorded: an entry the transcript gives no time is
+    // shown with none rather than with the moment it was read.
+    let clock = niobe_tui::clock::Clock::system();
+    for (event, at) in &events {
+        match at {
+            Some(at) => app.apply_at(event, clock.at(*at)),
+            None => app.apply(event),
+        }
+    }
     let elapsed = started.elapsed();
 
     if !std::io::stdout().is_terminal() {
@@ -674,8 +708,8 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     let store = repo::open_or_create_store(&root)?;
     app = carry_windows(app, Some(&store), selected.as_ref());
     let mut recorder = Recorder::new(store);
-    for event in &events {
-        recorder.record(event).map_err(|e| e.to_string())?;
+    for ((event, _), at) in events.iter().zip(stored_at(&events, SystemTime::now())) {
+        recorder.record_at(event, at).map_err(|e| e.to_string())?;
     }
     // A transcript can stop in the middle of a turn — the CLI was quit or
     // killed under it — and the turn is closed there, as a resumed one is.
@@ -1556,6 +1590,30 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("the terminal went away"))
         }
+    }
+
+    #[test]
+    fn an_imported_event_with_no_time_is_stored_beside_the_records_it_was_read_among() {
+        let second = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+        let event = || Event::TurnEnded;
+        let events = vec![
+            (event(), None),
+            (event(), Some(second(10))),
+            (event(), None),
+            (event(), Some(second(12))),
+            (event(), None),
+        ];
+        assert_eq!(
+            stored_at(&events, second(99)),
+            vec![second(10), second(10), second(10), second(12), second(12)]
+        );
+    }
+
+    #[test]
+    fn a_transcript_that_records_no_time_is_stored_as_it_was_read() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(99);
+        let events = vec![(Event::TurnEnded, None), (Event::TurnEnded, None)];
+        assert_eq!(stored_at(&events, now), vec![now, now]);
     }
 
     #[test]

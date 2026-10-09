@@ -55,6 +55,11 @@
 //!   the CLI's timestamps put them among the session's, which is where the
 //!   live stream would have shown them; see [`side_files`] and [`Threads`].
 //!
+//! A live event is dated by the clock as it arrives; a transcript's is dated
+//! by the `timestamp` of the record it was read from, which [`timed`] carries
+//! out beside it. A record with no stamp — most of the furniture — dates
+//! nothing, and what the reader says itself has no time either.
+//!
 //! [`Event::Titled`]: niobe_core::event::Event::Titled
 //!
 //! [`Event::UserMessage`]: niobe_core::event::Event::UserMessage
@@ -72,6 +77,7 @@ use niobe_core::event::{CompactTrigger, Event};
 
 use crate::conformance;
 use crate::spilled;
+use crate::stamp;
 use crate::translate::Spent;
 use crate::translate::{self, RecordedAgent, Translator};
 use crate::wire;
@@ -379,13 +385,38 @@ pub fn spent(path: &Path) -> Result<Spent, TranscriptError> {
     }))
 }
 
+/// One event a transcript folded to, and when the CLI recorded the record it
+/// came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Timed {
+    /// What happened.
+    pub event: Event,
+    /// The `timestamp` of the record the event was read from. Every event one
+    /// record folds to carries that record's time, and nothing is
+    /// interpolated between two records. `None` where the record carries no
+    /// stamp, as the CLI's bookkeeping records do not, where the stamp is not
+    /// in the shape the CLI writes, and for what the reader says itself
+    /// rather than reads off a record — the session's caption, a warning
+    /// about the release that wrote it.
+    pub at: Option<SystemTime>,
+}
+
 /// Everything the transcript at `path` says happened, as events, for a session
-/// running under `profile` in `cwd`.
+/// running under `profile` in `cwd`; [`timed`] without the times.
+pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, TranscriptError> {
+    Ok(timed(path, profile, cwd)?
+        .into_iter()
+        .map(|timed| timed.event)
+        .collect())
+}
+
+/// Everything the transcript at `path` says happened, as events, for a session
+/// running under `profile` in `cwd`, each at the time the CLI recorded it.
 ///
 /// A line that cannot be read becomes a warning entry and the rest of the file
 /// is still folded, exactly as on the live stream: a transcript written by a
 /// newer CLI than this build knows must not take the history with it.
-pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, TranscriptError> {
+pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, TranscriptError> {
     let text = read(path)?;
     let id = path
         .file_stem()
@@ -450,10 +481,10 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
             threads.fold_before(next_stamp.as_deref(), &mut fold);
         }
         threads.spawned_in(&record.record);
-        fold.record(record.line, record.record, None);
+        fold.record(record.line, record.record, record.at.as_deref(), None);
     }
     threads.fold_before(None, &mut fold);
-    Ok(fold.out)
+    Ok(fold.timed())
 }
 
 /// For each of `records`, the stamp of the first record after it that has
@@ -639,7 +670,12 @@ impl<'a> Threads<'a> {
     fn fold_before(&mut self, bound: Option<&str>, fold: &mut Fold) {
         while let Some((call, record)) = self.next_before(bound) {
             self.spawned_in(&record.record);
-            fold.record(record.line, record.record, Some(&call));
+            fold.record(
+                record.line,
+                record.record,
+                record.at.as_deref(),
+                Some(&call),
+            );
         }
     }
 
@@ -829,6 +865,10 @@ fn prompt(record: &Line) -> Option<String> {
 struct Fold {
     translator: Translator,
     out: Vec<Event>,
+    /// When each of `out` was recorded, by position, as far as a record has
+    /// said; an event past its end was pushed by the reader itself and has
+    /// no time.
+    times: Vec<Option<SystemTime>>,
     /// How many of the CLI's `cost-state` records are still to be folded. A
     /// message with one still ahead of it is counted by that accounting, and
     /// one after the last is counted by nothing but itself. See
@@ -870,6 +910,7 @@ impl Fold {
                 .reading_spilled_with(spilled::read)
                 .knowing_agents(agents),
             out: Vec::new(),
+            times: Vec::new(),
             accountings,
             counted: BTreeMap::new(),
             last_usage: BTreeMap::new(),
@@ -887,9 +928,38 @@ impl Fold {
         self
     }
 
+    /// Every event folded, each with the time of the record it came from.
+    fn timed(mut self) -> Vec<Timed> {
+        self.times.resize(self.out.len(), None);
+        self.out
+            .into_iter()
+            .zip(self.times)
+            .map(|(event, at)| Timed { event, at })
+            .collect()
+    }
+
     /// Folds one record of the session's own file, where `agent` is `None`,
-    /// or of the file of the sub-agent spawned by call `agent`.
-    fn record(&mut self, line: &str, record: Result<Line, serde_json::Error>, agent: Option<&str>) {
+    /// or of the file of the sub-agent spawned by call `agent`, every event it
+    /// folds to at the moment `at` names.
+    fn record(
+        &mut self,
+        line: &str,
+        record: Result<Line, serde_json::Error>,
+        at: Option<&str>,
+        agent: Option<&str>,
+    ) {
+        let start = self.out.len();
+        self.fold_record(line, record, agent);
+        self.times.resize(start, None);
+        self.times.resize(self.out.len(), at.and_then(stamp::parse));
+    }
+
+    fn fold_record(
+        &mut self,
+        line: &str,
+        record: Result<Line, serde_json::Error>,
+        agent: Option<&str>,
+    ) {
         match record {
             Ok(Line::Assistant(record)) => self.assistant(record, agent),
             Ok(Line::User(record)) => self.user(record, agent),
@@ -2010,7 +2080,7 @@ mod tests {
             agents,
         );
         for line in lines {
-            fold.record(line, serde_json::from_str::<Line>(line), None);
+            fold.record(line, serde_json::from_str::<Line>(line), None, None);
         }
         fold.out
     }
