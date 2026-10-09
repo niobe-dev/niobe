@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
-┏━━━━━ add etag support to the c┌──────────────────────────────┐nloading… ━━━━━┓
+┏━ > add etag support to the cat┌──────────────────────────────┐oading… ━━━━━━━┓
 ┃   115     cache.set(url, {    │ Diff              F5  Ctrl+T │               ┃
 ┃   116 +     etag: res.headers.│ Group by agent             a │               ┃
 ┃   117       body,             │ Usage pane             shown │               ┃

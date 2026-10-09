@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
-┏━━━━━━━━━━━━━━━━━━━━ what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━━━┓
+┏━ > what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ > you                                                                        ┃
 ┃   what does the fetcher do with a 304?                                       ┃
 ┃                                                                              ┃

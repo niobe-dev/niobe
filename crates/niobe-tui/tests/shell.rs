@@ -6040,3 +6040,77 @@ fn the_history_opened_before_its_load_lands_says_it_is_reading() {
     assert!(frame.contains("reading the earlier sessions"), "{frame}");
     assert!(!frame.contains("no other session"), "{frame}");
 }
+
+#[test]
+fn a_new_file_leaves_its_removed_column_blank_and_a_tracked_one_keeps_it() {
+    let working = |path: &str, new: bool| niobe_tui::app::WorkingFile {
+        path: path.to_owned(),
+        added: Some(4),
+        removed: Some(0),
+        new,
+    };
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        working: vec![working("kept.txt", false), working("fresh.txt", true)],
+        ..Repo::default()
+    });
+
+    let frame = screen(&mut app, 120, 30);
+    let row = |name: &str| {
+        frame
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("no row for {name}:\n{frame}"))
+            .to_owned()
+    };
+
+    assert!(row("fresh.txt").contains("new +4"), "{}", row("fresh.txt"));
+    assert!(!row("fresh.txt").contains('−'), "{}", row("fresh.txt"));
+    assert!(row("kept.txt").contains("+4 −0"), "{}", row("kept.txt"));
+}
+
+#[test]
+fn a_branch_level_with_its_upstream_says_so_and_one_without_an_upstream_says_nothing() {
+    let branch_row = |ahead: Option<u32>, behind: Option<u32>| {
+        let mut app = App::new(Repo {
+            name: "niobe".to_owned(),
+            branch: Some("main".to_owned()),
+            ahead,
+            behind,
+            read: true,
+            ..Repo::default()
+        });
+        let frame = screen(&mut app, 120, 30);
+        frame
+            .lines()
+            .find(|line| line.contains("⎇ main"))
+            .unwrap_or_else(|| panic!("no branch row:\n{frame}"))
+            .to_owned()
+    };
+
+    assert!(branch_row(Some(0), Some(0)).contains("⎇ main · in sync with upstream"));
+    assert!(!branch_row(Some(3), Some(0)).contains("in sync"));
+    assert!(branch_row(Some(3), Some(0)).contains("↑3"));
+    assert!(!branch_row(None, None).contains("in sync"));
+}
+
+#[test]
+fn the_session_caption_is_the_prompt_at_the_left_of_the_top_edge() {
+    let mut app = empty_session();
+    app.apply(&Event::UserMessage {
+        text: "Price the replayed sessions".to_owned(),
+    });
+
+    let frame = screen(&mut app, 120, 24);
+    let top = frame.lines().nth(1).unwrap_or_default();
+    let corner = top.find(FOCUS_TOP_LEFT).expect("the session pane's corner");
+
+    assert!(
+        top[corner..].starts_with(&format!(
+            "{FOCUS_TOP_LEFT}{FOCUS_EDGE} > Price the replayed sessions "
+        )),
+        "{top}"
+    );
+}

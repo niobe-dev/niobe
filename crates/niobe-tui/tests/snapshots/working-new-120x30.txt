@@ -8,9 +8,9 @@
  ┃   What the agent did, decided and touched, what it is doing now          ┃ │ ▾ Working tree  3 files  +≥4 −0       │
  ┃   and what it cost, visible while it happens and never a guess.          ┃ │   .                                   │
  ┃   You stay on the loop instead of in it.                                 ┃ │     kept.txt                    +1 −0 │
- ┃                                                                          ┃ │     large.txt                new — −0 │
+ ┃                                                                          ┃ │     large.txt                  new —  │
  ┃   No backend attached. `niobe profiles` shows what is defined.           ┃ │   sub/dir/                            │
- ┃                                                                          ┃ │     inner.txt               new +3 −0 │
+ ┃                                                                          ┃ │     inner.txt                 new +3  │
  ┃                                                                          ┃ │                                       │
  ┃                                                                          ┃ │                                       │
  ┃                                                                          ┃ │                                       │

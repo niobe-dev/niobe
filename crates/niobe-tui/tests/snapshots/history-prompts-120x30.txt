@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
- ┏━━━ add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
  ┃   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ History ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   │
  ┃   ┃   Prompts   Sessions                                                                             4 listed  ┃00 │
  ┃   ┃  filter ▏type to filter                                                                                    ┃── │

@@ -1110,38 +1110,70 @@ impl Border {
 /// between: the title already stands apart on the border, and a row of the
 /// changed files or of the agents at work is worth more than the room.
 fn pane(title: impl Into<String>, border: Border, theme: &Theme) -> Block<'static> {
-    // Reversed rather than painted, so that a terminal with no colour still
-    // draws the focused title as a solid bar.
-    let title_style = match border.focused {
-        true => Style::new()
-            .fg(theme.title)
-            .bg(theme.pane_bg)
-            .add_modifier(Modifier::REVERSED)
-            .bold(),
-        false => Style::new().fg(theme.title).bold(),
-    };
+    frame_of(border, theme).title_top(
+        Line::from(format!(" {} ", title.into()))
+            .style(title_style(theme.title, border, theme))
+            .centered(),
+    )
+}
+
+/// The frame of [`pane`] with nothing on its top edge yet.
+fn frame_of(border: Border, theme: &Theme) -> Block<'static> {
     Block::bordered()
         .border_type(border.kind)
         .border_style(border.style)
         .style(Style::new().bg(theme.pane_bg).fg(theme.fg))
         .padding(Padding::horizontal(1))
-        .title_top(
-            Line::from(format!(" {} ", title.into()))
-                .style(title_style)
-                .centered(),
-        )
+}
+
+/// A title in `colour`. Reversed rather than painted when the pane has the
+/// keyboard, so that a terminal with no colour still draws it as a solid bar.
+fn title_style(colour: Color, border: Border, theme: &Theme) -> Style {
+    match border.focused {
+        true => Style::new()
+            .fg(colour)
+            .bg(theme.pane_bg)
+            .add_modifier(Modifier::REVERSED)
+            .bold(),
+        false => Style::new().fg(colour).bold(),
+    }
+}
+
+/// The session pane's frame: the prompt that began the session, written the
+/// way the operator typed it — a bold `> ` and the user's colour — at the
+/// left of the top edge, where a caption is known, and the repository's name
+/// centred, as every other pane's title is, where it is not.
+fn session_frame(
+    caption: Option<String>,
+    repo: &str,
+    border: Border,
+    width: u16,
+    theme: &Theme,
+) -> Block<'static> {
+    let Some(caption) = caption else {
+        return pane(session_caption(None, repo, width), border, theme);
+    };
+    let style = title_style(theme.user, border, theme);
+    let edge = border.kind.to_border_set().horizontal_top;
+    let text = text::truncate_words(
+        &caption,
+        usize::from(width.saturating_sub(TITLE_MARGIN + 2)),
+    );
+    frame_of(border, theme).title_top(Line::from(vec![
+        Span::styled(edge, border.style),
+        Span::styled(" > ", style),
+        Span::styled(format!("{text} "), style.remove_modifier(Modifier::BOLD)),
+    ]))
 }
 
 /// The session pane: the transcript, and the composer under it. `panes` is
 /// whether the right-hand stack is on screen beside it, which decides whether
 /// Tab has anywhere to go.
 fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme: &Theme) {
-    let title = session_caption(app.caption(), &app.repo().name, area.width);
-
     app.measured_session(area);
     app.drew_jump(None);
     let border = Border::of(app.focus() == Focus::Session, theme);
-    let block = pane(title, border, theme);
+    let block = session_frame(app.caption(), &app.repo().name, border, area.width, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -4540,6 +4572,11 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
 /// What the Changes pane says where the session is not in a repository.
 const NOT_A_REPOSITORY: &str = "not a git repository";
 
+/// What the branch row says of a branch that is neither ahead of its upstream
+/// nor behind it. Not `origin`: the upstream is whatever remote the branch
+/// tracks, and the repository's report does not name it.
+const IN_SYNC: &str = " · in sync with upstream";
+
 /// `⎇ main  ↑3 ↓1`: the branch, and how far it has drifted from its upstream.
 ///
 /// A branch with no upstream carries neither figure: it is not zero commits
@@ -4552,6 +4589,12 @@ fn branch_row(branch: &str, repo: &crate::app::Repo, width: usize, theme: &Theme
             Some(count) => Some(format!(" {arrow}{count}")),
         })
         .collect();
+
+    // Zero in both directions is a count, so it is said; no upstream is not.
+    let drift = match (repo.ahead, repo.behind) {
+        (Some(0), Some(0)) => IN_SYNC.to_owned(),
+        _ => drift,
+    };
 
     Line::from(vec![
         Span::styled(
@@ -4752,7 +4795,7 @@ fn working_tree_rows(
                 row.name(),
                 Tag::new(file.new),
                 &measured('+', file.added),
-                &measured('−', file.removed),
+                &removed_of(file),
                 width,
                 theme,
             ),
@@ -4965,6 +5008,16 @@ fn files_said(files: usize) -> String {
         0 => "no files".to_owned(),
         1 => "1 file".to_owned(),
         files => format!("{files} files"),
+    }
+}
+
+/// A file's removed column. A file the repository does not track yet removed
+/// nothing by construction, so its column is left blank rather than saying
+/// `−0` as though that were a measurement.
+fn removed_of(file: &crate::app::WorkingFile) -> String {
+    match (file.new, file.removed) {
+        (true, Some(0)) => String::new(),
+        (_, removed) => measured('−', removed),
     }
 }
 

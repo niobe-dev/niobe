@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
- ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ where was I? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+ ┏━ > where was I? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
  ┃ · cleared                                                                ┃ │ 5h         15% ▓░░░░░░░░ resets 16:40 │
  ┃   The conversation starts over here, as a new session: nothing above     ┃ │ ───────────────────────────────────── │
  ┃   this line is in front of the model, and what came before is a session  ┃ │ sonnet-5  100% ▓▓▓▓▓▓▓▓▓▓▓▓   600     │
