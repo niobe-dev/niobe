@@ -329,6 +329,78 @@ fn a_finished_turn_is_ruled_off_with_what_it_spent() {
     assert_snapshot("turns-80x24", &frame);
 }
 
+/// A conversation started over is a new session: the frame after the clear
+/// holds nothing of what came before it — the transcript, the turn numbers,
+/// the title, the error count, the model rows — and the plan's windows stay.
+#[test]
+fn a_cleared_conversation_is_drawn_as_a_new_session() {
+    let usage = |model: &str| {
+        Event::Usage(Usage {
+            input: 500,
+            output: 100,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+            model: model.to_owned(),
+            cost_usd: None,
+            settles_model: false,
+            fast: false,
+        })
+    };
+    let mut app = session_with_finished_turns();
+    for event in [
+        Event::Titled {
+            title: "Cached manifests".to_owned(),
+        },
+        Event::Error {
+            message: "rate limited".to_owned(),
+            fatal: false,
+        },
+        usage("haiku-4-5"),
+    ] {
+        app.apply(&event);
+    }
+    let before = screen(&mut app, 120, 30);
+    assert!(before.contains("Cached manifests"), "{before}");
+    assert!(before.contains("haiku-4-5"), "{before}");
+    assert!(before.contains("1 error"), "{before}");
+
+    app.apply(&Event::UserMessage {
+        text: "/clear".to_owned(),
+    });
+    app.apply(&Event::Cleared);
+    app.apply(&Event::TurnEnded);
+    let between = screen(&mut app, 120, 30);
+    assert!(between.contains("no tokens reported yet"), "{between}");
+    assert!(!between.contains("haiku-4-5"), "{between}");
+    assert_snapshot("cleared-before-a-request-120x30", &between);
+
+    for event in [
+        Event::UserMessage {
+            text: "where was I?".to_owned(),
+        },
+        Event::AssistantMessage {
+            text: "A new conversation.".to_owned(),
+            agent: None,
+        },
+        usage("sonnet-5"),
+        Event::TurnEnded,
+    ] {
+        app.apply(&event);
+    }
+    let after = screen(&mut app, 120, 30);
+    assert!(after.contains("turn 1"), "{after}");
+    assert!(!after.contains("turn 2"), "{after}");
+    assert!(!after.contains("Cached manifests"), "{after}");
+    assert!(!after.contains("keep the cached copy"), "{after}");
+    assert!(!after.contains("haiku-4-5"), "{after}");
+    assert!(!after.contains("error"), "{after}");
+    assert!(after.contains("sonnet-5"), "{after}");
+    assert!(after.contains("5h"), "{after}");
+    assert_snapshot("cleared-then-a-turn-120x30", &after);
+}
+
 /// A turn whose CLI total came to more than its messages reported says so
 /// in words in the transcript, with the turn, the time, the CLI's session and
 /// the reply that never said what it finished at under it; and the Usage pane

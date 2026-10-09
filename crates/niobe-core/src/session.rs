@@ -555,6 +555,9 @@ pub struct SessionState {
     models: Vec<ModelOption>,
     /// The MCP servers the backend last said it has configured.
     mcp_servers: Vec<McpServer>,
+    /// Whether the turn that typed a clear has not ended: its end belongs to
+    /// the conversation that was cleared, and is not a turn of the new one.
+    clear_open: bool,
 }
 
 impl SessionState {
@@ -649,6 +652,7 @@ impl SessionState {
             // With nothing between, it is the last turn's end said again,
             // and a turn recorded for it would be one nobody ran.
             Event::TurnEnded if self.ended_last => {}
+            Event::TurnEnded if self.clear_open => self.end_clear(),
             Event::TurnEnded => self.end_turn(false),
 
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
@@ -767,15 +771,9 @@ impl SessionState {
                 self.context_floor = false;
             }
 
-            // Nothing has measured the conversation that starts here, and the
-            // last figure is of one the model no longer has: no figure is
-            // what is true until the next request reports one.
-            // A conversation started over is not one being compacted.
-            Event::Cleared => {
-                self.context = None;
-                self.context_floor = false;
-                self.compacting = false;
-            }
+            // The conversation started over is a new session in everything
+            // but the process: see `started_over`.
+            Event::Cleared => *self = self.started_over(),
 
             // As a fatal error does, without being one: the process stopped,
             // and whatever it was running will report nothing more.
@@ -1000,10 +998,47 @@ impl SessionState {
         }
     }
 
+    /// What the session is once its conversation has been started over: a
+    /// new one, which has said and spent nothing, on the same backend.
+    ///
+    /// What stays is what the backend and the account say rather than what
+    /// the session did — the conversation's identity, the mode and model, the
+    /// plan's windows, how it is billed, the commands, models and servers on
+    /// offer — and what is in flight and cannot be forgotten without
+    /// dropping it: a question waiting on the operator, a sub-agent still
+    /// running. The turn that typed the clear is still open, and its end is
+    /// the old conversation's.
+    fn started_over(&mut self) -> Self {
+        Self {
+            meta: self.meta.take(),
+            mode: self.mode,
+            model: self.model.take(),
+            usage_windows: self.usage_windows.take(),
+            billing: self.billing.take(),
+            commands: std::mem::take(&mut self.commands),
+            models: std::mem::take(&mut self.models),
+            mcp_servers: std::mem::take(&mut self.mcp_servers),
+            pending_permissions: std::mem::take(&mut self.pending_permissions),
+            running_agents: std::mem::take(&mut self.running_agents),
+            turn_running: self.turn_running,
+            clear_open: self.turn_running,
+            ..Self::default()
+        }
+    }
+
+    /// Ends the turn that typed a clear, which is no turn of the conversation
+    /// it started: nothing is recorded, and nothing it left open is carried
+    /// into the new one.
+    fn end_clear(&mut self) {
+        self.clear_open = false;
+        self.turn_running = false;
+    }
+
     /// Ends the running turn, and records what it spent.
     /// Records the running turn as ended, and whether it was `cut` off rather
     /// than ended by the backend.
     fn end_turn(&mut self, cut: bool) {
+        self.clear_open = false;
         // Nothing more comes until the next prompt, so a question the turn
         // left open waits on nobody: an answer to it would reach nothing. A
         // reply it left half-streamed is not the start of the next one.
@@ -2917,6 +2952,150 @@ mod tests {
 
         let state = SessionState::replay(&[context(150_000), Event::Cleared, context(9_000)]);
         assert_eq!(state.context().map(|c| c.tokens), Some(9_000));
+    }
+
+    fn before_a_clear() -> Vec<Event> {
+        vec![
+            prompt(),
+            start("t1", "Bash", None),
+            end("t1", "Bash"),
+            Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                kind: None,
+                label: "test-writer".to_owned(),
+            },
+            exit("a1", AgentOutcome::Failed),
+            Event::Error {
+                message: "rate limited".to_owned(),
+                fatal: false,
+            },
+            Event::Titled {
+                title: "Old work".to_owned(),
+            },
+            on_model("opus-5", 100, 10, Some(0.5)),
+            on_model("haiku-4", 20, 2, Some(0.01)),
+            Event::TurnEnded,
+        ]
+    }
+
+    #[test]
+    fn a_cleared_conversation_starts_the_session_over() {
+        let mut events = before_a_clear();
+        events.extend([
+            Event::Cleared,
+            prompt(),
+            start("t2", "Read", None),
+            on_model("sonnet-5", 7, 3, Some(0.02)),
+            Event::TurnEnded,
+        ]);
+        let state = SessionState::replay(&events);
+
+        assert_eq!(state.tools().started, 1);
+        assert_eq!(state.tools().by_name.get("Bash"), None);
+        assert_eq!(state.agents_spawned(), 0);
+        assert_eq!(state.agents_failed(), 0);
+        assert_eq!(state.errors(), 0);
+        assert_eq!(state.title(), None);
+        assert_eq!(state.user_messages(), 1);
+        assert_eq!(state.turns().len(), 1);
+        assert_eq!(state.turns()[0].number, 1);
+        let models: Vec<&str> = state
+            .totals()
+            .tokens_by_model
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(models, ["sonnet-5"]);
+        assert!((state.totals().reported_cost_usd - 0.02).abs() < 1e-9);
+
+        let before = SessionState::replay(&before_a_clear());
+        assert_eq!(before.tools().started, 1);
+        assert_eq!(before.agents_failed(), 1);
+        assert_eq!(before.errors(), 1);
+        assert_eq!(before.title(), Some("Old work"));
+        assert_eq!(before.totals().tokens_by_model.len(), 2);
+    }
+
+    #[test]
+    fn what_the_account_says_survives_a_clear() {
+        let window = UsageWindow {
+            utilization: 0.4,
+            resets_at: None,
+        };
+        let state = SessionState::replay(&[
+            Event::UsageWindows(UsageWindows {
+                five_hour: Some(window),
+                seven_day: None,
+                using_overage: false,
+            }),
+            Event::ModeSelected { mode: Mode::Plan },
+            Event::Cleared,
+        ]);
+        assert!(state.usage_windows().is_some());
+        assert_eq!(state.mode(), Some(Mode::Plan));
+    }
+
+    /// The command that typed the clear is still a turn when the reset
+    /// arrives, and its end is not a turn of the conversation that follows.
+    #[test]
+    fn the_turn_that_typed_a_clear_is_not_a_turn_of_the_new_conversation() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "/clear".to_owned(),
+            },
+            Event::Cleared,
+            Event::TurnEnded,
+            prompt(),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns().len(), 1);
+        assert_eq!(state.turns()[0].number, 1);
+        assert_eq!(state.user_messages(), 1);
+    }
+
+    #[test]
+    fn a_compaction_between_turns_numbers_the_next_turn_on() {
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            events.extend([prompt(), Event::TurnEnded]);
+        }
+        events.extend([
+            Event::UserMessage {
+                text: "/compact".to_owned(),
+            },
+            Event::CompactionStarted,
+            Event::CompactionEnded,
+            Event::Compacted {
+                trigger: CompactTrigger::Manual,
+                before: Some(9_000),
+                after: Some(1_000),
+            },
+            Event::TurnEnded,
+            prompt(),
+            Event::TurnEnded,
+        ]);
+        let state = SessionState::replay(&events);
+        let numbers: Vec<u64> = state.turns().iter().map(|turn| turn.number).collect();
+        assert_eq!(numbers, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_question_and_a_sub_agent_in_flight_at_a_clear_are_not_dropped() {
+        let state = SessionState::replay(&[
+            Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                kind: None,
+                label: "worker".to_owned(),
+            },
+            asked("t9"),
+            Event::Cleared,
+        ]);
+        assert_eq!(state.pending_permissions().len(), 1);
+        assert_eq!(state.running_agents().len(), 1);
     }
 
     fn said(text: &str) -> Event {

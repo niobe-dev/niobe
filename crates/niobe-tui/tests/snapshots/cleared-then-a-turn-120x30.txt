@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ where was I? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃ · cleared                                                                ┃ │ 5h         15% ▓░░░░░░░░ resets 16:40 │
+ ┃   The conversation starts over here, as a new session: nothing above     ┃ │ ───────────────────────────────────── │
+ ┃   this line is in front of the model, and what came before is a session  ┃ │ sonnet-5  100% ▓▓▓▓▓▓▓▓▓▓▓▓   600     │
+ ┃   of its own, with its own cost. Session › Resume opens it again.        ┃ │ cache hit   0% ░░░░░░░░░░░░     0     │
+ ┃                                                                          ┃ └───────────────────────────────────────┘
+ ┃ > you                                                                    ┃ ┌─────────────── Changes ───────────────┐
+ ┃   where was I?                                                           ┃ │ ⎇ main ↑3                             █
+ ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃ ◆ claude                                                                 ┃ │   .                                   █
+ ┃   A new conversation.                                                    ┃ │     CHANGELOG.md                +0 −0 │
+ ┃                                                                          ┃ │   catalog/                            │
+ ┃ ── turn 1 13:41 · 600 tok ────────────────────────────────────────────── ┃ │     fetch.ts                 +149 −12 │
+ ┃                                                                          ┃ │     etag.ts                   +88 −41 │
+ ┃                                                                          ┃ │     cache/lru.ts               +31 −9 │
+ ┃                                                                          ┃ │     cache/index.ts             +12 −0 │
+ ┃                                                                          ┃ │   docs/                               │
+ ┃                                                                          ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌────────────── Activity ───────────────┐
+ ┃                                                                          ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
+ ┃                                                                          ┃ │   none spawned                        │
+ ┃                                                                          ┃ │ ▾ Tools  0 calls · 0 denied · 0 B out │
+ ┃                                                                          ┃ │   none called                         │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
+ ┃  —  >  Ask for a change · @ file         Shift+Tab mode · Ctrl+J newline ┃ │                                       │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

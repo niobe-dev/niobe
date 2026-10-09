@@ -456,6 +456,13 @@ pub struct Session {
     /// asked about again (see [`Translator::take_mcp_status_wanted`]), and
     /// acted on by the next drain: only this side writes to the CLI.
     mcp_status_wanted: Arc<AtomicBool>,
+    /// Set by the thread reading the CLI when it reports the conversation
+    /// started over, which is a session with no title yet: the next prompt
+    /// that is not a command is asked about again.
+    cleared: Arc<AtomicBool>,
+    /// Whether [`Options::ask_title`] was on when the session started, which
+    /// is what a clear puts back.
+    titles_wanted: bool,
     stderr: Arc<Mutex<Tail>>,
     /// The threads reading standard output and standard error, in that
     /// order, and the one writing standard input.
@@ -578,6 +585,8 @@ impl Session {
         let asked_about_mcp = Arc::clone(&mcp_requests);
         let mcp_status_wanted = Arc::new(AtomicBool::new(false));
         let wants_mcp_status = Arc::clone(&mcp_status_wanted);
+        let cleared = Arc::new(AtomicBool::new(false));
+        let was_cleared = Arc::clone(&cleared);
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             while let Some(output) = next_line(&mut stdout) {
@@ -646,6 +655,9 @@ impl Session {
                     }
                 }
                 for event in events {
+                    if matches!(event, Event::Cleared) {
+                        was_cleared.store(true, Ordering::Release);
+                    }
                     // The receiver is gone: the session was dropped, and there
                     // is no one left to tell.
                     if sender.send(event).is_err() {
@@ -678,6 +690,8 @@ impl Session {
             title_requests,
             mcp_requests,
             mcp_status_wanted,
+            cleared,
+            titles_wanted: options.ask_title,
             stderr: kept,
             threads: vec![reader, errors, writer],
             control_requests: 0,
@@ -741,8 +755,13 @@ impl Session {
     /// after the turn has gone in, so the turn is not held behind it, and with
     /// `persist`, so the CLI keeps the title in its own transcript and answers
     /// with the one it has rather than making another. Asked once a session:
-    /// a CLI started again carries the conversation on, title and all.
+    /// a CLI started again carries the conversation on, title and all. A
+    /// conversation started over with `/clear` is a session of its own, and
+    /// is asked about again from its first prompt.
     fn ask_for_title(&mut self, prompt: &str) -> std::io::Result<()> {
+        if self.cleared.swap(false, Ordering::AcqRel) {
+            self.next.ask_title = self.titles_wanted;
+        }
         if !self.next.ask_title {
             return Ok(());
         }
@@ -2231,6 +2250,65 @@ mod tests {
             "{written}"
         );
         assert_eq!(lines[3]["type"], "user", "asked once: {written}");
+    }
+
+    /// A conversation started over is a session with no title, so the CLI is
+    /// asked for one again, from the first prompt that is not a command after
+    /// the clear.
+    #[cfg(unix)]
+    #[test]
+    fn the_cli_is_asked_for_a_title_again_after_a_clear() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let reset =
+            r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r init\nread -r one\nread -r title_one\nprintf '%s\\n' '{reset}'\n\
+                 read -r clear\nread -r two\nread -r title_two\nread -r three\n\
+                 printf '%s\\n' \"$one\" \"$title_one\" \"$clear\" \"$two\" \"$title_two\" \"$three\" > '{asked}'\n",
+                asked = asked.display()
+            ),
+            |options| options.ask_title = true,
+        );
+        session
+            .send("add etag support", &[])
+            .expect("the stand-in is reading");
+
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !events.contains(&Event::Cleared) {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never reset: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for prompt in ["/clear", "a new thing", "and more"] {
+            session.send(prompt, &[]).expect("the stand-in is reading");
+        }
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let written = std::fs::read_to_string(&asked).expect("the stand-in kept what it read");
+        let lines: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+            .collect();
+        let described: Vec<&str> = lines
+            .iter()
+            .filter(|line| line["request"]["subtype"] == "generate_session_title")
+            .filter_map(|line| line["request"]["description"].as_str())
+            .collect();
+        assert_eq!(described, ["add etag support", "a new thing"], "{written}");
+        assert_eq!(lines[5]["type"], "user", "asked once more only: {written}");
     }
 
     #[test]

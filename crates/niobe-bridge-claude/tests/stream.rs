@@ -1487,8 +1487,17 @@ fn a_cleared_conversation_is_billed_from_zero_again() {
     );
     assert!((costs[0] - 0.025_885).abs() < 1e-9, "{costs:?}");
     assert!((costs[1] - 0.042_380_4).abs() < 1e-9, "{costs:?}");
-    assert!((state.totals().reported_cost_usd - 0.068_265_4).abs() < 1e-9);
-    assert_eq!(state.totals().tokens(), 17_567 + 23_333);
+    // The conversation after the clear is a session of its own: the fold
+    // holds what it spent, and the part before the clear holds the rest.
+    assert!((state.totals().reported_cost_usd - 0.042_380_4).abs() < 1e-9);
+    assert_eq!(state.totals().tokens(), 23_333);
+    let cleared = events
+        .iter()
+        .position(|event| matches!(event, Event::Cleared))
+        .expect("the reset is reported");
+    let before = SessionState::replay(&events[..cleared]);
+    assert!((before.totals().reported_cost_usd - 0.025_885).abs() < 1e-9);
+    assert_eq!(before.totals().tokens(), 17_567);
     assert!(warnings(&events).is_empty(), "{events:?}");
     assert!(notices(&events).is_empty(), "{events:?}");
 }

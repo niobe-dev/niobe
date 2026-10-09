@@ -807,11 +807,14 @@ pub enum Event {
     /// The backend started the conversation over, at the operator's word:
     /// nothing said before this point is in front of the model any more.
     ///
-    /// The session goes on — what it spent stays spent, and the transcript
-    /// keeps what was said — but the context the last request measured is
-    /// gone with the conversation, and nothing measures the new one until its
-    /// first request. A backend that names its conversations says what the new
-    /// one is called with a fresh [`Event::SessionMeta`].
+    /// The session it ends and the one it starts are two: the fold forgets
+    /// everything the session did — its calls, sub-agents, errors, title,
+    /// turns and what it spent — and keeps what the backend and the account
+    /// say (the model and mode, the plan's windows, how it is billed, the
+    /// commands, models and servers on offer). A store records it as the
+    /// first event of a session of its own, so the one before it replays with
+    /// its own figures. A backend that names its conversations says what the
+    /// new one is called with a fresh [`Event::SessionMeta`].
     Cleared,
 
     /// The backend began compacting the conversation: summarising what was

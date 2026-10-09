@@ -233,6 +233,12 @@ impl Target {
         let Self::Open(recorder) = self else {
             return Err("the session store was not opened".into());
         };
+        // A conversation started over is a session of its own, whose first
+        // record says so: the session before it keeps its own figures, and
+        // can be opened again.
+        if matches!(event, Event::Cleared) {
+            recorder.start_over();
+        }
         recorder.record_at(event, at)?;
         Ok(recorder.session())
     }
@@ -309,6 +315,51 @@ mod tests {
             .filter(|entry| entry.kind != EntryKind::Notice)
             .cloned()
             .collect()
+    }
+
+    #[test]
+    fn a_cleared_conversation_is_recorded_as_a_session_of_its_own() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().to_path_buf();
+        let said = |text: &str| Event::UserMessage {
+            text: text.to_owned(),
+        };
+
+        let mut journal = StoreJournal::pending(root.clone());
+        for event in [
+            said("before"),
+            Event::TurnEnded,
+            Event::Cleared,
+            said("after"),
+            Event::TurnEnded,
+        ] {
+            journal.append(&event);
+        }
+        let last = journal.finish().session.expect("something was recorded");
+
+        let store = repo::open_existing_store(&root)
+            .expect("the store opens")
+            .expect("the store exists");
+        let sessions = store.sessions().expect("the sessions list");
+        assert_eq!(sessions.len(), 2, "{sessions:?}");
+        let kinds = |session| -> Vec<Event> {
+            store
+                .events(session)
+                .expect("the session loads")
+                .into_iter()
+                .map(|stored| stored.event)
+                .collect()
+        };
+        let first = sessions
+            .iter()
+            .map(|s| s.id)
+            .find(|id| *id != last)
+            .expect("an earlier session");
+        assert_eq!(kinds(first), [said("before"), Event::TurnEnded]);
+        assert_eq!(
+            kinds(last),
+            [Event::Cleared, said("after"), Event::TurnEnded]
+        );
     }
 
     #[test]

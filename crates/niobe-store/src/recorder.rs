@@ -58,6 +58,16 @@ impl Recorder {
         self.session
     }
 
+    /// Lets go of the session being recorded, and its hold, so that the next
+    /// event opens a session of its own in the same store.
+    ///
+    /// The session let go of keeps every event it holds and can be resumed
+    /// like any other.
+    pub fn start_over(&mut self) {
+        self.held = None;
+        self.session = None;
+    }
+
     /// The store underneath, for reading.
     pub fn store(&self) -> &Store {
         &self.store

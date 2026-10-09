@@ -1809,6 +1809,40 @@ impl App {
         }
     }
 
+    /// Forgets what the shell holds of the session so far, as a session
+    /// opened afresh holds none of it. The plan's windows, the repository's
+    /// working tree, the history of prompts, the profile and the rules kept
+    /// are not the session's, and stay.
+    fn start_over(&mut self) {
+        self.entries.clear();
+        self.tool_entries.clear();
+        self.agent_entries.clear();
+        self.agents.clear();
+        self.run = None;
+        self.reply = None;
+        self.compaction = None;
+        self.answered.clear();
+        self.just_ended = None;
+        self.scroll = 0;
+        self.follow = true;
+        self.held = None;
+        self.selection = None;
+        self.pressed = None;
+        self.offer_closed = None;
+        self.drawn = crate::ui::DrawnEntries::default();
+        self.transcript_drawn = None;
+        if let Some(find) = &mut self.find {
+            find.from = (0, true);
+            find.current = None;
+        }
+        self.first_prompt_unsent = false;
+        self.turn_began_at = None;
+        self.turn_began_with = (0, 0);
+        self.turns_took = Some(Duration::ZERO);
+        self.last_folded_at = None;
+        self.stop_asked_in = None;
+    }
+
     /// Records that the process this session runs in is leaving it with a
     /// turn still running, or that one before it did: a record that ends in
     /// the middle of a turn, taken up again. The turn ends there, cut, so the
@@ -2236,17 +2270,18 @@ impl App {
             // The working line reads the phase off the fold.
             Event::CompactionStarted | Event::CompactionEnded => {}
 
-            // A conversation started over is not what a compaction before it
-            // shrank to, so that row keeps no figure after it.
+            // A conversation started over is a new session: what the shell
+            // drew of the one before it goes, and the first row of this one
+            // says where that went.
             Event::Cleared => {
-                self.compaction = None;
+                self.start_over();
                 self.push(Entry {
                     kind: EntryKind::Notice,
                     head: "cleared".to_owned(),
                     meta: String::new(),
-                    body: "The conversation starts over here: nothing above this line is in \
-                       front of the model any more. What it cost stays in the session's \
-                       totals."
+                    body: "The conversation starts over here, as a new session: nothing above \
+                       this line is in front of the model, and what came before is a session \
+                       of its own, with its own cost. Session › Resume opens it again."
                         .to_owned(),
                     streaming: false,
                     at: self.at,
@@ -9006,12 +9041,63 @@ mod tests {
     }
 
     #[test]
-    fn a_cleared_conversation_is_a_line_in_the_transcript() {
+    fn a_cleared_conversation_starts_the_transcript_over_at_a_line_that_says_so() {
         let mut app = app();
+        for event in [
+            Event::UserMessage {
+                text: "one".to_owned(),
+            },
+            Event::AssistantMessage {
+                text: "done".to_owned(),
+                agent: None,
+            },
+            Event::TurnEnded,
+            Event::Error {
+                message: "rate limited".to_owned(),
+                fatal: false,
+            },
+        ] {
+            app.apply(&event);
+        }
+        assert!(app.entries().len() > 2);
+        assert_eq!(app.session().errors(), 1);
+
         app.apply(&Event::Cleared);
-        let last = app.entries().last().expect("an entry");
-        assert_eq!(last.kind, EntryKind::Notice);
-        assert_eq!(last.head, "cleared");
+
+        let [only] = app.entries() else {
+            panic!("the transcript holds only the clear: {:?}", app.entries());
+        };
+        assert_eq!(only.kind, EntryKind::Notice);
+        assert_eq!(only.head, "cleared");
+        assert!(only.body.contains("new session"), "{}", only.body);
+        assert_eq!(app.session().errors(), 0);
+        assert!(app.session().turns().is_empty());
+    }
+
+    #[test]
+    fn a_compaction_leaves_the_transcript_and_the_turn_numbers_as_they_were() {
+        let mut app = app();
+        for event in [
+            Event::UserMessage {
+                text: "one".to_owned(),
+            },
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "/compact".to_owned(),
+            },
+            Event::CompactionStarted,
+            Event::CompactionEnded,
+            Event::Compacted {
+                trigger: CompactTrigger::Manual,
+                before: Some(9_000),
+                after: Some(1_000),
+            },
+            Event::TurnEnded,
+        ] {
+            app.apply(&event);
+        }
+        assert_eq!(app.session().turns().len(), 2);
+        assert!(app.entries().len() >= 3);
     }
 
     #[test]
