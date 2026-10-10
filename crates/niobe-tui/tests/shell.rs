@@ -6391,3 +6391,23 @@ fn the_session_caption_is_the_prompt_at_the_left_of_the_top_edge() {
         "{top}"
     );
 }
+
+/// A title the backend made is not what the operator typed: it is drawn as a
+/// title is, without the prompt marker, and the first prompt still is one.
+#[test]
+fn a_backends_title_is_not_drawn_as_the_prompt_the_operator_typed() {
+    // The session already holds the prompt that began it.
+    let mut app = running_session();
+    let typed = screen(&mut app, 100, 30);
+    let typed_top = typed.lines().nth(1).unwrap_or_default();
+    assert!(typed_top.contains("> add etag support"), "{typed_top}");
+
+    app.apply(&Event::Titled {
+        title: "Cached manifests".to_owned(),
+    });
+    let titled = screen(&mut app, 100, 30);
+    let top = titled.lines().nth(1).unwrap_or_default();
+
+    assert!(top.contains("Cached manifests"), "{top}");
+    assert!(!top.contains("> Cached manifests"), "{top}");
+}

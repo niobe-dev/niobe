@@ -1139,12 +1139,17 @@ fn title_style(colour: Color, border: Border, theme: &Theme) -> Style {
     }
 }
 
-/// The session pane's frame: the prompt that began the session, written the
-/// way the operator typed it — a bold `> ` and the user's colour — at the
-/// left of the top edge, where a caption is known, and the repository's name
-/// centred, as every other pane's title is, where it is not.
+/// The session pane's frame: what the session is about at the left of the
+/// top edge, where a caption is known, and the repository's name centred, as
+/// every other pane's title is, where it is not.
+///
+/// The prompt that began the session is written the way the operator typed
+/// it — a bold `> ` and the user's colour. A title the backend made is not
+/// theirs, and is drawn as a title is: in the title colour, with no prompt
+/// marker.
 fn session_frame(
     caption: Option<String>,
+    titled: bool,
     repo: &str,
     border: Border,
     width: u16,
@@ -1153,17 +1158,29 @@ fn session_frame(
     let Some(caption) = caption else {
         return pane(session_caption(None, repo, width), border, theme);
     };
-    let style = title_style(theme.user, border, theme);
     let edge = border.kind.to_border_set().horizontal_top;
     let text = text::truncate_words(
         &caption,
         usize::from(width.saturating_sub(TITLE_MARGIN + 2)),
     );
-    frame_of(border, theme).title_top(Line::from(vec![
-        Span::styled(edge, border.style),
-        Span::styled(" > ", style),
-        Span::styled(format!("{text} "), style.remove_modifier(Modifier::BOLD)),
-    ]))
+    let line = match titled {
+        true => {
+            let style = title_style(theme.title, border, theme);
+            vec![
+                Span::styled(edge, border.style),
+                Span::styled(format!(" {text} "), style.remove_modifier(Modifier::BOLD)),
+            ]
+        }
+        false => {
+            let style = title_style(theme.user, border, theme);
+            vec![
+                Span::styled(edge, border.style),
+                Span::styled(" > ", style),
+                Span::styled(format!("{text} "), style.remove_modifier(Modifier::BOLD)),
+            ]
+        }
+    };
+    frame_of(border, theme).title_top(Line::from(line))
 }
 
 /// The session pane: the transcript, and the composer under it. `panes` is
@@ -1173,7 +1190,14 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     app.measured_session(area);
     app.drew_jump(None);
     let border = Border::of(app.focus() == Focus::Session, theme);
-    let block = session_frame(app.caption(), &app.repo().name, border, area.width, theme);
+    let block = session_frame(
+        app.caption(),
+        app.titled(),
+        &app.repo().name,
+        border,
+        area.width,
+        theme,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {

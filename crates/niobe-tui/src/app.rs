@@ -4648,6 +4648,15 @@ impl App {
         }
     }
 
+    /// Whether [`App::caption`] is a title the backend made, and not the
+    /// prompt the operator typed: a title with words in it, which the
+    /// caption takes ahead of the prompt.
+    pub fn titled(&self) -> bool {
+        self.session
+            .title()
+            .is_some_and(|title| title.lines().any(|line| !line.trim().is_empty()))
+    }
+
     /// Where the session is running.
     pub fn repo(&self) -> &Repo {
         &self.repo
