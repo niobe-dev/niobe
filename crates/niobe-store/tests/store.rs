@@ -981,3 +981,43 @@ fn only_a_session_meta_says_which_profile_a_session_ran_under() {
         None
     );
 }
+
+/// A file at the store's path that is some other program's, with tables of
+/// its own and no `user_version`: listing sessions looks at it and leaves it
+/// as it was, instead of giving it niobe's tables, triggers and WAL mode.
+#[test]
+fn a_foreign_database_is_refused_to_read_and_left_byte_identical() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("sessions.db");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("a database is made");
+        conn.execute("create table t(x)", [])
+            .expect("a table is made");
+        conn.execute("insert into t values (1)", [])
+            .expect("a row is added");
+    }
+    let before = std::fs::read(&path).expect("the file reads");
+
+    let refused = Store::open_to_read(&path).expect_err("it is not a niobe store");
+
+    assert!(
+        matches!(refused, StoreError::UnsupportedSchema { found: 0, .. }),
+        "{refused:?}"
+    );
+    assert_eq!(std::fs::read(&path).expect("the file reads"), before);
+    let beside: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("the directory lists")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        beside,
+        ["sessions.db"],
+        "no WAL or index was made beside it"
+    );
+}

@@ -303,7 +303,43 @@ impl Store {
     /// cannot be made in a directory that is not writable — it is read as
     /// immutable: as it is on disk, with no locking, which is right because
     /// nothing can be writing to it. A store opened this way refuses writes.
+    ///
+    /// A file that is there is looked at before anything is written to it:
+    /// one holding the schema this build reads is opened to read, and a file
+    /// that is some other program's, with tables and no `user_version`, is
+    /// refused as it is rather than given niobe's tables, triggers and WAL
+    /// mode. Only a file this build is to make or bring up to date is opened
+    /// to write.
     pub fn open_to_read(path: &Path) -> Result<Self, StoreError> {
+        if path.is_file() {
+            let looking = OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI;
+            if let Ok(conn) = Connection::open_with_flags(path, looking) {
+                let found: Result<i64, _> =
+                    conn.pragma_query_value(None, "user_version", |row| row.get(0));
+                match found {
+                    Ok(found) if found == SCHEMA_VERSION => {
+                        if let Ok(store) = Self::readable(conn) {
+                            return Ok(store);
+                        }
+                    }
+                    Ok(0) => {
+                        let tables: Result<i64, _> =
+                            conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                                row.get(0)
+                            });
+                        if tables.is_ok_and(|tables| tables > 0) {
+                            return Err(StoreError::UnsupportedSchema {
+                                found: 0,
+                                supported: SCHEMA_VERSION,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         match Self::open(path) {
             Err(StoreError::Sqlite(error)) if refused_a_write(&error) => {}
             opened => return opened,
