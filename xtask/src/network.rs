@@ -255,16 +255,74 @@ fn compiled_into_the_product(path: &str) -> bool {
     name == "build.rs" || components.any(|component| component == "src")
 }
 
+/// Programs that run the program they are given, so a network program named
+/// to them instead is run all the same: `Command::new("env").arg("curl")`.
+const LAUNCHERS: &[&str] = &["env", "nohup", "xargs", "exec", "command", "time", "nice"];
+
 /// Whether `line` hands one of the [`NETWORK_PROGRAMS`] to a constructor as
-/// a literal, `new("curl")` with any spacing inside the parentheses.
+/// a literal, `new("curl")` with any spacing inside the parentheses. The
+/// literal may be a raw string, may be a path (`/usr/bin/curl`) and is read
+/// in any case. A constructor given a launcher such as `env` is also
+/// flagged when a later literal on the line names a network program.
 fn spawns_a_network_program(line: &str) -> bool {
     line.match_indices("new(").any(|(at, open)| {
         let rest = line[at + open.len()..].trim_start();
-        NETWORK_PROGRAMS.iter().any(|program| {
-            rest.strip_prefix('"')
-                .and_then(|rest| rest.strip_prefix(program))
-                .is_some_and(|rest| rest.starts_with('"'))
-        })
+        let Some((literal, after)) = string_literal(rest) else {
+            return false;
+        };
+        let name = program_name(literal);
+        if is_network_program(&name) {
+            return true;
+        }
+        LAUNCHERS.contains(&name.as_str())
+            && string_literals(after).any(|later| is_network_program(&program_name(later)))
+    })
+}
+
+fn is_network_program(name: &str) -> bool {
+    NETWORK_PROGRAMS.contains(&name)
+}
+
+/// The program a literal names: the file name after its last `/`, in lower
+/// case, which is what a case-insensitive file system runs it as.
+fn program_name(literal: &str) -> String {
+    literal
+        .rsplit('/')
+        .next()
+        .unwrap_or(literal)
+        .to_ascii_lowercase()
+}
+
+/// The string literal `text` opens with, ordinary or raw, and what follows
+/// it.
+fn string_literal(text: &str) -> Option<(&str, &str)> {
+    let raw = text.strip_prefix('r');
+    let (hashes, body) = match raw {
+        Some(raw) => {
+            let hashes = raw.len() - raw.trim_start_matches('#').len();
+            (hashes, raw.trim_start_matches('#').strip_prefix('"')?)
+        }
+        None => (0, text.strip_prefix('"')?),
+    };
+    let close = format!("\"{}", "#".repeat(hashes));
+    let end = body.find(&close)?;
+    Some((&body[..end], &body[end + close.len()..]))
+}
+
+/// Every string literal on a line, in order.
+fn string_literals(mut text: &str) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        loop {
+            let at = text.find(['"', 'r'])?;
+            let candidate = &text[at..];
+            match string_literal(candidate) {
+                Some((literal, after)) => {
+                    text = after;
+                    return Some(literal);
+                }
+                None => text = &candidate[1..],
+            }
+        }
     })
 }
 
@@ -448,6 +506,24 @@ let kind = match program { \"curl\" | \"wget\" => Web, _ => Other };
                 "crates/x/src/lib.rs:2: Command::new( \"ssh\" );",
             ]
         );
+    }
+
+    #[test]
+    fn a_network_program_named_by_path_case_raw_string_or_launcher_is_named() {
+        let source = "Command::new(\"/usr/bin/curl\");
+Command::new(r\"curl\");
+Command::new(r#\"wget\"#);
+Command::new(\"CURL\");
+Command::new(\"env\").arg(\"curl\");
+Command::new(\"env\").arg(\"FOO=1\");
+Command::new(\"git\").arg(\"curl\");
+";
+        let found = network_marks_in("crates/x/src/lib.rs", source);
+        let lines: Vec<&str> = found
+            .iter()
+            .map(|mark| mark.split(':').nth(1).unwrap_or(""))
+            .collect();
+        assert_eq!(lines, ["1", "2", "3", "4", "5"]);
     }
 
     #[test]

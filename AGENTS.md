@@ -351,7 +351,9 @@ These hold for every change. Breaking one is a bug even when the feature ships g
    a connection (`std::net`, `net` in a `std::{…}` group, `TcpStream`, `TcpListener`,
    `UdpSocket`, `ToSocketAddrs`), names the keychain (`Keychain`, `find-generic-password`,
    `find-internet-password`), or hands a network program (`curl`, `wget`, `nc`, `ssh`,
-   `security` and the rest of `NETWORK_PROGRAMS`) to a `new(` as a literal. A line
+   `security` and the rest of `NETWORK_PROGRAMS`) to a `new(` as a literal — read as a path
+   (`/usr/bin/curl`), in any case, as a raw string, and behind a launcher such as `env` that
+   a later literal on the line gives it to. A line
    `ALLOWED_MARKS` names is passed over. A name built at run time, a program named through a
    variable, and a connection opened under a crate's `tests/` or by a dev-dependency all pass
    it, which is what review is for.
