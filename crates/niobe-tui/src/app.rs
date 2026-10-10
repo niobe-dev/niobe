@@ -3463,7 +3463,9 @@ impl App {
             .as_ref()
             .map_or(&[], |profile| profile.models.as_slice());
         let (options, more) = model_choices(self.session.models(), named);
-        if options.is_empty() && !self.attached {
+        // The models a replayed record lists are the ones its backend offered,
+        // and nothing now would take a choice among them.
+        if !self.attached {
             self.hint = Some(
                 "F4 Model — this session is not attached to a backend, so there is no model \
                  to change"
@@ -4397,6 +4399,16 @@ impl App {
     /// what the bridge spawns the CLI in: one keypress then lands where it
     /// would have from a mode that had been reported.
     fn cycle_mode(&mut self) {
+        // A record read back with nothing driving it has no mode to move: the
+        // change would be recorded and nothing would take it.
+        if !self.attached {
+            self.hint = Some(
+                "Shift+Tab — this session is not attached to a backend, so there is no mode \
+                 to change"
+                    .to_owned(),
+            );
+            return;
+        }
         let before = self.session.mode();
         let mode = before.unwrap_or(Mode::Ask).next();
         if self.attached {
@@ -10447,7 +10459,7 @@ mod tests {
     }
 
     fn under_a_profile(models: &[&str]) -> App {
-        app().with_profile(SelectedProfile {
+        app().attached().with_profile(SelectedProfile {
             name: "max".to_owned(),
             backend: Backend::Claude,
             models: models.iter().map(|m| (*m).to_owned()).collect(),
@@ -10460,9 +10472,40 @@ mod tests {
         KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
     }
 
+    /// A record read back with nothing driving it has no mode to change and no
+    /// model to move to, however many of them it lists.
+    #[test]
+    fn with_no_backend_attached_neither_the_mode_nor_the_model_can_be_changed() {
+        let mut app = app().with_profile(SelectedProfile {
+            name: "max".to_owned(),
+            backend: Backend::Claude,
+            models: vec!["opus".to_owned(), "sonnet".to_owned()],
+            billing: None,
+        });
+        app.apply(&offered());
+        app.apply(&Event::ModeSelected { mode: Mode::Ask });
+
+        app.on_key(back_tab());
+        assert_eq!(app.session().mode(), Some(Mode::Ask));
+        assert_eq!(app.take_produced(), []);
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("not attached")),
+            "{:?}",
+            app.hint()
+        );
+
+        app.on_key(key(KeyCode::F(4)));
+        assert!(app.picking().is_none());
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("not attached")),
+            "{:?}",
+            app.hint()
+        );
+    }
+
     #[test]
     fn shift_tab_cycles_the_mode_and_hands_the_change_out_to_be_kept() {
-        let mut app = app();
+        let mut app = app().attached();
         app.apply(&Event::ModeSelected { mode: Mode::Ask });
 
         app.on_key(back_tab());
@@ -10479,7 +10522,7 @@ mod tests {
 
     #[test]
     fn a_session_no_backend_has_reported_a_mode_for_cycles_from_asking() {
-        let mut app = app();
+        let mut app = app().attached();
         assert_eq!(app.session().mode(), None);
 
         app.on_key(back_tab());
@@ -14016,13 +14059,13 @@ mod tests {
     fn opened(overlay: Overlay) -> (App, KeyEvent) {
         let (mut app, opening, closing) = match overlay {
             Overlay::Menu => (
-                app(),
+                app().attached(),
                 KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
                 key(KeyCode::Enter),
             ),
-            Overlay::Sheet => (app(), key(KeyCode::F(1)), key(KeyCode::Enter)),
-            Overlay::Memory => (app(), key(KeyCode::F(8)), key(KeyCode::Esc)),
-            Overlay::Mcp => (app(), key(KeyCode::F(7)), key(KeyCode::Esc)),
+            Overlay::Sheet => (app().attached(), key(KeyCode::F(1)), key(KeyCode::Enter)),
+            Overlay::Memory => (app().attached(), key(KeyCode::F(8)), key(KeyCode::Esc)),
+            Overlay::Mcp => (app().attached(), key(KeyCode::F(7)), key(KeyCode::Esc)),
             Overlay::History => (
                 remembering(&[("rm the build dir and rebuild", "3")], &["3"]),
                 ctrl('r'),

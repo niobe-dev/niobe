@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ Niobe  Session  Context  Model  View  Help                                 opus-5  claude · default  ○ idle 0s  13:41
  ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
  ┃    44 +     headers.set("If-None-Match", cached.etag);                   ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
  ┃    45 +   }                                                              ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │

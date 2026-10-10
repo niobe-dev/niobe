@@ -2107,7 +2107,7 @@ fn a_model_the_operator_moved_to_is_what_the_menu_row_names() {
 
 #[test]
 fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
-    let mut app = running_session().with_profile(SelectedProfile {
+    let mut app = running_session().attached().with_profile(SelectedProfile {
         name: "max".to_owned(),
         backend: Backend::Claude,
         models: vec!["opus-5".to_owned(), "sonnet-5".to_owned()],
@@ -2245,7 +2245,7 @@ fn f4() -> ratatui::crossterm::event::KeyEvent {
 /// choosing it sends, and what it is for.
 #[test]
 fn the_model_list_shows_every_model_the_backend_offers_by_name_and_id() {
-    let mut app = running_session().with_profile(SelectedProfile {
+    let mut app = running_session().attached().with_profile(SelectedProfile {
         name: "max".to_owned(),
         backend: Backend::Claude,
         models: Vec::new(),
@@ -2274,7 +2274,7 @@ fn the_model_list_shows_every_model_the_backend_offers_by_name_and_id() {
 fn a_model_list_taller_than_the_screen_keeps_the_cursor_and_the_keys_in_view() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    let mut app = running_session().with_profile(SelectedProfile {
+    let mut app = running_session().attached().with_profile(SelectedProfile {
         name: "max".to_owned(),
         backend: Backend::Claude,
         models: Vec::new(),
@@ -2321,7 +2321,7 @@ fn a_model_list_taller_than_the_screen_keeps_the_cursor_and_the_keys_in_view() {
 /// of the backend's it leaves out.
 #[test]
 fn a_profile_naming_models_shows_those_and_how_many_more_the_backend_offers() {
-    let mut app = running_session().with_profile(SelectedProfile {
+    let mut app = running_session().attached().with_profile(SelectedProfile {
         name: "max".to_owned(),
         backend: Backend::Claude,
         models: vec!["fable".to_owned(), "claude-opus-4-8".to_owned()],
@@ -2680,7 +2680,7 @@ fn a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it() {
 
 #[test]
 fn a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not() {
-    let mut app = running_session();
+    let mut app = running_session().attached();
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
         ratatui::crossterm::event::KeyCode::BackTab,
         ratatui::crossterm::event::KeyModifiers::SHIFT,
