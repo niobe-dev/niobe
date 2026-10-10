@@ -1388,6 +1388,9 @@ pub struct App {
     /// The MCP servers the operator asked to be reconnected that the loop has
     /// not handed to the backend yet, oldest first.
     mcp_reconnects: Vec<String>,
+    /// The server a reconnect was asked of that the backend has not answered
+    /// for: the hint says so until its answer arrives or a key replaces it.
+    reconnecting: Option<String>,
     /// The panes of the right-hand stack the operator hid.
     hidden: BTreeSet<crate::menu::SidePane>,
     /// The files outside the session the shell can name or have opened.
@@ -1759,6 +1762,7 @@ impl App {
             memory_wanted: false,
             mcp: None,
             mcp_reconnects: Vec::new(),
+            reconnecting: None,
             hidden: BTreeSet::new(),
             places: Places::default(),
             trusting: None,
@@ -1818,6 +1822,7 @@ impl App {
             }
         }
         self.session.apply(event);
+        self.reconnect_answered(event);
         if matches!(event, Event::UsageWindows(_)) {
             self.windows_at = self.at;
             self.windows_recorded = false;
@@ -3949,8 +3954,48 @@ impl App {
             );
             return;
         }
-        self.hint = Some(format!("Reconnecting `{server}`…"));
+        self.hint = Some(Self::reconnecting_hint(&server));
+        self.reconnecting = Some(server.clone());
         self.mcp_reconnects.push(server);
+    }
+
+    fn reconnecting_hint(server: &str) -> String {
+        format!("Reconnecting `{server}`…")
+    }
+
+    /// Replaces the "Reconnecting" hint with what the backend answered: the
+    /// failure it gave, or how the server stands in the report that follows.
+    /// A hint a key has already replaced is left alone.
+    fn reconnect_answered(&mut self, event: &Event) {
+        let Some(server) = self.reconnecting.clone() else {
+            return;
+        };
+        if self.hint.as_deref() != Some(Self::reconnecting_hint(&server).as_str()) {
+            self.reconnecting = None;
+            return;
+        }
+        match event {
+            Event::Notice { message }
+                if message.contains(&format!("`{server}`"))
+                    && message.contains("could not be reconnected") =>
+            {
+                self.hint = Some(message.clone());
+                self.reconnecting = None;
+            }
+            Event::McpServers { servers } => {
+                self.hint = servers
+                    .iter()
+                    .find(|listed| listed.name == server)
+                    .map(|listed| match &listed.error {
+                        Some(error) => {
+                            format!("`{server}` is {}: {error}", listed.status.label())
+                        }
+                        None => format!("`{server}` is {}", listed.status.label()),
+                    });
+                self.reconnecting = None;
+            }
+            _ => {}
+        }
     }
 
     /// Whether `r` in the MCP view reaches a backend: only one listening can
@@ -14599,7 +14644,11 @@ mod tests {
 
         app.apply(&Event::McpServers {
             servers: vec![
-                mcp_server("remote docs", McpStatus::Connected, &["lookup"]),
+                mcp_server(
+                    "remote docs",
+                    niobe_core::event::McpStatus::Connected,
+                    &["lookup"],
+                ),
                 mcp_server("notes", McpStatus::Connected, &["search", "fetch"]),
             ],
         });
@@ -14629,6 +14678,71 @@ mod tests {
         replayed.on_key(key(KeyCode::Char('r')));
         assert_eq!(replayed.take_mcp_reconnects(), Vec::<String>::new());
         assert!(!mcp_shown(&replayed).contains("r reconnect"));
+    }
+
+    #[test]
+    fn a_reconnect_the_backend_refused_names_the_failure_in_place_of_reconnecting() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("Reconnecting")),
+            "{:?}",
+            app.hint()
+        );
+
+        app.apply(&Event::Notice {
+            message: "the MCP server `remote docs` could not be reconnected: ECONNREFUSED"
+                .to_owned(),
+        });
+
+        let hint = app.hint().expect("the answer is on the bar");
+        assert!(!hint.contains("Reconnecting"), "{hint}");
+        assert!(hint.contains("ECONNREFUSED"), "{hint}");
+    }
+
+    #[test]
+    fn a_reconnect_the_backend_took_says_how_the_server_stands_now() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+
+        app.apply(&Event::McpServers {
+            servers: vec![mcp_server(
+                "remote docs",
+                niobe_core::event::McpStatus::Connected,
+                &["lookup"],
+            )],
+        });
+
+        let hint = app.hint().expect("the answer is on the bar");
+        assert!(!hint.contains("Reconnecting"), "{hint}");
+        assert!(
+            hint.contains("remote docs") && hint.contains("connected"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn a_report_that_arrives_after_a_key_replaced_the_hint_does_not_bring_it_back() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+        app.on_key(key(KeyCode::Down));
+        assert!(app.hint().is_none(), "{:?}", app.hint());
+
+        app.apply(&Event::McpServers {
+            servers: vec![mcp_server(
+                "remote docs",
+                niobe_core::event::McpStatus::Connected,
+                &["lookup"],
+            )],
+        });
+
+        assert!(app.hint().is_none(), "{:?}", app.hint());
     }
 
     /// A shell with servers reported and no backend listening, as a recorded
