@@ -79,6 +79,10 @@ pub fn replacement_changed(old: &str, new: &str) -> Option<(u64, u64)> {
     if old.is_empty() {
         return match new.is_empty() {
             true => Some((0, 0)),
+            // The last line of `new` ends where the text does, as the lines it
+            // is drawn as do: a newline it already ends with is not another
+            // line, which a newline added unconditionally would make it.
+            false if new.ends_with('\n') => lines_changed("", new),
             false => lines_changed("", &format!("{new}\n")),
         };
     }
@@ -714,6 +718,7 @@ mod tests {
     #[test]
     fn replacing_nothing_is_a_pure_insertion() {
         assert_eq!(replacement_changed("", "line1\nline2"), Some((2, 0)));
+        assert_eq!(replacement_changed("", "x\ny\n"), Some((2, 0)));
         assert_eq!(replacement_changed("", "x"), Some((1, 0)));
         assert_eq!(replacement_changed("", ""), Some((0, 0)));
     }
@@ -752,6 +757,22 @@ mod tests {
             replacement_lines("beta", "gamma"),
             Some(vec![removed("beta"), added("gamma")])
         );
+    }
+
+    /// Nothing replaced is text put where there was none, and the lines it is
+    /// drawn as are the lines it is counted as, whether or not it ends in a
+    /// newline: a count that added a blank line for one read one more than
+    /// `git diff --numstat` and the diff beside it.
+    #[test]
+    fn an_insertion_is_counted_as_the_lines_it_is_drawn_as() {
+        for new in ["x", "x\ny", "x\ny\n", "a\n", "\n", "a\n\n", "a\n\nb"] {
+            let lines = replacement_lines("", new).expect("small texts are compared");
+            assert_eq!(
+                replacement_changed("", new),
+                Some((added_lines(&lines), 0)),
+                "{new:?}"
+            );
+        }
     }
 
     #[test]
