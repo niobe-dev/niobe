@@ -3239,6 +3239,65 @@ mod tests {
         assert_eq!(state.mode(), Some(Mode::Plan));
     }
 
+    /// What the backend offered once, at the start — its models, its commands
+    /// and its servers — is not said again after a clear, so a clear that
+    /// dropped it would leave the model picker empty for the rest of the
+    /// session; nor is how the account is billed.
+    #[test]
+    fn the_lists_and_the_billing_the_backend_gave_once_survive_a_clear() {
+        let model = |id: &str| ModelOption {
+            id: id.to_owned(),
+            name: None,
+            description: None,
+            resolves_to: None,
+        };
+        let command = SlashCommand {
+            name: "review".to_owned(),
+            description: "Review a change".to_owned(),
+            argument_hint: None,
+            mid_prompt: false,
+        };
+        let server = McpServer {
+            name: "docs".to_owned(),
+            status: crate::event::McpStatus::Connected,
+            source: None,
+            tools: vec!["search".to_owned()],
+            scope: None,
+            error: None,
+            endpoint: None,
+            reports_as: None,
+        };
+        let state = SessionState::replay(&[
+            Event::Models {
+                models: vec![model("opus"), model("haiku")],
+            },
+            Event::Commands {
+                commands: vec![command.clone()],
+            },
+            Event::McpServers {
+                servers: vec![server.clone()],
+            },
+            Event::Billing {
+                billing: Billing::Metered,
+            },
+            prompt(),
+            Event::TurnEnded,
+            Event::Cleared,
+        ]);
+
+        assert_eq!(
+            state
+                .models()
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["opus", "haiku"]
+        );
+        assert_eq!(state.commands(), [command]);
+        assert_eq!(state.mcp_servers(), [server]);
+        assert_eq!(state.billing(), Some(Billing::Metered));
+    }
+
     /// The command that typed the clear is still a turn when the reset
     /// arrives, and its end is not a turn of the conversation that follows.
     #[test]

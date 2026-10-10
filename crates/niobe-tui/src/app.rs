@@ -9384,6 +9384,63 @@ mod tests {
         assert!(entry.body.ends_with("disk full"), "{}", entry.body);
     }
 
+    /// A clear starts the shell's side of the conversation over as well: the
+    /// rows of its calls and agents, the answers it was given, where the view
+    /// is, and the figures a turn's rule is measured from. Each is a line of
+    /// `start_over` that nothing else would notice leaving out.
+    #[test]
+    fn a_clear_forgets_the_rows_the_answers_and_the_figures_of_the_conversation_before_it() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "first".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "explorer".to_owned(),
+        });
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Read".to_owned(),
+            input: "{}".to_owned(),
+            summary: None,
+            agent: Some("a1".into()),
+        });
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Read".to_owned(),
+            input: "{}".to_owned(),
+            target: None,
+            proposal: None,
+            reason: None,
+            agent: None,
+        });
+        app.apply(&Event::PermissionResponse {
+            id: "t1".into(),
+            decision: PermissionDecision::Allow,
+            message: None,
+        });
+        app.follow = false;
+        app.stop_asked_in = Some(3);
+        app.turn_began_with = (4, 5);
+        app.turns_took = Some(Duration::from_secs(9));
+        assert!(!app.tool_entries.is_empty());
+        assert!(!app.agents.is_empty());
+        assert!(!app.answered.is_empty());
+
+        app.apply(&Event::Cleared);
+
+        assert!(app.tool_entries.is_empty(), "the calls' rows");
+        assert!(app.agent_entries.is_empty(), "the agents' lines");
+        assert!(app.agents.is_empty(), "the agents");
+        assert!(app.answered.is_empty(), "the answers given");
+        assert!(app.follow, "the view follows the new conversation");
+        assert_eq!(app.stop_asked_in, None, "a stop asked of a turn gone");
+        assert_eq!(app.turn_began_with, (0, 0));
+        assert_eq!(app.turns_took, Some(Duration::ZERO));
+    }
+
     /// The store keeps refusing while the operator clears the conversation:
     /// the count was kept on an entry by its place, and the entries are new.
     #[test]
