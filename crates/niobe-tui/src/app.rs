@@ -1261,6 +1261,10 @@ pub struct App {
     /// Whether the last key was an Esc that did nothing else, which makes a
     /// digit pressed next the F-key of that number.
     escaped: bool,
+    /// The letter that opened the menu after an Esc, and when, until the key
+    /// after it: a second letter that follows too closely to have been chosen
+    /// is a prompt being typed, not an item.
+    menu_from_esc: Option<(char, Option<Instant>)>,
     /// The search through the transcript, while it is open.
     find: Option<Find>,
     /// The word the operator closed the list under — of files for an `@`
@@ -1556,6 +1560,11 @@ const BUDGET_WARNING: f64 = 0.8;
 /// the question before answering it.
 pub const ASK_QUIET: Duration = Duration::from_millis(500);
 
+/// How soon after a letter opened a menu, with Esc before it, a second letter
+/// reads as the operator typing a prompt: an item is picked by looking at the
+/// menu, which takes longer than the keys of a word do.
+const TYPING_AFTER_ESC: Duration = Duration::from_millis(350);
+
 /// What the transcript says under a prompt sent with no backend attached,
 /// live and when the [`Event::PromptNotSent`] it was kept as is read back.
 const NOT_ATTACHED: &str = "This session is not attached to a backend, so the prompt above was \
@@ -1704,6 +1713,7 @@ impl App {
             viewport_lines: 0,
             hint: None,
             escaped: false,
+            menu_from_esc: None,
             find: None,
             offer_closed: None,
             offer_selected: 0,
@@ -4199,6 +4209,7 @@ impl App {
     fn open_menu(&mut self, at: usize) {
         self.focus = Focus::Session;
         self.menu = Some(crate::menu::Open::at(at));
+        self.menu_from_esc = None;
     }
 
     /// One key, while a menu is open: the menu has the keyboard whole.
@@ -4208,6 +4219,23 @@ impl App {
         let Some(open) = self.menu else {
             return;
         };
+        // Only the key straight after the one that opened the menu can be the
+        // start of a word: an Esc that did nothing, then a sentence, would
+        // otherwise run whichever item the letters happened to land on.
+        if let Some((first, at)) = self.menu_from_esc.take()
+            && typed_char(key).is_some()
+            && let (Some(opened), Some(now)) = (at, self.latest_instant())
+            && now.saturating_duration_since(opened) < TYPING_AFTER_ESC
+        {
+            self.menu = None;
+            let typed = ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char(first),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            );
+            self.on_key_under(typed);
+            self.on_key_under(key);
+            return;
+        }
         match key.code {
             KeyCode::Esc => self.menu = None,
             KeyCode::Left => self.menu = Some(open.left()),
@@ -6330,6 +6358,9 @@ impl App {
             && let Some(at) = crate::menu::menu_of(letter)
         {
             self.open_menu(at);
+            if escaped && key.modifiers == KeyModifiers::NONE {
+                self.menu_from_esc = Some((letter, self.latest_instant()));
+            }
             return;
         }
 
@@ -11582,6 +11613,44 @@ mod tests {
 
         assert_eq!(app.take_produced(), []);
         assert!(app.asking().is_some());
+    }
+
+    /// An Esc that did nothing, then a prompt typed at the pace of a hand:
+    /// its first letter is a menu's, as it is for an operator who means the
+    /// menu, and the second is told from a choice by how soon it comes.
+    #[test]
+    fn a_prompt_typed_after_an_idle_esc_is_the_prompt_and_opens_no_menu_item() {
+        let start = Instant::now();
+        let mut app = app();
+        app.tick(start, None);
+        read(&mut app, b"\x1b", start);
+        let mut at = start + Duration::from_millis(400);
+        for c in "start now".chars() {
+            let mut bytes = [0; 4];
+            read(&mut app, c.encode_utf8(&mut bytes).as_bytes(), at);
+            at += Duration::from_millis(120);
+        }
+
+        assert_eq!(app.composed(), "start now");
+        assert!(app.menu().is_none());
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.take_handoffs(), vec![]);
+    }
+
+    #[test]
+    fn esc_then_a_menus_letter_with_nothing_after_it_still_opens_the_menu() {
+        let start = Instant::now();
+        let mut app = app();
+        app.tick(start, None);
+
+        read(&mut app, b"\x1b", start);
+        read(&mut app, b"s", start + Duration::from_millis(400));
+
+        assert!(app.menu().is_some());
+
+        // And an item is chosen by a key that comes after a look at it.
+        read(&mut app, b"n", start + Duration::from_millis(900));
+        assert!(app.menu().is_some(), "the menu stays open on a hot key");
     }
 
     #[test]
