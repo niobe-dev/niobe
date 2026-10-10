@@ -1283,6 +1283,10 @@ pub struct App {
     /// How many loads have landed, which is what tells the history dialog's
     /// rows from those of an earlier load.
     past_loads: u64,
+    /// The prompts sent in the conversations this shell has cleared, oldest
+    /// first, which Up and the history dialog still go back to: each is a
+    /// session of its own now, and one the operator wrote.
+    cleared_prompts: Vec<PromptRow>,
     /// The history dialog's rows, built once for what they are built from;
     /// `None` until the dialog or a walk first asks for them. Built where
     /// they are asked for, which a frame does through `&self`.
@@ -1707,6 +1711,7 @@ impl App {
             remembers: false,
             past: None,
             past_loads: 0,
+            cleared_prompts: Vec::new(),
             history_index: std::cell::RefCell::new(None),
             // Asked for as the shell opens, so Up has earlier sessions'
             // prompts by the time anyone presses it.
@@ -1829,6 +1834,15 @@ impl App {
     /// working tree, the history of prompts, the profile and the rules kept
     /// are not the session's, and stay.
     fn start_over(&mut self) {
+        let sent: Vec<PromptRow> = self
+            .own_prompts()
+            .map(|entry| PromptRow {
+                text: entry.body.clone(),
+                at: entry.at,
+                session: None,
+            })
+            .collect();
+        self.cleared_prompts.extend(sent);
         self.entries.clear();
         self.tool_entries.clear();
         self.agent_entries.clear();
@@ -7048,11 +7062,15 @@ impl App {
     /// the earlier sessions'. A prompt sent more than once is listed where it
     /// was sent last.
     fn every_prompt(&self) -> Vec<PromptRow> {
-        let own = self.own_prompts().rev().map(|entry| PromptRow {
-            text: entry.body.clone(),
-            at: entry.at,
-            session: None,
-        });
+        let own = self
+            .own_prompts()
+            .map(|entry| PromptRow {
+                text: entry.body.clone(),
+                at: entry.at,
+                session: None,
+            })
+            .rev()
+            .chain(self.cleared_prompts.iter().rev().cloned());
         let earlier = self
             .past
             .iter()
@@ -7073,7 +7091,7 @@ impl App {
     fn history_source(&self) -> crate::history::Source {
         crate::history::Source {
             loads: self.past_loads,
-            own: self.own_prompts().count(),
+            own: self.own_prompts().count() + self.cleared_prompts.len(),
             recorded_as: self.recorded_as.clone(),
             carrying_on: self
                 .session
@@ -14573,6 +14591,25 @@ mod tests {
             "past the newest is the draft, as it was"
         );
         assert!(app.take_produced().is_empty(), "recalling sends nothing");
+    }
+
+    /// `/clear` starts a session of its own, and the prompts the operator
+    /// wrote before it are still theirs to go back to without opening the
+    /// history dialog to have the store read again.
+    #[test]
+    fn up_right_after_a_clear_recalls_the_prompts_sent_before_it() {
+        let mut app = remembering(&[], &[]);
+        send_prompt(&mut app, "first prompt");
+        send_prompt(&mut app, "second prompt");
+        app.apply(&Event::Cleared);
+        send_prompt(&mut app, "after the clear");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "after the clear");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "second prompt");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "first prompt");
     }
 
     #[test]
