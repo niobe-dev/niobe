@@ -8,6 +8,7 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod audit;
 mod headers;
 mod network;
 mod version;
@@ -60,6 +61,7 @@ fn main() -> ExitCode {
         Some("size") => size().map(|_| ()),
         Some("layering") => layering(),
         Some("headers") => headers(),
+        Some("audit") => audit(),
         Some("version") => version::run(rest),
         _ => {
             eprintln!(
@@ -67,11 +69,13 @@ fn main() -> ExitCode {
 usage: cargo xtask <task>
 
 tasks:
-    ci        fmt --check, clippy, tests, layering, headers, versions, shellcheck, then size,
-              with RUSTFLAGS denying warnings as CI does
+    ci        fmt --check, clippy, tests, layering, headers, audit, versions, shellcheck, then
+              size, with RUSTFLAGS denying warnings as CI does
     layering  check that no crate depends on a workspace crate it may not name, that no
               network crate is in the tree and that no code reads a CLI's credentials
     headers   check that every file carries the SPDX copyright header
+    audit     check that no comment is a section banner, names planning outside the
+              repository or marks a gap with FIXME, HACK or XXX
     version   report what a release would be; --check that the manifest agrees with itself;
               <patch|minor|major|X.Y.Z> to move the workspace to that version
     size      build --release and check the `niobe` binary against the 20 MB budget"
@@ -116,6 +120,7 @@ fn ci() -> Result<(), String> {
     }
     layering()?;
     headers()?;
+    audit()?;
     version::run(&["--check".to_owned()])?;
     shellcheck()?;
     size().map(|_| ())
@@ -256,16 +261,7 @@ fn off_the_network(members: &[&str]) -> Result<(), String> {
         ));
     }
 
-    let listing = command_output(
-        "git",
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    )?;
+    let listing = published_files()?;
     let mut marks = Vec::new();
     for path in listing.split('\0').filter(|path| scanned_for_marks(path)) {
         let source = match std::fs::read_to_string(workspace_root().join(path)) {
@@ -291,16 +287,7 @@ fn off_the_network(members: &[&str]) -> Result<(), String> {
 /// Checks every file git would publish — tracked, or untracked and not ignored
 /// — for the header its type requires.
 fn headers() -> Result<(), String> {
-    let listing = command_output(
-        "git",
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    )?;
+    let listing = published_files()?;
 
     let mut checked = 0;
     let mut problems = Vec::new();
@@ -339,6 +326,51 @@ fn headers() -> Result<(), String> {
         "copyright headers:\n  {}\nsee AGENTS.md for the header each file type takes",
         problems.join("\n  ")
     ))
+}
+
+/// Checks every comment in the Rust files git would publish for a section
+/// banner, a reference to planning outside the repository, or a `FIXME`,
+/// `HACK` or `XXX`.
+fn audit() -> Result<(), String> {
+    let listing = published_files()?;
+
+    let mut swept = 0;
+    let mut marks = Vec::new();
+    for path in listing.split('\0').filter(|path| audit::swept(path)) {
+        let source = match std::fs::read_to_string(workspace_root().join(path)) {
+            Ok(source) => source,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("cannot read {path}: {e}")),
+        };
+        swept += 1;
+        marks.extend(audit::marks_in(path, &source));
+    }
+
+    if marks.is_empty() {
+        println!("audit: {swept} files, no banner, planning reference or unexplained gap");
+        return Ok(());
+    }
+
+    Err(format!(
+        "comments a reader of the public repository must not find:\n  {}\n\
+         describe what the code does and does not do, in plain words (AGENTS.md §4)",
+        marks.join("\n  ")
+    ))
+}
+
+/// Every file git would publish — tracked, or untracked and not ignored — as
+/// paths relative to the workspace root, NUL-separated.
+fn published_files() -> Result<String, String> {
+    command_output(
+        "git",
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )
 }
 
 /// Whether the file at `path`, relative to the workspace root, is Rust the

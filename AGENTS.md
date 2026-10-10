@@ -37,6 +37,12 @@ and is deliberately not part of the public repository. It never overrides §4.
 
 A Cargo workspace. The crate graph is the architecture: who may depend on whom is enforced in CI.
 
+At the root beside this file: `PRINCIPLES.md` is the binding standard a change is graded against —
+each principle with its trigger, its check and a Niobe example, the change-risk tiers, the review
+ownership matrix and the one severity rubric every reviewer cites (§3.2); `CONTRIBUTING.md` is the
+short version for a contributor; `.claude/skills/` and `.claude/agents/` are the workflows and the
+reviewers that encode both, for an agent working in this tree.
+
 - **`crates/niobe-core/`** — the shared vocabulary. `event.rs` is the event model, the one type
   every backend produces into, where a file change says whether it was the project's or one of
   the notes the agent keeps for itself, which the session's figures leave out; `session.rs` is `SessionState`, the fold every consumer derives its
@@ -281,7 +287,11 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   with the pictures in its `tests/snapshots/`, one per way a session is billed.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
   `version.rs` is the workspace version: the eight places the root manifest writes it, and
-  what the conventional-commit subjects since the last release tag call for (§8).
+  what the conventional-commit subjects since the last release tag call for (§8). `headers.rs`
+  is the copyright header each file type carries (§5), `network.rs` the names the layering check
+  reads the tree for (§2.2), and `audit.rs` the sweep over whole-line comments for a section
+  banner, a reference to planning outside the repository or a `FIXME`, `HACK` or `XXX` (§4), each
+  failing the gate.
 - **`install.sh`** — what users install niobe with: POSIX `sh`, picks the archive for the machine,
   checks it against its published SHA-256 and puts `niobe` in `~/.local/bin`. It is published
   with every release, so `releases/latest/download/install.sh` always matches the archives beside
@@ -354,8 +364,8 @@ These hold for every change. Breaking one is a bug even when the feature ships g
 5. **Each optimization has an off switch and a measured savings figure.** An optimization nobody
    measured is a behaviour change sold as a feature.
 6. **`niobe-tui` sees no backend-specific type** (§1.1).
-7. **CI is green on macOS and Linux**: format, clippy, tests, layering, headers and the release
-   binary size budget.
+7. **CI is green on macOS and Linux**: format, clippy, tests, layering, headers, the comment
+   audit and the release binary size budget.
 
 ---
 
@@ -396,7 +406,35 @@ These hold for every change. Breaking one is a bug even when the feature ships g
 Comments explain *why* — the constraint, the invariant, the alternative that was rejected — not
 *what* the next line does. Keep them true: an edit that invalidates a comment updates or deletes it
 in the same change. No commented-out code. No section banners (`// ---- helpers ----`); split into
-functions or modules instead.
+functions or modules instead. `cargo xtask audit` refuses a banner, and a `FIXME`, `HACK` or
+`XXX`, which mark a gap without saying what is missing; a `TODO` is allowed where it does (§7.7).
+
+### 3.2 The principles, and which skill to run
+
+`PRINCIPLES.md` is the binding standard for every change: what the crate graph means for what may
+cross a boundary, state as a fold, every figure measured or labelled or absent, SOLID read for a
+terminal tool, clean code with its ceilings, hostile input and the terminal, the test traps that are
+Niobe's own — each with a trigger, a check and a self-check — then the **change-risk tiers** (§8
+there) that decide how much review a change earns, the **ownership matrix** (§9) that gives each
+review axis one owner, and the **severity rubric** (§10) every reviewer cites. Read the sections a
+change touches before writing code; walk the self-checks before asking for review. Disagree with a
+principle in the commit body, never by silent deviation.
+
+The skills under `.claude/skills/` encode the workflow, and the agents under `.claude/agents/` the
+reviewers. Pick the cheapest that fits — the panel is not the default:
+
+- **`niobe-task`** — the default for a feature or a fix. One agent, no subagents: classifies the
+  tier, implements with TDD, self-reviews through every lens, runs the gate, lands the work.
+- **`niobe-panel-task`** — the same with the specialist panel, only for Major-tier work
+  (`PRINCIPLES.md` §8.1) or when the panel is asked for by name.
+- **`niobe-audit`** — a review-and-fix pass over an existing diff, crate or range with the panel,
+  ending in a CTO verdict. `--report-only` reviews without fixing.
+- **`niobe-scout`**, **`niobe-bolt`**, **`niobe-sentinel`** — one proven bug fixed at the root, one
+  measured performance win, one hardening at a boundary; each stops and changes nothing when nothing
+  qualifies.
+- **`niobe-hilo`** — one highlight and one lowlight of the architecture, with evidence; read-only.
+- The **`niobe-reviewer`** agent alone reviews a Standard-tier diff; **`niobe-test-runner`** runs
+  the gate off the main context; **`niobe-explorer`** answers where something lives.
 
 ---
 
@@ -419,6 +457,11 @@ names, snapshots, fixtures and their READMEs, manifests, CI config, and commit m
 **Rule of thumb**: if a sentence would be confusing to someone without access to a private plan,
 rewrite it to describe the implementation's actual behaviour, invariants or constraints.
 
+`cargo xtask audit` mechanizes the part a sweep can: every whole-line comment in every Rust file git
+would publish is refused for a section banner, for a milestone, a task or phase number, a ticket, a
+priority label or a `§` that names no file in the tree, and for a `FIXME`, `HACK` or `XXX`. The rest
+of the rule — strings, test names, fixtures, commits — is review's to read.
+
 ---
 
 ## 5. Copyright headers (BINDING)
@@ -434,6 +477,9 @@ Every file that can carry a comment starts with the SPDX header, followed by a b
 - TOML, YAML, `.gitignore`: the same two lines with `#`.
 - Shell scripts (`.sh`): the same two lines with `#`, directly under the `#!` line.
 - Markdown: the two lines inside a leading `<!-- … -->` block.
+- A skill or agent definition under `.claude/` (`*.md`): the same block directly under the YAML
+  frontmatter, with a blank line between, because the tool that reads the definition takes the
+  frontmatter from the file's first line.
 
 Exempt, because the format has no comments or the bytes are compared exactly: `LICENSE`,
 `CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt`, and recorded output
@@ -525,6 +571,7 @@ cargo test --release -p niobe-store --test replay_budget
 cargo test --release -p niobe-cli --test replay_budget
 cargo xtask layering
 cargo xtask headers
+cargo xtask audit
 cargo xtask version --check
 cargo xtask size
 ```

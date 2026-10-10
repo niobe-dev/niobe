@@ -28,6 +28,10 @@ pub enum Rule {
     LineComment(&'static str),
     /// The two lines inside a leading `<!--` … `-->` block.
     HtmlComment,
+    /// The `<!--` … `-->` block directly under a YAML frontmatter, which the
+    /// tool that reads a skill or agent definition under `.claude/` takes
+    /// from the file's first line, so nothing may come before it.
+    Frontmatter,
     /// The two lines behind `# `, under the `#!` line, which the kernel only
     /// honours as the very first line of the file.
     Script,
@@ -55,9 +59,11 @@ pub fn rule_for(path: &str) -> Option<Rule> {
         return Some(Rule::LineComment("# "));
     }
 
+    let is_agent_definition = path.starts_with(".claude/");
     match Path::new(name).extension().and_then(|e| e.to_str()) {
         Some("rs") => Some(Rule::LineComment("// ")),
         Some("toml" | "yml" | "yaml") => Some(Rule::LineComment("# ")),
+        Some("md") if is_agent_definition => Some(Rule::Frontmatter),
         Some("md") => Some(Rule::HtmlComment),
         Some("sh") => Some(Rule::Script),
         _ => None,
@@ -80,18 +86,34 @@ pub fn has_header(rule: Rule, contents: &str) -> bool {
             format!("{prefix}{LICENSE_LINE}"),
             format!("{prefix}{COPYRIGHT_LINE}"),
         ],
-        Rule::HtmlComment => vec![
-            "<!--".to_owned(),
-            LICENSE_LINE.to_owned(),
-            COPYRIGHT_LINE.to_owned(),
-            "-->".to_owned(),
-        ],
+        Rule::HtmlComment => html_comment_header(),
+        Rule::Frontmatter => {
+            if !skip_frontmatter(&mut lines) || lines.next() != Some("") {
+                return false;
+            }
+            html_comment_header()
+        }
     };
 
     expected
         .iter()
         .all(|line| lines.next() == Some(line.as_str()))
         && lines.next() == Some("")
+}
+
+fn html_comment_header() -> Vec<String> {
+    vec![
+        "<!--".to_owned(),
+        LICENSE_LINE.to_owned(),
+        COPYRIGHT_LINE.to_owned(),
+        "-->".to_owned(),
+    ]
+}
+
+/// Consumes a YAML frontmatter — a `---` line, then everything up to and
+/// including the next — and says whether there was one to consume.
+fn skip_frontmatter<'a>(lines: &mut impl Iterator<Item = &'a str>) -> bool {
+    lines.next() == Some("---") && lines.any(|line| line == "---")
 }
 
 #[cfg(test)]
@@ -166,6 +188,37 @@ mod tests {
             "# SPDX-License-Identifier: Apache-2.0\n\
              # Copyright (c) Viacheslav Shynkarenko\n\nset -eu\n"
         ));
+    }
+
+    #[test]
+    fn a_skill_or_agent_definition_carries_the_header_under_its_frontmatter() {
+        assert_eq!(
+            rule_for(".claude/skills/niobe-task/SKILL.md"),
+            Some(Rule::Frontmatter)
+        );
+        assert_eq!(
+            rule_for(".claude/agents/lead-rust-engineer.md"),
+            Some(Rule::Frontmatter)
+        );
+        // Markdown anywhere else still opens with the header.
+        assert_eq!(rule_for("PRINCIPLES.md"), Some(Rule::HtmlComment));
+        assert_eq!(rule_for("docs/.claude/notes.md"), Some(Rule::HtmlComment));
+
+        let file = "---\nname: niobe-task\ndescription: one line\n---\n\n<!--\n\
+                    SPDX-License-Identifier: Apache-2.0\n\
+                    Copyright (c) Viacheslav Shynkarenko\n-->\n\n# Niobe task\n";
+        assert!(has_header(Rule::Frontmatter, file));
+        // The header goes directly under the frontmatter, with a blank line
+        // between, and may not come first: the tool reads the frontmatter
+        // from the first line.
+        let header_first = "<!--\nSPDX-License-Identifier: Apache-2.0\n\
+                            Copyright (c) Viacheslav Shynkarenko\n-->\n\n---\nname: x\n---\n";
+        assert!(!has_header(Rule::Frontmatter, header_first));
+        assert!(!has_header(
+            Rule::Frontmatter,
+            "---\nname: x\n---\n\n# No header\n"
+        ));
+        assert!(!has_header(Rule::Frontmatter, "---\nname: x\n"));
     }
 
     #[test]
