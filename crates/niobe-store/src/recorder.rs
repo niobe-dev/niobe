@@ -166,7 +166,16 @@ impl Held {
             OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
-        .map_err(|e| StoreError::Hold(e.into()))?;
+        .map_err(|e| match e {
+            // The system's own wording for this, "too many levels of symbolic
+            // links", names neither the file nor the repository that put it
+            // there, and the operator is the one who has to remove it.
+            rustix::io::Errno::LOOP => StoreError::Hold(std::io::Error::other(format!(
+                "{} is a link, and a session is not held through a link; remove it",
+                path.display()
+            ))),
+            e => StoreError::Hold(e.into()),
+        })?;
         match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => Ok(file),
             Err(rustix::io::Errno::WOULDBLOCK) => Err(StoreError::SessionOpen(session)),

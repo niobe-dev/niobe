@@ -559,10 +559,12 @@ fn a_link_at_the_hold_name_is_refused_and_nothing_is_made_where_it_points() {
         .expect("a link can be made at the hold's name");
     let mut recorder = Recorder::new(Store::open(&path).expect("a store opens"));
 
-    assert!(matches!(
-        recorder.record(&user("one")),
-        Err(StoreError::Hold(_))
-    ));
+    let said = recorder
+        .record(&user("one"))
+        .expect_err("the link is refused");
+    assert!(matches!(said, StoreError::Hold(_)));
+    let said = said.to_string();
+    assert!(said.contains("sessions.db-open-1 is a link"), "{said}");
     assert!(!target.exists(), "the link was not followed");
 }
 

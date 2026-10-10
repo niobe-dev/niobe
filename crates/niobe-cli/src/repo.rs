@@ -83,6 +83,7 @@ pub fn open_or_create_store(root: &Path) -> Result<Store, String> {
     if !ignore.exists() {
         std::fs::write(&ignore, GITIGNORE).map_err(|e| failed(&e))?;
     }
+    keep_store_unpublished(root)?;
     private_file(&path).map_err(|e| failed(&e))?;
     let store = Store::open(&path).map_err(|e| failed(&e))?;
     keep_side_files_private(root);
@@ -234,7 +235,108 @@ pub fn store_stays_inside(root: &Path) -> Result<(), String> {
     let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     paths
         .iter()
-        .try_for_each(|path| link_stays_inside(&real_root, path))
+        .try_for_each(|path| link_stays_inside(&real_root, path))?;
+    store_is_not_tracked(root)
+}
+
+/// The store's paths relative to the repository root, as git is asked about
+/// them: the store and the side files SQLite makes beside it.
+fn store_pathspecs() -> Vec<String> {
+    std::iter::once(String::new())
+        .chain(STORE_SIDE_FILES.iter().map(|suffix| (*suffix).to_owned()))
+        .map(|suffix| format!("{DIR}/{STORE_FILE}{suffix}"))
+        .collect()
+}
+
+/// Runs `git` in `root` for what it answers by its exit status. The paths it
+/// is given are constants with no pattern character in them.
+///
+/// `None` where git cannot be run or `root` is not a work tree of one: there
+/// is then nothing to publish the store through, and not knowing is not a
+/// reason to refuse a session.
+fn git_status(root: &Path, args: &[&str]) -> Option<(i32, String)> {
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let output = reading(root).args(args).output().ok()?;
+    Some((
+        output.status.code()?,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
+/// Refuses a store that git tracks.
+///
+/// What a repository tracks arrived with the clone or will leave with the
+/// next push. A store committed there holds sessions that are not the
+/// operator's, which `niobe sessions`, the prompt history and the plan usage
+/// windows would show as theirs, and every session recorded into it would be
+/// a change to a tracked file whose content is every prompt and tool output.
+fn store_is_not_tracked(root: &Path) -> Result<(), String> {
+    let mut args = vec!["ls-files", "-z", "--"];
+    let specs = store_pathspecs();
+    args.extend(specs.iter().map(String::as_str));
+    let Some((0, listed)) = git_status(root, &args) else {
+        return Ok(());
+    };
+    match listed.split('\0').find(|name| !name.is_empty()) {
+        None => Ok(()),
+        Some(tracked) => Err(format!(
+            "{tracked} is tracked by git: sessions recorded into it would be published by the \
+             next push, and the ones already in it did not come from you. Niobe will not use \
+             it; remove it from the repository with `git rm --cached {tracked}`"
+        )),
+    }
+}
+
+/// Makes sure git does not offer the store for a commit, whatever the
+/// repository's own ignore files say.
+///
+/// A `.niobe/.gitignore` that arrived with the clone may ignore nothing, and
+/// niobe writes its own only where there is none. The rule goes into the
+/// repository's `info/exclude` otherwise, which is the operator's alone and
+/// is never committed or cloned. A repository where it still is not ignored
+/// is refused: the store would be one `git add -A` from publication.
+fn keep_store_unpublished(root: &Path) -> Result<(), String> {
+    let store = format!("{DIR}/{STORE_FILE}");
+    let ignored = |root: &Path| git_status(root, &["check-ignore", "-q", "--", &store]);
+    if !matches!(ignored(root), Some((1, _))) {
+        return Ok(());
+    }
+    let exclude = git_status(root, &["rev-parse", "--git-path", "info/exclude"])
+        .filter(|(code, _)| *code == 0)
+        .map(|(_, path)| root.join(path.trim_end()))
+        .ok_or_else(|| not_ignored(&store))?;
+    let written = (|| {
+        if let Some(dir) = exclude.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&exclude)?;
+        use std::io::Write as _;
+        // A first line of its own: the file may not end in a newline.
+        write!(
+            file,
+            "\n# Written by niobe: the session store is not for commits.\n"
+        )?;
+        write!(file, "/{store}\n/{store}-*\n")
+    })();
+    if written.is_err() || !matches!(ignored(root), Some((0, _))) {
+        return Err(not_ignored(&store));
+    }
+    Ok(())
+}
+
+/// The refusal for a store that git does not ignore and niobe could not make
+/// it ignore.
+fn not_ignored(store: &str) -> String {
+    format!(
+        "{store} is not ignored by git, and niobe could not add it to .git/info/exclude: \
+         a session recorded there would be one `git add -A` from being published. Add \
+         `{store}*` to an ignore file of yours and start again"
+    )
 }
 
 /// Whether `path`, if it is a link, leads to something that exists under
@@ -1704,6 +1806,67 @@ mod tests {
         open_or_create_store(dir.path()).expect("a link inside the repository is followed");
 
         assert!(std::fs::metadata(&real).expect("stat").len() > 0);
+    }
+
+    /// A clone whose upstream committed `files` under `.niobe`, as the work
+    /// tree of the repository [`repository`] builds.
+    fn clone_with(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+        let dir = repository();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(work.join(DIR)).expect("the directory is made");
+        for (name, text) in files {
+            std::fs::write(work.join(DIR).join(name), text).expect("the file is written");
+            run(&work, &["add", &format!("{DIR}/{name}")]);
+        }
+        run(&work, &["commit", "-m", "ship niobe files"]);
+        (dir, work)
+    }
+
+    fn untracked_or_modified(work: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["status", "--short", "--", DIR])
+            .current_dir(work)
+            .output()
+            .expect("git runs");
+        String::from_utf8(out.stdout).expect("git prints UTF-8")
+    }
+
+    #[test]
+    fn a_store_the_clone_tracks_is_refused_to_record_and_to_read() {
+        let (_dir, work) = clone_with(&[("sessions.db", "")]);
+
+        let said = open_or_create_store(&work).expect_err("a tracked store is not the operator's");
+
+        assert!(
+            said.contains(".niobe/sessions.db is tracked by git"),
+            "{said}"
+        );
+        assert!(said.contains("git rm --cached"), "{said}");
+        assert!(read_existing_store(&work).is_err(), "nor is it read");
+        assert!(open_existing_store(&work).is_err(), "nor listed");
+    }
+
+    #[test]
+    fn a_committed_ignore_file_that_ignores_nothing_does_not_leave_the_store_for_a_commit() {
+        let (_dir, work) = clone_with(&[(".gitignore", "# nothing is ignored here\n")]);
+
+        open_or_create_store(&work).expect("the store is made");
+
+        assert_eq!(
+            untracked_or_modified(&work),
+            "",
+            "the store is not offered to `git add -A`"
+        );
+        assert!(store_path(&work).exists());
+    }
+
+    #[test]
+    fn a_store_in_a_directory_git_does_not_know_is_made_as_before() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+
+        open_or_create_store(dir.path()).expect("no repository, nothing to publish through");
+
+        assert!(store_path(dir.path()).exists());
     }
 
     #[cfg(unix)]
