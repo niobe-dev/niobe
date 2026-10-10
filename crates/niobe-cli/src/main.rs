@@ -935,7 +935,7 @@ fn consented(root: &Path, asked: &Asked) -> Result<Option<config::Loaded>, Strin
             None => return Ok(None),
             Some(niobe_tui::trust::Answer::NotNow) => break,
             Some(niobe_tui::trust::Answer::Trust) => {
-                consent::record(&untrusted.path, &untrusted.text)?;
+                consent::record(untrusted)?;
                 loaded = config::load(root)?;
             }
         }
@@ -966,7 +966,7 @@ fn trust(yes: bool) -> Result<(), String> {
         say!("{} is not trusted; nothing was recorded", path.display());
         return Ok(());
     }
-    consent::record(&untrusted.path, &untrusted.text)?;
+    consent::record(&untrusted)?;
 
     say!("trusted {}", path.display());
     say!(
@@ -1651,6 +1651,7 @@ mod tests {
                 text: String::new(),
                 config: niobe_config::Config::default(),
                 replaces: Vec::new(),
+                attached: Vec::new(),
             }),
         };
 

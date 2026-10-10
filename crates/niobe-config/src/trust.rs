@@ -28,6 +28,11 @@
 //! would carry a decision made about bytes that are no longer there. Editing
 //! the file — a pull, a rebase, a rewrite — asks again.
 //!
+//! What a config names is part of the same decision. A `settings` file or a
+//! file an `args` entry names is read by the CLI when it starts, and a pull
+//! can rewrite it without touching the config, so each is recorded in the same
+//! file beside the config, at the contents the operator was shown.
+//!
 //! The user's own config is not gated. It is the file the operator writes;
 //! asking them to trust their own text would teach them to say yes without
 //! reading, which is how a trust prompt stops being one.
@@ -53,8 +58,9 @@ pub const FILE_NAME: &str = "trusted.list";
 const HEADER: &str = "\
 # Written by niobe. Each line is a repository config this machine has been told
 # it may start a backend with — its profiles' env, args, settings and
-# auth_refresh — and the SHA-256 of that file's contents when it was told so.
-# Editing the config makes it untrusted again. `niobe untrust` removes a line;
+# auth_refresh — or a settings or argument file such a config names, and the
+# SHA-256 of that file's contents when it was told so. Editing the config, or
+# a file it names, makes it untrusted again. `niobe untrust` removes a line;
 # so does deleting it.
 ";
 

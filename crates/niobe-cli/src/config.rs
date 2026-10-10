@@ -50,6 +50,28 @@ pub struct Untrusted {
     /// The profiles the user's config defines that it defines too, which it
     /// replaces once trusted.
     pub replaces: Vec<String>,
+    /// The files it names that a backend is started with the contents of: a
+    /// profile's `settings` file, and a file an `args` entry names. They are
+    /// trusted with it, each at the contents shown.
+    pub attached: Vec<Attached>,
+}
+
+/// A file a repository's config names that the CLI reads when it starts: its
+/// `settings`, or a path in its `args`.
+///
+/// The config's own digest does not cover it, and a pull can change it alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    /// Where it is, as the CLI would find it.
+    pub path: PathBuf,
+    /// What it holds, or why it cannot be read as text, which leaves it
+    /// untrusted: a file that cannot be shown cannot be agreed to.
+    pub text: Result<String, String>,
+    /// The profiles that name it, in the config's order.
+    pub profiles: Vec<String>,
+    /// Whether one of them names it as its `settings` file, as opposed to an
+    /// argument.
+    pub settings: bool,
 }
 
 impl Loaded {
@@ -151,13 +173,24 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
 
 /// [`load`], with the user's config file handed in rather than found.
 fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
+    load_with(user, root, trust_path(), std::env::var_os("HOME"))
+}
+
+/// [`load_from`], with the trust record and the home directory handed in
+/// rather than found, so that a test can hold its own.
+fn load_with(
+    user: Option<PathBuf>,
+    root: &Path,
+    record: Option<PathBuf>,
+    home: Option<OsString>,
+) -> Result<Loaded, String> {
     let repo = repo::config_path(root);
     let searched: Vec<PathBuf> = user.iter().cloned().chain([repo.clone()]).collect();
 
     let mut config = user_config(user.as_deref())?;
     let mut untrusted = None;
     repo::inside(root, &repo)?;
-    if let Some(layer) = repository(&repo)? {
+    if let Some(layer) = repository(&repo, root, record.as_deref(), home.as_deref())? {
         // A file that defines a profile the user's does is worth trusting
         // even where it sets nothing else: until it is trusted, its profile of
         // that name is not the one in force.
@@ -167,6 +200,7 @@ fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
                 replaces: replaced(&config, &layer.whole),
                 text: layer.text,
                 config: layer.whole,
+                attached: layer.attached,
             });
         }
         config = config.overlay(layer.config);
@@ -195,9 +229,11 @@ pub fn as_written(path: &Path, text: String) -> Result<Untrusted, String> {
         )
         .as_deref(),
     )?;
+    let home = std::env::var_os("HOME");
     Ok(Untrusted {
         path: path.to_owned(),
         replaces: replaced(&user, &config),
+        attached: attached(&config, &root_of(path), home.as_deref()),
         text,
         config,
     })
@@ -231,6 +267,8 @@ struct Layer {
     whole: Config,
     /// The text `whole` was parsed from.
     text: String,
+    /// The files `whole` names that the CLI reads, as they are now.
+    attached: Vec<Attached>,
     /// Whether the file has not been trusted as it stands, so that `config` is
     /// what [`Config::untrusted`] leaves of it.
     gated: bool,
@@ -245,17 +283,24 @@ struct Layer {
 ///
 /// The file is read once and both parsed and hashed from that text, so the
 /// config that is laid on is the one the digest was taken of.
-fn repository(path: &Path) -> Result<Option<Layer>, String> {
+fn repository(
+    path: &Path,
+    root: &Path,
+    record: Option<&Path>,
+    home: Option<&OsStr>,
+) -> Result<Option<Layer>, String> {
     let Some(text) = read(path)? else {
         return Ok(None);
     };
     let config = Config::parse(&text, path).map_err(|e| e.to_string())?;
     let needs_trust = config.needs_trust();
-    if trusted(path, &text)? {
+    let attached = attached(&config, root, home);
+    if trusted(record, path, &text, &attached)? {
         return Ok(Some(Layer {
             whole: config.clone(),
             config,
             text,
+            attached,
             gated: false,
             needs_trust,
         }));
@@ -264,24 +309,91 @@ fn repository(path: &Path) -> Result<Option<Layer>, String> {
         whole: config.clone(),
         config: config.untrusted(),
         text,
+        attached,
         gated: true,
         needs_trust,
     }))
 }
 
-/// Whether the repository config at `path`, holding `text`, has been trusted
-/// as it now stands.
+/// The root of the repository whose config file is `path`: two directories up,
+/// at `.niobe/config.toml`.
+fn root_of(path: &Path) -> PathBuf {
+    path.parent()
+        .and_then(Path::parent)
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+}
+
+/// The files the profiles of `config` name that the CLI reads when it starts,
+/// each once, as they are now.
+///
+/// A relative path is the repository's: the CLI reads it from the root. A
+/// file an `args` entry names is one that exists as a regular file there, in
+/// the entry or after its `=`; an entry that names nothing is a flag or a
+/// value, and covers nothing. A `settings` file that is not there covers
+/// nothing either, and the profile is refused before a backend starts; when it
+/// appears it is a file that was not trusted.
+pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attached> {
+    let mut files: Vec<Attached> = Vec::new();
+    let mut add = |path: PathBuf, profile: &str, settings: bool| {
+        if !path.is_file() {
+            return;
+        }
+        match files.iter_mut().find(|file| file.path == path) {
+            Some(file) => {
+                file.settings |= settings;
+                if !file.profiles.iter().any(|name| name == profile) {
+                    file.profiles.push(profile.to_owned());
+                }
+            }
+            None => files.push(Attached {
+                text: niobe_config::read::text(&path).map_err(|error| error.to_string()),
+                path,
+                profiles: vec![profile.to_owned()],
+                settings,
+            }),
+        }
+    };
+    for (name, profile) in config.profiles() {
+        if let Some(settings) = profile.settings()
+            && let Some(written) = expanded(settings, home)
+        {
+            add(root.join(written), name, true);
+        }
+        for arg in profile.args() {
+            let value = arg.split_once('=').map_or(arg.as_str(), |(_, value)| value);
+            for candidate in [arg.as_str(), value] {
+                if candidate.is_empty() || candidate.starts_with('-') {
+                    continue;
+                }
+                add(root.join(candidate), name, false);
+            }
+        }
+    }
+    files
+}
+
+/// Whether the repository config at `path`, holding `text`, and the files it
+/// names that the CLI reads, `attached`, have been trusted as they now stand.
 ///
 /// A machine that says where nothing of the operator's lives has nowhere to
 /// keep the decision, so it has not been made: a repository is gated rather
-/// than ungated by an environment that says nothing.
-fn trusted(path: &Path, text: &str) -> Result<bool, String> {
-    let Some(record) = trust_path() else {
+/// than ungated by an environment that says nothing. A file that cannot be
+/// read as text is not trusted, because nobody could have been shown it.
+fn trusted(
+    record: Option<&Path>,
+    path: &Path,
+    text: &str,
+    attached: &[Attached],
+) -> Result<bool, String> {
+    let Some(record) = record else {
         return Ok(false);
     };
-    Ok(Trusted::read(&record)
-        .map_err(|e| e.to_string())?
-        .trusts(path, text))
+    let record = Trusted::read(record).map_err(|e| e.to_string())?;
+    Ok(record.trusts(path, text)
+        && attached.iter().all(|file| match &file.text {
+            Ok(text) => record.trusts(&file.path, text),
+            Err(_) => false,
+        }))
 }
 
 /// Where this machine keeps the record of the config files it has trusted.
@@ -521,5 +633,123 @@ mod tests {
         assert_eq!(loaded.config.titles(), niobe_config::Titles::FirstPrompt);
         let untrusted = loaded.untrusted.expect("the file is named as untrusted");
         assert_eq!(untrusted.path, config);
+    }
+
+    /// A repository whose config names `settings` as a profile's settings
+    /// file and `args`, trusted under a record of the test's own.
+    struct Cloned {
+        dir: tempfile::TempDir,
+        record: PathBuf,
+    }
+
+    impl Cloned {
+        fn new(config: &str) -> Self {
+            let dir = tempfile::tempdir().expect("a temporary directory can be created");
+            let path = repo::config_path(dir.path());
+            std::fs::create_dir_all(path.parent().expect("a directory")).expect("made");
+            std::fs::write(&path, config).expect("written");
+            let record = dir.path().join("trusted.list");
+            Self { dir, record }
+        }
+
+        fn write(&self, name: &str, text: &str) {
+            std::fs::write(self.dir.path().join(name), text).expect("written");
+        }
+
+        fn load(&self) -> Loaded {
+            load_with(
+                None,
+                self.dir.path(),
+                Some(self.record.clone()),
+                os("/home/me"),
+            )
+            .expect("the config loads")
+        }
+
+        /// What `niobe trust` records for what is there now.
+        fn trust(&self) {
+            let path = repo::config_path(self.dir.path());
+            let text = std::fs::read_to_string(&path).expect("reads");
+            let config = Config::parse(&text, &path).expect("valid");
+            let untrusted = Untrusted {
+                attached: attached(&config, self.dir.path(), os("/home/me").as_deref()),
+                path,
+                text,
+                config,
+                replaces: Vec::new(),
+            };
+            std::fs::create_dir_all(self.record.parent().expect("a directory")).expect("made");
+            Trusted::update(&self.record, |trusted| {
+                trusted.trust(&untrusted.path, &untrusted.text)?;
+                for file in &untrusted.attached {
+                    trusted.trust(&file.path, file.text.as_ref().expect("readable"))?;
+                }
+                Ok(())
+            })
+            .expect("the record is written");
+        }
+    }
+
+    const TEAM: &str = "[profiles.team]\nbackend = \"claude\"\nsettings = \"claude.json\"\n";
+
+    #[test]
+    fn a_settings_file_rewritten_after_the_config_was_trusted_puts_the_question_back() {
+        let clone = Cloned::new(TEAM);
+        clone.write("claude.json", r#"{"env":{"A":"1"}}"#);
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        clone.write(
+            "claude.json",
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://x"}}"#,
+        );
+
+        let loaded = clone.load();
+        let untrusted = loaded.untrusted.expect("the file is asked about again");
+        assert_eq!(untrusted.attached.len(), 1);
+        assert_eq!(
+            untrusted.attached[0].text.as_deref(),
+            Ok(r#"{"env":{"ANTHROPIC_BASE_URL":"https://x"}}"#)
+        );
+        assert!(
+            loaded
+                .config
+                .profiles()
+                .get("team")
+                .is_some_and(|p| p.settings().is_none()),
+            "its settings are not in force until then"
+        );
+    }
+
+    #[test]
+    fn a_file_an_argument_names_is_trusted_with_the_config_and_by_its_contents() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [\"--mcp-config\", \"mcp.json\", \"--settings=s.json\", \"opus\"]\n",
+        );
+        clone.write("mcp.json", "{}");
+        clone.write("s.json", "{}");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none());
+
+        clone.write("mcp.json", r#"{"mcpServers":{}}"#);
+        assert!(clone.load().untrusted.is_some(), "a file named in args");
+
+        clone.trust();
+        clone.write("opus", "now a file, named by an argument that was a model");
+        assert!(clone.load().untrusted.is_some(), "a file that appears");
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_read_as_text_is_not_trusted() {
+        let clone = Cloned::new(TEAM);
+        std::fs::write(clone.dir.path().join("claude.json"), [0xff, 0xfe]).expect("written");
+        let path = repo::config_path(clone.dir.path());
+        Trusted::update(&clone.record, |trusted| {
+            trusted.trust(&path, TEAM)?;
+            trusted.trust(&clone.dir.path().join("claude.json"), "")
+        })
+        .expect("the record is written");
+
+        assert!(clone.load().untrusted.is_some());
     }
 }

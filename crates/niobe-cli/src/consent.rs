@@ -11,13 +11,13 @@
 //! whether to let the file start a backend, and `ANTHROPIC_BASE_URL` is
 //! harmless or not by what it is set to.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use niobe_config::Config;
 use niobe_config::trust::Trusted;
 use niobe_tui::trust::Question;
 
-use crate::config::{self, Untrusted};
+use crate::config::{self, Attached, Untrusted};
 use crate::printable::on_one_line;
 
 /// The question about `untrusted`: the file, and a row for each thing in it
@@ -25,7 +25,7 @@ use crate::printable::on_one_line;
 pub fn question(untrusted: &Untrusted) -> Question {
     Question {
         path: untrusted.path.display().to_string(),
-        grants: grants(&untrusted.config, &untrusted.replaces),
+        grants: grants(&untrusted.config, &untrusted.replaces, &untrusted.attached),
     }
 }
 
@@ -33,8 +33,11 @@ pub fn question(untrusted: &Untrusted) -> Question {
 /// its `[permissions]` rules, its `default_profile`, a `titles = "model"`
 /// that has the model title each new session, and for each profile what
 /// it starts the backend with, how it says the account is billed, and whether
-/// it replaces one of `replaces`, the user's profiles.
-fn grants(config: &Config, replaces: &[String]) -> Vec<(String, String)> {
+/// it replaces one of `replaces`, the user's profiles. Under a profile's
+/// `settings` row go what the file `attached` holds that is put in front of the
+/// CLI with it — its `env` with values, and the events it has hooks for — and
+/// under its `args` a row for each file they name.
+fn grants(config: &Config, replaces: &[String], attached: &[Attached]) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     let rules: Vec<String> = config
         .allowed()
@@ -76,6 +79,18 @@ fn grants(config: &Config, replaces: &[String]) -> Vec<(String, String)> {
         }
         if let Some(settings) = profile.settings() {
             rows.push(row(name, format!("settings {}", settings.path())));
+            for file in attached
+                .iter()
+                .filter(|a| a.settings && a.profiles.contains(name))
+            {
+                rows.extend(settings_rows(name, file));
+            }
+        }
+        for file in attached
+            .iter()
+            .filter(|a| !a.settings && a.profiles.contains(name))
+        {
+            rows.push(row(name, format!("file {}", file.path.display())));
         }
         if let Some(command) = profile.auth_refresh() {
             rows.push(row(name, format!("auth_refresh {command}")));
@@ -87,12 +102,61 @@ fn grants(config: &Config, replaces: &[String]) -> Vec<(String, String)> {
     rows
 }
 
+/// The rows for a settings file: the environment it sets with its values, the
+/// events it runs hooks on, or why what it holds cannot be shown.
+///
+/// What the CLI is started under is what the file says, so a file shown only
+/// by name would be agreed to unread.
+fn settings_rows(profile: &str, file: &Attached) -> Vec<(String, String)> {
+    let text = match &file.text {
+        Ok(text) => text,
+        Err(error) => {
+            return vec![row(
+                profile,
+                format!("settings file cannot be read: {error}"),
+            )];
+        }
+    };
+    let Ok(serde_json::Value::Object(settings)) = serde_json::from_str(text) else {
+        return vec![row(
+            profile,
+            "settings file is not a JSON object".to_owned(),
+        )];
+    };
+    let mut rows = Vec::new();
+    if let Some(serde_json::Value::Object(env)) = settings.get("env")
+        && !env.is_empty()
+    {
+        let env: Vec<String> = env
+            .iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    serde_json::Value::String(value) => value.clone(),
+                    other => other.to_string(),
+                };
+                format!("{}={}", one_word(key), one_word(&value))
+            })
+            .collect();
+        rows.push(row(profile, format!("settings env {}", env.join(", "))));
+    }
+    if let Some(serde_json::Value::Object(hooks)) = settings.get("hooks")
+        && !hooks.is_empty()
+    {
+        let events: Vec<String> = hooks.keys().map(|event| one_word(event)).collect();
+        rows.push(row(
+            profile,
+            format!("settings hooks that run commands on {}", events.join(", ")),
+        ));
+    }
+    rows
+}
+
 /// What `niobe trust` prints before it asks: the file, and the same rows the
 /// question in the shell shows, values included, one line each under it.
 pub fn listing(untrusted: &Untrusted) -> Vec<String> {
     let path = untrusted.path.display().to_string();
     let path = on_one_line(&path);
-    let rows = grants(&untrusted.config, &untrusted.replaces);
+    let rows = grants(&untrusted.config, &untrusted.replaces, &untrusted.attached);
     if rows.is_empty() {
         return vec![format!(
             "{path} sets nothing that takes effect only once it is trusted"
@@ -145,15 +209,37 @@ fn one_word(value: &str) -> String {
     quoted
 }
 
-/// Records `path`, holding `text`, as a config the operator has read, so that
-/// what it sets is in force from the next time it is loaded.
+/// Records the config of `untrusted`, and each file it names that the CLI
+/// reads, as read by the operator, at the contents they were shown, so that what
+/// it sets is in force from the next time it is loaded.
 ///
 /// What is trusted is what the operator could read and agree to: a file that
 /// is not a config says nothing of the kind, and is refused.
-pub fn record(path: &Path, text: &str) -> Result<(), String> {
-    Config::parse(text, path)
+pub fn record(untrusted: &Untrusted) -> Result<(), String> {
+    let path = &untrusted.path;
+    Config::parse(&untrusted.text, path)
         .map_err(|error| format!("{} is not trusted: {error}", path.display()))?;
-    Trusted::update(&record_path()?, |trusted| trusted.trust(path, text)).map_err(|e| e.to_string())
+    let mut files = Vec::new();
+    for file in &untrusted.attached {
+        match &file.text {
+            Ok(text) => files.push((&file.path, text)),
+            Err(error) => {
+                return Err(format!(
+                    "{} is not trusted: {} cannot be read: {error}",
+                    path.display(),
+                    file.path.display()
+                ));
+            }
+        }
+    }
+    Trusted::update(&record_path()?, |trusted| {
+        trusted.trust(path, &untrusted.text)?;
+        for (file, text) in &files {
+            trusted.trust(file, text)?;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Where the record of what this machine has trusted is kept.
@@ -195,6 +281,7 @@ backend = "claude"
             text: REPO.to_owned(),
             path,
             replaces: replaces.iter().map(|name| (*name).to_owned()).collect(),
+            attached: Vec::new(),
         }
     }
 
@@ -273,6 +360,7 @@ backend = "claude"
             text: plain.to_owned(),
             path,
             replaces: Vec::new(),
+            attached: Vec::new(),
         };
 
         assert_eq!(
@@ -290,6 +378,7 @@ backend = "claude"
             text: text.to_owned(),
             path,
             replaces: Vec::new(),
+            attached: Vec::new(),
         };
 
         assert_eq!(
@@ -317,6 +406,7 @@ backend = "claude"
             text: text.to_owned(),
             path,
             replaces: Vec::new(),
+            attached: Vec::new(),
         };
 
         assert!(question(&untrusted).grants.is_empty());
@@ -329,6 +419,7 @@ backend = "claude"
             text: text.to_owned(),
             path,
             replaces: Vec::new(),
+            attached: Vec::new(),
         }
     }
 
@@ -386,12 +477,75 @@ backend = "claude"
 
     #[test]
     fn a_file_that_is_not_a_config_is_not_recorded_as_trusted() {
-        let refused = record(
-            Path::new("/r/.niobe/config.toml"),
-            "[profiles.x]\nbackend = 3\n",
-        )
-        .expect_err("the text is not a config");
+        let mut not_a_config = untrusted(&[]);
+        not_a_config.text = "[profiles.x]\nbackend = 3\n".to_owned();
+
+        let refused = record(&not_a_config).expect_err("the text is not a config");
 
         assert!(refused.contains("is not trusted"), "{refused}");
+    }
+
+    /// A settings file attached to the `work` profile of [`untrusted`].
+    fn with_settings_file(text: Result<String, String>) -> Untrusted {
+        let mut untrusted = untrusted(&[]);
+        untrusted.attached = vec![Attached {
+            path: PathBuf::from("/r/claude.json"),
+            text,
+            profiles: vec!["work".to_owned()],
+            settings: true,
+        }];
+        untrusted
+    }
+
+    fn settings_rows_of(untrusted: &Untrusted) -> Vec<String> {
+        question(untrusted)
+            .grants
+            .into_iter()
+            .filter(|(name, value)| name == "work" && value.starts_with("settings "))
+            .map(|(_, value)| value)
+            .collect()
+    }
+
+    #[test]
+    fn a_settings_file_is_shown_with_the_environment_and_hooks_it_puts_in_front_of_the_cli() {
+        let untrusted = with_settings_file(Ok(
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://a.example","N":3},"hooks":{"PreToolUse":[]}}"#
+                .to_owned(),
+        ));
+
+        assert_eq!(
+            settings_rows_of(&untrusted),
+            [
+                "settings ./claude.json",
+                "settings env ANTHROPIC_BASE_URL=https://a.example, N=3",
+                "settings hooks that run commands on PreToolUse",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_shown_says_so_rather_than_nothing() {
+        let unreadable = with_settings_file(Err("not a regular file".to_owned()));
+        let not_json = with_settings_file(Ok("env = 1".to_owned()));
+
+        assert_eq!(
+            settings_rows_of(&unreadable)[1],
+            "settings file cannot be read: not a regular file"
+        );
+        assert_eq!(
+            settings_rows_of(&not_json)[1],
+            "settings file is not a JSON object"
+        );
+    }
+
+    #[test]
+    fn a_file_the_operator_could_not_be_shown_is_not_recorded_as_trusted() {
+        let refused = record(&with_settings_file(Err("not a regular file".to_owned())))
+            .expect_err("it cannot be read");
+
+        assert!(
+            refused.contains("/r/claude.json cannot be read"),
+            "{refused}"
+        );
     }
 }
