@@ -1417,6 +1417,13 @@ impl Translator {
         self.turn = Counts::default();
         self.unfinished.clear();
         self.context = None;
+        // The conversation after a clear is a stored session of its own,
+        // read back without the one before it: how it is billed, which
+        // release ran it and what the CLI said that this build cannot read
+        // are said for it again, or it reads as unbilled and unwarned.
+        self.billing = None;
+        self.checked_release = false;
+        self.unread_said.clear();
         out.push(Event::Cleared);
     }
 
@@ -4444,6 +4451,50 @@ mod tests {
             "{events:?}"
         );
         assert_eq!(warnings(&events), Vec::<String>::new());
+    }
+
+    /// A cleared conversation is a stored session of its own, which is read
+    /// back alone: what only the first init and the first result said has to
+    /// be said again for it, or it reads as unbilled and unwarned.
+    #[test]
+    fn a_clear_says_how_the_session_is_billed_and_what_it_runs_on_again() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","apiKeySource":"ANTHROPIC_API_KEY","claude_code_version":"9.9.999"}"#;
+        let reset =
+            r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#;
+        let mut translator = Translator::new("work");
+
+        let first = translator.line(init);
+        let cleared = translator.line(reset);
+        let again = translator.line(init);
+
+        assert_eq!(billing(&first), [Billing::Metered]);
+        assert_eq!(warnings(&first).len(), 1, "{first:?}");
+        assert!(cleared.contains(&Event::Cleared), "{cleared:?}");
+        assert_eq!(billing(&again), [Billing::Metered], "{again:?}");
+        assert_eq!(warnings(&again).len(), 1, "the release warning: {again:?}");
+    }
+
+    #[test]
+    fn a_message_type_seen_before_a_clear_is_reported_again_after_it() {
+        let odd = r#"{"type":"system","subtype":"from_the_future"}"#;
+        let reset =
+            r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#;
+        let mut translator = translator();
+
+        let first = translator.line(odd);
+        let repeated = translator.line(odd);
+        translator.line(reset);
+        let after = translator.line(odd);
+
+        let notices = |events: &[Event]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::Notice { .. }))
+                .count()
+        };
+        assert_eq!(notices(&first), 1, "{first:?}");
+        assert_eq!(notices(&repeated), 0, "{repeated:?}");
+        assert_eq!(notices(&after), 1, "{after:?}");
     }
 
     /// After `/clear` the CLI's totals restart from nothing, so the first
