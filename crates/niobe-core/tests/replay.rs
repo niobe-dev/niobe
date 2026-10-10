@@ -151,20 +151,25 @@ fn a_recorded_log_replays_into_the_derived_totals() {
     assert_eq!(state.billing(), None);
 }
 
-/// `replay` is that same loop today, so this holds by construction. It is
-/// kept as the guard for the day `replay` does something cleverer — batching,
-/// or skipping what a later event overrides — which must still arrive where
-/// applying every event in turn does.
+/// What a session folds to when each event reaches it the way the store
+/// hands it back — as the JSON line it was written as, one at a time — must be
+/// what the log folds to read whole. The two paths share no code with each
+/// other: one is the events as parsed from the fixture, the other each of
+/// them written out and read back, which is what a resumed session does.
 #[test]
-fn replaying_event_by_event_matches_replaying_the_whole_log() {
+fn an_event_stream_written_out_and_read_back_folds_to_what_the_log_folds_to() {
     let events = recorded_events();
+    let whole = SessionState::replay(&events);
 
-    let mut incremental = SessionState::new();
+    let mut stored = SessionState::new();
     for event in &events {
-        incremental.apply(event);
+        let line = serde_json::to_string(event).expect("an Event serializes");
+        let back: Event = serde_json::from_str(&line).expect("an Event deserializes");
+        stored.apply(&back);
     }
 
-    assert_eq!(incremental, SessionState::replay(&events));
+    assert_eq!(stored, whole);
+    assert_eq!(whole.totals().records, 25);
 }
 
 #[test]

@@ -2296,6 +2296,65 @@ mod tests {
         assert_eq!(state.agents_cancelled(), 1);
     }
 
+    #[test]
+    fn a_call_a_gone_agent_started_late_is_cut_at_the_turn_end_while_a_running_agents_goes_on() {
+        let mut state = SessionState::new();
+        for id in ["a1", "a2"] {
+            state.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: None,
+                label: "explorer".to_owned(),
+            });
+        }
+        state.apply(&Event::AgentExit {
+            id: "a2".into(),
+            outcome: AgentOutcome::Completed,
+        });
+        // A sub-agent's own records are folded in by their stamps, so a call
+        // can arrive after its agent's exit.
+        state.apply(&start("late", "Read", Some("a2")));
+        state.apply(&start("live", "Read", Some("a1")));
+
+        state.apply(&Event::TurnEnded);
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("live")]
+        );
+        assert_eq!(state.tools().interrupted, 1);
+    }
+
+    #[test]
+    fn a_turn_end_straight_after_the_session_was_left_records_no_turn() {
+        let state = SessionState::replay(&[
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            Event::SessionLeft,
+            Event::TurnEnded,
+        ]);
+
+        assert_eq!(state.turns().len(), 1);
+    }
+
+    #[test]
+    fn agents_cut_by_two_endings_are_both_counted() {
+        let state = SessionState::replay(&[
+            spawn("a1"),
+            Event::SessionLeft,
+            spawn("a2"),
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+            spawn("a3"),
+            Event::SessionLeft,
+        ]);
+
+        assert_eq!(state.agents_interrupted(), 3);
+    }
+
     fn spawn(id: &str) -> Event {
         Event::AgentSpawn {
             id: id.into(),

@@ -575,8 +575,11 @@ mod tests {
     /// still text to it.
     #[test]
     fn a_nul_past_where_git_looks_leaves_the_file_text() {
-        let before = format!("{}\n", "x".repeat(8_000));
+        // Bytes 0..7999 are the 8000 git looks at; the nul is byte 8000, the
+        // first it does not.
+        let before = format!("{}\n", "x".repeat(7_999));
         let after = format!("{before}\0\n");
+        assert_eq!(after.find('\0'), Some(8_000));
         assert_eq!(lines_changed(&before, &after), Some((1, 0)));
     }
 
@@ -846,5 +849,25 @@ mod tests {
         assert_eq!((added_lines(&lines), removed_lines(&lines)), (1, 1));
         assert_eq!(side(&lines, true), before.lines().collect::<Vec<_>>());
         assert_eq!(side(&lines, false), after.lines().collect::<Vec<_>>());
+    }
+
+    /// Twelve hundred lines each, none alike, take about three million steps
+    /// to tell apart: more than the budget, and less than ten times it, so a
+    /// budget made larger lets it through.
+    #[test]
+    fn a_change_that_takes_more_than_the_step_budget_has_no_count() {
+        let before: String = (0..1_200).map(|i| format!("before {i}\n")).collect();
+        let after: String = (0..1_200).map(|i| format!("after {i}\n")).collect();
+
+        assert_eq!(lines_changed(&before, &after), None);
+        assert_eq!(replacement_lines(&before, &after), None);
+    }
+
+    #[test]
+    fn a_replacement_where_only_one_side_ends_a_line_keeps_the_context_line_after_it() {
+        assert_eq!(
+            replacement_lines("a\n", ""),
+            Some(vec![removed("a"), Line::Context(String::new())])
+        );
     }
 }

@@ -1090,6 +1090,9 @@ mod tests {
     fn a_long_option_or_one_with_a_value_is_not_an_in_place_edit() {
         let cases: &[(&str, Work, &[&str])] = &[
             ("perl --version", Work::Other, &["perl"]),
+            // The `i` is the module's name, which `-m` takes the rest of the
+            // word for.
+            ("perl -mbigint scripts/check.pl", Work::Other, &["perl"]),
             ("sed --quiet -n '/fn/p' f.rs", Work::Exploring, &["sed"]),
             (
                 "perl -I/usr/lib/perl5 scripts/check.pl",
@@ -1100,6 +1103,16 @@ mod tests {
         for (command, work, specifics) in cases {
             assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
         }
+    }
+
+    #[test]
+    fn a_dash_m_after_dash_c_is_the_code_not_a_module() {
+        let (work, specifics) = read("python3 -c -m pytest");
+        assert_ne!(work, Work::Building, "{specifics:?}");
+        assert!(
+            !specifics.iter().any(|name| name.contains("pytest")),
+            "{specifics:?}"
+        );
     }
 
     #[test]

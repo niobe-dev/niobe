@@ -1326,6 +1326,7 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "sudo -u cargo test",
             "nice -n cargo test",
             "cargo --list test",
+            "cargo --explain test",
             "cargo -h test",
             "command -v cargo test",
             "cat > run.sh <<'EOF'\n#!/bin/sh\ncargo test\nEOF",
