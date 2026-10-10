@@ -34,8 +34,12 @@ jobs:
 
       # The same gate, in the same order, as `cargo xtask ci` runs on a
       # developer's machine: a step added there runs here without anyone
-      # having to add it twice. It lints install.sh with shellcheck where
-      # shellcheck is installed, which is the Ubuntu image.
+      # having to add it twice. It lints install.sh with shellcheck, which
+      # `CI` makes mandatory, so the step below installs it where an image
+      # lacks it.
+      - name: Install shellcheck where the image lacks it
+        run: command -v shellcheck || { if [ "$RUNNER_OS" = macOS ]; then brew install shellcheck; else sudo apt-get install -y shellcheck; fi; }
+
       - name: Gate
         run: cargo xtask ci
 
@@ -58,5 +62,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      - name: Build on it
-        run: cargo +"$RUST_VERSION" check --workspace --all-targets
+      # Tests, not only a check: a test that uses a newer standard library
+      # item compiles on stable and is what the promise breaks on.
+      - name: Test on it
+        run: cargo +"$RUST_VERSION" test --workspace

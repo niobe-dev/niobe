@@ -136,8 +136,10 @@ fn denying_warnings(flags: Option<&str>) -> String {
 }
 
 /// Lints `install.sh` as the POSIX `sh` it is run with. CI runs this on the
-/// Ubuntu image, which has shellcheck; a machine without it says it skipped
-/// the check rather than failing a gate it cannot run.
+/// runner images, which have shellcheck; a developer's machine without it says
+/// it skipped the check rather than failing a gate it cannot run. Where `CI`
+/// is set the gate is the one that guards a merge, so a missing shellcheck
+/// fails it: a check that is skipped silently is a check nobody notices gone.
 fn shellcheck() -> Result<(), String> {
     println!("$ shellcheck -s sh install.sh");
     match Command::new("shellcheck")
@@ -148,6 +150,9 @@ fn shellcheck() -> Result<(), String> {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!("shellcheck -s sh install.sh failed with {status}")),
         Err(e) if e.kind() == ErrorKind::NotFound => {
+            if std::env::var_os("CI").is_some_and(|value| !value.is_empty()) {
+                return Err("shellcheck is not installed, and CI must lint install.sh".to_owned());
+            }
             println!("shellcheck is not installed: install.sh was not linted");
             Ok(())
         }
