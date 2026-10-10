@@ -2327,7 +2327,8 @@ impl Translator {
         out: &mut Vec<Event>,
     ) {
         for (model, usage) in model_usage {
-            if let Some(window) = usage.context_window {
+            // A window of nothing is no window: it would override the table's.
+            if let Some(window) = usage.context_window.filter(|window| *window > 0) {
                 self.windows.insert(model.clone(), window);
             }
         }
@@ -3532,6 +3533,8 @@ fn server_tools(server: &str, tools: &[String]) -> Vec<String> {
 /// A server's status, in the CLI's spelling.
 fn mcp_status(status: String) -> McpStatus {
     match status.as_str() {
+        // An entry that named no status, or not as text.
+        "" => McpStatus::Other("not reported".to_owned()),
         "connected" => McpStatus::Connected,
         "pending" => McpStatus::Pending,
         "needs-auth" => McpStatus::NeedsAuth,
@@ -7777,6 +7780,58 @@ error: could not compile `demo` (lib test) due to 1 previous error";
             translator.take_mcp_status_wanted(),
             "a server that changed is asked about"
         );
+    }
+
+    /// One server's entry is not worth the whole `init`: its session id and
+    /// model still arrive, and the entry reads as not reported.
+    #[test]
+    fn an_init_with_a_malformed_server_entry_still_yields_the_session() {
+        for status in ["", r#","status":null"#, r#","status":5"#] {
+            let mut translator = Translator::new("max");
+            let events = translator.line(&format!(
+                r#"{{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","mcp_servers":[{{"name":"docs"{status}}}]}}"#
+            ));
+
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Event::SessionMeta(_))),
+                "{status}: {events:?}"
+            );
+            let servers = events.iter().find_map(|event| match event {
+                Event::McpServers { servers } => Some(servers),
+                _ => None,
+            });
+            assert!(
+                servers.is_some_and(|servers| servers.len() == 1
+                    && servers[0].status == McpStatus::Other("not reported".to_owned())),
+                "{status}: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mistyped_overage_flag_or_a_fractional_reset_still_reports_the_windows() {
+        let mut translator = Translator::new("max");
+        let events = translator.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"isUsingOverage":null,"unifiedWindows":{"five_hour":{"utilization":0.5,"resetsAt":1790000000.5}}}}"#,
+        );
+
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::UsageWindows(windows) if windows.five_hour.is_some())
+            ),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_context_window_of_nothing_is_no_window() {
+        let mut translator = Translator::new("max");
+        translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":1},"modelUsage":{"opus-5":{"inputTokens":1,"outputTokens":1,"costUSD":0.01,"contextWindow":0}},"total_cost_usd":0.01}"#,
+        );
+        assert_eq!(translator.windows.get("opus-5"), None);
     }
 
     #[test]

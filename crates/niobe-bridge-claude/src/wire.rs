@@ -144,7 +144,9 @@ pub(crate) struct System {
 pub(crate) struct McpServer {
     pub(crate) name: String,
     /// `connected`, `pending`, `needs-auth`, `failed` or `disabled`, as
-    /// Claude Code 2.1.292 spells them.
+    /// Claude Code 2.1.292 spells them. Empty where the entry has none or
+    /// not a string: one server's field is not worth the whole `init`.
+    #[serde(default, deserialize_with = "lenient_text")]
     pub(crate) status: String,
     /// Where the CLI found the server's configuration: `user`, `project`,
     /// `local`, or `dynamic` for one handed to it with `--mcp-config`.
@@ -160,6 +162,7 @@ pub(crate) struct McpServer {
 pub(crate) struct McpServerStatus {
     pub(crate) name: String,
     /// As on `init`.
+    #[serde(default, deserialize_with = "lenient_text")]
     pub(crate) status: String,
     /// Why the CLI could not connect to it, in its words: `ECONNREFUSED:
     /// Unable to connect. …` for an address nothing listens on.
@@ -691,7 +694,7 @@ pub(crate) struct RateLimitInfo {
     /// Whether the plan has started spending beyond its flat fee. Absent on a
     /// CLI version that does not report it, which is read as "did not say"
     /// rather than as a promise that nothing extra is being charged.
-    #[serde(rename = "isUsingOverage", default)]
+    #[serde(rename = "isUsingOverage", default, deserialize_with = "lenient_flag")]
     pub(crate) is_using_overage: bool,
 }
 
@@ -708,8 +711,43 @@ pub(crate) struct Window {
     /// The share used, 0–1. Absent from a window the CLI named without
     /// measuring, which is a window this bridge reports nothing for.
     pub(crate) utilization: Option<f64>,
-    #[serde(rename = "resetsAt")]
+    #[serde(rename = "resetsAt", default, deserialize_with = "lenient_seconds")]
     pub(crate) resets_at: Option<u64>,
+}
+
+/// A string where there is one, and nothing where there is a number, a null or
+/// no field at all: a figure no pane depends on is not worth losing the whole
+/// message over.
+fn lenient_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().unwrap_or_default().to_owned())
+}
+
+/// A boolean where there is one, and false where there is anything else.
+fn lenient_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(false))
+}
+
+/// A whole number of seconds where there is one, a fractional one cut to its
+/// whole seconds, and nothing where there is anything else.
+fn lenient_seconds<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .map(|seconds| seconds as u64)
+    }))
 }
 
 /// A `control_request`: the CLI asking Niobe to decide something.
