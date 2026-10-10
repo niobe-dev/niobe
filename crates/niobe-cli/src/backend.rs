@@ -435,7 +435,7 @@ fn claude_options(
     options.env = profile.profile.env().clone();
     options.args = profile.profile.args().to_vec();
     options.billing = profile.profile.billing();
-    options.settings = crate::config::settings_path(profile, home)?;
+    options.settings = crate::config::settings_path(profile, home, root)?;
     options.resume = with.resume.clone();
     options.budget_usd = with.budget_usd;
     // A resumed session starts the CLI in the mode it was left in; a new one

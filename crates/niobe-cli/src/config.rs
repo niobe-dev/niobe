@@ -107,6 +107,11 @@ pub fn named(selected: Selected<'_>) -> SelectedProfile {
 /// path only some shells would resolve is a path that runs a session on
 /// credentials nobody chose.
 ///
+/// A path that is still relative is the repository's: the CLI is started in
+/// `base`, the root, and reads it from there whichever directory niobe was
+/// started in. It is resolved against `base` once, here, so the file that is
+/// checked is the file that is passed.
+///
 /// The file has to be there, and this is looked at before a backend is
 /// spawned. The `claude` CLI started without the settings a profile named
 /// would run on the settings the machine holds for every session — which, on a
@@ -115,6 +120,7 @@ pub fn named(selected: Selected<'_>) -> SelectedProfile {
 pub fn settings_path(
     selected: &Selected<'_>,
     home: Option<OsString>,
+    base: &Path,
 ) -> Result<Option<String>, String> {
     let Some(settings) = selected.profile.settings() else {
         return Ok(None);
@@ -126,6 +132,10 @@ pub fn settings_path(
             settings.path()
         ))
     })?;
+    let path = match Path::new(&path).is_absolute() {
+        true => path,
+        false => base.join(&path).display().to_string(),
+    };
 
     if !Path::new(&path).is_file() {
         let problem = match Path::new(&path).exists() {
@@ -481,6 +491,38 @@ mod tests {
             .expect("a profile was selected")
     }
 
+    /// The CLI is started in the repository's root and reads a relative path
+    /// from there, so that is where it is looked for, whichever directory
+    /// niobe itself was started in; and the path handed on is the one looked
+    /// at.
+    #[test]
+    fn a_relative_settings_path_is_the_repositorys_and_not_the_working_directorys() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).expect("made");
+        let real = root.join("claude.json");
+        std::fs::write(&real, "{}").expect("written");
+        let config = with_settings("claude.json");
+
+        assert_eq!(
+            settings_path(&max(&config), os("/home/me"), &root),
+            Ok(Some(real.display().to_string()))
+        );
+
+        // A file of that name beside the process, which the CLI would never
+        // load, is not what is looked at: with none in the root, it is missing.
+        let elsewhere = dir.path().join("sub");
+        std::fs::create_dir_all(&elsewhere).expect("made");
+        std::fs::write(elsewhere.join("claude.json"), "{}").expect("written");
+        std::fs::remove_file(&real).expect("removed");
+        let said =
+            settings_path(&max(&config), os("/home/me"), &root).expect_err("the root holds none");
+        assert!(
+            said.contains(&format!("no such file: {}", real.display())),
+            "{said}"
+        );
+    }
+
     #[test]
     fn a_settings_path_is_expanded_against_the_home_directory() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
@@ -489,7 +531,11 @@ mod tests {
         let config = with_settings("~/claude-personal.json");
 
         assert_eq!(
-            settings_path(&max(&config), Some(OsString::from(dir.path()))),
+            settings_path(
+                &max(&config),
+                Some(OsString::from(dir.path())),
+                Path::new("/repo")
+            ),
             Ok(Some(file.display().to_string()))
         );
     }
@@ -502,7 +548,7 @@ mod tests {
         let config = with_settings(&file.display().to_string());
 
         assert_eq!(
-            settings_path(&max(&config), os("/home/me")),
+            settings_path(&max(&config), os("/home/me"), Path::new("/repo")),
             Ok(Some(file.display().to_string()))
         );
     }
@@ -513,7 +559,7 @@ mod tests {
     fn a_tilde_naming_another_user_is_left_as_written() {
         let config = with_settings("~other/settings.json");
 
-        let said = settings_path(&max(&config), os("/home/me"))
+        let said = settings_path(&max(&config), os("/home/me"), Path::new("/repo"))
             .expect_err("no such file is there as written");
 
         assert!(said.contains("~other/settings.json"), "{said}");
@@ -528,7 +574,10 @@ mod tests {
         )
         .expect("the config is valid");
 
-        assert_eq!(settings_path(&max(&config), os("/home/me")), Ok(None));
+        assert_eq!(
+            settings_path(&max(&config), os("/home/me"), Path::new("/repo")),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -538,7 +587,7 @@ mod tests {
         let config = with_settings(&missing.display().to_string());
 
         assert_eq!(
-            settings_path(&max(&config), os("/home/me")),
+            settings_path(&max(&config), os("/home/me"), Path::new("/repo")),
             Err(format!(
                 "/u/config.toml:3: profiles.max.settings: no such file: {}",
                 missing.display()
@@ -548,7 +597,7 @@ mod tests {
         // A directory where the file should be is not a settings file either.
         let config = with_settings(&dir.path().display().to_string());
         assert_eq!(
-            settings_path(&max(&config), os("/home/me")),
+            settings_path(&max(&config), os("/home/me"), Path::new("/repo")),
             Err(format!(
                 "/u/config.toml:3: profiles.max.settings: is not a file: {}",
                 dir.path().display()
@@ -561,7 +610,7 @@ mod tests {
         let config = with_settings("~/claude-personal.json");
 
         assert_eq!(
-            settings_path(&max(&config), None),
+            settings_path(&max(&config), None, Path::new("/repo")),
             Err("/u/config.toml:3: profiles.max.settings: names `~/claude-personal.json`, and HOME does not say what `~` is".to_owned())
         );
     }
