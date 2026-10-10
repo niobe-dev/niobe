@@ -228,7 +228,17 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
             }
             Hold::Reassert => guard.reassert(),
             Hold::Lend => guard.suspend(),
-            Hold::Retake => guard.resume(),
+            // A stop an editor asked of its whole process group, which the shell
+            // is in, reached the shell while the terminal was lent. The editor
+            // was stopped and continued by whoever runs the operator's jobs and
+            // has ended; stopping the shell now would leave nothing to continue
+            // it, and under a wrapper that waits on it the session hangs.
+            Hold::Retake => {
+                guard.resume()?;
+                shutdown.take_suspend();
+                shutdown.take_continued();
+                Ok(())
+            }
         }
     };
 

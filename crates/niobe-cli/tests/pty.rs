@@ -2291,6 +2291,60 @@ fn e_in_the_memory_view_opens_an_imported_command_file_in_the_editor_and_runs_no
     assert_handed_back_times(&drawn, cooked, "a quit after an edit", Keys::Reported, 2);
 }
 
+/// An editor that suspends itself, as vim does on Ctrl+Z: it signals its
+/// whole process group, which the shell is in, so the shell is told to stop
+/// while the terminal is lent. The operator's shell then continues the
+/// editor, which ends. The shell must not stop once it has the terminal back:
+/// nothing would be left to continue it, and under a wrapper that waits on it
+/// the session hangs.
+#[test]
+fn an_editor_that_suspends_itself_does_not_stop_the_shell_after_it_ends() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::write(repo.path().join("CLAUDE.md"), "@tools/notes.md\n")
+        .expect("the memory file is written");
+    std::fs::create_dir(repo.path().join("tools")).expect("a directory for the notes");
+    std::fs::write(repo.path().join("tools").join("notes.md"), "notes\n")
+        .expect("the imported file is written");
+    let editor = elsewhere.path().join("editor");
+    // The pty's group is orphaned, so the editor itself is not stopped by
+    // this; the shell, which catches the signal, is the one that is told.
+    std::fs::write(&editor, "#!/bin/sh\nkill -TSTP 0\nexit 0\n")
+        .expect("the stand-in editor is written");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in editor is made executable");
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("HOME", elsewhere.path())
+        .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor)
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[19~");
+    terminal.shows("notes.md");
+    terminal.typed(b"\x1b[F");
+    terminal.typed(b"e");
+    terminal.shows("Edited");
+    let closing = terminal.mark();
+    terminal.typed(b"\x1b");
+    terminal.drew_since(closing);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(
+        status.success(),
+        "the shell ended with {status}, or was stopped again after the editor: {drawn}"
+    );
+}
+
 /// An image file dropped on the terminal — which types its path as a paste —
 /// is attached rather than typed, and goes to the CLI as an image block after
 /// the prompt's text, which keeps the placeholder standing where it went.
