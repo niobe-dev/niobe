@@ -2168,10 +2168,15 @@ impl Translator {
     }
 
     /// Whether a file is at `path` — taken relative to where the session
-    /// runs where it is not absolute — or `None` where nothing looks or the
-    /// session's directory is not known.
+    /// runs where it is not absolute — or `None` where nothing looks, the
+    /// session's directory is not known, or the path starts with `~`.
     fn existed(&self, path: &str) -> Option<bool> {
         let exists = self.file_exists?;
+        // `~` is the home directory to the CLI and a directory of this name
+        // here: the file it would write is not one this can look for.
+        if path == "~" || path.starts_with("~/") {
+            return None;
+        }
         let path = Path::new(path);
         match path.is_absolute() {
             true => exists(path),
@@ -5459,6 +5464,26 @@ mod tests {
             Some(true)
         );
         assert_eq!(existed(&mut translator().checking_files_with(exists)), None);
+    }
+
+    /// The CLI's Write takes `~` for the home directory; a path of that name
+    /// looked for under the session's directory would find nothing, and the
+    /// question would call an existing dotfile a new file.
+    #[test]
+    fn a_write_to_the_home_directory_is_not_looked_for_as_a_directory_named_tilde() {
+        fn exists(_: &Path) -> Option<bool> {
+            Some(false)
+        }
+        let line = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"~/.zshrc","content":"x"},"tool_use_id":"toolu_1"}}"#;
+        let mut translator = translator().checking_files_with(exists).in_dir("/repo");
+
+        let action =
+            proposal_asked(line, &mut translator).map(|proposal| proposal.action().clone());
+
+        assert!(
+            matches!(action, Some(Action::Write { existed: None, .. })),
+            "{action:?}"
+        );
     }
 
     #[test]

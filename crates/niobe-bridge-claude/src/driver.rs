@@ -1785,12 +1785,15 @@ fn group_of(leader: u32) -> Option<rustix::process::Pid> {
         .and_then(rustix::process::Pid::from_raw)
 }
 
-/// Whether anything is at `path`, for a question about writing it: the
-/// entry itself, a link included, since a write to a link replaces what it
-/// leads to. Reads no file, so a FIFO there is not waited on. `None` where
-/// the answer is not that it is there or that nothing is.
+/// Whether a file is at `path`, for a question about writing it: what the
+/// path leads to, a link followed, since a write to a link replaces what it
+/// leads to — and creates it where the link is dangling. Reads no file, so a
+/// FIFO there is not waited on. `None` where the answer is not that a file is
+/// there or that nothing is: a directory, which a write does not replace as a
+/// file, and a path that could not be looked at.
 fn file_exists(path: &Path) -> Option<bool> {
-    match std::fs::symlink_metadata(path) {
+    match std::fs::metadata(path) {
+        Ok(found) if found.is_dir() => None,
         Ok(_) => Some(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
         Err(_) => None,
@@ -2858,6 +2861,83 @@ mod tests {
         // minutes on; queued, the lines took 105 ms at worst with two
         // whole-workspace test runs sharing the machine.
         assert!(took < Duration::from_secs(10), "writing took {took:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_there_where_the_path_leads_to_one_and_not_where_it_leads_to_nothing() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = dir.path().join("there.txt");
+        std::fs::write(&file, "x").expect("written");
+        symlink(&file, dir.path().join("link-to-there")).expect("a link");
+        symlink(dir.path().join("gone"), dir.path().join("dangling")).expect("a link");
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+
+        assert_eq!(file_exists(&file), Some(true));
+        assert_eq!(file_exists(&dir.path().join("link-to-there")), Some(true));
+        assert_eq!(
+            file_exists(&dir.path().join("dangling")),
+            Some(false),
+            "a write through it would create what it leads to"
+        );
+        assert_eq!(file_exists(&dir.path().join("missing")), Some(false));
+        assert_eq!(
+            file_exists(dir.path()),
+            None,
+            "a directory is not a file a write replaces"
+        );
+        // Looked at, not opened: a FIFO is there and nothing waits on it.
+        assert_eq!(file_exists(&fifo), Some(true));
+    }
+
+    /// The wiring, not the function: a prompt to write a file that exists says
+    /// so, and one for a file that does not says the other thing.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_prompt_over_a_file_that_exists_says_it_is_replaced() {
+        let ask = |name: &str| {
+            format!(
+                r#"{{"type":"control_request","request_id":"w","request":{{"subtype":"can_use_tool","tool_name":"Write","input":{{"file_path":"{name}","content":"x"}},"tool_use_id":"toolu_w"}}}}"#
+            )
+        };
+        let (mut session, dir) = started(&format!(
+            "read -r initialize\nprintf '%s\n' '{}'\nprintf '%s\n' '{}'\nexec sleep 30\n",
+            ask("here.txt"),
+            ask("not-here.txt"),
+        ));
+        std::fs::write(dir.path().join("here.txt"), "old").expect("written");
+
+        let events = drained_until(
+            &mut session,
+            |event| matches!(event, Event::PermissionRequest { id, .. } if id.as_str() == "toolu_w"),
+        );
+        let existed = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::PermissionRequest {
+                    proposal: Some(proposal),
+                    ..
+                } => match proposal.action() {
+                    niobe_core::Action::Write { path, existed, .. } => {
+                        Some((path.clone(), *existed))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            existed.first().map(|(path, there)| (path.as_str(), *there)),
+            Some(("here.txt", Some(true))),
+            "{events:#?}"
+        );
     }
 
     #[cfg(unix)]
