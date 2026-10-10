@@ -1856,6 +1856,9 @@ impl App {
         self.turns_took = Some(Duration::ZERO);
         self.last_folded_at = None;
         self.stop_asked_in = None;
+        // The entry a refusal was counted on is gone, and an index into the
+        // entries that replace it would rewrite whichever one is there.
+        self.unsaved = None;
     }
 
     /// Records that the process this session runs in is leaving it with a
@@ -9298,6 +9301,41 @@ mod tests {
         assert_eq!(entry.kind, EntryKind::Failure);
         assert_eq!(entry.head, "not saved");
         assert!(entry.body.ends_with("disk full"), "{}", entry.body);
+    }
+
+    /// The store keeps refusing while the operator clears the conversation:
+    /// the count was kept on an entry by its place, and the entries are new.
+    #[test]
+    fn a_refusal_counted_across_a_clear_rewrites_no_entry_it_did_not_make() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "first".to_owned(),
+        });
+        app.not_kept("locked");
+        app.apply(&Event::Cleared);
+        app.apply(&Event::UserMessage {
+            text: "second".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "second reply".to_owned(),
+            agent: None,
+        });
+
+        app.not_kept("locked");
+
+        let reply = app
+            .entries()
+            .iter()
+            .find(|entry| entry.body.contains("second reply"))
+            .expect("the reply is still there");
+        assert_eq!(reply.kind, EntryKind::Agent);
+        let saved: Vec<_> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "not saved")
+            .collect();
+        assert_eq!(saved.len(), 1, "one entry of its own for the new count");
+        assert_eq!(saved[0].meta, events(1));
     }
 
     /// A usage record carrying a cost the backend reported.
