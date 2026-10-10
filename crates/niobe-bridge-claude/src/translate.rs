@@ -3424,19 +3424,32 @@ fn endpoint(config: wire::McpConfig) -> Option<String> {
     Some(format!("{transport} · {target}"))
 }
 
-/// `url` with no user, password, query or fragment.
+/// `url` as scheme, host and port alone, with a `/…` where there was a path.
+///
+/// Hosted servers keep the API key in the path (`/mcp/<key>/sse`), in a
+/// `;param` after it or in a user and password before the host, so the path
+/// is not kept at all: what the operator needs to tell servers apart is the
+/// host. A user and password end at the last `@` of the authority, since a
+/// password may hold one, and are dropped with or without a scheme before
+/// them — an address that names none reads as a host all the same.
 fn without_secrets(url: &str) -> String {
-    let end = url.find(['?', '#']).unwrap_or(url.len());
-    let url = &url[..end];
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_owned();
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, url),
     };
-    let host_end = rest.find('/').unwrap_or(rest.len());
-    let (authority, path) = rest.split_at(host_end);
+    let end = rest.find(['/', '?', '#', ';']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
-    format!("{scheme}://{host}{path}")
+    let path = match tail.trim_start_matches('/').is_empty() || tail.starts_with(['?', '#', ';']) {
+        true => "",
+        false => "/…",
+    };
+    match scheme {
+        Some(scheme) => format!("{scheme}://{host}{path}"),
+        None => format!("{host}{path}"),
+    }
 }
 
 /// The tools of `server`'s among the session's: those named
@@ -7478,14 +7491,38 @@ error: could not compile `demo` (lib test) due to 1 previous error";
     }
 
     #[test]
-    fn an_mcp_servers_address_is_kept_without_its_credentials_or_query() {
+    fn an_mcp_servers_address_is_kept_without_its_credentials_path_or_query() {
         assert_eq!(
             without_secrets("https://user:key@mcp.example.com:8443/v1/mcp?token=abc#x"),
-            "https://mcp.example.com:8443/v1/mcp"
+            "https://mcp.example.com:8443/…"
         );
         assert_eq!(
             without_secrets("http://127.0.0.1:9/mcp"),
-            "http://127.0.0.1:9/mcp"
+            "http://127.0.0.1:9/…"
+        );
+        assert_eq!(without_secrets("http://127.0.0.1:9"), "http://127.0.0.1:9");
+        assert_eq!(without_secrets("http://127.0.0.1:9/"), "http://127.0.0.1:9");
+        // The three shapes the key was found in.
+        assert_eq!(
+            without_secrets("https://actions.zapier.com/mcp/sk-ak-SECRET123/sse"),
+            "https://actions.zapier.com/…"
+        );
+        assert_eq!(
+            without_secrets("user:pw@host.example/mcp"),
+            "host.example/…"
+        );
+        assert_eq!(
+            without_secrets("https://host.example;token=abc/mcp"),
+            "https://host.example"
+        );
+        assert_eq!(
+            without_secrets("https://host/mcp;token=abc"),
+            "https://host/…"
+        );
+        // A password holding an `@` ends at the last one: none of it is kept.
+        assert_eq!(
+            without_secrets("https://user:p@ss@host.example/mcp"),
+            "https://host.example/…"
         );
         let config =
             |transport: Option<&str>, command: Option<&str>, url: Option<&str>| wire::McpConfig {
@@ -7499,7 +7536,7 @@ error: could not compile `demo` (lib test) due to 1 previous error";
         );
         assert_eq!(
             endpoint(config(Some("sse"), None, Some("https://x.dev/sse?key=1"))).as_deref(),
-            Some("sse · https://x.dev/sse")
+            Some("sse · https://x.dev/…")
         );
         assert_eq!(endpoint(config(None, None, None)), None);
     }

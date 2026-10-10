@@ -2207,7 +2207,7 @@ fn recorded_status() -> Vec<niobe_core::event::McpServer> {
             ..server(
                 "remote docs",
                 McpStatus::Failed,
-                "http · http://127.0.0.1:9/mcp",
+                "http · http://127.0.0.1:9/…",
             )
         },
     ]
