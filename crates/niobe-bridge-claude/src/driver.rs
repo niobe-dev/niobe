@@ -571,6 +571,11 @@ impl Session {
             .checking_files_with(file_exists);
         if let Some(billing) = options.billing {
             translator = translator.billed_as(billing);
+            // Said before the CLI says anything: the CLI writes its `init`
+            // with the first turn, and the Usage pane would read "billing not
+            // known" until then, for an account the profile says how it is
+            // billed.
+            let _ = sender.send(Event::Billing { billing });
         }
         let waiting: Waiting = Arc::new(Mutex::new(BTreeMap::new()));
         let asked = Arc::clone(&waiting);
@@ -2936,6 +2941,23 @@ mod tests {
             Some(("here.txt", Some(true))),
             "{events:#?}"
         );
+    }
+
+    /// The profile says how the account is billed, and the CLI says nothing
+    /// until it is given a turn: what the profile says is reported at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_that_names_its_billing_has_it_reported_before_the_first_turn() {
+        for billing in [Billing::Metered, Billing::Plan] {
+            let (mut session, _dir) = started_with("exec sleep 30\n", move |options| {
+                options.billing = Some(billing)
+            });
+
+            let events =
+                drained_until(&mut session, |event| matches!(event, Event::Billing { .. }));
+
+            assert_eq!(events, [Event::Billing { billing }]);
+        }
     }
 
     #[cfg(unix)]
