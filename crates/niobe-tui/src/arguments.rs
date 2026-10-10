@@ -206,7 +206,13 @@ fn list(
             Value::String(said) if said.contains('\n') => {
                 string(said, indent, width, theme, rows);
             }
-            Value::String(said) => line(&format!("- {said}"), indent, width, theme, rows),
+            Value::String(said) => line(
+                &format!("- {}", text::controls_shown_in_rows(said)),
+                indent,
+                width,
+                theme,
+                rows,
+            ),
             Value::Number(_) | Value::Bool(_) | Value::Null => {
                 line(&format!("- {item}"), indent, width, theme, rows);
             }
@@ -231,7 +237,7 @@ fn pair(
     let room = width.saturating_sub(indent).max(1);
     let said = match value.is_empty() {
         true => head.clone(),
-        false => format!("{head} {value}"),
+        false => format!("{head} {}", text::controls_shown_in_rows(value)),
     };
     let value_style = match dim {
         true => Style::new().fg(theme.dim),
@@ -254,7 +260,7 @@ fn pair(
 /// and then how many rows are left.
 fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec<Line<'static>>) {
     let room = width.saturating_sub(indent).max(1);
-    let wrapped = text::wrap(said.trim_end(), room);
+    let wrapped = text::wrap(&text::controls_shown_in_rows(said.trim_end()), room);
     let lead = " ".repeat(indent);
     let shown = match wrapped.len() > STRING_ROWS + 1 {
         true => STRING_ROWS,

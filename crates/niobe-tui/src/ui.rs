@@ -3017,10 +3017,13 @@ fn option_row(
     let rest = width.saturating_sub(text::width(&lead));
     let label = text::truncate(&label, rest);
     let hint_room = rest.saturating_sub(text::width(&label) + 2);
-    // A hint holding a tab or a line break is drawn on its row with each
-    // turned into a space or a `↵`, which is not the rule as it is kept, so
-    // it counts as cut however short it is.
-    let whole = text::width(&hint) <= hint_room && !hint.contains(['\t', '\n', '\r']);
+    // A hint holding a control character is drawn with each shown by its
+    // glyph, and a tab or a line break turned into a space or a `↵`, which is
+    // not the rule as it is kept, so it is said again whole below however
+    // short it is.
+    let altered = hint.contains(char::is_control);
+    let hint = text::controls_shown_in_rows(&hint);
+    let whole = text::width(&hint) <= hint_room && !altered;
     let hint = text::truncate(&hint, hint_room);
     let gap = rest.saturating_sub(text::width(&label) + text::width(&hint));
 

