@@ -605,7 +605,7 @@ fn send_produced(
             | SessionEvent::SessionLeft
             | SessionEvent::PermissionRequest { .. }
             | SessionEvent::PermissionWithdrawn { .. }
-            | SessionEvent::ModelRefused
+            | SessionEvent::ModelRefused { .. }
             | SessionEvent::FileChange { .. }
             | SessionEvent::TestRun { .. }
             | SessionEvent::AgentSpawn { .. }
@@ -2046,7 +2046,10 @@ mod tests {
         send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
 
         assert_eq!(app.session().model(), Some("claude-opus-5"));
-        assert_eq!(journal.events.last(), Some(&SessionEvent::ModelRefused));
+        assert_eq!(
+            journal.events.last(),
+            Some(&SessionEvent::ModelRefused { back_to: None })
+        );
         assert!(
             app.entries()
                 .iter()

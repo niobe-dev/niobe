@@ -619,10 +619,14 @@ impl SessionState {
             // operator their choice did not land.
             Event::ModelSelected { model } => self.model = Some(model.clone()),
 
-            // Back to what the backend last reported running, or to no model
-            // where it has reported none: the choice it refused never ran.
-            Event::ModelRefused => {
-                self.model = self.meta.as_ref().map(|meta| meta.model.clone());
+            // Back to what the backend is running: the model a change it took
+            // put it on where the refusal says so, otherwise what it last
+            // reported, or no model where it has reported none. The choice it
+            // refused never ran.
+            Event::ModelRefused { back_to } => {
+                self.model = back_to
+                    .clone()
+                    .or_else(|| self.meta.as_ref().map(|meta| meta.model.clone()));
             }
 
             Event::Titled { title } => self.title = Some(title.clone()),
@@ -2456,9 +2460,32 @@ mod tests {
         });
         assert_eq!(state.model(), Some("no-such-model"));
 
-        state.apply(&Event::ModelRefused);
+        state.apply(&Event::ModelRefused { back_to: None });
 
         assert_eq!(state.model(), Some("claude-opus-5"));
+    }
+
+    #[test]
+    fn a_refusal_goes_back_to_the_model_a_change_the_backend_took_put_it_on() {
+        let mut state = SessionState::new();
+        state.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-haiku-4-5-20251001".to_owned(),
+            backend_session: None,
+        }));
+        state.apply(&Event::ModelSelected {
+            model: "claude-opus-4-8".to_owned(),
+        });
+        state.apply(&Event::ModelSelected {
+            model: "refuse".to_owned(),
+        });
+
+        state.apply(&Event::ModelRefused {
+            back_to: Some("claude-opus-4-8".to_owned()),
+        });
+
+        assert_eq!(state.model(), Some("claude-opus-4-8"));
     }
 
     #[test]
@@ -2468,7 +2495,7 @@ mod tests {
             model: "no-such-model".to_owned(),
         });
 
-        state.apply(&Event::ModelRefused);
+        state.apply(&Event::ModelRefused { back_to: None });
 
         assert_eq!(state.model(), None);
     }

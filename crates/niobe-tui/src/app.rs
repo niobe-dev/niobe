@@ -2411,7 +2411,7 @@ impl App {
             | Event::Usage(_)
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
-            | Event::ModelRefused
+            | Event::ModelRefused { .. }
             | Event::UsageWindows(_)
             | Event::Billing { .. }
             | Event::Commands { .. }
@@ -3188,7 +3188,7 @@ impl App {
     /// that does it, for the journal.
     pub fn model_not_taken(&mut self, error: &str) -> Event {
         self.not_changed("model", error);
-        let back = Event::ModelRefused;
+        let back = Event::ModelRefused { back_to: None };
         self.fold_event(&back);
         back
     }

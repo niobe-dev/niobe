@@ -946,7 +946,14 @@ pub enum Event {
     /// Without it the operator's choice would stand until the next
     /// `SessionMeta`, and the session would be shown, priced and measured
     /// against a model that is not running.
-    ModelRefused,
+    ModelRefused {
+        /// The model the backend is running, where it has said: the one a
+        /// change it took before this one put it on, which a later
+        /// `SessionMeta` has not yet confirmed. `None` goes back to what the
+        /// last `SessionMeta` reported, or to no model where there was none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        back_to: Option<String>,
+    },
 
     /// A tool call changed a file, and by how many lines.
     ///
@@ -1549,7 +1556,10 @@ mod tests {
             Event::ModelSelected {
                 model: "haiku".to_owned(),
             },
-            Event::ModelRefused,
+            Event::ModelRefused { back_to: None },
+            Event::ModelRefused {
+                back_to: Some("opus".to_owned()),
+            },
         ] {
             let line = serde_json::to_string(&event).expect("an event serializes");
             let read: Event = serde_json::from_str(&line).expect("what was written reads back");

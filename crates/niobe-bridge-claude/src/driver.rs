@@ -157,7 +157,7 @@ type Refusals = Arc<Mutex<Vec<ToolCallId>>>;
 /// refused change reads as any other refusal and the shell goes on showing the
 /// model it never moved to. Written before the request goes out and drained
 /// before every line, as [`Refusals`] is.
-type ModelRequests = Arc<Mutex<Vec<String>>>;
+type ModelRequests = Arc<Mutex<Vec<(String, String)>>>;
 
 /// The `request_id`s of title requests the thread reading the CLI has not
 /// been told about yet, for the reason [`ModelRequests`] has: the answer names
@@ -612,8 +612,8 @@ impl Session {
                     }
                 }
                 if let Ok(mut asked) = asked_for_model.lock() {
-                    for request_id in asked.drain(..) {
-                        translator.asked_for_model(&request_id);
+                    for (request_id, model) in asked.drain(..) {
+                        translator.asked_for_model(&request_id, &model);
                     }
                 }
                 if let Ok(mut asked) = asked_for_title.lock() {
@@ -864,7 +864,7 @@ impl Session {
     pub fn set_model(&mut self, model: &str) -> std::io::Result<()> {
         let id = self.next_request_id();
         if let Ok(mut asked) = self.model_requests.lock() {
-            asked.push(id.clone());
+            asked.push((id.clone(), model.to_owned()));
         }
         self.ask(&control_request(
             &id,
@@ -2870,10 +2870,12 @@ mod tests {
         );
 
         session.set_model("refuse").expect("the request is queued");
-        let events = drained_until(&mut session, |event| matches!(event, Event::ModelRefused));
+        let events = drained_until(&mut session, |event| {
+            matches!(event, Event::ModelRefused { .. })
+        });
 
         assert!(
-            matches!(events.as_slice(), [.., Event::Error { message, fatal: false }, Event::ModelRefused]
+            matches!(events.as_slice(), [.., Event::Error { message, fatal: false }, Event::ModelRefused { .. }]
                 if message.contains("model refuse is not available")),
             "{events:#?}"
         );
@@ -3247,7 +3249,12 @@ mod tests {
         session.set_model("refuse").expect("the request is queued");
         let events = drained_to_the_end(&mut session);
 
-        assert!(events.contains(&Event::ModelRefused), "{events:#?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ModelRefused { .. })),
+            "{events:#?}"
+        );
         assert_eq!(session.next().expect("it can carry on").model, None);
     }
 
@@ -3266,7 +3273,12 @@ mod tests {
         session.set_model("good").expect("the request is queued");
         let events = drained_to_the_end(&mut session);
 
-        assert!(events.contains(&Event::ModelRefused), "{events:#?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ModelRefused { .. })),
+            "{events:#?}"
+        );
         assert_eq!(
             session.next().expect("it can carry on").model.as_deref(),
             Some("good")
@@ -3288,7 +3300,12 @@ mod tests {
         session.set_model("bad").expect("the request is queued");
         let events = drained_to_the_end(&mut session);
 
-        assert!(events.contains(&Event::ModelRefused), "{events:#?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ModelRefused { .. })),
+            "{events:#?}"
+        );
         assert_eq!(
             session.next().expect("it can carry on").model.as_deref(),
             Some("good")

@@ -451,7 +451,10 @@ pub struct Translator {
     /// The `request_id`s of the model changes Niobe asked for that the CLI has
     /// not answered yet: a refusal of one of those is what puts the session
     /// back on the model it last reported.
-    model_requests: BTreeSet<String>,
+    model_requests: BTreeMap<String, String>,
+    /// The model the last model change the CLI took asked for, until an
+    /// `init` says what the CLI resolved it to.
+    taken_model: Option<String>,
     /// The model changes the CLI has answered since the last
     /// [`Translator::take_model_answers`], oldest first.
     model_answers: Vec<ModelAnswer>,
@@ -583,7 +586,8 @@ impl Translator {
             agent_models: BTreeMap::new(),
             recorded_agents: BTreeMap::new(),
             denied: BTreeMap::new(),
-            model_requests: BTreeSet::new(),
+            model_requests: BTreeMap::new(),
+            taken_model: None,
             model_answers: Vec::new(),
             title_requests: BTreeSet::new(),
             mcp_status_requests: BTreeSet::new(),
@@ -730,8 +734,9 @@ impl Translator {
     /// only this says that a refusal is of a model: told it, the translator
     /// follows the refusal's warning with [`Event::ModelRefused`], and the
     /// session goes back to showing the model that is still running.
-    pub fn asked_for_model(&mut self, request_id: &str) {
-        self.model_requests.insert(request_id.to_owned());
+    pub fn asked_for_model(&mut self, request_id: &str, model: &str) {
+        self.model_requests
+            .insert(request_id.to_owned(), model.to_owned());
     }
 
     /// Records that the control request `request_id` asks the CLI to title
@@ -890,10 +895,22 @@ impl Translator {
         if self.answered_of_mcp(&outcome, out) {
             return;
         }
-        let of_model = outcome
+        let asked_model = outcome
             .request_id
             .as_deref()
-            .is_some_and(|id| self.model_requests.remove(id));
+            .and_then(|id| self.model_requests.remove(id));
+        let of_model = asked_model.is_some();
+        // A model change the CLI took is what it runs from its next turn, and
+        // what a refusal of a later one goes back to: its next `init` has not
+        // said so yet.
+        if let Some(model) = &asked_model
+            && outcome.subtype.as_deref() == Some("success")
+        {
+            self.taken_model = Some(model.clone());
+            out.push(Event::ModelSelected {
+                model: model.clone(),
+            });
+        }
         if of_model && let Some(request_id) = &outcome.request_id {
             self.model_answers.push(ModelAnswer {
                 request_id: request_id.clone(),
@@ -931,7 +948,9 @@ impl Translator {
             outcome.error.as_deref().unwrap_or("the CLI gave no reason")
         )));
         if of_model {
-            out.push(Event::ModelRefused);
+            out.push(Event::ModelRefused {
+                back_to: self.taken_model.clone().or_else(|| self.model.clone()),
+            });
         }
     }
 
@@ -1411,6 +1430,7 @@ impl Translator {
             return;
         }
         self.model = Some(model.clone());
+        self.taken_model = None;
         self.announced_session = self.backend_session.clone();
         out.push(Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
@@ -5717,7 +5737,7 @@ mod tests {
     #[test]
     fn a_refused_model_change_is_reported_as_one_and_any_other_refusal_is_not() {
         let mut translator = translator();
-        translator.asked_for_model("niobe-2");
+        translator.asked_for_model("niobe-2", "refuse");
 
         let mode = translator.line(
             r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-1","error":"Cannot set permission mode"}}"#,
@@ -5734,7 +5754,62 @@ mod tests {
             "{model:?}"
         );
         assert_eq!(model.len(), 2, "{model:?}");
-        assert_eq!(model[1], Event::ModelRefused);
+        assert_eq!(
+            model[1],
+            Event::ModelRefused {
+                back_to: Some("opus-5".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn a_refusal_goes_back_to_the_model_a_taken_change_put_the_cli_on() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s"}"#,
+        );
+        translator.asked_for_model("niobe-2", "claude-opus-4-8");
+        translator.asked_for_model("niobe-3", "refuse");
+
+        let taken = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2"}}"#,
+        );
+        let refused = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"model refuse is not available"}}"#,
+        );
+
+        assert_eq!(
+            taken,
+            [Event::ModelSelected {
+                model: "claude-opus-4-8".to_owned()
+            }]
+        );
+        assert_eq!(
+            refused[1],
+            Event::ModelRefused {
+                back_to: Some("claude-opus-4-8".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_no_change_taken_before_it_goes_back_to_the_models_the_cli_started_on() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s"}"#,
+        );
+        translator.asked_for_model("niobe-2", "refuse");
+
+        let refused = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"nope"}}"#,
+        );
+
+        assert_eq!(
+            refused[1],
+            Event::ModelRefused {
+                back_to: Some("claude-haiku-4-5-20251001".to_owned())
+            }
+        );
     }
 
     #[test]
@@ -5808,7 +5883,7 @@ mod tests {
     #[test]
     fn a_model_change_the_cli_took_is_not_refused_by_a_later_answer_to_the_same_id() {
         let mut translator = translator();
-        translator.asked_for_model("niobe-2");
+        translator.asked_for_model("niobe-2", "refuse");
 
         let taken = translator.line(
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2"}}"#,
@@ -5817,7 +5892,12 @@ mod tests {
             r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"said twice"}}"#,
         );
 
-        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(
+            taken,
+            [Event::ModelSelected {
+                model: "refuse".to_owned()
+            }]
+        );
         assert_eq!(again.len(), 1, "{again:?}");
         assert_eq!(warnings(&again).len(), 1, "{again:?}");
     }
