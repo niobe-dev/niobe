@@ -105,7 +105,25 @@ mod tests {
         assert_eq!(read(&path, 3), None, "it is not UTF-8");
         assert_eq!(read(&dir.path().join("gone.txt"), 3), None);
         assert_eq!(read(dir.path(), 3), None, "a directory is no output");
-        assert_eq!(read(&path, LIMIT + 1), None);
+    }
+
+    /// A file that holds exactly the bytes its report names, and is past what
+    /// is read: it is the limit that refuses it, not a size that does not
+    /// match. Sparse, so nothing is written.
+    #[test]
+    fn an_output_past_the_limit_is_refused_by_the_limit_and_one_at_it_is_read() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let over = dir.path().join("over.txt");
+        std::fs::File::create(&over)
+            .and_then(|file| file.set_len(LIMIT + 1))
+            .expect("a sparse file is made");
+        assert_eq!(read(&over, LIMIT + 1), None);
+
+        let at = dir.path().join("at.txt");
+        std::fs::File::create(&at)
+            .and_then(|file| file.set_len(LIMIT))
+            .expect("a sparse file is made");
+        assert_eq!(read(&at, LIMIT).map(|text| text.len() as u64), Some(LIMIT));
     }
 
     #[cfg(unix)]
@@ -120,7 +138,9 @@ mod tests {
         assert!(made.success(), "the FIFO is made");
 
         let (sender, received) = std::sync::mpsc::channel();
-        std::thread::spawn(move || sender.send(read(&fifo, 100)));
+        // Size 0, which an empty read of it would equal: only the check that
+        // it is a file stands between a FIFO and an empty output.
+        std::thread::spawn(move || sender.send(read(&fifo, 0)));
         let read = received
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("the read returns without waiting on the FIFO");

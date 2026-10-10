@@ -1229,3 +1229,156 @@ fn a_record_whose_stamp_does_not_parse_still_reads_with_no_time() {
         ]
     );
 }
+
+/// A transcript written by the test, under the name the CLI gives one, with
+/// each of `sides` as the file of the sub-agent spawned by the call named.
+fn constructed(session: &[String], sides: &[(&str, Vec<String>)]) -> (tempfile::TempDir, PathBuf) {
+    let id = "5c1e7a42-9d3b-4f60-8a17-3b2d9e0c4f58";
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join(format!("{id}.jsonl"));
+    std::fs::write(&path, session.join("\n") + "\n").expect("the session is written");
+    if !sides.is_empty() {
+        let agents = dir.path().join(id).join("subagents");
+        std::fs::create_dir_all(&agents).expect("the side files' directory is made");
+        for (at, (call, lines)) in sides.iter().enumerate() {
+            std::fs::write(
+                agents.join(format!("agent-a{at}.meta.json")),
+                format!(r#"{{"toolUseId":"{call}"}}"#),
+            )
+            .expect("the meta file is written");
+            std::fs::write(
+                agents.join(format!("agent-a{at}.jsonl")),
+                lines.join("\n") + "\n",
+            )
+            .expect("the side file is written");
+        }
+    }
+    (dir, path)
+}
+
+/// An assistant record saying `text`, stamped `at`.
+fn said(text: &str, at: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","message":{{"id":"m-{at}","model":"claude-opus-5","role":"assistant","content":[{{"type":"text","text":"{text}"}}],"usage":{{"input_tokens":1,"output_tokens":1}}}},"uuid":"u-{at}","timestamp":"{at}","version":"2.1.277"}}"#
+    )
+}
+
+/// An assistant record spawning the sub-agent `call`, stamped `at`.
+fn spawning(call: &str, at: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","message":{{"id":"s-{call}","model":"claude-opus-5","role":"assistant","content":[{{"type":"tool_use","id":"{call}","name":"Agent","input":{{"subagent_type":"quick-lookup","description":"Look","prompt":"Look."}}}}],"usage":{{"input_tokens":1,"output_tokens":1}}}},"uuid":"u-{call}","timestamp":"{at}","version":"2.1.277"}}"#
+    )
+}
+
+fn said_in_order(events: &[Event]) -> Vec<(String, bool)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AssistantMessage { text, agent } => Some((text.clone(), agent.is_some())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An agent's record stamped at the same moment as a record of the session's
+/// is not before it: the session's goes first, where the file puts it, and the
+/// agent's after.
+#[test]
+fn an_agents_record_stamped_the_same_moment_as_the_sessions_follows_it() {
+    let at = "2026-09-18T09:00:03.000Z";
+    let (_dir, path) = constructed(
+        &[
+            spawning("toolu_a", "2026-09-18T09:00:01.000Z"),
+            said("main says", at),
+        ],
+        &[("toolu_a", vec![said("agent says", at)])],
+    );
+
+    let events = transcript::events(&path, "max", Path::new("/repo")).expect("it reads");
+
+    assert_eq!(
+        said_in_order(&events),
+        [
+            ("main says".to_owned(), false),
+            ("agent says".to_owned(), true)
+        ],
+        "{events:#?}"
+    );
+}
+
+/// The caption and the release warning are the reader's own words, said
+/// before any record was read, and no record's time is theirs.
+#[test]
+fn what_the_reader_says_itself_has_no_time_and_a_record_keeps_its_own() {
+    let (_dir, path) = constructed(
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"add etag support"},"uuid":"u1","timestamp":"2026-09-18T09:00:01.000Z","version":"9.9.999","sessionId":"s"}"#.to_owned(),
+        ],
+        &[],
+    );
+
+    let timed = transcript::timed(&path, "max", Path::new("/repo")).expect("it reads");
+
+    let at = |wanted: fn(&Event) -> bool| {
+        timed
+            .iter()
+            .find(|entry| wanted(&entry.event))
+            .map(|entry| entry.at)
+    };
+    assert_eq!(at(|e| matches!(e, Event::Titled { .. })), Some(None));
+    assert_eq!(
+        at(|e| matches!(e, Event::Error { .. })),
+        Some(None),
+        "the release warning: {timed:#?}"
+    );
+    let stamp = at(|e| matches!(e, Event::UserMessage { .. })).flatten();
+    assert_eq!(
+        stamp,
+        Some(UNIX_EPOCH + Duration::from_secs(1_789_722_001)),
+        "{timed:#?}"
+    );
+}
+
+/// What the CLI's `informational` record says at the level of an error is
+/// shown as one, and a `scheduled_task_fire` that says nothing says nothing.
+#[test]
+fn an_informational_record_keeps_its_level_and_an_empty_fire_is_no_notice() {
+    let record = |extra: &str| {
+        format!(
+            r#"{{"type":"system",{extra},"uuid":"x","timestamp":"2026-09-18T09:00:02.000Z","version":"2.1.277"}}"#
+        )
+    };
+    let (_dir, path) = constructed(
+        &[
+            record(
+                r#""subtype":"informational","content":"the disk is nearly full","level":"error""#,
+            ),
+            record(r#""subtype":"scheduled_task_fire","content":"   ""#),
+            record(r#""subtype":"informational","content":"fine","level":"info""#),
+        ],
+        &[],
+    );
+
+    let events = transcript::events(&path, "max", Path::new("/repo")).expect("it reads");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Error { message, fatal: false } if message == "the disk is nearly full"
+        )),
+        "an error level is a warning: {events:#?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice { message } if message == "fine"
+        )),
+        "{events:#?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Notice { message } if message.trim().is_empty())),
+        "an empty fire says nothing: {events:#?}"
+    );
+}

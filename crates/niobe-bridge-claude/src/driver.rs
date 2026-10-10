@@ -2333,12 +2333,10 @@ mod tests {
 
         let about = title_description(&prompt).expect("the prompt says something");
 
-        assert!(about.len() <= TITLE_DESCRIPTION, "{} bytes", about.len());
-        assert!(
-            about.len() >= TITLE_DESCRIPTION - 1,
-            "{} bytes",
-            about.len()
-        );
+        // A literal, not the constant: a bound read off itself holds at any
+        // value, and what it keeps from a second bill is a kilobyte.
+        assert!(about.len() <= 1024, "{} bytes", about.len());
+        assert!(about.len() >= 1023, "{} bytes", about.len());
         assert!(prompt.starts_with(about));
     }
 
@@ -3388,6 +3386,32 @@ mod tests {
                 .any(|event| matches!(event, Event::ModelRefused { .. })),
             "{events:#?}"
         );
+        assert_eq!(session.next().expect("it can carry on").model, None);
+    }
+
+    /// Two changes asked for before either is answered, both refused: the
+    /// model to carry on with is the one before either, which the second was
+    /// to go back to only through the first.
+    #[cfg(unix)]
+    #[test]
+    fn two_refused_model_changes_carry_on_with_the_model_before_both() {
+        let refused = |id: &str| {
+            format!(
+                r#"printf '%s\n' '{{"type":"control_response","response":{{"subtype":"error","request_id":"{id}","error":"model is not available"}}}}'"#
+            )
+        };
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r first\nread -r second\n{}\n{}\nexit 143\n",
+                refused("niobe-2"),
+                refused("niobe-3"),
+            ),
+            true,
+        );
+        session.set_model("bad-one").expect("the request is queued");
+        session.set_model("bad-two").expect("the request is queued");
+        drained_to_the_end(&mut session);
+
         assert_eq!(session.next().expect("it can carry on").model, None);
     }
 

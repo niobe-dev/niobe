@@ -5486,6 +5486,23 @@ mod tests {
         );
     }
 
+    /// An edit whose `replace_all` is not a boolean is not read as one that
+    /// replaces a single occurrence: what it asks for is not known, so the
+    /// question shows the arguments as they are.
+    #[test]
+    fn an_edit_whose_replace_all_is_not_a_boolean_proposes_nothing() {
+        let line = |every: &str| {
+            format!(
+                r#"{{"type":"control_request","request_id":"c1","request":{{"subtype":"can_use_tool","tool_name":"Edit","input":{{"file_path":"/repo/a.txt","old_string":"a","new_string":"b","replace_all":{every}}},"tool_use_id":"toolu_1"}}}}"#
+            )
+        };
+
+        assert!(proposal_asked(&line("true"), &mut translator()).is_some());
+        assert!(proposal_asked(&line("false"), &mut translator()).is_some());
+        assert!(proposal_asked(&line(r#""yes""#), &mut translator()).is_none());
+        assert!(proposal_asked(&line("1"), &mut translator()).is_none());
+    }
+
     #[test]
     fn a_shell_prompt_proposes_its_command_and_leaves_the_rest_to_be_shown() {
         let proposal = proposal_asked(

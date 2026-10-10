@@ -133,6 +133,25 @@ mod tests {
         assert_eq!(parse("2026-13-01T00:00:00.000Z"), None);
     }
 
+    /// A year divisible by a hundred is a leap year only where it is by four
+    /// hundred: 2000 had a 29th of February, 2100 will not.
+    #[test]
+    fn a_century_is_a_leap_year_only_where_four_hundred_divides_it() {
+        assert!(parse("2000-02-29T00:00:00.000Z").is_some());
+        assert_eq!(parse("2100-02-29T00:00:00.000Z"), None);
+        assert_eq!(parse("1900-02-29T00:00:00.000Z"), None);
+        assert!(parse("2024-02-29T00:00:00.000Z").is_some());
+    }
+
+    /// There is no leap second in a stamp: the CLI's clock does not write one,
+    /// and `:60` would be read as the first second of the next minute.
+    #[test]
+    fn the_sixtieth_second_is_no_moment_and_the_fifty_ninth_is() {
+        assert!(parse("2026-09-18T09:00:59.000Z").is_some());
+        assert_eq!(parse("2026-09-18T09:00:60.000Z"), None);
+        assert_eq!(parse("2026-09-18T09:59:60Z"), None);
+    }
+
     #[test]
     fn a_stamp_in_any_other_shape_is_no_moment() {
         for stamp in [
