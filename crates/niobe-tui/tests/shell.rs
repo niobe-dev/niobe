@@ -563,6 +563,47 @@ fn a_question_says_why_the_backend_asked() {
     assert_snapshot("asking-with-a-reason-100x30", &frame);
 }
 
+/// What is approved is the text as written: a path with two spaces in it is
+/// another file than one with one, and a pattern's runs of spaces are part of
+/// the pattern. The target is drawn once, and the arguments by key beside it
+/// keep what they hold.
+#[test]
+fn a_targeted_question_draws_its_target_once_and_every_space_of_its_arguments() {
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "spaced".into(),
+        tool: "Grep".to_owned(),
+        input: serde_json::json!({
+            "path": "/repo/a  b.txt",
+            "pattern": "fn  main\\(\\)    \\{",
+            "glob": "*.rs",
+        })
+        .to_string(),
+        target: Some("/repo/a  b.txt".to_owned()),
+        proposal: None,
+        reason: None,
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 120, 40);
+    let rows = question_rows(&frame);
+
+    let target = rows
+        .iter()
+        .filter(|row| row.contains("/repo/a  b.txt") && !row.contains("niobe saves"))
+        .count();
+    assert_eq!(target, 1, "the target once, spaces kept:\n{frame}");
+    assert!(
+        rows.iter()
+            .any(|row| row == "pattern: fn  main\\(\\)    \\{"),
+        "the pattern's runs of spaces are kept:\n{frame}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.starts_with("path:")),
+        "the key that holds the target is not said again:\n{frame}"
+    );
+}
+
 /// A refused command of several lines, drawn on its one row, keeps its
 /// lines apart: `set -e` and `cd /tmp` joined would read as another command.
 #[test]
@@ -1107,10 +1148,12 @@ fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     assert!(frame.contains("blocks turn 1"), "{frame}");
     let rows = question_rows(&frame);
     assert!(rows.iter().any(|row| row == "to run Read"), "{frame}");
-    assert!(rows.iter().any(|row| row == "/repo/notes.txt"), "{frame}");
-    // The whole of the arguments, by key.
-    assert!(
-        rows.iter().any(|row| row == "file_path: /repo/notes.txt"),
+    // The target once: the key that holds it is not said again by key.
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("/repo/notes.txt") && !row.contains("niobe saves"))
+            .count(),
+        1,
         "{frame}"
     );
     // Numbered, the first selected, each with what choosing it does.
@@ -1207,7 +1250,6 @@ fn an_edit_question_shows_the_lines_it_removes_and_adds_and_ctrl_t_what_is_sent(
             ("-         return cached.body", true),
             ("+     if cached and cached.etag:", true),
             ("+         headers[\"If-None-Match\"] = cached.etag", whole),
-            ("… 4 more lines · Ctrl+T shows the whole call", !whole),
         ] {
             assert_eq!(
                 rows.iter().any(|drawn| drawn == row),
@@ -1215,6 +1257,22 @@ fn an_edit_question_shows_the_lines_it_removes_and_adds_and_ctrl_t_what_is_sent(
                 "{row}:\n{frame}"
             );
         }
+        // The count of what is not drawn is the change's lines less the ones
+        // that are, read off the fixture and the frame and not off the code.
+        let changed = EDIT_OLD.lines().count() + EDIT_NEW.lines().count();
+        let drawn = rows
+            .iter()
+            .filter(|row| row.starts_with("- ") || row.starts_with("+ "))
+            .count();
+        let said = format!(
+            "… {} more lines · Ctrl+T shows the whole call",
+            changed - drawn
+        );
+        assert_eq!(
+            rows.contains(&said),
+            !whole,
+            "{said}:\n{frame}"
+        );
         assert!(
             !rows.iter().any(|row| row.starts_with('{')),
             "no JSON until Ctrl+T:\n{frame}"

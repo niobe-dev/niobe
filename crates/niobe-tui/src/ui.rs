@@ -2801,7 +2801,7 @@ struct QuestionBody {
     head: Vec<Line<'static>>,
     /// What would run: what the call does where the backend read it, or its
     /// target, and the arguments under it.
-    call: Vec<Line<'static>>,
+    call: crate::proposed::Call,
     /// The numbered answers, after a blank row.
     answers: Vec<Line<'static>>,
     /// Any consequence too long for its column, said whole.
@@ -2813,7 +2813,7 @@ struct QuestionBody {
 impl QuestionBody {
     fn len(&self) -> usize {
         self.head.len()
-            + self.call.len()
+            + self.call.rows.len()
             + self.answers.len()
             + self.consequences.len()
             + self.rest.len()
@@ -2821,7 +2821,7 @@ impl QuestionBody {
 
     fn whole(self) -> Vec<Line<'static>> {
         let mut lines = self.head;
-        lines.extend(self.call);
+        lines.extend(self.call.rows);
         lines.extend(self.answers);
         lines.extend(self.consequences);
         lines.extend(self.rest);
@@ -2835,19 +2835,27 @@ impl QuestionBody {
     fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
         let fixed = self.head.len() + self.answers.len() + self.rest.len() + 1;
         let room = rows.saturating_sub(fixed);
-        let hidden_consequences = std::mem::take(&mut self.consequences).len();
-        let kept = room.clamp(1, self.call.len().max(1));
-        let hidden = self.call.len().saturating_sub(kept) + hidden_consequences;
-        self.call.truncate(kept);
-        let said = match hidden {
-            1 => "… 1 more line · Ctrl+T shows the whole call".to_owned(),
-            n => format!("… {n} more lines · Ctrl+T shows the whole call"),
+        let dropped_consequences = !std::mem::take(&mut self.consequences).is_empty();
+        let kept = room.clamp(1, self.call.rows.len().max(1));
+        // The lines of the call that are not drawn, which the operator reads
+        // as how much more there is to see: not the blank rows between its
+        // parts, not a marker row, which is a count and not a line, and not
+        // the rule said again, which is a copy of the answer above it.
+        let hidden = self.call.hidden_after(kept);
+        self.call.rows.truncate(kept);
+        let said = match (hidden, dropped_consequences) {
+            (0, false) => None,
+            (0, true) => Some("… the rule is cut above · Ctrl+T shows it whole".to_owned()),
+            (1, _) => Some("… 1 more line · Ctrl+T shows the whole call".to_owned()),
+            (n, _) => Some(format!("… {n} more lines · Ctrl+T shows the whole call")),
         };
-        self.call.extend(
-            text::wrap(&said, inner)
-                .into_iter()
-                .map(|line| Line::from(line).style(Style::new().fg(theme.hot))),
-        );
+        if let Some(said) = said {
+            self.call.rows.extend(
+                text::wrap(&said, inner)
+                    .into_iter()
+                    .map(|line| Line::from(line).style(Style::new().fg(theme.hot))),
+            );
+        }
         self.whole()
     }
 }
@@ -2910,38 +2918,91 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
 /// backend read that out of its arguments, and otherwise its target and its
 /// arguments by key. Ctrl+T draws the arguments as they are sent instead of
 /// by key, and under what the call does, since they are what is approved.
-fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::proposed::Call {
+    use crate::proposed::Call;
+
     let open = app.diffs_open();
-    let as_sent = || -> Vec<Line<'static>> {
-        text::wrap_exact(&ask.input, inner)
-            .into_iter()
-            .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.dim)))
-            .collect()
-    };
     let proposed = ask
         .proposed
         .as_ref()
-        .and_then(|proposed| proposed.lines(&ask.input, inner, open, theme));
+        .and_then(|proposed| proposed.call(&ask.input, inner, open, theme));
     if let Some(mut call) = proposed {
         if open {
-            call.push(Line::from(""));
-            call.extend(as_sent());
+            call.rows.push(Line::from(""));
+            call.rows.extend(sent_rows(&ask.input, inner, theme));
         }
         return call;
     }
-    let by_key = match open {
-        false => crate::arguments::lines(&ask.input, inner, theme),
-        true => None,
-    };
     let Some(target) = &ask.target else {
-        return by_key
-            .filter(|rows| !rows.is_empty())
-            .unwrap_or_else(|| bold_rows(&ask.input, inner, theme));
+        return match open {
+            false => crate::arguments::lines(&ask.input, inner, theme)
+                .filter(|rows| !rows.is_empty())
+                .map_or_else(|| Call::of(bold_rows(&ask.input, inner, theme)), Call::of),
+            true => Call::of(bold_rows(&ask.input, inner, theme)),
+        };
     };
     let mut call = bold_rows(target, inner, theme);
-    call.push(Line::from(""));
-    call.extend(by_key.unwrap_or_else(as_sent));
-    call
+    let mut markers = Vec::new();
+    let under = match open {
+        true => sent_rows(&ask.input, inner, theme),
+        false => {
+            // The key that holds the target is the target, drawn above: said
+            // again by key it would be the same text under another name, and
+            // wrapped as words it was not the same text.
+            let fields = crate::arguments::fields_without(&ask.input, |_, value| {
+                value.as_str() == Some(target.as_str())
+            });
+            match fields {
+                Some(fields) => {
+                    let (laid, hidden, marker_rows) = crate::arguments::rows(&fields, inner, theme);
+                    if hidden > 0 {
+                        // After the blank row that sets them off.
+                        markers.push((
+                            call.len() + 1 + laid.len() - marker_rows,
+                            marker_rows,
+                            hidden,
+                        ));
+                    }
+                    laid
+                }
+                None => sent_rows(&ask.input, inner, theme),
+            }
+        }
+    };
+    if !under.is_empty() {
+        call.push(Line::from(""));
+        call.extend(under);
+    }
+    Call {
+        rows: call,
+        markers,
+    }
+}
+
+/// The most rows of the arguments as sent that are drawn behind Ctrl+T: they
+/// can be the whole of a file, and a row of them is drawn with every tick.
+const SENT_ROWS: usize = 2_000;
+
+/// The arguments as the backend sent them, `inner` columns wide, character for
+/// character, and — past [`SENT_ROWS`] rows of them — how many characters are
+/// not drawn.
+fn sent_rows(input: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let room = inner.max(1).saturating_mul(SENT_ROWS);
+    let cut = input.char_indices().nth(room).map(|(at, _)| at);
+    let shown = &input[..cut.unwrap_or(input.len())];
+    let mut rows: Vec<Line<'static>> = text::wrap_exact(shown, inner)
+        .into_iter()
+        .map(|wrapped| Line::from(wrapped).style(dim))
+        .collect();
+    if let Some(cut) = cut {
+        let rest = input[cut..].chars().count();
+        rows.push(
+            Line::from(format!("… {rest} more characters as sent are not drawn"))
+                .style(Style::new().fg(theme.hot)),
+        );
+    }
+    rows
 }
 
 /// `said` wrapped to `inner` columns exactly as written, in bold.

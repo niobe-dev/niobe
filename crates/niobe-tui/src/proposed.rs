@@ -28,6 +28,52 @@ pub struct Proposed {
     /// and for a replacement too large or too binary to compare, which is
     /// then shown by its arguments instead.
     lines: Option<Vec<DiffLine>>,
+    /// The arguments the proposal says nothing of, read from the call's
+    /// input the first time they are drawn and kept: the input can be the
+    /// whole of a file, and the question is drawn again with every tick.
+    others: std::cell::OnceCell<Option<serde_json::Map<String, serde_json::Value>>>,
+}
+
+/// What a question's call is drawn as, with what the rows leave out.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Call {
+    /// The rows, in order.
+    pub rows: Vec<Line<'static>>,
+    /// The rows that say how many lines are not drawn, as where each starts,
+    /// how many rows it takes and how many lines it stands for: a marker is
+    /// not itself a line of the call.
+    pub markers: Vec<(usize, usize, usize)>,
+}
+
+impl Call {
+    /// A call drawn as `rows` and nothing left out.
+    pub(crate) fn of(rows: Vec<Line<'static>>) -> Self {
+        Self {
+            rows,
+            markers: Vec::new(),
+        }
+    }
+
+    /// How many lines of the call are hidden where only its first `kept` rows
+    /// are drawn: the lines among the rows cut away, a blank one and a marker
+    /// excepted, and the lines a marker cut away stands for.
+    pub(crate) fn hidden_after(&self, kept: usize) -> usize {
+        let inside = |at: usize| {
+            self.markers
+                .iter()
+                .find(|(first, rows, _)| (*first..first + rows).contains(&at))
+        };
+        self.rows
+            .iter()
+            .enumerate()
+            .skip(kept)
+            .map(|(at, row)| match inside(at) {
+                Some((first, _, stands_for)) if *first == at => *stands_for,
+                Some(_) => 0,
+                None => usize::from(row.spans.iter().any(|span| !span.content.trim().is_empty())),
+            })
+            .sum()
+    }
 }
 
 impl Proposed {
@@ -43,7 +89,11 @@ impl Proposed {
             ),
             Action::Command { .. } => None,
         };
-        Self { proposal, lines }
+        Self {
+            proposal,
+            lines,
+            others: std::cell::OnceCell::new(),
+        }
     }
 
     /// The call as what it would do, `width` cells wide, then the arguments
@@ -52,6 +102,7 @@ impl Proposed {
     ///
     /// A change longer than a transcript diff is cut where one is, unless
     /// `open`.
+    #[cfg(test)]
     pub(crate) fn lines(
         &self,
         input: &str,
@@ -59,9 +110,21 @@ impl Proposed {
         open: bool,
         theme: &Theme,
     ) -> Option<Vec<Line<'static>>> {
+        self.call(input, width, open, theme).map(|call| call.rows)
+    }
+
+    /// [`Proposed::lines`], with the rows that stand for lines not drawn.
+    pub(crate) fn call(
+        &self,
+        input: &str,
+        width: usize,
+        open: bool,
+        theme: &Theme,
+    ) -> Option<Call> {
         let plain = Style::new().fg(theme.fg);
         let dim = Style::new().fg(theme.dim);
         let mut rows = Vec::new();
+        let mut markers = Vec::new();
         let (subject, said) = match (self.proposal.action(), &self.lines) {
             (Action::Replace { path, every, .. }, Some(_)) => (
                 path,
@@ -90,15 +153,26 @@ impl Proposed {
         );
         if let Some(lines) = self.lines.as_deref().filter(|lines| !lines.is_empty()) {
             rows.push(Line::from(""));
-            rows.extend(hunks::proposed(lines, width, open, theme));
+            let (change, beyond) = hunks::proposed(lines, width, open, theme);
+            if beyond > 0 {
+                markers.push((rows.len() + change.len() - 1, 1, beyond));
+            }
+            rows.extend(change);
         }
-        let others = arguments::lines_except(input, width, theme, |key| self.proposal.covers(key))
-            .unwrap_or_default();
-        if !others.is_empty() {
-            rows.push(Line::from(""));
-            rows.extend(others);
+        let others = self
+            .others
+            .get_or_init(|| arguments::fields_without(input, |key, _| self.proposal.covers(key)));
+        if let Some(fields) = others {
+            let (laid, hidden, marker_rows) = arguments::rows(fields, width, theme);
+            if !laid.is_empty() {
+                rows.push(Line::from(""));
+                if hidden > 0 {
+                    markers.push((rows.len() + laid.len() - marker_rows, marker_rows, hidden));
+                }
+                rows.extend(laid);
+            }
         }
-        Some(rows)
+        Some(Call { rows, markers })
     }
 }
 

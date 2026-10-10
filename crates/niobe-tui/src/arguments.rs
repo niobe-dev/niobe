@@ -51,23 +51,49 @@ pub(crate) fn lines_except(
     theme: &Theme,
     shown: impl Fn(&str) -> bool,
 ) -> Option<Vec<Line<'static>>> {
+    let fields = fields_without(input, |key, _| shown(key))?;
+    Some(rows(&fields, width, theme).0)
+}
+
+/// `input`'s arguments but for the fields `shown` says are drawn elsewhere,
+/// or `None` where it is not a JSON object.
+///
+/// Read once and kept by a caller that draws on every frame: the input can be
+/// the whole of a file being written.
+pub(crate) fn fields_without(
+    input: &str,
+    shown: impl Fn(&str, &Value) -> bool,
+) -> Option<Map<String, Value>> {
     let Ok(Value::Object(mut fields)) = serde_json::from_str::<Value>(input) else {
         return None;
     };
-    fields.retain(|key, _| !shown(key));
+    fields.retain(|key, value| !shown(key, value));
+    Some(fields)
+}
+
+/// `fields` laid out by key, `width` cells wide, cut at [`ROWS`] with rows
+/// saying how many more there are: with how many lines those rows stand for,
+/// which are not drawn, and how many rows they take, at the end of the rows.
+pub(crate) fn rows(
+    fields: &Map<String, Value>,
+    width: usize,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, usize, usize) {
     let mut rows = Vec::new();
-    object(&fields, 0, width, theme, &mut rows);
-    if rows.len() > ROWS + 1 {
-        let hidden = rows.len() - ROWS;
-        rows.truncate(ROWS);
-        let said = format!("… {hidden} more lines · Ctrl+T shows the arguments as sent");
-        rows.extend(
-            text::wrap(&said, width.max(1))
-                .into_iter()
-                .map(|line| Line::from(Span::styled(line, Style::new().fg(theme.hot)))),
-        );
+    object(fields, 0, width, theme, &mut rows);
+    if rows.len() <= ROWS + 1 {
+        return (rows, 0, 0);
     }
-    Some(rows)
+    let hidden = rows.len() - ROWS;
+    rows.truncate(ROWS);
+    let said = format!("… {hidden} more lines · Ctrl+T shows the arguments as sent");
+    rows.extend(
+        text::wrap(&said, width.max(1))
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::new().fg(theme.hot)))),
+    );
+    let marker_rows = rows.len() - ROWS;
+    (rows, hidden, marker_rows)
 }
 
 /// Where a key is drawn among its siblings, and whether it recedes.
@@ -243,7 +269,10 @@ fn pair(
         true => Style::new().fg(theme.dim),
         false => Style::new().fg(theme.fg),
     };
-    for (at, wrapped) in text::wrap(&said, room).into_iter().enumerate() {
+    for (at, wrapped) in text::wrap_keeping_spaces(&said, room)
+        .into_iter()
+        .enumerate()
+    {
         let spans = match (at, wrapped.strip_prefix(&head)) {
             (0, Some(rest)) => vec![
                 Span::raw(lead.clone()),
@@ -260,7 +289,7 @@ fn pair(
 /// and then how many rows are left.
 fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec<Line<'static>>) {
     let room = width.saturating_sub(indent).max(1);
-    let wrapped = text::wrap(&text::controls_shown_in_rows(said.trim_end()), room);
+    let wrapped = text::wrap_keeping_spaces(&text::controls_shown_in_rows(said.trim_end()), room);
     let lead = " ".repeat(indent);
     let shown = match wrapped.len() > STRING_ROWS + 1 {
         true => STRING_ROWS,
@@ -288,7 +317,7 @@ fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec
 fn line(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec<Line<'static>>) {
     let room = width.saturating_sub(indent).max(1);
     let lead = " ".repeat(indent);
-    for wrapped in text::wrap(said, room) {
+    for wrapped in text::wrap_keeping_spaces(said, room) {
         rows.push(Line::from(vec![
             Span::raw(lead.clone()),
             Span::styled(wrapped, Style::new().fg(theme.fg)),

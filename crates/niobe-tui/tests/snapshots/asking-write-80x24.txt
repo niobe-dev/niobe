@@ -8,7 +8,7 @@
 ┃   │ + # Caching                                                          │   ┃
 ┃   │ +                                                                    │   ┃
 ┃   │ + Responses are kept with their etag.                                │   ┃
-┃   │ … 2 more lines · Ctrl+T shows the whole call                         │   ┃
+┃   │ … the rule is cut above · Ctrl+T shows it whole                      │   ┃
 ┃   │                                                                      │   ┃
 ┃   │ ▶ 1. Allow once                                       this call only │   ┃
 ┃   │   2. Always allow Write                            niobe saves Write │   ┃

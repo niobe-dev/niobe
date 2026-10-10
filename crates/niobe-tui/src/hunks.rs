@@ -185,17 +185,33 @@ pub(crate) fn lines(
 /// Unnumbered, since a proposed edit says what text it replaces and not
 /// where in the file that text is. And wrapped rather than cut at the edge,
 /// unlike a change already made: what is still to be approved is read whole.
+///
+/// With the rows, how many lines of the change the marker stands for and are
+/// not drawn: none where the change is whole or open.
 pub(crate) fn proposed(
     lines: &[DiffLine],
     width: usize,
     open: bool,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, usize) {
     let mut rows = Vec::new();
     let mut dropped = false;
+    // The rows laid out before the rest is only counted: a file of a hundred
+    // thousand lines is not laid out to draw twenty rows of it, nor to be
+    // scrolled through under Ctrl+T, which draws what a screenful of scrolling
+    // can reach.
+    let ceiling = match open {
+        true => OPEN_ROWS,
+        false => MAX_ROWS,
+    };
+    let mut uncounted = 0;
     for (line, keep) in lines.iter().zip(near_a_change(lines)) {
         if !keep {
             dropped = true;
+            continue;
+        }
+        if rows.len() > ceiling {
+            uncounted += 1;
             continue;
         }
         if dropped && !rows.is_empty() {
@@ -204,14 +220,43 @@ pub(crate) fn proposed(
         dropped = false;
         rows.extend(wrapped_row(line, width, theme));
     }
-    if cuts(rows.len()) {
-        let beyond = rows.len() - MAX_ROWS;
-        if !open {
-            rows.truncate(MAX_ROWS);
-        }
-        rows.push(marker(beyond, open, width, theme));
+    let total = rows.len() + uncounted;
+    if open && total > OPEN_ROWS + 1 {
+        let beyond = total - OPEN_ROWS;
+        rows.truncate(OPEN_ROWS);
+        rows.push(capped_marker(beyond, width, theme));
+        return (rows, beyond);
     }
-    rows
+    if !cuts(total) {
+        return (rows, 0);
+    }
+    let beyond = total - MAX_ROWS;
+    if !open {
+        rows.truncate(MAX_ROWS);
+    }
+    rows.push(marker(beyond, open, width, theme));
+    // What the marker stands for is not drawn only while the change is cut.
+    (rows, if open { 0 } else { beyond })
+}
+
+/// How many rows of a proposed change are laid out with the diffs open: more
+/// than a pane scrolls through in a reading, and a bound on what a frame
+/// costs however large the change is.
+const OPEN_ROWS: usize = 2_000;
+
+/// The marker under a proposed change too long to lay out whole even open: how
+/// many rows it leaves out.
+fn capped_marker(beyond: usize, width: usize, theme: &Theme) -> Line<'static> {
+    let rows = plural(beyond, "row", "rows");
+    let said = format!(
+        "▴ the first {OPEN_ROWS} rows are shown · {beyond} more {rows} are not drawn · \
+         {OPEN_KEY} hides them"
+    );
+    let said = text::truncate(&said, width);
+    Line::from(Span::styled(
+        pad(&said, width),
+        Style::new().fg(theme.dim).bg(theme.diff_bg),
+    ))
 }
 
 /// One line of a proposed change as the rows it wraps to: its sign on the

@@ -8,7 +8,7 @@
 ┃   │ -         return cached.body                                         │   ┃
 ┃   │ -     response = get(url)                                            │   ┃
 ┃   │ +     if cached and cached.etag:                                     │   ┃
-┃   │ … 4 more lines · Ctrl+T shows the whole call                         │   ┃
+┃   │ … 2 more lines · Ctrl+T shows the whole call                         │   ┃
 ┃   │                                                                      │   ┃
 ┃   │ ▶ 1. Allow once                                       this call only │   ┃
 ┃   │   2. Always allow Edit                              niobe saves Edit │   ┃

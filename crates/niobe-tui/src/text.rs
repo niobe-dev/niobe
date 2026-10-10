@@ -299,6 +299,21 @@ pub fn wrap_exact(text: &str, columns: usize) -> Vec<String> {
     lines
 }
 
+/// [`wrap`] where it loses nothing, and [`wrap_exact`] where it would: words
+/// joined by one space read as they were written unless the text has a run
+/// of spaces, a tab or a space at either end, which is then kept.
+///
+/// For a value the operator approves, where `a    b` and `a b` are two
+/// different strings: a pattern, a path, a quoted argument.
+pub fn wrap_keeping_spaces(text: &str, columns: usize) -> Vec<String> {
+    let loses_something =
+        text.contains("  ") || text.contains('\t') || text.starts_with(' ') || text.ends_with(' ');
+    match loses_something {
+        true => wrap_exact(text, columns),
+        false => wrap(text, columns),
+    }
+}
+
 /// Cuts a string into pieces no wider than `columns` cells.
 pub fn split_to_width(text: &str, columns: usize) -> Vec<String> {
     let mut chunks = Vec::new();
