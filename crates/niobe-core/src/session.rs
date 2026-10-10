@@ -1010,9 +1010,32 @@ impl SessionState {
     /// plan's windows, how it is billed, the commands, models and servers on
     /// offer — and what is in flight and cannot be forgotten without
     /// dropping it: a question waiting on the operator, a sub-agent still
-    /// running. The turn that typed the clear is still open, and its end is
-    /// the old conversation's.
+    /// running with the calls it has running, a command the operator ran.
+    /// Each is counted as started in the conversation it goes on in, so that
+    /// its end is an end and not one without a start. The turn that typed the
+    /// clear is still open, and its end is the old conversation's.
     fn started_over(&mut self) -> Self {
+        let running_agents = std::mem::take(&mut self.running_agents);
+        let pending_permissions = std::mem::take(&mut self.pending_permissions);
+        let in_flight_tools: BTreeMap<ToolCallId, String> = self
+            .in_flight_tools
+            .iter()
+            .filter(|(id, name)| {
+                name.as_str() == OPERATOR_SHELL
+                    || self
+                        .agent_calls
+                        .get(*id)
+                        .is_some_and(|agent| running_agents.contains(agent))
+            })
+            .map(|(id, name)| (id.clone(), name.clone()))
+            .collect();
+        let agent_calls: BTreeMap<ToolCallId, AgentId> = self
+            .agent_calls
+            .iter()
+            .filter(|(id, _)| in_flight_tools.contains_key(*id))
+            .map(|(id, agent)| (id.clone(), agent.clone()))
+            .collect();
+        let running = running_agents.len() as u64;
         Self {
             meta: self.meta.take(),
             mode: self.mode,
@@ -1022,8 +1045,17 @@ impl SessionState {
             commands: std::mem::take(&mut self.commands),
             models: std::mem::take(&mut self.models),
             mcp_servers: std::mem::take(&mut self.mcp_servers),
-            pending_permissions: std::mem::take(&mut self.pending_permissions),
-            running_agents: std::mem::take(&mut self.running_agents),
+            permission_requests: pending_permissions.len() as u64,
+            pending_permissions,
+            agents_spawned: running,
+            peak_running_agents: running,
+            running_agents,
+            tools: ToolTotals {
+                started: in_flight_tools.len() as u64,
+                ..ToolTotals::default()
+            },
+            in_flight_tools,
+            agent_calls,
             turn_running: self.turn_running,
             clear_open: self.turn_running,
             ..Self::default()
@@ -1034,6 +1066,14 @@ impl SessionState {
     /// it started: nothing is recorded, and nothing it left open is carried
     /// into the new one.
     fn end_clear(&mut self) {
+        // A prompt sent, or tokens spent, after the clear belong to the new
+        // conversation, and the turn that carried them ends here: it is its
+        // first, and the turns would otherwise not add up to the session's
+        // total.
+        if self.user_messages > 0 || self.usage_reported {
+            self.end_turn(false);
+            return;
+        }
         self.clear_open = false;
         self.turn_running = false;
     }
@@ -2237,6 +2277,136 @@ mod tests {
         );
         assert_eq!(state.tools().interrupted, 1);
         assert_eq!(state.agents_cancelled(), 1);
+    }
+
+    fn spawn(id: &str) -> Event {
+        Event::AgentSpawn {
+            id: id.into(),
+            parent: None,
+            kind: None,
+            label: "explorer".to_owned(),
+        }
+    }
+
+    fn ended_ok(id: &str, name: &str) -> Event {
+        let Event::ToolCallEnd {
+            id,
+            name,
+            input,
+            output,
+            bytes,
+            summary,
+            exit_code,
+            error,
+            command,
+            ..
+        } = end(id, name)
+        else {
+            unreachable!("end builds a call's end");
+        };
+        Event::ToolCallEnd {
+            id,
+            name,
+            input,
+            output,
+            bytes,
+            outcome: ToolOutcome::Ok,
+            summary,
+            exit_code,
+            error,
+            command,
+        }
+    }
+
+    #[test]
+    fn what_runs_across_a_clear_is_carried_with_its_calls_and_counted_in_the_new_conversation() {
+        let mut state = SessionState::new();
+        state.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        state.apply(&spawn("a1"));
+        state.apply(&start("a1c", "Read", Some("a1")));
+        state.apply(&start("op1", OPERATOR_SHELL, None));
+        state.apply(&start("t1", "Bash", None));
+        state.apply(&asked("q1"));
+
+        state.apply(&Event::Cleared);
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("a1c"), &ToolCallId::from("op1")],
+            "the agent's call and the operator's command go on; the turn's own call does not"
+        );
+        assert_eq!(state.agents_spawned(), 1);
+        assert_eq!(state.peak_running_agents(), 1);
+        assert_eq!(state.permission_requests(), 1);
+
+        state.apply(&ended_ok("op1", OPERATOR_SHELL));
+        state.apply(&ended_ok("a1c", "Read"));
+        state.apply(&Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Completed,
+        });
+        state.apply(&Event::PermissionResponse {
+            id: "q1".into(),
+            decision: PermissionDecision::Deny,
+            message: None,
+        });
+
+        assert_eq!(state.tools().unmatched_ends, 0);
+        assert_eq!(state.tools().started, 2);
+        assert_eq!(state.tools().finished, 2);
+        assert!(
+            state.agents_completed()
+                + state.agents_failed()
+                + state.agents_cancelled()
+                + state.agents_interrupted()
+                <= state.agents_spawned()
+        );
+        assert!(state.permissions_denied() <= state.permission_requests());
+    }
+
+    #[test]
+    fn a_prompt_sent_while_the_clears_turn_runs_is_a_turn_with_what_it_spent() {
+        let mut state = SessionState::new();
+        for event in [
+            Event::UserMessage {
+                text: "first".to_owned(),
+            },
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "/clear".to_owned(),
+            },
+            Event::Cleared,
+            Event::UserMessage {
+                text: "next".to_owned(),
+            },
+            usage(5, 4, None),
+            Event::TurnEnded,
+        ] {
+            state.apply(&event);
+        }
+
+        let turns = state.turns();
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].tokens, Some(9));
+        assert_eq!(state.totals().tokens(), 9);
+    }
+
+    #[test]
+    fn the_turn_that_typed_a_clear_and_nothing_else_is_still_no_turn() {
+        let mut state = SessionState::new();
+        for event in [
+            Event::UserMessage {
+                text: "/clear".to_owned(),
+            },
+            Event::Cleared,
+            Event::TurnEnded,
+        ] {
+            state.apply(&event);
+        }
+
+        assert!(state.turns().is_empty());
     }
 
     #[test]
