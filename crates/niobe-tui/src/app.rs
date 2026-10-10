@@ -768,6 +768,10 @@ pub struct Call {
     /// reported it at the call's end. `None` before then, where it was not
     /// reported, and for every call [`Call::programs`] is `None` for.
     pub command: Option<String>,
+    /// What the operator wrote in place of letting the call run, where they
+    /// refused it at the prompt with words of their own: drawn whole under
+    /// its row, since it is what the agent was told to do instead.
+    pub answer: Option<String>,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -796,6 +800,7 @@ impl Call {
             memory: false,
             programs: None,
             command: None,
+            answer: None,
             started: at,
         }
     }
@@ -2325,10 +2330,13 @@ impl App {
                 });
             }
 
-            // A refusal is shown as its own entry rather than left to the tool
+            // A refusal is shown when it is made rather than left to the tool
             // result that carries it back: a backend that reports nothing
             // further about a call it was not allowed to make would leave a
             // denial indistinguishable from the agent deciding not to act.
+            // A call already in the transcript ends there, as denied, and an
+            // end the backend reports for it after lands on the same row; a
+            // call that never started in it gets an entry of its own.
             Event::PermissionResponse {
                 id,
                 decision,
@@ -2339,7 +2347,24 @@ impl App {
                     self.answered.insert(id.clone(), *decision);
                     self.restart_clock(id);
                 }
-                if *decision == PermissionDecision::Deny {
+                if *decision == PermissionDecision::Deny
+                    && let Some(&(at, index)) = self.tool_entries.get(id)
+                {
+                    let refused = Ending {
+                        outcome: ToolOutcome::Denied,
+                        bytes: 0,
+                        exit_code: None,
+                        error: None,
+                    };
+                    self.end_call(at, index, refused);
+                    if let Some(call) = self
+                        .entries
+                        .get_mut(at)
+                        .and_then(|entry| entry.calls.get_mut(index))
+                    {
+                        call.answer = message.clone();
+                    }
+                } else if *decision == PermissionDecision::Deny {
                     let agent = asked.as_ref().and_then(|ask| ask.agent.clone());
                     let (tool, what) = match &asked {
                         Some(ask) => (
@@ -2612,7 +2637,9 @@ impl App {
         self.tool_entries.retain(|id, _| running.contains_key(id));
         for (at, index) in cut {
             if let Some(entry) = self.entries.get_mut(at) {
-                if let Some(call) = entry.calls.get_mut(index) {
+                // A call refused at the prompt ended there, though the fold
+                // still waits on the backend to report it.
+                if let Some(call) = entry.calls.get_mut(index).filter(|call| call.running()) {
                     call.interrupted = true;
                 }
                 entry.streaming = entry.calls.iter().any(Call::running);
@@ -12253,7 +12280,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_between_two_calls_breaks_their_run() {
+    fn a_refused_call_stays_in_its_run_as_its_own_denied_row() {
         let mut app = app();
         called(&mut app, "t1", "Edit");
         app.apply(&start("t2", "Edit", "{}", None));
@@ -12265,14 +12292,48 @@ mod tests {
         app.apply(&ended("t2", "Edit", ToolOutcome::Denied, 0));
         called(&mut app, "t3", "Edit");
 
-        assert_eq!(
-            heads(&app),
-            vec![
-                ("Edit".to_owned(), 2),
-                ("denied".to_owned(), 0),
-                ("Edit".to_owned(), 1),
-            ]
-        );
+        assert_eq!(heads(&app), vec![("Edit".to_owned(), 3)]);
+        assert_eq!(app.entries()[0].calls[1].outcome, Some(ToolOutcome::Denied));
+    }
+
+    /// Refuses the call `id` at the prompt, with the operator's written
+    /// answer where there is one.
+    fn refused(app: &mut App, id: &str, said: Option<&str>) {
+        app.apply(&asked_by(id, None));
+        app.apply(&Event::PermissionResponse {
+            id: id.into(),
+            decision: PermissionDecision::Deny,
+            message: said.map(str::to_owned),
+        });
+    }
+
+    #[test]
+    fn a_refusal_the_backend_also_ends_the_call_for_reads_as_one_row() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash", "{}", Some("touch b.txt")));
+        refused(&mut app, "t1", Some("Do not create b.txt."));
+        app.apply(&ended("t1", "Bash", ToolOutcome::Denied, 0));
+
+        assert_eq!(heads(&app), vec![("Bash".to_owned(), 1)]);
+        let call = &app.entries()[0].calls[0];
+        assert_eq!(call.outcome, Some(ToolOutcome::Denied));
+        assert_eq!(call.answer.as_deref(), Some("Do not create b.txt."));
+        assert_eq!(app.entries()[0].kind, EntryKind::Failure);
+    }
+
+    #[test]
+    fn a_refusal_the_backend_says_nothing_more_about_still_reads_as_one_denied_row() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash", "{}", Some("touch b.txt")));
+        refused(&mut app, "t1", Some("Do not create b.txt."));
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(heads(&app)[0], ("Bash".to_owned(), 1));
+        let call = &app.entries()[0].calls[0];
+        assert_eq!(call.outcome, Some(ToolOutcome::Denied));
+        assert!(!call.interrupted, "a refused call was not cut short");
+        assert!(!app.entries()[0].streaming);
+        assert_eq!(call.answer.as_deref(), Some("Do not create b.txt."));
     }
 
     fn millis(ms: u64) -> Stamp {

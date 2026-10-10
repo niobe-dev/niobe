@@ -375,7 +375,10 @@ fn under(
             lines
         }
         (None, Some(run), _, _) => vec![test_line(run, room, theme)],
-        (None, None, true, _) => vec![reason(call, room, theme)],
+        (None, None, true, _) => match &call.answer {
+            Some(said) => answer_lines(said, room, theme),
+            None => vec![reason(call, room, theme)],
+        },
         // The agent's own notes keep their lines behind Ctrl+T.
         (None, None, false, Some(_)) if call.memory && !detail.diffs_open => Vec::new(),
         (None, None, false, Some(change)) => {
@@ -727,6 +730,27 @@ fn reason(call: &Call, room: usize, theme: &Theme) -> Line<'static> {
         Span::styled(LAST_BRANCH, Style::new().fg(theme.dim)),
         Span::styled(text::truncate(&said, room), style),
     ])
+}
+
+/// What the operator wrote in place of letting a refused call run, every
+/// line of it wrapped rather than cut: it is what the agent was told to do
+/// instead, and it is read here and nowhere else in the transcript.
+fn answer_lines(said: &str, room: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let indent = text::width(LAST_BRANCH);
+    let room = room.saturating_sub(indent).max(1);
+    let style = Style::new().fg(theme.fg);
+    format!("You answered instead: {said}")
+        .lines()
+        .flat_map(|line| text::wrap(line, room))
+        .enumerate()
+        .map(|(at, part)| {
+            let lead = match at {
+                0 => Span::styled(LAST_BRANCH, Style::new().fg(theme.dim)),
+                _ => Span::raw(" ".repeat(indent)),
+            };
+            Line::from(vec![lead, Span::styled(part, style)])
+        })
+        .collect()
 }
 
 fn first_line(text: &str) -> Option<&str> {
@@ -1174,6 +1198,56 @@ mod tests {
             rows[1].trim(),
             "└ the call failed and the backend said nothing about why"
         );
+    }
+
+    /// The operator's own words are what they refused the call with, so they
+    /// are kept whole under it, in place of the backend's reading of them.
+    #[test]
+    fn a_refused_call_shows_the_operators_written_answer_whole_under_its_row() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash"));
+        app.apply(&Event::PermissionResponse {
+            id: "t1".into(),
+            decision: niobe_core::event::PermissionDecision::Deny,
+            message: Some("Do not create b.txt.\nUse the scratch directory instead.".to_owned()),
+        });
+        app.apply(&end(
+            "t1",
+            "Bash",
+            ToolOutcome::Denied,
+            Some("The user doesn't want to proceed with this tool use."),
+        ));
+
+        let rows = drawn(&app, false);
+        assert_eq!(app.entries().len(), 1, "{:?}", app.entries());
+        assert!(rows[0].ends_with("denied"), "{rows:?}");
+        assert_eq!(
+            rows[1..3].iter().map(|row| row.trim()).collect::<Vec<_>>(),
+            [
+                "└ You answered instead: Do not create b.txt.",
+                "Use the scratch directory instead.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_no_written_answer_shows_the_backends_reason() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash"));
+        app.apply(&Event::PermissionResponse {
+            id: "t1".into(),
+            decision: niobe_core::event::PermissionDecision::Deny,
+            message: None,
+        });
+        app.apply(&end(
+            "t1",
+            "Bash",
+            ToolOutcome::Denied,
+            Some("The operator denied this call in Niobe."),
+        ));
+
+        let rows = drawn(&app, false);
+        assert_eq!(rows[1].trim(), "└ The operator denied this call in Niobe.");
     }
 
     #[test]
