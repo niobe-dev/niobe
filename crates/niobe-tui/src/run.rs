@@ -314,126 +314,123 @@ fn event_loop<B: Backend<Error = io::Error>>(
     // the screen as it drew it.
     let mut owed_frame = false;
 
-    while !app.should_quit() {
-        // First, so that everything this pass folds in — what the backend
-        // produced and what the operator answered — is stamped with a clock
-        // read this pass, rather than with the one before it.
-        app.tick(std::time::Instant::now(), Some(machine.clock.now()));
-        let producing = fold_backend(app, journal, backend, watch);
-        fold_journal(app, journal);
-        fold_commands(app, shell, watch);
-        fold_images(app, images);
-        fold_history(app, journal, history);
-        fold_memory(app, memory);
-        // Whatever a read of the repository has finished with since the last
-        // tick. Nothing is waited on here: an unfinished or failed read says
-        // nothing and the pane keeps what it had.
-        if let Some(repo) = watch.look() {
-            app.set_repo(repo);
-        }
-        // Before the draw, so that a prompt a standing rule already answers is
-        // never on screen for the frame it takes to answer it.
-        app.settle_rules();
-        // After the fold and never inside it: the warning is about what this
-        // session has spent under the budget this run was given, not about
-        // what a recording being read back spent under one it knew nothing of.
-        app.settle_budget();
-        run_commands(app, shell);
-        fetch_images(app, images);
-        let lent = hand_off(app, desktop, machine.suspend)?;
-        send_produced(app, journal, backend, rules);
-        // An editor drew on the screen while it had the terminal, and a draw
-        // sends only what changed since the last frame: a resize to the same
-        // size forgets that frame, as after a stop.
-        if lent || owed_frame {
-            let area = terminal.size()?;
-            terminal.resize(area.into())?;
-            owed_frame = false;
-        }
-        terminal.draw(|frame| ui::draw(frame, app))?;
-
-        // An image asked for is looked for again soon, as a reply is: the
-        // operator is waiting to see it land in the prompt.
-        let tick = if producing || app.fetching_image() {
-            BUSY_TICK
-        } else {
-            TICK
-        };
-        match machine.wait.input(tick)? {
-            Input::Ready => {
-                read_input(app, machine.wait)?;
-                run_commands(app, shell);
-                fetch_images(app, images);
-                owed_frame |= hand_off(app, desktop, machine.suspend)?;
-                send_produced(app, journal, backend, rules);
+    // A closure, so that a loop that fails — the terminal it draws on closing
+    // under it — is still followed by what ends a session: the commands it
+    // ran are ended in the record, and a turn left running is closed.
+    let looped = (|| -> io::Result<()> {
+        while !app.should_quit() {
+            // First, so that everything this pass folds in — what the backend
+            // produced and what the operator answered — is stamped with a clock
+            // read this pass, rather than with the one before it.
+            app.tick(std::time::Instant::now(), Some(machine.clock.now()));
+            let producing = fold_backend(app, journal, backend, watch);
+            fold_journal(app, journal);
+            fold_commands(app, shell, watch);
+            fold_images(app, images);
+            fold_history(app, journal, history);
+            fold_memory(app, memory);
+            // Whatever a read of the repository has finished with since the last
+            // tick. Nothing is waited on here: an unfinished or failed read says
+            // nothing and the pane keeps what it had.
+            if let Some(repo) = watch.look() {
+                app.set_repo(repo);
             }
-            Input::Idle => {
-                let mut events = Vec::new();
-                machine.wait.settle(&mut events);
-                if !events.is_empty() {
-                    hand_over(app, events);
+            // Before the draw, so that a prompt a standing rule already answers is
+            // never on screen for the frame it takes to answer it.
+            app.settle_rules();
+            // After the fold and never inside it: the warning is about what this
+            // session has spent under the budget this run was given, not about
+            // what a recording being read back spent under one it knew nothing of.
+            app.settle_budget();
+            run_commands(app, shell);
+            fetch_images(app, images);
+            let lent = hand_off(app, desktop, machine.suspend)?;
+            send_produced(app, journal, backend, rules);
+            // An editor drew on the screen while it had the terminal, and a draw
+            // sends only what changed since the last frame: a resize to the same
+            // size forgets that frame, as after a stop.
+            if lent || owed_frame {
+                let area = terminal.size()?;
+                terminal.resize(area.into())?;
+                owed_frame = false;
+            }
+            terminal.draw(|frame| ui::draw(frame, app))?;
+
+            // An image asked for is looked for again soon, as a reply is: the
+            // operator is waiting to see it land in the prompt.
+            let tick = if producing || app.fetching_image() {
+                BUSY_TICK
+            } else {
+                TICK
+            };
+            match machine.wait.input(tick)? {
+                Input::Ready => {
+                    read_input(app, machine.wait)?;
                     run_commands(app, shell);
                     fetch_images(app, images);
                     owed_frame |= hand_off(app, desktop, machine.suspend)?;
                     send_produced(app, journal, backend, rules);
                 }
+                Input::Idle => {
+                    let mut events = Vec::new();
+                    machine.wait.settle(&mut events);
+                    if !events.is_empty() {
+                        hand_over(app, events);
+                        run_commands(app, shell);
+                        fetch_images(app, images);
+                        owed_frame |= hand_off(app, desktop, machine.suspend)?;
+                        send_produced(app, journal, backend, rules);
+                    }
+                }
+                // The terminal is gone: there is no one left to type and nothing
+                // left to draw on, so the session ends the way a quit does and the
+                // guard hands back what there is to hand back.
+                Input::HungUp => {
+                    ended = Ended::TerminalGone;
+                    app.quit();
+                }
             }
-            // The terminal is gone: there is no one left to type and nothing
-            // left to draw on, so the session ends the way a quit does and the
-            // guard hands back what there is to hand back.
-            Input::HungUp => {
-                ended = Ended::TerminalGone;
-                app.quit();
-            }
-        }
 
-        match machine.shutdown.requested() {
-            None => {}
-            Some(Stop::Requested) => app.quit(),
-            // SIGHUP is the terminal going away, reported by the kernel rather
-            // than by the wait: a session in the session that owns the terminal
-            // is told twice, and whichever telling arrives first is the one that
-            // says what this session ended as.
-            Some(Stop::TerminalGone) => {
-                ended = Ended::TerminalGone;
-                app.quit();
+            match machine.shutdown.requested() {
+                None => {}
+                Some(Stop::Requested) => app.quit(),
+                // SIGHUP is the terminal going away, reported by the kernel rather
+                // than by the wait: a session in the session that owns the terminal
+                // is told twice, and whichever telling arrives first is the one that
+                // says what this session ended as.
+                Some(Stop::TerminalGone) => {
+                    ended = Ended::TerminalGone;
+                    app.quit();
+                }
+            }
+
+            // Both are read, so that a Ctrl+Z and a SIGTSTP arriving in one tick
+            // are one stop rather than a second waiting for the continue.
+            let suspend = app.take_suspend() | machine.shutdown.take_suspend();
+            let suspended = suspend && !app.should_quit();
+            if suspended {
+                (machine.suspend)(Hold::Suspend)?;
+            }
+            // After a stop the screen holds whatever was drawn on it meanwhile, and
+            // a draw sends only what changed since the last frame. A resize to the
+            // same size clears the screen and forgets that frame, without asking
+            // the terminal where its cursor is the way `Terminal::clear` does.
+            if machine.shutdown.take_continued() && !app.should_quit() {
+                // A continue that did not follow a stop of the shell's own was
+                // one nothing caught, and the terminal is as the operator's shell
+                // left it.
+                if !suspended {
+                    (machine.suspend)(Hold::Reassert)?;
+                }
+                let area = terminal.size()?;
+                terminal.resize(area.into())?;
             }
         }
+        Ok(())
+    })();
 
-        // Both are read, so that a Ctrl+Z and a SIGTSTP arriving in one tick
-        // are one stop rather than a second waiting for the continue.
-        let suspend = app.take_suspend() | machine.shutdown.take_suspend();
-        let suspended = suspend && !app.should_quit();
-        if suspended {
-            (machine.suspend)(Hold::Suspend)?;
-        }
-        // After a stop the screen holds whatever was drawn on it meanwhile, and
-        // a draw sends only what changed since the last frame. A resize to the
-        // same size clears the screen and forgets that frame, without asking
-        // the terminal where its cursor is the way `Terminal::clear` does.
-        if machine.shutdown.take_continued() && !app.should_quit() {
-            // A continue that did not follow a stop of the shell's own was
-            // one nothing caught, and the terminal is as the operator's shell
-            // left it.
-            if !suspended {
-                (machine.suspend)(Hold::Reassert)?;
-            }
-            let area = terminal.size()?;
-            terminal.resize(area.into())?;
-        }
-    }
-
-    // A command still running is stopped as the session ends, when whatever
-    // runs it is dropped; its call is ended here, so a session read back does
-    // not show it running for ever.
-    fold_commands(app, shell, watch);
-    app.abandon_commands();
-    // A turn still running ends with the session, and the record says so,
-    // rather than leaving the next session to join it.
-    if app.is_attached() {
-        app.leave();
-    }
-    send_produced(app, journal, backend, rules);
+    close_out(app, shell, watch, journal, backend, rules);
+    looped?;
 
     // Asked for by the operator, and ended as a quit is: what the shell held
     // is recorded and the backend told, and the caller opens the other.
@@ -441,6 +438,27 @@ fn event_loop<B: Backend<Error = io::Error>>(
         ended = Ended::Open(target);
     }
     Ok(ended)
+}
+
+/// What ends a session, whether its loop ended or failed: a command still
+/// running is stopped as the session ends, when whatever runs it is dropped,
+/// and its call is ended here so that a session read back does not show it
+/// running for ever; a turn still running ends with the session, and the
+/// record says so rather than leaving the next session to join it.
+fn close_out(
+    app: &mut App,
+    shell: &mut dyn Shell,
+    watch: &mut dyn Watch,
+    journal: &mut dyn Journal,
+    backend: &mut dyn Bridge,
+    rules: &mut dyn Rules,
+) {
+    fold_commands(app, shell, watch);
+    app.abandon_commands();
+    if app.is_attached() {
+        app.leave();
+    }
+    send_produced(app, journal, backend, rules);
 }
 
 /// Passes on a load of the earlier sessions the shell asked for, and hands it
@@ -1017,6 +1035,36 @@ mod tests {
         send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
 
         assert_eq!(ended_calls(&kept), [(ToolOutcome::Ok, None)]);
+    }
+
+    /// The loop can fail on its terminal with a command running, and the
+    /// record is what is read back: it ends the call.
+    #[test]
+    fn what_ends_a_session_ends_the_commands_it_ran_in_the_record() {
+        let mut app = app_that_ran("sleep 100");
+        let mut kept = Kept::default();
+        let mut shell = Running::default();
+        run_commands(&mut app, &mut shell);
+        send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
+
+        close_out(
+            &mut app,
+            &mut shell,
+            &mut Unwatched,
+            &mut kept,
+            &mut Detached,
+            &mut Forgotten,
+        );
+
+        let ended = ended_calls(&kept);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert!(
+            ended[0]
+                .1
+                .as_deref()
+                .is_some_and(|error| error.contains("stopped")),
+            "{ended:?}"
+        );
     }
 
     #[test]

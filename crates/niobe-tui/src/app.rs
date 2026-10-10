@@ -1902,6 +1902,33 @@ impl App {
     /// until the backend reports again. See [`App::plan_windows`].
     pub fn resumed(&mut self) {
         self.windows_recorded = self.session.usage_windows().is_some();
+        // A command the operator ran that the record never saw end was
+        // stopped with the session that ran it, which nothing outlives: the
+        // processes it started are in groups the session's reaper ends. Left
+        // open it would read as running for ever, with nothing to stop it.
+        let open: Vec<ToolCallId> = self
+            .session
+            .in_flight_tools()
+            .iter()
+            .filter(|(id, name)| {
+                name.as_str() == crate::shell::OPERATOR_SHELL
+                    && !self
+                        .running_commands
+                        .iter()
+                        .any(|(running, _)| running == *id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in open {
+            self.ran(crate::shell::Ran {
+                id,
+                output: String::new(),
+                bytes: 0,
+                whole: false,
+                exit_code: None,
+                error: Some("stopped: the session ended before the command did".to_owned()),
+            });
+        }
     }
 
     /// Draws the rule under the turn the fold has just ended, below whatever
@@ -12592,6 +12619,34 @@ mod tests {
         app.apply_at(&said("again"), millis(2_826_000));
         app.apply_at(&Event::TurnEnded, millis(2_826_100));
         app
+    }
+
+    /// The process that ran a command is gone with the session that started
+    /// it, so a record that never saw the command end is one that cannot
+    /// still be running it.
+    #[test]
+    fn a_command_the_record_never_saw_end_is_ended_when_the_session_is_resumed() {
+        let mut app = app();
+        app.apply(&Event::ToolCallStart {
+            id: "op1".into(),
+            name: crate::shell::OPERATOR_SHELL.to_owned(),
+            input: "sleep 100".to_owned(),
+            summary: None,
+            agent: None,
+        });
+
+        app.resumed();
+
+        let produced = app.take_produced();
+        assert!(
+            matches!(
+                produced.as_slice(),
+                [Event::ToolCallEnd { id, error: Some(error), .. }]
+                    if id.as_str() == "op1" && error.contains("stopped")
+            ),
+            "{produced:?}"
+        );
+        assert!(app.session().in_flight_tools().is_empty());
     }
 
     #[test]
