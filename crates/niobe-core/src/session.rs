@@ -476,6 +476,8 @@ pub struct SessionState {
     context_floor: bool,
     tools: ToolTotals,
     in_flight_tools: BTreeMap<ToolCallId, String>,
+    /// The calls cut short, until each ends: see [`SessionState::cut_calls`].
+    cut_tools: BTreeSet<ToolCallId>,
     /// The calls whose end has been counted, so that an end said again for
     /// one of them is not a second call.
     ended_tools: BTreeSet<ToolCallId>,
@@ -730,7 +732,16 @@ impl SessionState {
                     ToolOutcome::Interrupted => {}
                 }
                 if self.in_flight_tools.remove(id).is_none() {
-                    bump(&mut self.tools.unmatched_ends);
+                    // A call that was cut short and has now ended: it ran to
+                    // its end after the turn or the agent that left it
+                    // running, so it is one call that finished, and not one
+                    // that was interrupted as well, nor an end with no start.
+                    match self.cut_tools.remove(id) {
+                        true => {
+                            self.tools.interrupted = self.tools.interrupted.saturating_sub(1);
+                        }
+                        false => bump(&mut self.tools.unmatched_ends),
+                    }
                 }
                 self.ended_by = self.agent_calls.remove(id);
             }
@@ -985,10 +996,16 @@ impl SessionState {
     }
 
     /// Records each of `cut` as cut short: no end will arrive for it.
+    ///
+    /// Each is remembered, since an end that was only late — a sub-agent's
+    /// own records are folded in by their stamps, and one can come after its
+    /// agent's exit — is still the end of the call and moves it from
+    /// interrupted to finished.
     fn cut_calls(&mut self, cut: Vec<ToolCallId>) {
         for id in cut {
             self.in_flight_tools.remove(&id);
             self.agent_calls.remove(&id);
+            self.cut_tools.insert(id);
             bump(&mut self.tools.interrupted);
         }
     }
@@ -2407,6 +2424,43 @@ mod tests {
         }
 
         assert!(state.turns().is_empty());
+    }
+
+    /// A call counted as cut short whose end then comes is one call, and
+    /// finished: the figures never say it was interrupted as well, nor that
+    /// its end had no start.
+    #[test]
+    fn a_call_cut_short_and_ended_late_is_one_call_that_finished() {
+        let sequences: [Vec<Event>; 2] = [
+            vec![
+                prompt(),
+                start("c1", "Read", None),
+                Event::TurnEnded,
+                ended_ok("c1", "Read"),
+            ],
+            vec![
+                spawn("a1"),
+                start("c1", "Read", Some("a1")),
+                Event::AgentExit {
+                    id: "a1".into(),
+                    outcome: AgentOutcome::Completed,
+                },
+                ended_ok("c1", "Read"),
+            ],
+        ];
+        for events in sequences {
+            let state = SessionState::replay(&events);
+            let tools = state.tools();
+
+            assert_eq!(tools.started, 1, "{events:?}");
+            assert_eq!(
+                tools.finished + tools.interrupted,
+                tools.started,
+                "{events:?}"
+            );
+            assert_eq!(tools.interrupted, 0, "{events:?}");
+            assert_eq!(tools.unmatched_ends, 0, "{events:?}");
+        }
     }
 
     #[test]
