@@ -3272,6 +3272,59 @@ mod tests {
         assert!(session.next().is_some());
     }
 
+    /// A turn that launches two sub-agents in the background, the second of
+    /// which reports its end before the turn does.
+    const TWO_BACKGROUND_AGENTS: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review it."}},{"type":"tool_use","id":"toolu_done","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Check the docs","prompt":"Check them."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]},{"type":"tool_result","tool_use_id":"toolu_done","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review"}}' '{"type":"system","subtype":"task_notification","tool_use_id":"toolu_done","status":"completed","summary":"The docs are right."}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// An agent that exited before the stop is not cancelled by it as well:
+    /// its exit was already reported, and a second one would be counted
+    /// against the agents' figures.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_that_exited_before_the_stop_is_not_cancelled_by_it() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{TWO_BACKGROUND_AGENTS}\nkill -TERM $$\n"),
+            true,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        let exits: Vec<(String, AgentOutcome)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentExit { id, outcome } => Some((id.to_string(), *outcome)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            exits,
+            [
+                ("toolu_done".to_owned(), AgentOutcome::Completed),
+                ("toolu_bg".to_owned(), AgentOutcome::Cancelled),
+            ],
+            "{events:#?}"
+        );
+    }
+
+    /// Where the session ends instead of carrying on, its end says for itself
+    /// that nothing it ran is running: no exit is made up for an agent.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_ends_the_session_cancels_no_agent_in_its_name() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{BACKGROUND_AGENT}\nkill -TERM $$\n"),
+            false,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::AgentExit { .. })),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_cli_that_fails_between_turns_without_a_signal_still_ends_the_session() {
