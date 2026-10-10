@@ -40,7 +40,7 @@
 use std::collections::BTreeSet;
 
 use crate::event::OPERATOR_SHELL;
-use crate::test_run::{RESERVED, Wrapper, is_assignment, simple_commands};
+use crate::test_run::{RESERVED, Word, Wrapper, is_assignment, simple_commands_marked};
 
 /// A kind of work, which the Activity pane counts calls under.
 ///
@@ -241,7 +241,7 @@ fn server_name(registered: &str) -> String {
 
 /// The kind of work a shell command was.
 pub fn of_command(command: &str) -> Reading {
-    let parts: Vec<Part> = simple_commands(command)
+    let parts: Vec<Part> = simple_commands_marked(command)
         .iter()
         .flat_map(|words| parts_of(words))
         .collect();
@@ -299,14 +299,24 @@ struct Part {
 /// The simple command `words`, read: the program it runs and, where that
 /// runs others on what it found — `find -exec` — those too. Nothing where it
 /// runs no program.
-fn parts_of(words: &[String]) -> Vec<Part> {
-    let saves = words.iter().enumerate().any(|(at, word)| {
-        redirect_target(word, words.get(at + 1).map(String::as_str)).is_some_and(is_a_file)
+fn parts_of(marked: &[Word]) -> Vec<Part> {
+    // A quoted word is text however it begins: `grep '>>>' file` redirects
+    // nothing. A target may be quoted, as in `> "out file"`; an operator may
+    // not.
+    let saves = marked.iter().enumerate().any(|(at, word)| {
+        !word.quoted
+            && redirect_target(
+                &word.text,
+                marked.get(at + 1).map(|next| next.text.as_str()),
+            )
+            .is_some_and(is_a_file)
     });
     // A here-document or a here-string is what the program reads, which for
     // an interpreter is its script.
-    let fed = words.iter().any(|word| word.starts_with("<<"));
-    let Some(words) = program_words(words) else {
+    let fed = marked
+        .iter()
+        .any(|word| !word.quoted && word.text.starts_with("<<"));
+    let Some(words) = program_words(marked) else {
         return Vec::new();
     };
     let Some((program, rest)) = words.split_first() else {
@@ -314,7 +324,7 @@ fn parts_of(words: &[String]) -> Vec<Part> {
     };
     let program = program.rsplit('/').next().unwrap_or(program);
     if let Some(line) = shell_line(program, rest) {
-        return simple_commands(line)
+        return simple_commands_marked(line)
             .iter()
             .flat_map(|words| parts_of(words))
             .map(|part| Part {
@@ -460,23 +470,24 @@ const XARGS_TAKES_A_VALUE: &[&str] = &[
 /// and the wrappers that run the command after them as it is — `xargs`
 /// among them, which runs it on what it reads, so that what is counted is
 /// what it ran.
-fn program_words(words: &[String]) -> Option<Vec<&str>> {
+fn program_words(words: &[Word]) -> Option<Vec<&str>> {
     // The word after a redirection operator that stands alone — `> out`,
-    // `<<EOF` — is where it goes, not a word of the command.
+    // `<<EOF` — is where it goes, not a word of the command. A quoted word
+    // is not an operator, whatever it begins with.
     let mut target_next = false;
     let mut words = words
         .iter()
-        .map(String::as_str)
         .filter(move |word| {
             if std::mem::take(&mut target_next) {
                 return false;
             }
-            if is_redirection(word) {
-                target_next = stands_alone(word);
+            if !word.quoted && is_redirection(&word.text) {
+                target_next = stands_alone(&word.text);
                 return false;
             }
             true
         })
+        .map(|word| word.text.as_str())
         .skip_while(|word| RESERVED.contains(word))
         .peekable();
     if words

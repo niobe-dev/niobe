@@ -151,6 +151,24 @@ pub fn is_test_run(command: &str) -> bool {
 /// nor a comment, from an unquoted `#` that starts a word to the end of its
 /// line: writing a script that runs `cargo test` is not running it.
 pub(crate) fn simple_commands(command: &str) -> Vec<Vec<String>> {
+    simple_commands_marked(command)
+        .into_iter()
+        .map(|words| words.into_iter().map(|word| word.text).collect())
+        .collect()
+}
+
+/// A word of a simple command, and whether any of it was quoted.
+///
+/// A quoted `>` is a pattern or some text, which no shell reads as a
+/// redirection; read with its quoting taken off it looks like one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Word {
+    pub(crate) text: String,
+    pub(crate) quoted: bool,
+}
+
+/// [`simple_commands`], each word with whether it was quoted.
+pub(crate) fn simple_commands_marked(command: &str) -> Vec<Vec<Word>> {
     let chars: Vec<char> = command.chars().collect();
     let mut split = Split::default();
     let mut open: Vec<Quoted> = Vec::new();
@@ -260,8 +278,8 @@ pub(crate) fn simple_commands(command: &str) -> Vec<Vec<String>> {
 /// The words and commands [`simple_commands`] has read so far.
 #[derive(Debug, Default)]
 struct Split {
-    commands: Vec<Vec<String>>,
-    words: Vec<String>,
+    commands: Vec<Vec<Word>>,
+    words: Vec<Word>,
     word: String,
     /// Whether the word being read has been quoted, so that `''` is a word
     /// though nothing is in it.
@@ -283,7 +301,10 @@ impl Split {
 
     fn end_word(&mut self) {
         if self.quoted || !self.word.is_empty() {
-            self.words.push(std::mem::take(&mut self.word));
+            self.words.push(Word {
+                text: std::mem::take(&mut self.word),
+                quoted: self.quoted,
+            });
             self.quoted = false;
         }
     }
@@ -308,8 +329,10 @@ impl Split {
         if strip_tabs {
             at += 1;
         }
-        self.words
-            .push(if strip_tabs { "<<-" } else { "<<" }.to_owned());
+        self.words.push(Word {
+            text: if strip_tabs { "<<-" } else { "<<" }.to_owned(),
+            quoted: false,
+        });
         while chars.get(at + 1).is_some_and(|&c| c == ' ' || c == '\t') {
             at += 1;
         }
@@ -324,7 +347,10 @@ impl Split {
             at += 1;
         }
         if !delimiter.is_empty() {
-            self.words.push(delimiter.clone());
+            self.words.push(Word {
+                text: delimiter.clone(),
+                quoted: false,
+            });
             self.heredocs.push((delimiter, strip_tabs));
         }
         at

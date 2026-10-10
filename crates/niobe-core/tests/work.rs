@@ -169,3 +169,26 @@ fn the_command_a_call_ran_is_the_whole_one_where_reported_and_the_shells_summary
     assert_eq!(command_of("Read", None, Some("src/lib.rs")), None);
     assert_eq!(command_of("Bash", None, None), None);
 }
+
+/// A `>` in quotes is the text a search looks for, and no shell hands it to
+/// a file: grepping for a conflict marker is exploring, not editing.
+#[test]
+fn a_quoted_angle_bracket_is_not_a_redirection() {
+    reads_as(&[
+        ("grep -rn '>>>>>>>' src", Work::Exploring, &["grep"]),
+        ("grep '>' notes.md", Work::Exploring, &["grep"]),
+        ("rg '>= 0' src", Work::Exploring, &["rg"]),
+        ("git grep -n '>>>'", Work::Exploring, &["git grep"]),
+        ("grep -n \"<<<<<<<\" a.rs", Work::Exploring, &["grep"]),
+    ]);
+}
+
+#[test]
+fn an_unquoted_redirection_still_saves_the_output() {
+    reads_as(&[
+        ("echo hi > out", Work::Editing, &["echo"]),
+        ("cat <<EOF > f\nbody\nEOF", Work::Editing, &["cat"]),
+        ("echo hi > \"out file\"", Work::Editing, &["echo"]),
+        ("grep -rn foo src > hits.txt", Work::Editing, &["grep"]),
+    ]);
+}
