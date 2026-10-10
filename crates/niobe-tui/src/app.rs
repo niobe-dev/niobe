@@ -6514,13 +6514,17 @@ impl App {
             self.on_writing_key(key);
             return;
         }
-        if self.too_soon_to_answer() {
-            return;
-        }
+        // A letter answers nothing, so it is never held back: a word typed
+        // through the moment a question comes up would otherwise lose every
+        // letter that came within the quiet of the one before it, each of
+        // which restarts it.
         if self.ask_focus == AskFocus::Choosing
             && let Some(typed) = typed_char(key).filter(|c| !c.is_ascii_digit())
         {
             self.type_past_the_question(typed);
+            return;
+        }
+        if self.too_soon_to_answer() {
             return;
         }
         match self.ask_focus {
@@ -11477,6 +11481,48 @@ mod tests {
         }
     }
 
+    /// A question that comes up in the middle of a word the operator is
+    /// typing at a steady pace: every key lands within the quiet of the one
+    /// before it, and none of them can answer anything.
+    #[test]
+    fn a_word_typed_through_the_moment_a_question_comes_up_is_kept_whole() {
+        let start = Instant::now();
+        let mut app = app();
+        app.tick(start, None);
+        let mut at = start;
+        let step = Duration::from_millis(120);
+        for c in "fix the".chars() {
+            let mut bytes = [0; 4];
+            read(&mut app, c.encode_utf8(&mut bytes).as_bytes(), at);
+            at += step;
+        }
+        app.tick(at, None);
+        app.apply(&prompt(Some("touch one.txt")));
+        for c in " tests".chars() {
+            let mut bytes = [0; 4];
+            read(&mut app, c.encode_utf8(&mut bytes).as_bytes(), at);
+            at += step;
+        }
+
+        assert_eq!(app.composed(), "fix the tests");
+        assert_eq!(app.take_produced(), []);
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn a_digit_or_enter_inside_the_quiet_still_answers_nothing() {
+        let shown = Instant::now();
+        let mut app = app();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("touch one.txt")));
+
+        read(&mut app, b"1", shown + Duration::from_millis(50));
+        read(&mut app, b"\r", shown + Duration::from_millis(100));
+
+        assert_eq!(app.take_produced(), []);
+        assert!(app.asking().is_some());
+    }
+
     #[test]
     fn a_letter_typed_at_a_question_says_where_it_went() {
         let shown = Instant::now();
@@ -13076,11 +13122,15 @@ mod tests {
         let last = typed_apart(&mut app, " instead", withdrawn, every);
         read(&mut app, b"\r", last + every);
 
+        // The words went on into the prompt behind the question, which waits:
+        // letters answer nothing, so none of them was held back, and the
+        // Enter that ended them sent nothing.
         assert_eq!(app.take_produced(), []);
-        assert_eq!(app.hint(), Some(TOO_SOON_HINT));
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
-        assert_eq!(app.ask_focus(), AskFocus::Choosing);
-        read(&mut app, b"\r", last + every + ASK_QUIET * 2);
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+        assert_eq!(app.composed(), " instead");
+        read(&mut app, b"\x1b", last + every + ASK_QUIET * 2);
+        read(&mut app, b"\r", last + every + ASK_QUIET * 4);
         assert_eq!(
             app.take_produced(),
             [Event::PermissionResponse {
