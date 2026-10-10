@@ -1730,6 +1730,33 @@ fn a_transcript_with_no_cost_state_restores_nothing() {
     );
 }
 
+/// The CLI restores its last running total whatever this side can read, so an
+/// older record's figure is not what the first turn reports on top of: using
+/// it would count the turns in between again as measured.
+#[test]
+fn a_last_cost_state_that_cannot_be_read_leaves_the_earlier_spend_unknown() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("left.jsonl");
+    let older = r#"{"type":"cost-state","sessionId":"s","totalCostUSD":1.0,"modelUsage":{"claude-sonnet-5":{"inputTokens":1,"outputTokens":1,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":1.0}}}"#;
+    let wrong_type = r#"{"type":"cost-state","sessionId":"s","totalCostUSD":3.0,"modelUsage":7}"#;
+    let cut_off = r#"{"type":"cost-state","sessionId":"s","totalCostUSD":3.0,"modelUsa"#;
+    let mentions = r#"{"type":"assistant","message":{"role":"assistant","content":"the cost-state is written on exit"}}"#;
+
+    for last in [wrong_type, cut_off] {
+        std::fs::write(&path, format!("{older}\n{last}\n")).expect("written");
+        let spent = transcript::spent(&path).expect("the transcript reads");
+        assert!(!spent.is_known(), "{last}");
+        assert_eq!(spent.cost_usd("claude-sonnet-5"), None, "{last}");
+    }
+
+    // A readable last record reads as before, and another record that merely
+    // names the type does not stand in for it.
+    std::fs::write(&path, format!("{older}\n{mentions}\n")).expect("written");
+    let spent = transcript::spent(&path).expect("the transcript reads");
+    assert!(spent.is_known());
+    assert_eq!(spent.cost_usd("claude-sonnet-5"), Some(1.0));
+}
+
 /// The hand-written shapes: a prompt the CLI withdrew, and a turn the budget
 /// ended. See `tests/fixtures/README.md`.
 const HAND_WRITTEN: &str = include_str!("fixtures/hand-written.jsonl");

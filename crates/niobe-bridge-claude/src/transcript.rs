@@ -370,19 +370,43 @@ pub fn list(dir: &Path) -> Result<Vec<Transcript>, TranscriptError> {
 /// running totals the CLI restores when that session is resumed, which the
 /// resumed process's first turn reports on top of. Nothing where the CLI never
 /// wrote a `cost-state`, which is a session it did not leave cleanly.
+///
+/// The last `cost-state` record alone is the one the CLI restores. Where it
+/// cannot be read — a field of a shape this build does not know, or a record
+/// the CLI was cut off writing — the spend is [`Spent::unknown`] and not an
+/// older record's figure, which would count the turns in between again as
+/// measured on the resumed session's first result.
 pub fn spent(path: &Path) -> Result<Spent, TranscriptError> {
     let text = read(path)?;
-    let last = text
+    for line in text
         .lines()
         .rev()
         .filter(|line| line.contains(r#""cost-state""#))
-        .find_map(|line| match serde_json::from_str::<Line>(line) {
-            Ok(Line::CostState(record)) => Some(record),
-            _ => None,
-        });
-    Ok(last.map_or_else(Spent::default, |record| {
-        Spent::from_model_usage(&record.model_usage)
-    }))
+    {
+        match serde_json::from_str::<Line>(line) {
+            Ok(Line::CostState(record)) => return Ok(Spent::from_model_usage(&record.model_usage)),
+            // Another record that happens to name the type, a message that
+            // talks about it: not the CLI's accounting.
+            Ok(_) => {}
+            Err(error) if is_cost_state(line) => {
+                return Ok(Spent::unknown(format!(
+                    "the transcript's last cost-state record cannot be read: {error}"
+                )));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(Spent::default())
+}
+
+/// Whether `line`, which this build could not read as a record, is a
+/// `cost-state` one: its `type` says so, or it was cut off in the middle of
+/// writing what begins by saying so.
+fn is_cost_state(line: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(value) => value.get("type").and_then(|t| t.as_str()) == Some("cost-state"),
+        Err(_) => line.trim_start().starts_with(r#"{"type":"cost-state""#),
+    }
 }
 
 /// One event a transcript folded to, and when the CLI recorded the record it
