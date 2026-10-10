@@ -602,22 +602,59 @@ fn imports(text: &str) -> Vec<String> {
         if fenced {
             continue;
         }
-        // Every other run between backticks is a code span.
-        for (i, outside) in line.split('`').enumerate() {
-            if i % 2 == 1 {
-                continue;
-            }
-            found.extend(
-                outside
-                    .split_whitespace()
-                    .filter_map(|word| word.strip_prefix('@'))
-                    .map(|path| path.trim_end_matches([',', ';', ':', '!', '?', ')', '.']))
-                    .filter(|path| !path.is_empty())
-                    .map(str::to_owned),
-            );
-        }
+        found.extend(
+            outside_code_spans(line)
+                .split_whitespace()
+                .filter_map(|word| word.strip_prefix('@'))
+                .map(|path| path.trim_end_matches([',', ';', ':', '!', '?', ')', '.']))
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned),
+        );
     }
     found
+}
+
+/// `line` with each code span replaced by a space: a run of backticks opens
+/// one, and the next run of exactly as many closes it, so that ``` `` a`b `` ```
+/// is one span with a backtick in it. A run with no run of its length after it
+/// is not a span, and stays as it was written.
+fn outside_code_spans(line: &str) -> String {
+    let runs = |text: &str| -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        let mut start = None;
+        for (at, c) in text.char_indices() {
+            match (c == '`', start) {
+                (true, None) => start = Some(at),
+                (false, Some(from)) => {
+                    found.push((from, at - from));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(from) = start {
+            found.push((from, text.len() - from));
+        }
+        found
+    };
+    let ticks = runs(line);
+    let mut out = String::with_capacity(line.len());
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(&(open, len)) = ticks.get(at) {
+        match ticks[at + 1..].iter().position(|&(_, other)| other == len) {
+            Some(offset) => {
+                let (close, _) = ticks[at + 1 + offset];
+                out.push_str(&line[copied..open]);
+                out.push(' ');
+                copied = close + len;
+                at += offset + 2;
+            }
+            None => at += 1,
+        }
+    }
+    out.push_str(&line[copied..]);
+    out
 }
 
 /// Where an import of `path` from a file in `from` points: from the home
@@ -1160,6 +1197,17 @@ mod tests {
             contents(&vec![b'x'; limit]),
             Contents::Text(text, size) if size == LIMIT && text.len() == limit
         ));
+    }
+
+    /// A code span is opened by a run of backticks and closed by one of the
+    /// same length, so a double-backtick span with a single one inside it is
+    /// one span, and an `@` word in it imports nothing.
+    #[test]
+    fn an_at_path_in_a_double_backtick_code_span_is_not_an_import() {
+        assert_eq!(imports("see `@a.md` and @b.md"), ["b.md"]);
+        assert_eq!(imports("see ``x ` @c.md`` and @d.md"), ["d.md"]);
+        assert_eq!(imports("an unclosed ` tick then @e.md"), ["e.md"]);
+        assert_eq!(imports("x ```` @f.md ```` @g.md"), ["g.md"]);
     }
 
     /// The CLI follows imports [`IMPORT_DEPTH`] deep and no further: a chain

@@ -1341,10 +1341,10 @@ impl Tail {
     /// one.
     fn said(&self) -> String {
         let mut from = self.kept.len().saturating_sub(SAID);
-        let cut = self
+        let before = self
             .bytes
             .saturating_sub(u64::try_from(self.kept.len() - from).unwrap_or(u64::MAX));
-        if cut > 0 {
+        if before > 0 {
             while self
                 .kept
                 .get(from)
@@ -1353,6 +1353,11 @@ impl Tail {
                 from += 1;
             }
         }
+        // Counted after the character the cut went through is left out, so
+        // that what is left out and what is shown add up to what was written.
+        let cut = self
+            .bytes
+            .saturating_sub(u64::try_from(self.kept.len() - from).unwrap_or(u64::MAX));
         let text = String::from_utf8_lossy(self.kept.get(from..).unwrap_or_default());
         let text = text.trim();
         match cut {
@@ -2345,6 +2350,29 @@ mod tests {
         assert!(prompt.starts_with(about));
     }
 
+    /// What is left out and what is shown add up to what was written, even
+    /// where the cut went through a character and its continuation bytes were
+    /// skipped.
+    #[test]
+    fn the_stderr_tail_counts_the_bytes_it_skips_as_left_out() {
+        let mut tail = Tail::default();
+        let written = "€".repeat(24_577 / 3).into_bytes();
+        let total = written.len() as u64;
+        tail.add(&written);
+
+        let said = tail.said();
+
+        let header = said
+            .strip_prefix("[the first ")
+            .and_then(|rest| rest.split_once(" of "))
+            .expect("the tail says how much it left out");
+        let left_out: u64 = header.0.parse().expect("a count");
+        let shown = said
+            .split_once("] ")
+            .map_or(0, |(_, text)| text.len() as u64);
+        assert_eq!(left_out + shown, total, "{left_out} + {shown} of {total}");
+    }
+
     #[test]
     fn a_short_first_prompt_is_sent_for_a_title_whole() {
         assert_eq!(
@@ -3132,10 +3160,12 @@ mod tests {
         assert!(text.ends_with("éx"), "{said}");
         assert_eq!(text.len(), SAID - 1, "{said}");
         let written = 2 * SAID + 1;
+        // What is left out is what is not shown, the byte of the character the
+        // cut went through included.
         assert!(
             said.starts_with(&format!(
                 "[the first {} of {written} bytes it wrote are left out]",
-                written - SAID
+                written - text.len()
             )),
             "{}",
             &said[..80]
