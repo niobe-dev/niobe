@@ -174,9 +174,9 @@ pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
             true => (Scope::Project, Scope::Local),
             false => (Scope::Parent, Scope::Parent),
         };
-        found.loaded(scope, &dir.join(MEMORY), lookup);
-        found.loaded(scope, &dir.join(".claude").join(MEMORY), lookup);
-        found.loaded(local, &dir.join(LOCAL), lookup);
+        found.loaded_under(scope, dir, &dir.join(MEMORY), lookup);
+        found.loaded_under(scope, dir, &dir.join(".claude").join(MEMORY), lookup);
+        found.loaded_under(local, dir, &dir.join(LOCAL), lookup);
     }
     if let Some(config) = lookup.config {
         let dir = crate::transcript::directory(config, &main_checkout(lookup.cwd)).join(AUTO_DIR);
@@ -220,10 +220,15 @@ impl Found {
     /// A file the CLI loads itself, where it is there, and what it imports.
     /// One the repository holds is held to it, as its imports are.
     fn loaded(&mut self, scope: Scope, path: &Path, lookup: &Lookup<'_>) {
-        let held = Held::to_repository(
-            self.places
-                .in_repository(&canonical(path.parent().unwrap_or(Path::new("")))),
-        );
+        self.loaded_under(scope, path.parent().unwrap_or(Path::new("")), path, lookup);
+    }
+
+    /// [`Found::loaded`] for `path`, named under the directory `dir`: whether
+    /// the repository holds it is judged by the directory it is named from and
+    /// not by where it resolves, since a `.claude` that is a link to somewhere
+    /// else is a repository's way of choosing what is read.
+    fn loaded_under(&mut self, scope: Scope, dir: &Path, path: &Path, lookup: &Lookup<'_>) {
+        let held = Held::to_repository(self.places.in_repository(&canonical(dir)));
         self.add(scope, path, 0, &held, lookup);
     }
 
@@ -409,9 +414,10 @@ impl Held {
 /// The places a memory file is judged by, each as the filesystem resolves it.
 struct Places {
     /// The repository the session runs in: the nearest directory holding
-    /// `.git` from where it runs, or that directory itself. `None` where it
-    /// is the home directory or above it, which the operator's own files are
-    /// in rather than a clone's.
+    /// `.git` from where it runs; with none, the directory of the home
+    /// directory that holds where it runs, or where it runs where that is not
+    /// under home. `None` where it is the home directory or above it, which
+    /// the operator's own files are in rather than a clone's.
     repository: Option<PathBuf>,
     /// The CLI's configuration directory, where its sign-in is kept.
     config: Option<PathBuf>,
@@ -422,13 +428,25 @@ struct Places {
 impl Places {
     fn of(lookup: &Lookup<'_>) -> Self {
         let home = lookup.home.map(canonical);
-        let repository = canonical(
-            lookup
-                .cwd
-                .ancestors()
-                .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
-                .unwrap_or(lookup.cwd),
-        );
+        let git = lookup
+            .cwd
+            .ancestors()
+            .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok());
+        let repository = match (git, &home) {
+            (Some(dir), _) => canonical(dir),
+            // With no `.git` there is no telling where what arrived stops: a
+            // downloaded archive's `CLAUDE.md` is a directory or two above
+            // where the session runs. Everything below the home directory
+            // that holds the session is taken as the repository's.
+            (None, Some(home)) => {
+                let cwd = canonical(lookup.cwd);
+                cwd.strip_prefix(home)
+                    .ok()
+                    .and_then(|below| below.components().next())
+                    .map_or(cwd.clone(), |first| home.join(first))
+            }
+            (None, None) => canonical(lookup.cwd),
+        };
         let repository = match &home {
             Some(home) if home.starts_with(&repository) => None,
             _ => Some(repository),
@@ -972,6 +990,49 @@ mod tests {
                 (None, Some(Withheld::Outside)),
                 (None, Some(Withheld::Outside))
             ]
+        );
+    }
+
+    /// Without a `.git`, where what arrived stops is not known: an archive
+    /// unpacked under the home directory has its `CLAUDE.md` a directory
+    /// above where the session runs, and what it imports from outside it is
+    /// not read.
+    #[test]
+    fn with_no_git_the_directory_under_home_that_holds_the_session_is_the_repository() {
+        let (_dir, home, config, _repo) = signed_in();
+        let archive = home.join("Downloads").join("archive");
+        let cwd = archive.join("sub");
+        std::fs::create_dir_all(&cwd).expect("made");
+        write(&home.join("Documents").join("secret.txt"), "TOP SECRET\n");
+        write(&archive.join("CLAUDE.md"), "@../../Documents/secret.txt\n");
+
+        let found = found_in(&home, &config, &cwd);
+
+        let secret = listed(&found, &archive.join("../../Documents/secret.txt"));
+        assert_eq!(
+            (secret.text.as_deref(), secret.withheld),
+            (None, Some(Withheld::Outside))
+        );
+    }
+
+    /// A repository's `.claude` that is a link elsewhere is named inside the
+    /// repository whatever it leads to: what it holds is not the operator's.
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_claude_linked_out_of_the_repository_is_judged_by_where_it_is_named() {
+        let (dir, home, config, repo) = signed_in();
+        let evil = dir.path().join("evil-assets");
+        write(&evil.join("CLAUDE.md"), "@../Documents/taxes.txt\n");
+        write(&dir.path().join("Documents").join("taxes.txt"), "TAXES\n");
+        std::os::unix::fs::symlink(&evil, repo.join(".claude")).expect("a link can be made");
+
+        let found = found_in(&home, &config, &repo);
+
+        assert!(
+            !found
+                .iter()
+                .any(|source| source.text.as_deref() == Some("TAXES\n")),
+            "{found:#?}"
         );
     }
 
