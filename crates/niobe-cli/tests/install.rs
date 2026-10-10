@@ -45,9 +45,14 @@ fn release(root: &Path) -> PathBuf {
 
 /// A release whose binary is the script `stand_in`.
 fn release_of(root: &Path, stand_in: &str) -> PathBuf {
+    release_holding(root, "niobe", stand_in)
+}
+
+/// A release whose archives hold the script `stand_in` as the file `name`.
+fn release_holding(root: &Path, name: &str, stand_in: &str) -> PathBuf {
     let staging = root.join("staging");
     fs::create_dir_all(&staging).expect("the temporary directory is writable");
-    let binary = staging.join("niobe");
+    let binary = staging.join(name);
     fs::write(&binary, stand_in).expect("the staging directory is writable");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
         .expect("the stand-in was just written");
@@ -61,7 +66,7 @@ fn release_of(root: &Path, stand_in: &str) -> PathBuf {
             .arg(&archive)
             .arg("-C")
             .arg(&staging)
-            .arg("niobe")
+            .arg(name)
             .status()
             .expect("tar is on PATH on every machine the tests run on");
         assert!(
@@ -446,4 +451,350 @@ fn a_binary_that_does_not_run_installs_nothing() {
     );
     assert_nothing_staged(root.path());
     assert!(!root.path().join("bin").join("niobe").exists());
+}
+
+/// Runs the installer with `tools` as the whole PATH and exactly the
+/// environment `env` names.
+fn run_installer(tools: &Path, env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new("sh");
+    command.arg(installer()).env_clear().env("PATH", tools);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command
+        .output()
+        .expect("sh is on every machine the tests run on")
+}
+
+/// A stand-in `curl` that writes its arguments on one line of `used`, and
+/// fetches a `file://` URL by copying it: any other URL is a failed download,
+/// whose message then names the URL the installer built.
+fn recording_curl(used: &Path) -> String {
+    format!(
+        "echo \"$*\" >> '{used}'
+url= file=
+while [ $# -gt 0 ]; do
+    case \"$1\" in
+        -o) file=$2; shift ;;
+        --proto) shift ;;
+        -*) ;;
+        *) url=$1 ;;
+    esac
+    shift
+done
+case \"$url\" in
+    file://*) cp \"${{url#file://}}\" \"$file\" ;;
+    *) exit 1 ;;
+esac
+",
+        used = used.display()
+    )
+}
+
+/// The arguments each stand-in was run with, one line to a run.
+fn argv_of(used: &Path) -> String {
+    fs::read_to_string(used).expect("the stand-in was run")
+}
+
+#[test]
+fn curl_is_held_to_https_and_a_current_tls() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+    let tools = root.path().join("tools");
+    tools_without(&tools, &["curl", "wget"]);
+    let used = root.path().join("used");
+    script(&tools.join("curl"), &recording_curl(&used));
+
+    let output = install_with_tools(root.path(), &release, &tools);
+
+    assert!(output.status.success(), "{}", said(&output));
+    for line in argv_of(&used).lines() {
+        assert!(line.contains("--proto =https,file"), "{line}");
+        assert!(line.contains("--tlsv1.2"), "{line}");
+    }
+}
+
+#[test]
+fn a_wget_that_can_be_held_to_https_is() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+    let tools = root.path().join("tools");
+    tools_without(&tools, &["curl", "wget"]);
+    let used = root.path().join("used");
+    script(
+        &tools.join("wget"),
+        &format!(
+            "echo \"$*\" >> '{}.argv'\n{}",
+            used.display(),
+            gnu_wget(&used)
+        ),
+    );
+
+    let output = install_with_tools(root.path(), &release, &tools);
+
+    assert!(output.status.success(), "{}", said(&output));
+    let argv =
+        fs::read_to_string(format!("{}.argv", used.display())).expect("the stand-in was run");
+    let downloads: Vec<&str> = argv.lines().filter(|line| line.contains("-O")).collect();
+    assert!(!downloads.is_empty(), "{argv}");
+    for line in downloads {
+        assert!(line.contains("--https-only"), "{line}");
+    }
+}
+
+#[test]
+fn a_wget_that_cannot_be_held_to_https_refuses_a_plain_http_url() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let tools = root.path().join("tools");
+    tools_without(&tools, &["curl", "wget"]);
+    let used = root.path().join("used");
+    script(&tools.join("wget"), &busybox_wget(&used));
+
+    let output = run_installer(
+        &tools,
+        &[
+            ("HOME", &root.path().display().to_string()),
+            (
+                "NIOBE_INSTALL_DIR",
+                &root.path().join("bin").display().to_string(),
+            ),
+            ("NIOBE_DOWNLOAD_URL", "http://releases.example/niobe"),
+        ],
+    );
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("is not an https:// URL"),
+        "{}",
+        said(&output)
+    );
+    assert!(!used.exists(), "a plain-http URL was fetched");
+}
+
+/// A machine as `os` and `arch`, which `uname` is made to report, with the
+/// Rosetta answer `rosetta` for Apple silicon, and a curl that fails every
+/// download and so names the URL it was asked for.
+fn on_machine(
+    root: &Path,
+    os: &str,
+    arch: &str,
+    rosetta: Option<&str>,
+    env: &[(&str, &str)],
+) -> Output {
+    let tools = root.join("tools");
+    tools_without(&tools, &["curl", "wget", "uname", "sysctl"]);
+    script(
+        &tools.join("uname"),
+        &format!("case \"$1\" in -s) echo '{os}' ;; -m) echo '{arch}' ;; esac\n"),
+    );
+    if let Some(answer) = rosetta {
+        script(&tools.join("sysctl"), &format!("echo {answer}\n"));
+    }
+    script(&tools.join("curl"), &recording_curl(&root.join("used")));
+    let home = root.display().to_string();
+    let mut all = vec![("HOME", home.as_str())];
+    all.extend_from_slice(env);
+    run_installer(&tools, &all)
+}
+
+#[test]
+fn an_operating_system_with_no_release_is_named() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+
+    let output = on_machine(root.path(), "Plan9", "x86_64", None, &[]);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("niobe-install: error: no release is built for Plan9"),
+        "{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn an_architecture_with_no_release_is_named() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+
+    let output = on_machine(root.path(), "Linux", "riscv64", None, &[]);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("no release is built for riscv64"),
+        "{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn a_shell_under_rosetta_installs_the_native_binary() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+
+    let output = on_machine(root.path(), "Darwin", "x86_64", Some("1"), &[]);
+
+    assert!(
+        said(&output).contains("niobe-aarch64-apple-darwin.tar.gz"),
+        "{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn an_intel_mac_installs_the_intel_binary() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+
+    let output = on_machine(root.path(), "Darwin", "x86_64", Some("0"), &[]);
+
+    assert!(
+        said(&output).contains("niobe-x86_64-apple-darwin.tar.gz"),
+        "{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn each_form_of_the_requested_version_names_its_release_url() {
+    let base = "https://github.com/niobe-dev/niobe/releases";
+    for (version, url) in [
+        (None, format!("{base}/latest/download/")),
+        (Some("v1.2.3"), format!("{base}/download/v1.2.3/")),
+        (Some("1.2.3"), format!("{base}/download/v1.2.3/")),
+    ] {
+        let root = tempfile::tempdir().expect("a temporary directory can be made");
+        let env: Vec<(&str, &str)> = version.map(|v| ("NIOBE_VERSION", v)).into_iter().collect();
+
+        let output = on_machine(root.path(), "Linux", "x86_64", None, &env);
+
+        assert!(
+            said(&output).contains(&format!("{url}niobe-x86_64-unknown-linux-musl.tar.gz")),
+            "{version:?}: {}",
+            said(&output)
+        );
+    }
+}
+
+#[test]
+fn a_machine_with_no_downloader_says_so() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let tools = root.path().join("tools");
+    tools_without(&tools, &["curl", "wget"]);
+
+    let output = install_with_tools(root.path(), &root.path().join("release"), &tools);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("needs curl or wget"),
+        "{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn a_machine_with_no_sha_tool_says_so_and_installs_nothing() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+    let tools = root.path().join("tools");
+    tools_without(&tools, &["sha256sum", "shasum"]);
+
+    let output = install_with_tools(root.path(), &release, &tools);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("needs sha256sum or shasum"),
+        "{}",
+        said(&output)
+    );
+    assert!(!root.path().join("bin/niobe").exists());
+}
+
+#[test]
+fn an_archive_that_holds_no_niobe_installs_nothing() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release_holding(root.path(), "something-else", STAND_IN);
+
+    let output = install(root.path(), &release);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("holds no niobe binary"),
+        "{}",
+        said(&output)
+    );
+    assert!(!root.path().join("bin/niobe").exists());
+}
+
+#[test]
+fn a_machine_without_claude_is_told_niobe_drives_it() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+
+    let output = install(root.path(), &release);
+
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("'claude' CLI, which is not on PATH"),
+        "{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn a_machine_with_claude_is_not_told_so() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+    let tools = root.path().join("tools");
+    tools_without(&tools, &[]);
+    script(&tools.join("claude"), "exit 0\n");
+
+    let output = install_with_tools(root.path(), &release, &tools);
+
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(!said(&output).contains("'claude'"), "{}", said(&output));
+}
+
+#[test]
+fn an_empty_home_with_no_install_directory_ends_in_the_installers_own_message() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+    let url = format!("file://{}", release.display());
+    let tools = root.path().join("tools");
+    tools_without(&tools, &[]);
+
+    for env in [
+        vec![("HOME", ""), ("NIOBE_DOWNLOAD_URL", url.as_str())],
+        vec![("NIOBE_DOWNLOAD_URL", url.as_str())],
+    ] {
+        let output = run_installer(&tools, &env);
+
+        assert!(!output.status.success(), "{}", said(&output));
+        assert!(
+            said(&output).contains("niobe-install: error: HOME is not set"),
+            "{}",
+            said(&output)
+        );
+    }
+}
+
+#[test]
+fn a_directory_at_the_staging_name_is_refused_and_left_alone() {
+    let root = tempfile::tempdir().expect("a temporary directory can be made");
+    let release = release(root.path());
+    let in_the_way = root.path().join("bin").join(".niobe.new");
+    fs::create_dir_all(&in_the_way).expect("the directory is made");
+
+    let output = install(root.path(), &release);
+
+    assert!(!output.status.success(), "{}", said(&output));
+    assert!(
+        said(&output).contains("niobe-install: error:") && said(&output).contains("in the way"),
+        "{}",
+        said(&output)
+    );
+    assert!(
+        fs::read_dir(&in_the_way)
+            .expect("the directory is still there")
+            .next()
+            .is_none(),
+        "the binary was copied into the directory"
+    );
+    assert!(!root.path().join("bin/niobe").exists());
 }

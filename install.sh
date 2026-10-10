@@ -108,7 +108,12 @@ main() {
     need mktemp
 
     version=${NIOBE_VERSION:-latest}
-    install_dir=${NIOBE_INSTALL_DIR:-"$HOME/.local/bin"}
+    install_dir=${NIOBE_INSTALL_DIR:-}
+    if [ -z "$install_dir" ]; then
+        [ -n "${HOME:-}" ] ||
+            fail "HOME is not set; set NIOBE_INSTALL_DIR to say where niobe goes"
+        install_dir="$HOME/.local/bin"
+    fi
     case "$version" in
         latest) base="https://github.com/$REPO/releases/latest/download" ;;
         v*) base="https://github.com/$REPO/releases/download/$version" ;;
@@ -151,6 +156,12 @@ main() {
     # the rename, so a binary that does not run on this machine replaces
     # nothing.
     staged="$install_dir/.niobe.new"
+    # A directory there would take the copy inside it, and a link would send
+    # it wherever it points; only a file of an earlier, cut-off install is
+    # overwritten.
+    if [ -d "$staged" ] || [ -L "$staged" ]; then
+        fail "$staged is in the way; remove it, nothing was installed"
+    fi
     cp "$scratch/niobe" "$staged"
     chmod 755 "$staged"
     if ! installed=$("$staged" --version 2>&1); then
