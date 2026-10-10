@@ -2322,6 +2322,7 @@ mod tests {
                 input: r#"{"command":"cargo test"}"#.to_owned(),
                 target: Some("cargo test".to_owned()),
                 proposal: None,
+                reason: None,
                 agent: None,
             },
             second(100),

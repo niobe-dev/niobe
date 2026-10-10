@@ -2858,7 +2858,8 @@ impl QuestionBody {
 fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionBody {
     let plain = Style::new().fg(theme.fg);
 
-    let head = question_head(&tool_label(&ask.tool), inner, plain);
+    let mut head = question_head(&tool_label(&ask.tool), inner, plain);
+    head.extend(question_reason(ask, inner, theme));
     let call = question_call(app, ask, inner, theme);
     let mut answers = vec![Line::from("")];
     let focus = app.ask_focus();
@@ -2948,6 +2949,19 @@ fn bold_rows(said: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
     text::wrap_exact(said, inner)
         .into_iter()
         .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.fg).bold()))
+        .collect()
+}
+
+/// Why the backend asked, where it said, wrapped to `inner` columns under
+/// what is asked. A command it could not check reads as routine without it.
+fn question_reason(ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    const BECAUSE: &str = "asked because: ";
+    let Some(reason) = ask.reason.as_deref().filter(|said| !said.trim().is_empty()) else {
+        return Vec::new();
+    };
+    text::wrap_exact(&format!("{BECAUSE}{reason}"), inner)
+        .into_iter()
+        .map(|row| Line::from(row).style(Style::new().fg(theme.fg).italic()))
         .collect()
 }
 

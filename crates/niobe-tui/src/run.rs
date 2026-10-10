@@ -1123,6 +1123,7 @@ mod tests {
             input: r#"{"command":"cargo test"}"#.to_owned(),
             target: target.map(str::to_owned),
             proposal: None,
+            reason: None,
             agent: None,
         });
         app
@@ -1846,6 +1847,7 @@ mod tests {
                 input: r#"{"command":"cargo test"}"#.to_owned(),
                 target: Some("cargo test".to_owned()),
                 proposal: None,
+                reason: None,
                 agent: None,
             }],
             ..Attached::default()
@@ -1880,6 +1882,7 @@ mod tests {
             input: r#"{"command":"cargo test"}"#.to_owned(),
             target: Some("cargo test".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         });
 

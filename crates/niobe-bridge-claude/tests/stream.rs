@@ -1757,6 +1757,52 @@ fn a_last_cost_state_that_cannot_be_read_leaves_the_earlier_spend_unknown() {
     assert_eq!(spent.cost_usd("claude-sonnet-5"), Some(1.0));
 }
 
+/// The CLI says why it is asking, and a question that left that out would
+/// read as routine: three of the recorded prompts were stopped on a command
+/// that could hide arguments from the CLI's own checks.
+#[test]
+fn a_prompt_carries_the_reason_the_cli_gave_for_asking() {
+    let events = translate(SUB_AGENTS);
+
+    let reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::PermissionRequest { reason, .. } => reason.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "Newline followed by # inside a quoted argument can hide arguments from path \
+             validation",
+            "Contains brace with quote character (expansion obfuscation)",
+            "Parser skipped input between top-level statements",
+        ]
+    );
+}
+
+/// A refusal the CLI announces says why, and the call's row says it: the
+/// result that carries the refusal back to the model does not.
+#[test]
+fn a_refusal_the_cli_announced_says_why_on_the_calls_end() {
+    let events = translated();
+
+    let denied = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolCallEnd {
+                id,
+                outcome: ToolOutcome::Denied,
+                error,
+                ..
+            } if id.as_str() == "toolu_bash" => Some(error.clone()),
+            _ => None,
+        })
+        .expect("the recording refuses toolu_bash");
+    assert_eq!(denied.as_deref(), Some("This command requires approval"));
+}
+
 /// The hand-written shapes: a prompt the CLI withdrew, and a turn the budget
 /// ended. See `tests/fixtures/README.md`.
 const HAND_WRITTEN: &str = include_str!("fixtures/hand-written.jsonl");

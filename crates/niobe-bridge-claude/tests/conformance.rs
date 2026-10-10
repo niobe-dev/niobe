@@ -763,3 +763,40 @@ fn every_tool_a_recorded_init_lists_is_put_under_a_kind_of_work() {
          it does in `niobe_core::work`, or list it in OTHER_ON_PURPOSE with why."
     );
 }
+
+/// The reason the CLI gives for asking, and for refusing, is read off the
+/// recordings: a release that renamed the field would leave every question
+/// reading as routine, and nothing else here would say so.
+#[test]
+fn the_recordings_still_carry_the_reason_a_call_was_asked_or_refused() {
+    let mut asked = 0;
+    let mut refused = 0;
+    for path in recordings() {
+        let text = std::fs::read_to_string(&path).expect("a recording reads");
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let has_reason = |at: &serde_json::Value| {
+                at.get("decision_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|said| !said.is_empty())
+            };
+            match value.get("type").and_then(serde_json::Value::as_str) {
+                Some("control_request") if value.get("request").is_some_and(has_reason) => {
+                    asked += 1;
+                }
+                Some("system")
+                    if value.get("subtype").and_then(serde_json::Value::as_str)
+                        == Some("permission_denied")
+                        && has_reason(&value) =>
+                {
+                    refused += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(asked >= 3, "no recorded question carries a reason: {asked}");
+    assert!(refused >= 1, "no recorded refusal carries one: {refused}");
+}

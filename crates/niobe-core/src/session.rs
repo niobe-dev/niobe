@@ -1921,6 +1921,7 @@ mod tests {
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: Some("rm -rf build".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         });
         assert_eq!(state.pending_permissions().len(), 1);
@@ -1942,6 +1943,7 @@ mod tests {
             input: r#"{"command":"ls"}"#.to_owned(),
             target: Some("ls".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         }
     }
@@ -1987,6 +1989,7 @@ mod tests {
             input: r#"{"command":"ls"}"#.to_owned(),
             target: Some("ls".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         });
         state.apply(&Event::Error {

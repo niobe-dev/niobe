@@ -323,6 +323,10 @@ pub struct Ask {
     /// What the call would do, where the backend read it out of the
     /// arguments; `None` leaves the arguments to be shown by key.
     pub proposed: Option<Proposed>,
+    /// Why the backend asked, in its words, where it said. Drawn under the
+    /// tool's name: it is what tells a call that looks routine from the
+    /// reason it was stopped on.
+    pub reason: Option<String>,
     /// The turn the call belongs to, counted in prompts sent this session,
     /// which is what the question says it is blocking. Zero where the session
     /// has no prompt on record, as one attached to a turn already running.
@@ -2307,6 +2311,7 @@ impl App {
                 input,
                 target,
                 proposal,
+                reason,
                 agent,
             } => {
                 // An Esc pressed before the question came up made the next
@@ -2325,6 +2330,7 @@ impl App {
                     input: input.clone(),
                     target: target.clone(),
                     proposed: proposal.clone().map(Proposed::new),
+                    reason: reason.clone(),
                     turn: self.session.user_messages(),
                     agent: agent.clone(),
                 });
@@ -9314,6 +9320,7 @@ mod tests {
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: target.map(str::to_owned),
             proposal: None,
+            reason: None,
             agent: None,
         }
     }
@@ -9444,6 +9451,7 @@ mod tests {
             input: r#"{"command":"ls"}"#.to_owned(),
             target: Some("ls".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         });
         app.on_key(key(KeyCode::Esc));
@@ -9784,6 +9792,7 @@ mod tests {
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         });
 
@@ -10130,6 +10139,7 @@ mod tests {
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: Some("rm -rf build".to_owned()),
             proposal: None,
+            reason: None,
             agent: agent.map(AgentId::new),
         }
     }
@@ -10214,6 +10224,7 @@ mod tests {
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         });
 
@@ -10241,6 +10252,7 @@ mod tests {
             input: r#"{"command":"cargo test && rm -rf ~"}"#.to_owned(),
             target: Some("cargo test && rm -rf ~".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         });
 
@@ -11313,6 +11325,7 @@ mod tests {
             input: "{}".to_owned(),
             target: None,
             proposal: None,
+            reason: None,
             agent: None,
         });
         assert_eq!(
@@ -11347,6 +11360,7 @@ mod tests {
                 input: r#"{"command":"ls"}"#.to_owned(),
                 target: target.map(str::to_owned),
                 proposal: None,
+                reason: None,
                 agent: None,
             });
         }
@@ -12126,6 +12140,7 @@ mod tests {
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
             proposal: None,
+            reason: None,
             agent: None,
         });
         app.apply(&Event::PermissionResponse {
@@ -12528,6 +12543,7 @@ mod tests {
                 input: "{}".to_owned(),
                 target: None,
                 proposal: None,
+                reason: None,
                 agent: None,
             },
             millis(1_100),

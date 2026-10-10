@@ -221,6 +221,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             input: format!("{{\"command\":\"{p}\"}}"),
             target: Some(format!("rm {p}")),
             proposal: None,
+            reason: Some(format!("why {p}")),
             agent: None,
         }])
     }));
@@ -250,6 +251,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 input: serde_json::json!({ "description": p, "file_path": p }).to_string(),
                 target: Some(format!("src/{p}.rs")),
                 proposal: Some(Proposal::new(action(p), ["file_path"])),
+                reason: None,
                 agent: None,
             }])
         }));
@@ -404,6 +406,7 @@ fn a_permission_question_shows_each_control_it_holds_where_the_operator_approves
             input: input.to_string(),
             target,
             proposal: action,
+            reason: None,
             agent: None,
         }])
     };

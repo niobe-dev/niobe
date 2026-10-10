@@ -884,6 +884,13 @@ pub enum Event {
         /// shown as it is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proposal: Option<Proposal>,
+        /// Why the backend asked, in its own words, where it said: a command
+        /// it could not check, a path outside the project. Shown with the
+        /// question, since a call that looks routine is not one the backend
+        /// would have stopped on. `None` is that it gave none, which is no
+        /// claim that the call is routine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
         /// The sub-agent whose call is waiting, or `None` for the session's
         /// own. It says who is asking and nothing more: a standing answer is
         /// about the tool and its target, whichever agent asked.
@@ -1349,6 +1356,7 @@ mod tests {
             input: "{}".to_owned(),
             target: Some("ls".to_owned()),
             proposal: None,
+            reason: None,
             agent,
         };
         for agent in [Some(AgentId::new("toolu_a")), None] {

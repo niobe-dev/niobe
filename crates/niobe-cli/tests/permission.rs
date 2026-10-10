@@ -174,6 +174,7 @@ fn a_rule_covers_the_target_it_names_and_nothing_else() {
         input: r#"{"command":"cargo publish"}"#.to_owned(),
         target: Some("cargo publish".to_owned()),
         proposal: None,
+        reason: None,
         agent: None,
     });
     app.settle_rules();
@@ -197,6 +198,7 @@ fn always_this_tool_answers_every_call_to_it() {
         input: r#"{"command":"cargo publish"}"#.to_owned(),
         target: Some("cargo publish".to_owned()),
         proposal: None,
+        reason: None,
         agent: None,
     });
     app.settle_rules();

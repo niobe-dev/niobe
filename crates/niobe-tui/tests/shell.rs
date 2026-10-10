@@ -68,6 +68,7 @@ pub fn session_waiting_on_a_prompt() -> App {
         input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
         target: Some("/repo/notes.txt".to_owned()),
         proposal: None,
+        reason: None,
         agent: None,
     });
     app
@@ -511,6 +512,7 @@ fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
         input: format!(r#"{{"command":"{command}"}}"#),
         target: Some(command.to_owned()),
         proposal: ran(command),
+        reason: None,
         agent: Some(AgentId::new(agent)),
     };
     app.apply(&asked("f3", "curl -sI localhost:8080", "toolu_fetch"));
@@ -532,6 +534,35 @@ fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
     assert_snapshot("agents-asking-120x30", &frame);
 }
 
+/// The CLI stops on a command it could not check, and says so: the question
+/// carries that under the tool's name, where without it the command would
+/// read as any other.
+#[test]
+fn a_question_says_why_the_backend_asked() {
+    let mut app = running_session();
+    let command = "grep -rn \"cache\" . ; python3 -c '\n# x\nprint(1)'";
+    app.apply(&Event::PermissionRequest {
+        id: "why".into(),
+        tool: "Bash".to_owned(),
+        input: format!(r#"{{"command":{}}}"#, serde_json::json!(command)),
+        target: Some(command.to_owned()),
+        proposal: ran(command),
+        reason: Some(
+            "Newline followed by # inside a quoted argument can hide arguments from path \
+             validation"
+                .to_owned(),
+        ),
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 100, 30);
+    assert!(
+        frame.contains("asked because: Newline followed by #"),
+        "{frame}"
+    );
+    assert_snapshot("asking-with-a-reason-100x30", &frame);
+}
+
 /// A refused command of several lines, drawn on its one row, keeps its
 /// lines apart: `set -e` and `cd /tmp` joined would read as another command.
 #[test]
@@ -544,6 +575,7 @@ fn a_denied_command_of_several_lines_keeps_its_lines_apart_on_its_row() {
         input: r#"{"command":"set -e\ncd /tmp\necho step 0"}"#.to_owned(),
         target: Some(command.to_owned()),
         proposal: ran(command),
+        reason: None,
         agent: None,
     });
     app.apply(&Event::PermissionResponse {
@@ -924,6 +956,7 @@ fn session_waiting_on_a_long_command() -> App {
         ),
         proposal: ran(&command),
         target: Some(command),
+        reason: None,
         agent: None,
     });
     app
@@ -1127,6 +1160,7 @@ fn session_asked(tool: &str, input: serde_json::Value, proposal: Proposal) -> Ap
         input: input.to_string(),
         target,
         proposal: Some(proposal),
+        reason: None,
         agent: None,
     });
     app
@@ -1293,6 +1327,7 @@ fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
         input: format!(r#"{{"command":"{command}"}}"#),
         target: Some(command.to_owned()),
         proposal: None,
+        reason: None,
         agent: None,
     });
     let frame = screen(&mut app, 120, 30);
@@ -1411,6 +1446,7 @@ fn session_asked_to_create_a_page() -> App {
         input: PAGE_ARGUMENTS.to_owned(),
         target: None,
         proposal: None,
+        reason: None,
         agent: None,
     });
     app
@@ -1574,6 +1610,7 @@ fn a_long_mcp_tool_name_keeps_the_questions_border_and_reads_whole() {
             input: r#"{"body":"looks good"}"#.to_owned(),
             target: None,
             proposal: None,
+            reason: None,
             agent: None,
         });
         let frame = screen(&mut app, width, height);
@@ -1612,6 +1649,7 @@ fn a_control_character_in_a_question_does_not_move_its_border() {
             input,
             proposal: target.as_deref().and_then(ran),
             target,
+            reason: None,
             agent: None,
         });
         assert_the_question_box_holds(&screen(&mut app, 100, 40));
@@ -1628,6 +1666,7 @@ fn a_long_request_wraps_inside_the_question() {
         input: format!(r#"{{"command":"{}"}}"#, command.trim()),
         target: Some(command.trim().to_owned()),
         proposal: ran(command.trim()),
+        reason: None,
         agent: None,
     });
     let frame = screen(&mut app, 200, 60);
@@ -1660,6 +1699,7 @@ fn session_waiting_on_a_spaced_command() -> App {
         ),
         target: Some(command.to_owned()),
         proposal: ran(command),
+        reason: None,
         agent: None,
     });
     app
@@ -1733,6 +1773,7 @@ fn a_short_standing_answer_with_a_tab_in_it_is_repeated_as_it_is_kept() {
         input: r#"{"command":"ls\t-l"}"#.to_owned(),
         target: Some("ls\t-l".to_owned()),
         proposal: ran("ls\t-l"),
+        reason: None,
         agent: None,
     });
     let frame = screen(&mut app, 120, 30);
@@ -1810,6 +1851,7 @@ fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
         input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
         target: Some("/repo/notes.txt".to_owned()),
         proposal: None,
+        reason: None,
         agent: None,
     });
     let after = screen(&mut app, 120, 30);

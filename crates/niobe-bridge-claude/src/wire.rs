@@ -88,6 +88,8 @@ pub(crate) struct System {
     /// `task_notification`: the call that started the task, where a call did.
     pub(crate) tool_name: Option<String>,
     pub(crate) tool_use_id: Option<String>,
+    /// On `permission_denied`: why the call was refused, in the CLI's words.
+    pub(crate) decision_reason: Option<String>,
     /// On `task_notification`: how the task stopped — `completed`, `failed` or
     /// `stopped` in the CLI's own schema. On `status`, the CLI's request state,
     /// which is read only for whether it is `compacting`.
@@ -735,6 +737,11 @@ pub(crate) struct ControlBody {
     pub(crate) tool_name: Option<String>,
     pub(crate) tool_use_id: Option<String>,
     pub(crate) input: Option<serde_json::Value>,
+    /// Why the CLI is asking, in its words: a command it could not check, a
+    /// path it would not read on its own. Recorded on Claude Code 2.1.278.
+    pub(crate) decision_reason: Option<String>,
+    /// The file a path-guarded call was stopped at, where the CLI named one.
+    pub(crate) blocked_path: Option<String>,
 }
 
 /// A `control_response`: the CLI answering a request Niobe made.

@@ -447,7 +447,7 @@ pub struct Translator {
     /// The `tool_use` ids the CLI refused and this bridge has already
     /// reported, so that the closing `result`'s list of the same refusals is
     /// not counted a second time.
-    denied: BTreeMap<String, ()>,
+    denied: BTreeMap<String, Option<String>>,
     /// The `request_id`s of the model changes Niobe asked for that the CLI has
     /// not answered yet: a refusal of one of those is what puts the session
     /// back on the model it last reported.
@@ -720,7 +720,7 @@ impl Translator {
     /// call refused over the control channel, only for one it refuses by its
     /// own rules.
     pub fn refused(&mut self, id: &ToolCallId) {
-        self.denied.insert(id.as_str().to_owned(), ());
+        self.denied.insert(id.as_str().to_owned(), None);
     }
 
     /// Records that the control request `request_id` asks the CLI for a
@@ -1351,7 +1351,10 @@ impl Translator {
         let target = call.and_then(|call| call.target.clone());
         let agent = call.and_then(|call| call.agent.clone());
 
-        self.denied.insert(id.clone(), ());
+        let reason = system
+            .decision_reason
+            .filter(|said| !said.trim().is_empty());
+        self.denied.insert(id.clone(), reason.clone());
         let id = ToolCallId::new(id);
         out.push(Event::PermissionRequest {
             id: id.clone(),
@@ -1360,6 +1363,7 @@ impl Translator {
             target,
             // Refused without asking: there is no question to show it in.
             proposal: None,
+            reason,
             agent,
         });
         out.push(Event::PermissionResponse {
@@ -1612,7 +1616,15 @@ impl Translator {
             let exit_code = exit_code(&name, outcome, &output, reported.as_ref());
             let error = match outcome {
                 ToolOutcome::Ok => None,
-                ToolOutcome::Failed | ToolOutcome::Denied => failure_reason(&output, exit_code),
+                ToolOutcome::Failed => failure_reason(&output, exit_code),
+                // The CLI's own reason for the refusal says more than the
+                // result that carries it back to the model.
+                ToolOutcome::Denied => self
+                    .denied
+                    .get(&tool_use_id)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| failure_reason(&output, exit_code)),
                 ToolOutcome::Interrupted => Some(STOPPED.to_owned()),
             };
 
@@ -2074,12 +2086,14 @@ impl Translator {
             .input
             .as_ref()
             .and_then(|input| self.proposal_of(&tool, input));
+        let reason = asking_reason(body.decision_reason, body.blocked_path);
         out.push(Event::PermissionRequest {
             id,
             tool,
             input: body.input.as_ref().map(render).unwrap_or_default(),
             target: body.input.as_ref().and_then(rule_target),
             proposal,
+            reason,
             agent,
         });
     }
@@ -2163,7 +2177,7 @@ impl Translator {
         // the CLI did not announce — recorded here, late, rather than lost.
         for denial in outcome.permission_denials {
             let id = denial.tool_use_id.unwrap_or_default();
-            if self.denied.insert(id.clone(), ()).is_some() {
+            if self.denied.insert(id.clone(), None).is_some() {
                 continue;
             }
             let agent = self
@@ -2178,6 +2192,7 @@ impl Translator {
                 input: denial.tool_input.as_ref().map(render).unwrap_or_default(),
                 target: denial.tool_input.as_ref().and_then(rule_target),
                 proposal: None,
+                reason: None,
                 agent,
             });
             out.push(Event::PermissionResponse {
@@ -3373,6 +3388,17 @@ fn mcp_server_status(server: wire::McpServerStatus) -> McpServer {
             said(Some(named.trim().to_owned()))
         }),
         name: server.name,
+    }
+}
+
+/// Why the CLI asked about a call, from the reason it gave and the path it
+/// stopped at: its words, with the path after them where it named one.
+fn asking_reason(reason: Option<String>, blocked_path: Option<String>) -> Option<String> {
+    match (said(reason), said(blocked_path)) {
+        (Some(reason), Some(path)) => Some(format!("{reason} ({path})")),
+        (Some(reason), None) => Some(reason),
+        (None, Some(path)) => Some(format!("blocked path: {path}")),
+        (None, None) => None,
     }
 }
 
