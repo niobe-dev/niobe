@@ -2799,7 +2799,8 @@ struct QuestionBody {
     /// `to run <tool>`, wrapped: a tool's name is what is being approved, so
     /// it is read whole rather than cut at the frame.
     head: Vec<Line<'static>>,
-    /// What would run: the target, and the arguments whole under it.
+    /// What would run: what the call does where the backend read it, or its
+    /// target, and the arguments under it.
     call: Vec<Line<'static>>,
     /// The numbered answers, after a blank row.
     answers: Vec<Line<'static>>,
@@ -2858,24 +2859,7 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
     let plain = Style::new().fg(theme.fg);
 
     let head = question_head(&tool_label(&ask.tool), inner, plain);
-    // A call with no target has only its arguments to show, and they are
-    // laid out by key unless Ctrl+T asked for them as they are sent.
-    let laid_out = match (&ask.target, app.diffs_open()) {
-        (None, false) => crate::arguments::lines(&ask.input, inner, theme),
-        (None, true) | (Some(_), _) => None,
-    };
-    let mut call = laid_out.unwrap_or_default();
-    if call.is_empty() {
-        for wrapped in text::wrap_exact(ask.target.as_deref().unwrap_or(&ask.input), inner) {
-            call.push(Line::from(wrapped).style(plain.bold()));
-        }
-    }
-    if ask.target.is_some() {
-        call.push(Line::from(""));
-        for wrapped in text::wrap_exact(&ask.input, inner) {
-            call.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
-        }
-    }
+    let call = question_call(app, ask, inner, theme);
     let mut answers = vec![Line::from("")];
     let focus = app.ask_focus();
     let selected = app.ask_selected();
@@ -2919,6 +2903,52 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
         consequences,
         rest,
     }
+}
+
+/// What would run, `inner` columns wide: what the call does where the
+/// backend read that out of its arguments, and otherwise its target and its
+/// arguments by key. Ctrl+T draws the arguments as they are sent instead of
+/// by key, and under what the call does, since they are what is approved.
+fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let open = app.diffs_open();
+    let as_sent = || -> Vec<Line<'static>> {
+        text::wrap_exact(&ask.input, inner)
+            .into_iter()
+            .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.dim)))
+            .collect()
+    };
+    let proposed = ask
+        .proposed
+        .as_ref()
+        .and_then(|proposed| proposed.lines(&ask.input, inner, open, theme));
+    if let Some(mut call) = proposed {
+        if open {
+            call.push(Line::from(""));
+            call.extend(as_sent());
+        }
+        return call;
+    }
+    let by_key = match open {
+        false => crate::arguments::lines(&ask.input, inner, theme),
+        true => None,
+    };
+    let Some(target) = &ask.target else {
+        return by_key
+            .filter(|rows| !rows.is_empty())
+            .unwrap_or_else(|| bold_rows(&ask.input, inner, theme));
+    };
+    let mut call = bold_rows(target, inner, theme);
+    call.push(Line::from(""));
+    call.extend(by_key.unwrap_or_else(as_sent));
+    call
+}
+
+/// `said` wrapped to `inner` columns exactly as written, in bold.
+fn bold_rows(said: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    text::wrap_exact(said, inner)
+        .into_iter()
+        .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.fg).bold()))
+        .collect()
 }
 
 /// `to run <tool>` wrapped to `inner` columns, the tool's name in bold on

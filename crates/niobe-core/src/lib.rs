@@ -12,6 +12,7 @@ pub mod diff;
 pub mod event;
 pub mod image;
 pub mod permission;
+pub mod proposal;
 pub mod session;
 pub mod test_run;
 pub mod work;
@@ -22,6 +23,7 @@ pub use event::{
 };
 pub use image::{Image, ImageError, MediaType};
 pub use permission::{Allowlist, Rule, RuleError};
+pub use proposal::{Action, Proposal};
 pub use session::{
     FileChanges, Owed, SessionState, TestRunRecord, ToolTotals, Totals, TurnRecord, WorkTotals,
 };

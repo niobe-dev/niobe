@@ -1122,6 +1122,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"cargo test"}"#.to_owned(),
             target: target.map(str::to_owned),
+            proposal: None,
             agent: None,
         });
         app
@@ -1844,6 +1845,7 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: r#"{"command":"cargo test"}"#.to_owned(),
                 target: Some("cargo test".to_owned()),
+                proposal: None,
                 agent: None,
             }],
             ..Attached::default()
@@ -1877,6 +1879,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"cargo test"}"#.to_owned(),
             target: Some("cargo test".to_owned()),
+            proposal: None,
             agent: None,
         });
 

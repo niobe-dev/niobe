@@ -7,7 +7,7 @@
 ┃   │ to run Read                                                          │   ┃
 ┃   │ /repo/notes.txt                                                      │   ┃
 ┃   │                                                                      │   ┃
-┃   │ {"file_path":"/repo/notes.txt"}                                      │   ┃
+┃   │ file_path: /repo/notes.txt                                           │   ┃
 ┃   │                                                                      │   ┃
 ┃   │ ▶ 1. Allow once                                       this call only │   ┃
 ┃   │   2. Always allow Read                              niobe saves Read │   ┃

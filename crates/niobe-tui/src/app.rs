@@ -33,6 +33,7 @@ use crate::clock::{Clock, LocalTime, Stamp};
 use crate::history::{Browser, Listed, Newer, PromptRow, Recall, SessionRow, Target, View};
 use crate::images::{Attachments, DraftId, Fetched, Source, image_path};
 use crate::prices::Prices;
+use crate::proposed::Proposed;
 use crate::theme::{Depth, Theme};
 use crate::trust;
 
@@ -303,9 +304,11 @@ const SEVEN_DAYS: u64 = 7 * 86_400;
 
 /// A permission prompt the shell is waiting on the operator to answer.
 ///
-/// What the backend said, and nothing derived: the question shows the tool,
-/// what it would run on and the whole of its arguments, because approving a
-/// call whose arguments were summarised away is approving something else.
+/// What the backend said: the question shows the tool, what it would run on
+/// and the whole of its arguments, because approving a call whose arguments
+/// were summarised away is approving something else. The one thing derived is
+/// the lines of a proposed change, worked out once here rather than with
+/// every frame the question is drawn in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     /// The call being gated, which the answer is addressed by.
@@ -317,6 +320,9 @@ pub struct Ask {
     /// The one thing the call acts on, where the backend could name it. A
     /// prompt without one can only be answered for the whole tool.
     pub target: Option<String>,
+    /// What the call would do, where the backend read it out of the
+    /// arguments; `None` leaves the arguments to be shown by key.
+    pub proposed: Option<Proposed>,
     /// The turn the call belongs to, counted in prompts sent this session,
     /// which is what the question says it is blocking. Zero where the session
     /// has no prompt on record, as one attached to a turn already running.
@@ -2295,6 +2301,7 @@ impl App {
                 tool,
                 input,
                 target,
+                proposal,
                 agent,
             } => {
                 // An Esc pressed before the question came up made the next
@@ -2312,6 +2319,7 @@ impl App {
                     tool: tool.clone(),
                     input: input.clone(),
                     target: target.clone(),
+                    proposed: proposal.clone().map(Proposed::new),
                     turn: self.session.user_messages(),
                     agent: agent.clone(),
                 });
@@ -9278,6 +9286,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: target.map(str::to_owned),
+            proposal: None,
             agent: None,
         }
     }
@@ -9407,6 +9416,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"ls"}"#.to_owned(),
             target: Some("ls".to_owned()),
+            proposal: None,
             agent: None,
         });
         app.on_key(key(KeyCode::Esc));
@@ -9746,6 +9756,7 @@ mod tests {
             tool: "Write".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            proposal: None,
             agent: None,
         });
 
@@ -10091,6 +10102,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: Some("rm -rf build".to_owned()),
+            proposal: None,
             agent: agent.map(AgentId::new),
         }
     }
@@ -10174,6 +10186,7 @@ mod tests {
             tool: "Read".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            proposal: None,
             agent: None,
         });
 
@@ -10200,6 +10213,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"cargo test && rm -rf ~"}"#.to_owned(),
             target: Some("cargo test && rm -rf ~".to_owned()),
+            proposal: None,
             agent: None,
         });
 
@@ -11271,6 +11285,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: "{}".to_owned(),
             target: None,
+            proposal: None,
             agent: None,
         });
         assert_eq!(
@@ -11304,6 +11319,7 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: r#"{"command":"ls"}"#.to_owned(),
                 target: target.map(str::to_owned),
+                proposal: None,
                 agent: None,
             });
         }
@@ -12082,6 +12098,7 @@ mod tests {
             tool: "Edit".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            proposal: None,
             agent: None,
         });
         app.apply(&Event::PermissionResponse {
@@ -12449,6 +12466,7 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: "{}".to_owned(),
                 target: None,
+                proposal: None,
                 agent: None,
             },
             millis(1_100),

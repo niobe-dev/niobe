@@ -100,6 +100,7 @@ use niobe_core::event::{
     McpServer, McpStatus, Mode, ModelOption, PermissionDecision, SessionMeta, SlashCommand,
     TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
+use niobe_core::proposal::{Action, Proposal};
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
 
@@ -528,6 +529,9 @@ pub struct Translator {
     /// What reads a shell result the CLI saved to a file, where the caller
     /// handed one in. `None` leaves every such result unread.
     read_spilled: Option<ReadSpilled>,
+    /// What says whether a file is at a path, where the caller handed one
+    /// in. `None` leaves it unsaid of every file a write would replace.
+    file_exists: Option<FileExists>,
     /// Whether the CLI's last request state was `compacting`, so that the
     /// state after it is reported as the compaction's end.
     compacting: bool,
@@ -550,6 +554,13 @@ pub(crate) struct RecordedAgent {
 /// Handed in rather than done here, so that the translator does no I/O of its
 /// own and a recorded log exercises exactly the code a live session runs.
 pub(crate) type ReadSpilled = fn(&Path, u64) -> Option<String>;
+
+/// Whether a file is at a path, as a permission question to write it is
+/// asked: what the file held is lost to the write and is not in the call, so
+/// the question says whether there was one. `None` where that cannot be told.
+///
+/// Handed in as [`ReadSpilled`] is, so the translator does no I/O of its own.
+pub(crate) type FileExists = fn(&Path) -> Option<bool>;
 
 impl Translator {
     /// A translator for a session running under `profile`.
@@ -596,6 +607,7 @@ impl Translator {
             api_key_source: None,
             billing: None,
             read_spilled: None,
+            file_exists: None,
             compacting: false,
         }
     }
@@ -649,6 +661,17 @@ impl Translator {
     #[must_use]
     pub(crate) fn reading_spilled_with(mut self, read: ReadSpilled) -> Self {
         self.read_spilled = Some(read);
+        self
+    }
+
+    /// The same translator, looking with `exists` for the file a write it
+    /// is asked about would replace.
+    ///
+    /// Only a live session's translator looks: a transcript read back later
+    /// would be told what is on disk now, not what was when it asked.
+    #[must_use]
+    pub(crate) fn checking_files_with(mut self, exists: FileExists) -> Self {
+        self.file_exists = Some(exists);
         self
     }
 
@@ -1335,6 +1358,8 @@ impl Translator {
             tool,
             input,
             target,
+            // Refused without asking: there is no question to show it in.
+            proposal: None,
             agent,
         });
         out.push(Event::PermissionResponse {
@@ -2044,13 +2069,73 @@ impl Translator {
                 input: body.input.clone().unwrap_or(serde_json::Value::Null),
             });
         }
+        let tool = body.tool_name.unwrap_or_default();
+        let proposal = body
+            .input
+            .as_ref()
+            .and_then(|input| self.proposal_of(&tool, input));
         out.push(Event::PermissionRequest {
             id,
-            tool: body.tool_name.unwrap_or_default(),
+            tool,
             input: body.input.as_ref().map(render).unwrap_or_default(),
             target: body.input.as_ref().and_then(rule_target),
+            proposal,
             agent,
         });
+    }
+
+    /// What a call to the CLI's tool `tool` would do, read from its `input`,
+    /// for the tools whose arguments are known here: `Edit`, `Write` and
+    /// `Bash`. `None` for any other tool, and for arguments not of the shape
+    /// the tool takes, which the question then shows as they are.
+    fn proposal_of(&self, tool: &str, input: &serde_json::Value) -> Option<Proposal> {
+        let text = |key: &str| input.get(key)?.as_str().map(str::to_owned);
+        match tool {
+            "Edit" => {
+                let every = match input.get("replace_all") {
+                    None => false,
+                    Some(every) => every.as_bool()?,
+                };
+                let action = Action::Replace {
+                    path: text("file_path")?,
+                    old: text("old_string")?,
+                    new: text("new_string")?,
+                    every,
+                };
+                Some(Proposal::new(
+                    action,
+                    ["file_path", "old_string", "new_string", "replace_all"],
+                ))
+            }
+            "Write" => {
+                let path = text("file_path")?;
+                let action = Action::Write {
+                    existed: self.existed(&path),
+                    path,
+                    content: text("content")?,
+                };
+                Some(Proposal::new(action, ["file_path", "content"]))
+            }
+            "Bash" => Some(Proposal::new(
+                Action::Command {
+                    command: text("command")?,
+                },
+                ["command"],
+            )),
+            _ => None,
+        }
+    }
+
+    /// Whether a file is at `path` — taken relative to where the session
+    /// runs where it is not absolute — or `None` where nothing looks or the
+    /// session's directory is not known.
+    fn existed(&self, path: &str) -> Option<bool> {
+        let exists = self.file_exists?;
+        let path = Path::new(path);
+        match path.is_absolute() {
+            true => exists(path),
+            false => exists(&self.cwd.as_ref()?.join(path)),
+        }
     }
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
@@ -2092,6 +2177,7 @@ impl Translator {
                 tool: denial.tool_name.unwrap_or_default(),
                 input: denial.tool_input.as_ref().map(render).unwrap_or_default(),
                 target: denial.tool_input.as_ref().and_then(rule_target),
+                proposal: None,
                 agent,
             });
             out.push(Event::PermissionResponse {
@@ -5163,6 +5249,152 @@ mod tests {
         assert!(rules.allows("Bash", target.as_deref()));
     }
 
+    fn proposal_asked(line: &str, translator: &mut Translator) -> Option<Proposal> {
+        let events = translator.line(line);
+        let [Event::PermissionRequest { proposal, .. }] = events.as_slice() else {
+            panic!("one prompt: {events:?}");
+        };
+        proposal.clone()
+    }
+
+    /// The recorded shape of an `Edit` prompt, with lines in its strings.
+    #[test]
+    fn an_edit_prompt_proposes_its_replacement() {
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Edit","display_name":"Edit","input":{"file_path":"/repo/notes.txt","old_string":"a\nbeta","new_string":"a\ngamma","replace_all":true},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        )
+        .expect("an edit is read");
+        assert_eq!(
+            proposal.action(),
+            &Action::Replace {
+                path: "/repo/notes.txt".to_owned(),
+                old: "a\nbeta".to_owned(),
+                new: "a\ngamma".to_owned(),
+                every: true,
+            }
+        );
+        for key in ["file_path", "old_string", "new_string", "replace_all"] {
+            assert!(proposal.covers(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn an_edit_without_replace_all_replaces_one_occurrence() {
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{"file_path":"/f","old_string":"a","new_string":"b"},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        );
+        assert!(matches!(
+            proposal.as_ref().map(Proposal::action),
+            Some(Action::Replace { every: false, .. })
+        ));
+    }
+
+    #[test]
+    fn a_write_prompt_proposes_the_content_and_says_whether_the_file_was_there() {
+        fn exists(path: &Path) -> Option<bool> {
+            match path.to_str() {
+                Some("/repo/old.txt") => Some(true),
+                Some("/repo/new.txt") => Some(false),
+                _ => None,
+            }
+        }
+        let asked = |path: &str, translator: &mut Translator| {
+            proposal_asked(
+                &format!(
+                    r#"{{"type":"control_request","request_id":"c1","request":{{"subtype":"can_use_tool","tool_name":"Write","input":{{"file_path":"{path}","content":"one\ntwo\n"}},"tool_use_id":"toolu_1"}}}}"#
+                ),
+                translator,
+            )
+            .map(|proposal| proposal.action().clone())
+        };
+        let write = |path: &str, existed| Action::Write {
+            path: path.to_owned(),
+            content: "one\ntwo\n".to_owned(),
+            existed,
+        };
+        let mut checking = translator().checking_files_with(exists);
+        assert_eq!(
+            asked("/repo/old.txt", &mut checking),
+            Some(write("/repo/old.txt", Some(true)))
+        );
+        assert_eq!(
+            asked("/repo/new.txt", &mut checking),
+            Some(write("/repo/new.txt", Some(false)))
+        );
+        // Nothing handed in to look with: nobody looked.
+        assert_eq!(
+            asked("/repo/old.txt", &mut translator()),
+            Some(write("/repo/old.txt", None))
+        );
+    }
+
+    /// A relative path is relative to where the CLI runs, which a translator
+    /// told no directory cannot know, so it does not look.
+    #[test]
+    fn a_write_to_a_relative_path_is_looked_for_under_the_session_directory() {
+        fn exists(path: &Path) -> Option<bool> {
+            Some(path == Path::new("/repo/a.txt"))
+        }
+        let line = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"a.txt","content":"x"},"tool_use_id":"toolu_1"}}"#;
+        let existed = |translator: &mut Translator| match proposal_asked(line, translator)
+            .map(|proposal| proposal.action().clone())
+        {
+            Some(Action::Write { existed, .. }) => existed,
+            other => panic!("a write: {other:?}"),
+        };
+        assert_eq!(
+            existed(&mut translator().checking_files_with(exists).in_dir("/repo")),
+            Some(true)
+        );
+        assert_eq!(existed(&mut translator().checking_files_with(exists)), None);
+    }
+
+    #[test]
+    fn a_shell_prompt_proposes_its_command_and_leaves_the_rest_to_be_shown() {
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cargo test","description":"Run the tests","dangerouslyDisableSandbox":true},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        )
+        .expect("a command is read");
+        assert_eq!(
+            proposal.action(),
+            &Action::Command {
+                command: "cargo test".to_owned()
+            }
+        );
+        assert!(proposal.covers("command"));
+        assert!(!proposal.covers("description"));
+        assert!(!proposal.covers("dangerouslyDisableSandbox"));
+    }
+
+    /// Arguments of another shape than the tool's are not read as the tool's:
+    /// the question shows them as they are.
+    #[test]
+    fn a_prompt_whose_arguments_are_not_the_tools_proposes_nothing() {
+        for (tool, input) in [
+            ("Edit", r#"{"file_path":"/f","old_string":"a"}"#),
+            (
+                "Edit",
+                r#"{"file_path":"/f","old_string":"a","new_string":7}"#,
+            ),
+            ("Write", r#"{"file_path":"/f"}"#),
+            ("Bash", r#"{"cmd":"ls"}"#),
+            ("Read", r#"{"file_path":"/f"}"#),
+            ("mcp__notion__search", r#"{"command":"ls"}"#),
+        ] {
+            let line = format!(
+                r#"{{"type":"control_request","request_id":"c1","request":{{"subtype":"can_use_tool","tool_name":"{tool}","input":{input},"tool_use_id":"toolu_1"}}}}"#
+            );
+            assert_eq!(
+                proposal_asked(&line, &mut translator()),
+                None,
+                "{tool} {input}"
+            );
+        }
+    }
+
     #[test]
     fn a_prompt_the_cli_withdraws_is_withdrawn_from_the_session() {
         let mut translator = translator();
@@ -5218,6 +5450,7 @@ mod tests {
                 input,
                 target,
                 agent,
+                ..
             },
             Event::PermissionResponse { decision, .. },
         ] = announced.as_slice()

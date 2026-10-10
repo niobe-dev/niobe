@@ -37,10 +37,21 @@ use niobe_core::event::{
     AgentId, Backend, CompactTrigger, Event, Mode, PermissionDecision, Usage, UsageWindow,
     UsageWindows,
 };
-use niobe_core::{FailedTests, TestCounts, TestRunRecord};
+use niobe_core::{Action, FailedTests, Proposal, TestCounts, TestRunRecord};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
 use ratatui::style::{Color, Style};
+
+/// What the bridge reads a shell call's arguments as: the command, and no
+/// other argument.
+fn ran(command: &str) -> Option<Proposal> {
+    Some(Proposal::new(
+        Action::Command {
+            command: command.to_owned(),
+        },
+        ["command"],
+    ))
+}
 
 /// The same session, stopped on a permission prompt it is waiting on.
 ///
@@ -56,6 +67,7 @@ pub fn session_waiting_on_a_prompt() -> App {
         tool: "Read".to_owned(),
         input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
         target: Some("/repo/notes.txt".to_owned()),
+        proposal: None,
         agent: None,
     });
     app
@@ -498,6 +510,7 @@ fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
         tool: "Bash".to_owned(),
         input: format!(r#"{{"command":"{command}"}}"#),
         target: Some(command.to_owned()),
+        proposal: ran(command),
         agent: Some(AgentId::new(agent)),
     };
     app.apply(&asked("f3", "curl -sI localhost:8080", "toolu_fetch"));
@@ -530,6 +543,7 @@ fn a_denied_command_of_several_lines_keeps_its_lines_apart_on_its_row() {
         tool: "Bash".to_owned(),
         input: r#"{"command":"set -e\ncd /tmp\necho step 0"}"#.to_owned(),
         target: Some(command.to_owned()),
+        proposal: ran(command),
         agent: None,
     });
     app.apply(&Event::PermissionResponse {
@@ -908,6 +922,7 @@ fn session_waiting_on_a_long_command() -> App {
             r#"{{"command":"{}"}}"#,
             command.replace('\\', "\\\\").replace('\n', "\\n")
         ),
+        proposal: ran(&command),
         target: Some(command),
         agent: None,
     });
@@ -1060,10 +1075,9 @@ fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     let rows = question_rows(&frame);
     assert!(rows.iter().any(|row| row == "to run Read"), "{frame}");
     assert!(rows.iter().any(|row| row == "/repo/notes.txt"), "{frame}");
-    // The whole of the arguments, not a summary of them.
+    // The whole of the arguments, by key.
     assert!(
-        rows.iter()
-            .any(|row| row == r#"{"file_path":"/repo/notes.txt"}"#),
+        rows.iter().any(|row| row == "file_path: /repo/notes.txt"),
         "{frame}"
     );
     // Numbered, the first selected, each with what choosing it does.
@@ -1099,6 +1113,154 @@ fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     );
 }
 
+/// A session waiting on a call the bridge read as what it would do: its
+/// arguments as the CLI sends them, and the proposal read out of them.
+fn session_asked(tool: &str, input: serde_json::Value, proposal: Proposal) -> App {
+    let mut app = running_session();
+    let target = ["command", "file_path"]
+        .iter()
+        .find_map(|key| input.get(key)?.as_str())
+        .map(str::to_owned);
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_proposed".into(),
+        tool: tool.to_owned(),
+        input: input.to_string(),
+        target,
+        proposal: Some(proposal),
+        agent: None,
+    });
+    app
+}
+
+const EDIT_OLD: &str = "    if cached:\n        return cached.body\n    response = get(url)";
+const EDIT_NEW: &str = "    if cached and cached.etag:\n        headers[\"If-None-Match\"] = cached.etag\n    response = get(url, headers=headers)";
+
+fn session_waiting_on_an_edit() -> App {
+    session_asked(
+        "Edit",
+        serde_json::json!({
+            "file_path": "/repo/catalog/fetch.py",
+            "old_string": EDIT_OLD,
+            "new_string": EDIT_NEW,
+            "replace_all": false,
+        }),
+        Proposal::new(
+            Action::Replace {
+                path: "/repo/catalog/fetch.py".to_owned(),
+                old: EDIT_OLD.to_owned(),
+                new: EDIT_NEW.to_owned(),
+                every: false,
+            },
+            ["file_path", "old_string", "new_string", "replace_all"],
+        ),
+    )
+}
+
+#[test]
+fn an_edit_question_shows_the_lines_it_removes_and_adds_and_ctrl_t_what_is_sent() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let mut app = session_waiting_on_an_edit();
+        let frame = screen(&mut app, width, height);
+        let rows = question_rows(&frame);
+        // A pane too short for the whole question cuts the change, as it
+        // cuts any arguments, and keeps what is asked and every answer.
+        let whole = height >= 30;
+        for (row, shown) in [
+            ("/repo/catalog/fetch.py", true),
+            ("-     if cached:", true),
+            ("-         return cached.body", true),
+            ("+     if cached and cached.etag:", true),
+            ("+         headers[\"If-None-Match\"] = cached.etag", whole),
+            ("… 4 more lines · Ctrl+T shows the whole call", !whole),
+        ] {
+            assert_eq!(
+                rows.iter().any(|drawn| drawn == row),
+                shown,
+                "{row}:\n{frame}"
+            );
+        }
+        assert!(
+            !rows.iter().any(|row| row.starts_with('{')),
+            "no JSON until Ctrl+T:\n{frame}"
+        );
+        assert_snapshot(&format!("asking-edit-{width}x{height}"), &frame);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        let sent = screen(&mut app, width, height);
+        assert!(
+            question_rows(&sent)
+                .iter()
+                .any(|row| row.starts_with(r#"{"file_path":"/repo/catalog/fetch.py""#)),
+            "Ctrl+T shows the arguments as sent:\n{sent}"
+        );
+    }
+}
+
+#[test]
+fn a_write_question_shows_the_lines_written_and_that_what_the_file_held_is_not_in_the_call() {
+    let content = "# Caching\n\nResponses are kept with their etag.\n";
+    for (width, height) in [(80, 24), (120, 30)] {
+        let mut app = session_asked(
+            "Write",
+            serde_json::json!({"file_path": "/repo/docs/caching.md", "content": content}),
+            Proposal::new(
+                Action::Write {
+                    path: "/repo/docs/caching.md".to_owned(),
+                    content: content.to_owned(),
+                    existed: Some(true),
+                },
+                ["file_path", "content"],
+            ),
+        );
+        let frame = screen(&mut app, width, height);
+        let rows = question_rows(&frame);
+        for row in [
+            "/repo/docs/caching.md",
+            "+ # Caching",
+            "+ Responses are kept with their etag.",
+        ] {
+            assert!(rows.iter().any(|drawn| drawn == row), "{row}:\n{frame}");
+        }
+        assert!(frame.contains("what it held is not in the call"), "{frame}");
+        assert!(!rows.iter().any(|row| row.starts_with('-')), "{frame}");
+        assert_snapshot(&format!("asking-write-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn a_bash_question_shows_the_command_once_and_its_description() {
+    for (width, height) in [(80, 24), (120, 30)] {
+        let mut app = session_asked(
+            "Bash",
+            serde_json::json!({"command": "cargo test -p catalog", "description": "Run the catalog tests"}),
+            Proposal::new(
+                Action::Command {
+                    command: "cargo test -p catalog".to_owned(),
+                },
+                ["command"],
+            ),
+        );
+        let frame = screen(&mut app, width, height);
+        let rows = question_rows(&frame);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.contains("cargo test -p catalog"))
+                .count(),
+            // The command, and the standing answer that names it.
+            1 + usize::from(frame.contains("Bash(cargo test -p catalog)")),
+            "{frame}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row == "description: Run the catalog tests"),
+            "{frame}"
+        );
+        assert_snapshot(&format!("asking-bash-{width}x{height}"), &frame);
+    }
+}
+
 #[test]
 fn the_selected_answer_is_a_solid_bar_as_well_as_a_mark() {
     let mut app = session_waiting_on_a_prompt().with_theme(CLASSIC);
@@ -1130,6 +1292,7 @@ fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
         tool: "mcp__claude_ai_Notion__notion-search".to_owned(),
         input: format!(r#"{{"command":"{command}"}}"#),
         target: Some(command.to_owned()),
+        proposal: None,
         agent: None,
     });
     let frame = screen(&mut app, 120, 30);
@@ -1247,6 +1410,7 @@ fn session_asked_to_create_a_page() -> App {
         tool: "mcp__claude_ai_Notion__notion-create-pages".to_owned(),
         input: PAGE_ARGUMENTS.to_owned(),
         target: None,
+        proposal: None,
         agent: None,
     });
     app
@@ -1409,6 +1573,7 @@ fn a_long_mcp_tool_name_keeps_the_questions_border_and_reads_whole() {
             tool: format!("mcp__github__{name}"),
             input: r#"{"body":"looks good"}"#.to_owned(),
             target: None,
+            proposal: None,
             agent: None,
         });
         let frame = screen(&mut app, width, height);
@@ -1445,6 +1610,7 @@ fn a_control_character_in_a_question_does_not_move_its_border() {
             id: "toolu_control".into(),
             tool: "Bash".to_owned(),
             input,
+            proposal: target.as_deref().and_then(ran),
             target,
             agent: None,
         });
@@ -1461,6 +1627,7 @@ fn a_long_request_wraps_inside_the_question() {
         tool: "Bash".to_owned(),
         input: format!(r#"{{"command":"{}"}}"#, command.trim()),
         target: Some(command.trim().to_owned()),
+        proposal: ran(command.trim()),
         agent: None,
     });
     let frame = screen(&mut app, 200, 60);
@@ -1470,8 +1637,8 @@ fn a_long_request_wraps_inside_the_question() {
         .take_while(|row| !row.starts_with("▶ 1."))
         .collect();
     let words = call.matches("word").count();
-    // Forty in the command and forty again in the arguments, none cut off.
-    assert_eq!(words, 80, "{frame}");
+    // Forty in the command, none cut off, and not again in the arguments.
+    assert_eq!(words, 40, "{frame}");
     assert!(frame.lines().all(|row| text_width(row) <= 200));
 }
 
@@ -1492,6 +1659,7 @@ fn session_waiting_on_a_spaced_command() -> App {
                 .replace('\t', "\\t")
         ),
         target: Some(command.to_owned()),
+        proposal: ran(command),
         agent: None,
     });
     app
@@ -1499,8 +1667,14 @@ fn session_waiting_on_a_spaced_command() -> App {
 
 #[test]
 fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
-    let frame = screen(&mut session_waiting_on_a_spaced_command(), 120, 40);
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_waiting_on_a_spaced_command();
+    let frame = screen(&mut app, 120, 40);
     let rows = question_cells(&frame);
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let sent = screen(&mut app, 120, 40);
+    let sent_rows = question_cells(&sent);
     let from = |first: &str, count: usize| -> Vec<String> {
         rows.iter()
             .map(|row| row.trim_end().to_owned())
@@ -1508,7 +1682,12 @@ fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
             .take(count)
             .collect()
     };
-    let arguments: String = rows
+    // The command once, and the arguments as they are sent only on Ctrl+T.
+    assert!(
+        !rows.iter().any(|row| row.starts_with(r#"{"command""#)),
+        "{frame}"
+    );
+    let arguments: String = sent_rows
         .iter()
         .skip_while(|row| !row.starts_with(r#"{"command""#))
         .take_while(|row| !row.trim().is_empty())
@@ -1529,7 +1708,7 @@ fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
     assert_eq!(
         arguments.trim_end(),
         r#"{"command":"python3 -c '\nclass H:\n    def log(self, a): pass\n\tprint(\"a    b\")\n' # three   spaces"}"#,
-        "the arguments are not drawn as they arrived:\n{frame}"
+        "the arguments are not drawn as they arrived:\n{sent}"
     );
     assert_eq!(
         from("3. niobe saves Bash(python3 -c '", 5),
@@ -1553,6 +1732,7 @@ fn a_short_standing_answer_with_a_tab_in_it_is_repeated_as_it_is_kept() {
         tool: "Bash".to_owned(),
         input: r#"{"command":"ls\t-l"}"#.to_owned(),
         target: Some("ls\t-l".to_owned()),
+        proposal: ran("ls\t-l"),
         agent: None,
     });
     let frame = screen(&mut app, 120, 30);
@@ -1629,6 +1809,7 @@ fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
         tool: "Read".to_owned(),
         input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
         target: Some("/repo/notes.txt".to_owned()),
+        proposal: None,
         agent: None,
     });
     let after = screen(&mut app, 120, 30);

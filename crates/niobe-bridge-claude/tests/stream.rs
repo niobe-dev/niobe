@@ -557,6 +557,7 @@ fn a_prompt_the_cli_is_waiting_on_is_asked_and_kept_to_be_answered() {
         input,
         target,
         agent,
+        ..
     }) = asked.first().copied()
     else {
         panic!("the CLI asked before it read the file: {asked:?}");

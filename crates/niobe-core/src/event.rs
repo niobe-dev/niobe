@@ -23,6 +23,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::proposal::Proposal;
+
 /// Declares a string newtype used to correlate events with each other.
 ///
 /// The ids are opaque: a backend supplies whatever it uses (a UUID, a counter,
@@ -877,6 +879,11 @@ pub enum Event {
         /// the call acts on nothing.
         #[serde(default)]
         target: Option<String>,
+        /// What the call would do, where the backend knows the tool well
+        /// enough to read it out of `input`. `None` leaves `input` to be
+        /// shown as it is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposal: Option<Proposal>,
         /// The sub-agent whose call is waiting, or `None` for the session's
         /// own. It says who is asking and nothing more: a standing answer is
         /// about the tool and its target, whichever agent asked.
@@ -1341,6 +1348,7 @@ mod tests {
             tool: "Bash".to_owned(),
             input: "{}".to_owned(),
             target: Some("ls".to_owned()),
+            proposal: None,
             agent,
         };
         for agent in [Some(AgentId::new("toolu_a")), None] {

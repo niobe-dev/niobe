@@ -43,7 +43,7 @@
  ┃   │ to run Read                                                          │                                                   █ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
  ┃   │ /repo/notes.txt                                                      │                                                   █ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                                 │
  ┃   │                                                                      │                                                   █ │     Read 3                                                        │
- ┃   │ {"file_path":"/repo/notes.txt"}                                      │                                                   █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                             │
+ ┃   │ file_path: /repo/notes.txt                                           │                                                   █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                             │
  ┃   │                                                                      │                                                   █ │     fetch 1 · search 1 · update-page 1                            │
  ┃   │ ▶ 1. Allow once                                       this call only │                                                   █ │   Editing files    1 ▓▓▓▓                                         │
  ┃   │   2. Always allow Read                              niobe saves Read │                                                   █ │     Edit 1                                                        │

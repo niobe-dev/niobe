@@ -85,6 +85,165 @@ pub fn replacement_changed(old: &str, new: &str) -> Option<(u64, u64)> {
     lines_changed(&format!("{old}\n"), &format!("{new}\n"))
 }
 
+/// The lines of replacing `old` with `new` somewhere inside a file, as a
+/// diff shows them: the lines both share as context, and each run of changed
+/// lines as what it removed and then what it added.
+///
+/// Read as [`replacement_changed`] reads the pair — each side's last line
+/// continued by the same rest of the file — so the removed and added lines
+/// here are the lines it counts. A side ending in a newline continues onto
+/// that rest of the file on both sides alike, which is no line of the
+/// replacement and is not shown.
+///
+/// No line here is numbered: the arguments say what is replaced, not where
+/// in the file it is.
+///
+/// `None` where [`replacement_changed`] has no count: either side binary, or
+/// the two too different to compare within a redraw.
+pub fn replacement_lines(old: &str, new: &str) -> Option<Vec<Line>> {
+    // Nothing replaced is text put where there was none: every line of it is
+    // added, and a newline it ends with ends its last line.
+    if old.is_empty() {
+        return Some(new.lines().map(|l| Line::Added(l.to_owned())).collect());
+    }
+    let (before, after) = (format!("{old}\n"), format!("{new}\n"));
+    if is_binary(&before) || is_binary(&after) {
+        return None;
+    }
+    let before: Vec<&str> = before.split_inclusive('\n').collect();
+    let after: Vec<&str> = after.split_inclusive('\n').collect();
+    let head = common_prefix(&before, &after);
+    let tail = common_suffix(&before[head..], &after[head..]);
+    let middle = (
+        &before[head..before.len() - tail],
+        &after[head..after.len() - tail],
+    );
+    let script = edit_script(middle.0, middle.1)?;
+
+    let mut lines: Vec<Line> = before[..head].iter().map(|l| context(l)).collect();
+    let (mut removed, mut added) = (middle.0.iter(), middle.1.iter());
+    let mut run: (Vec<Line>, Vec<Line>) = (Vec::new(), Vec::new());
+    for step in script {
+        match step {
+            Step::Keep => {
+                lines.append(&mut run.0);
+                lines.append(&mut run.1);
+                added.next();
+                lines.extend(removed.next().map(|l| context(l)));
+            }
+            Step::Remove => run.0.extend(removed.next().map(|l| Line::Removed(bare(l)))),
+            Step::Add => run.1.extend(added.next().map(|l| Line::Added(bare(l)))),
+        }
+    }
+    lines.append(&mut run.0);
+    lines.append(&mut run.1);
+    lines.extend(before[before.len() - tail..].iter().map(|l| context(l)));
+    if old.ends_with('\n') && new.ends_with('\n') {
+        lines.pop_if(|line| *line == Line::Context(String::new()));
+    }
+    Some(lines)
+}
+
+fn context(line: &str) -> Line {
+    Line::Context(bare(line))
+}
+
+/// A line without its terminator, as [`str::lines`] gives it.
+fn bare(line: &str) -> String {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line).to_owned()
+}
+
+/// One step of turning one sequence of lines into another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Keep,
+    Remove,
+    Add,
+}
+
+/// The fewest steps that turn `before` into `after`, or `None` where finding
+/// them would take more than [`MAX_STEPS`].
+///
+/// [`common_lines`]' search, keeping how far each diagonal reached at every
+/// script length so the script can be walked back from the end. Only the
+/// diagonals a length can reach are kept for it, so what is kept grows with
+/// the square of how much the two differ, which [`MAX_STEPS`] already bounds.
+fn edit_script(before: &[&str], after: &[&str]) -> Option<Vec<Step>> {
+    let (n, m) = (before.len(), after.len());
+    if n == 0 || m == 0 {
+        let mut script = vec![Step::Remove; n];
+        script.extend(vec![Step::Add; m]);
+        return Some(script);
+    }
+    let offset = n + m;
+    let mut furthest = vec![0usize; 2 * offset + 2];
+    let mut trace: Vec<Vec<usize>> = Vec::new();
+    let mut steps = 0usize;
+    for d in 0..=offset {
+        for k in (offset - d..=offset + d).step_by(2) {
+            let down = k == offset - d || (k != offset + d && furthest[k - 1] < furthest[k + 1]);
+            let mut x = match down {
+                true => furthest[k + 1],
+                false => furthest[k - 1] + 1,
+            };
+            let mut y = (x + offset).checked_sub(k)?;
+            while x < n && y < m && before[x] == after[y] {
+                x += 1;
+                y += 1;
+                steps += 1;
+            }
+            furthest[k] = x;
+            if x >= n && y >= m {
+                trace.push(furthest[offset - d..=offset + d].to_vec());
+                return Some(walk_back(&trace, n, m, offset));
+            }
+            steps += 1;
+            if steps > MAX_STEPS {
+                return None;
+            }
+        }
+        trace.push(furthest[offset - d..=offset + d].to_vec());
+    }
+    None
+}
+
+/// The script [`edit_script`]'s search found, walked back from the end of
+/// both sequences through how far each diagonal reached at each length.
+fn walk_back(trace: &[Vec<usize>], n: usize, m: usize, offset: usize) -> Vec<Step> {
+    let mut script = Vec::new();
+    let (mut x, mut y) = (n, m);
+    for d in (1..trace.len()).rev() {
+        // The previous length's diagonals start at `offset - (d - 1)`.
+        let reached = |k: usize| trace[d - 1][k + d - 1 - offset];
+        let k = x + offset - y;
+        let down = k == offset - d || (k != offset + d && reached(k - 1) < reached(k + 1));
+        let from = match down {
+            true => k + 1,
+            false => k - 1,
+        };
+        let from_x = reached(from);
+        let from_y = from_x + offset - from;
+        let step_x = match down {
+            true => from_x,
+            false => from_x + 1,
+        };
+        while x > step_x {
+            script.push(Step::Keep);
+            x -= 1;
+            y -= 1;
+        }
+        script.push(match down {
+            true => Step::Add,
+            false => Step::Remove,
+        });
+        (x, y) = (from_x, from_y);
+    }
+    script.extend(std::iter::repeat_n(Step::Keep, x));
+    script.reverse();
+    script
+}
+
 /// How far into a text `git` looks for a nul before calling it binary.
 const BINARY_PROBE: usize = 8_000;
 
@@ -557,5 +716,114 @@ mod tests {
         assert_eq!(replacement_changed("", "line1\nline2"), Some((2, 0)));
         assert_eq!(replacement_changed("", "x"), Some((1, 0)));
         assert_eq!(replacement_changed("", ""), Some((0, 0)));
+    }
+
+    fn removed_lines(lines: &[Line]) -> u64 {
+        lines
+            .iter()
+            .filter(|l| matches!(l, Line::Removed(_)))
+            .count() as u64
+    }
+
+    fn added_lines(lines: &[Line]) -> u64 {
+        lines.iter().filter(|l| matches!(l, Line::Added(_))).count() as u64
+    }
+
+    /// The side of a replacement its lines say it had, before or after.
+    fn side(lines: &[Line], before: bool) -> Vec<&str> {
+        lines
+            .iter()
+            .filter(|line| match line {
+                Line::Context(_) => true,
+                Line::Removed(_) => before,
+                Line::Added(_) => !before,
+            })
+            .map(Line::text)
+            .collect()
+    }
+
+    #[test]
+    fn a_replaced_line_reads_as_removed_then_added_between_what_is_kept() {
+        assert_eq!(
+            replacement_lines("a\nb\nc", "a\nx\nc"),
+            Some(vec![context("a"), removed("b"), added("x"), context("c")])
+        );
+        assert_eq!(
+            replacement_lines("beta", "gamma"),
+            Some(vec![removed("beta"), added("gamma")])
+        );
+    }
+
+    #[test]
+    fn replacement_lines_agree_with_the_count_and_rebuild_both_sides() {
+        let texts = [
+            "a",
+            "a\nb",
+            "a\nb\nc",
+            "b\nc\na",
+            "a\nx\nb\ny\nc",
+            "x\ny",
+            "a\n\nb",
+            "a\r\nb",
+            "c\nb\na",
+            "a\nb\nc\nd\ne\nf",
+        ];
+        for old in texts {
+            for new in texts {
+                let lines = replacement_lines(old, new).expect("small texts are compared");
+                assert_eq!(
+                    Some((added_lines(&lines), removed_lines(&lines))),
+                    replacement_changed(old, new),
+                    "{old:?} → {new:?}"
+                );
+                assert_eq!(side(&lines, true), old.lines().collect::<Vec<_>>());
+                assert_eq!(side(&lines, false), new.lines().collect::<Vec<_>>());
+            }
+        }
+    }
+
+    #[test]
+    fn each_run_of_changes_reads_as_its_removals_and_then_its_additions() {
+        let lines = replacement_lines("a\nb\nc\nd", "x\nb\ny\nz").expect("small");
+        assert_eq!(
+            lines,
+            [
+                removed("a"),
+                added("x"),
+                context("b"),
+                removed("c"),
+                removed("d"),
+                added("y"),
+                added("z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn replacing_nothing_reads_as_every_new_line_added() {
+        assert_eq!(
+            replacement_lines("", "one\ntwo"),
+            Some(vec![added("one"), added("two")])
+        );
+        assert_eq!(replacement_lines("", "one\n"), Some(vec![added("one")]));
+        assert_eq!(replacement_lines("", ""), Some(vec![]));
+    }
+
+    #[test]
+    fn a_binary_or_too_different_replacement_has_no_lines_rather_than_a_guess() {
+        assert_eq!(replacement_lines("a\0", "b"), None);
+        let before: String = (0..3_000).map(|i| format!("before {i}\n")).collect();
+        let after: String = (0..3_000).map(|i| format!("after {i}\n")).collect();
+        assert_eq!(replacement_lines(&before, &after), None);
+    }
+
+    #[test]
+    fn a_small_edit_inside_a_large_replacement_is_still_drawn() {
+        let before: String = (0..5_000).map(|i| format!("line {i}\n")).collect();
+        let after = before.replace("line 2500\n", "line 2500b\n");
+        let lines = replacement_lines(&before, &after).expect("trimmed to the change");
+        assert_eq!((added_lines(&lines), removed_lines(&lines)), (1, 1));
+        assert_eq!(side(&lines, true), before.lines().collect::<Vec<_>>());
+        assert_eq!(side(&lines, false), after.lines().collect::<Vec<_>>());
     }
 }

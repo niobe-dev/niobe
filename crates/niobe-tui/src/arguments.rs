@@ -41,9 +41,20 @@ const INDENT: usize = 2;
 /// `input`'s arguments, one key to a row, `width` cells wide; `None` where it
 /// is not a JSON object, which is then shown as it is.
 pub(crate) fn lines(input: &str, width: usize, theme: &Theme) -> Option<Vec<Line<'static>>> {
-    let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(input) else {
+    lines_except(input, width, theme, |_| false)
+}
+
+/// [`lines`], leaving out the keys `shown` says are already drawn elsewhere.
+pub(crate) fn lines_except(
+    input: &str,
+    width: usize,
+    theme: &Theme,
+    shown: impl Fn(&str) -> bool,
+) -> Option<Vec<Line<'static>>> {
+    let Ok(Value::Object(mut fields)) = serde_json::from_str::<Value>(input) else {
         return None;
     };
+    fields.retain(|key, _| !shown(key));
     let mut rows = Vec::new();
     object(&fields, 0, width, theme, &mut rows);
     if rows.len() > ROWS + 1 {

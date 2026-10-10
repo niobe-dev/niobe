@@ -20,6 +20,7 @@ mod common;
 
 use common::{hunk, running_session};
 use niobe_core::event::{AgentId, Event, SlashCommand, ToolOutcome};
+use niobe_core::{Action, Proposal};
 use niobe_tui::app::{App, Repo, WorkingFile};
 use niobe_tui::shell::Ran;
 use niobe_tui::ui;
@@ -219,9 +220,40 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             tool: format!("Bash{p}"),
             input: format!("{{\"command\":\"{p}\"}}"),
             target: Some(format!("rm {p}")),
+            proposal: None,
             agent: None,
         }])
     }));
+    /// What a proposal does, built around a payload.
+    type Proposing = fn(&str) -> Action;
+    let actions: [(&str, Proposing); 3] = [
+        ("proposed-edit", |p: &str| Action::Replace {
+            path: format!("src/{p}.rs"),
+            old: format!("old {p}\nkept"),
+            new: format!("new {p}\nkept"),
+            every: true,
+        }),
+        ("proposed-write", |p: &str| Action::Write {
+            path: format!("src/{p}.rs"),
+            content: format!("line {p}\n{p}"),
+            existed: Some(true),
+        }),
+        ("proposed-command", |p: &str| Action::Command {
+            command: format!("echo {p}"),
+        }),
+    ];
+    for (name, action) in actions {
+        all.extend(check(name, |p| {
+            with(vec![Event::PermissionRequest {
+                id: "perm".into(),
+                tool: "Edit".to_owned(),
+                input: serde_json::json!({ "description": p, "file_path": p }).to_string(),
+                target: Some(format!("src/{p}.rs")),
+                proposal: Some(Proposal::new(action(p), ["file_path"])),
+                agent: None,
+            }])
+        }));
+    }
     all.extend(check("agent", |p| {
         with(vec![
             Event::AgentSpawn {

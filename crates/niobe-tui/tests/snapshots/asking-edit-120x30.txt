@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃   304 path asserts a body that is no longer sent.                        ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃                                                                          ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃   ┌─ ? claude asks ───────────────────────────────────── blocks turn 1 ┐ ┃ │ ───────────────────────────────────── │
+ ┃   │ to run Edit                                                        │ ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃   │ /repo/catalog/fetch.py                                             │ ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃   │                                                                    │ ┃ │ ───────────────────────────────────── │
+ ┃   │ -     if cached:                                                   │ ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   │ -         return cached.body                                       │ ┃ └───────────────────────────────────────┘
+ ┃   │ -     response = get(url)                                          │ ┃ ┌─────────────── Changes ───────────────┐
+ ┃   │ +     if cached and cached.etag:                                   │ ┃ │ ⎇ main ↑3                             █
+ ┃   │ +         headers["If-None-Match"] = cached.etag                   │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃   │ +     response = get(url, headers=headers)                         │ ┃ │   .                                   █
+ ┃   │                                                                    │ ┃ │     CHANGELOG.md                +0 −0 │
+ ┃   │ ▶ 1. Allow once                                     this call only │ ┃ │   catalog/                            │
+ ┃   │   2. Always allow Edit                            niobe saves Edit │ ┃ │     fetch.ts                 +149 −12 │
+ ┃   │   3. Always allow this target  niobe saves Edit(/repo/catalog/fet… │ ┃ │     etag.ts                   +88 −41 │
+ ┃   │   4. Deny                                    the call does not run │ █ │     cache/lru.ts               +31 −9 │
+ ┃   │                                                                    │ █ │     cache/index.ts             +12 −0 │
+ ┃   │ 3. niobe saves Edit(/repo/catalog/fetch.py)                        │ █ └───────────────────────────────────────┘
+ ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
+ ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   │ Esc decide later                                                   │ █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
+ ┃   └────────────────────────────────────────────────────────────────────┘ █ │   └ Reading tests/stream.rs           █
+ ┃                                                                          █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │     Read 3                            │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

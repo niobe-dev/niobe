@@ -44,6 +44,7 @@ mod mention;
 pub mod menu;
 mod meter;
 pub mod prices;
+pub mod proposed;
 pub mod rules;
 pub mod run;
 mod select;

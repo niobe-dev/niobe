@@ -16,7 +16,7 @@
 //! can read.
 
 use niobe_core::diff::{Hunk, Line as DiffLine};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::{Change, Gate};
@@ -178,6 +178,92 @@ pub(crate) fn lines(
     lines
 }
 
+/// A change a permission question proposes, `width` cells wide: each line
+/// signed as [`lines`] signs it, unchanged lines more than [`CONTEXT_LINES`]
+/// from a change left out, and cut at [`MAX_ROWS`] rows unless `open`.
+///
+/// Unnumbered, since a proposed edit says what text it replaces and not
+/// where in the file that text is. And wrapped rather than cut at the edge,
+/// unlike a change already made: what is still to be approved is read whole.
+pub(crate) fn proposed(
+    lines: &[DiffLine],
+    width: usize,
+    open: bool,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    let mut dropped = false;
+    for (line, keep) in lines.iter().zip(near_a_change(lines)) {
+        if !keep {
+            dropped = true;
+            continue;
+        }
+        if dropped && !rows.is_empty() {
+            rows.push(elided(0, width, theme));
+        }
+        dropped = false;
+        rows.extend(wrapped_row(line, width, theme));
+    }
+    if cuts(rows.len()) {
+        let beyond = rows.len() - MAX_ROWS;
+        if !open {
+            rows.truncate(MAX_ROWS);
+        }
+        rows.push(marker(beyond, open, width, theme));
+    }
+    rows
+}
+
+/// One line of a proposed change as the rows it wraps to: its sign on the
+/// first, and the rest under its text.
+fn wrapped_row(line: &DiffLine, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let (sign, sign_colour, text_colour, bg) = look(line, theme);
+    let room = width.saturating_sub(2).max(1);
+    let mut parts = text::wrap_exact(line.text(), room);
+    if parts.is_empty() {
+        parts.push(String::new());
+    }
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(at, part)| {
+            let sign = match at {
+                0 => sign,
+                _ => " ",
+            };
+            Line::from(vec![
+                Span::styled(sign, Style::new().fg(sign_colour).bg(bg).bold()),
+                Span::styled(" ", Style::new().bg(bg)),
+                Span::styled(pad(&part, room), Style::new().fg(text_colour).bg(bg)),
+            ])
+            .style(Style::new().bg(bg))
+        })
+        .collect()
+}
+
+/// A line's sign, the colour of its sign or number, of its text, and of what
+/// it is drawn on.
+fn look(line: &DiffLine, theme: &Theme) -> (&'static str, Color, Color, Color) {
+    match line {
+        DiffLine::Context(_) => (" ", theme.dim, theme.fg, theme.diff_bg),
+        DiffLine::Removed(_) => ("-", theme.del, theme.del, theme.del_bg),
+        DiffLine::Added(_) => ("+", theme.add, theme.add, theme.add_bg),
+    }
+}
+
+/// The row standing for unchanged lines left out, under a gutter of
+/// `number_width` digits.
+fn elided(number_width: usize, width: usize, theme: &Theme) -> Line<'static> {
+    let gutter = " ".repeat(number_width + 1);
+    Line::from(vec![
+        Span::styled(gutter, Style::new().bg(theme.diff_bg)),
+        Span::styled(
+            pad("…", width.saturating_sub(number_width + 1)),
+            Style::new().fg(theme.dim).bg(theme.diff_bg),
+        ),
+    ])
+}
+
 /// How many digits `number` is written in.
 fn digits(number: u64) -> usize {
     number.checked_ilog10().map_or(1, |log| log as usize + 1)
@@ -190,20 +276,9 @@ fn digits(number: u64) -> usize {
 /// file is always one row and one number.
 fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> Line<'static> {
     let Row::Line(number, line) = row else {
-        let gutter = " ".repeat(number_width + 1);
-        return Line::from(vec![
-            Span::styled(gutter, Style::new().bg(theme.diff_bg)),
-            Span::styled(
-                pad("…", width.saturating_sub(number_width + 1)),
-                Style::new().fg(theme.dim).bg(theme.diff_bg),
-            ),
-        ]);
+        return elided(number_width, width, theme);
     };
-    let (sign, number_colour, text_colour, bg) = match line {
-        DiffLine::Context(_) => (" ", theme.dim, theme.fg, theme.diff_bg),
-        DiffLine::Removed(_) => ("-", theme.del, theme.del, theme.del_bg),
-        DiffLine::Added(_) => ("+", theme.add, theme.add, theme.add_bg),
-    };
+    let (sign, number_colour, text_colour, bg) = look(line, theme);
     let room = width.saturating_sub(number_width + 3);
     let shown = text::truncate(&text::expand_tabs(line.text()), room);
     Line::from(vec![

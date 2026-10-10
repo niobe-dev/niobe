@@ -44,7 +44,10 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   `Allowlist`), which the shell matches and the config stores, and which refuses a rule copied in
   Claude Code's own `:*` or `**` form with the rule to write instead; `diff.rs` is the line arithmetic
   every backend counts a file change with, so two bridges cannot disagree about what a changed
-  line is, and the `Hunk` a change's lines travel in where the backend reported them; `test_run.rs` recognises a shell
+  line is, and the `Hunk` a change's lines travel in where the backend reported them, and the
+  lines an edit still waiting on the operator would remove and add; `proposal.rs` is what a call
+  waiting on the operator would do — replace text in a file, write a file whole, run a command —
+  as the backend read it out of the call's arguments, and which arguments that reading covers; `test_run.rs` recognises a shell
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
@@ -167,8 +170,11 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   that names the agent, rows with nothing under them on consecutive lines, a run of calls to one tool as one
   group that Ctrl+O folds, edits to the agent's own notes as one `updated memory` row whose
   lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
-  grouped under a heading per agent — `arguments.rs` lays out the arguments of a call a permission question has no
-  target for, one key to a row, with the JSON as sent behind Ctrl+T, `tags.rs` names each sub-agent by one short word of the kind of agent
+  grouped under a heading per agent — `arguments.rs` lays out a permission question's arguments one key to a row, with
+  the JSON as sent behind Ctrl+T, `proposed.rs` draws what a question's call would do where the
+  backend read it — an edit as the lines it removes and adds, wrapped and cut where a transcript
+  diff is, a file written as the lines it will hold and whether what it held is lost, a command
+  once — and the arguments that reading does not cover by key, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
   it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
@@ -185,14 +191,15 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
-  `translate.rs` turns one message of it into events and owns no process — and reads the MCP
+  `translate.rs` turns one message of it into events and owns no process — and reads an `Edit`,
+  `Write` or `Bash` permission prompt's arguments as what the call would do, and the MCP
   servers every `init` lists, each with the tools of the session's that are its own, and the
   CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or
   address (never its arguments, environment or headers) — which it keeps for every later
   `init`, and marks an edit
   under the CLI's `projects/<project>/memory/` as the agent's own notes — `driver.rs` spawns the
   binary, writes a turn with its attached images as base64 image blocks after the text, as the
-  CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), asks it with
+  CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), looks, as a `Write` is asked about, whether a file is at the path it would replace, asks it with
   `initialize` what it offers — the answer is where the slash commands a
   session starts with are listed, `commands_changed` only reports a change to them — asks it
   `mcp_status` whenever an `init` lists a server standing otherwise than it last said, and after

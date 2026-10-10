@@ -567,7 +567,8 @@ impl Session {
         let mut translator = Translator::new(options.profile.clone())
             .resuming(&options.spent)
             .in_dir(options.cwd.clone())
-            .reading_spilled_with(spilled::read);
+            .reading_spilled_with(spilled::read)
+            .checking_files_with(file_exists);
         if let Some(billing) = options.billing {
             translator = translator.billed_as(billing);
         }
@@ -1782,6 +1783,18 @@ fn group_of(leader: u32) -> Option<rustix::process::Pid> {
     i32::try_from(leader)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
+}
+
+/// Whether anything is at `path`, for a question about writing it: the
+/// entry itself, a link included, since a write to a link replaces what it
+/// leads to. Reads no file, so a FIFO there is not waited on. `None` where
+/// the answer is not that it is there or that nothing is.
+fn file_exists(path: &Path) -> Option<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Some(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
