@@ -1767,3 +1767,32 @@ fn a_settings_file_rewritten_after_trust_is_not_trusted_and_its_env_is_shown() {
     let out = stdout(&setup.run(&["profiles"]));
     assert!(!out.contains("not trusted"), "{out}");
 }
+
+/// A repository's config chooses the names and the values of its profiles, and
+/// a line break in one is a row of the listing that is the file's and not the
+/// operator's own: it is drawn on the row it is in.
+#[test]
+fn a_line_break_in_a_profile_does_not_forge_a_row_of_the_listing() {
+    let setup = Configured::new(
+        USER_CONFIG,
+        r#"
+[profiles."evil\n* personal  claude   /Users/me/.config/niobe/config.toml"]
+backend = "claude"
+args = ["--model", "x\n* forged  codex  /nowhere"]
+settings = ".niobe/a\nb.json"
+auth_refresh = "true\n* personal  claude  /user"
+"#,
+    );
+
+    let out = stdout(&setup.run(&["profiles"]));
+
+    for line in out.lines() {
+        assert!(
+            !line.starts_with("* personal  claude   /Users/me")
+                && !line.starts_with("* forged")
+                && !line.starts_with("* personal  claude  /user"),
+            "a row the file forged: {line:?}\n{out}"
+        );
+    }
+    assert!(out.contains('\u{2424}'), "the break is shown: {out}");
+}

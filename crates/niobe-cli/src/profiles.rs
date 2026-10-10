@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use niobe_config::{Config, Profile, Withheld};
 use niobe_core::Backend;
 
+use crate::printable::on_one_line;
+
 /// The list: one row per profile under a header, the selected one marked with
 /// `*`, and under each row what the profile sets beyond its backend.
 ///
@@ -31,9 +33,12 @@ pub fn table(
     forcing_bedrock: Option<&Path>,
 ) -> Vec<String> {
     let profiles = config.profiles();
+    // Everything a config file holds is drawn on one line: a line break in a
+    // profile's name or one of its values would start a row of its own that
+    // reads as another profile's, a selected one among them.
     let name_width = profiles
         .keys()
-        .map(|name| name.chars().count())
+        .map(|name| on_one_line(name).chars().count())
         .max()
         .unwrap_or(0)
         .max("PROFILE".len());
@@ -48,30 +53,32 @@ pub fn table(
         } else {
             ' '
         };
+        let name = on_one_line(name);
         lines.push(format!(
             "{marker} {name:<name_width$}  {:<7}  {}",
             profile.backend().as_str(),
-            profile.source().display()
+            on_one_line(&profile.source().display().to_string())
         ));
 
         lines.extend(details(profile, forcing_bedrock, name_width));
     }
     if let Some((name, path)) = config.withheld_default() {
         lines.push(format!(
-            "  default_profile `{name}` in {} is not in force: that file is not trusted",
-            path.display()
+            "  default_profile `{}` in {} is not in force: that file is not trusted",
+            on_one_line(name),
+            on_one_line(&path.display().to_string())
         ));
     }
     if let Some((rules, path)) = config.withheld_rules() {
         let rules: Vec<String> = rules
             .rules()
             .iter()
-            .map(|rule| format!("`{rule}`"))
+            .map(|rule| format!("`{}`", on_one_line(&rule.to_string())))
             .collect();
         lines.push(format!(
             "  permissions allow {} in {} are not in force: that file is not trusted",
             rules.join(", "),
-            path.display()
+            on_one_line(&path.display().to_string())
         ));
     }
     lines
@@ -79,7 +86,7 @@ pub fn table(
 
 /// Formats a detail row for a profile property, aligned under the profile name.
 fn detail_row(label: &str, value: String, name_width: usize) -> String {
-    format!("  {:<name_width$}  {label:<13}{value}", "")
+    format!("  {:<name_width$}  {label:<13}{}", "", on_one_line(&value))
 }
 
 /// What a profile sets beyond its backend, one indented row each, under the
