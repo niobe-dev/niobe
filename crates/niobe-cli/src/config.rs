@@ -200,7 +200,7 @@ fn load_with(
     let mut config = user_config(user.as_deref())?;
     let mut untrusted = None;
     repo::inside(root, &repo)?;
-    if let Some(layer) = repository(&repo, root, record.as_deref(), home.as_deref())? {
+    if let Some(layer) = repository(&repo, root, &config, record.as_deref(), home.as_deref())? {
         // A file that defines a profile the user's does is worth trusting
         // even where it sets nothing else: until it is trusted, its profile of
         // that name is not the one in force.
@@ -296,6 +296,7 @@ struct Layer {
 fn repository(
     path: &Path,
     root: &Path,
+    user: &Config,
     record: Option<&Path>,
     home: Option<&OsStr>,
 ) -> Result<Option<Layer>, String> {
@@ -305,7 +306,8 @@ fn repository(
     let config = Config::parse(&text, path).map_err(|e| e.to_string())?;
     let needs_trust = config.needs_trust();
     let attached = attached(&config, root, home);
-    if trusted(record, path, &text, &attached)? {
+    let replaces = replaced(user, &config);
+    if trusted(record, path, &text, &attached, &replaces)? {
         return Ok(Some(Layer {
             whole: config.clone(),
             config,
@@ -389,21 +391,41 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
 /// keep the decision, so it has not been made: a repository is gated rather
 /// than ungated by an environment that says nothing. A file that cannot be
 /// read as text is not trusted, because nobody could have been shown it.
+///
+/// The profiles the file replaces of the user's, `replaces`, are part of what
+/// was agreed to: a profile the operator adds to their own config afterwards
+/// under a name the file defines is a replacement nobody was asked about.
+/// A record from before the names were kept stands for none.
 fn trusted(
     record: Option<&Path>,
     path: &Path,
     text: &str,
     attached: &[Attached],
+    replaces: &[String],
 ) -> Result<bool, String> {
     let Some(record) = record else {
         return Ok(false);
     };
     let record = Trusted::read(record).map_err(|e| e.to_string())?;
+    let names = replaces_key(path);
+    let names_agreed = match record.holds(&names) {
+        true => record.trusts(&names, &replaces.join("\n")),
+        false => replaces.is_empty(),
+    };
     Ok(record.trusts(path, text)
+        && names_agreed
         && attached.iter().all(|file| match &file.text {
             Ok(text) => record.trusts(&file.path, text),
             Err(_) => false,
         }))
+}
+
+/// Where the record keeps the names of the user's profiles a trusted config
+/// replaces: beside the config's own entry, under a name no file has.
+pub fn replaces_key(config: &Path) -> PathBuf {
+    let mut key = config.as_os_str().to_owned();
+    key.push("#replaces");
+    PathBuf::from(key)
 }
 
 /// Where this machine keeps the record of the config files it has trusted.
@@ -737,6 +759,65 @@ mod tests {
             })
             .expect("the record is written");
         }
+    }
+
+    /// The operator adds a profile of their own under a name a trusted file
+    /// defines: the file was trusted while that was no replacement, and what
+    /// it replaces now is something nobody was asked about.
+    #[test]
+    fn a_trusted_config_that_comes_to_replace_a_users_profile_is_asked_about_again() {
+        let clone = Cloned::new("[profiles.max]\nbackend = \"claude\"\nenv = { A = \"1\" }\n");
+        clone.trust();
+        let user = clone.dir.path().join("user.toml");
+        let load = |user: Option<PathBuf>| {
+            load_with(
+                user,
+                clone.dir.path(),
+                Some(clone.record.clone()),
+                os("/home/me"),
+            )
+            .expect("the config loads")
+        };
+        assert!(load(None).untrusted.is_none(), "nothing replaced, trusted");
+
+        std::fs::write(&user, "[profiles.max]\nbackend = \"codex\"\n").expect("written");
+        let loaded = load(Some(user));
+
+        let untrusted = loaded.untrusted.expect("a replacement nobody agreed to");
+        assert_eq!(untrusted.replaces, ["max"]);
+        assert_eq!(
+            loaded
+                .config
+                .profiles()
+                .get("max")
+                .map(niobe_config::Profile::backend),
+            Some(niobe_core::Backend::Codex),
+            "the operator's profile is the one in force until they say otherwise"
+        );
+    }
+
+    #[test]
+    fn a_replacement_that_was_shown_and_trusted_stays_trusted() {
+        let clone = Cloned::new("[profiles.max]\nbackend = \"claude\"\nenv = { A = \"1\" }\n");
+        let user = clone.dir.path().join("user.toml");
+        std::fs::write(&user, "[profiles.max]\nbackend = \"codex\"\n").expect("written");
+        let path = repo::config_path(clone.dir.path());
+        let text = std::fs::read_to_string(&path).expect("reads");
+        Trusted::update(&clone.record, |trusted| {
+            trusted.trust(&path, &text)?;
+            trusted.trust(&replaces_key(&path), "max")
+        })
+        .expect("the record is written");
+
+        let loaded = load_with(
+            Some(user),
+            clone.dir.path(),
+            Some(clone.record.clone()),
+            os("/home/me"),
+        )
+        .expect("the config loads");
+
+        assert!(loaded.untrusted.is_none());
     }
 
     const TEAM: &str = "[profiles.team]\nbackend = \"claude\"\nsettings = \"claude.json\"\n";

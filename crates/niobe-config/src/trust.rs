@@ -31,7 +31,10 @@
 //! What a config names is part of the same decision. A `settings` file or a
 //! file an `args` entry names is read by the CLI when it starts, and a pull
 //! can rewrite it without touching the config, so each is recorded in the same
-//! file beside the config, at the contents the operator was shown.
+//! file beside the config, at the contents the operator was shown, and so are
+//! the names of the user's profiles it replaces: a profile added to the
+//! user's own config later, under a name the file defines, is a replacement
+//! nobody was asked about.
 //!
 //! The user's own config is not gated. It is the file the operator writes;
 //! asking them to trust their own text would teach them to say yes without
@@ -142,6 +145,11 @@ impl Trusted {
             entries.insert(PathBuf::from(file), hex.to_ascii_lowercase());
         }
         Ok(Self { entries })
+    }
+
+    /// Whether `file` has an entry at all, for whatever contents.
+    pub fn holds(&self, file: &Path) -> bool {
+        self.entries.contains_key(file)
     }
 
     /// Whether `file`, holding `text`, may start a backend with what it says.

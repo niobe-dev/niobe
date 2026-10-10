@@ -234,6 +234,7 @@ pub fn record(untrusted: &Untrusted) -> Result<(), String> {
     }
     Trusted::update(&record_path()?, |trusted| {
         trusted.trust(path, &untrusted.text)?;
+        trusted.trust(&config::replaces_key(path), &untrusted.replaces.join("\n"))?;
         for (file, text) in &files {
             trusted.trust(file, text)?;
         }
