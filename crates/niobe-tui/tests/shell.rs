@@ -1268,11 +1268,7 @@ fn an_edit_question_shows_the_lines_it_removes_and_adds_and_ctrl_t_what_is_sent(
             "… {} more lines · Ctrl+T shows the whole call",
             changed - drawn
         );
-        assert_eq!(
-            rows.contains(&said),
-            !whole,
-            "{said}:\n{frame}"
-        );
+        assert_eq!(rows.contains(&said), !whole, "{said}:\n{frame}");
         assert!(
             !rows.iter().any(|row| row.starts_with('{')),
             "no JSON until Ctrl+T:\n{frame}"
