@@ -1382,3 +1382,38 @@ fn an_informational_record_keeps_its_level_and_an_empty_fire_is_no_notice() {
         "an empty fire says nothing: {events:#?}"
     );
 }
+
+/// Two files of agent records that name one call are two files for one agent,
+/// which a map would let replace each other by the directory's order: the first
+/// by name is read, deterministically, and the other is said to be passed over.
+#[test]
+fn two_side_files_naming_one_call_say_which_was_not_read() {
+    let at = "2026-09-18T09:00:03.000Z";
+    let (_dir, path) = constructed(
+        &[spawning("toolu_a", "2026-09-18T09:00:01.000Z")],
+        &[
+            ("toolu_a", vec![said("first file", at)]),
+            ("toolu_a", vec![said("second file", at)]),
+        ],
+    );
+
+    let events = transcript::events(&path, "max", Path::new("/repo")).expect("it reads");
+
+    assert_eq!(
+        said_in_order(&events),
+        [("first file".to_owned(), true)],
+        "{events:#?}"
+    );
+    let warned: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Error { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(
+        warned[0].contains("toolu_a") && warned[0].contains("agent-a1"),
+        "{warned:?}"
+    );
+}

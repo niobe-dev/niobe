@@ -456,7 +456,19 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
         .iter()
         .filter(|record| matches!(record.record, Ok(Line::CostState(_))))
         .count();
-    let sides = side_files(path);
+    let mut sides = side_files(path);
+    // One agent has one file. Where two name the same call, the first by name
+    // is read and the other is said to have been passed over, with the call:
+    // read in turn they would replace each other, and which won would depend
+    // on the directory.
+    let mut passed_over: Vec<(String, String)> = Vec::new();
+    sides.dedup_by(|later, kept| {
+        let same = later.call == kept.call;
+        if same {
+            passed_over.push((later.call.clone(), later.file.clone()));
+        }
+        same
+    });
     let mut threads = Threads::read(&sides);
     let last_usage = last_usage(read.iter().chain(threads.records()));
     let agents = sides
@@ -465,6 +477,12 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
         .collect();
 
     let mut fold = Fold::new(profile, cwd, id, accountings, agents).counting(last_usage);
+    for (call, file) in passed_over {
+        fold.out.push(translate::warn(format!(
+            "two files of sub-agent records name the call `{call}`: `{file}` is not read, and \
+             what it holds is not counted"
+        )));
+    }
     // A session the CLI never titled is captioned by what the operator first
     // asked. Said here rather than left to the first message, because the
     // first message in a transcript may be one the CLI wrote itself.
@@ -728,6 +746,8 @@ impl<'a> Threads<'a> {
 /// A sub-agent's own transcript, and the call that spawned the agent.
 struct SideFile {
     call: String,
+    /// The name of the file the text was read from, without its extension.
+    file: String,
     text: String,
 }
 
@@ -769,11 +789,16 @@ fn side_files(path: &Path) -> Vec<SideFile> {
         let Ok(text) = read(&dir.join(format!("{stem}.{EXTENSION}"))) else {
             continue;
         };
-        sides.push(SideFile { call, text });
+        sides.push(SideFile {
+            call,
+            file: stem.to_owned(),
+            text,
+        });
     }
-    // The directory's own order is the file system's; the call's id is at
-    // least the same on every machine.
-    sides.sort_by(|a, b| a.call.cmp(&b.call));
+    // The directory's own order is the file system's; the call's id, and the
+    // file's name where two name the same call, are at least the same on every
+    // machine.
+    sides.sort_by(|a, b| (&a.call, &a.file).cmp(&(&b.call, &b.file)));
     sides
 }
 
