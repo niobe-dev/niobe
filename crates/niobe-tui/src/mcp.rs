@@ -222,7 +222,7 @@ fn listing(
             lines.push(Line::styled(said, Style::new().fg(theme.dialog_fg)));
         }
     } else {
-        let columns = Columns::of(servers);
+        let columns = Columns::of(servers, width);
         let room = rows
             .saturating_sub(elsewhere.len())
             .saturating_sub(3)
@@ -254,7 +254,9 @@ fn elsewhere(app: &App, width: usize) -> Vec<String> {
     text::wrap(&said, width)
 }
 
-/// How wide the list's columns are drawn, from the servers in it.
+/// How wide the list's columns are drawn, from the servers in it, the name's
+/// no more than the share of the width that leaves a status, a scope and a tool
+/// count room: a plugin's name can be longer than the screen.
 struct Columns {
     name: usize,
     status: usize,
@@ -262,7 +264,7 @@ struct Columns {
 }
 
 impl Columns {
-    fn of(servers: &[McpServer]) -> Self {
+    fn of(servers: &[McpServer], width: usize) -> Self {
         let widest = |cell: fn(&McpServer) -> &str| {
             servers
                 .iter()
@@ -271,7 +273,7 @@ impl Columns {
                 .unwrap_or(0)
         };
         Self {
-            name: widest(|server| &server.name),
+            name: widest(|server| &server.name).min(width / 2),
             status: widest(|server| server.status.label()),
             origin: widest(origin),
         }
@@ -294,7 +296,8 @@ fn row(
     theme: &Theme,
 ) -> Line<'static> {
     let marker = if on_it { CURSOR } else { "  " };
-    let lead = format!("{marker}{}{GAP}", text::pad(&server.name, columns.name));
+    let name = text::truncate(&server.name, columns.name);
+    let lead = format!("{marker}{}{GAP}", text::pad(&name, columns.name));
     let status = text::pad(server.status.label(), columns.status);
     let origin = format!("{GAP}{}", text::pad(origin(server), columns.origin));
     let tools = tool_count(server.tools.len());
@@ -535,6 +538,33 @@ mod tests {
                 field("tools", "none"),
             ]
         );
+    }
+
+    /// A plugin-style name longer than the view: it is cut to its share, and
+    /// the status, the scope and the tool count of every row are still there.
+    #[test]
+    fn a_name_longer_than_the_view_leaves_every_servers_status_on_its_row() {
+        let theme = Theme::default();
+        let long = "plugin:".to_owned() + &"x".repeat(129);
+        let servers = [
+            server(&long, McpStatus::Connected),
+            McpServer {
+                scope: Some("project".to_owned()),
+                ..server("broken", McpStatus::Failed)
+            },
+        ];
+        let columns = Columns::of(&servers, 100);
+        let rows: Vec<Line<'static>> = servers
+            .iter()
+            .enumerate()
+            .map(|(at, server)| row(server, &columns, at == 0, 100, &theme))
+            .collect();
+        let rows = said(&rows);
+
+        assert!(rows[0].contains("connected"), "{:?}", rows[0]);
+        assert!(rows[1].contains("failed"), "{:?}", rows[1]);
+        assert!(rows[1].contains("project"), "{:?}", rows[1]);
+        assert!(rows.iter().all(|row| text::width(row) <= 100), "{rows:?}");
     }
 
     #[test]
