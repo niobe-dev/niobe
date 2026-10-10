@@ -6097,6 +6097,20 @@ impl App {
         self.hint = None;
         self.escaped = false;
         let text = pasted_lines(pasted);
+        // A paste is text. A control character in it — an escape sequence
+        // copied out of a terminal, a bell — would be sent with the prompt and
+        // drawn nowhere, so what is sent would not be what is shown: it is
+        // left out, and the bar says how many were.
+        let kept: String = text
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .collect();
+        let left_out = text.chars().count() - kept.chars().count();
+        let text = kept;
+        if left_out > 0 && text.trim().is_empty() {
+            self.hint = Some(controls_left_out(left_out));
+            return;
+        }
         // Nothing pasted answers the trust question, and there is no prompt
         // behind it to take the text.
         if self.trusting.is_some() {
@@ -6165,6 +6179,9 @@ impl App {
         if self.composer.insert_str(text) {
             self.offer_selected = 0;
             self.reopen_offers();
+        }
+        if left_out > 0 {
+            self.hint = Some(controls_left_out(left_out));
         }
     }
 
@@ -7684,6 +7701,14 @@ fn pasted_lines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// What the bar says of the control characters a paste had in it.
+fn controls_left_out(count: usize) -> String {
+    match count {
+        1 => "1 control character was left out of the paste".to_owned(),
+        n => format!("{n} control characters were left out of the paste"),
+    }
+}
+
 /// A paste for somewhere that holds one line: its lines joined by spaces.
 fn joined_lines(text: &str) -> String {
     text.replace('\n', " ")
@@ -8848,6 +8873,35 @@ mod tests {
         assert_eq!(app.composed(), "ls");
         assert_eq!(app.hint(), Some(NO_IMAGE_IN_A_COMMAND_HINT));
         assert_eq!(app.take_turn_images(), vec![]);
+    }
+
+    /// What is sent is what is drawn: a terminal's escape sequence or a bell
+    /// in a paste is not sent, and the bar says it was left out.
+    #[test]
+    fn a_paste_leaves_its_control_characters_out_and_says_so() {
+        let mut app = app();
+
+        app.on_paste("ab\x1b[31mred\x1b[0m\x07cd\nef");
+
+        assert_eq!(app.composed(), "ab[31mred[0mcd\nef");
+        assert_eq!(
+            app.hint(),
+            Some("3 control characters were left out of the paste")
+        );
+    }
+
+    #[test]
+    fn a_paste_of_nothing_but_controls_is_not_a_request_for_the_image_on_the_clipboard() {
+        let mut app = app();
+
+        app.on_paste("\x1b\x07");
+
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "");
+        assert_eq!(
+            app.hint(),
+            Some("2 control characters were left out of the paste")
+        );
     }
 
     #[test]
