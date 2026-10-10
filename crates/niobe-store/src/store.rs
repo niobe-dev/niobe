@@ -98,9 +98,13 @@ SELECT windows.at, windows.event
  ORDER BY windows.at DESC, windows.session_id DESC, windows.seq DESC";
 
 /// The events found by their kind rather than by reading every row: the
-/// usage windows, by when they were recorded, and the session headers that
-/// name each session's profile, by session — what [`LAST_USAGE_WINDOWS`]
-/// reads before the shell draws its first frame.
+/// usage windows, by when they were recorded — what [`LAST_USAGE_WINDOWS`]
+/// reads through before the shell draws its first frame — and the session
+/// headers that name each session's profile, by session.
+///
+/// The second is not the one that query's subquery plans on: that is a search
+/// of the session's own rows by the primary key, `session_id` and `seq`, which
+/// is as narrow. It is for a lookup of the headers alone.
 ///
 /// Partial, so each holds only the few rows of its kind, not one entry per
 /// streamed fragment of a reply. Created where missing on every open that
@@ -820,7 +824,23 @@ mod tests {
 
         let steps = plan(&store, LAST_USAGE_WINDOWS);
 
-        assert!(steps.iter().all(|step| step != "SCAN events"), "{steps:#?}");
+        // The table is read under its alias, so a full scan is `SCAN windows`
+        // and not `SCAN events`: what is asked is that the windows are found
+        // by the partial index made for them, and that no step of the plan
+        // walks a table with no index.
+        assert!(
+            steps
+                .iter()
+                .any(|step| step.starts_with("SCAN windows")
+                    && step.contains("events_usage_windows")),
+            "the windows are not read through their index: {steps:#?}"
+        );
+        assert!(
+            steps
+                .iter()
+                .all(|step| !step.starts_with("SCAN ") || step.contains("USING")),
+            "a step walks a whole table: {steps:#?}"
+        );
     }
 
     #[test]
