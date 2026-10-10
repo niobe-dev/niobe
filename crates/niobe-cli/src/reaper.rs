@@ -102,8 +102,13 @@ impl Drop for Watcher {
     /// Kills the reaper before its pipe closes: the session is ending by its
     /// own way out, which stops what it started, and the reaper reading the
     /// end of its input would signal those groups again.
+    ///
+    /// The pipe is closed before the wait, so that a reaper the kill did not
+    /// reach ends on its own rather than leaving the wait for ever: a `wait`
+    /// holding the write end open is waiting on a `sh` that is waiting on it.
     fn drop(&mut self) {
         let _ = self.sh.kill();
+        drop(self.told.take());
         let _ = self.sh.wait();
     }
 }
@@ -291,6 +296,29 @@ mod tests {
         assert!(
             ended_within(&mut started, Duration::from_millis(1500)).is_none(),
             "the reaper signalled a group the session was left to stop"
+        );
+        let _ = started.kill();
+        let _ = started.wait();
+    }
+
+    #[test]
+    fn dropping_the_last_reaper_returns_promptly_and_signals_nothing() {
+        let reaper = Reaper::start().expect("sh starts");
+        let mut started = group();
+        reaper.watch(started.id());
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(reaper);
+            let _ = done.send(());
+        });
+
+        assert!(
+            finished.recv_timeout(PATIENCE).is_ok(),
+            "dropping the reaper did not return"
+        );
+        assert!(
+            ended_within(&mut started, Duration::from_millis(1500)).is_none(),
+            "dropping the reaper signalled a group the session was left to stop"
         );
         let _ = started.kill();
         let _ = started.wait();
