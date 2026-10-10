@@ -24,11 +24,18 @@ const TRACK: char = '\u{2591}';
 /// what carries the overflow**, and it is never clamped: a backend reporting
 /// more of a window than there is has reported something the operator has to
 /// see. A share that is anything above nothing keeps a cell, so a window that
-/// has been touched does not read as untouched; a share that is not a number
-/// at all fills nothing.
+/// has been touched does not read as untouched, and one that is short of the
+/// whole keeps a cell of track, so that a window with a tenth left does not
+/// read as one that is gone; a share that is not a number at all fills
+/// nothing. Where there is a single cell, it can keep only one of the two, and
+/// keeps the filled one.
 pub fn meter(share: f64, cells: usize) -> (String, String) {
+    let ceiling = match share < 1.0 && cells > 1 {
+        true => cells - 1,
+        false => cells,
+    };
     let filled = match share.is_finite() && share > 0.0 {
-        true => ((share * cells as f64).round().max(1.0) as usize).min(cells),
+        true => ((share * cells as f64).round().max(1.0) as usize).min(ceiling),
         false => 0,
     };
     (
@@ -55,6 +62,20 @@ mod tests {
     #[test]
     fn a_window_that_is_gone_leaves_no_track() {
         assert_eq!(meter(1.0, 12), ("▓".repeat(12), String::new()));
+    }
+
+    /// Rounding must not draw a window with a tenth left as one with none: in
+    /// five cells, 0.9 is 4.5 of them, which rounds up to all five.
+    #[test]
+    fn a_window_short_of_the_whole_keeps_a_cell_of_track() {
+        assert_eq!(meter(0.9, 5), ("▓".repeat(4), "░".to_owned()));
+        assert_eq!(meter(0.99, 12), ("▓".repeat(11), "░".to_owned()));
+        assert_eq!(meter(1.0, 5), ("▓".repeat(5), String::new()));
+        assert_eq!(
+            meter(0.9, 1),
+            ("▓".to_owned(), String::new()),
+            "one cell is filled"
+        );
     }
 
     #[test]
