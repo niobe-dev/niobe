@@ -2931,7 +2931,21 @@ impl App {
         self.hint = Some(QUESTION_WITHDRAWN_HINT.to_owned());
         if self.asks.is_empty() {
             self.withdrawn_quiet_since = self.latest_instant();
-            if self.composer.is_empty() && self.composer.insert_str(draft) {
+        }
+        // Nothing the operator wrote is dropped: an answer goes into an empty
+        // prompt, or after what the prompt holds on a line of its own, and
+        // waits there where another question is queued behind this one.
+        if !draft.is_empty() {
+            let kept = match self.composer.is_empty() {
+                true => self.composer.insert_str(draft),
+                false => {
+                    self.composer
+                        .move_cursor(ratatui_textarea::CursorMove::Bottom);
+                    self.composer.move_cursor(ratatui_textarea::CursorMove::End);
+                    self.composer.insert_str(format!("\n{draft}"))
+                }
+            };
+            if kept && self.asks.is_empty() {
                 self.focus = Focus::Session;
             }
         }
@@ -13480,6 +13494,41 @@ mod tests {
         at
     }
 
+    /// What the operator was writing as the question went is theirs: beside a
+    /// draft it goes after it, and behind another question it waits in the
+    /// prompt.
+    #[test]
+    fn an_answer_being_written_is_kept_when_its_question_is_withdrawn() {
+        let mut app = asked(Some("ls"));
+        typed(&mut app, "my next idea");
+        app.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(app.composed(), "my next idea");
+
+        // An answer being written beside a draft: after it, on its own line.
+        let mut beside = asked(Some("ls"));
+        beside.composer.insert_str("my next idea");
+        beside.on_key(key(KeyCode::Tab));
+        typed(&mut beside, "no, use rg");
+        beside.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(beside.composed(), "my next idea\nno, use rg");
+
+        // Another question queued behind: the answer waits in the prompt.
+        let mut queued = asked(Some("ls"));
+        queued.apply(&Event::PermissionRequest {
+            id: "t2".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"pwd"}"#.to_owned(),
+            target: Some("pwd".to_owned()),
+            proposal: None,
+            reason: None,
+            agent: None,
+        });
+        queued.on_key(key(KeyCode::Tab));
+        typed(&mut queued, "no, use rg");
+        queued.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(queued.composed(), "no, use rg");
+    }
+
     #[test]
     fn a_question_brought_up_by_withdrawing_the_one_being_answered_waits_for_a_quiet_keyboard() {
         let shown = Instant::now();
@@ -13502,7 +13551,9 @@ mod tests {
         assert_eq!(app.take_produced(), []);
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
-        assert_eq!(app.composed(), " instead");
+        // What was being written for the question that went is not lost to
+        // the one that came up behind it: the words go on in the prompt.
+        assert_eq!(app.composed(), "use rg instead");
         read(&mut app, b"\x1b", last + every + ASK_QUIET * 2);
         read(&mut app, b"\r", last + every + ASK_QUIET * 4);
         assert_eq!(
