@@ -256,3 +256,32 @@ fn a_link_wider_than_its_row_opens_whole_from_either_part() {
         }
     }
 }
+
+/// The click was the dialog's, not the transcript's under it: a link there
+/// would hand the machine's opener an address nobody aimed at, and a drag
+/// would copy text the dialog hides.
+#[test]
+fn a_click_or_a_drag_over_an_open_dialog_reaches_nothing_under_it() {
+    use niobe_tui::menu::Action;
+
+    for (name, open) in [
+        ("history", Action::History),
+        ("theme", Action::Theme),
+        ("search", Action::Find),
+    ] {
+        let mut app = replied("The docs are at https://example.com/docs/select. Read them.");
+        let frame = screen(&mut app, WIDTH, HEIGHT);
+        let (column, row) = cell_of(&frame, "example.com");
+        app.perform(open);
+        assert!(
+            app.picking().is_some() || app.finding().is_some() || app.browser().is_some(),
+            "{name} did not open"
+        );
+
+        click(&mut app, (column + 3, row));
+        assert_eq!(app.take_handoffs(), vec![], "{name}: a click opened it");
+
+        drag(&mut app, (column, row), (column + 9, row));
+        assert_eq!(app.take_handoffs(), vec![], "{name}: a drag copied it");
+    }
+}

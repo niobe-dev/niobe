@@ -5794,6 +5794,11 @@ impl App {
             MouseEventKind::ScrollDown => wheel(self, Scroll::Down(Self::WHEEL_LINES)),
             MouseEventKind::Down(MouseButton::Left)
                 if self.on_menu_click(mouse.column, mouse.row) => {}
+            // What is open takes the click that lands on it, like a sheet
+            // does, and nothing is pressed under it: the link or the text
+            // beneath a dialog is not what the operator aimed at, and a drag
+            // would copy what the dialog hides.
+            MouseEventKind::Down(MouseButton::Left) if self.overlay().is_some() => {}
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
                 let jump = self
