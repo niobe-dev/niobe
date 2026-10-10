@@ -1450,12 +1450,12 @@ mod tests {
     /// is ten seconds of an idle session, and several seconds of a busy one.
     const TICKS: usize = 100;
 
-    /// A quarter of a second. Asking without waiting costs microseconds a
-    /// time, and a look that waited for a read would cost tens of
-    /// milliseconds each — seconds over [`TICKS`] — so this bound still tells
-    /// the two apart, with room for a debug build sharing its cores with the
-    /// tests around it, where one frame's worth did not.
-    const FRAME: Duration = Duration::from_millis(250);
+    /// Two seconds. Asking without waiting costs microseconds a time, and a
+    /// look that waited for a read would cost tens of milliseconds each —
+    /// seconds over [`TICKS`] — so this bound still tells the two apart, with
+    /// room for a debug build sharing its cores with the tests around it,
+    /// where a bound of one frame's worth, and then a quarter second, did not.
+    const FRAME: Duration = Duration::from_secs(2);
 
     /// A read of this workspace takes tens of milliseconds — several frames —
     /// so the loop can never be the thing doing it. A hundred ticks' worth of

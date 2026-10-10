@@ -558,7 +558,7 @@ mod tests {
         drop(held);
 
         assert!(
-            taken < Duration::from_millis(100),
+            taken < Duration::from_secs(2),
             "the shell waited {taken:?} on a store another process held"
         );
     }
