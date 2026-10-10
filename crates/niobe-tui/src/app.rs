@@ -5312,6 +5312,12 @@ impl App {
     pub fn fetched(&mut self, fetched: Fetched) {
         let pasted = self.images.fetched(&fetched.source);
         match (fetched.image, fetched.source) {
+            // Asked for before a `!` was typed, and landing after: a command
+            // line takes no image, and its placeholder would be a word of
+            // the command.
+            (Ok(_), _) if self.shell_mode => {
+                self.hint = Some(NO_IMAGE_IN_A_COMMAND_HINT.to_owned());
+            }
             (Ok(image), _) => {
                 let placeholder = self.images.attach(image);
                 self.hint = None;
@@ -8813,6 +8819,26 @@ mod tests {
         assert_eq!(app.take_image_requests(), []);
         assert_eq!(app.composed(), "ls");
         assert_eq!(app.hint(), Some(NO_IMAGE_IN_A_COMMAND_HINT));
+    }
+
+    /// An image asked for before the `!` and landing after it: the command
+    /// line takes none, and its placeholder would be a word of the command.
+    #[test]
+    fn an_image_landing_in_a_shell_command_leaves_the_command_as_it_was() {
+        let mut app = app().runs_commands();
+        app.on_key(ctrl('v'));
+        assert_eq!(app.take_image_requests(), [Source::Clipboard]);
+        typed(&mut app, "!ls");
+        assert!(app.shell_mode());
+
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+
+        assert_eq!(app.composed(), "ls");
+        assert_eq!(app.hint(), Some(NO_IMAGE_IN_A_COMMAND_HINT));
+        assert_eq!(app.take_turn_images(), vec![]);
     }
 
     #[test]
