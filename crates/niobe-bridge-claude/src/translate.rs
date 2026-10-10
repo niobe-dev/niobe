@@ -472,6 +472,12 @@ pub struct Translator {
     /// What the CLI's last answer to `mcp_status` said of each server, by
     /// name, which every later `init` lists again without.
     mcp_said: BTreeMap<String, McpServer>,
+    /// The servers the last `init` listed, and how each stood: what an answer
+    /// that omits one is read against.
+    mcp_listed: BTreeMap<String, McpStatus>,
+    /// The servers the last answer left out, and how each stood when it did:
+    /// one that still stands so is not asked about again for the omission.
+    mcp_omitted: BTreeMap<String, McpStatus>,
     /// Whether the servers should be asked about again: one stands otherwise
     /// than the CLI last said, or a reconnect was answered. Taken by
     /// [`Translator::take_mcp_status_wanted`].
@@ -593,6 +599,8 @@ impl Translator {
             mcp_status_requests: BTreeSet::new(),
             reconnects: BTreeMap::new(),
             mcp_said: BTreeMap::new(),
+            mcp_listed: BTreeMap::new(),
+            mcp_omitted: BTreeMap::new(),
             mcp_status_wanted: false,
             mcp_status_refused: false,
             turn: Counts::default(),
@@ -988,6 +996,12 @@ impl Translator {
     /// every later `init` to be read against.
     fn mcp_status(&mut self, servers: Vec<wire::McpServerStatus>) -> Event {
         let servers: Vec<McpServer> = servers.into_iter().map(mcp_server_status).collect();
+        self.mcp_omitted = self
+            .mcp_listed
+            .iter()
+            .filter(|(name, _)| !servers.iter().any(|server| &server.name == *name))
+            .map(|(name, status)| (name.clone(), status.clone()))
+            .collect();
         self.mcp_said = servers
             .iter()
             .map(|server| (server.name.clone(), server.clone()))
@@ -1001,9 +1015,17 @@ impl Translator {
     /// as it did then. One that stands otherwise is asked about again.
     fn mcp_servers(&mut self, servers: Vec<wire::McpServer>, tools: &[String]) -> Event {
         let mut listed = Vec::with_capacity(servers.len());
+        self.mcp_listed.clear();
         for server in mcp_servers(servers, tools) {
             let said = self.mcp_said.get(&server.name);
-            if said.is_none_or(|said| said.status != server.status) {
+            self.mcp_listed
+                .insert(server.name.clone(), server.status.clone());
+            // A server the answer left out has nothing said of it to be read
+            // against, and asking again would be told the same: it is asked
+            // about once for each way it stands.
+            let omitted =
+                said.is_none() && self.mcp_omitted.get(&server.name) == Some(&server.status);
+            if !omitted && said.is_none_or(|said| said.status != server.status) {
                 self.mcp_status_wanted = true;
             }
             listed.push(match said {
@@ -7720,6 +7742,41 @@ error: could not compile `demo` (lib test) due to 1 previous error";
         format!(
             r#"{{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{{"name":"docs","status":"{status}","source":"project"}}]}}"#
         )
+    }
+
+    /// An answer that leaves a server out says nothing of it: asking again
+    /// after every turn would be answered the same, and store a list each time.
+    #[test]
+    fn a_server_the_answer_left_out_is_not_asked_about_again_while_it_stands_so() {
+        let mut translator = Translator::new("max");
+        let init = |docs: &str| {
+            format!(
+                r#"{{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{{"name":"docs","status":"{docs}","source":"project"}},{{"name":"ghost","status":"pending"}}]}}"#
+            )
+        };
+        translator.line(&init("connected"));
+        assert!(
+            translator.take_mcp_status_wanted(),
+            "a first listing is asked about"
+        );
+        translator.asked_for_mcp_status("niobe-2");
+        translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"mcpServers":[{"name":"docs","status":"connected","scope":"project"}]}}}"#,
+        );
+
+        for _ in 0..3 {
+            translator.line(&init("connected"));
+            assert!(
+                !translator.take_mcp_status_wanted(),
+                "the omitted server stands as it did"
+            );
+        }
+
+        translator.line(&init("failed"));
+        assert!(
+            translator.take_mcp_status_wanted(),
+            "a server that changed is asked about"
+        );
     }
 
     #[test]
