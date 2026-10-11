@@ -81,7 +81,7 @@ pub enum Action {
     Commands,
     /// Opens the page each release is described on.
     ReleaseNotes,
-    /// Opens the page an issue is filed on.
+    /// Copies the diagnostics block and opens the page an issue is filed on.
     ReportBug,
 }
 
@@ -121,7 +121,7 @@ impl Action {
             Action::Shortcuts => "list the keys the shell answers to",
             Action::Commands => "the backend's commands and skills",
             Action::ReleaseNotes => "open the page releases are described on",
-            Action::ReportBug => "open the page an issue is filed on",
+            Action::ReportBug => "copy the diagnostics and open the page an issue is filed on",
         }
     }
 }

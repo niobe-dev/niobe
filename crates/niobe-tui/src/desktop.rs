@@ -33,6 +33,17 @@ pub trait Desktop: std::fmt::Debug {
     /// it again after, so an editor that runs on the terminal has it. An
     /// error says why it could not, in words the operator reads.
     fn edit(&mut self, path: &str) -> Result<(), String>;
+
+    /// Puts the diagnostics a report of a problem carries on the clipboard
+    /// and opens `link`, the page the report is filed on. Nothing is sent: the
+    /// operator reads the block and pastes it. An error says why it could
+    /// not, in words the operator reads.
+    ///
+    /// Refused unless the desktop knows how to make the block, which only the
+    /// binary does.
+    fn report(&mut self, _link: &str) -> Result<(), String> {
+        Err("this session has no diagnostics to put in a report".to_owned())
+    }
 }
 
 /// No desktop: a recorded log being looked at with nothing around it. Every
@@ -63,6 +74,9 @@ pub enum Handoff {
     Open(String),
     /// A file to open in a text editor, on the terminal.
     Edit(String),
+    /// The diagnostics of a report of a problem, to be copied, and the link
+    /// of the page the report is filed on, to be opened.
+    Report(String),
 }
 
 impl Handoff {
@@ -70,7 +84,7 @@ impl Handoff {
     /// an editor runs on it.
     pub fn lends_the_terminal(&self) -> bool {
         match self {
-            Self::Copy(_) | Self::Open(_) => false,
+            Self::Copy(_) | Self::Open(_) | Self::Report(_) => false,
             Self::Edit(_) => true,
         }
     }

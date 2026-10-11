@@ -148,6 +148,88 @@ pub struct Facts {
     pub ssh: bool,
     /// The home directory, which no path is shown under.
     pub home: Option<PathBuf>,
+    /// The operating system and architecture this binary was built for.
+    pub target: String,
+    /// What each config file sets, by key and never by value.
+    pub shapes: Vec<Shape>,
+    /// How many errors the newest recorded session reported, where there is
+    /// one and it could be read.
+    pub newest_session_errors: Option<u64>,
+}
+
+/// What one config file sets: the keys, never the values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shape {
+    /// Where the file is.
+    pub path: PathBuf,
+    /// What was found there.
+    pub state: ShapeState,
+}
+
+/// How a config file reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShapeState {
+    /// There is no such file.
+    Absent,
+    /// It is there and does not read as a config. Why is not kept: the
+    /// reason quotes the text it stopped at.
+    Unreadable,
+    /// It reads, and sets these.
+    Set {
+        /// The top-level keys it sets.
+        keys: Vec<&'static str>,
+        /// The profiles it defines, each with the keys it sets.
+        profiles: Vec<ProfileShape>,
+    },
+}
+
+/// One profile of a config file, by key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileShape {
+    /// The name the file gives it.
+    pub name: String,
+    /// The backend it runs.
+    pub backend: String,
+    /// Which of `env`, `args`, `models`, `billing`, `settings` and
+    /// `auth_refresh` it sets.
+    pub keys: Vec<&'static str>,
+}
+
+/// The keys `config` sets, and which each profile sets, with no value.
+fn shape_of(config: &niobe_config::Config) -> ShapeState {
+    let mut keys = Vec::new();
+    if config.select(None).ok().flatten().is_some() {
+        keys.push("default_profile");
+    }
+    if !config.allowed().is_empty() {
+        keys.push("permissions");
+    }
+    if config.theme().is_some() {
+        keys.push("theme");
+    }
+    let profiles = config
+        .profiles()
+        .iter()
+        .map(|(name, profile)| {
+            let set = [
+                ("env", !profile.env().is_empty()),
+                ("args", !profile.args().is_empty()),
+                ("models", !profile.models().is_empty()),
+                ("billing", profile.billing().is_some()),
+                ("settings", profile.settings().is_some()),
+                ("auth_refresh", profile.auth_refresh().is_some()),
+            ];
+            ProfileShape {
+                name: name.clone(),
+                backend: profile.backend().to_string(),
+                keys: set
+                    .into_iter()
+                    .filter_map(|(key, set)| set.then_some(key))
+                    .collect(),
+            }
+        })
+        .collect();
+    ShapeState::Set { keys, profiles }
 }
 
 /// The report for `facts`, in the order it is read.
@@ -333,11 +415,38 @@ pub fn text(rows: &[Row]) -> Vec<String> {
     lines
 }
 
-/// The report as JSON, for an issue.
-pub fn json(rows: &[Row]) -> Value {
+/// The report as JSON, for an issue: the rows, and the facts a maintainer
+/// would otherwise ask for — the target, the shapes of the config files and
+/// how the newest session fared.
+pub fn json(rows: &[Row], facts: &Facts) -> Value {
+    let home = facts.home.as_deref();
+    let shapes: Vec<Value> = facts
+        .shapes
+        .iter()
+        .map(|shape| {
+            let path = shown_path(&shape.path, home);
+            match &shape.state {
+                ShapeState::Absent => json!({"path": path, "state": "absent"}),
+                ShapeState::Unreadable => json!({"path": path, "state": "does not parse"}),
+                ShapeState::Set { keys, profiles } => json!({
+                    "path": path,
+                    "state": "set",
+                    "keys": keys,
+                    "profiles": profiles.iter().map(|profile| json!({
+                        "name": profile.name,
+                        "backend": profile.backend,
+                        "keys": profile.keys,
+                    })).collect::<Vec<_>>(),
+                }),
+            }
+        })
+        .collect();
     json!({
         "niobe": niobe_core::VERSION,
+        "target": facts.target,
         "ok": rows.iter().all(|row| row.status != Status::Fail),
+        "config": shapes,
+        "newest_session_errors": facts.newest_session_errors,
         "rows": rows.iter().map(|row| json!({
             "name": row.name,
             "status": row.status.word(),
@@ -445,7 +554,11 @@ fn codex_login(path: &Path) -> Login {
 }
 
 /// What this machine and this repository say, gathered once.
-pub fn gather(config: &crate::config::Loaded, recorded: impl Fn(&str) -> bool) -> Facts {
+pub fn gather(
+    config: &crate::config::Loaded,
+    root: &Path,
+    recorded: impl Fn(&str) -> bool,
+) -> Facts {
     let path_var = std::env::var_os("PATH");
     let claude = find_on_path("claude", path_var.as_deref()).map(|path| {
         let version = version_of(&path);
@@ -490,6 +603,49 @@ pub fn gather(config: &crate::config::Loaded, recorded: impl Fn(&str) -> bool) -
         tmux: std::env::var_os("TMUX").is_some(),
         ssh: std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some(),
         home: std::env::var_os("HOME").map(PathBuf::from),
+        target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        shapes: config
+            .searched
+            .iter()
+            .map(|path| Shape {
+                path: path.clone(),
+                state: match niobe_config::Config::read(path) {
+                    Ok(None) => ShapeState::Absent,
+                    Ok(Some(config)) => shape_of(&config),
+                    Err(_) => ShapeState::Unreadable,
+                },
+            })
+            .collect(),
+        newest_session_errors: newest_session_errors(root),
+    }
+}
+
+/// How many errors the newest session recorded in the repository at `root`
+/// reported, where there is a store and a session in it.
+fn newest_session_errors(root: &Path) -> Option<u64> {
+    let store = crate::repo::read_existing_store(root).ok().flatten()?;
+    let newest = store.sessions().ok()?.into_iter().next()?;
+    let events = store.events(newest.id).ok()?;
+    let state =
+        niobe_core::session::SessionState::replay(events.iter().map(|stored| &stored.event));
+    Some(state.errors())
+}
+
+/// The report as a block to paste into an issue, gathered now for the
+/// repository at `root`: the same JSON `niobe doctor --json` prints.
+pub fn block(root: &Path, recorded: impl Fn(&str) -> bool) -> String {
+    match crate::config::load(root) {
+        Ok(loaded) => {
+            let facts = gather(&loaded, root, recorded);
+            let rows = rows(&facts);
+            serde_json::to_string_pretty(&json(&rows, &facts)).unwrap_or_else(|_| "{}".to_owned())
+        }
+        Err(_) => json!({
+            "niobe": niobe_core::VERSION,
+            "target": format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+            "config": "does not read",
+        })
+        .to_string(),
     }
 }
 
@@ -536,6 +692,9 @@ mod tests {
             tmux: false,
             ssh: false,
             home: Some(PathBuf::from("/home/me")),
+            target: "aarch64-macos".to_owned(),
+            shapes: Vec::new(),
+            newest_session_errors: None,
         }
     }
 
@@ -689,7 +848,7 @@ mod tests {
     #[test]
     fn no_path_under_the_home_directory_is_shown_beyond_a_tilde() {
         let rows = rows(&facts());
-        let report = format!("{}\n{}", text(&rows).join("\n"), json(&rows));
+        let report = format!("{}\n{}", text(&rows).join("\n"), json(&rows, &facts()));
 
         assert!(!report.contains("/home/me"), "{report}");
         assert!(report.contains("~/.local/bin/claude"), "{report}");
@@ -698,12 +857,13 @@ mod tests {
 
     #[test]
     fn the_json_carries_each_row_with_its_status_and_fix() {
-        let rows = rows(&Facts {
+        let facts = Facts {
             claude: None,
             ..facts()
-        });
+        };
+        let rows = rows(&facts);
 
-        let report = json(&rows);
+        let report = json(&rows, &facts);
 
         assert_eq!(report["ok"], json!(false));
         assert_eq!(report["niobe"], json!(niobe_core::VERSION));
@@ -713,6 +873,80 @@ mod tests {
             .expect("the claude row is there");
         assert_eq!(claude["status"], json!("fail"));
         assert!(claude["fix"].is_string());
+    }
+
+    /// A config that sets a secret in every place a value could leak from:
+    /// the report names the keys and holds none of what they were set to.
+    #[test]
+    fn a_config_is_reported_by_its_keys_and_none_of_its_values() {
+        let text = "default_profile = \"work\"\n\
+            [profiles.work]\nbackend = \"claude\"\n\
+            env = { AWS_SECRET_ACCESS_KEY = \"hunter2-secret-value\" }\n\
+            args = [\"--model\", \"secret-model-name\"]\n\
+            settings = \"/home/me/private/secret-settings.json\"\n\
+            auth_refresh = \"aws sso login --profile secret-profile\"\n";
+        let config = niobe_config::Config::parse(text, Path::new("/home/me/config.toml"))
+            .expect("the config is valid");
+        let facts = Facts {
+            shapes: vec![Shape {
+                path: PathBuf::from("/home/me/.config/niobe/config.toml"),
+                state: shape_of(&config),
+            }],
+            ..facts()
+        };
+
+        let report = json(&rows(&facts), &facts).to_string();
+
+        for value in [
+            "hunter2",
+            "secret-model-name",
+            "secret-settings",
+            "secret-profile",
+            "aws sso login",
+            "AWS_SECRET_ACCESS_KEY",
+        ] {
+            assert!(!report.contains(value), "{value} leaked: {report}");
+        }
+        let shape = &json(&rows(&facts), &facts)["config"][0];
+        assert_eq!(shape["state"], json!("set"));
+        assert_eq!(shape["keys"], json!(["default_profile"]));
+        assert_eq!(shape["profiles"][0]["name"], json!("work"));
+        assert_eq!(
+            shape["profiles"][0]["keys"],
+            json!(["env", "args", "settings", "auth_refresh"])
+        );
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_reported_as_that_and_not_quoted() {
+        let facts = Facts {
+            shapes: vec![Shape {
+                path: PathBuf::from("/home/me/repo/.niobe/config.toml"),
+                state: ShapeState::Unreadable,
+            }],
+            ..facts()
+        };
+
+        let report = json(&rows(&facts), &facts);
+
+        assert_eq!(report["config"][0]["state"], json!("does not parse"));
+        assert_eq!(
+            report["config"][0]["path"],
+            json!("~/repo/.niobe/config.toml")
+        );
+    }
+
+    #[test]
+    fn the_target_and_the_newest_sessions_errors_are_in_the_block() {
+        let facts = Facts {
+            newest_session_errors: Some(3),
+            ..facts()
+        };
+
+        let report = json(&rows(&facts), &facts);
+
+        assert_eq!(report["target"], json!("aarch64-macos"));
+        assert_eq!(report["newest_session_errors"], json!(3));
     }
 
     #[test]

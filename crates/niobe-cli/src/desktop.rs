@@ -132,6 +132,16 @@ pub struct System {
     copiers: Vec<Program>,
     opener: Program,
     editor: Program,
+    diagnostics: Option<Diagnostics>,
+}
+
+/// What makes the diagnostics block of a report of a problem.
+struct Diagnostics(Box<dyn Fn() -> String>);
+
+impl std::fmt::Debug for Diagnostics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Diagnostics")
+    }
 }
 
 impl System {
@@ -142,7 +152,16 @@ impl System {
             copiers: platform_copiers(),
             opener: platform_opener(),
             editor: platform_editor(),
+            diagnostics: None,
         }
+    }
+
+    /// This desktop, able to put a report's diagnostics on the clipboard:
+    /// `diagnostics` makes the block when a report is asked for.
+    #[must_use]
+    pub fn reporting(mut self, diagnostics: impl Fn() -> String + 'static) -> Self {
+        self.diagnostics = Some(Diagnostics(Box::new(diagnostics)));
+        self
     }
 }
 
@@ -192,6 +211,19 @@ impl Desktop for System {
             return Err("it is not a file's whole path".to_owned());
         }
         self.editor.run_on_the_terminal(path)
+    }
+
+    fn report(&mut self, link: &str) -> Result<(), String> {
+        let Some(diagnostics) = &self.diagnostics else {
+            return Err("this session has no diagnostics to put in a report".to_owned());
+        };
+        let block = (diagnostics.0)();
+        // Not opened where the block could not be copied: a form the operator
+        // cannot paste into asks for the very thing they were not given.
+        self.copy(&block).map_err(|reason| {
+            format!("{reason}; `niobe doctor --json` prints the same block to paste")
+        })?;
+        self.open(link)
     }
 }
 
@@ -262,6 +294,7 @@ mod tests {
             ],
             opener: sh("true"),
             editor: sh("true"),
+            diagnostics: None,
         };
         assert_eq!(desktop.copy("line one\nline two"), Ok(()));
         assert_eq!(written(&out), "line one\nline two");
@@ -273,6 +306,7 @@ mod tests {
             copiers: vec![Program::new("niobe-no-such-copier", &[])],
             opener: sh("true"),
             editor: sh("true"),
+            diagnostics: None,
         };
         let refused = desktop.copy("text").expect_err("nothing can copy it");
         assert!(refused.contains("niobe-no-such-copier"), "{refused}");
@@ -286,6 +320,7 @@ mod tests {
             copiers: Vec::new(),
             opener: sh(&format!("printf '%s' \"$1\" > '{}'", out.display())),
             editor: sh("true"),
+            diagnostics: None,
         };
         assert_eq!(desktop.open("https://example.com/a b"), Ok(()));
         assert_eq!(written(&out), "https://example.com/a b");
@@ -297,6 +332,7 @@ mod tests {
             copiers: Vec::new(),
             opener: sh("true"),
             editor: sh("true"),
+            diagnostics: None,
         };
         assert!(desktop.open("--help").is_err());
     }
@@ -342,6 +378,7 @@ mod tests {
             copiers: Vec::new(),
             opener: sh("exit 1"),
             editor: sh(&format!("printf '%s' \"$1\" > '{}'", out.display())),
+            diagnostics: None,
         };
         let path = scratch.0.join("tools").join("setup.command");
         assert_eq!(desktop.edit(&path.display().to_string()), Ok(()));
@@ -358,6 +395,7 @@ mod tests {
             copiers: Vec::new(),
             opener: sh("true"),
             editor: sh("exit 3"),
+            diagnostics: None,
         };
         let failed = desktop
             .edit("/work/CLAUDE.md")
@@ -365,5 +403,16 @@ mod tests {
         assert!(failed.contains("sh ended"), "{failed}");
         assert!(desktop.edit("--help").is_err());
         assert!(desktop.edit("CLAUDE.md").is_err());
+    }
+
+    #[test]
+    fn a_report_is_refused_by_a_desktop_that_cannot_make_the_diagnostics() {
+        let mut desktop = System::new();
+
+        let said = desktop
+            .report("https://example.invalid/issues/new")
+            .expect_err("there is nothing to put in a report");
+
+        assert!(said.contains("no diagnostics"), "{said}");
     }
 }

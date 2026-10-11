@@ -341,7 +341,10 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
             watch: &mut watching,
             shell: &mut commands,
             images: &mut images_for(&root),
-            desktop: &mut desktop::System::new(),
+            desktop: &mut desktop::System::new().reporting({
+                let root = root.clone();
+                move || doctor::block(&root, backend::claude_release_recorded)
+            }),
             history: &mut history_for(&root, selected.as_ref()),
             memory: &mut memory::Files::at(
                 root.clone(),
@@ -1113,10 +1116,11 @@ fn list_profiles(profile: Option<&str>) -> Result<(), String> {
 /// JSON an issue carries, and fails where a session could not run.
 fn run_doctor(json: bool) -> Result<(), String> {
     let loaded = config::load(&repo::root(&cwd()?))?;
-    let facts = doctor::gather(&loaded, backend::claude_release_recorded);
+    let root = repo::root(&cwd()?);
+    let facts = doctor::gather(&loaded, &root, backend::claude_release_recorded);
     let rows = doctor::rows(&facts);
     if json {
-        say!("{}", doctor::json(&rows));
+        say!("{}", doctor::json(&rows, &facts));
     } else {
         for line in doctor::text(&rows) {
             say!("{line}");

@@ -3765,8 +3765,8 @@ impl App {
             Action::ReleaseNotes => self.handoffs.push(crate::desktop::Handoff::Open(format!(
                 "{REPOSITORY}/releases"
             ))),
-            Action::ReportBug => self.handoffs.push(crate::desktop::Handoff::Open(format!(
-                "{REPOSITORY}/issues/new"
+            Action::ReportBug => self.handoffs.push(crate::desktop::Handoff::Report(format!(
+                "{REPOSITORY}/issues/new?template=bug.yml"
             ))),
         }
     }
@@ -6056,6 +6056,10 @@ impl App {
             (Handoff::Open(link), Err(reason)) => format!("{link} is not opened: {reason}"),
             (Handoff::Edit(path), Ok(())) => format!("Edited {path}"),
             (Handoff::Edit(path), Err(reason)) => format!("{path} is not edited: {reason}"),
+            (Handoff::Report(link), Ok(())) => {
+                format!("Copied the diagnostics for a report: paste them into the form at {link}")
+            }
+            (Handoff::Report(_), Err(reason)) => format!("Nothing reported: {reason}"),
         });
     }
 
@@ -14920,6 +14924,30 @@ mod tests {
     }
 
     #[test]
+    fn reporting_a_bug_asks_for_the_diagnostics_and_the_bug_form_and_says_so_in_the_bar() {
+        let mut app = app();
+
+        app.perform(crate::menu::Action::ReportBug);
+
+        let handoffs = app.take_handoffs();
+        let [crate::desktop::Handoff::Report(link)] = handoffs.as_slice() else {
+            panic!("one report was asked for: {handoffs:?}");
+        };
+        assert!(link.ends_with("/issues/new?template=bug.yml"), "{link}");
+        app.handed_off(&handoffs[0], Ok(()));
+        let said = app.hint().expect("the bar says what was copied");
+        assert!(said.contains("Copied the diagnostics"), "{said}");
+        assert!(said.contains(link.as_str()), "{said}");
+
+        app.handed_off(
+            &handoffs[0],
+            Err("this needs one of pbcopy installed".to_owned()),
+        );
+        let said = app.hint().expect("the bar says why nothing was reported");
+        assert!(said.starts_with("Nothing reported"), "{said}");
+    }
+
+    #[test]
     fn the_links_open_this_projects_pages() {
         let mut app = app();
         app.perform(crate::menu::Action::ReportBug);
@@ -14928,7 +14956,7 @@ mod tests {
             .take_handoffs()
             .into_iter()
             .map(|handoff| match handoff {
-                crate::desktop::Handoff::Open(link) => link,
+                crate::desktop::Handoff::Open(link) | crate::desktop::Handoff::Report(link) => link,
                 crate::desktop::Handoff::Copy(text) => panic!("copied {text}"),
                 crate::desktop::Handoff::Edit(path) => panic!("edited {path}"),
             })

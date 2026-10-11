@@ -731,6 +731,7 @@ fn hand_off(
             Handoff::Copy(text) => desktop.copy(text),
             Handoff::Open(link) => desktop.open(link),
             Handoff::Edit(path) => desktop.edit(path),
+            Handoff::Report(link) => desktop.report(link),
         };
         if handoff.lends_the_terminal() {
             hold(Hold::Retake)?;
