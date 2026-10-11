@@ -42,6 +42,32 @@ cargo xtask size
 Report the exact pass and fail counts in the pull request. The timed tests run only in a release
 build; the debug suite reports them ignored, which is expected.
 
+## Running the terminal tests
+
+`crates/niobe-cli/tests/pty.rs` runs the binary on a real pseudo-terminal against stand-in
+`claude` scripts, so it needs no account and starts nothing of yours:
+
+```sh
+cargo test -p niobe-cli --test pty
+```
+
+It is where terminal restoration is proven: a clean quit, SIGTERM, SIGINT, SIGQUIT and a panic.
+Run it after touching `terminal.rs` or `run.rs`. A test that waits on a process can be slow on a
+loaded machine; re-run it once before treating a failure as a regression.
+
+## The crate graph
+
+Who may depend on whom is the architecture, and `cargo xtask layering` enforces it:
+
+| Crate | May depend on |
+| ----- | ------------- |
+| `niobe-core` | nothing in the workspace |
+| `niobe-ledger`, `niobe-config`, `niobe-store`, `niobe-tui`, each bridge | `niobe-core` only |
+| `niobe-cli` | everything |
+
+A type cannot leak out of a bridge into the terminal UI if the UI cannot name the bridge. Widen
+the table only on purpose, and say why in the commit.
+
 ## What a change keeps
 
 The invariants in `AGENTS.md` §2 hold for every change, and breaking one is a bug even when the
@@ -80,7 +106,20 @@ If you work with a coding agent, the repository carries skills under `.claude/sk
 reviewers under `.claude/agents/` that encode this page and `PRINCIPLES.md`. `niobe-task` is the
 default for a feature or fix; `PRINCIPLES.md` §12 lists the rest.
 
+## A good first change
+
+User-defined themes: a palette in TOML at both colour depths, drawn by the same table the
+built-in ones are. It touches one crate, has a snapshot to read and an obvious test to write
+first.
+
+## Reporting, and the changelog
+
+A bug report asks for the output of `niobe doctor --json`, which is built to be pasted. A
+security problem is reported privately, as `SECURITY.md` says. There is no changelog file: the
+release notes on the releases page are the record, written once, when a release is cut. Be
+kind to each other; `CODE_OF_CONDUCT.md` is short.
+
 ## Questions
 
-Open an issue. A question about a figure on the screen is always welcome: if a number cannot be
+Open a discussion, or an issue. A question about a figure on the screen is always welcome: if a number cannot be
 explained, that is a bug.

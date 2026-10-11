@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+name: Bug
+description: Something Niobe did or showed that was wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: A figure that is wrong is a bug; say which and what it should have been.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `niobe doctor --json`
+      description: |
+        Paste it as it is. It carries the versions, the terminal and which config files
+        exist, with nothing under your home directory beyond `~`, no environment values and no
+        token. Read it before you paste.
+      render: json
+    validations:
+      required: true
+  - type: dropdown
+    id: plain
+    attributes:
+      label: Does it happen in plain `claude`?
+      options:
+        - Yes, the same thing happens
+        - No, only under Niobe
+        - I did not try
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal emulator and multiplexer
+      description: For example iTerm2, tmux 3.5, over SSH.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: markdown
+    attributes:
+      value: |
+        For a bug in how Niobe reads the CLI, the raw stream is the evidence, and it holds your
+        whole conversation. Attach it only if you have read it and are willing to.

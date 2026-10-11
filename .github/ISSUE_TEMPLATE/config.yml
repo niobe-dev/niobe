@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question or show your setup
+    url: https://github.com/niobe-dev/niobe/discussions
+    about: Questions, ideas that are not yet a request, and how you run it.
+  - name: Report a security problem
+    url: https://github.com/niobe-dev/niobe/security/advisories/new
+    about: Privately, please. SECURITY.md says what to include.

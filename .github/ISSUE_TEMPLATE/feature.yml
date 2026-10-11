@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+name: Feature
+description: Something Niobe could do that it does not.
+labels: [feature]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need to see, know or do
+      description: Start from what you were doing, not from the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today instead
+  - type: markdown
+    attributes:
+      value: |
+        Niobe keeps you aware of what the agent did, decided, touched and cost. A request that
+        fits that is easiest to take; one that is about the agent itself belongs upstream.
