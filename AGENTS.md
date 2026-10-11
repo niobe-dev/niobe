@@ -222,7 +222,9 @@ reviewers that encode both, for an agent working in this tree.
   stops with a signal between turns is reported with a notice rather than as the session's end,
   and the binary's bridge starts it again on its conversation, with `--resume`, at the next
   prompt — and passes over a
-  line of its output past 64 MiB with a notice rather than hold it; `spilled.rs` reads the file the CLI saves a shell output
+  line of its output past 64 MiB with a notice rather than hold it; `tap.rs` keeps, where the binary names a directory outside the repository with
+  `NIOBE_STREAM_DIR`, one file per CLI process holding its argv and every line that crossed its pipes
+  in order, written on a thread of its own, so a recording needs no shim on `PATH`; `spilled.rs` reads the file the CLI saves a shell output
   too large to hand over to, so a whole test run is counted from it rather than from the
   preview, and both the driver and the transcript reader hand it to the translator;
   `memory.rs` finds the files the CLI gives the agent as memory by the CLI's documented lookup —

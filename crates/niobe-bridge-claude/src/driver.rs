@@ -58,6 +58,7 @@ use niobe_core::image::Image;
 
 use crate::base64;
 use crate::spilled;
+use crate::tap::Tap;
 use crate::translate::{ModelAnswer, Spent, Translator};
 
 /// The binary this bridge drives, as looked up on `PATH`.
@@ -281,6 +282,11 @@ pub struct Options {
     /// length again. It writes the title into its own transcript too, and
     /// starts no other session to make it. Off unless asked for.
     pub ask_title: bool,
+    /// A directory to keep a copy of what crosses the CLI's pipes in, one
+    /// file per process, where one is asked for; see [`crate::tap`]. The file
+    /// holds the whole conversation, so the caller decides where it may go:
+    /// this creates the directory and writes to it wherever it is.
+    pub tap: Option<PathBuf>,
 }
 
 impl Options {
@@ -303,6 +309,7 @@ impl Options {
             ask_over_stdio: false,
             carry_on: false,
             ask_title: false,
+            tap: None,
         }
     }
 
@@ -365,6 +372,15 @@ pub enum SpawnError {
         /// The directory the CLI was to run in.
         directory: PathBuf,
     },
+    /// The directory the stream was to be copied into could not be written
+    /// to. Reported before the CLI is started: a recording asked for and not
+    /// taken is not noticed until it is needed.
+    Tap {
+        /// The directory.
+        directory: PathBuf,
+        /// What the operating system said.
+        error: std::io::Error,
+    },
     /// The binary is there and could not be started.
     Failed {
         /// The file that was found for the name looked up, where `PATH` found
@@ -393,6 +409,11 @@ impl std::fmt::Display for SpawnError {
                  again from one that is",
                 directory.display()
             ),
+            Self::Tap { directory, error } => write!(
+                f,
+                "cannot keep the stream in {}: {error}",
+                directory.display()
+            ),
             Self::Failed { binary, error } => {
                 write!(f, "cannot start `{}`: {error}", binary.display())
             }
@@ -404,7 +425,7 @@ impl std::error::Error for SpawnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::NotInstalled { .. } | Self::NoDirectory { .. } => None,
-            Self::Failed { error, .. } => Some(error),
+            Self::Tap { error, .. } | Self::Failed { error, .. } => Some(error),
         }
     }
 }
@@ -522,6 +543,17 @@ impl Session {
                 directory: options.cwd.clone(),
             });
         }
+        let tap = match &options.tap {
+            Some(directory) => {
+                Some(
+                    Tap::open(directory, &options.argv()).map_err(|error| SpawnError::Tap {
+                        directory: directory.clone(),
+                        error,
+                    })?,
+                )
+            }
+            None => None,
+        };
         let mut command = Command::new(&options.binary);
         command
             .args(options.argv().iter().map(OsString::from))
@@ -593,9 +625,10 @@ impl Session {
         let wants_mcp_status = Arc::clone(&mcp_status_wanted);
         let cleared = Arc::new(AtomicBool::new(false));
         let was_cleared = Arc::clone(&cleared);
+        let out_tap = tap.clone();
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
-            while let Some(output) = next_line(&mut stdout) {
+            while let Some(output) = next_line(&mut stdout, out_tap.as_ref()) {
                 let (line, decoded) = match output {
                     Output::Line { text, decoded } => (text, decoded),
                     Output::Overlong => {
@@ -681,7 +714,9 @@ impl Session {
         let (failures, unsent) = mpsc::channel();
         let writing: Writing = Arc::new(Mutex::new(None));
         let progress = Arc::clone(&writing);
-        let writer = std::thread::spawn(move || write_lines(stdin, &queued, &progress, &failures));
+        let writer = std::thread::spawn(move || {
+            write_lines(stdin, &queued, &progress, &failures, tap.as_ref())
+        });
 
         let mut session = Self {
             child,
@@ -1278,6 +1313,7 @@ fn write_lines(
     queued: &Receiver<Line>,
     writing: &Mutex<Option<(Instant, &'static str)>>,
     failures: &Sender<Event>,
+    tap: Option<&Tap>,
 ) {
     for Line { mut text, what } in queued {
         text.push('\n');
@@ -1289,6 +1325,11 @@ fn write_lines(
             .and_then(|()| stdin.flush());
         if let Ok(mut writing) = writing.lock() {
             *writing = None;
+        }
+        if written.is_ok()
+            && let Some(tap) = tap
+        {
+            tap.sent(text.trim_end_matches('\n').as_bytes());
         }
         if let Err(error) = written {
             let behind = queued.try_iter().count();
@@ -1406,7 +1447,7 @@ enum Output {
 /// U+FFFD rather than ending the pipe: the bytes come from whatever a tool
 /// printed or a file held, and one of them must not cost the rest of the
 /// session — nor leave the CLI blocked writing to a pipe nobody reads.
-fn next_line(reader: &mut impl BufRead) -> Option<Output> {
+fn next_line(reader: &mut impl BufRead, tap: Option<&Tap>) -> Option<Output> {
     let mut bytes = Vec::new();
     // One byte past the limit with no line break in it is a line past it.
     match reader
@@ -1426,6 +1467,9 @@ fn next_line(reader: &mut impl BufRead) -> Option<Output> {
         if bytes.last() == Some(&b'\r') {
             bytes.pop();
         }
+    }
+    if let Some(tap) = tap {
+        tap.out(&bytes);
     }
     Some(match String::from_utf8(bytes) {
         Ok(text) => Output::Line {
@@ -1832,17 +1876,17 @@ mod tests {
         let mut stdout = BufReader::new(hundred_megabytes.chain(&b"\n{\"type\":\"result\"}\n"[..]));
 
         assert!(
-            matches!(next_line(&mut stdout), Some(Output::Overlong)),
+            matches!(next_line(&mut stdout, None), Some(Output::Overlong)),
             "the line was read whole"
         );
         assert_eq!(
-            next_line(&mut stdout),
+            next_line(&mut stdout, None),
             Some(Output::Line {
                 text: r#"{"type":"result"}"#.to_owned(),
                 decoded: true
             })
         );
-        assert_eq!(next_line(&mut stdout), None);
+        assert_eq!(next_line(&mut stdout, None), None);
     }
 
     #[test]
@@ -1850,7 +1894,7 @@ mod tests {
         let limit = usize::try_from(LINE_LIMIT).expect("64 MiB fits a usize");
         let mut stdout = BufReader::new(std::io::repeat(b'x').take(LINE_LIMIT).chain(&b"\n"[..]));
 
-        let Some(Output::Line { text, decoded }) = next_line(&mut stdout) else {
+        let Some(Output::Line { text, decoded }) = next_line(&mut stdout, None) else {
             panic!("the line is read");
         };
         assert_eq!((text.len(), decoded), (limit, true));
@@ -2151,6 +2195,98 @@ mod tests {
         options.cwd = dir.path().to_path_buf();
         configure(&mut options);
         (spawn_written(&options), dir)
+    }
+
+    /// With the tap on, the process leaves one file with the arguments it was
+    /// started with and every line that crossed its pipes, in the order they
+    /// crossed, byte for byte.
+    #[cfg(unix)]
+    #[test]
+    fn a_tap_keeps_the_argv_and_every_line_in_the_order_it_crossed() {
+        let taps = tempfile::tempdir().expect("a scratch directory");
+        let init = r#"{"type":"system","subtype":"init","session_id":"s"}"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r initialize\nread -r turn\nprintf '%s\\n' '{init}'\n\
+                 printf '%s\\n' 'not json, kept as it came'\n"
+            ),
+            |options| options.tap = Some(taps.path().to_path_buf()),
+        );
+        session.send("hello", &[]).expect("the stand-in is reading");
+
+        let started = Instant::now();
+        let kept = loop {
+            session.drain();
+            let files: Vec<_> = std::fs::read_dir(taps.path())
+                .expect("the tap directory was made")
+                .collect();
+            if let [Ok(file)] = files.as_slice() {
+                let text = std::fs::read_to_string(file.path()).unwrap_or_default();
+                if text.lines().count() >= 5 {
+                    break text;
+                }
+            }
+            assert!(started.elapsed() < PATIENCE, "the tap never held the lines");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+
+        let lines: Vec<&str> = kept.lines().collect();
+        let argv: Vec<String> =
+            serde_json::from_str(lines[0]).expect("the first line is the arguments as JSON");
+        assert_eq!(argv, options().argv());
+        // What the CLI was asked, in order: the initialize request, then the turn.
+        assert!(
+            lines[1].starts_with("in {") && lines[1].contains("\"subtype\":\"initialize\""),
+            "{lines:?}"
+        );
+        assert!(
+            lines[2].starts_with("in {") && lines[2].contains("\"type\":\"user\""),
+            "{lines:?}"
+        );
+        assert!(lines[2].contains("hello"), "{lines:?}");
+        assert_eq!(lines[3], format!("out {init}"));
+        assert_eq!(lines[4], "out not json, kept as it came");
+    }
+
+    /// Off by default: no directory is made and no file written.
+    #[cfg(unix)]
+    #[test]
+    fn with_no_tap_nothing_is_written_beside_the_session() {
+        let (mut session, dir) = started("read -r a\nread -r b\nexit 0\n");
+        session.send("hello", &[]).expect("the stand-in is reading");
+
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("the scratch directory reads")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        assert_eq!(entries, ["claude"], "{entries:?}");
+    }
+
+    /// A directory that cannot be written to is said before the CLI starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_tap_that_cannot_be_opened_stops_the_session_before_the_cli_starts() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "").expect("a file is written");
+        let mut options = options();
+        options.cwd = dir.path().to_path_buf();
+        options.tap = Some(file.join("under-a-file"));
+
+        let error = Session::spawn(&options).expect_err("a file has nothing under it");
+
+        assert!(matches!(error, SpawnError::Tap { .. }), "{error}");
+        assert!(
+            error.to_string().contains("cannot keep the stream"),
+            "{error}"
+        );
     }
 
     /// An `init` that lists a server the CLI has said nothing more of has the

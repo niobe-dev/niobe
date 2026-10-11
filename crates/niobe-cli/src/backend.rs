@@ -37,6 +37,47 @@ pub struct Attach {
     /// prompt. Only a new session is: one carried on was titled, if it was,
     /// when it began.
     pub title: bool,
+    /// A directory to keep a copy of the backend's stream in, where one was
+    /// asked for with [`STREAM_DIR_VAR`] and found fit by [`stream_tap`].
+    pub tap: Option<PathBuf>,
+}
+
+/// The environment variable that names a directory to keep a copy of what
+/// crosses the `claude` CLI's pipes in, so that a recording is taken from the
+/// session as it ran, with no program put in front of the CLI on `PATH`.
+pub const STREAM_DIR_VAR: &str = "NIOBE_STREAM_DIR";
+
+/// The directory [`STREAM_DIR_VAR`] names, where it names one that may be
+/// written to.
+///
+/// The files hold the whole conversation, so they are never put where a
+/// `git add` could take them: a directory inside the repository at `root` is
+/// refused, as is one that is not given as a whole path. It is made where it
+/// is not there, and the path handed back is the real one.
+pub fn stream_tap(root: &Path, named: Option<OsString>) -> Result<Option<PathBuf>, String> {
+    let Some(named) = named.filter(|named| !named.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(named);
+    let shown = path.display();
+    if !path.is_absolute() {
+        return Err(format!(
+            "{STREAM_DIR_VAR} is {shown}, which is not a whole path; name a directory outside the \
+             repository"
+        ));
+    }
+    std::fs::create_dir_all(&path)
+        .map_err(|error| format!("{STREAM_DIR_VAR} is {shown}, which cannot be made: {error}"))?;
+    let real = std::fs::canonicalize(&path)
+        .map_err(|error| format!("{STREAM_DIR_VAR} is {shown}, which cannot be read: {error}"))?;
+    let repository = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if real.starts_with(&repository) {
+        return Err(format!(
+            "{STREAM_DIR_VAR} is {shown}, which is inside the repository: the stream holds the \
+             whole conversation and must not be somewhere it can be committed"
+        ));
+    }
+    Ok(Some(real))
 }
 
 /// What a session is attached to.
@@ -438,6 +479,7 @@ fn claude_options(
     options.settings = crate::config::settings_path(profile, home, root)?;
     options.resume = with.resume.clone();
     options.budget_usd = with.budget_usd;
+    options.tap = with.tap.clone();
     // A resumed session starts the CLI in the mode it was left in; a new one
     // leaves it at the default, which is the mode the shell shows until
     // something says otherwise.
@@ -762,6 +804,7 @@ mod tests {
                 mode: Some(niobe_core::event::Mode::Plan),
                 budget_usd: None,
                 title: false,
+                tap: None,
             },
             Some(claude.path().as_os_str().to_owned()),
             NO_HOME,
@@ -1056,6 +1099,7 @@ mod tests {
                 mode: Some(Mode::Plan),
                 budget_usd: Some(0.5),
                 title: false,
+                tap: None,
             },
             NO_HOME,
         )
@@ -1295,5 +1339,46 @@ mod tests {
 
         assert_eq!(carried.spent.cost_usd("opus-5"), Some(0.25));
         assert_eq!(carried.resume.as_deref(), Some("s-9"));
+    }
+
+    #[test]
+    fn a_stream_directory_outside_the_repository_is_made_and_one_inside_it_is_refused() {
+        let outside = tempfile::tempdir().expect("a scratch directory");
+        let repository = tempfile::tempdir().expect("a scratch directory");
+        let os = |path: &Path| Some(OsString::from(path));
+
+        let made = stream_tap(repository.path(), os(&outside.path().join("taps")))
+            .expect("a directory outside the repository is fine")
+            .expect("one was named");
+        assert!(made.is_dir(), "{made:?}");
+
+        let inside = stream_tap(repository.path(), os(&repository.path().join("taps")))
+            .expect_err("the repository is where it could be committed");
+        assert!(inside.contains("inside the repository"), "{inside}");
+        assert!(
+            !repository.path().join("taps").exists() || inside.contains("inside"),
+            "{inside}"
+        );
+
+        // A link out of the repository to a place inside it is inside it.
+        let link = outside.path().join("link");
+        std::os::unix::fs::symlink(repository.path(), &link).expect("a link is made");
+        let through = stream_tap(repository.path(), os(&link.join("taps")))
+            .expect_err("the real path is what is compared");
+        assert!(through.contains("inside the repository"), "{through}");
+    }
+
+    #[test]
+    fn a_stream_directory_that_is_not_a_whole_path_or_is_unset_is_not_taken() {
+        let repository = tempfile::tempdir().expect("a scratch directory");
+
+        assert_eq!(stream_tap(repository.path(), None), Ok(None));
+        assert_eq!(
+            stream_tap(repository.path(), Some(OsString::new())),
+            Ok(None)
+        );
+        let relative = stream_tap(repository.path(), Some(OsString::from("taps")))
+            .expect_err("a relative path depends on where niobe was started");
+        assert!(relative.contains("not a whole path"), "{relative}");
     }
 }

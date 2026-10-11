@@ -283,6 +283,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
     };
     let selected = loaded.select(profile)?;
     budget_fits(asked, selected.as_ref())?;
+    let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
     let app = say_untrusted(
         say_prices(
             App::new(repo::describe(&root))
@@ -327,12 +328,14 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         &backend::Attach {
             budget_usd: asked.budget,
             title: loaded.config.titles() == niobe_config::Titles::Model,
+            tap: tap.clone(),
             ..backend::Attach::default()
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
     let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
+    let app = say_tap(app, tap.as_deref());
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -466,6 +469,7 @@ fn resume(
     };
     let selected = loaded.select(profile)?;
     budget_fits(asked, selected.as_ref())?;
+    let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
     let mut app = say_untrusted(
         say_prices(
             App::new(repo::describe(&root))
@@ -553,11 +557,13 @@ fn resume(
             mode: app.session().mode(),
             budget_usd: asked.budget,
             title: false,
+            tap: tap.clone(),
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
     let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
+    let app = say_tap(app, tap.as_deref());
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -664,6 +670,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     };
     let selected = loaded.select(profile)?;
     budget_fits(asked, selected.as_ref())?;
+    let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
     let theme = chosen_theme(asked, &loaded)?;
 
     let started = Instant::now();
@@ -725,11 +732,13 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             mode: app.session().mode(),
             budget_usd: asked.budget,
             title: false,
+            tap: tap.clone(),
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
-    let (mut backend, mut app) = attached_or_noticed(&loaded, attempt, app)?;
+    let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
+    let mut app = say_tap(app, tap.as_deref());
 
     // Recorded only once there is a terminal to continue it on and a backend
     // started to continue it with: a piped run is a look at the transcript,
@@ -888,6 +897,20 @@ fn attached_or_noticed(
             ))
         }
         Err(said) => Err(said),
+    }
+}
+
+/// The shell, saying where the backend's stream is being copied to, once, where
+/// it is: the files hold the whole conversation.
+fn say_tap(app: App, tap: Option<&Path>) -> App {
+    match tap {
+        None => app,
+        Some(directory) => app.with_notice(
+            "stream kept",
+            &directory.display().to_string(),
+            "A copy of everything that crosses the claude CLI's pipes is being written here, \
+             one file per process. It holds the whole conversation; read it before it is shared.",
+        ),
     }
 }
 
@@ -1316,6 +1339,12 @@ OPTIONS:
                            or modern
     -h, --help             Print this help
     -V, --version          Print the version
+
+ENVIRONMENT:
+    NIOBE_STREAM_DIR       A directory, outside the repository, to keep a copy of what
+                           crosses the claude CLI's pipes in, one file per process, for
+                           recording a fixture. It holds the whole conversation; the
+                           shell says so once when it is on. Off by default.
 
 EXIT STATUS:
     0   The session ended, including because the terminal it drew on went away

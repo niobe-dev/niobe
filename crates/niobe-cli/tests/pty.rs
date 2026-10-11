@@ -2975,6 +2975,77 @@ fn a_shell_with_no_config_and_no_claude_opens_on_what_is_missing() {
     assert!(!drawn.contains("config.toml"), "{drawn}");
 }
 
+/// With `NIOBE_STREAM_DIR` set, a session leaves a file holding the
+/// arguments the CLI was started with and what crossed its pipes, outside the
+/// repository, and says once that it is doing so.
+#[test]
+fn a_session_with_a_stream_directory_keeps_what_crossed_the_cli_s_pipes() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let taps = tempfile::tempdir().expect("a temporary directory can be created");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("NIOBE_STREAM_DIR", taps.path())
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("stream kept");
+    terminal.typed(b"go\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "ended with {status}: {drawn}");
+
+    let files: Vec<_> = std::fs::read_dir(taps.path())
+        .expect("the directory is there")
+        .collect();
+    assert_eq!(files.len(), 1, "one file for the one process: {files:?}");
+    let kept = std::fs::read_to_string(files[0].as_ref().expect("an entry").path())
+        .expect("the file is text");
+    let lines: Vec<&str> = kept.lines().collect();
+    assert!(lines[0].starts_with("[\"-p\""), "{kept}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("in ") && line.contains("go")),
+        "{kept}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("out ") && line.contains("answered-the-turn")),
+        "{kept}"
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".niobe")
+            .join("sessions.db")
+            .to_string_lossy()
+            .is_empty()
+    );
+}
+
+/// A directory inside the repository is refused before the shell opens: the
+/// files hold the conversation, and are where a `git add` would find them.
+#[test]
+fn a_stream_directory_inside_the_repository_stops_the_session() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("NIOBE_STREAM_DIR", repo.path().join("taps"))
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert_eq!(status.code(), Some(1), "{drawn}");
+    assert!(drawn.contains("inside the repository"), "{drawn}");
+}
+
 /// A `claude` that starts something of its own on its standard output and
 /// error — as a command a tool call left in the background, or an MCP server,
 /// is — writes down its own process and that one, answers one turn, and

@@ -49,6 +49,7 @@ mod base64;
 mod driver;
 mod spilled;
 mod stamp;
+mod tap;
 mod translate;
 mod wire;
 
