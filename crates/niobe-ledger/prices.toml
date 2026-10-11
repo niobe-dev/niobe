@@ -48,7 +48,8 @@
 # they are listed only for models whose window is billed at standard rates, or
 # where the long-context rates say what it costs.
 
-# Claude Fable 5.1
+# Claude Fable 5.1. Its cache reads are 2.5% of input (0.25 on 10.00), as the
+# pricing page lists them; Fable 5's are the usual 10%.
 [[model]]
 ids = [
     "claude-fable-5-1",
@@ -309,7 +310,10 @@ cache_write_1h = 2.00
 # 2026. Opus 4.6 and Sonnet 4.6 start at 13 March 2026, when their 1M window
 # came to standard pricing: what Bedrock billed a long prompt before that is
 # not on record here. Claude Fable 5.1 is not listed: its only regional
-# endpoint is in us-east-1, and no profile id for it is documented.
+# endpoint is in us-east-1, and no profile id for it is documented. Claude Opus
+# 5.5 is not listed either: neither its Bedrock rates nor its profile ids were
+# read from AWS's price list or a model card for this table, so a Bedrock
+# session on it is unpriced rather than guessed.
 #
 # Claude Sonnet 5.5's rates were read from the copy of 30 September 2026, two
 # days after its release, and its profile ids from its model card,

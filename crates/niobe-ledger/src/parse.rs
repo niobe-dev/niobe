@@ -615,7 +615,7 @@ mod tests {
         let table = parse(&one_model(PRICE)).expect("the table is valid");
         let price = table
             .price("m", Date::new(2026, 7, 24).expect("a date"))
-            .expect("priced");
+            .expect("the model has a price on that day in this table");
         assert_eq!(price.rates().cache_write().micros(), 6_250_000);
         assert_eq!(price.rates().cache_write_1h(), None);
         assert_eq!(price.long_context(), None);
@@ -628,7 +628,7 @@ mod tests {
             parse(&one_model(price))
                 .expect("the table is valid")
                 .price("m", day)
-                .expect("priced")
+                .expect("the model has a price on that day in this table")
                 .fast()
         };
         assert_eq!(fast(&format!("{PRICE}fast = 2\n")), Some(2_000_000));

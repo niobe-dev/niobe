@@ -297,14 +297,16 @@ mod tests {
 
         let text = trusted.render();
         assert_eq!(
-            Trusted::parse(&text, Path::new("/u/trusted.list")).expect("valid"),
+            Trusted::parse(&text, Path::new("/u/trusted.list"))
+                .expect("the text in this test is valid"),
             trusted
         );
 
         assert!(trusted.forget(&file()));
         assert!(!trusted.forget(&file()));
         let text = trusted.render();
-        let read = Trusted::parse(&text, Path::new("/u/trusted.list")).expect("valid");
+        let read = Trusted::parse(&text, Path::new("/u/trusted.list"))
+            .expect("the text in this test is valid");
         assert!(!read.trusts(&file(), "a"));
         assert!(read.trusts(Path::new("/other \"quoted\"/.niobe/config.toml"), "b"));
     }

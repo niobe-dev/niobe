@@ -229,7 +229,9 @@ mod tests {
         let store = repo::open_or_create_store(root.path()).expect("the store is made");
         let session = store.create_session().expect("a session is created");
         for event in [meta("conv-1"), user("add etag support"), user("and a test")] {
-            store.append(session, &event).expect("append");
+            store
+                .append(session, &event)
+                .expect("a session in a temporary store takes an event");
         }
         let empty = store.create_session().expect("a session is created");
         let _ = empty;
@@ -360,7 +362,7 @@ mod tests {
                     title: "Etag support".to_owned(),
                 },
             )
-            .expect("append");
+            .expect("a session in a temporary store takes an event");
 
         let past = read(root.path(), Some(&dir), &clock());
 

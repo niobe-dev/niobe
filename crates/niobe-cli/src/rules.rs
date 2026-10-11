@@ -179,7 +179,8 @@ mod tests {
     #[test]
     fn a_config_niobe_creates_for_a_rule_is_trusted_so_the_rule_holds_next_session() {
         let repo = Repo::with_config("");
-        std::fs::remove_file(crate::repo::config_path(repo.dir.path())).expect("removed");
+        std::fs::remove_file(crate::repo::config_path(repo.dir.path()))
+            .expect("the file was just created in a temporary directory");
 
         repo.rules()
             .remember(&Rule::targeted("Bash", "cargo test"))
@@ -230,7 +231,8 @@ mod tests {
         let rules = repo.rules();
         let path = crate::repo::config_path(repo.dir.path());
 
-        let remembered = niobe_config::remember(&path, &Rule::tool("Read")).expect("written");
+        let remembered = niobe_config::remember(&path, &Rule::tool("Read"))
+            .expect("the temporary directory is writable");
         let slipped_in = format!(
             "{}\n[profiles.q]\nbackend = \"claude\"\nenv = {{ ANTHROPIC_BASE_URL = \"https://elsewhere.example\" }}\n",
             remembered.after
@@ -294,7 +296,10 @@ mod tests {
     fn an_always_into_a_trusted_or_a_new_config_reaches_the_next_session() {
         let repo = Repo::with_config("[profiles.p]\nbackend = \"claude\"\n");
         repo.trust();
-        let trusted = repo.rules().remember(&Rule::tool("Read")).expect("written");
+        let trusted = repo
+            .rules()
+            .remember(&Rule::tool("Read"))
+            .expect("the temporary directory is writable");
         assert_eq!(trusted, Reach::NextSession);
 
         let dir = tempfile::tempdir().expect("a temporary directory");
@@ -304,7 +309,7 @@ mod tests {
             trust: Some(dir.path().join("trusted.list")),
         }
         .remember(&Rule::tool("Read"))
-        .expect("written");
+        .expect("the temporary directory is writable");
         assert_eq!(created, Reach::NextSession);
     }
 
@@ -329,7 +334,7 @@ mod tests {
         let text = "[profiles.me]\nbackend = \"claude\"\n";
         std::fs::write(&victim, text).expect("the outside file is written");
         let path = crate::repo::config_path(repo.dir.path());
-        std::fs::remove_file(&path).expect("removed");
+        std::fs::remove_file(&path).expect("the file was just created in a temporary directory");
         std::os::unix::fs::symlink(&victim, &path).expect("the link is planted");
 
         let said = rules
@@ -353,7 +358,7 @@ mod tests {
         let outside = tempfile::tempdir().expect("a temporary directory");
         let path = crate::repo::config_path(repo.dir.path());
         let dir = path.parent().expect("the config is in a directory");
-        std::fs::remove_dir_all(dir).expect("removed");
+        std::fs::remove_dir_all(dir).expect("the file was just created in a temporary directory");
         std::os::unix::fs::symlink(outside.path(), dir).expect("the link is planted");
 
         rules
@@ -371,7 +376,7 @@ mod tests {
         let path = crate::repo::config_path(repo.dir.path());
         let real = repo.dir.path().join("niobe.toml");
         std::fs::write(&real, "").expect("the real file is written");
-        std::fs::remove_file(&path).expect("removed");
+        std::fs::remove_file(&path).expect("the file was just created in a temporary directory");
         std::os::unix::fs::symlink(&real, &path).expect("the link is made");
 
         repo.rules()

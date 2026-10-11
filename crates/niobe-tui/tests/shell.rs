@@ -4417,7 +4417,11 @@ fn opening_a_line_after_a_wrapped_one_keeps_both_of_its_rows_in_sight() {
         assert_eq!(rows.len(), 3, "{key:?}:\n{frame}");
         assert!(rows[0].contains("> w0 w1"), "{key:?}:\n{frame}");
         assert!(
-            rows[1].contains(line.split_whitespace().last().expect("words")),
+            rows[1].contains(
+                line.split_whitespace()
+                    .last()
+                    .expect("the row holds a last word")
+            ),
             "{key:?}:\n{frame}"
         );
     }

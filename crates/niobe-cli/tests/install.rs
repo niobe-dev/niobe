@@ -416,7 +416,7 @@ fn an_install_target_that_is_a_link_is_left_alone() {
     let root = tempfile::tempdir().expect("a temporary directory");
     let release = release(root.path());
     let elsewhere = root.path().join("elsewhere");
-    fs::write(&elsewhere, "someone else's").expect("written");
+    fs::write(&elsewhere, "someone else's").expect("the temporary directory is writable");
     fs::create_dir_all(root.path().join("bin")).expect("the directory is made");
     std::os::unix::fs::symlink(&elsewhere, root.path().join("bin").join("niobe"))
         .expect("the link is made");
@@ -427,7 +427,8 @@ fn an_install_target_that_is_a_link_is_left_alone() {
     assert!(said(&output).contains("is a link"), "{}", said(&output));
     assert_nothing_staged(root.path());
     assert_eq!(
-        fs::read_to_string(&elsewhere).expect("read"),
+        fs::read_to_string(&elsewhere)
+            .expect("the file is in a temporary directory and was just written"),
         "someone else's"
     );
 }

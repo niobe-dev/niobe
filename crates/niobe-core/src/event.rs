@@ -1172,7 +1172,8 @@ mod tests {
             hunks: Vec::new(),
             scope,
         };
-        let project = serde_json::to_string(&change(ChangeScope::Project)).expect("written");
+        let project = serde_json::to_string(&change(ChangeScope::Project))
+            .expect("the temporary directory is writable");
         assert_eq!(
             project,
             r#"{"type":"file_change","path":"a.md","added":1,"removed":0}"#
@@ -1180,7 +1181,8 @@ mod tests {
         let read: Event = serde_json::from_str(&project).expect("read back");
         assert_eq!(read, change(ChangeScope::Project));
 
-        let memory = serde_json::to_string(&change(ChangeScope::AgentMemory)).expect("written");
+        let memory = serde_json::to_string(&change(ChangeScope::AgentMemory))
+            .expect("the temporary directory is writable");
         assert!(memory.contains(r#""scope":"agent_memory""#), "{memory}");
         let read: Event = serde_json::from_str(&memory).expect("read back");
         assert_eq!(read, change(ChangeScope::AgentMemory));

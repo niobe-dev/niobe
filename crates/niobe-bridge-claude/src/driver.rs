@@ -1897,12 +1897,15 @@ mod tests {
 
         let argv = options.argv();
 
-        let resume = argv.iter().position(|a| a == "--resume").expect("resume");
+        let resume = argv
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("the CLI is handed a --resume option");
         assert_eq!(argv[resume + 1], "1a3e0a35");
         let settings = argv
             .iter()
             .position(|a| a == "--settings")
-            .expect("settings");
+            .expect("the CLI is handed a --settings option");
         assert_eq!(argv[settings + 1], r#"{"env":{"A":"1"}}"#);
     }
 
@@ -2900,7 +2903,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().expect("a scratch directory");
         let file = dir.path().join("there.txt");
-        std::fs::write(&file, "x").expect("written");
+        std::fs::write(&file, "x").expect("the temporary directory is writable");
         symlink(&file, dir.path().join("link-to-there")).expect("a link");
         symlink(dir.path().join("gone"), dir.path().join("dangling")).expect("a link");
         let fifo = dir.path().join("pipe");
@@ -2942,7 +2945,8 @@ mod tests {
             ask("here.txt"),
             ask("not-here.txt"),
         ));
-        std::fs::write(dir.path().join("here.txt"), "old").expect("written");
+        std::fs::write(dir.path().join("here.txt"), "old")
+            .expect("the temporary directory is writable");
 
         let events = drained_until(
             &mut session,

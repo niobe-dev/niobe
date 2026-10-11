@@ -1189,12 +1189,13 @@ mod tests {
         run(&work, &["commit", "-m", "ignore logs"]);
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
         std::fs::create_dir_all(work.join("sub/dir")).expect("the directory can be made");
-        std::fs::write(work.join("sub/dir/inner.txt"), "one\ntwo\nthree").expect("written");
+        std::fs::write(work.join("sub/dir/inner.txt"), "one\ntwo\nthree")
+            .expect("the temporary directory is writable");
         std::fs::write(
             work.join("large.txt"),
             "x\n".repeat(niobe_config::read::LIMIT as usize),
         )
-        .expect("written");
+        .expect("the temporary directory is writable");
         std::fs::write(work.join("noise.log"), "ignored\n").expect("the file is written");
 
         let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
@@ -1805,7 +1806,12 @@ mod tests {
 
         open_or_create_store(dir.path()).expect("a link inside the repository is followed");
 
-        assert!(std::fs::metadata(&real).expect("stat").len() > 0);
+        assert!(
+            std::fs::metadata(&real)
+                .expect("the file was just created")
+                .len()
+                > 0
+        );
     }
 
     /// A clone whose upstream committed `files` under `.niobe`, as the work
@@ -1874,12 +1880,18 @@ mod tests {
     fn a_niobe_directory_linked_out_of_the_repository_is_refused() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let outside = tempfile::tempdir().expect("a temporary directory can be created");
-        std::os::unix::fs::symlink(outside.path(), dir.path().join(DIR)).expect("linked");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(DIR))
+            .expect("a link can be made in a temporary directory");
 
         let said = open_or_create_store(dir.path()).expect_err("the store would be outside");
 
         assert!(said.contains("outside the repository"), "{said}");
-        assert_eq!(std::fs::read_dir(outside.path()).expect("lists").count(), 0);
+        assert_eq!(
+            std::fs::read_dir(outside.path())
+                .expect("the directory exists and is readable")
+                .count(),
+            0
+        );
         let said = read_existing_store(dir.path()).expect_err("so would the one read");
         assert!(said.contains(".niobe"), "{said}");
     }
@@ -2023,11 +2035,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let store = open_or_create_store(dir.path()).expect("the store is created");
         let open = std::fs::Permissions::from_mode(0o644);
-        std::fs::set_permissions(store_path(dir.path()), open.clone()).expect("loosened");
+        std::fs::set_permissions(store_path(dir.path()), open.clone())
+            .expect("the file is the test's own and can be given a mode");
         std::fs::set_permissions(dir.path().join(DIR), std::fs::Permissions::from_mode(0o755))
-            .expect("loosened");
+            .expect("the file is the test's own and can be given a mode");
         for path in side_files(dir.path()) {
-            std::fs::set_permissions(&path, open.clone()).expect("loosened");
+            std::fs::set_permissions(&path, open.clone())
+                .expect("the file is the test's own and can be given a mode");
         }
         drop(store);
 

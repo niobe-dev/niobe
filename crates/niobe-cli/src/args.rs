@@ -625,7 +625,8 @@ mod tests {
 
     #[test]
     fn a_theme_applies_to_a_replay_too() {
-        let asked = invocation(&["replay", "log.jsonl", "--theme", "neo"]).expect("parses");
+        let asked = invocation(&["replay", "log.jsonl", "--theme", "neo"])
+            .expect("the command line in this test is valid");
         assert!(asked.theme.is_some());
     }
 

@@ -506,7 +506,13 @@ mod tests {
         let store = repo::open_existing_store(&root)
             .expect("the store opens")
             .expect("the store exists");
-        assert_eq!(store.events(session).expect("load").len(), 1);
+        assert_eq!(
+            store
+                .events(session)
+                .expect("the session was just written to the store")
+                .len(),
+            1
+        );
     }
 
     /// Another process holding the store's write lock, as a `sqlite3` shell
@@ -642,7 +648,19 @@ mod tests {
         let store = repo::open_existing_store(&root)
             .expect("the store opens")
             .expect("the store exists");
-        assert_eq!(store.events(session).expect("load").len(), 2);
-        assert_eq!(store.sessions().expect("listing").len(), 1);
+        assert_eq!(
+            store
+                .events(session)
+                .expect("the session was just written to the store")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .sessions()
+                .expect("the store was just opened and can list its sessions")
+                .len(),
+            1
+        );
     }
 }

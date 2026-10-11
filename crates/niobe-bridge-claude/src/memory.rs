@@ -1002,7 +1002,7 @@ mod tests {
         let (_dir, home, config, _repo) = signed_in();
         let archive = home.join("Downloads").join("archive");
         let cwd = archive.join("sub");
-        std::fs::create_dir_all(&cwd).expect("made");
+        std::fs::create_dir_all(&cwd).expect("the temporary directory is writable");
         write(&home.join("Documents").join("secret.txt"), "TOP SECRET\n");
         write(&archive.join("CLAUDE.md"), "@../../Documents/secret.txt\n");
 

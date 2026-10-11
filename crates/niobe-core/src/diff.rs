@@ -528,7 +528,7 @@ mod tests {
                 3,
                 vec![context("a"), removed("old()"), added("new()"), context("b")],
             )
-            .expect("consistent"),
+            .expect("the hunk's counts match its lines"),
             Hunk::checked(
                 20,
                 1,
@@ -536,7 +536,7 @@ mod tests {
                 2,
                 vec![removed("old()"), added("new()"), added("more()")],
             )
-            .expect("consistent"),
+            .expect("the hunk's counts match its lines"),
         ];
         assert_eq!(hunks_changed(&hunks), Some((3, 2)));
         assert_eq!(hunks_changed(&[]), None);
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn a_hunk_that_rewrites_a_line_unchanged_but_for_its_end_counts_it() {
         let hunk = Hunk::checked(1, 2, 1, 2, vec![context("a"), removed("b"), added("b")])
-            .expect("consistent");
+            .expect("the hunk's counts match its lines");
         assert_eq!(hunks_changed(&[hunk]), Some((1, 1)));
     }
 
@@ -808,7 +808,8 @@ mod tests {
 
     #[test]
     fn each_run_of_changes_reads_as_its_removals_and_then_its_additions() {
-        let lines = replacement_lines("a\nb\nc\nd", "x\nb\ny\nz").expect("small");
+        let lines = replacement_lines("a\nb\nc\nd", "x\nb\ny\nz")
+            .expect("a change this small is within the comparison budget");
         assert_eq!(
             lines,
             [

@@ -133,7 +133,8 @@ fn repo_with_the_fixture_recorded() -> tempfile::TempDir {
     std::fs::create_dir(dir.path().join(".git")).expect("a .git directory can be made");
     std::fs::create_dir(dir.path().join(".niobe")).expect("a .niobe directory can be made");
 
-    let store = Store::open(&dir.path().join(".niobe").join("sessions.db")).expect("store");
+    let store = Store::open(&dir.path().join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
     let session = store.create_session().expect("a session is created");
     let text = std::fs::read_to_string(fixture_path()).expect("the fixture reads");
     for event in read_log(&text).expect("the fixture parses") {
@@ -428,7 +429,8 @@ fn a_session_listing_prints_a_stored_prompts_escape_sequences_as_text() {
     let dir = tempfile::tempdir().expect("a temporary directory can be created");
     std::fs::create_dir(dir.path().join(".git")).expect("a .git directory can be made");
     std::fs::create_dir(dir.path().join(".niobe")).expect("a .niobe directory can be made");
-    let store = Store::open(&dir.path().join(".niobe").join("sessions.db")).expect("store");
+    let store = Store::open(&dir.path().join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
     let session = store.create_session().expect("a session is created");
     let line = r#"{"type":"user_message","text":"hi\u001b]0;PWNED-TITLE\u0007\u001b[2J\u202e"}"#;
     for event in read_log(line).expect("the event parses") {
@@ -1691,7 +1693,8 @@ fn a_session_on_a_read_only_store_is_printed() {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("read-only");
 
     let output = niobe(repo.path(), &["--resume", "1"]);
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("writable");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+        .expect("the directory is the test's own and can be given a mode");
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stdout(&output).contains("562,988"), "{}", stdout(&output));

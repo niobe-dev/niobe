@@ -401,11 +401,13 @@ allow = [
     #[test]
     fn a_last_element_with_no_comma_is_given_one() {
         assert_eq!(
-            spliced("[permissions]\nallow = [\n  \"Bash\" # all\n]\n", "Read").expect("spliced"),
+            spliced("[permissions]\nallow = [\n  \"Bash\" # all\n]\n", "Read")
+                .expect("the text in this test is an allow array the splice reads"),
             "[permissions]\nallow = [\n  \"Bash\", # all\n    \"Read\",\n]\n"
         );
         assert_eq!(
-            spliced("[permissions]\nallow = []\n", "Read").expect("spliced"),
+            spliced("[permissions]\nallow = []\n", "Read")
+                .expect("the text in this test is an allow array the splice reads"),
             "[permissions]\nallow = [\"Read\"]\n"
         );
     }
@@ -523,7 +525,8 @@ allow = [
     fn a_config_that_does_not_load_is_not_written_to() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("config.toml");
-        std::fs::write(&file, "[profiles.max]\nbackend = \"nothing\"\n").expect("written");
+        std::fs::write(&file, "[profiles.max]\nbackend = \"nothing\"\n")
+            .expect("the temporary directory is writable");
 
         let said = remember(&file, &Rule::tool("Read"))
             .expect_err("the file does not load")
@@ -568,7 +571,8 @@ allow = [
         for round in 0..100 {
             let dir = tempfile::tempdir().expect("a temporary directory");
             let file = dir.path().join("config.toml");
-            std::fs::write(&file, "[profiles.max]\nbackend = \"claude\"\n").expect("written");
+            std::fs::write(&file, "[profiles.max]\nbackend = \"claude\"\n")
+                .expect("the temporary directory is writable");
             let start = std::sync::Barrier::new(2);
 
             std::thread::scope(|scope| {

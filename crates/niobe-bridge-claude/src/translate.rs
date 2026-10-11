@@ -6418,7 +6418,7 @@ mod tests {
                     2,
                     vec![context("alpha"), removed("beta"), added("gamma")]
                 )
-                .expect("consistent")
+                .expect("the hunk's counts match its lines")
             ]]
         );
     }
@@ -6577,7 +6577,7 @@ mod tests {
             hunks(&events),
             vec![vec![
                 Hunk::checked(1, 1, 1, 1, vec![removed("beta"), added("gamma")])
-                    .expect("consistent")
+                    .expect("the hunk's counts match its lines")
             ]]
         );
     }

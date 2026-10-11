@@ -2135,7 +2135,9 @@ mod tests {
 
         let drawn: Vec<String> = printed_lines(
             &call,
-            call.printed.as_ref().expect("set"),
+            call.printed
+                .as_ref()
+                .expect("the call has a printed output set"),
             30,
             &Theme::default(),
         )

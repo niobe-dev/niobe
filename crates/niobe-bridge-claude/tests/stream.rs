@@ -1721,7 +1721,7 @@ fn a_transcript_with_no_cost_state_restores_nothing() {
         .filter(|line| !line.contains("cost-state"))
         .map(|line| format!("{line}\n"))
         .collect();
-    std::fs::write(&path, open).expect("written");
+    std::fs::write(&path, open).expect("the temporary directory is writable");
 
     assert!(
         transcript::spent(&path)
@@ -1743,7 +1743,8 @@ fn a_last_cost_state_that_cannot_be_read_leaves_the_earlier_spend_unknown() {
     let mentions = r#"{"type":"assistant","message":{"role":"assistant","content":"the cost-state is written on exit"}}"#;
 
     for last in [wrong_type, cut_off] {
-        std::fs::write(&path, format!("{older}\n{last}\n")).expect("written");
+        std::fs::write(&path, format!("{older}\n{last}\n"))
+            .expect("the temporary directory is writable");
         let spent = transcript::spent(&path).expect("the transcript reads");
         assert!(!spent.is_known(), "{last}");
         assert_eq!(spent.cost_usd("claude-sonnet-5"), None, "{last}");
@@ -1751,7 +1752,8 @@ fn a_last_cost_state_that_cannot_be_read_leaves_the_earlier_spend_unknown() {
 
     // A readable last record reads as before, and another record that merely
     // names the type does not stand in for it.
-    std::fs::write(&path, format!("{older}\n{mentions}\n")).expect("written");
+    std::fs::write(&path, format!("{older}\n{mentions}\n"))
+        .expect("the temporary directory is writable");
     let spent = transcript::spent(&path).expect("the transcript reads");
     assert!(spent.is_known());
     assert_eq!(spent.cost_usd("claude-sonnet-5"), Some(1.0));

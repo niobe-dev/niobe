@@ -114,7 +114,7 @@ fn two_shells_creating_the_store_at_once_both_open_it() {
             Store::open(&path)
                 .expect("the store opens")
                 .sessions()
-                .expect("listing")
+                .expect("the store was just opened and can list its sessions")
                 .len(),
             2
         );
@@ -129,7 +129,9 @@ fn two_shells_creating_the_store_at_once_both_open_it() {
 fn a_file_locked_past_the_timeout_fails_the_append_and_recording_resumes_after() {
     let (_dir, path) = scratch();
     let mut recorder = Recorder::new(Store::open(&path).expect("the store opens"));
-    recorder.record(&user("before")).expect("record");
+    recorder
+        .record(&user("before"))
+        .expect("a session in a temporary store takes an event");
     let session = recorder.session().expect("a session was opened");
 
     let mut other = raw(&path);
@@ -146,8 +148,16 @@ fn a_file_locked_past_the_timeout_fails_the_append_and_recording_resumes_after()
     assert!(error.to_string().contains("locked"), "{error}");
     drop(lock);
 
-    assert_eq!(recorder.record(&user("after")).expect("record"), 2);
-    let stored = recorder.store().events(session).expect("load");
+    assert_eq!(
+        recorder
+            .record(&user("after"))
+            .expect("a session in a temporary store takes an event"),
+        2
+    );
+    let stored = recorder
+        .store()
+        .events(session)
+        .expect("the session was just written to the store");
     assert_eq!(
         stored.into_iter().map(|s| s.event).collect::<Vec<_>>(),
         [user("before"), user("after")]
@@ -205,7 +215,9 @@ fn a_read_only_store_is_refused_with_an_error_that_says_so() {
     let (_dir, path) = scratch();
     {
         let mut recorder = Recorder::new(Store::open(&path).expect("the store opens"));
-        recorder.record(&user("kept")).expect("record");
+        recorder
+            .record(&user("kept"))
+            .expect("a session in a temporary store takes an event");
     }
     let Some(_read_only) = ReadOnly::new(&path) else {
         return;
@@ -224,7 +236,9 @@ fn a_read_only_store_is_read_as_it_is() {
     let (_dir, path) = scratch();
     let session = {
         let mut recorder = Recorder::new(Store::open(&path).expect("the store opens"));
-        recorder.record(&user("kept")).expect("record");
+        recorder
+            .record(&user("kept"))
+            .expect("a session in a temporary store takes an event");
         recorder.session().expect("the record opened a session")
     };
     let Some(_read_only) = ReadOnly::new(&path) else {
@@ -243,7 +257,7 @@ fn a_store_opened_to_read_that_can_be_written_is_read_too() {
     let (_dir, path) = scratch();
     Recorder::new(Store::open(&path).expect("the store opens"))
         .record(&user("kept"))
-        .expect("record");
+        .expect("a session in a temporary store takes an event");
     let store = Store::open_to_read(&path).expect("the store is read");
     assert_eq!(store.sessions().expect("the list reads").len(), 1);
 }
@@ -258,7 +272,9 @@ fn a_row_that_is_not_json_fails_only_its_own_session() {
         let store = Store::open(&path).expect("a store opens");
         let broken = store.create_session().expect("a session is created");
         let fine = store.create_session().expect("a session is created");
-        store.append(fine, &user("fine")).expect("append");
+        store
+            .append(fine, &user("fine"))
+            .expect("a session in a temporary store takes an event");
         (broken, fine)
     };
     raw(&path)
@@ -315,7 +331,9 @@ fn a_row_that_is_not_json_hides_no_other_prompt() {
         let store = Store::open(&path).expect("a store opens");
         let broken = store.create_session().expect("a session is created");
         let fine = store.create_session().expect("a session is created");
-        store.append(fine, &user("fine")).expect("append");
+        store
+            .append(fine, &user("fine"))
+            .expect("a session in a temporary store takes an event");
         broken
     };
     raw(&path)
@@ -353,7 +371,9 @@ fn beside_a_fine_session(event: rusqlite::types::Value) -> (tempfile::TempDir, S
         let store = Store::open(&path).expect("a store opens");
         let broken = store.create_session().expect("a session is created");
         let fine = store.create_session().expect("a session is created");
-        store.append(fine, &user("fine")).expect("append");
+        store
+            .append(fine, &user("fine"))
+            .expect("a session in a temporary store takes an event");
         broken
     };
     plant(&path, broken, event);

@@ -1160,7 +1160,7 @@ fn every_event_one_record_folds_to_has_that_records_time() {
 #[test]
 fn no_imported_event_is_given_a_time_its_records_do_not_hold() {
     // `jq -r 'select(.timestamp) | .timestamp'` over the fixture, less the
-    // line that is not JSON: every stamp it holds is a whole second but one.
+    // line that is not JSON: every stamp it holds is a whole second but two.
     let recorded: Vec<Option<SystemTime>> = [0, 1, 2, 5, 6, 7, 12, 13]
         .into_iter()
         .map(at_second)

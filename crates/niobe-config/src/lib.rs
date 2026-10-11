@@ -964,8 +964,8 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     #[test]
     fn an_untrusted_files_permissions_answer_no_prompt_and_are_named_as_withheld() {
         let user = parsed("[permissions]\nallow = [\"Read\"]\n");
-        let repo =
-            Config::parse("[permissions]\nallow = [\"Bash\"]\n", &path("repo")).expect("valid");
+        let repo = Config::parse("[permissions]\nallow = [\"Bash\"]\n", &path("repo"))
+            .expect("the text in this test is valid");
         assert!(repo.needs_trust(), "a rule is what trust gates");
 
         let config = user.clone().overlay(repo.clone().untrusted());
@@ -992,7 +992,7 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
             "[profiles.api]\nbackend = \"claude\"\nbilling = \"plan\"\n",
             &path("repo"),
         )
-        .expect("valid");
+        .expect("the text in this test is valid");
         assert!(repo.needs_trust());
 
         let config = user.overlay(repo.untrusted());
@@ -1014,8 +1014,8 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
         // keeps it on the operator's own account, and run on whatever the CLI
         // finds by itself under the name the operator trusts.
         let user = parsed("[profiles.max]\nbackend = \"claude\"\nsettings = \"~/max.json\"\n");
-        let repo =
-            Config::parse("[profiles.max]\nbackend = \"codex\"\n", &path("repo")).expect("valid");
+        let repo = Config::parse("[profiles.max]\nbackend = \"codex\"\n", &path("repo"))
+            .expect("the text in this test is valid");
 
         let config = user.clone().overlay(repo.clone().untrusted());
         let max = &config.profiles()["max"];
@@ -1040,7 +1040,8 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
             "default_profile = \"max\"\n[profiles.max]\nbackend = \"claude\"\n\
              [profiles.api]\nbackend = \"claude\"\n",
         );
-        let repo = Config::parse("\ndefault_profile = \"api\"\n", &path("repo")).expect("valid");
+        let repo = Config::parse("\ndefault_profile = \"api\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         assert!(repo.needs_trust());
 
         let untrusted = repo.clone().untrusted();
@@ -1048,7 +1049,10 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
         let config = user.clone().overlay(untrusted);
 
         assert_eq!(
-            config.select(None).expect("valid").map(|s| s.name),
+            config
+                .select(None)
+                .expect("the text in this test is valid")
+                .map(|s| s.name),
             Some("max")
         );
         assert_eq!(
@@ -1058,7 +1062,10 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
 
         let trusted = user.overlay(repo);
         assert_eq!(
-            trusted.select(None).expect("valid").map(|s| s.name),
+            trusted
+                .select(None)
+                .expect("the text in this test is valid")
+                .map(|s| s.name),
             Some("api")
         );
         assert_eq!(trusted.withheld_default(), None);
@@ -1088,7 +1095,7 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
 
     #[test]
     fn repo_config_overrides_user_config() {
-        let user = Config::parse(EXAMPLE, &path("user")).expect("valid");
+        let user = Config::parse(EXAMPLE, &path("user")).expect("the text in this test is valid");
         let repo = Config::parse(
             r#"
 default_profile = "work"
@@ -1098,7 +1105,7 @@ backend = "codex"
 "#,
             &path("repo"),
         )
-        .expect("valid");
+        .expect("the text in this test is valid");
 
         let config = user.overlay(repo);
 
@@ -1110,7 +1117,10 @@ backend = "codex"
             "a profile the repo defines replaces the user's whole, env included"
         );
         assert_eq!(config.profiles()["personal"].source(), path("user"));
-        let selected = config.select(None).expect("valid").expect("a default");
+        let selected = config
+            .select(None)
+            .expect("the text in this test is valid")
+            .expect("a default");
         assert_eq!(selected.name, "work");
     }
 
@@ -1118,12 +1128,15 @@ backend = "codex"
     fn a_layer_without_a_default_keeps_the_one_beneath_it() {
         let user = parsed(EXAMPLE);
         let repo = Config::parse("[profiles.extra]\nbackend = \"native\"\n", &path("repo"))
-            .expect("valid");
+            .expect("the text in this test is valid");
 
         let config = user.overlay(repo);
 
         assert_eq!(
-            config.select(None).expect("valid").map(|s| s.name),
+            config
+                .select(None)
+                .expect("the text in this test is valid")
+                .map(|s| s.name),
             Some("personal")
         );
         assert_eq!(config.profiles().len(), 4);
@@ -1134,8 +1147,8 @@ backend = "codex"
         let config = parsed(EXAMPLE);
         let selected = config
             .select(Some("work"))
-            .expect("valid")
-            .expect("selected");
+            .expect("the text in this test is valid")
+            .expect("the profile the test names is defined");
         assert_eq!(selected.name, "work");
         assert_eq!(selected.profile, &config.profiles()["work"]);
     }
@@ -1143,8 +1156,16 @@ backend = "codex"
     #[test]
     fn without_a_request_or_a_default_no_profile_is_selected() {
         let config = parsed("[profiles.only]\nbackend = \"claude\"\n");
-        assert_eq!(config.select(None).expect("valid"), None);
-        assert_eq!(Config::default().select(None).expect("valid"), None);
+        assert_eq!(
+            config.select(None).expect("the text in this test is valid"),
+            None
+        );
+        assert_eq!(
+            Config::default()
+                .select(None)
+                .expect("the text in this test is valid"),
+            None
+        );
     }
 
     #[test]
@@ -1171,7 +1192,10 @@ backend = "codex"
     #[test]
     fn a_default_profile_that_is_not_defined_is_reported_where_it_was_set() {
         let config = parsed("\n\ndefault_profile = \"missing\"\n");
-        let error = config.select(None).expect_err("undefined").to_string();
+        let error = config
+            .select(None)
+            .expect_err("a default profile that is not defined is an error")
+            .to_string();
         assert_eq!(
             error,
             "/configs/user/config.toml:3: default_profile: names `missing`, which no config defines"
@@ -1212,13 +1236,14 @@ backend = "codex"
         assert_eq!(user.theme().map(ThemeName::name), Some("classic"));
         assert!(!user.needs_trust());
 
-        let repo = Config::parse("theme = \"neo\"\n", &path("repo")).expect("valid");
+        let repo = Config::parse("theme = \"neo\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         let config = user.clone().overlay(repo);
         assert_eq!(config.theme().map(ThemeName::name), Some("neo"));
 
         // A file that names none leaves the one before it standing.
-        let quiet =
-            Config::parse("[profiles.p]\nbackend = \"claude\"\n", &path("repo")).expect("valid");
+        let quiet = Config::parse("[profiles.p]\nbackend = \"claude\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         assert_eq!(
             user.overlay(quiet).theme().map(ThemeName::name),
             Some("classic")
@@ -1244,7 +1269,7 @@ backend = "codex"
     fn a_file_nobody_trusted_may_stop_titles_costing_tokens_and_may_not_start_them() {
         let user = parsed("titles = \"first-prompt\"\n");
         let spends = Config::parse("titles = \"model\"\n", &path("repo"))
-            .expect("valid")
+            .expect("the text in this test is valid")
             .untrusted();
         assert!(
             spends.needs_trust(),
@@ -1257,17 +1282,19 @@ backend = "codex"
         );
 
         let saves = Config::parse("titles = \"first-prompt\"\n", &path("repo"))
-            .expect("valid")
+            .expect("the text in this test is valid")
             .untrusted();
         assert_eq!(parsed("").overlay(saves).titles(), Titles::FirstPrompt);
 
-        let trusted = Config::parse("titles = \"model\"\n", &path("repo")).expect("valid");
+        let trusted = Config::parse("titles = \"model\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         assert_eq!(user.overlay(trusted).titles(), Titles::Model);
     }
 
     #[test]
     fn a_file_that_turns_the_models_titles_on_is_one_to_trust_and_says_so() {
-        let spends = Config::parse("titles = \"model\"\n", &path("repo")).expect("valid");
+        let spends = Config::parse("titles = \"model\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         assert!(spends.needs_trust(), "read whole, it would spend tokens");
         assert!(!spends.withholds_model_titles());
 
@@ -1276,7 +1303,7 @@ backend = "codex"
         assert!(withheld.withholds_model_titles());
 
         let saves = Config::parse("titles = \"first-prompt\"\n", &path("repo"))
-            .expect("valid")
+            .expect("the text in this test is valid")
             .untrusted();
         assert!(!saves.needs_trust(), "turning titles off is not gated");
         assert!(!saves.withholds_model_titles());
@@ -1297,10 +1324,14 @@ backend = "codex"
     #[test]
     fn a_default_set_by_one_file_may_name_a_profile_another_defines() {
         let user = parsed("[profiles.work]\nbackend = \"claude\"\n");
-        let repo = Config::parse("default_profile = \"work\"\n", &path("repo")).expect("valid");
+        let repo = Config::parse("default_profile = \"work\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         let config = user.overlay(repo);
         assert_eq!(
-            config.select(None).expect("valid").map(|s| s.name),
+            config
+                .select(None)
+                .expect("the text in this test is valid")
+                .map(|s| s.name),
             Some("work")
         );
     }
@@ -1495,7 +1526,9 @@ backend = "codex"
         std::fs::write(&user, "[profiles.work]\nbackend = \"clade\"\n")
             .expect("the config is written");
 
-        let error = Config::load(&[&user]).expect_err("invalid").to_string();
+        let error = Config::load(&[&user])
+            .expect_err("an invalid config is an error")
+            .to_string();
         assert!(
             error.starts_with(&format!("{}:2: profiles.work.backend:", user.display())),
             "{error}"

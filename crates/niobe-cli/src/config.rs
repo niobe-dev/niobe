@@ -521,9 +521,9 @@ mod tests {
     fn a_relative_settings_path_is_the_repositorys_and_not_the_working_directorys() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let root = dir.path().join("repo");
-        std::fs::create_dir_all(&root).expect("made");
+        std::fs::create_dir_all(&root).expect("the temporary directory is writable");
         let real = root.join("claude.json");
-        std::fs::write(&real, "{}").expect("written");
+        std::fs::write(&real, "{}").expect("the temporary directory is writable");
         let config = with_settings("claude.json");
 
         assert_eq!(
@@ -534,9 +534,10 @@ mod tests {
         // A file of that name beside the process, which the CLI would never
         // load, is not what is looked at: with none in the root, it is missing.
         let elsewhere = dir.path().join("sub");
-        std::fs::create_dir_all(&elsewhere).expect("made");
-        std::fs::write(elsewhere.join("claude.json"), "{}").expect("written");
-        std::fs::remove_file(&real).expect("removed");
+        std::fs::create_dir_all(&elsewhere).expect("the temporary directory is writable");
+        std::fs::write(elsewhere.join("claude.json"), "{}")
+            .expect("the temporary directory is writable");
+        std::fs::remove_file(&real).expect("the file was just created in a temporary directory");
         let said =
             settings_path(&max(&config), os("/home/me"), &root).expect_err("the root holds none");
         assert!(
@@ -674,11 +675,14 @@ mod tests {
     fn a_repository_file_that_only_redefines_a_users_profile_is_untrusted() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let user = dir.path().join("user.toml");
-        std::fs::write(&user, "[profiles.max]\nbackend = \"claude\"\n").expect("written");
+        std::fs::write(&user, "[profiles.max]\nbackend = \"claude\"\n")
+            .expect("the temporary directory is writable");
         let root = dir.path().join("repo");
         let config = repo::config_path(&root);
-        std::fs::create_dir_all(config.parent().expect("a directory")).expect("made");
-        std::fs::write(&config, "[profiles.max]\nbackend = \"claude\"\n").expect("written");
+        std::fs::create_dir_all(config.parent().expect("a directory"))
+            .expect("the temporary directory is writable");
+        std::fs::write(&config, "[profiles.max]\nbackend = \"claude\"\n")
+            .expect("the temporary directory is writable");
 
         let loaded = load_from(Some(user), &root).expect("both configs load");
 
@@ -693,11 +697,14 @@ mod tests {
     fn a_repository_file_that_only_turns_the_models_titles_on_is_untrusted() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let user = dir.path().join("user.toml");
-        std::fs::write(&user, "titles = \"first-prompt\"\n").expect("written");
+        std::fs::write(&user, "titles = \"first-prompt\"\n")
+            .expect("the temporary directory is writable");
         let root = dir.path().join("repo");
         let config = repo::config_path(&root);
-        std::fs::create_dir_all(config.parent().expect("a directory")).expect("made");
-        std::fs::write(&config, "titles = \"model\"\n").expect("written");
+        std::fs::create_dir_all(config.parent().expect("a directory"))
+            .expect("the temporary directory is writable");
+        std::fs::write(&config, "titles = \"model\"\n")
+            .expect("the temporary directory is writable");
 
         let loaded = load_from(Some(user), &root).expect("both configs load");
 
@@ -717,14 +724,16 @@ mod tests {
         fn new(config: &str) -> Self {
             let dir = tempfile::tempdir().expect("a temporary directory can be created");
             let path = repo::config_path(dir.path());
-            std::fs::create_dir_all(path.parent().expect("a directory")).expect("made");
-            std::fs::write(&path, config).expect("written");
+            std::fs::create_dir_all(path.parent().expect("a directory"))
+                .expect("the temporary directory is writable");
+            std::fs::write(&path, config).expect("the temporary directory is writable");
             let record = dir.path().join("trusted.list");
             Self { dir, record }
         }
 
         fn write(&self, name: &str, text: &str) {
-            std::fs::write(self.dir.path().join(name), text).expect("written");
+            std::fs::write(self.dir.path().join(name), text)
+                .expect("the temporary directory is writable");
         }
 
         fn load(&self) -> Loaded {
@@ -740,8 +749,9 @@ mod tests {
         /// What `niobe trust` records for what is there now.
         fn trust(&self) {
             let path = repo::config_path(self.dir.path());
-            let text = std::fs::read_to_string(&path).expect("reads");
-            let config = Config::parse(&text, &path).expect("valid");
+            let text = std::fs::read_to_string(&path)
+                .expect("the file is in a temporary directory and was just written");
+            let config = Config::parse(&text, &path).expect("the text in this test is valid");
             let untrusted = Untrusted {
                 attached: attached(&config, self.dir.path(), os("/home/me").as_deref()),
                 path,
@@ -749,11 +759,17 @@ mod tests {
                 config,
                 replaces: Vec::new(),
             };
-            std::fs::create_dir_all(self.record.parent().expect("a directory")).expect("made");
+            std::fs::create_dir_all(self.record.parent().expect("a directory"))
+                .expect("the temporary directory is writable");
             Trusted::update(&self.record, |trusted| {
                 trusted.trust(&untrusted.path, &untrusted.text)?;
                 for file in &untrusted.attached {
-                    trusted.trust(&file.path, file.text.as_ref().expect("readable"))?;
+                    trusted.trust(
+                        &file.path,
+                        file.text
+                            .as_ref()
+                            .expect("an untrusted file's text was read when it was found"),
+                    )?;
                 }
                 Ok(())
             })
@@ -780,7 +796,8 @@ mod tests {
         };
         assert!(load(None).untrusted.is_none(), "nothing replaced, trusted");
 
-        std::fs::write(&user, "[profiles.max]\nbackend = \"codex\"\n").expect("written");
+        std::fs::write(&user, "[profiles.max]\nbackend = \"codex\"\n")
+            .expect("the temporary directory is writable");
         let loaded = load(Some(user));
 
         let untrusted = loaded.untrusted.expect("a replacement nobody agreed to");
@@ -800,9 +817,11 @@ mod tests {
     fn a_replacement_that_was_shown_and_trusted_stays_trusted() {
         let clone = Cloned::new("[profiles.max]\nbackend = \"claude\"\nenv = { A = \"1\" }\n");
         let user = clone.dir.path().join("user.toml");
-        std::fs::write(&user, "[profiles.max]\nbackend = \"codex\"\n").expect("written");
+        std::fs::write(&user, "[profiles.max]\nbackend = \"codex\"\n")
+            .expect("the temporary directory is writable");
         let path = repo::config_path(clone.dir.path());
-        let text = std::fs::read_to_string(&path).expect("reads");
+        let text = std::fs::read_to_string(&path)
+            .expect("the file is in a temporary directory and was just written");
         Trusted::update(&clone.record, |trusted| {
             trusted.trust(&path, &text)?;
             trusted.trust(&replaces_key(&path), "max")
@@ -872,7 +891,8 @@ mod tests {
     #[test]
     fn a_settings_file_that_cannot_be_read_as_text_is_not_trusted() {
         let clone = Cloned::new(TEAM);
-        std::fs::write(clone.dir.path().join("claude.json"), [0xff, 0xfe]).expect("written");
+        std::fs::write(clone.dir.path().join("claude.json"), [0xff, 0xfe])
+            .expect("the temporary directory is writable");
         let path = repo::config_path(clone.dir.path());
         Trusted::update(&clone.record, |trusted| {
             trusted.trust(&path, TEAM)?;

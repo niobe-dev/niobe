@@ -76,12 +76,24 @@ fn sequence_numbers_count_per_session() {
     let first = store.create_session().expect("a session is created");
     let second = store.create_session().expect("a session is created");
 
-    store.append(first, &user("a")).expect("append");
-    store.append(second, &user("b")).expect("append");
-    let seq = store.append(first, &user("c")).expect("append");
+    store
+        .append(first, &user("a"))
+        .expect("a session in a temporary store takes an event");
+    store
+        .append(second, &user("b"))
+        .expect("a session in a temporary store takes an event");
+    let seq = store
+        .append(first, &user("c"))
+        .expect("a session in a temporary store takes an event");
 
     assert_eq!(seq, 2);
-    assert_eq!(store.events(second).expect("load")[0].seq, 1);
+    assert_eq!(
+        store
+            .events(second)
+            .expect("the session was just written to the store")[0]
+            .seq,
+        1
+    );
 }
 
 #[test]
@@ -116,7 +128,9 @@ fn the_database_itself_refuses_to_edit_or_delete_an_event() {
     {
         let store = Store::open(&path).expect("a store opens");
         let session = store.create_session().expect("a session is created");
-        store.append(session, &user("keep me")).expect("append");
+        store
+            .append(session, &user("keep me"))
+            .expect("a session in a temporary store takes an event");
     }
 
     let conn = raw(&path);
@@ -157,7 +171,10 @@ fn the_database_itself_refuses_to_edit_or_delete_an_event() {
         std::time::UNIX_EPOCH + std::time::Duration::from_millis(42)
     );
     assert_eq!(
-        store.events(listed[0].id).expect("load")[0].event,
+        store
+            .events(listed[0].id)
+            .expect("the session was just written to the store")[0]
+            .event,
         user("keep me")
     );
 }
@@ -168,8 +185,10 @@ fn sessions_are_listed_newest_first_with_their_first_prompt_and_size() {
     let older = store.create_session().expect("a session is created");
     store
         .append(older, &user("add etag support"))
-        .expect("append");
-    store.append(older, &user("now the tests")).expect("append");
+        .expect("a session in a temporary store takes an event");
+    store
+        .append(older, &user("now the tests"))
+        .expect("a session in a temporary store takes an event");
     let newer = store.create_session().expect("a session is created");
     store
         .append(
@@ -179,7 +198,7 @@ fn sessions_are_listed_newest_first_with_their_first_prompt_and_size() {
                 agent: None,
             },
         )
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     let sessions = store.sessions().expect("listing works");
     assert_eq!(
@@ -207,10 +226,14 @@ fn a_session_is_listed_with_the_last_title_its_backend_gave_it() {
         titled_event("Etag support"),
         titled_event("Static file handler etag support"),
     ] {
-        store.append(titled, &event).expect("append");
+        store
+            .append(titled, &event)
+            .expect("a session in a temporary store takes an event");
     }
     let untitled = store.create_session().expect("a session is created");
-    store.append(untitled, &user("fix it")).expect("append");
+    store
+        .append(untitled, &user("fix it"))
+        .expect("a session in a temporary store takes an event");
 
     let sessions = store.sessions().expect("listing works");
     assert_eq!(sessions[0].title, None);
@@ -255,7 +278,9 @@ fn an_unreadable_row_names_the_session_and_the_sequence_number() {
     let session = {
         let store = Store::open(&path).expect("a store opens");
         let session = store.create_session().expect("a session is created");
-        store.append(session, &user("fine")).expect("append");
+        store
+            .append(session, &user("fine"))
+            .expect("a session in a temporary store takes an event");
         session
     };
     raw(&path)
@@ -293,7 +318,9 @@ fn calls_messages_and_prompts_stored_before_they_named_an_agent_load_as_the_sess
     let session = {
         let store = Store::open(&path).expect("a store opens");
         let session = store.create_session().expect("a session is created");
-        store.append(session, &user("review it")).expect("append");
+        store
+            .append(session, &user("review it"))
+            .expect("a session in a temporary store takes an event");
         session
     };
     let id = session.to_string().parse::<i64>().expect("ids are numbers");
@@ -325,7 +352,9 @@ fn calls_messages_and_prompts_stored_before_they_named_an_agent_load_as_the_sess
         summary: None,
         agent: Some(AgentId::new("toolu_a")),
     };
-    store.append(session, &owned).expect("append");
+    store
+        .append(session, &owned)
+        .expect("a session in a temporary store takes an event");
 
     let events: Vec<Event> = store
         .events(session)
@@ -419,12 +448,12 @@ fn reported_costs_come_back_bit_for_bit() {
                     fast: false,
                 }),
             )
-            .expect("append");
+            .expect("a session in a temporary store takes an event");
     }
 
     let back: Vec<f64> = store
         .events(session)
-        .expect("load")
+        .expect("the session was just written to the store")
         .into_iter()
         .map(|stored| match stored.event {
             Event::Usage(usage) => usage.cost_usd.expect("every record was priced"),
@@ -445,15 +474,28 @@ fn a_recorder_creates_its_session_on_the_first_event_and_not_before() {
     let store = Store::open_in_memory().expect("an in-memory store opens");
     let mut recorder = Recorder::new(store);
     assert_eq!(recorder.session(), None);
-    assert!(recorder.store().sessions().expect("listing").is_empty());
+    assert!(
+        recorder
+            .store()
+            .sessions()
+            .expect("the store was just opened and can list its sessions")
+            .is_empty()
+    );
 
-    recorder.record(&user("first")).expect("record");
-    recorder.record(&user("second")).expect("record");
+    recorder
+        .record(&user("first"))
+        .expect("a session in a temporary store takes an event");
+    recorder
+        .record(&user("second"))
+        .expect("a session in a temporary store takes an event");
 
     let session = recorder
         .session()
         .expect("the first event opened a session");
-    let sessions = recorder.store().sessions().expect("listing");
+    let sessions = recorder
+        .store()
+        .sessions()
+        .expect("the store was just opened and can list its sessions");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, session);
     assert_eq!(sessions[0].events, 2);
@@ -467,10 +509,13 @@ fn an_event_recorded_late_is_dated_when_it_happened() {
 
     recorder
         .record_at(&user("typed while the store was locked"), happened)
-        .expect("record");
+        .expect("a session in a temporary store takes an event");
 
     let session = recorder.session().expect("the event opened a session");
-    let stored = recorder.store().events(session).expect("load");
+    let stored = recorder
+        .store()
+        .events(session)
+        .expect("the session was just written to the store");
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].at, happened);
 }
@@ -482,22 +527,37 @@ fn a_resumed_recorder_appends_to_the_session_it_resumed() {
         let mut recorder = Recorder::new(Store::open(&path).expect("a store opens"));
         recorder
             .record(&user("before the restart"))
-            .expect("record");
+            .expect("a session in a temporary store takes an event");
         recorder.session().expect("a session was opened")
     };
 
     let mut resumed = Recorder::resume(Store::open(&path).expect("the store opens again"), session)
         .expect("the session exists");
-    resumed.record(&user("after the restart")).expect("record");
+    resumed
+        .record(&user("after the restart"))
+        .expect("a session in a temporary store takes an event");
 
-    let stored = resumed.store().events(session).expect("load");
+    let stored = resumed
+        .store()
+        .events(session)
+        .expect("the session was just written to the store");
     assert_eq!(stored.len(), 2);
     assert_eq!(stored[1].seq, 2);
-    assert_eq!(resumed.store().sessions().expect("listing").len(), 1);
+    assert_eq!(
+        resumed
+            .store()
+            .sessions()
+            .expect("the store was just opened and can list its sessions")
+            .len(),
+        1
+    );
 
     let missing: SessionId = "7".parse().expect("a number is a session id");
     assert!(matches!(
-        Recorder::resume(Store::open(&path).expect("opens"), missing),
+        Recorder::resume(
+            Store::open(&path).expect("the store file is in a temporary directory"),
+            missing
+        ),
         Err(StoreError::NoSuchSession(_))
     ));
 }
@@ -509,7 +569,7 @@ fn a_session_one_recorder_holds_cannot_be_taken_up_by_another_until_it_lets_go()
     let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
     first
         .record(&user("from the first window"))
-        .expect("record");
+        .expect("a session in a temporary store takes an event");
     let session = first.session().expect("a session was opened");
 
     let second = Recorder::resume(Store::open(&path).expect("the store opens again"), session);
@@ -520,8 +580,11 @@ fn a_session_one_recorder_holds_cannot_be_taken_up_by_another_until_it_lets_go()
     assert!(said.contains("open"), "{said}");
 
     drop(first);
-    Recorder::resume(Store::open(&path).expect("opens"), session)
-        .expect("a session nobody holds is taken up");
+    Recorder::resume(
+        Store::open(&path).expect("the store file is in a temporary directory"),
+        session,
+    )
+    .expect("a session nobody holds is taken up");
 }
 
 #[cfg(unix)]
@@ -539,7 +602,9 @@ fn a_session_whose_hold_cannot_be_taken_is_opened_once_and_taken_up_when_it_can_
         ));
     }
     std::fs::remove_dir(&blocker).expect("the directory is removed");
-    recorder.record(&user("four")).expect("record");
+    recorder
+        .record(&user("four"))
+        .expect("a session in a temporary store takes an event");
 
     let listed = recorder.store().sessions().expect("listing works");
     assert_eq!(listed.len(), 1);
@@ -573,7 +638,9 @@ fn a_link_at_the_hold_name_is_refused_and_nothing_is_made_where_it_points() {
 fn a_recorder_removes_its_hold_file_when_it_lets_go() {
     let (dir, path) = scratch();
     let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
-    first.record(&user("held")).expect("record");
+    first
+        .record(&user("held"))
+        .expect("a session in a temporary store takes an event");
     let session = first.session().expect("a session was opened");
     let hold = dir.path().join(format!("sessions.db-open-{session}"));
     assert!(hold.exists());
@@ -581,8 +648,11 @@ fn a_recorder_removes_its_hold_file_when_it_lets_go() {
     drop(first);
     assert!(!hold.exists());
 
-    let resumed = Recorder::resume(Store::open(&path).expect("opens"), session)
-        .expect("a session nobody holds is taken up");
+    let resumed = Recorder::resume(
+        Store::open(&path).expect("the store file is in a temporary directory"),
+        session,
+    )
+    .expect("a session nobody holds is taken up");
     assert!(hold.exists());
     drop(resumed);
     assert!(!hold.exists());
@@ -593,11 +663,19 @@ fn a_recorder_removes_its_hold_file_when_it_lets_go() {
 fn a_session_can_still_be_read_while_a_recorder_holds_it() {
     let (_dir, path) = scratch();
     let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
-    first.record(&user("held")).expect("record");
+    first
+        .record(&user("held"))
+        .expect("a session in a temporary store takes an event");
     let session = first.session().expect("a session was opened");
 
     let reader = Store::open_to_read(&path).expect("the store opens to read");
-    assert_eq!(reader.events(session).expect("load").len(), 1);
+    assert_eq!(
+        reader
+            .events(session)
+            .expect("the session was just written to the store")
+            .len(),
+        1
+    );
 }
 
 #[cfg(unix)]
@@ -605,7 +683,9 @@ fn a_session_can_still_be_read_while_a_recorder_holds_it() {
 fn a_session_reads_as_held_while_a_recorder_holds_it_and_the_look_takes_nothing() {
     let (dir, path) = scratch();
     let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
-    first.record(&user("held")).expect("record");
+    first
+        .record(&user("held"))
+        .expect("a session in a temporary store takes an event");
     let session = first.session().expect("a session was opened");
     let reader = Store::open_to_read(&path).expect("the store opens to read");
 
@@ -619,8 +699,11 @@ fn a_session_reads_as_held_while_a_recorder_holds_it_and_the_look_takes_nothing(
             .exists(),
         "looking made no hold file"
     );
-    Recorder::resume(Store::open(&path).expect("opens"), session)
-        .expect("a session that was looked at is still taken up");
+    Recorder::resume(
+        Store::open(&path).expect("the store file is in a temporary directory"),
+        session,
+    )
+    .expect("a session that was looked at is still taken up");
 }
 
 #[cfg(unix)]
@@ -665,10 +748,12 @@ fn a_fifo_at_the_hold_name_is_looked_at_without_waiting_and_is_not_a_hold() {
 fn a_session_that_opens_with_a_slash_command_is_listed_by_the_prompt_after_it() {
     let store = Store::open_in_memory().expect("an in-memory store opens");
     let session = store.create_session().expect("a session is created");
-    store.append(session, &user("/clear")).expect("append");
+    store
+        .append(session, &user("/clear"))
+        .expect("a session in a temporary store takes an event");
     store
         .append(session, &user("add etag support"))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     let listed = store.sessions().expect("listing works");
 
@@ -686,7 +771,7 @@ fn a_prompt_that_reached_no_backend_is_neither_the_first_prompt_nor_one_of_the_p
                 text: "hello".to_owned(),
             },
         )
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     let listed = store.sessions().expect("listing works");
     assert_eq!(listed.len(), 1, "the session itself is still listed");
@@ -708,10 +793,12 @@ fn every_prompt_of_every_session_comes_back_newest_first_with_its_session() {
     let store = Store::open_in_memory().expect("an in-memory store opens");
     let first = store.create_session().expect("a session is created");
     let second = store.create_session().expect("a session is created");
-    store.append(first, &meta("conv-1")).expect("append");
+    store
+        .append(first, &meta("conv-1"))
+        .expect("a session in a temporary store takes an event");
     store
         .append(first, &user("add etag support"))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append(
             first,
@@ -719,11 +806,13 @@ fn every_prompt_of_every_session_comes_back_newest_first_with_its_session() {
                 text: "done".to_owned(),
             },
         )
-        .expect("append");
-    store.append(first, &user("/compact")).expect("append");
+        .expect("a session in a temporary store takes an event");
+    store
+        .append(first, &user("/compact"))
+        .expect("a session in a temporary store takes an event");
     store
         .append(second, &user("why does it hang?"))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     let prompts = store.prompts().expect("the prompts are read");
     let listed: Vec<(SessionId, &str)> = prompts
@@ -747,9 +836,13 @@ fn every_conversation_a_session_carried_on_is_named_with_it() {
     let session = store.create_session().expect("a session is created");
     let other = store.create_session().expect("a session is created");
     for event in [meta("conv-1"), user("go"), meta("conv-1"), meta("conv-2")] {
-        store.append(session, &event).expect("append");
+        store
+            .append(session, &event)
+            .expect("a session in a temporary store takes an event");
     }
-    store.append(other, &user("nothing said")).expect("append");
+    store
+        .append(other, &user("nothing said"))
+        .expect("a session in a temporary store takes an event");
 
     let mut carried = store.conversations().expect("they are read");
     carried.sort();
@@ -793,29 +886,31 @@ fn the_newest_windows_a_profile_recorded_come_back_with_when_they_were_recorded(
 
     store
         .append_at(older, &under("max"), at(100))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(older, &five_hour(0.2), at(110))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(newer, &under("max"), at(200))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(newer, &five_hour(0.37), at(210))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     // A report that names no window is not a level, and is passed over.
     let silent = Event::UsageWindows(niobe_core::event::UsageWindows {
         using_overage: true,
         ..niobe_core::event::UsageWindows::default()
     });
-    store.append_at(newer, &silent, at(220)).expect("append");
+    store
+        .append_at(newer, &silent, at(220))
+        .expect("a session in a temporary store takes an event");
     // Another profile's account is not this one's.
     store
         .append_at(other, &under("work"), at(300))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(other, &five_hour(0.9), at(310))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     let (when, windows) = store
         .last_usage_windows("max")
@@ -842,13 +937,13 @@ fn windows_belong_to_the_profile_in_force_when_they_were_recorded() {
 
     store
         .append_at(session, &under("personal"), at(100))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(session, &five_hour(0.8), at(110))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(session, &under("work"), at(200))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     assert_eq!(
         store.last_usage_windows("work").expect("the store is read"),
@@ -858,7 +953,7 @@ fn windows_belong_to_the_profile_in_force_when_they_were_recorded() {
 
     store
         .append_at(session, &five_hour(0.3), at(210))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     let (when, windows) = store
         .last_usage_windows("work")
@@ -882,16 +977,16 @@ fn the_newest_windows_are_the_latest_recorded_whichever_session_was_opened_first
     let opened_later = store.create_session().expect("a session is created");
     store
         .append_at(opened_later, &under("max"), at(100))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(opened_later, &five_hour(0.2), at(110))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(opened_first, &under("max"), at(200))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(opened_first, &five_hour(0.37), at(210))
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     let (when, windows) = store
         .last_usage_windows("max")
@@ -906,13 +1001,15 @@ fn of_two_reports_in_the_same_millisecond_the_later_one_stands() {
     let store = Store::open_in_memory().expect("an in-memory store opens");
     let at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
     let session = store.create_session().expect("a session is created");
-    store.append_at(session, &under("max"), at).expect("append");
+    store
+        .append_at(session, &under("max"), at)
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(session, &five_hour(0.2), at)
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
     store
         .append_at(session, &five_hour(0.37), at)
-        .expect("append");
+        .expect("a session in a temporary store takes an event");
 
     let (_, windows) = store
         .last_usage_windows("max")
@@ -942,8 +1039,12 @@ fn a_row_that_is_not_json_does_not_hide_the_windows_beside_it() {
     let session = {
         let store = Store::open(&path).expect("a store opens");
         let session = store.create_session().expect("a session is created");
-        store.append(session, &under("max")).expect("append");
-        store.append(session, &five_hour(0.37)).expect("append");
+        store
+            .append(session, &under("max"))
+            .expect("a session in a temporary store takes an event");
+        store
+            .append(session, &five_hour(0.37))
+            .expect("a session in a temporary store takes an event");
         session
     };
     append_raw(&path, session, 3, r#"{"type":"usage_wind"#);
@@ -962,8 +1063,12 @@ fn only_a_session_meta_says_which_profile_a_session_ran_under() {
     let session = {
         let store = Store::open(&path).expect("a store opens");
         let session = store.create_session().expect("a session is created");
-        store.append(session, &under("work")).expect("append");
-        store.append(session, &five_hour(0.9)).expect("append");
+        store
+            .append(session, &under("work"))
+            .expect("a session in a temporary store takes an event");
+        store
+            .append(session, &five_hour(0.9))
+            .expect("a session in a temporary store takes an event");
         session
     };
     append_raw(

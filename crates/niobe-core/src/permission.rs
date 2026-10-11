@@ -634,9 +634,19 @@ mod tests {
     fn a_prefix_inside_a_word_includes_only_rules_that_stay_in_that_word() {
         let outer = Rule::parse("Bash(cat src/*)").expect("the rule is valid");
 
-        assert!(outer.includes(&Rule::parse("Bash(cat src/a/*)").expect("valid")));
-        assert!(!outer.includes(&Rule::parse("Bash(cat src/a *)").expect("valid")));
-        assert!(!outer.includes(&Rule::parse("Bash(cat src/x ../*)").expect("valid")));
+        assert!(
+            outer.includes(
+                &Rule::parse("Bash(cat src/a/*)").expect("the text in this test is valid")
+            )
+        );
+        assert!(
+            !outer.includes(
+                &Rule::parse("Bash(cat src/a *)").expect("the text in this test is valid")
+            )
+        );
+        assert!(!outer.includes(
+            &Rule::parse("Bash(cat src/x ../*)").expect("the text in this test is valid")
+        ));
     }
 
     #[test]
@@ -646,17 +656,24 @@ mod tests {
             assert_eq!(rule.to_string(), text);
         }
 
-        let targeted = Rule::parse("Bash(cargo test)").expect("valid");
+        let targeted = Rule::parse("Bash(cargo test)").expect("the text in this test is valid");
         assert_eq!(targeted.tool_name(), "Bash");
         assert_eq!(
             targeted.target(),
             Some(&Target::Exact("cargo test".to_owned()))
         );
         assert_eq!(
-            Rule::parse("Bash(cargo *)").expect("valid").target(),
+            Rule::parse("Bash(cargo *)")
+                .expect("the text in this test is valid")
+                .target(),
             Some(&Target::Prefix("cargo ".to_owned()))
         );
-        assert_eq!(Rule::parse("Read").expect("valid").target(), None);
+        assert_eq!(
+            Rule::parse("Read")
+                .expect("the text in this test is valid")
+                .target(),
+            None
+        );
     }
 
     #[test]

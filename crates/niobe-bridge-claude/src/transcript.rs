@@ -2290,15 +2290,17 @@ mod tests {
             // A description that names no call has no agent to go with.
             ("agent-a2", r#"{"agentType":"quick-lookup"}"#),
         ] {
-            std::fs::write(agents.join(format!("{name}{META}")), meta).expect("written");
-            std::fs::write(agents.join(format!("{name}.{EXTENSION}")), answer).expect("written");
+            std::fs::write(agents.join(format!("{name}{META}")), meta)
+                .expect("the temporary directory is writable");
+            std::fs::write(agents.join(format!("{name}.{EXTENSION}")), answer)
+                .expect("the temporary directory is writable");
         }
         // A description whose transcript is gone.
         std::fs::write(
             agents.join(format!("agent-a3{META}")),
             r#"{"toolUseId":"toolu_c"}"#,
         )
-        .expect("written");
+        .expect("the temporary directory is writable");
 
         let found: Vec<(String, String)> = side_files(&session)
             .into_iter()
@@ -2321,11 +2323,12 @@ mod tests {
             agents.join(format!("agent-a1{META}")),
             r#"{"toolUseId":"toolu_a"}"#,
         )
-        .expect("written");
+        .expect("the temporary directory is writable");
         let answer = r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Done."}]}}"#;
         let mut bytes = format!("{answer}\n").into_bytes();
         bytes.extend_from_slice(&"{\"type\":\"assistant\",\"text\":\"—".as_bytes()[..30]);
-        std::fs::write(agents.join(format!("agent-a1.{EXTENSION}")), bytes).expect("written");
+        std::fs::write(agents.join(format!("agent-a1.{EXTENSION}")), bytes)
+            .expect("the temporary directory is writable");
 
         let found = side_files(&session);
         let [side] = found.as_slice() else {
@@ -2896,12 +2899,12 @@ mod tests {
             sides.join(format!("agent-a1{META}")),
             r#"{"toolUseId":"toolu_a"}"#,
         )
-        .expect("written");
+        .expect("the temporary directory is writable");
         std::fs::write(
             sides.join(format!("agent-a1.{EXTENSION}")),
             agent.join("\n"),
         )
-        .expect("written");
+        .expect("the temporary directory is writable");
         events(&path, "max", Path::new("/repo")).expect("the transcript reads")
     }
 

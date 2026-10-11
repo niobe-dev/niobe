@@ -493,19 +493,27 @@ mod tests {
         let said = said.trim_start_matches('<');
         if let Some((h, m)) = said.split_once("h ") {
             let (h, m): (f64, f64) = (
-                h.parse().expect("hours"),
-                m.trim_end_matches('m').parse().expect("minutes"),
+                h.parse()
+                    .expect("the drawn duration holds a number of hours"),
+                m.trim_end_matches('m')
+                    .parse()
+                    .expect("the drawn duration holds a number of minutes"),
             );
             return h * 3_600.0 + m * 60.0;
         }
         if let Some((m, s)) = said.split_once("m ") {
             let (m, s): (f64, f64) = (
-                m.parse().expect("minutes"),
-                s.trim_end_matches('s').parse().expect("seconds"),
+                m.parse()
+                    .expect("the drawn duration holds a number of minutes"),
+                s.trim_end_matches('s')
+                    .parse()
+                    .expect("the drawn duration holds a number of seconds"),
             );
             return m * 60.0 + s;
         }
-        said.trim_end_matches('s').parse().expect("seconds")
+        said.trim_end_matches('s')
+            .parse()
+            .expect("the drawn duration holds a number of seconds")
     }
 
     #[test]

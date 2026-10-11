@@ -802,7 +802,9 @@ mod tests {
         let text = |i: usize| Event::UserMessage {
             text: format!("{i} {}", "x".repeat(2_000)),
         };
-        store.append(session, &text(0)).expect("append");
+        store
+            .append(session, &text(0))
+            .expect("a session in a temporary store takes an event");
 
         let pages: i64 = store
             .conn
@@ -825,7 +827,9 @@ mod tests {
             .pragma_update(None, "max_page_count", 1_000_000)
             .expect("the page limit is lifted");
         let kept = store.events(session).expect("the session loads");
-        let next = store.append(session, &text(999)).expect("append");
+        let next = store
+            .append(session, &text(999))
+            .expect("a session in a temporary store takes an event");
         assert_eq!(next, kept.len() as u64 + 1);
         let seqs: Vec<u64> = store
             .events(session)

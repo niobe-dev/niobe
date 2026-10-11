@@ -211,11 +211,15 @@ mod tests {
     fn a_file_is_replaced_whole_and_nothing_is_left_beside_it() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("config.toml");
-        std::fs::write(&file, "old").expect("written");
+        std::fs::write(&file, "old").expect("the temporary directory is writable");
 
         replace(&file, b"new").expect("the file is replaced");
 
-        assert_eq!(std::fs::read_to_string(&file).expect("read"), "new");
+        assert_eq!(
+            std::fs::read_to_string(&file)
+                .expect("the file is in a temporary directory and was just written"),
+            "new"
+        );
         assert_eq!(listing(dir.path()), ["config.toml"]);
     }
 
@@ -226,7 +230,11 @@ mod tests {
 
         replace(&file, b"first").expect("the file is created");
 
-        assert_eq!(std::fs::read_to_string(&file).expect("read"), "first");
+        assert_eq!(
+            std::fs::read_to_string(&file)
+                .expect("the file is in a temporary directory and was just written"),
+            "first"
+        );
     }
 
     #[cfg(unix)]
@@ -236,13 +244,16 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("config.toml");
-        std::fs::write(&file, "old").expect("written");
+        std::fs::write(&file, "old").expect("the temporary directory is writable");
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
             .expect("the mode is set");
 
         replace(&file, b"new").expect("the file is replaced");
 
-        let mode = std::fs::metadata(&file).expect("stat").permissions().mode();
+        let mode = std::fs::metadata(&file)
+            .expect("the file was just created")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 
@@ -252,7 +263,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let real = dir.path().join("dotfiles-config.toml");
         let link = dir.path().join("config.toml");
-        std::fs::write(&real, "old").expect("written");
+        std::fs::write(&real, "old").expect("the temporary directory is writable");
         std::os::unix::fs::symlink(&real, &link).expect("the link is made");
 
         let target = resolved(&link).expect("the link resolves");
@@ -260,12 +271,16 @@ mod tests {
 
         assert!(
             std::fs::symlink_metadata(&link)
-                .expect("stat")
+                .expect("the file was just created")
                 .file_type()
                 .is_symlink(),
             "the link was replaced by a file"
         );
-        assert_eq!(std::fs::read_to_string(&real).expect("read"), "new");
+        assert_eq!(
+            std::fs::read_to_string(&real)
+                .expect("the file is in a temporary directory and was just written"),
+            "new"
+        );
     }
 
     #[cfg(unix)]
@@ -274,8 +289,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("config.toml");
         let victim = dir.path().join("victim.rc");
-        std::fs::write(&file, "old").expect("written");
-        std::fs::write(&victim, "the victim's own text").expect("written");
+        std::fs::write(&file, "old").expect("the temporary directory is writable");
+        std::fs::write(&victim, "the victim's own text")
+            .expect("the temporary directory is writable");
         let planted = staging(&file, "planted").expect("a staging name");
         std::os::unix::fs::symlink(&victim, &planted).expect("the link is planted");
 
@@ -285,14 +301,19 @@ mod tests {
         })
         .expect("the file is replaced through a fresh staging file");
 
-        assert_eq!(std::fs::read_to_string(&file).expect("read"), "new");
         assert_eq!(
-            std::fs::read_to_string(&victim).expect("read"),
+            std::fs::read_to_string(&file)
+                .expect("the file is in a temporary directory and was just written"),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim)
+                .expect("the file is in a temporary directory and was just written"),
             "the victim's own text"
         );
         assert!(
             std::fs::symlink_metadata(&file)
-                .expect("stat")
+                .expect("the file was just created")
                 .file_type()
                 .is_file(),
             "the planted link was renamed over the file"
@@ -304,7 +325,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("config.toml");
         std::fs::write(staging(&file, "taken").expect("a name"), "someone else's")
-            .expect("written");
+            .expect("the temporary directory is writable");
 
         let error = replace_staged(&file, b"new", io::Write::write_all, || "taken".to_owned())
             .expect_err("no name was free");

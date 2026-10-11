@@ -1074,7 +1074,9 @@ fn a_session_store_linked_out_of_the_repository_stops_the_session_and_writes_not
         let written = std::fs::read(&planted).unwrap_or_default();
         assert!(written.is_empty(), "{name}: niobe wrote through the link");
         assert_eq!(
-            std::fs::read_dir(outside.path()).expect("lists").count(),
+            std::fs::read_dir(outside.path())
+                .expect("the directory exists and is readable")
+                .count(),
             usize::from(exists),
             "{name}: niobe created a file outside the repository"
         );
