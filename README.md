@@ -15,6 +15,17 @@ is already signed in with. Niobe never reads the CLI's credential files and make
 calls of its own. Profiles for the `codex` CLI can be written, but that bridge does not start
 the CLI yet, so a session under one has nowhere to send a prompt and says so.
 
+## What Niobe is, and is not
+
+Niobe keeps the official harness and adds awareness: the `claude` CLI does the work, and Niobe
+draws what it did, decided and touched, and what that cost, while it happens, without asking you
+to approve every step.
+
+It is not an IDE, not a proxy in front of a provider, and not a new agent loop: it starts the
+CLI you already have and reads what the CLI says. It does not read the CLI's credential files,
+set a user agent or open a connection of its own; [SECURITY.md](SECURITY.md) names the check
+that enforces each of those.
+
 ## Install
 
 On macOS (arm64, x86_64) or Linux (x86_64, arm64):
@@ -31,10 +42,13 @@ You need the `claude` CLI installed and signed in.
 
 ## Use
 
-Run `niobe` in a repository. With no config file it runs the `claude` on your `PATH` with that
-CLI's own settings, under a profile it calls `claude`. `niobe --help` lists the commands, the
-config keys and the keys the shell answers to; `niobe sessions` lists the sessions you can carry
-on with `niobe --resume <id>`.
+Run `niobe` in a repository. Type a prompt and press Enter; Shift+Enter (or Ctrl+J) opens a new
+line, F1 lists the keys, Shift+Tab changes the permission mode and Ctrl+Q quits.
+
+With no config file it runs the `claude` on your `PATH` with that CLI's own settings, under a
+profile it calls `claude`. `niobe --help` lists the commands, the config keys and the keys the
+shell answers to; `niobe sessions` lists the sessions you can carry on with
+`niobe --resume <id>`.
 
 To choose how a backend is run, write a profile in `~/.config/niobe/config.toml`. A config file
 replaces the implied profile, so name the one you want as the default:
