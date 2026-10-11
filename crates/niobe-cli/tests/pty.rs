@@ -805,6 +805,40 @@ fn a_claude_session_read_in_is_a_niobe_session_from_then_on() {
     assert!(out.contains("1 changed — +3 −1"), "{out}");
 }
 
+/// The CLI's id run twice is one conversation: the second run opens the Niobe
+/// session the first made rather than reading the same history in again.
+#[test]
+fn a_claude_session_read_in_twice_opens_the_niobe_session_the_first_made() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    for _ in 0..2 {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_command(&slave, repo.path())
+            .env("CLAUDE_CONFIG_DIR", claude.path())
+            .args(["--resume", TRANSCRIPT_SESSION])
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows("Done: the catalog response carries an etag.");
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        drop(slave);
+        assert!(status.success(), "ended with {status}");
+    }
+
+    let listed = niobe(repo.path(), &["sessions"]);
+    let out = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
+    let niobe_sessions: Vec<&str> = out
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty() && !line.contains("claude sessions"))
+        .collect();
+    assert_eq!(
+        niobe_sessions.len(),
+        1,
+        "the same conversation was recorded twice:\n{out}"
+    );
+}
+
 /// A session read in from the CLI's transcript is stored at the times the
 /// CLI recorded, so that resuming it shows when it happened rather than when
 /// it was read in.

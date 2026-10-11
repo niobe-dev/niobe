@@ -254,6 +254,22 @@ fn budget_fits(asked: &Asked, selected: Option<&niobe_config::Selected<'_>>) -> 
     }
 }
 
+/// The first Niobe session in this repository's store that carries the
+/// conversation the `claude` CLI calls `conversation`, where there is one.
+///
+/// A store that cannot be read says nothing here: the conversation is read in
+/// as a new session, and the store reports itself when that session records.
+fn carried_conversation(root: &Path, conversation: &str) -> Option<SessionId> {
+    let store = repo::read_existing_store(root).ok().flatten()?;
+    store
+        .conversations()
+        .ok()?
+        .into_iter()
+        .filter(|(_, id)| id == conversation)
+        .map(|(session, _)| session)
+        .min()
+}
+
 /// Opens the shell on a new session, recorded into this repository's store.
 ///
 /// Without a terminal there is nothing to draw into and raw mode would fail, so
@@ -637,6 +653,12 @@ fn stored_at(events: &[(Event, Option<SystemTime>)], now: SystemTime) -> Vec<Sys
 /// continues it and every total on screen is a fold over the same events.
 fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String> {
     let root = repo::root(&cwd()?);
+    // A conversation some Niobe session already carries is continued there:
+    // reading it in again would list one conversation twice, with only one of
+    // the two being added to.
+    if let Some(carried) = carried_conversation(&root, session) {
+        return resume(carried, profile, asked);
+    }
     let Some(loaded) = consented(&root, asked)? else {
         return Ok(None);
     };
