@@ -32,6 +32,9 @@ pub struct Loaded {
     /// once it has been trusted and has not been trusted. What it set is not
     /// in `config`.
     pub untrusted: Option<Untrusted>,
+    /// Whether no config file exists anywhere it was looked for, so that
+    /// `config` is [`Config::implied`] and not something written.
+    pub implied: bool,
 }
 
 /// A repository's config that sets what only a trusted file may, as it was
@@ -197,10 +200,15 @@ fn load_with(
     let repo = repo::config_path(root);
     let searched: Vec<PathBuf> = user.iter().cloned().chain([repo.clone()]).collect();
 
+    let user_present = user
+        .as_deref()
+        .is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
     let mut config = user_config(user.as_deref())?;
     let mut untrusted = None;
+    let mut repo_present = false;
     repo::inside(root, &repo)?;
     if let Some(layer) = repository(&repo, root, &config, record.as_deref(), home.as_deref())? {
+        repo_present = true;
         // A file that defines a profile the user's does is worth trusting
         // even where it sets nothing else: until it is trusted, its profile of
         // that name is not the one in force.
@@ -216,10 +224,18 @@ fn load_with(
         config = config.overlay(layer.config);
     }
 
+    // The implied profile stands in for a file and is never laid under one:
+    // any file at all, even an empty one, is what the operator wrote.
+    let implied = !user_present && !repo_present;
+    if implied {
+        config = Config::implied();
+    }
+
     Ok(Loaded {
         config,
         searched,
         untrusted,
+        implied,
     })
 }
 
@@ -775,6 +791,62 @@ mod tests {
             })
             .expect("the record is written");
         }
+    }
+
+    #[test]
+    fn with_no_config_file_anywhere_the_session_runs_on_the_implied_claude_profile() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let user = dir.path().join("user").join("config.toml");
+
+        let loaded =
+            load_with(Some(user), dir.path(), None, os("/home/me")).expect("no file is no error");
+
+        assert!(loaded.implied);
+        let selected = loaded
+            .selected(None)
+            .expect("the implied default is defined")
+            .expect("a profile is selected");
+        assert_eq!(selected.name, "claude");
+    }
+
+    #[test]
+    fn a_repository_file_that_defines_no_profile_leaves_the_session_with_none() {
+        let repo = Cloned::new("# nothing here\n");
+
+        let loaded = repo.load();
+
+        assert!(!loaded.implied);
+        assert!(loaded.config.profiles().is_empty());
+        assert!(
+            loaded
+                .selected(None)
+                .expect("no default is named")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_users_file_that_names_another_default_is_not_given_an_implied_profile_beside_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let user = dir.path().join("config.toml");
+        std::fs::write(
+            &user,
+            "default_profile = \"work\"\n[profiles.work]\nbackend = \"claude\"\n",
+        )
+        .expect("the temporary directory is writable");
+
+        let loaded =
+            load_with(Some(user), dir.path(), None, os("/home/me")).expect("the config loads");
+
+        assert!(!loaded.implied);
+        assert_eq!(
+            loaded.config.profiles().keys().collect::<Vec<_>>(),
+            ["work"]
+        );
+        assert_eq!(
+            loaded.selected(None).expect("valid").map(|s| s.name),
+            Some("work".to_owned())
+        );
     }
 
     /// The operator adds a profile of their own under a name a trusted file

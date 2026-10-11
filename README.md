@@ -31,7 +31,13 @@ You need the `claude` CLI installed and signed in.
 
 ## Use
 
-Write a profile in `~/.config/niobe/config.toml`:
+Run `niobe` in a repository. With no config file it runs the `claude` on your `PATH` with that
+CLI's own settings, under a profile it calls `claude`. `niobe --help` lists the commands, the
+config keys and the keys the shell answers to; `niobe sessions` lists the sessions you can carry
+on with `niobe --resume <id>`.
+
+To choose how a backend is run, write a profile in `~/.config/niobe/config.toml`. A config file
+replaces the implied profile, so name the one you want as the default:
 
 ```toml
 default_profile = "personal"
@@ -40,9 +46,8 @@ default_profile = "personal"
 backend = "claude"
 ```
 
-Then run `niobe` in a repository. `niobe --help` lists the commands, the config keys and the
-keys the shell answers to; `niobe sessions` lists the sessions you can carry on with
-`niobe --resume <id>`.
+`niobe profiles` lists the profiles in force and, where none is written, the three lines that
+make the implied one explicit.
 
 A repository can commit its own `.niobe/config.toml`. What it may put in front of a backend —
 an environment, arguments, a settings file, a login command, permission rules — stays out of

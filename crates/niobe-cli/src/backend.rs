@@ -466,7 +466,9 @@ fn carried_on(mut next: Options, transcripts: Option<&Path>) -> Options {
     next
 }
 
-fn detached() -> Attachment {
+/// A backend that is not there: what a session under no profile, or under
+/// one whose backend could not be started, is attached to.
+pub fn detached() -> Attachment {
     Attachment {
         bridge: Box::new(Detached),
         attached: false,
@@ -479,8 +481,11 @@ fn detached() -> Attachment {
 /// The error already says what to do; this only names the profile, because the
 /// operator picked a profile and not a binary.
 fn describe(error: SpawnError) -> String {
-    format!("cannot start this profile's backend: {error}")
+    format!("{CANNOT_START}{error}")
 }
+
+/// How [`describe`] opens, for a caller that says it in its own words.
+pub const CANNOT_START: &str = "cannot start this profile's backend: ";
 
 /// The `claude` bridge behind the trait the shell asked for.
 #[derive(Debug)]

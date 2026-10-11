@@ -303,7 +303,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
     // Spawned after the terminal check and before the shell takes the screen:
     // a piped run starts no subprocess, and a backend that will not start says
     // why on a screen that is still the operator's.
-    let mut backend = backend::attach(
+    let attempt = backend::attach(
         &root,
         selected.as_ref(),
         &backend::Attach {
@@ -313,7 +313,8 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
-    )?;
+    );
+    let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -523,7 +524,7 @@ fn resume(
     // stopped, and the backend is started that way: a session that came back
     // asking about everything it had been told to stop asking about would have
     // lost a decision the operator made.
-    let mut backend = backend::attach(
+    let attempt = backend::attach(
         &root,
         selected.as_ref(),
         &backend::Attach {
@@ -534,7 +535,8 @@ fn resume(
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
-    )?;
+    );
+    let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -686,7 +688,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     }
     keys_can_be_read()?;
 
-    let mut backend = backend::attach(
+    let attempt = backend::attach(
         &root,
         selected.as_ref(),
         &backend::Attach {
@@ -699,7 +701,8 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
-    )?;
+    );
+    let (mut backend, mut app) = attached_or_noticed(&loaded, attempt, app)?;
 
     // Recorded only once there is a terminal to continue it on and a backend
     // started to continue it with: a piped run is a look at the transcript,
@@ -831,6 +834,35 @@ fn list_sessions() -> Result<(), String> {
 const UNTRUSTED: &str = "\
 Opened without what it sets that needs your trust. The next session asks \
 again, and `niobe trust` shows what it sets, values included, and asks too.";
+
+/// The backend `attempt` opened, or, where the profile is the implied one and
+/// the backend would not start, no backend and a line in the shell saying why.
+///
+/// An operator who wrote a profile asked for its backend, so a backend that
+/// will not start is a failure they are told of before the shell opens. One
+/// who wrote nothing asked for nothing: opening on what is missing, and how
+/// to get it, is what a first run is owed instead of an error about a file.
+fn attached_or_noticed(
+    loaded: &config::Loaded,
+    attempt: Result<backend::Attachment, String>,
+    app: App,
+) -> Result<(backend::Attachment, App), String> {
+    match attempt {
+        Ok(attachment) => Ok((attachment, app)),
+        Err(said) if loaded.implied => {
+            let cause = said.strip_prefix(backend::CANNOT_START).unwrap_or(&said);
+            let body = format!(
+                "With no config file niobe runs the `claude` CLI found on PATH, and it \
+                 would not start: {cause}"
+            );
+            Ok((
+                backend::detached(),
+                app.with_notice("no backend to run", "", &body),
+            ))
+        }
+        Err(said) => Err(said),
+    }
+}
 
 /// The shell with a price sheet, so that a turn the backend has not priced yet
 /// shows what it is costing rather than nothing.
@@ -1066,6 +1098,11 @@ fn list_profiles(profile: Option<&str>) -> Result<(), String> {
         bedrock.as_deref(),
     ) {
         say!("{line}");
+    }
+    if loaded.implied {
+        for line in profiles::implied_note(&loaded.searched) {
+            say!("{line}");
+        }
     }
     Ok(())
 }
@@ -1653,6 +1690,7 @@ mod tests {
                 replaces: Vec::new(),
                 attached: Vec::new(),
             }),
+            implied: false,
         };
 
         let app = say_untrusted(App::new(niobe_tui::app::Repo::default()), &loaded);
@@ -1680,6 +1718,7 @@ mod tests {
             config: niobe_config::Config::default(),
             searched: Vec::new(),
             untrusted: None,
+            implied: false,
         };
 
         let app = say_untrusted(App::new(niobe_tui::app::Repo::default()), &loaded);

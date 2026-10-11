@@ -109,6 +109,15 @@ pub use write::{Remembered, remember};
 /// repository's `.niobe` directory alike.
 pub const FILE_NAME: &str = "config.toml";
 
+/// The name of the profile a session runs under where no config file exists
+/// anywhere: see [`Config::implied`].
+pub const IMPLIED_PROFILE: &str = "claude";
+
+/// The file that says what [`Config::implied`] is, in the words a config is
+/// written in, so that making it explicit is a copy.
+pub const IMPLIED_FILE: &str =
+    "default_profile = \"claude\"\n[profiles.claude]\nbackend = \"claude\"\n";
+
 /// What a profile lost because the file it came from has not been trusted
 /// (see [`trust`]).
 ///
@@ -417,6 +426,22 @@ impl Config {
         Ok(config)
     }
 
+    /// The config a session runs on where no config file exists: one profile,
+    /// [`IMPLIED_PROFILE`], that runs the `claude` CLI found on `PATH` with
+    /// its own settings untouched, and is the default.
+    ///
+    /// It is a stand-in for a file and never an addition to one. A caller
+    /// uses it only where there is no file to read, so a file that exists
+    /// replaces it whole and nothing changes under an operator who has one.
+    pub fn implied() -> Self {
+        let source = Path::new("(implied: no config file)");
+        let mut config = Self::default();
+        if let Ok(parsed) = Self::parse(IMPLIED_FILE, source) {
+            config = parsed;
+        }
+        config
+    }
+
     /// Reads and parses the config file at `path`. A file that does not exist
     /// is no config at all, which is not an error: most repositories have none.
     pub fn read(path: &Path) -> Result<Option<Self>, ConfigError> {
@@ -670,6 +695,37 @@ auth_refresh = "aws sso login --profile corp-sso"
 backend = "codex"
 args = ["--model", "gpt-4"]
 "#;
+
+    #[test]
+    fn the_implied_config_selects_a_claude_profile_with_nothing_set() {
+        let config = Config::implied();
+
+        let selected = config
+            .select(None)
+            .expect("the implied default names a profile it defines")
+            .expect("the implied config selects one");
+        assert_eq!(selected.name, IMPLIED_PROFILE);
+        assert_eq!(selected.profile.backend(), Backend::Claude);
+        assert!(selected.profile.env().is_empty());
+        assert!(selected.profile.args().is_empty());
+        assert!(selected.profile.settings().is_none());
+        assert!(selected.profile.auth_refresh().is_none());
+        assert!(config.allowed().is_empty());
+    }
+
+    #[test]
+    fn the_file_that_makes_the_implied_profile_explicit_parses_to_the_same_profile() {
+        let written = parsed(IMPLIED_FILE);
+
+        assert_eq!(
+            written.select(None).expect("valid").map(|s| s.name),
+            Some(IMPLIED_PROFILE)
+        );
+        assert_eq!(
+            written.profiles().keys().collect::<Vec<_>>(),
+            Config::implied().profiles().keys().collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn a_profile_is_a_backend_plus_an_environment_arguments_and_a_refresh_command() {

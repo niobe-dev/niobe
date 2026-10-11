@@ -201,6 +201,31 @@ fn listed(withheld: &Withheld) -> String {
     parts.join(", ")
 }
 
+/// What `niobe profiles` adds under the table where the profile in it is the
+/// implied one: that no file was found, and the file that would make it
+/// explicit, to be written at `searched`'s first path, the user's.
+pub fn implied_note(searched: &[PathBuf]) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    lines.push(format!(
+        "`{}` is implied: no config file was found, so niobe runs the `claude` on PATH \
+         with its own settings. Writing a config file replaces it.",
+        niobe_config::IMPLIED_PROFILE
+    ));
+    if let Some(path) = searched.first() {
+        lines.push(format!(
+            "To make it explicit, put this in {}:",
+            path.display()
+        ));
+        lines.push(String::new());
+    }
+    lines.extend(
+        niobe_config::IMPLIED_FILE
+            .lines()
+            .map(|line| format!("  {line}")),
+    );
+    lines
+}
+
 /// What `niobe profiles` prints when no config defines a profile.
 pub fn none_defined(searched: &[PathBuf]) -> String {
     let files: Vec<String> = searched
@@ -361,6 +386,17 @@ auth_refresh = "aws sso login"
         assert!(!listing.contains("do-not-print"), "{listing}");
         assert!(!listing.contains("example-sso"), "{listing}");
         assert!(!listing.contains('*'), "{listing}");
+    }
+
+    #[test]
+    fn the_implied_profile_is_said_to_be_implied_with_the_file_that_makes_it_explicit() {
+        let said = implied_note(&[PathBuf::from("/u/config.toml")]).join("\n");
+
+        assert!(said.contains("`claude` is implied"), "{said}");
+        assert!(said.contains("put this in /u/config.toml"), "{said}");
+        assert!(said.contains("  default_profile = \"claude\""), "{said}");
+        assert!(said.contains("  [profiles.claude]"), "{said}");
+        assert!(said.contains("  backend = \"claude\""), "{said}");
     }
 
     #[test]

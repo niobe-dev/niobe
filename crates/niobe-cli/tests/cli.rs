@@ -1119,8 +1119,33 @@ fn commands_that_run_no_session_do_not_read_the_config() {
 }
 
 #[test]
-fn where_no_config_defines_a_profile_the_list_says_where_it_looked() {
+fn with_no_config_file_the_list_shows_the_implied_profile_and_the_file_that_makes_it_explicit() {
     let setup = Configured::new("", "");
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        out.contains("* claude"),
+        "the implied profile is the one selected: {out}"
+    );
+    assert!(out.contains("`claude` is implied"), "{out}");
+    assert!(
+        out.contains(&format!("put this in {}", setup.user_config().display())),
+        "{out}"
+    );
+    for line in [
+        "default_profile = \"claude\"",
+        "[profiles.claude]",
+        "backend = \"claude\"",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+}
+
+#[test]
+fn where_a_config_file_defines_no_profile_the_list_says_where_it_looked() {
+    let setup = Configured::new("", "# nothing defined here\n");
     let output = setup.run(&["profiles"]);
     let out = stdout(&output);
 

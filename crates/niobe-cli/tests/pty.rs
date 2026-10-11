@@ -469,8 +469,22 @@ fn repo() -> tempfile::TempDir {
     dir
 }
 
-/// The shell, ready to run on `slave` and record into `cwd`, with no user
-/// config and no `COLORTERM`: the operator's own config, and the depth their
+/// A user config directory under `cwd` whose file defines no profile, so that
+/// a shell run under it is attached to nothing.
+///
+/// Not a missing file: with none anywhere a session runs the `claude` it
+/// finds, which these tests are not about.
+fn defines_no_profile(cwd: &Path) -> PathBuf {
+    let home = cwd.join("no-profile-here");
+    let dir = home.join("niobe");
+    std::fs::create_dir_all(&dir).expect("a config directory can be made");
+    std::fs::write(dir.join("config.toml"), "# no profile is defined\n")
+        .expect("the user config is written");
+    home
+}
+
+/// The shell, ready to run on `slave` and record into `cwd`, with a user
+/// config that defines no profile and no `COLORTERM`: the operator's own config, and the depth their
 /// terminal announces, would otherwise change what these tests see.
 ///
 /// Standard error goes to the terminal too, the way it does for an operator:
@@ -483,7 +497,10 @@ fn shell_command(slave: &File, cwd: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_niobe"));
     command
         .current_dir(cwd)
-        .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
+        .env("XDG_CONFIG_HOME", defines_no_profile(cwd))
+        // A test that wants a `claude` puts one first on this, and one that
+        // does not must not start whatever this machine has installed.
+        .env("PATH", "/usr/bin:/bin")
         .env_remove("COLORTERM")
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
@@ -597,7 +614,8 @@ fn shell_reading_from(input: &File, screen: &File, cwd: &Path) -> Child {
     let stderr = screen.try_clone().expect("the slave can be duplicated");
     Command::new(env!("CARGO_BIN_EXE_niobe"))
         .current_dir(cwd)
-        .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
+        .env("XDG_CONFIG_HOME", defines_no_profile(cwd))
+        .env("PATH", "/usr/bin:/bin")
         .env_remove("COLORTERM")
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
@@ -2780,7 +2798,7 @@ fn asked_by_niobe_trust() -> (tempfile::TempDir, Terminal, File, Reaped) {
 /// The record `niobe trust` keeps for the repository in `repo`, under the
 /// user config directory [`shell_command`] names.
 fn trust_record(repo: &Path) -> PathBuf {
-    repo.join("no-user-config-here")
+    repo.join("no-profile-here")
         .join("niobe")
         .join("trusted.list")
 }
@@ -2839,6 +2857,13 @@ fn a_config_rewritten_while_niobe_trust_asks_is_not_trusted_by_the_yes() {
 /// Puts `script` in `cwd` as the `claude` a session runs, and gives back a
 /// user config whose default profile runs it.
 fn stand_in(cwd: &Path, script: &str) -> tempfile::TempDir {
+    put_stand_in(cwd, script);
+    user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n")
+}
+
+/// Puts `script` in `cwd` as the `claude` [`shell_driving_the_stand_in`]
+/// finds first on its `PATH`.
+fn put_stand_in(cwd: &Path, script: &str) {
     let bin = cwd.join("bin");
     std::fs::create_dir(&bin).expect("a directory for the stand-in");
     let claude = bin.join("claude");
@@ -2848,7 +2873,6 @@ fn stand_in(cwd: &Path, script: &str) -> tempfile::TempDir {
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755))
             .expect("the stand-in is made executable");
     }
-    user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n")
 }
 
 /// The shell on `slave`, recording into `cwd` under the config in `home`,
@@ -2860,6 +2884,61 @@ fn shell_driving_the_stand_in(slave: &File, cwd: &Path, home: &Path) -> Command 
         format!("{}:/bin:/usr/bin", cwd.join("bin").display()),
     );
     command
+}
+
+/// With no config file anywhere, the shell runs the `claude` on `PATH` under
+/// the implied profile: a prompt is answered and the session is recorded
+/// under it.
+#[test]
+fn a_shell_with_no_config_runs_the_claude_on_path_under_the_implied_profile() {
+    let repo = repo();
+    put_stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let none = repo.path().join("no-user-config-here");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), &none)
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"go\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+
+    assert!(status.success(), "ended with {status}: {drawn}");
+    let store = rusqlite::Connection::open(repo.path().join(".niobe").join("sessions.db"))
+        .expect("the session was recorded in the repository's store");
+    let profile: String = store
+        .query_row(
+            "SELECT json_extract(event, '$.profile') FROM events \
+             WHERE json_extract(event, '$.profile') IS NOT NULL LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the session recorded the profile it ran under");
+    assert_eq!(profile, "claude");
+}
+
+/// With no config and no `claude`, the shell still opens, on a line that says
+/// what is missing and how to get it, and not on an error about a file.
+#[test]
+fn a_shell_with_no_config_and_no_claude_opens_on_what_is_missing() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("XDG_CONFIG_HOME", repo.path().join("no-user-config-here"))
+        .env("PATH", repo.path().join("nothing-here"))
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("is not on PATH");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+
+    assert!(status.success(), "ended with {status}: {drawn}");
+    assert!(!drawn.contains("config.toml"), "{drawn}");
 }
 
 /// A `claude` that starts something of its own on its standard output and
