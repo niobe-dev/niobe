@@ -2228,6 +2228,7 @@ fn offered() -> Event {
                     name: Some((*name).to_owned()),
                     description: Some((*description).to_owned()),
                     resolves_to: Some((*resolves_to).to_owned()),
+                    auto_mode: None,
                 },
             )
             .collect(),
@@ -2287,6 +2288,7 @@ fn a_model_list_taller_than_the_screen_keeps_the_cursor_and_the_keys_in_view() {
                 name: Some(format!("Model {n:02}")),
                 description: Some("A model".to_owned()),
                 resolves_to: None,
+                auto_mode: None,
             })
             .collect(),
     });

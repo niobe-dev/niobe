@@ -229,8 +229,8 @@ pub(crate) struct Command {
 
 /// One model the answer to `initialize` lists.
 ///
-/// Each also says which effort levels and modes it supports; nothing here
-/// offers those per model, so they are not read.
+/// Each also says which effort levels and modes it supports; only whether it
+/// runs `auto` is read, which is what a mode change is refused on.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Model {
     /// What the CLI takes it by, on `--model` and `set_model` alike.
@@ -242,6 +242,9 @@ pub(crate) struct Model {
     /// The exact model the value runs on today.
     #[serde(rename = "resolvedModel")]
     pub(crate) resolved_model: Option<String>,
+    /// Whether the model can run in `auto` mode, where the CLI says.
+    #[serde(rename = "supportsAutoMode")]
+    pub(crate) supports_auto_mode: Option<bool>,
 }
 
 /// What a background task has used, as the CLI counts it for the task alone.

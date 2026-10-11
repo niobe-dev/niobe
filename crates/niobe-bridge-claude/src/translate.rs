@@ -3557,6 +3557,7 @@ fn offered_models(models: Vec<wire::Model>) -> Event {
                 name: given(model.display_name),
                 description: given(model.description),
                 resolves_to: given(model.resolved_model),
+                auto_mode: model.supports_auto_mode,
             })
             .collect(),
     }
@@ -3638,6 +3639,29 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn whether_a_model_runs_auto_is_what_the_cli_said_and_unknown_where_it_did_not() {
+        let model = |value: &str, supports: Option<bool>| wire::Model {
+            value: value.to_owned(),
+            display_name: None,
+            description: None,
+            resolved_model: None,
+            supports_auto_mode: supports,
+        };
+
+        let offered = offered_models(vec![
+            model("opus", Some(true)),
+            model("haiku", Some(false)),
+            model("sonnet", None),
+        ]);
+
+        let Event::Models { models } = offered else {
+            panic!("models were offered");
+        };
+        let said: Vec<Option<bool>> = models.iter().map(|model| model.auto_mode).collect();
+        assert_eq!(said, [Some(true), Some(false), None]);
+    }
+
     /// A name, a description or a model the CLI wrote empty or blank is one
     /// it did not give, and a model with no value to ask for it by is none.
     #[test]
@@ -3647,6 +3671,7 @@ mod tests {
             display_name: Some(words.to_owned()),
             description: Some(words.to_owned()),
             resolved_model: Some(words.to_owned()),
+            supports_auto_mode: None,
         };
         let offered = offered_models(vec![
             model(" ", "Opus"),
@@ -3662,6 +3687,7 @@ mod tests {
                         name: None,
                         description: None,
                         resolves_to: None,
+                        auto_mode: None,
                     })
                     .to_vec()
             }

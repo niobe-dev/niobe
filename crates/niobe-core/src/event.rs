@@ -404,6 +404,10 @@ pub struct ModelOption {
     /// itself running once it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolves_to: Option<String>,
+    /// Whether the model can run in `auto` mode, where the backend said. A
+    /// backend that does not say leaves it unknown, which is not a refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_mode: Option<bool>,
 }
 
 /// A Model Context Protocol server the backend has configured for the

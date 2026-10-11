@@ -4470,10 +4470,37 @@ impl App {
         }
         let before = self.session.mode();
         let mode = before.unwrap_or(Mode::Ask).next();
+        if mode == Mode::Auto && self.model_cannot_run_auto() {
+            self.hint = Some(
+                "Shift+Tab — this model cannot run auto mode; pick another with F8 or stay \
+                 in this mode"
+                    .to_owned(),
+            );
+            return;
+        }
         if self.attached {
             self.modes_before.push_back(before);
         }
         self.produce(Event::ModeSelected { mode });
+    }
+
+    /// Whether the backend said the model this session runs on cannot run
+    /// `auto` mode. Unknown — no model reported, none of the listed ones the
+    /// one running, or a backend that did not say — is not a refusal.
+    fn model_cannot_run_auto(&self) -> bool {
+        let Some(running) = self.session.model() else {
+            return false;
+        };
+        let offered = self.session.models();
+        offered
+            .iter()
+            .find(|offer| offer.id == running)
+            .or_else(|| {
+                offered
+                    .iter()
+                    .find(|offer| offer.resolves_to.as_deref() == Some(running))
+            })
+            .is_some_and(|offer| offer.auto_mode == Some(false))
     }
 
     /// The session's reply still being written, where nothing drawn since it
@@ -7800,7 +7827,7 @@ fn model_choices(
     let described = |model: &niobe_core::event::ModelOption| Choice {
         value: model.id.clone(),
         name: model.name.clone().filter(|name| *name != model.id),
-        note: model.description.clone(),
+        note: noted(model),
     };
     if named.is_empty() {
         return (offered.iter().map(described).collect(), 0);
@@ -7817,6 +7844,20 @@ fn model_choices(
         .filter(|model| !named.contains(&model.id))
         .count();
     (choices, more)
+}
+
+/// What a model's row says beside its name: what it is for, in the backend's
+/// words, and that it cannot run `auto` where the backend said so, so that
+/// the refusal is read before the model is chosen rather than after a mode
+/// change fails.
+fn noted(model: &niobe_core::event::ModelOption) -> Option<String> {
+    let refusal = (model.auto_mode == Some(false)).then_some("cannot run auto mode");
+    match (model.description.as_deref(), refusal) {
+        (Some(words), Some(refusal)) => Some(format!("{words} · {refusal}")),
+        (Some(words), None) => Some(words.to_owned()),
+        (None, Some(refusal)) => Some(refusal.to_owned()),
+        (None, None) => None,
+    }
 }
 
 /// Which of `options` the session runs on `model`: the row whose id it is,
@@ -10672,6 +10713,85 @@ mod tests {
         assert_eq!(app.session().mode(), Some(Mode::Plan));
     }
 
+    /// A model the backend says cannot run `auto`, among others it does not
+    /// say it of.
+    fn without_auto(id: &str) -> Event {
+        let Event::Models { mut models } = offered() else {
+            unreachable!("the helper offers models");
+        };
+        for model in &mut models {
+            if model.id == id {
+                model.auto_mode = Some(false);
+            }
+        }
+        Event::Models { models }
+    }
+
+    #[test]
+    fn a_model_that_cannot_run_auto_says_so_on_its_row_in_the_model_list() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&[]);
+        app.apply(&without_auto("opus"));
+
+        app.on_key(key(KeyCode::F(4)));
+
+        let picker = app.picking().expect("the model list is on screen");
+        let note = |value: &str| {
+            picker
+                .options
+                .iter()
+                .find(|choice| choice.value == value)
+                .and_then(|choice| choice.note.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            note("opus").contains("cannot run auto mode"),
+            "{}",
+            note("opus")
+        );
+        assert!(
+            note("opus").contains("For complex work"),
+            "{}",
+            note("opus")
+        );
+        assert!(!note("fable").contains("auto"), "{}", note("fable"));
+    }
+
+    #[test]
+    fn shift_tab_refuses_auto_on_a_model_that_cannot_run_it_and_changes_nothing() {
+        let mut app = app().attached();
+        app.apply(&without_auto("opus"));
+        app.apply(&Event::ModelSelected {
+            model: "opus".to_owned(),
+        });
+        app.apply(&Event::ModeSelected { mode: Mode::Ask });
+
+        app.on_key(back_tab());
+
+        assert_eq!(app.session().mode(), Some(Mode::Ask));
+        assert_eq!(app.take_produced(), []);
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("cannot run auto mode")),
+            "{:?}",
+            app.hint()
+        );
+    }
+
+    #[test]
+    fn a_model_the_backend_said_nothing_of_is_not_refused_auto() {
+        let mut app = app().attached();
+        app.apply(&offered());
+        app.apply(&Event::ModelSelected {
+            model: "opus".to_owned(),
+        });
+        app.apply(&Event::ModeSelected { mode: Mode::Ask });
+
+        app.on_key(back_tab());
+
+        assert_eq!(app.session().mode(), Some(Mode::Auto));
+    }
+
     #[test]
     fn a_session_no_backend_has_reported_a_mode_for_cycles_from_asking() {
         let mut app = app().attached();
@@ -10746,6 +10866,7 @@ mod tests {
                 name: Some(name.to_owned()),
                 description: Some(description.to_owned()),
                 resolves_to: Some(resolves_to.to_owned()),
+                auto_mode: None,
             }
         };
         Event::Models {

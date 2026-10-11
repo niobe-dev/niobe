@@ -3363,6 +3363,7 @@ mod tests {
             name: None,
             description: None,
             resolves_to: None,
+            auto_mode: None,
         };
         let command = SlashCommand {
             name: "review".to_owned(),

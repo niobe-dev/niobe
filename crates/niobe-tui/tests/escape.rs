@@ -483,6 +483,7 @@ fn model_picker(p: &str) -> App {
             name: Some(format!("name {p}")),
             description: Some(format!("desc {p}")),
             resolves_to: Some(format!("exact{p}")),
+            auto_mode: None,
         }],
     });
     app.on_key(key(KeyCode::F(4)));
