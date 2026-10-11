@@ -590,4 +590,35 @@ mod tests {
         let (lines, _) = detail(Some(&many), usize::MAX, (40, 5), &Theme::default());
         assert_eq!(lines.len(), 6, "the blank line and a screenful");
     }
+
+    fn listed(servers: &[McpServer], at: usize, rows: usize) -> Vec<String> {
+        let app = App::new(crate::app::Repo::default());
+        said(&listing(&app, servers, at, (60, rows), &Theme::default()))
+    }
+
+    #[test]
+    fn a_server_with_no_scope_or_source_says_so_with_a_dash() {
+        let mut bare = server("notes", McpStatus::Connected);
+        bare.source = None;
+
+        let rows = listed(&[bare], 0, 12);
+
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("notes") && row.contains('—')),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_list_scrolls_to_keep_the_cursor_in_sight() {
+        let servers: Vec<McpServer> = (0..30)
+            .map(|i| server(&format!("srv{i:02}"), McpStatus::Connected))
+            .collect();
+
+        let rows = listed(&servers, 25, 12);
+
+        assert!(rows.iter().any(|row| row.contains("srv25")), "{rows:?}");
+        assert!(!rows.iter().any(|row| row.contains("srv00")), "{rows:?}");
+    }
 }

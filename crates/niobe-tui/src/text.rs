@@ -903,4 +903,12 @@ mod tests {
         assert_eq!(truncate_start("ui.rs", 1), "…");
         assert_eq!(truncate_start("ui.rs", 0), "");
     }
+
+    #[test]
+    fn a_control_among_wide_characters_takes_no_cell() {
+        // Not ASCII, so the width is read a grapheme at a time; the C1
+        // control in it is dropped by the terminal and takes none.
+        assert_eq!(width("é\u{9b}x"), 2);
+        assert_eq!(width("日\u{85}本"), 4);
+    }
 }

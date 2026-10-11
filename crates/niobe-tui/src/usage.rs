@@ -392,4 +392,17 @@ mod tests {
         assert_eq!(output_only.output, 500);
         assert_eq!(cache_hit_rate(&output_only), None);
     }
+
+    #[test]
+    fn a_leftover_percent_between_equal_remainders_goes_to_the_larger_count() {
+        // 100·1 and 100·3 both leave 4 over 8, and one percent is unassigned.
+        assert_eq!(shares(&[1, 3, 4]), [12, 38, 50]);
+    }
+
+    #[test]
+    fn only_an_eight_digit_tail_is_a_release_date() {
+        assert_eq!(labels(["claude-opus-5-20250929"]), ["opus-5"]);
+        assert_eq!(labels(["claude-opus-5-123456"]), ["opus-5-123456"]);
+        assert_eq!(labels(["claude-opus-5-1234567"]), ["opus-5-1234567"]);
+    }
 }

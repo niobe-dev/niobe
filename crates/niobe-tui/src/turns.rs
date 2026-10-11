@@ -564,4 +564,21 @@ mod tests {
         let said = compaction(&row, 20);
         assert!(text::width(&said) <= 20, "{said}");
     }
+
+    /// A figure stays only while the rule keeps two columns after it, a space
+    /// and a run of rule: one column left over is not enough, so the first
+    /// figure to give way goes.
+    #[test]
+    fn a_figure_goes_when_one_column_is_left_after_the_rest_and_stays_with_two() {
+        let busy = TurnRule {
+            agents: 9,
+            calls: 83,
+            ..rule()
+        };
+        let full = "── turn 46 14:05 · 9 sub-agents · 83 tool calls · 6400 tok · 1% of 5h · 38s";
+        let width = text::width(full);
+
+        assert!(drawn(&busy, width + 2).contains("14:05"));
+        assert!(!drawn(&busy, width + 1).contains("14:05"));
+    }
 }

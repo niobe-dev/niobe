@@ -1231,6 +1231,20 @@ mod tests {
     }
 
     #[test]
+    fn a_written_answer_wraps_inside_the_room_left_after_its_branch() {
+        let said = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+        let room = 24;
+
+        let lines = answer_lines(said, room, &Theme::default());
+
+        assert!(lines.len() > 1, "the answer did not wrap");
+        for line in &lines {
+            let row: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text::width(&row) <= room, "{row:?} is wider than {room}");
+        }
+    }
+
+    #[test]
     fn a_refusal_with_no_written_answer_shows_the_backends_reason() {
         let mut app = app();
         app.apply(&start("t1", "Bash"));

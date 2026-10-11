@@ -490,4 +490,24 @@ mod tests {
         assert_eq!(colours(&rows[0]), [Some(CYBER.dim), Some(CYBER.fg)]);
         assert_eq!(colours(&rows[1]), [Some(CYBER.dim), Some(CYBER.dim)]);
     }
+
+    /// One row more than the cut would leave is drawn, not summarised as one
+    /// more line: a marker row would take the room that line needed.
+    #[test]
+    fn a_row_over_the_cut_is_drawn_and_two_over_are_counted() {
+        let object = |keys: usize| {
+            let fields: Vec<String> = (0..keys).map(|i| format!("\"k{i:02}\":\"v\"")).collect();
+            format!("{{{}}}", fields.join(","))
+        };
+
+        let one_over = drawn(&object(ROWS + 1), 60);
+        assert_eq!(one_over.len(), ROWS + 1, "{one_over:?}");
+        assert!(
+            !one_over.iter().any(|row| row.contains("more")),
+            "{one_over:?}"
+        );
+
+        let two_over = drawn(&object(ROWS + 2), 60);
+        assert!(two_over[ROWS].contains("… 2 more lines"), "{two_over:?}");
+    }
 }

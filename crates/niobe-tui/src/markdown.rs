@@ -1054,4 +1054,32 @@ mod tests {
             ["• ☑ done", "• ☐ not yet"]
         );
     }
+
+    #[test]
+    fn a_soft_break_is_a_space_between_the_words_it_joins() {
+        assert_eq!(drawn("foo\nbar", 40), ["foo bar"]);
+    }
+
+    #[test]
+    fn a_rule_is_as_wide_as_the_room_inside_a_list_and_a_quote() {
+        let in_list = drawn("- one\n\n  ---\n\n  two", 20);
+        let rule = in_list
+            .iter()
+            .find(|row| row.contains('─'))
+            .expect("the rule is drawn");
+        assert!(text::width(rule) <= 20, "{in_list:?}");
+        let quoted = drawn("> ---", 20);
+        assert!(
+            quoted.iter().all(|row| text::width(row) <= 20),
+            "{quoted:?}"
+        );
+        let bare = drawn("---", 20);
+        assert_eq!(text::width(&bare[0]), 20, "{bare:?}");
+    }
+
+    #[test]
+    fn a_centred_column_puts_the_odd_cell_of_padding_on_the_right() {
+        let table = "| mids | z |\n|:----:|---|\n| b | y |";
+        assert_eq!(drawn(table, 40), ["mids │ z", "─────┼──", " b   │ y"],);
+    }
 }

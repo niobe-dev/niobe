@@ -327,4 +327,36 @@ mod tests {
         let proposed = Proposed::new(replace(&before, &after, false));
         assert!(proposed.lines("{}", 80, false, &CLASSIC).is_none());
     }
+
+    #[test]
+    fn an_empty_write_says_so_for_each_state_the_file_was_in_and_draws_no_lines() {
+        let write = |existed| {
+            Proposal::new(
+                Action::Write {
+                    path: "a.txt".to_owned(),
+                    content: String::new(),
+                    existed,
+                },
+                ["file_path", "content"],
+            )
+        };
+        assert_eq!(
+            drawn(write(Some(false)), "{}", 80, false),
+            ["a.txt", "a new, empty file"]
+        );
+        assert_eq!(
+            drawn(write(Some(true)), "{}", 80, false),
+            [
+                "a.txt",
+                "empties the file · what it held is not in the call"
+            ]
+        );
+        assert_eq!(
+            drawn(write(None), "{}", 80, false),
+            [
+                "a.txt",
+                "writes an empty file · what it held, if it was there, is not in the call"
+            ]
+        );
+    }
 }
