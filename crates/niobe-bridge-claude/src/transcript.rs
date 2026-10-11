@@ -942,6 +942,11 @@ struct Fold {
     /// summary written after it has not, so that the summary does not report
     /// the same compaction again.
     compacted: bool,
+    /// A command line the CLI recorded the operator typing, not yet known to
+    /// be a prompt: a local command makes no request, and what it printed
+    /// follows it, so it is the CLI's note between turns and no turn of its
+    /// own. Anything else that follows makes it the prompt it was.
+    command: Option<String>,
 }
 
 impl Fold {
@@ -967,6 +972,7 @@ impl Fold {
             title: None,
             answered: false,
             compacted: false,
+            command: None,
         }
     }
 
@@ -979,6 +985,7 @@ impl Fold {
 
     /// Every event folded, each with the time of the record it came from.
     fn timed(mut self) -> Vec<Timed> {
+        self.flush_command();
         self.times.resize(self.out.len(), None);
         self.out
             .into_iter()
@@ -1044,6 +1051,8 @@ impl Fold {
         } = record;
         let parent = agent.map(str::to_owned);
         if agent.is_none() {
+            // A command the model went on to answer was a prompt.
+            self.flush_command();
             self.answered = true;
         }
 
@@ -1184,12 +1193,8 @@ impl Fold {
             // wrote as a user turn and which is read the same way here: the
             // CLI's answer to the command, from inside its markup.
             Some("local_command") => {
-                if let Some(printed) = content.and_then(local_output)
-                    && !printed.is_empty()
-                {
-                    self.out.push(Event::Notice {
-                        message: printed.to_owned(),
-                    });
+                if let Some(printed) = content.and_then(local_output) {
+                    self.printed(printed);
                 }
             }
             // A scheduled prompt firing — a `/loop` waking up — which is why
@@ -1263,19 +1268,13 @@ impl Fold {
             // What a local command printed is the CLI's answer to it, not
             // something the operator said.
             if let Some(printed) = local_output(&text) {
-                if !printed.is_empty() {
-                    self.out.push(Event::Notice {
-                        message: printed.to_owned(),
-                    });
-                }
+                self.printed(printed);
+            } else if let Some(command) = typed_command(&text) {
+                self.flush_command();
+                self.command = Some(command);
             } else {
-                // A transcript has no `result` to end a turn with, so a turn
-                // ends where the operator speaks again after an answer.
-                if std::mem::take(&mut self.answered) {
-                    self.out.push(Event::TurnEnded);
-                }
-                let text = typed_command(&text).unwrap_or(text);
-                self.out.push(Event::UserMessage { text });
+                self.flush_command();
+                self.said(text);
             }
         }
         // The same record carries the results of the calls the turn before it
@@ -1399,6 +1398,38 @@ impl Fold {
 
     fn fold(&mut self, message: wire::Message) {
         self.out.append(&mut self.translator.message(message));
+    }
+
+    /// The operator speaking: a transcript has no `result` to end a turn
+    /// with, so a turn ends where the operator speaks again after an answer.
+    fn said(&mut self, text: String) {
+        if std::mem::take(&mut self.answered) {
+            self.out.push(Event::TurnEnded);
+        }
+        self.out.push(Event::UserMessage { text });
+    }
+
+    /// The command line held back, as the prompt it turned out to be.
+    fn flush_command(&mut self) {
+        if let Some(command) = self.command.take() {
+            self.said(command);
+        }
+    }
+
+    /// What a local command printed, which is the CLI's note and no turn of
+    /// the operator's: the command line held back for it is dropped, since a
+    /// command that made no request is not a prompt.
+    ///
+    /// A command that printed nothing keeps its line, as a live session shows
+    /// `/clear` typed: there is no note to be the whole of it.
+    fn printed(&mut self, printed: &str) {
+        match (self.command.take(), printed.is_empty()) {
+            (Some(command), true) => self.said(command),
+            (_, true) => {}
+            (_, false) => self.out.push(Event::Notice {
+                message: printed.to_owned(),
+            }),
+        }
     }
 }
 
@@ -1862,7 +1893,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(said, ["/model opus", "first real prompt", "second prompt"]);
+        // A local command makes no request, so what it printed is a note
+        // between turns and the line that asked for it is not something the
+        // operator said.
+        assert_eq!(said, ["first real prompt", "second prompt"]);
         assert!(
             events.iter().any(
                 |event| matches!(event, Event::Notice { message } if message == "Set model to Opus 5.5")
@@ -1874,6 +1908,72 @@ mod tests {
         assert!(
             state.turn_running(),
             "the second is the one the record stops in"
+        );
+    }
+
+    /// A session left with `/exit` ends on a command the CLI answered itself.
+    const LEFT_WITH_EXIT: &str = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"a real prompt"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"an answer"}]}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<command-name>/exit</command-name>\n<command-args></command-args>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Catch you later!</local-command-stdout>"}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn a_session_left_with_exit_ends_on_a_note_and_not_on_a_turn_the_operator_took() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        transcript(dir.path(), "left", Duration::from_secs(60), LEFT_WITH_EXIT);
+
+        let events = events(&dir.path().join("left.jsonl"), "max", Path::new("/repo"))
+            .expect("the transcript folds");
+
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["a real prompt"], "/exit is not a prompt");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Notice { message } if message == "Catch you later!"
+            )),
+            "{events:?}"
+        );
+        let state = niobe_core::SessionState::replay(&events);
+        assert_eq!(
+            state.turns().len() + usize::from(state.turn_running()),
+            1,
+            "the command opened no turn of its own"
+        );
+    }
+
+    #[test]
+    fn a_command_the_model_goes_on_to_answer_is_still_a_prompt() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let expanded = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/review</command-name>\n<command-args>the diff</command-args>"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"reviewed"}]}}"#,
+            "\n",
+        );
+        transcript(dir.path(), "skill", Duration::from_secs(60), expanded);
+
+        let events = events(&dir.path().join("skill.jsonl"), "max", Path::new("/repo"))
+            .expect("the transcript folds");
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::UserMessage { text } if text == "/review the diff"
+            )),
+            "{events:?}"
         );
     }
 
