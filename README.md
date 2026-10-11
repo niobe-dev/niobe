@@ -46,6 +46,8 @@ default_profile = "personal"
 backend = "claude"
 ```
 
+`niobe doctor` checks that the `claude` CLI is installed and signed in, the config and the
+terminal, and says how to fix what is not; `niobe doctor --json` prints the same for an issue.
 `niobe profiles` lists the profiles in force and, where none is written, the three lines that
 make the implied one explicit.
 

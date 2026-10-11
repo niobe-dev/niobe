@@ -466,6 +466,12 @@ fn carried_on(mut next: Options, transcripts: Option<&Path>) -> Options {
     next
 }
 
+/// Whether `version` is a `claude` release the bridge's reading was recorded
+/// from.
+pub fn claude_release_recorded(version: &str) -> bool {
+    niobe_bridge_claude::conformance::recorded(version)
+}
+
 /// A backend that is not there: what a session under no profile, or under
 /// one whose backend could not be started, is attached to.
 pub fn detached() -> Attachment {

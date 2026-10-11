@@ -31,7 +31,7 @@ serde_json.workspace = true
 [target.'cfg(unix)'.dependencies]
 # Stopping a command the operator ran with `!`, and everything it started, as
 # the session ends: its process group is signalled, which std cannot do.
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["process", "termios"] }
 
 [dev-dependencies]
 # The shell's key events are ratatui's; the tests drive the shell with them.

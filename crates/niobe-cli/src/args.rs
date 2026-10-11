@@ -25,6 +25,11 @@ pub enum Command {
     Sessions,
     /// List the profiles the config defines, marking the selected one.
     Profiles,
+    /// Check what a first session needs and say what is missing, with the fix.
+    Doctor {
+        /// `--json` was given: the same report for an issue, as JSON.
+        json: bool,
+    },
     /// Show what this repository's config would put in force, values
     /// included, and record it as one whose profiles may start a backend with
     /// the environment, arguments and refresh command they name once the
@@ -234,6 +239,14 @@ fn command(args: &[&str]) -> Result<Command, String> {
         ["profiles", rest @ ..] => {
             no_more(rest)?;
             Command::Profiles
+        }
+        ["doctor", "--json", rest @ ..] => {
+            no_more(rest)?;
+            Command::Doctor { json: true }
+        }
+        ["doctor", rest @ ..] => {
+            no_more(rest)?;
+            Command::Doctor { json: false }
         }
         ["trust", "--yes", rest @ ..] => {
             no_more(rest)?;
@@ -471,6 +484,18 @@ mod tests {
             Ok(Command::Profiles)
         );
         assert_eq!(profile(&[]), Ok(None));
+    }
+
+    #[test]
+    fn doctor_takes_json_and_nothing_else() {
+        let command = parsed;
+
+        assert_eq!(command(&["doctor"]), Ok(Command::Doctor { json: false }));
+        assert_eq!(
+            command(&["doctor", "--json"]),
+            Ok(Command::Doctor { json: true })
+        );
+        assert!(command(&["doctor", "--yes"]).is_err());
     }
 
     #[test]

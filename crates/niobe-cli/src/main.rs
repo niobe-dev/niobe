@@ -20,6 +20,7 @@ mod commands;
 mod config;
 mod consent;
 mod desktop;
+mod doctor;
 mod history;
 mod images;
 mod journal;
@@ -172,6 +173,7 @@ fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(
         Command::Shell | Command::Resume(_) => Ok(()),
         Command::Sessions => list_sessions(),
         Command::Profiles => list_profiles(profile),
+        Command::Doctor { json } => run_doctor(json),
         Command::Trust { yes } => trust(yes),
         Command::Untrust => untrust(),
         Command::Prices(model) => list_prices(model.as_deref()),
@@ -853,7 +855,7 @@ fn attached_or_noticed(
             let cause = said.strip_prefix(backend::CANNOT_START).unwrap_or(&said);
             let body = format!(
                 "With no config file niobe runs the `claude` CLI found on PATH, and it \
-                 would not start: {cause}"
+                 would not start: {cause} `niobe doctor` checks the rest of the setup."
             );
             Ok((
                 backend::detached(),
@@ -1107,6 +1109,25 @@ fn list_profiles(profile: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Prints what a first session needs and what is missing, as text or as the
+/// JSON an issue carries, and fails where a session could not run.
+fn run_doctor(json: bool) -> Result<(), String> {
+    let loaded = config::load(&repo::root(&cwd()?))?;
+    let facts = doctor::gather(&loaded, backend::claude_release_recorded);
+    let rows = doctor::rows(&facts);
+    if json {
+        say!("{}", doctor::json(&rows));
+    } else {
+        for line in doctor::text(&rows) {
+            say!("{line}");
+        }
+    }
+    match doctor::failed(&rows) {
+        true => Err("a session cannot run until the rows marked fail are fixed".to_owned()),
+        false => Ok(()),
+    }
+}
+
 /// Prints the prices in force today, or every price `model` has had.
 fn list_prices(model: Option<&str>) -> Result<(), String> {
     let loaded = prices::load()?;
@@ -1253,6 +1274,8 @@ USAGE:
     niobe --resume <id>    Open the shell on an earlier session and continue it
     niobe sessions         List the sessions this repository can carry on
     niobe profiles         List the profiles the config defines, the selected one marked
+    niobe doctor [--json]  Check what a session needs — the CLIs, their sign-in, the config,
+                           the terminal — and say how to fix what is missing
     niobe trust [--yes]    Show what this repository's config sets and let it start a
                            backend with that, once you agree
     niobe untrust          Take that back

@@ -1110,6 +1110,38 @@ fn a_budget_on_a_metered_profile_is_taken() {
 }
 
 #[test]
+fn doctor_without_claude_on_path_fails_with_the_fix_and_the_json_says_the_same() {
+    let setup = Configured::new("", "");
+    let run = |args: &[&str]| {
+        niobe_command(
+            setup.repo.path(),
+            setup.user.path(),
+            &setup.repo.path().join("c"),
+            args,
+        )
+        .env("PATH", setup.repo.path().join("nothing-here"))
+        .output()
+        .expect("the niobe binary runs")
+    };
+
+    let text = run(&["doctor"]);
+    let said = stdout(&text);
+    assert_eq!(text.status.code(), Some(1), "{said}{}", stderr(&text));
+    assert!(said.contains("fail  claude"), "{said}");
+    assert!(said.contains("claude auth login"), "{said}");
+
+    let json = run(&["doctor", "--json"]);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&json)).expect("the report is JSON");
+    assert_eq!(report["ok"], serde_json::json!(false));
+    let claude = report["rows"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["name"] == "claude"))
+        .expect("the claude row is there");
+    assert_eq!(claude["status"], serde_json::json!("fail"));
+}
+
+#[test]
 fn commands_that_run_no_session_do_not_read_the_config() {
     let setup = Configured::new("this is not toml", "");
     for args in [&["sessions"][..], &["--help"], &["--version"]] {

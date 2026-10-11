@@ -274,7 +274,11 @@ reviewers that encode both, for an agent working in this tree.
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
   operator's trust decision about that file; `prices.rs` is the price table `niobe prices`
   prints and the sheet the shell values tokens with; `profiles.rs` and `sessions.rs` are what
-  `niobe profiles` and `niobe sessions` print; `summary.rs` is what `niobe replay` and
+  `niobe profiles` and `niobe sessions` print; `doctor.rs` is what `niobe doctor` prints — one row each for
+  the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
+  read from its files), the config files and whether the repository's is trusted, and the terminal,
+  with the fix for each that is not fine, as text or as `--json` with nothing under the home
+  directory beyond `~`; `summary.rs` is what `niobe replay` and
   `--resume` print where standard output is not a terminal; every line the binary prints goes
   through `printable.rs`, which shows a character that would act on the terminal as one that
   says where it was, and `stdout.rs`, which writes it without panicking, so a reader that stops
