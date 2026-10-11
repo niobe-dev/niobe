@@ -505,25 +505,32 @@ fn shell_on(slave: &File, cwd: &Path) -> Reaped {
 /// gives an operator's shell one: in a session of its own, where `/dev/tty`
 /// names `slave`. [`shell_on`] leaves the shell whatever controlling terminal
 /// the test runner has, which under CI is none.
+fn shell_owning(slave: &File, cwd: &Path) -> Reaped {
+    let mut command = shell_command(slave, cwd);
+    in_a_session_of_its_own(&mut command);
+    Reaped(command.spawn().expect("the niobe binary runs"))
+}
+
+/// Makes `command` lead a session of its own, with its standard input as the
+/// session's controlling terminal. A signal it sends to its process group
+/// then reaches nothing of the test runner's.
 ///
 /// `unsafe` is allowed here for the reason the binary's own `!` commands
 /// allow it: `pre_exec` is the only hook between fork and exec,
 /// and nothing safe gives a child a session and a terminal.
 #[allow(unsafe_code)]
-fn shell_owning(slave: &File, cwd: &Path) -> Reaped {
-    let mut command = shell_command(slave, cwd);
+fn in_a_session_of_its_own(command: &mut Command) {
     // SAFETY: between fork and exec the child may make only async-signal-safe
     // calls. `setsid` and the `TIOCSCTTY` ioctl are single system calls that
     // allocate nothing and take no lock, and fd 0 is `slave` by then: the
     // standard streams are set before the closure runs.
     unsafe {
-        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+        std::os::unix::process::CommandExt::pre_exec(command, || {
             rustix::process::setsid()?;
             rustix::process::ioctl_tiocsctty(rustix::stdio::stdin())?;
             Ok(())
         });
     }
-    Reaped(command.spawn().expect("the niobe binary runs"))
 }
 
 /// A child process that is killed and reaped when it is dropped, whatever
@@ -2320,13 +2327,16 @@ fn an_editor_that_suspends_itself_does_not_stop_the_shell_after_it_ends() {
         .expect("the stand-in editor is made executable");
 
     let (terminal, slave) = Terminal::open();
-    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+    // In a session of its own: the editor signals its process group, which
+    // is the runner's, and every test beside this one, otherwise.
+    let mut command = shell_driving_the_stand_in(&slave, repo.path(), home.path());
+    command
         .env("HOME", elsewhere.path())
         .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
         .env_remove("VISUAL")
-        .env("EDITOR", &editor)
-        .spawn()
-        .expect("the niobe binary runs");
+        .env("EDITOR", &editor);
+    in_a_session_of_its_own(&mut command);
+    let mut shell = Reaped(command.spawn().expect("the niobe binary runs"));
     terminal.shows(OPENING_FRAME);
 
     terminal.typed(b"\x1b[19~");
@@ -2340,7 +2350,8 @@ fn an_editor_that_suspends_itself_does_not_stop_the_shell_after_it_ends() {
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    let (drawn, _) = released(terminal, slave);
+    drop(slave);
+    let drawn = terminal.drained();
     assert!(
         status.success(),
         "the shell ended with {status}, or was stopped again after the editor: {drawn}"
