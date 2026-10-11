@@ -377,6 +377,204 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
     assert!(all.is_empty(), "{all:#?}");
 }
 
+/// A shell attached to a backend that listed the command `name`, as the
+/// views behind a backend's command are only offered where it did.
+fn attached_offering(name: &str) -> App {
+    let mut app = running_session().attached();
+    app.apply(&Event::Commands {
+        commands: vec![SlashCommand {
+            name: name.to_owned(),
+            description: String::new(),
+            argument_hint: None,
+            mid_prompt: false,
+        }],
+    });
+    app
+}
+
+fn mcp_server(p: &str) -> niobe_core::event::McpServer {
+    niobe_core::event::McpServer {
+        name: format!("srv{p}"),
+        status: niobe_core::event::McpStatus::Failed,
+        source: Some(format!("src{p}")),
+        tools: vec![format!("tool{p}"), format!("other{p}")],
+        scope: Some(format!("scope{p}")),
+        error: Some(format!("error {p}")),
+        endpoint: Some(format!("stdio · run{p}")),
+        reports_as: Some(format!("reports{p} 1.0")),
+    }
+}
+
+fn memory_file(p: &str) -> niobe_tui::MemoryFile {
+    niobe_tui::MemoryFile {
+        scope: niobe_tui::memory::Scope::Imported,
+        path: format!("notes/{p}.md"),
+        named: format!("notes/{p}.md"),
+        depth: 1,
+        text: Some(format!("first {p} line\nsecond {p} line\n")),
+        bytes: Some(30),
+        note: Some(format!("note {p}")),
+        editable: Some(format!("notes/{p}.md")),
+    }
+}
+
+fn mcp_list(p: &str) -> App {
+    let mut app = attached_offering("mcp");
+    app.apply(&Event::McpServers {
+        servers: vec![mcp_server(p)],
+    });
+    app.on_key(key(KeyCode::F(7)));
+    app
+}
+
+fn mcp_detail(p: &str) -> App {
+    let mut app = mcp_list(p);
+    app.on_key(key(KeyCode::Enter));
+    app
+}
+
+fn memory_list(p: &str) -> App {
+    let mut app = running_session();
+    app.on_key(key(KeyCode::F(8)));
+    assert!(app.take_memory_request(), "F8 asked for no read");
+    app.set_memory(vec![memory_file(p)]);
+    app
+}
+
+fn memory_reading(p: &str) -> App {
+    let mut app = memory_list(p);
+    app.on_key(key(KeyCode::Enter));
+    app
+}
+
+fn refused_answer(p: &str) -> App {
+    let mut app = with(vec![
+        Event::ToolCallStart {
+            id: "q1".into(),
+            name: "Bash".into(),
+            input: "{}".into(),
+            summary: None,
+            agent: None,
+        },
+        Event::PermissionRequest {
+            id: "q1".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            target: Some("ls".into()),
+            proposal: None,
+            reason: None,
+            agent: None,
+        },
+        Event::PermissionResponse {
+            id: "q1".into(),
+            decision: niobe_core::event::PermissionDecision::Deny,
+            message: Some(format!("not that {p} one")),
+        },
+    ]);
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    app
+}
+
+fn model_picker(p: &str) -> App {
+    let mut app = attached_offering("model");
+    app.apply(&Event::Models {
+        models: vec![niobe_core::event::ModelOption {
+            id: format!("id{p}"),
+            name: Some(format!("name {p}")),
+            description: Some(format!("desc {p}")),
+            resolves_to: Some(format!("exact{p}")),
+        }],
+    });
+    app.on_key(key(KeyCode::F(4)));
+    app
+}
+
+fn proposal_open(action: fn(&str) -> Action, p: &str) -> App {
+    let mut app = with(vec![Event::PermissionRequest {
+        id: "perm".into(),
+        tool: "Edit".to_owned(),
+        input: serde_json::json!({ "description": p, "file_path": p }).to_string(),
+        target: Some(format!("src/{p}.rs")),
+        proposal: Some(Proposal::new(action(p), ["file_path"])),
+        reason: None,
+        agent: None,
+    }]);
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    app
+}
+
+fn edit_open(p: &str) -> App {
+    proposal_open(
+        |p| Action::Replace {
+            path: format!("src/{p}.rs"),
+            old: format!("old {p}\nkept"),
+            new: format!("new {p}\nkept"),
+            every: false,
+        },
+        p,
+    )
+}
+
+fn write_open(p: &str) -> App {
+    proposal_open(
+        |p| Action::Write {
+            path: format!("src/{p}.rs"),
+            content: format!("line {p}\n{p}"),
+            existed: Some(false),
+        },
+        p,
+    )
+}
+
+fn command_open(p: &str) -> App {
+    proposal_open(
+        |p| Action::Command {
+            command: format!("echo {p}"),
+        },
+        p,
+    )
+}
+
+/// The views a backend fills and the call a refusal ended, each with a word
+/// of what it draws from its content, so that a site that stopped drawing the
+/// content is not passed for one that draws it safely.
+/// A site's name, how it is built around a payload, and a word it draws.
+type Site = (&'static str, fn(&str) -> App, &'static str);
+
+const SITES: &[Site] = &[
+    ("mcp-list", mcp_list, "srv"),
+    ("mcp-detail", mcp_detail, "reports"),
+    ("memory-list", memory_list, "notes/"),
+    ("memory-reading", memory_reading, "second"),
+    ("refused-answer", refused_answer, "not that"),
+    ("model-picker", model_picker, "name"),
+    ("proposed-edit-open", edit_open, "old"),
+    ("proposed-write-open", write_open, "line"),
+    ("proposed-command-open", command_open, "echo"),
+];
+
+#[test]
+fn each_new_site_draws_the_content_it_is_given() {
+    for (site, build, word) in SITES {
+        let mut app = build("QQ");
+        let shown = common::screen(&mut app, 200, 60);
+        assert!(shown.contains(word), "{site} drew no `{word}`:\n{shown}");
+        assert!(
+            shown.contains("QQ"),
+            "{site} drew none of its content:\n{shown}"
+        );
+    }
+}
+
+#[test]
+fn the_views_a_backend_fills_put_no_control_or_direction_mark_on_the_terminal() {
+    let mut all = Vec::new();
+    for (site, build, _) in SITES {
+        all.extend(check(site, build));
+    }
+    assert!(all.is_empty(), "{all:#?}");
+}
+
 /// The drawn frame as text, one line per row.
 fn screen(app: &mut App, w: u16, h: u16) -> String {
     let mut terminal =
