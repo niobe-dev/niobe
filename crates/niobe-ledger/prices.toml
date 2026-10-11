@@ -208,6 +208,38 @@ cache_read = 0.20
 cache_write = 2.50
 cache_write_1h = 4.00
 
+# Claude Haiku 5.5, released on 7 October 2026 by the release notes
+# (https://platform.claude.com/docs/en/release-notes/overview) and its model
+# page; its rates read from the pricing page on 11 October 2026, which prices
+# it by prompt length: a request whose prompt, cache reads and writes included,
+# is over 100,000 tokens pays the second set, each request on its own. The
+# models overview gives it a 1M-token window and no dated id.
+#
+# Bedrock's rates for it are not listed: they were not read from AWS's price
+# list or a model card for this table, so a Bedrock session on it is unpriced
+# rather than guessed.
+[[model]]
+ids = [
+    "claude-haiku-5-5",
+    "claude-haiku-5-5[1m]",
+]
+
+[[model.price]]
+from = 2026-10-07
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write = 0.125
+cache_write_1h = 0.20
+
+[model.price.long_context]
+above = 100_000
+input = 0.50
+output = 2.50
+cache_read = 0.05
+cache_write = 0.625
+cache_write_1h = 1.00
+
 # Claude Sonnet 5
 [[model]]
 ids = [
@@ -723,6 +755,17 @@ ids = [
 
 [[context.window]]
 from = 2026-09-28
+tokens = 1_000_000
+
+# Claude Haiku 5.5
+[[context]]
+ids = [
+    "claude-haiku-5-5",
+    "claude-haiku-5-5[1m]",
+]
+
+[[context.window]]
+from = 2026-10-07
 tokens = 1_000_000
 
 # Claude Sonnet 5

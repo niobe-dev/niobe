@@ -147,6 +147,61 @@ fn claude_sonnet_5_5_on_the_claude_api_matches_a_hand_computed_cost() {
 }
 
 #[test]
+fn claude_haiku_5_5_is_priced_by_the_length_of_each_requests_prompt() {
+    // Claude Haiku 5.5, from 7 October 2026: input $0.10, output $0.50, cache
+    // read $0.01, 1-hour write $0.20; over a 100,000-token prompt (cache reads
+    // and writes counted) input $0.50, output $2.50, read $0.05, 1-hour write
+    // $1.
+    let table = bundled();
+    let day = date(2026, 10, 10);
+
+    // A 64,000-token prompt, at the first rates:
+    //  10,000 input × 0.1     =  1,000
+    //   2,000 output × 0.5    =  1,000
+    //  50,000 cache read × .01 =    500
+    //   4,000 1h write × 0.2  =    800
+    //                            3,300 / 1e6 = $0.0033
+    let short = Usage {
+        input: 10_000,
+        output: 2_000,
+        cache_read: 50_000,
+        cache_write: 4_000,
+        cache_write_1h: 4_000,
+        ..usage("claude-haiku-5-5")
+    };
+    assert_eq!(usd(table.cost(&short, day)), 0.0033);
+
+    // A 115,000-token prompt, at the second:
+    //  30,000 input × 0.5     = 15,000
+    //   1,000 output × 2.5    =  2,500
+    //  80,000 cache read × .05 =  4,000
+    //   5,000 1h write × 1    =  5,000
+    //                           26,500 / 1e6 = $0.0265
+    let long = Usage {
+        input: 30_000,
+        output: 1_000,
+        cache_read: 80_000,
+        cache_write: 5_000,
+        cache_write_1h: 5_000,
+        ..usage("claude-haiku-5-5[1m]")
+    };
+    assert_eq!(usd(table.cost(&long, day)), 0.0265);
+
+    // Exactly 100,000 is not over it: 100,000 × 0.1 = 10,000 / 1e6 = $0.01.
+    let at_the_threshold = Usage {
+        input: 100_000,
+        ..usage("claude-haiku-5-5")
+    };
+    assert_eq!(usd(table.cost(&at_the_threshold, day)), 0.01);
+
+    assert_eq!(
+        table.cost(&short, date(2026, 10, 6)).provenance(),
+        Provenance::Unpriced,
+        "priced before its release"
+    );
+}
+
+#[test]
 fn claude_sonnet_5_on_a_bedrock_eu_profile_matches_a_hand_computed_cost() {
     // Bedrock EU cross-region inference, Claude Sonnet 5: input $2.20, output
     // $11, cache read $0.22, 1-hour write $4.40 (the global rates plus 10%).

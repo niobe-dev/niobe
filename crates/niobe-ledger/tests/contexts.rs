@@ -46,6 +46,19 @@ fn the_claude_5_models_have_a_million_token_window() {
     }
 }
 
+/// The models overview lists Claude Haiku 5.5, released on 7 October 2026, at
+/// "1M tokens" and gives it no dated id.
+#[test]
+fn haiku_5_5_has_a_million_token_window_from_its_release() {
+    for model in ["claude-haiku-5-5", "claude-haiku-5-5[1m]"] {
+        assert_eq!(
+            bundled().context_window(model, date(2026, 10, 10)),
+            Some(1_000_000),
+            "{model}"
+        );
+    }
+}
+
 /// "Other Claude models, including Claude Sonnet 4.5, have a 200k-token
 /// context window"; the models overview lists Claude Haiku 4.5 at "200K
 /// tokens".
@@ -96,6 +109,10 @@ fn a_model_the_table_does_not_list_has_no_window() {
 
 #[test]
 fn a_model_has_no_window_before_it_was_released() {
+    assert_eq!(
+        bundled().context_window("claude-haiku-5-5", date(2026, 10, 6)),
+        None
+    );
     assert_eq!(
         bundled().context_window("claude-opus-5-5", date(2026, 9, 21)),
         None
