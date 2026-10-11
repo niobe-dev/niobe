@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 
+use niobe_core::keys::{Bindable, Chord, Keymap};
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::{Backend, Billing};
 use toml::Spanned;
@@ -52,13 +53,14 @@ impl File<'_> {
                 // longer has. A file written to turn it off still loads.
                 "effects" => {}
                 "permissions" => config.allowed = self.permissions(value, &at)?,
+                "keys" => config.keys = self.keys(value, &at)?,
                 "profiles" => config.profiles.extend(self.profiles(value, &at)?),
                 _ => {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
                         "unknown key; expected `default_profile`, `theme`, `titles`, \
-                         `profiles` or `permissions`",
+                         `profiles`, `permissions` or `keys`",
                     ));
                 }
             }
@@ -104,6 +106,35 @@ impl File<'_> {
                     ),
                 )
             })
+    }
+
+    /// The keys the F-key bar's actions have been given other than their own.
+    ///
+    /// A name that is no action, a key that cannot be bound, and two actions
+    /// on one key are each reported at the line that made them: a binding
+    /// dropped quietly is a key that does nothing when pressed.
+    fn keys(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Keymap, ConfigError> {
+        let mut bindings: Vec<(Bindable, Chord)> = Vec::new();
+        for (name, chord) in in_file_order(self.table(value, at)?) {
+            let at = at.child(name.get_ref());
+            let Some(action) = Bindable::from_name(name.get_ref()) else {
+                let names: Vec<&str> = Bindable::ALL.iter().map(|action| action.name()).collect();
+                return Err(self.invalid(
+                    &name.span(),
+                    &at,
+                    &format!("unknown action; expected {}", names.join(", ")),
+                ));
+            };
+            let text = self.string(chord, &at)?;
+            let chord_value =
+                Chord::parse(text).map_err(|error| self.invalid(&chord.span(), &at, &error))?;
+            bindings.push((action, chord_value));
+            // Checked as each is made, so the error names the line that
+            // made the clash and not the first line of the table.
+            Keymap::new(bindings.iter().copied())
+                .map_err(|error| self.invalid(&chord.span(), &at, &error.to_string()))?;
+        }
+        Keymap::new(bindings).map_err(|error| self.invalid(&value.span(), at, &error.to_string()))
     }
 
     fn profiles(

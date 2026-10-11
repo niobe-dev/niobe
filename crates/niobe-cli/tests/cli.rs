@@ -1142,6 +1142,27 @@ fn doctor_without_claude_on_path_fails_with_the_fix_and_the_json_says_the_same()
 }
 
 #[test]
+fn a_key_that_cannot_be_bound_is_reported_at_its_key_and_its_line() {
+    let setup = Configured::new("[keys]\nmcp = \"ctrl+c\"\n", "");
+    let output = setup.run(&["profiles"]);
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(said.contains(":2: keys.mcp: "), "{said}");
+    assert!(said.contains("F1 to F12"), "{said}");
+}
+
+#[test]
+fn the_help_says_how_a_key_is_rebound() {
+    let setup = Configured::new("", "");
+    let output = setup.run(&["--help"]);
+    let out = stdout(&output);
+
+    assert!(out.contains("[keys]"), "{out}");
+    assert!(out.contains("mcp = \"ctrl+l\""), "{out}");
+}
+
+#[test]
 fn commands_that_run_no_session_do_not_read_the_config() {
     let setup = Configured::new("this is not toml", "");
     for args in [&["sessions"][..], &["--help"], &["--version"]] {

@@ -99,6 +99,7 @@ mod write;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use niobe_core::keys::Keymap;
 use niobe_core::permission::Allowlist;
 use niobe_core::{Backend, Billing};
 
@@ -368,6 +369,7 @@ pub struct Config {
     default_profile: Option<DefaultProfile>,
     theme: Option<ThemeName>,
     titles: Option<Titles>,
+    keys: Keymap,
     allowed: Allowlist,
     /// The `default_profile` of a file that has not been trusted, which is not
     /// in force.
@@ -507,6 +509,12 @@ impl Config {
         if over.titles.is_some() {
             self.titles = over.titles;
         }
+        // A file that rebinds keys says what every rebound key is: bindings
+        // laid together could put one key on two actions, so the later file's
+        // table replaces the earlier one whole.
+        if !over.keys.is_empty() {
+            self.keys = over.keys;
+        }
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
         // where one is taken back. An untrusted file has none left to add.
@@ -621,6 +629,14 @@ impl Config {
         self.theme.as_ref()
     }
 
+    /// The keys the F-key bar's actions were given instead of their own.
+    ///
+    /// Not gated on trust: a key is nothing a backend is started with, and a
+    /// repository that rebinds one has moved a key of the shell's.
+    pub fn keys(&self) -> &Keymap {
+        &self.keys
+    }
+
     /// How a session is titled: by the model unless a config says
     /// `titles = "first-prompt"`. A file that has not been trusted can turn
     /// the model's titles off and cannot turn them on ([`Config::untrusted`]).
@@ -695,6 +711,67 @@ auth_refresh = "aws sso login --profile corp-sso"
 backend = "codex"
 args = ["--model", "gpt-4"]
 "#;
+
+    #[test]
+    fn a_keys_table_rebinds_the_bars_actions_and_is_laid_over_by_a_later_file() {
+        use niobe_core::keys::{Bindable, Chord};
+        let user = parsed("[keys]\nmcp = \"F11\"\nmemory = \"ctrl+s\"\n");
+
+        assert_eq!(user.keys().chord_of(Bindable::Mcp), Some(Chord::F(11)));
+        assert_eq!(
+            user.keys().chord_of(Bindable::Memory),
+            Some(Chord::Ctrl('s'))
+        );
+        assert_eq!(user.keys().chord_of(Bindable::Help), None);
+
+        let repository =
+            Config::parse("[keys]\nmcp = \"F12\"\n", &path("repo")).expect("the config is valid");
+        let laid = user.overlay(repository);
+        assert_eq!(laid.keys().chord_of(Bindable::Mcp), Some(Chord::F(12)));
+        assert_eq!(
+            laid.keys().chord_of(Bindable::Memory),
+            None,
+            "a file that rebinds keys says what every rebound key is"
+        );
+    }
+
+    #[test]
+    fn rebinding_a_key_needs_no_trust_and_an_untrusted_file_keeps_its_keys() {
+        use niobe_core::keys::{Bindable, Chord};
+        let config = parsed("[keys]\nmcp = \"F11\"\n");
+
+        assert!(!config.needs_trust());
+        assert_eq!(
+            config.untrusted().keys().chord_of(Bindable::Mcp),
+            Some(Chord::F(11))
+        );
+    }
+
+    #[test]
+    fn a_binding_that_cannot_be_made_is_reported_at_its_key_and_its_line() {
+        assert_eq!(
+            invalid("[keys]\nmpc = \"F11\"\n"),
+            "/configs/user/config.toml:2: keys.mpc: unknown action; expected help, compact, \
+             clear, model, diff, rewind, mcp, memory, settings, quit"
+        );
+        let bad = invalid("[keys]\nmcp = \"ctrl+c\"\n");
+        assert!(
+            bad.starts_with("/configs/user/config.toml:2: keys.mcp: "),
+            "{bad}"
+        );
+        assert!(bad.contains("F1 to F12"), "{bad}");
+        let same = invalid("[keys]\nmcp = \"F11\"\nmemory = \"F11\"\n");
+        assert!(
+            same.starts_with("/configs/user/config.toml:3: keys.memory: "),
+            "{same}"
+        );
+        let takes = invalid("[keys]\nmcp = \"F8\"\n");
+        assert!(
+            takes.starts_with("/configs/user/config.toml:2: keys.mcp: "),
+            "{takes}"
+        );
+        assert!(takes.contains("memory"), "{takes}");
+    }
 
     #[test]
     fn the_implied_config_selects_a_claude_profile_with_nothing_set() {
@@ -1448,7 +1525,7 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `titles`, `profiles` or `permissions`"
+             expected `default_profile`, `theme`, `titles`, `profiles`, `permissions` or `keys`"
         );
     }
 

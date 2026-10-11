@@ -411,8 +411,30 @@ pub fn stop_columns() -> u16 {
 /// where equal slots would cut the longest. Narrower than that, the keys
 /// share what there is and their labels are cut.
 pub fn fkey_widths(width: u16) -> [u16; FKEYS.len()] {
-    let natural = FKEYS.map(|(digit, label, _)| {
-        u16::try_from(digit.chars().count() + label.chars().count() + 1).unwrap_or(u16::MAX)
+    fkey_widths_for(width, &default_labels())
+}
+
+/// The key each of the ten is drawn with where nothing was rebound: the
+/// digit that follows Esc.
+pub fn default_labels() -> [String; FKEYS.len()] {
+    FKEYS.map(|(digit, _, _)| digit.to_owned())
+}
+
+/// The action an F-key slot's bar entry belongs to, as a rebindable action:
+/// the one a config's `[keys]` table names it by.
+pub fn bindable(action: Action) -> Option<niobe_core::Bindable> {
+    niobe_core::Bindable::ALL
+        .into_iter()
+        .find(|bound| fkey(bound.slot()) == Some(action))
+}
+
+/// [`fkey_widths`], with each key drawn as `keys` says rather than as its
+/// digit, so that a key rebound to one that is wider is given the room.
+pub fn fkey_widths_for(width: u16, keys: &[String; FKEYS.len()]) -> [u16; FKEYS.len()] {
+    let natural = std::array::from_fn(|at| {
+        let label = FKEYS.get(at).map_or("", |(_, label, _)| *label);
+        let key = keys.get(at).map_or(0, |key| key.chars().count());
+        u16::try_from(key + label.chars().count() + 1).unwrap_or(u16::MAX)
     });
     let room = width.saturating_sub(stop_columns());
     let count = u16::try_from(FKEYS.len()).unwrap_or(u16::MAX);
@@ -429,11 +451,16 @@ pub fn fkey_widths(width: u16) -> [u16; FKEYS.len()] {
 
 /// What a click at `column` of an F-key bar `width` wide presses.
 pub fn fkey_at(width: u16, column: u16) -> Option<Action> {
+    fkey_at_for(width, column, &default_labels())
+}
+
+/// [`fkey_at`], for a bar whose keys are drawn as `keys` says.
+pub fn fkey_at_for(width: u16, column: u16, keys: &[String; FKEYS.len()]) -> Option<Action> {
     let mut start = stop_columns();
     if column < start {
         return Some(Action::Stop);
     }
-    for ((_, _, action), key) in FKEYS.iter().zip(fkey_widths(width)) {
+    for ((_, _, action), key) in FKEYS.iter().zip(fkey_widths_for(width, keys)) {
         if column < start.saturating_add(key) {
             return Some(*action);
         }

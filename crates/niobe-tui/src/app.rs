@@ -1198,6 +1198,8 @@ pub struct App {
     theme: Theme,
     /// How many colours the terminal draws, which every theme is drawn at.
     depth: Depth,
+    /// The keys the F-key bar's actions were given instead of their own.
+    keymap: niobe_core::Keymap,
     session: SessionState,
     entries: Vec<Entry>,
     /// Where each running call is drawn: its entry, and its place among the
@@ -1694,6 +1696,7 @@ impl App {
             windows_recorded: false,
             theme,
             depth: Depth::default(),
+            keymap: niobe_core::Keymap::default(),
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
@@ -4279,12 +4282,24 @@ impl App {
         rows.push(String::new());
         rows.push("F-keys:".to_owned());
         rows.push(
-            crate::menu::FKEYS
+            self.fkey_labels()
                 .iter()
-                .map(|(digit, label, _)| format!("{digit} {label}"))
+                .zip(crate::menu::FKEYS)
+                .map(|(key, (_, label, _))| format!("{key} {label}"))
                 .collect::<Vec<_>>()
                 .join(" · "),
         );
+        if !self.keymap.is_empty() {
+            rows.push(
+                "Rebound in your config: ".to_owned()
+                    + &self
+                        .keymap
+                        .iter()
+                        .map(|(action, chord)| format!("{chord} is {}", action.name()))
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+            );
+        }
         Sheet {
             title: "Shortcuts".to_owned(),
             rows,
@@ -4419,7 +4434,9 @@ impl App {
             return true;
         }
         if let Some((_, fkeys)) = self.bars.filter(|(_, fkeys)| fkeys.contains(point)) {
-            if let Some(action) = crate::menu::fkey_at(fkeys.width, column - fkeys.x) {
+            if let Some(action) =
+                crate::menu::fkey_at_for(fkeys.width, column - fkeys.x, &self.fkey_labels())
+            {
                 self.perform_clicked(action);
             }
             return true;
@@ -4639,6 +4656,83 @@ impl App {
         self.depth = depth;
         self.set_theme(self.theme);
         self
+    }
+
+    /// The same shell with the F-key bar's actions on the keys `keymap`
+    /// gives them: each is pressed by its chord, and the bar and the menus
+    /// draw that chord in place of its F-key.
+    #[must_use]
+    pub fn with_keymap(mut self, keymap: niobe_core::Keymap) -> Self {
+        self.keymap = keymap;
+        self
+    }
+
+    /// What each key of the F-key bar is drawn as: the digit that follows
+    /// Esc, or the chord the action was given.
+    pub fn fkey_labels(&self) -> [String; 10] {
+        std::array::from_fn(|at| {
+            let slot = u8::try_from(at + 1).unwrap_or(u8::MAX);
+            niobe_core::Bindable::ALL
+                .into_iter()
+                .find(|action| action.slot() == slot)
+                .and_then(|action| self.keymap.chord_of(action))
+                .map_or_else(
+                    || crate::menu::default_labels()[at].clone(),
+                    niobe_core::Chord::short,
+                )
+        })
+    }
+
+    /// The keys a menu item is drawn with: what the menu says, with the
+    /// F-key of an action that was rebound replaced by the chord it was given.
+    pub fn item_keys(&self, item: &crate::menu::Item) -> String {
+        let Some(action) = crate::menu::bindable(item.action) else {
+            return item.keys.to_owned();
+        };
+        let Some(chord) = self.keymap.chord_of(action) else {
+            return item.keys.to_owned();
+        };
+        let default = format!("F{}", action.slot());
+        item.keys
+            .split_whitespace()
+            .map(|key| {
+                if key == default {
+                    chord.to_string()
+                } else {
+                    key.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    }
+
+    /// The key as the action it is bound to, where it is a chord that was
+    /// given to one: the F-key that action has by default.
+    fn rebound(
+        &self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> ratatui::crossterm::event::KeyEvent {
+        use niobe_core::Chord;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        if self.keymap.is_empty() {
+            return key;
+        }
+        let chord = match (key.code, key.modifiers) {
+            (KeyCode::F(n), _) if Chord::F_KEYS.contains(&n) => Chord::F(n),
+            (KeyCode::Char(letter), KeyModifiers::CONTROL) => {
+                Chord::Ctrl(letter.to_ascii_lowercase())
+            }
+            _ => return key,
+        };
+        match self.keymap.action_of(chord) {
+            Some(action) => KeyEvent {
+                code: KeyCode::F(action.slot()),
+                modifiers: KeyModifiers::NONE,
+                ..key
+            },
+            None => key,
+        }
     }
 
     fn set_theme(&mut self, theme: Theme) {
@@ -6399,6 +6493,7 @@ impl App {
         self.selection = None;
         let escaped = self.escaped;
         let key = self.as_function_key(key);
+        let key = self.rebound(key);
         // A terminal that did not say it could send Shift+Enter has now sent
         // one — tmux asked for modifyOtherKeys, under a terminal that reports
         // it — so it is the key the bar can name.
@@ -14726,6 +14821,83 @@ mod tests {
     /// What the open MCP view shows, a line a row.
     fn mcp_shown(app: &App) -> String {
         crate::mcp::shown(app, 90).join("\n")
+    }
+
+    fn rebound(pairs: &[(niobe_core::Bindable, niobe_core::Chord)]) -> App {
+        app()
+            .attached()
+            .with_keymap(niobe_core::Keymap::new(pairs.iter().copied()).expect("valid bindings"))
+    }
+
+    #[test]
+    fn an_action_rebound_to_an_f_key_is_pressed_by_it_and_the_bar_and_menu_say_so() {
+        use niobe_core::{Bindable, Chord};
+        let mut app = rebound(&[(Bindable::Mcp, Chord::F(11))]);
+
+        app.on_key(key(KeyCode::F(11)));
+
+        assert!(app.mcp().is_some(), "F11 did not open the MCP view");
+        let labels = app.fkey_labels();
+        assert_eq!(labels[6], "11", "the bar still draws 7: {labels:?}");
+        assert_eq!(labels[7], "8");
+        let item = crate::menu::MENUS
+            .iter()
+            .flat_map(|menu| menu.items)
+            .find(|item| item.action == crate::menu::Action::Mcp)
+            .expect("MCP is in a menu");
+        assert!(
+            app.item_keys(item).contains("F11"),
+            "{}",
+            app.item_keys(item)
+        );
+        assert!(
+            !app.item_keys(item).contains("F7"),
+            "{}",
+            app.item_keys(item)
+        );
+    }
+
+    #[test]
+    fn an_action_rebound_to_a_ctrl_letter_is_pressed_by_it() {
+        use niobe_core::{Bindable, Chord};
+        let mut app = rebound(&[(Bindable::Memory, Chord::Ctrl('s'))]);
+
+        app.on_key(ctrl('s'));
+
+        assert!(
+            app.memory().is_some(),
+            "Ctrl+S did not open the memory view"
+        );
+        assert_eq!(app.fkey_labels()[7], "^S");
+    }
+
+    #[test]
+    fn two_actions_that_trade_keys_each_answer_to_the_key_they_were_given() {
+        use niobe_core::{Bindable, Chord};
+        let mut app = rebound(&[
+            (Bindable::Mcp, Chord::F(8)),
+            (Bindable::Memory, Chord::F(7)),
+        ]);
+
+        app.on_key(key(KeyCode::F(8)));
+        assert!(app.mcp().is_some(), "F8 is MCP now");
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::F(7)));
+        assert!(app.memory().is_some(), "F7 is memory now");
+    }
+
+    #[test]
+    fn with_nothing_rebound_the_bar_draws_its_digits_and_the_keys_are_unchanged() {
+        let mut app = app().attached();
+
+        assert_eq!(
+            app.fkey_labels(),
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map(str::to_owned)
+        );
+        app.on_key(key(KeyCode::F(11)));
+        assert!(app.mcp().is_none());
+        app.on_key(ctrl('s'));
+        assert!(app.memory().is_none());
     }
 
     #[test]

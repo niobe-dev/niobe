@@ -51,7 +51,10 @@ reviewers that encode both, for an agent working in this tree.
   Claude Code's own `:*` or `**` form with the rule to write instead; `diff.rs` is the line arithmetic
   every backend counts a file change with, so two bridges cannot disagree about what a changed
   line is, and the `Hunk` a change's lines travel in where the backend reported them, and the
-  lines an edit still waiting on the operator would remove and add; `proposal.rs` is what a call
+  lines an edit still waiting on the operator would remove and add; `keys.rs` is the F-key bar's ten actions and the few chords a config may rebind them to —
+  F1 to F12 and the Ctrl letters nothing else answers to — checked once for a key two actions would
+  share or another action's own, so the config that writes them and the shell that draws them agree;
+  `proposal.rs` is what a call
   waiting on the operator would do — replace text in a file, write a file whole, run a command —
   as the backend read it out of the call's arguments, and which arguments that reading covers; `test_run.rs` recognises a shell
   command that runs `cargo test` and reads the counts out of its output, only where the output

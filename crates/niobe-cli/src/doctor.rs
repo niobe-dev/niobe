@@ -207,6 +207,9 @@ fn shape_of(config: &niobe_config::Config) -> ShapeState {
     if config.theme().is_some() {
         keys.push("theme");
     }
+    if !config.keys().is_empty() {
+        keys.push("keys");
+    }
     let profiles = config
         .profiles()
         .iter()

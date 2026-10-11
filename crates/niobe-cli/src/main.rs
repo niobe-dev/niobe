@@ -290,6 +290,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
                 .with_rules(loaded.config.allowed().clone())
                 .with_places(places(&loaded))
                 .with_depth(asked.depth)
+                .with_keymap(loaded.config.keys().clone())
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -476,6 +477,7 @@ fn resume(
                 .with_rules(loaded.config.allowed().clone())
                 .with_places(places(&loaded))
                 .with_depth(asked.depth)
+                .with_keymap(loaded.config.keys().clone())
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -687,6 +689,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
                 .with_rules(loaded.config.allowed().clone())
                 .with_places(places(&loaded))
                 .with_depth(asked.depth)
+                .with_keymap(loaded.config.keys().clone())
                 .with_theme(theme),
         ),
         &loaded,
@@ -1351,6 +1354,24 @@ EXIT STATUS:
     1   Something failed; the reason was written to standard error, which
         discards it when standard error is closed or /dev/null
     2   Something failed and the reason could not be written to standard error
+
+KEYS:
+    Each of the F-key bar's ten actions has its own function key, and a
+    digit after Esc. A terminal that eats one can give the action another key
+    in the config, in a [keys] table:
+
+        [keys]
+        mcp = \"ctrl+l\"
+        memory = \"ctrl+s\"
+
+    The actions are help, compact, clear, model, diff, rewind, mcp, memory,
+    settings and quit. A key is any of the twelve function keys, written as
+    the letter f and its number, or ctrl+l or ctrl+s, the Ctrl letters
+    nothing else answers to. A key that two actions would share, or that is
+    another action's own function key, is refused at its line. The bar, the
+    menus and the help sheet draw the new key. Not gated on trust: a key is
+    nothing a backend is started with. A repository's [keys] replace the
+    user's whole.
 
 PROFILES:
     A profile is a backend plus the environment and arguments it runs with,

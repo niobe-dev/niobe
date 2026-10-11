@@ -436,9 +436,9 @@ fn draw_menu_list(
                     true => "shown",
                     false => "hidden",
                 },
-                // Only a pane's row says something that changes; every other
-                // action's keys are fixed in its menu.
-                _ => item.keys,
+                // Only a pane's row, and a rebound action's, say something that
+                // changes; every other action's keys are fixed in its menu.
+                _ => return (item.label.to_owned(), app.item_keys(item)),
             };
             (item.label.to_owned(), keys.to_owned())
         })
@@ -5285,10 +5285,11 @@ fn draw_fkeys(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Span::styled(" ", bar),
     ];
 
-    let widths = crate::menu::fkey_widths(area.width);
-    for ((digit, label, action), width) in crate::menu::FKEYS.iter().zip(widths) {
-        let room = usize::from(width).saturating_sub(digit.len() + 1);
-        spans.push(Span::styled(*digit, key_style));
+    let keys = app.fkey_labels();
+    let widths = crate::menu::fkey_widths_for(area.width, &keys);
+    for (((_, label, action), key), width) in crate::menu::FKEYS.iter().zip(&keys).zip(widths) {
+        let room = usize::from(width).saturating_sub(key.chars().count() + 1);
+        spans.push(Span::styled(key.clone(), key_style));
         spans.push(Span::styled(
             text::pad(&text::truncate(label, room), room),
             stopped(app.can(*action)),
