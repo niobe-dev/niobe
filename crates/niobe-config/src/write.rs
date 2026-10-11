@@ -23,9 +23,11 @@
 //!   config gets broken by a program they asked to remember one thing.
 
 use std::io::Write as _;
+use std::ops::Range;
 use std::path::Path;
 
 use niobe_core::permission::Rule;
+use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
 use crate::{Config, ConfigError, replace};
@@ -142,30 +144,47 @@ fn splice(text: &str, path: &Path, rule: &str) -> Result<String, ConfigError> {
     let root = document.get_ref();
 
     let Some((key, value)) = root.get_key_value("permissions") else {
-        let mut written = text.to_owned();
-        if !written.is_empty() && !written.ends_with('\n') {
-            written.push('\n');
-        }
-        if !written.is_empty() {
-            written.push('\n');
-        }
-        written.push_str("[permissions]\nallow = ");
-        written.push_str(&array(&[rule]));
-        written.push('\n');
-        return Ok(written);
+        return Ok(append_permissions(text, rule));
     };
 
+    let (items, span) = allow_array(key.span(), value, text, path)?;
+    let last_end = items.last().map(|item| item.span().end);
+    Ok(splice_into_array(text, rule, span, last_end))
+}
+
+/// Appends a new `[permissions]` table and `allow` array to a file that lacks one.
+fn append_permissions(text: &str, rule: &str) -> String {
+    let mut written = text.to_owned();
+    if !written.is_empty() && !written.ends_with('\n') {
+        written.push('\n');
+    }
+    if !written.is_empty() {
+        written.push('\n');
+    }
+    written.push_str("[permissions]\nallow = ");
+    written.push_str(&array(&[rule]));
+    written.push('\n');
+    written
+}
+
+/// Extracts the slice of items and byte span of `permissions.allow`, or returns a descriptive error.
+fn allow_array<'t, 'i>(
+    key_span: Range<usize>,
+    value: &'t Spanned<DeValue<'i>>,
+    text: &str,
+    path: &Path,
+) -> Result<(&'t [Spanned<DeValue<'i>>], Range<usize>), ConfigError> {
     let DeValue::Table(table) = value.get_ref() else {
         return Err(unwritable(
             path,
-            line(text, key.span().start),
+            line(text, key_span.start),
             "is not a table, so Niobe cannot add a rule to it",
         ));
     };
     let Some(allow) = table.get("allow") else {
         return Err(unwritable(
             path,
-            line(text, key.span().start),
+            line(text, key_span.start),
             "has no `allow` array for Niobe to add a rule to; add `allow = []` to it",
         ));
     };
@@ -176,10 +195,17 @@ fn splice(text: &str, path: &Path, rule: &str) -> Result<String, ConfigError> {
             "is not an array, so Niobe cannot add a rule to it",
         ));
     };
+    Ok((items, allow.span()))
+}
 
-    let span = allow.span();
+/// Splices `rule` into the array at `span`, preserving formatting and comments.
+fn splice_into_array(
+    text: &str,
+    rule: &str,
+    span: Range<usize>,
+    last_end: Option<usize>,
+) -> String {
     let close = span.end.saturating_sub(1);
-    let last_end = items.last().map(|item| item.span().end);
     let open_a_line = text[span.start..close].contains('\n')
         && text[..close]
             .rfind('\n')
@@ -215,7 +241,7 @@ fn splice(text: &str, path: &Path, rule: &str) -> Result<String, ConfigError> {
             written.push_str(&text[close..]);
         }
     }
-    Ok(written)
+    written
 }
 
 /// Whether `between`, the text from the end of an array's last element to its
