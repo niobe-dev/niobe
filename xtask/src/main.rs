@@ -9,6 +9,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod audit;
+mod formula;
 mod headers;
 mod network;
 mod version;
@@ -63,6 +64,7 @@ fn main() -> ExitCode {
         Some("headers") => headers(),
         Some("audit") => audit(),
         Some("version") => version::run(rest),
+        Some("formula") => formula::run(rest),
         _ => {
             eprintln!(
                 "\
@@ -78,6 +80,8 @@ tasks:
               repository or marks a gap with FIXME, HACK or XXX
     version   report what a release would be; --check that the manifest agrees with itself;
               <patch|minor|major|X.Y.Z> to move the workspace to that version
+    formula   print the Homebrew formula for <version> from the .sha256 files of a release in
+              <directory>
     size      build --release and check the `niobe` binary against the 20 MB budget"
             );
             return ExitCode::FAILURE;

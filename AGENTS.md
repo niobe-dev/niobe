@@ -298,7 +298,8 @@ reviewers that encode both, for an agent working in this tree.
   `version.rs` is the workspace version: the eight places the root manifest writes it, and
   what the conventional-commit subjects since the last release tag call for (§8). `headers.rs`
   is the copyright header each file type carries (§5), `network.rs` the names the layering check
-  reads the tree for (§2.2), and `audit.rs` the sweep over whole-line comments for a section
+  reads the tree for (§2.2), and `formula.rs` writes the Homebrew formula from the SHA-256 files a release published, which the
+  release workflow commits to the tap, `audit.rs` the sweep over whole-line comments for a section
   banner, a reference to planning outside the repository or a `FIXME`, `HACK` or `XXX` (§4), each
   failing the gate.
 - **`install.sh`** — what users install niobe with: POSIX `sh`, picks the archive for the machine,
@@ -307,7 +308,8 @@ reviewers that encode both, for an agent working in this tree.
   it. `crates/niobe-cli/tests/install.rs` runs it against a release laid out on disk.
 - **`.github/workflows/release.yml`** — a tag `v<version>` builds macOS (arm64, x86_64) and static
   musl Linux (x86_64, arm64) binaries and publishes them, with their checksums and `install.sh`,
-  as a GitHub Release. The tag must equal the workspace version, and an annotated tag's own message
+  as a GitHub Release, then commits the Homebrew formula for it to the tap and fails red where it cannot.
+  The tag must equal the workspace version, and an annotated tag's own message
   is what the release page says, so the notes are written and reviewed in git rather than in a web
   form after the binaries are out. Run by hand it builds and publishes nothing.
 
