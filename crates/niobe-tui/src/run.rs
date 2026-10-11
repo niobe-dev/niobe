@@ -359,10 +359,9 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // An editor drew on the screen while it had the terminal, and a draw
             // sends only what changed since the last frame: a resize to the same
             // size forgets that frame, as after a stop.
-            if lent || owed_frame {
+            if whole_frame_owed(lent, &mut owed_frame) {
                 let area = terminal.size()?;
                 terminal.resize(area.into())?;
-                owed_frame = false;
             }
             terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -694,6 +693,13 @@ fn run_commands(app: &mut App, shell: &mut dyn Shell) {
     for id in app.take_stops() {
         shell.stop(&id);
     }
+}
+
+/// Whether the next draw must send the whole frame: a program ran on the
+/// terminal this pass (`lent`), or one ran in an earlier pass whose draw has
+/// not happened yet (`owed`). Clears what was owed, since this draw pays it.
+fn whole_frame_owed(lent: bool, owed: &mut bool) -> bool {
+    std::mem::take(owed) | lent
 }
 
 /// Hands where the operator asked for an image to `images`.
@@ -1322,6 +1328,22 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn a_program_that_ran_this_pass_or_an_earlier_one_owes_the_whole_frame_once() {
+        let mut owed = false;
+        assert!(!whole_frame_owed(false, &mut owed));
+        assert!(whole_frame_owed(true, &mut owed), "an editor ran this pass");
+        assert!(!owed);
+
+        let mut owed = true;
+        assert!(
+            whole_frame_owed(false, &mut owed),
+            "an editor ran last pass"
+        );
+        assert!(!owed, "the draw pays what was owed");
+        assert!(!whole_frame_owed(false, &mut owed));
     }
 
     #[test]

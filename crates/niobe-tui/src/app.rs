@@ -13245,6 +13245,27 @@ mod tests {
 
     /// A terminal that does not bracket pastes sends a pasted line break as
     /// Enter, in the same read as the text around it.
+    /// A second `!` right behind the one that opens the command line is a
+    /// key of its own: the line is empty, so it is pressed rather than
+    /// batched in as text, and a command line it leaves is a prompt holding
+    /// `!x`, as typing the keys one at a time makes it.
+    #[test]
+    fn a_second_bang_read_with_the_first_is_pressed_not_batched_into_the_command_line() {
+        let mut together = app().runs_commands();
+        read(&mut together, b"!!x", Instant::now());
+
+        let mut apart = app().runs_commands();
+        for c in ['!', '!', 'x'] {
+            read(&mut apart, c.to_string().as_bytes(), Instant::now());
+        }
+
+        assert_eq!(
+            (together.shell_mode(), together.composed()),
+            (apart.shell_mode(), apart.composed())
+        );
+        assert_eq!(together.composed(), "!x");
+    }
+
     #[test]
     fn an_enter_pasted_after_a_bang_runs_no_command() {
         let mut app = app().runs_commands();
@@ -13649,6 +13670,23 @@ mod tests {
                 text: "no, use rg".to_owned()
             }]
         );
+    }
+
+    /// Keys that arrive together are not an operator's deliberate Enter: a
+    /// burst read after the quiet has passed does not end the guard, so an
+    /// Enter inside it still sends nothing.
+    #[test]
+    fn a_burst_read_after_the_quiet_does_not_end_the_withdrawal_guard() {
+        let (mut app, pressed) =
+            written_through_a_withdrawal(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(app.take_produced(), []);
+
+        let burst = pressed + ASK_QUIET * 2;
+        read(&mut app, b"xy", burst);
+        read(&mut app, b"\r", burst + Duration::from_millis(150));
+
+        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
     }
 
     #[test]
@@ -15170,6 +15208,23 @@ mod tests {
 
         app.on_key(key(KeyCode::Down));
         assert_eq!(app.composed(), "brand new");
+    }
+
+    /// A walk begun from an empty composer set no draft aside: sending what
+    /// it showed gives back the draft an earlier edit left set aside, rather
+    /// than the empty one the walk began with.
+    #[test]
+    fn a_walk_begun_from_nothing_gives_back_the_draft_an_edit_left_set_aside() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        app.drafts
+            .push((app.walk_draft, "kept for later".to_owned()));
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "earlier");
+        app.on_key(key(KeyCode::Enter));
+        app.take_produced();
+
+        assert_eq!(app.composed(), "kept for later");
     }
 
     #[test]
