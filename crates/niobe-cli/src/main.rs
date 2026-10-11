@@ -34,6 +34,7 @@ mod rules;
 mod sessions;
 mod stdout;
 mod summary;
+mod themes;
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -65,6 +66,12 @@ use crate::journal::StoreJournal;
 use crate::rules::ConfigRules;
 
 fn main() -> ExitCode {
+    // Before the arguments: `--theme` may name one of the user's own.
+    themes::register(config::user_file(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+        "themes",
+    ));
     let parsed = args::utf8(std::env::args_os().skip(1)).and_then(|args| args::parse(&args));
     let result = match parsed {
         Ok(invocation) => run(invocation).and_then(|()| stdout::outcome()),
@@ -214,6 +221,9 @@ struct Asked {
 /// and got the usual one would read it as the file not being loaded. View ›
 /// Theme… changes it from here for the rest of the session.
 fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String> {
+    if let Some(problem) = themes::problem() {
+        return Err(problem.to_owned());
+    }
     if let Some(theme) = asked.theme {
         return Ok(theme);
     }
@@ -1372,6 +1382,27 @@ KEYS:
     menus and the help sheet draw the new key. Not gated on trust: a key is
     nothing a backend is started with. A repository's [keys] replace the
     user's whole.
+
+THEMES:
+    A theme of your own is a file in ~/.config/niobe/themes ($XDG_CONFIG_HOME
+    when that is set), named for the theme, and is offered by --theme, the
+    config key and the theme list beside the built-in ones:
+
+        base = \"cyber\"
+        [colors]
+        hot = \"#ff8800\"
+        fg = \"light-cyan\"
+        [borders]
+        border = \"rounded\"
+
+    Every colour left out is the base's. A colour in hex is drawn only on a
+    terminal that draws 24-bit colour; where it has the sixteen, the base's
+    sixteen-colour table is used with the colours spelled as names laid over
+    it. A colour or key that is not one, a pairing drawn on top of its own
+    colour and text under 3 to 1 against its background at 24 bits are each
+    refused at the file and line, and the shell does not open on the file.
+    Only your own config directory is looked in: a repository cannot change
+    how the shell is drawn.
 
 PROFILES:
     A profile is a backend plus the environment and arguments it runs with,

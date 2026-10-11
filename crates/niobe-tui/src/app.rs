@@ -3532,7 +3532,7 @@ impl App {
 
     /// Opens the list of themes, on the one in force.
     fn pick_theme(&mut self) {
-        let options: Vec<Choice> = crate::theme::THEMES
+        let options: Vec<Choice> = crate::theme::Theme::all()
             .iter()
             .map(|theme| Choice::plain(theme.name))
             .collect();

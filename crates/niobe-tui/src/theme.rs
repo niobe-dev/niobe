@@ -29,8 +29,15 @@
 //! frame is part of its look and the focused pane's line is the one mark of
 //! focus a monochrome terminal keeps.
 
+use std::sync::OnceLock;
+
 use ratatui::style::Color;
 use ratatui::widgets::BorderType;
+
+/// A colour of a theme, as a theme file's reader hands it on.
+pub type Colour = Color;
+/// A line a theme draws its panes in, as a theme file's reader hands it on.
+pub type Line = BorderType;
 
 /// How many colours the terminal can draw, which decides whether a designed
 /// theme is drawn in its own 24-bit values or in its sixteen-colour table.
@@ -708,7 +715,18 @@ impl Theme {
     pub fn by_name(name: &str) -> Option<Self> {
         THEMES
             .into_iter()
+            .chain(user_themes().iter().map(|user| user.sixteen))
             .find(|theme| theme.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Every theme the shell offers, the built-in ones first and then the
+    /// user's, each as its sixteen-colour table: the order the theme list and
+    /// the cycle go in.
+    pub fn all() -> Vec<Self> {
+        THEMES
+            .into_iter()
+            .chain(user_themes().iter().map(|user| user.sixteen))
+            .collect()
     }
 
     /// This theme drawn at `depth`: its design's own values on a terminal
@@ -720,6 +738,7 @@ impl Theme {
             Depth::Sixteen => sixteen,
             Depth::TrueColour => [NEO_TRUE, CYBER_TRUE, MODERN_TRUE]
                 .into_iter()
+                .chain(user_themes().iter().map(|user| user.deep))
                 .find(|deep| deep.name == sixteen.name)
                 .unwrap_or(sixteen),
         }
@@ -731,19 +750,20 @@ impl Theme {
     /// A theme is found in the cycle by its name, so a palette drawn at any
     /// depth moves to the theme after it.
     pub fn next(self) -> Self {
-        let at = THEMES.iter().position(|theme| theme.name == self.name);
+        let all = Self::all();
+        let at = all.iter().position(|theme| theme.name == self.name);
         // A theme that is not in the table can only come from a caller that
         // built one by hand; cycling from it starts the cycle rather than
         // failing, because there is nothing for the operator to do about it.
-        let next = at.map_or(0, |at| (at + 1) % THEMES.len());
-        THEMES.get(next).copied().unwrap_or(CYBER)
+        let next = at.map_or(0, |at| (at + 1) % all.len());
+        all.get(next).copied().unwrap_or(CYBER)
     }
 }
 
 /// The theme names as a config file and `--theme` spell them, in a sentence
 /// that lists them all, so an unknown name is reported with the known ones.
 pub fn listed() -> String {
-    let names: Vec<String> = THEMES
+    let names: Vec<String> = Theme::all()
         .iter()
         .map(|theme| format!("`{}`", theme.name.to_lowercase()))
         .collect();
@@ -751,6 +771,351 @@ pub fn listed() -> String {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
         None => String::new(),
+    }
+}
+
+impl Theme {
+    /// Every foreground the drawing code puts on a background, and the one
+    /// pairing that is not a foreground on a background: an F-key's label
+    /// block has to stand out from the bar it sits in. A pair of one colour
+    /// is a pair nothing can be read in, which is the whole way a palette
+    /// loses its readability in sixteen colours.
+    fn pairings(&self) -> Vec<(Color, Color, &'static str)> {
+        let t = self;
+        vec![
+            (t.fg, t.pane_bg, "body text"),
+            (t.dim, t.pane_bg, "secondary text"),
+            (t.frame, t.pane_bg, "a pane border"),
+            (t.frame_focus, t.pane_bg, "the focused pane's border"),
+            // The focused pane's title is inverted: the pane background
+            // on the title colour.
+            (t.pane_bg, t.title, "the focused pane's title"),
+            (t.title, t.pane_bg, "a pane title"),
+            (t.hot, t.pane_bg, "the accent"),
+            (t.warn, t.pane_bg, "a usage window running low"),
+            (t.add, t.pane_bg, "an added line"),
+            (t.del, t.pane_bg, "a removed line"),
+            (t.fg, t.diff_bg, "a diff's unchanged line"),
+            (t.dim, t.diff_bg, "a diff's line numbers"),
+            (t.add, t.add_bg, "a diff's added line"),
+            (t.del, t.del_bg, "a diff's removed line"),
+            (t.user, t.pane_bg, "the operator's own message"),
+            (t.agent, t.pane_bg, "an assistant message"),
+            (t.tool, t.pane_bg, "a tool call"),
+            (t.code, t.pane_bg, "code in a reply"),
+            (t.command, t.pane_bg, "a command named in a prompt"),
+            (t.menu_fg, t.menu_bg, "the menu bar"),
+            (t.hot, t.menu_bg, "a menu hot key"),
+            (t.pulldown_fg, t.menu_bg, "an open menu's item"),
+            (t.pulldown_frame, t.menu_bg, "an open menu's frame"),
+            (
+                t.pulldown_dim,
+                t.menu_bg,
+                "an open menu's item that can do nothing",
+            ),
+            (t.hot, t.menu_bg, "an open menu's hot key"),
+            (t.menu_cursor_bg, t.menu_bg, "an open menu's cursor row"),
+            (
+                t.menu_cursor_fg,
+                t.menu_cursor_bg,
+                "an open menu's cursor row's text",
+            ),
+            (t.keybar_fg, t.keybar_bg, "an F-key's number"),
+            (t.fkey_fg, t.fkey_bg, "an F-key label"),
+            (t.fkey_bg, t.keybar_bg, "an F-key label block"),
+            // The menu row carries the session's identity beside the
+            // menus, so what it says there is checked against the menu
+            // background as well.
+            (t.del, t.menu_bg, "an error count in the menu row"),
+            (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
+            (t.dialog_fg, t.dialog_bg, "dialog text"),
+            (t.dialog_frame, t.dialog_bg, "a dialog's border"),
+            (t.dialog_title, t.dialog_bg, "a dialog's title"),
+            (t.cursor_bg, t.dialog_bg, "a dialog's cursor row"),
+            (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
+            // A question's selected answer is drawn inverted, in the pane
+            // background on the title colour.
+            (t.pane_bg, t.title, "a question's selected answer"),
+            (t.shadow, t.dialog_bg, "a dialog's shadow"),
+            (t.shadow_fg, t.shadow, "what a dialog's shadow falls on"),
+        ]
+    }
+
+    /// The pairings a person reads text in, which have to be told apart by
+    /// more than being different colours at 24-bit.
+    fn legible_pairings(&self) -> Vec<(Color, Color, &'static str)> {
+        let t = self;
+        vec![
+            (t.fg, t.pane_bg, "body text"),
+            (t.dim, t.pane_bg, "secondary text"),
+            (t.title, t.pane_bg, "a pane title"),
+            (t.hot, t.pane_bg, "the accent"),
+            (t.warn, t.pane_bg, "a usage window running low"),
+            (t.add, t.pane_bg, "an added line"),
+            (t.del, t.pane_bg, "a removed line"),
+            (t.user, t.pane_bg, "the operator's own message"),
+            (t.agent, t.pane_bg, "an assistant message"),
+            (t.tool, t.pane_bg, "a tool call"),
+            (t.code, t.pane_bg, "code in a reply"),
+            (t.command, t.pane_bg, "a command named in a prompt"),
+            (t.fg, t.diff_bg, "a diff's unchanged line"),
+            (t.add, t.add_bg, "a diff's added line"),
+            (t.del, t.del_bg, "a diff's removed line"),
+            (t.menu_fg, t.menu_bg, "the menu bar"),
+            (t.hot, t.menu_bg, "a menu hot key"),
+            (t.fkey_fg, t.fkey_bg, "an F-key label"),
+            (t.keybar_fg, t.keybar_bg, "an F-key's number"),
+            (t.pulldown_fg, t.menu_bg, "an open menu's item"),
+            (
+                t.menu_cursor_fg,
+                t.menu_cursor_bg,
+                "an open menu's cursor row's text",
+            ),
+            (t.dialog_fg, t.dialog_bg, "dialog text"),
+            (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
+        ]
+    }
+
+    /// What this theme draws on top of its own colour, by what it is: empty
+    /// for a palette that can be read.
+    pub fn invisible(&self) -> Vec<&'static str> {
+        self.pairings()
+            .into_iter()
+            .filter(|(on, over, _)| on == over)
+            .map(|(_, _, what)| what)
+            .collect()
+    }
+
+    /// What this theme draws at less than 3 to 1 against its background, by
+    /// what it is and the ratio, where both are 24-bit colours: WCAG's bar for
+    /// large text. A palette of the sixteen names is not measured, since their
+    /// values are the user's scheme's.
+    pub fn illegible(&self) -> Vec<(&'static str, f64)> {
+        self.legible_pairings()
+            .into_iter()
+            .filter_map(|(on, over, what)| {
+                let ratio = contrast(on, over)?;
+                (ratio < 3.0).then_some((what, ratio))
+            })
+            .collect()
+    }
+}
+
+/// WCAG's contrast ratio of two 24-bit colours, and `None` where either is
+/// not one.
+fn contrast(a: Color, b: Color) -> Option<f64> {
+    let luminance = |colour: Color| {
+        let Color::Rgb(r, g, b) = colour else {
+            return None;
+        };
+        let channel = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.039_28 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
+    };
+    let (a, b) = (luminance(a)?, luminance(b)?);
+    let (light, dark) = if a > b { (a, b) } else { (b, a) };
+    Some((light + 0.05) / (dark + 0.05))
+}
+
+/// A theme a user wrote, at both depths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserTheme {
+    /// What a terminal that draws the sixteen names gets: the base's table
+    /// with the colours the file spelled as names.
+    pub sixteen: Theme,
+    /// What a terminal that draws 24-bit colour gets: the base's, with every
+    /// colour the file set.
+    pub deep: Theme,
+}
+
+static USER: OnceLock<Vec<UserTheme>> = OnceLock::new();
+
+/// The themes the user wrote, as [`register_user`] was given them: none until
+/// it is called, and the same for the rest of the process.
+pub fn user_themes() -> &'static [UserTheme] {
+    USER.get().map_or(&[], Vec::as_slice)
+}
+
+/// Makes `themes` offered alongside the built-in ones, by name, in the theme
+/// list, the cycle, `--theme` and the config key. Done once, before anything
+/// is drawn; a second call changes nothing and says so.
+///
+/// A name is the caller's to keep apart from the built-in ones: a theme named
+/// like one of them would be found second and never chosen.
+pub fn register_user(themes: Vec<UserTheme>) -> bool {
+    USER.set(themes).is_ok()
+}
+
+impl Theme {
+    /// The colours a theme file may set, by the key it spells them with.
+    pub const COLOUR_KEYS: [&'static str; 37] = [
+        "pane_bg",
+        "frame",
+        "frame_focus",
+        "title",
+        "fg",
+        "dim",
+        "hot",
+        "warn",
+        "menu_bg",
+        "menu_fg",
+        "pulldown_fg",
+        "pulldown_frame",
+        "pulldown_dim",
+        "menu_cursor_bg",
+        "menu_cursor_fg",
+        "keybar_bg",
+        "keybar_fg",
+        "fkey_bg",
+        "fkey_fg",
+        "add",
+        "del",
+        "diff_bg",
+        "add_bg",
+        "del_bg",
+        "user",
+        "agent",
+        "tool",
+        "code",
+        "command",
+        "dialog_bg",
+        "dialog_fg",
+        "dialog_frame",
+        "dialog_title",
+        "cursor_bg",
+        "cursor_fg",
+        "shadow",
+        "shadow_fg",
+    ];
+
+    /// The lines a theme file may set, by the key it spells them with.
+    pub const BORDER_KEYS: [&'static str; 3] = ["border", "border_focus", "menu_border"];
+
+    /// This theme with the colour `key` set to `colour`, or `None` where no
+    /// colour is called that.
+    #[must_use]
+    pub fn with_colour(mut self, key: &str, colour: Color) -> Option<Self> {
+        let slot = match key {
+            "pane_bg" => &mut self.pane_bg,
+            "frame" => &mut self.frame,
+            "frame_focus" => &mut self.frame_focus,
+            "title" => &mut self.title,
+            "fg" => &mut self.fg,
+            "dim" => &mut self.dim,
+            "hot" => &mut self.hot,
+            "warn" => &mut self.warn,
+            "menu_bg" => &mut self.menu_bg,
+            "menu_fg" => &mut self.menu_fg,
+            "pulldown_fg" => &mut self.pulldown_fg,
+            "pulldown_frame" => &mut self.pulldown_frame,
+            "pulldown_dim" => &mut self.pulldown_dim,
+            "menu_cursor_bg" => &mut self.menu_cursor_bg,
+            "menu_cursor_fg" => &mut self.menu_cursor_fg,
+            "keybar_bg" => &mut self.keybar_bg,
+            "keybar_fg" => &mut self.keybar_fg,
+            "fkey_bg" => &mut self.fkey_bg,
+            "fkey_fg" => &mut self.fkey_fg,
+            "add" => &mut self.add,
+            "del" => &mut self.del,
+            "diff_bg" => &mut self.diff_bg,
+            "add_bg" => &mut self.add_bg,
+            "del_bg" => &mut self.del_bg,
+            "user" => &mut self.user,
+            "agent" => &mut self.agent,
+            "tool" => &mut self.tool,
+            "code" => &mut self.code,
+            "command" => &mut self.command,
+            "dialog_bg" => &mut self.dialog_bg,
+            "dialog_fg" => &mut self.dialog_fg,
+            "dialog_frame" => &mut self.dialog_frame,
+            "dialog_title" => &mut self.dialog_title,
+            "cursor_bg" => &mut self.cursor_bg,
+            "cursor_fg" => &mut self.cursor_fg,
+            "shadow" => &mut self.shadow,
+            "shadow_fg" => &mut self.shadow_fg,
+            _ => return None,
+        };
+        *slot = colour;
+        Some(self)
+    }
+
+    /// This theme with the line `key` set to `line`, or `None` where no line
+    /// is called that.
+    #[must_use]
+    pub fn with_border(mut self, key: &str, line: BorderType) -> Option<Self> {
+        match key {
+            "border" => self.border = line,
+            "border_focus" => self.border_focus = line,
+            "menu_border" => self.menu_border = line,
+            _ => return None,
+        }
+        Some(self)
+    }
+
+    /// This theme under another name, which is how the menu bar and the theme
+    /// list call it.
+    #[must_use]
+    pub fn named(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// The design's own 24-bit table of this built-in theme, where it has
+    /// one; its sixteen-colour table otherwise.
+    pub fn deep(self) -> Self {
+        self.at(Depth::TrueColour)
+    }
+}
+
+/// The colour a theme file spells as `text`: `#rrggbb`, or one of the sixteen
+/// names — `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
+/// `white`, `gray`, `dark-gray` and `light-` before the first six — and
+/// whether it is a 24-bit one, which a terminal of sixteen cannot draw.
+pub fn parse_colour(text: &str) -> Option<(Color, bool)> {
+    let text = text.trim().to_ascii_lowercase();
+    if let Some(hex) = text.strip_prefix('#') {
+        if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let channel = |at: usize| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok();
+        return Some((Color::Rgb(channel(0)?, channel(2)?, channel(4)?), true));
+    }
+    let named = match text.as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" => Color::White,
+        "gray" | "grey" => Color::Gray,
+        "dark-gray" | "dark-grey" => Color::DarkGray,
+        "light-red" => Color::LightRed,
+        "light-green" => Color::LightGreen,
+        "light-yellow" => Color::LightYellow,
+        "light-blue" => Color::LightBlue,
+        "light-magenta" => Color::LightMagenta,
+        "light-cyan" => Color::LightCyan,
+        _ => return None,
+    };
+    Some((named, false))
+}
+
+/// The line a theme file spells as `text`.
+pub fn parse_border(text: &str) -> Option<BorderType> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "plain" => Some(BorderType::Plain),
+        "rounded" => Some(BorderType::Rounded),
+        "double" => Some(BorderType::Double),
+        "thick" => Some(BorderType::Thick),
+        _ => None,
     }
 }
 
@@ -839,65 +1204,12 @@ mod tests {
     #[test]
     fn nothing_any_theme_draws_is_drawn_on_top_of_its_own_colour() {
         for t in every_palette() {
-            for (on, over, what) in [
-                (t.fg, t.pane_bg, "body text"),
-                (t.dim, t.pane_bg, "secondary text"),
-                (t.frame, t.pane_bg, "a pane border"),
-                (t.frame_focus, t.pane_bg, "the focused pane's border"),
-                // The focused pane's title is inverted: the pane background
-                // on the title colour.
-                (t.pane_bg, t.title, "the focused pane's title"),
-                (t.title, t.pane_bg, "a pane title"),
-                (t.hot, t.pane_bg, "the accent"),
-                (t.warn, t.pane_bg, "a usage window running low"),
-                (t.add, t.pane_bg, "an added line"),
-                (t.del, t.pane_bg, "a removed line"),
-                (t.fg, t.diff_bg, "a diff's unchanged line"),
-                (t.dim, t.diff_bg, "a diff's line numbers"),
-                (t.add, t.add_bg, "a diff's added line"),
-                (t.del, t.del_bg, "a diff's removed line"),
-                (t.user, t.pane_bg, "the operator's own message"),
-                (t.agent, t.pane_bg, "an assistant message"),
-                (t.tool, t.pane_bg, "a tool call"),
-                (t.code, t.pane_bg, "code in a reply"),
-                (t.command, t.pane_bg, "a command named in a prompt"),
-                (t.menu_fg, t.menu_bg, "the menu bar"),
-                (t.hot, t.menu_bg, "a menu hot key"),
-                (t.pulldown_fg, t.menu_bg, "an open menu's item"),
-                (t.pulldown_frame, t.menu_bg, "an open menu's frame"),
-                (
-                    t.pulldown_dim,
-                    t.menu_bg,
-                    "an open menu's item that can do nothing",
-                ),
-                (t.hot, t.menu_bg, "an open menu's hot key"),
-                (t.menu_cursor_bg, t.menu_bg, "an open menu's cursor row"),
-                (
-                    t.menu_cursor_fg,
-                    t.menu_cursor_bg,
-                    "an open menu's cursor row's text",
-                ),
-                (t.keybar_fg, t.keybar_bg, "an F-key's number"),
-                (t.fkey_fg, t.fkey_bg, "an F-key label"),
-                (t.fkey_bg, t.keybar_bg, "an F-key label block"),
-                // The menu row carries the session's identity beside the
-                // menus, so what it says there is checked against the menu
-                // background as well.
-                (t.del, t.menu_bg, "an error count in the menu row"),
-                (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
-                (t.dialog_fg, t.dialog_bg, "dialog text"),
-                (t.dialog_frame, t.dialog_bg, "a dialog's border"),
-                (t.dialog_title, t.dialog_bg, "a dialog's title"),
-                (t.cursor_bg, t.dialog_bg, "a dialog's cursor row"),
-                (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
-                // A question's selected answer is drawn inverted, in the pane
-                // background on the title colour.
-                (t.pane_bg, t.title, "a question's selected answer"),
-                (t.shadow, t.dialog_bg, "a dialog's shadow"),
-                (t.shadow_fg, t.shadow, "what a dialog's shadow falls on"),
-            ] {
-                assert_ne!(on, over, "{}: {what} is invisible", t.name);
-            }
+            assert!(
+                t.invisible().is_empty(),
+                "{}: {:?} is invisible",
+                t.name,
+                t.invisible()
+            );
         }
     }
 
@@ -1104,63 +1416,13 @@ mod tests {
     fn every_truecolor_palette_draws_its_text_legibly() {
         for theme in [CYBER, NEO, MODERN] {
             let t = theme.at(Depth::TrueColour);
-            for (on, over, what) in [
-                (t.fg, t.pane_bg, "body text"),
-                (t.dim, t.pane_bg, "secondary text"),
-                (t.title, t.pane_bg, "a pane title"),
-                (t.hot, t.pane_bg, "the accent"),
-                (t.warn, t.pane_bg, "a usage window running low"),
-                (t.add, t.pane_bg, "an added line"),
-                (t.del, t.pane_bg, "a removed line"),
-                (t.user, t.pane_bg, "the operator's own message"),
-                (t.agent, t.pane_bg, "an assistant message"),
-                (t.tool, t.pane_bg, "a tool call"),
-                (t.code, t.pane_bg, "code in a reply"),
-                (t.command, t.pane_bg, "a command named in a prompt"),
-                (t.fg, t.diff_bg, "a diff's unchanged line"),
-                (t.add, t.add_bg, "a diff's added line"),
-                (t.del, t.del_bg, "a diff's removed line"),
-                (t.menu_fg, t.menu_bg, "the menu bar"),
-                (t.hot, t.menu_bg, "a menu hot key"),
-                (t.fkey_fg, t.fkey_bg, "an F-key label"),
-                (t.keybar_fg, t.keybar_bg, "an F-key's number"),
-                (t.pulldown_fg, t.menu_bg, "an open menu's item"),
-                (
-                    t.menu_cursor_fg,
-                    t.menu_cursor_bg,
-                    "an open menu's cursor row's text",
-                ),
-                (t.dialog_fg, t.dialog_bg, "dialog text"),
-                (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
-            ] {
-                let ratio = contrast(on, over);
-                assert!(
-                    ratio >= 3.0,
-                    "{}: {what} is {ratio:.2} to 1 against its background",
-                    t.name
-                );
-            }
+            assert!(
+                t.illegible().is_empty(),
+                "{}: {:?} is under 3 to 1 against its background",
+                t.name,
+                t.illegible()
+            );
         }
-    }
-
-    /// WCAG's contrast ratio of two 24-bit colours.
-    fn contrast(a: Color, b: Color) -> f64 {
-        let luminance = |colour: Color| {
-            let Color::Rgb(r, g, b) = colour else {
-                panic!("{colour:?} is not a 24-bit colour");
-            };
-            let channel = |c: u8| {
-                let c = f64::from(c) / 255.0;
-                if c <= 0.039_28 {
-                    c / 12.92
-                } else {
-                    ((c + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
-        };
-        let (a, b) = (luminance(a), luminance(b));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
     /// The pairs the panes tell apart by colour as well as by a mark. The

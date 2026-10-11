@@ -1162,6 +1162,58 @@ fn the_help_says_how_a_key_is_rebound() {
     assert!(out.contains("mcp = \"ctrl+l\""), "{out}");
 }
 
+/// A user config directory holding the theme file `text`, as `midnight`.
+fn with_a_theme(text: &str) -> Configured {
+    let setup = Configured::new("", "");
+    let dir = setup.user.path().join("niobe").join("themes");
+    std::fs::create_dir_all(&dir).expect("a themes directory");
+    std::fs::write(dir.join("midnight.toml"), text).expect("the theme is written");
+    setup
+}
+
+#[test]
+fn a_users_theme_is_a_name_the_theme_flag_takes_and_the_list_offers() {
+    let setup = with_a_theme("base = \"neo\"\n[colors]\nhot = \"#ff8800\"\n");
+
+    let log = fixture_path();
+    let log = log.to_str().expect("the fixture's path is text");
+    let taken = setup.run(&["--theme", "midnight", "replay", log]);
+    assert!(taken.status.success(), "{}", stderr(&taken));
+
+    let refused = setup.run(&["--theme", "matrix", "replay", log]);
+    assert!(!refused.status.success());
+    let said = stderr(&refused);
+    assert!(
+        said.contains("`midnight`"),
+        "the list names the user's theme: {said}"
+    );
+    assert!(said.contains("`cyber`"), "{said}");
+}
+
+#[test]
+fn a_theme_file_that_is_not_a_theme_stops_a_session_at_its_key_and_line() {
+    let setup = with_a_theme("[colors]\nfg = \"white\"\nhot = \"orange\"\n");
+    let theme_file = setup
+        .user
+        .path()
+        .join("niobe")
+        .join("themes")
+        .join("midnight.toml");
+
+    let output = niobe_with_user_config(
+        setup.repo.path(),
+        setup.user.path(),
+        &["--theme", "cyber", "--resume", "999"],
+    );
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(
+        said.contains(&format!("{}:3: colors.hot: ", theme_file.display())),
+        "{said}"
+    );
+}
+
 #[test]
 fn commands_that_run_no_session_do_not_read_the_config() {
     let setup = Configured::new("this is not toml", "");

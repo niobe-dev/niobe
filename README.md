@@ -55,6 +55,10 @@ A terminal that eats an F-key can give the bar's action another one: `[keys]` wi
 `mcp = "ctrl+l"` in the config, and the bar, the menus and the help draw the new key.
 `niobe --help` lists the actions and the keys that can be bound.
 
+A theme of your own is a TOML file in `~/.config/niobe/themes`: a `base` theme and the colours to
+change, in hex or the sixteen names. `niobe --help` has the format; one that cannot be read is
+refused at its line.
+
 A repository can commit its own `.niobe/config.toml`. What it may put in front of a backend —
 an environment, arguments, a settings file, a login command, permission rules — stays out of
 force until you have read it with `niobe trust` and agreed.
