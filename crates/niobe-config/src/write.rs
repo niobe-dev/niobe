@@ -149,7 +149,7 @@ fn splice(text: &str, path: &Path, rule: &str) -> Result<String, ConfigError> {
 
     let (items, span) = allow_array(key.span(), value, text, path)?;
     let last_end = items.last().map(|item| item.span().end);
-    Ok(splice_into_array(text, rule, span, last_end))
+    splice_into_array(text, path, rule, span, last_end)
 }
 
 /// Appends a new `[permissions]` table and `allow` array to a file that lacks one.
@@ -198,50 +198,87 @@ fn allow_array<'t, 'i>(
     Ok((items, allow.span()))
 }
 
+/// Safely extracts a string slice from `text` if `start` and `end` are within bounds and on UTF-8 char boundaries.
+fn safe_slice(text: &str, start: usize, end: usize) -> Option<&str> {
+    if start <= end
+        && end <= text.len()
+        && text.is_char_boundary(start)
+        && text.is_char_boundary(end)
+    {
+        Some(&text[start..end])
+    } else {
+        None
+    }
+}
+
 /// Splices `rule` into the array at `span`, preserving formatting and comments.
 fn splice_into_array(
     text: &str,
+    path: &Path,
     rule: &str,
     span: Range<usize>,
     last_end: Option<usize>,
-) -> String {
+) -> Result<String, ConfigError> {
+    let invalid = || {
+        unwritable(
+            path,
+            line(text, span.start),
+            "has an array that cannot be edited",
+        )
+    };
+
     let close = span.end.saturating_sub(1);
-    let open_a_line = text[span.start..close].contains('\n')
-        && text[..close]
+    if span.start > close || close > text.len() {
+        return Err(invalid());
+    }
+
+    let within_span = safe_slice(text, span.start, close).ok_or_else(invalid)?;
+    let before_close = safe_slice(text, 0, close).ok_or_else(invalid)?;
+
+    let open_a_line = within_span.contains('\n')
+        && before_close
             .rfind('\n')
-            .is_some_and(|at| text[at + 1..close].trim().is_empty());
+            .is_some_and(|at| safe_slice(text, at + 1, close).is_some_and(|s| s.trim().is_empty()));
 
     let mut written = String::with_capacity(text.len() + rule.len() + INDENT.len() + 4);
     let mut from = 0;
+
     // The element before the new one needs its comma, where it has none.
-    if let Some(end) = last_end
-        && !comma_after(&text[end..close])
-    {
-        written.push_str(&text[..end]);
-        written.push(',');
-        from = end;
+    if let Some(end) = last_end {
+        let between = safe_slice(text, end, close).ok_or_else(invalid)?;
+        if !comma_after(between) {
+            let prefix = safe_slice(text, 0, end).ok_or_else(invalid)?;
+            written.push_str(prefix);
+            written.push(',');
+            from = end;
+        }
     }
+
     match open_a_line {
         // One to a line: the rule goes on a line of its own, above the one
         // the bracket closes on and below whatever comment ends the array.
         true => {
-            let at = text[..close].rfind('\n').map_or(close, |at| at + 1);
-            written.push_str(&text[from..at]);
+            let at = before_close.rfind('\n').map_or(close, |at| at + 1);
+            let head = safe_slice(text, from, at).ok_or_else(invalid)?;
+            let tail = safe_slice(text, at, text.len()).ok_or_else(invalid)?;
+            written.push_str(head);
             written.push_str(INDENT);
             written.push_str(&quoted(rule));
             written.push_str(",\n");
-            written.push_str(&text[at..]);
+            written.push_str(tail);
         }
         false => {
-            written.push_str(&text[from..close]);
+            let head = safe_slice(text, from, close).ok_or_else(invalid)?;
+            let tail = safe_slice(text, close, text.len()).ok_or_else(invalid)?;
+            written.push_str(head);
             if last_end.is_some() {
                 written.push(' ');
             }
             written.push_str(&quoted(rule));
-            written.push_str(&text[close..]);
+            written.push_str(tail);
         }
     }
-    written
+    Ok(written)
 }
 
 /// Whether `between`, the text from the end of an array's last element to its
@@ -617,5 +654,20 @@ allow = [
                 "round {round} lost a rule: {rules:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_multibyte_utf8_comment_before_array_closing_bracket_does_not_panic() {
+        let before = "[permissions]\nallow = [\n  \"Bash\" # 🦀 crab\n]\n";
+        let written = spliced(before, "Read").expect("spliced without panic");
+        assert!(written.contains("\"Read\""));
+    }
+
+    #[test]
+    fn an_empty_or_invalid_array_span_does_not_panic_splice_into_array() {
+        let text = "[permissions]\nallow = []";
+        // span 10..10 -> close = 9, so span.start (10) > close (9)
+        let res = splice_into_array(text, &path(), "Read", 10..10, None);
+        assert!(res.is_err(), "returns typed error instead of panicking");
     }
 }
