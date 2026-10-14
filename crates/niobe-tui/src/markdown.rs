@@ -661,6 +661,11 @@ fn fit_columns(natural: &[usize], room: usize) -> Option<Vec<usize>> {
     }
 }
 
+// Optimization: `words` borrows `&str` slices instead of allocating owned `String`s
+// for every word fragment. `push_span` merges adjacent text fragments sharing the
+// exact same `Style` into single `Span`s when building lines, eliminating allocation
+// churn and dramatically reducing span count per frame during steady TUI redraws.
+
 /// Wraps styled runs to `width` cells, breaking between words and inside a
 /// word only where it is wider than the line. A word can span runs — a code
 /// span with a possessive after it — and stays whole across them.
@@ -684,19 +689,18 @@ fn wrap_runs(runs: &[Run], width: usize) -> Vec<Vec<Span<'static>>> {
                     used = 0;
                 }
                 used += piece_width;
-                line.extend(piece);
+                push_spans(&mut line, piece);
             }
             continue;
         }
         if used > 0 {
-            line.push(Span::styled(" ", space_style));
+            push_span(&mut line, " ", space_style);
             used += 1;
         }
         used += word_width;
-        line.extend(
-            word.into_iter()
-                .map(|(text, style)| Span::styled(text, style)),
-        );
+        for (text, style) in word {
+            push_span(&mut line, text, style);
+        }
     }
     if !line.is_empty() {
         lines.push(line);
@@ -704,19 +708,43 @@ fn wrap_runs(runs: &[Run], width: usize) -> Vec<Vec<Span<'static>>> {
     lines
 }
 
+/// Appends text to `line`, merging with the preceding span if it shares `style`.
+fn push_span(line: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if text.is_empty() {
+        return;
+    }
+    match line.last_mut() {
+        Some(last) if last.style == style => last.content.to_mut().push_str(text),
+        _ => line.push(Span::styled(text.to_owned(), style)),
+    }
+}
+
+/// Appends `pieces` to `line`, merging adjacent spans that share the same style.
+fn push_spans(line: &mut Vec<Span<'static>>, pieces: Vec<Span<'static>>) {
+    for span in pieces {
+        if span.content.is_empty() {
+            continue;
+        }
+        match line.last_mut() {
+            Some(last) if last.style == span.style => last.content.to_mut().push_str(&span.content),
+            _ => line.push(span),
+        }
+    }
+}
+
 /// The runs cut into words, each a list of styled fragments, with the style
 /// of the space before it, so an underlined link keeps its underline across
 /// the spaces inside it.
-fn words(runs: &[Run]) -> Vec<(Vec<Run>, Style)> {
-    let mut words: Vec<(Vec<Run>, Style)> = Vec::new();
-    let mut word: Vec<Run> = Vec::new();
+fn words<'a>(runs: &'a [Run]) -> Vec<(Vec<(&'a str, Style)>, Style)> {
+    let mut words: Vec<(Vec<(&'a str, Style)>, Style)> = Vec::new();
+    let mut word: Vec<(&'a str, Style)> = Vec::new();
     let mut space = Style::default();
     for (text, style) in runs {
         let mut start_idx = 0;
         for (idx, c) in text.char_indices() {
             if c.is_whitespace() {
                 if idx > start_idx {
-                    word.push((text[start_idx..idx].to_owned(), *style));
+                    word.push((&text[start_idx..idx], *style));
                 }
                 if !word.is_empty() {
                     words.push((std::mem::take(&mut word), space));
@@ -726,7 +754,7 @@ fn words(runs: &[Run]) -> Vec<(Vec<Run>, Style)> {
             }
         }
         if start_idx < text.len() {
-            word.push((text[start_idx..].to_owned(), *style));
+            word.push((&text[start_idx..], *style));
         }
     }
     if !word.is_empty() {
@@ -736,7 +764,7 @@ fn words(runs: &[Run]) -> Vec<(Vec<Run>, Style)> {
 }
 
 /// A word wider than the line, cut into line-wide pieces with their styles.
-fn split_word(word: &[Run], width: usize) -> Vec<(Vec<Span<'static>>, usize)> {
+fn split_word(word: &[(&str, Style)], width: usize) -> Vec<(Vec<Span<'static>>, usize)> {
     let mut pieces = Vec::new();
     let mut piece: Vec<Span<'static>> = Vec::new();
     let mut used = 0;
@@ -779,7 +807,7 @@ mod tests {
         lines
             .iter()
             .flat_map(|line| &line.spans)
-            .find(|span| span.content == content)
+            .find(|span| span.content.contains(content))
             .unwrap_or_else(|| panic!("no span {content:?} in {lines:?}"))
     }
 
