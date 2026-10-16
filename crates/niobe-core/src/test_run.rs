@@ -1817,6 +1817,61 @@ error: doctest failed, to rerun pass `--doc`
     }
 
     #[test]
+    fn a_malformed_failed_tests_json_is_rejected_by_one_or_many_deserializer() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct Envelope {
+            #[serde(deserialize_with = "one_or_many")]
+            failures: Vec<FailedTests>,
+        }
+
+        assert!(serde_json::from_str::<Envelope>(r#"{"failures": 12345}"#).is_err());
+        assert!(serde_json::from_str::<Envelope>(r#"{"failures": false}"#).is_err());
+    }
+
+    #[test]
+    fn a_test_run_with_multiple_wrapper_commands_and_env_vars_is_recognised() {
+        assert!(is_test_run(
+            "env RUST_LOG=info CARGO_TERM_COLOR=always timeout 10s sudo cargo test"
+        ));
+    }
+
+    #[test]
+    fn a_failed_test_run_with_missing_exit_code_is_not_treated_as_failed() {
+        assert!(!failed("cargo test", FAILED, None));
+    }
+
+    #[test]
+    fn a_summary_with_overflowing_test_counts_returns_none() {
+        let overflow = "test result: ok. 18446744073709551616 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s";
+        assert_eq!(Summary::of(overflow), None);
+    }
+
+    #[test]
+    fn a_failing_test_run_with_ansi_color_codes_around_test_failures_extracts_failed_tests() {
+        let coloured_failures = FAILED
+            .replace("FAILED", "\x1b[1m\x1b[91mFAILED\x1b[0m")
+            .replace("failures:", "\x1b[1mfailures:\x1b[0m")
+            .replace(
+                "error: test failed",
+                "\x1b[1m\x1b[91merror\x1b[0m: test failed",
+            );
+
+        let extracted = failures(&coloured_failures);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].binary, "--lib");
+        assert_eq!(extracted[0].tests, vec!["tests::wrong"]);
+    }
+
+    #[test]
+    fn a_cargo_test_command_with_mixed_quotes_and_escaped_separators_is_recognised_as_a_test_run() {
+        assert!(is_test_run("echo 'a;b' && cargo test"));
+        assert!(is_test_run("echo \"foo; bar\" ; cargo test"));
+        assert!(!is_test_run("echo hello\\; cargo test"));
+        assert!(!is_test_run("git commit -m \"fix; cargo test passes\""));
+        assert!(!is_test_run("echo \"cargo test; echo hi\""));
+    }
+
+    #[test]
     fn test_counts_failing_returns_true_only_when_failed_count_is_positive() {
         let clean = TestCounts {
             passed: 10,
