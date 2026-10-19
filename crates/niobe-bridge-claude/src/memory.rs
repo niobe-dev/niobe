@@ -290,13 +290,14 @@ fn entries(index: &str) -> Vec<(String, Option<String>)> {
         .lines()
         .filter_map(|line| {
             let open = line.find("](")?;
-            let rest = &line[open + 2..];
+            let rest = line.get(open.checked_add(2)?..)?;
             let close = rest.find(')')?;
-            let target = rest[..close].trim();
+            let target = rest.get(..close)?.trim();
             if target.is_empty() || target.contains("://") {
                 return None;
             }
-            let note = rest[close + 1..]
+            let note = rest
+                .get(close.checked_add(1)?..)?
                 .trim()
                 .trim_start_matches(['—', '–', '-', ':'])
                 .trim();
@@ -427,6 +428,20 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["CLAUDE.md", "a.md", "b.md"]);
+    }
+
+    #[test]
+    fn entries_parsing_handles_malformed_and_multibyte_utf8_safely() {
+        assert_eq!(
+            entries("- [Title](file.md) — note"),
+            vec![("file.md".to_owned(), Some("note".to_owned()))]
+        );
+        assert_eq!(entries("- [Bad]("), vec![]);
+        assert_eq!(entries("- [Bad](http://external.com)"), vec![]);
+        assert_eq!(
+            entries("🦀 [Emoji](🦀.md) — 🎉 note"),
+            vec![("🦀.md".to_owned(), Some("🎉 note".to_owned()))]
+        );
     }
 
     #[test]
