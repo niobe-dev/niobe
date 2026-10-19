@@ -567,26 +567,7 @@ impl<'t> Renderer<'t> {
                     .and_then(|lines| lines.get(at))
                     .cloned()
                     .unwrap_or_default();
-                let used: usize = cell.iter().map(|span| text::width(&span.content)).sum();
-                let pad = " ".repeat(width.saturating_sub(used));
-                let right = matches!(alignments.get(column), Some(Alignment::Right));
-                let centre = matches!(alignments.get(column), Some(Alignment::Center));
-                match (right, centre) {
-                    (true, _) => {
-                        spans.push(Span::raw(pad));
-                        spans.extend(cell);
-                    }
-                    (false, true) => {
-                        let (left, right) = pad.split_at(pad.len() / 2);
-                        spans.push(Span::raw(left.to_owned()));
-                        spans.extend(cell);
-                        spans.push(Span::raw(right.to_owned()));
-                    }
-                    (false, false) => {
-                        spans.extend(cell);
-                        spans.push(Span::raw(pad));
-                    }
-                }
+                spans.extend(format_cell(cell, *width, alignments.get(column)));
             }
             // Trailing padding would only be spaces at the pane's edge.
             if let Some(last) = spans.last()
@@ -612,6 +593,34 @@ impl<'t> Renderer<'t> {
         }
         self.lines
     }
+}
+
+/// Formats a single table cell's spans according to column width and alignment.
+fn format_cell(
+    cell: Vec<Span<'static>>,
+    width: usize,
+    alignment: Option<&Alignment>,
+) -> Vec<Span<'static>> {
+    let used: usize = cell.iter().map(|span| text::width(&span.content)).sum();
+    let pad = " ".repeat(width.saturating_sub(used));
+    let mut spans = Vec::new();
+    match alignment {
+        Some(Alignment::Right) => {
+            spans.push(Span::raw(pad));
+            spans.extend(cell);
+        }
+        Some(Alignment::Center) => {
+            let (left, right) = pad.split_at(pad.len() / 2);
+            spans.push(Span::raw(left.to_owned()));
+            spans.extend(cell);
+            spans.push(Span::raw(right.to_owned()));
+        }
+        Some(Alignment::Left | Alignment::None) | None => {
+            spans.extend(cell);
+            spans.push(Span::raw(pad));
+        }
+    }
+    spans
 }
 
 /// Column widths that fit `room`: every column its natural width if they all
