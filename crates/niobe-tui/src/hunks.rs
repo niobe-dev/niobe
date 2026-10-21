@@ -182,11 +182,11 @@ fn digits(number: u64) -> usize {
 /// file is always one row and one number.
 fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> Line<'static> {
     let Row::Line(number, line) = row else {
-        let gutter = " ".repeat(number_width + 1);
+        let gutter = text::pad("", number_width + 1);
         return Line::from(vec![
             Span::styled(gutter, Style::new().bg(theme.diff_bg)),
             Span::styled(
-                pad("…", width.saturating_sub(number_width + 1)),
+                text::pad("…", width.saturating_sub(number_width + 1)),
                 Style::new().fg(theme.dim).bg(theme.diff_bg),
             ),
         ]);
@@ -198,6 +198,8 @@ fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> L
     };
     let room = width.saturating_sub(number_width + 3);
     let shown = text::truncate(&text::expand_tabs(line.text()), room);
+    // Optimization: Use `text::pad` instead of private `pad` (`" ".repeat` + `format!`)
+    // to eliminate duplicate heap allocations on every diff line drawn.
     Line::from(vec![
         Span::styled(
             format!("{number:>number_width$} "),
@@ -205,7 +207,7 @@ fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> L
         ),
         Span::styled(sign, Style::new().fg(number_colour).bg(bg).bold()),
         Span::styled(" ", Style::new().bg(bg)),
-        Span::styled(pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
+        Span::styled(text::pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
     ])
     .style(Style::new().bg(bg))
 }
@@ -233,7 +235,7 @@ fn marker(beyond: usize, open: bool, width: usize, theme: &Theme) -> Line<'stati
         false => text::truncate(&said, width),
     };
     Line::from(Span::styled(
-        pad(&said, width),
+        text::pad(&said, width),
         Style::new().fg(theme.dim).bg(theme.diff_bg),
     ))
 }
@@ -254,12 +256,6 @@ fn footer(gate: Gate, width: usize, theme: &Theme) -> Line<'static> {
             Style::new().fg(theme.dim),
         ),
     ])
-}
-
-/// `text` padded with spaces to `width` cells.
-fn pad(shown: &str, width: usize) -> String {
-    let fill = width.saturating_sub(text::width(shown));
-    format!("{shown}{}", " ".repeat(fill))
 }
 
 fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
