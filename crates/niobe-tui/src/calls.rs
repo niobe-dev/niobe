@@ -101,6 +101,18 @@ impl Columns {
     }
 }
 
+/// A static buffer of spaces used to slice padding gaps without heap allocation.
+const SPACES: &str = "                                                                                                                                ";
+
+/// Slices up to `n` spaces from `SPACES`, falling back to heap allocation only if `n` exceeds the buffer size.
+fn spaces(n: usize) -> std::borrow::Cow<'static, str> {
+    if n <= SPACES.len() {
+        std::borrow::Cow::Borrowed(&SPACES[..n])
+    } else {
+        std::borrow::Cow::Owned(" ".repeat(n))
+    }
+}
+
 /// The glyph and the space after it, which every row of the transcript starts
 /// with.
 const GUTTER: usize = 2;
@@ -714,15 +726,27 @@ fn row(
         .saturating_sub(text::width(&what))
         .saturating_add(GAP);
 
+    // Optimization: Borrow static glyph strings and slice `SPACES` instead of allocating
+    // owned `String`s via `format!` and `" ".repeat(gap)` on every tool call row during frame redraws.
+    let glyph_padded: std::borrow::Cow<'static, str> = match glyph {
+        "⚙" => std::borrow::Cow::Borrowed("⚙ "),
+        "✗" => std::borrow::Cow::Borrowed("✗ "),
+        "⠋" => std::borrow::Cow::Borrowed("⠋ "),
+        "◆" => std::borrow::Cow::Borrowed("◆ "),
+        "▸" => std::borrow::Cow::Borrowed("▸ "),
+        "▾" => std::borrow::Cow::Borrowed("▾ "),
+        _ => std::borrow::Cow::Owned(format!("{glyph} ")),
+    };
+
     let mut spans = vec![
-        Span::styled(format!("{glyph} "), Style::new().fg(glyph_colour).bold()),
+        Span::styled(glyph_padded, Style::new().fg(glyph_colour).bold()),
         Span::styled(text::pad(&name, name_column), Style::new().fg(colour)),
         Span::raw(" "),
     ];
     if agent_column > 0 {
         let tag = text::truncate(doing.agent.unwrap_or_default(), agent_column);
         spans.push(Span::styled(
-            format!("{} ", text::pad(&tag, agent_column)),
+            text::pad(&tag, agent_column + 1),
             Style::new().fg(theme.dim),
         ));
     }
@@ -730,7 +754,7 @@ fn row(
     // text's colour, are what the eye finds first; a failure says so in the
     // glyph and the name.
     spans.push(Span::styled(what, Style::new().fg(theme.dim)));
-    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::raw(spaces(gap)));
     spans.extend(result);
     Line::from(spans)
 }
