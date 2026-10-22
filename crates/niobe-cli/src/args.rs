@@ -9,6 +9,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use niobe_ledger::Date;
 use niobe_store::SessionId;
 use niobe_tui::Theme;
 use niobe_tui::theme;
@@ -24,8 +25,8 @@ pub enum Command {
     /// `claude` CLI's.
     Sessions,
     /// Print every session recorded in this repository, folded, as one
-    /// Markdown page.
-    Overview,
+    /// Markdown page, narrowed to the sessions the flags name.
+    Overview(Narrowing),
     /// List the profiles the config defines, marking the selected one.
     Profiles,
     /// Check what a first session needs and say what is missing, with the fix.
@@ -239,10 +240,7 @@ fn command(args: &[&str]) -> Result<Command, String> {
             no_more(rest)?;
             Command::Sessions
         }
-        ["overview", rest @ ..] => {
-            no_more(rest)?;
-            Command::Overview
-        }
+        ["overview", rest @ ..] => Command::Overview(narrowing(rest)?),
         ["profiles", rest @ ..] => {
             no_more(rest)?;
             Command::Profiles
@@ -310,6 +308,50 @@ fn resume(id: &str) -> Result<Resume, String> {
         )),
         _ => Ok(Resume::Imported(id.to_owned())),
     }
+}
+
+/// Which sessions `niobe overview` folds: all of them unless `--last` or
+/// `--since` says otherwise, and with both, the sessions that pass each.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Narrowing {
+    /// Only the newest this many.
+    pub last: Option<usize>,
+    /// Only those started on this UTC day or after it.
+    pub since: Option<Date>,
+}
+
+fn narrowing(mut rest: &[&str]) -> Result<Narrowing, String> {
+    const LAST: &str = "`--last` needs a number of sessions, as in `--last 5`";
+    const SINCE: &str = "`--since` needs a UTC day, as in `--since 2026-09-01`";
+    let mut narrowing = Narrowing::default();
+    while let Some((flag, after)) = rest.split_first() {
+        let (name, value, after) = match flag.split_once('=') {
+            Some((name, value)) => (name, Some(value), after),
+            None => match after.split_first() {
+                Some((value, after)) => (*flag, Some(*value), after),
+                None => (*flag, None, after),
+            },
+        };
+        match name {
+            "--last" => {
+                let last = value.and_then(|n| n.parse().ok()).filter(|n| *n > 0);
+                narrowing.last = Some(last.ok_or(LAST)?);
+            }
+            "--since" => narrowing.since = Some(value.and_then(day).ok_or(SINCE)?),
+            _ => return Err(format!("unexpected argument `{flag}`")),
+        }
+        rest = after;
+    }
+    Ok(narrowing)
+}
+
+/// A day written `YYYY-MM-DD`, and only one that exists.
+fn day(text: &str) -> Option<Date> {
+    let mut parts = text.splitn(3, '-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    Date::new(year, month, day)
 }
 
 fn no_more(rest: &[&str]) -> Result<(), String> {
@@ -455,9 +497,38 @@ mod tests {
     }
 
     #[test]
+    fn the_overview_is_narrowed_to_the_newest_sessions_or_those_since_a_day() {
+        let day = Date::new(2026, 9, 1).expect("a real day");
+        for args in [
+            &["overview", "--last", "5", "--since", "2026-09-01"][..],
+            &["overview", "--since=2026-09-01", "--last=5"][..],
+        ] {
+            assert_eq!(
+                parsed(args),
+                Ok(Command::Overview(Narrowing {
+                    last: Some(5),
+                    since: Some(day)
+                }))
+            );
+        }
+        for wrong in [
+            &["overview", "--last"][..],
+            &["overview", "--last", "0"][..],
+            &["overview", "--last", "five"][..],
+            &["overview", "--since", "2026-02-30"][..],
+            &["overview", "--since", "yesterday"][..],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+    }
+
+    #[test]
     fn subcommands_take_nothing_extra() {
         assert_eq!(parsed(&["sessions"]), Ok(Command::Sessions));
-        assert_eq!(parsed(&["overview"]), Ok(Command::Overview));
+        assert_eq!(
+            parsed(&["overview"]),
+            Ok(Command::Overview(Narrowing::default()))
+        );
         assert!(parsed(&["overview", "--all"]).is_err());
         assert_eq!(
             parsed(&["sessions", "--all"]),

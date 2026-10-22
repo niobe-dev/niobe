@@ -115,6 +115,30 @@ fn the_overviews_tools_and_paths_are_the_ones_the_recordings_hold() {
     }
 }
 
+/// `--last 1` reads the newer of the two sessions alone, and the page says
+/// what it was narrowed to.
+#[test]
+fn the_overview_narrowed_to_the_newest_session_reads_that_one_alone() {
+    let (_dir, root) = repository();
+    let output = Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .args(["overview", "--last", "1"])
+        .current_dir(&root)
+        .env("XDG_CONFIG_HOME", root.join("no-user-config-here"))
+        .env("CLAUDE_CONFIG_DIR", root.join("no-claude-sessions-here"))
+        .env_remove("HOME")
+        .output()
+        .expect("the niobe binary runs");
+    let page = String::from_utf8(output.stdout).expect("the page is UTF-8");
+
+    assert!(page.contains("1 session recorded"), "{page}");
+    assert!(
+        page.contains("Read: the newest 1 session. `niobe overview` alone reads every one."),
+        "{page}"
+    );
+    assert!(page.contains("Session 2:"), "{page}");
+    assert!(!page.contains("Session 1:"), "{page}");
+}
+
 #[test]
 fn a_repository_with_nothing_recorded_says_so_in_one_line() {
     let dir = tempfile::tempdir().expect("a temporary directory can be created");

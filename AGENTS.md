@@ -317,7 +317,7 @@ reviewers that encode both, for an agent working in this tree.
   spent them — a session read back is priced only where its rates held across those days, and
   a log with no times is a floor; `profiles.rs` and `sessions.rs` are what
   `niobe profiles` and `niobe sessions` print; `overview.rs` is what `niobe overview` prints —
-  every session the store holds, folded, as one Markdown page of what went well and what went
+  every session the store holds, or the newest `--last` or those `--since` a day, folded, as one Markdown page of what went well and what went
   wrong, what was left open, the tools used most and the paths changed most, with no figure a
   model wrote, and the page the shell's overview shows, written on a thread of its own; `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never

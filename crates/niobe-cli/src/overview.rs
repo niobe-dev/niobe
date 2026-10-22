@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use niobe_core::session::SessionState;
 use niobe_store::SessionId;
 
+use crate::args::Narrowing;
 use crate::repo;
 use crate::sessions::utc_minute;
 use crate::summary::grouped;
@@ -85,7 +86,9 @@ impl Page {
 /// The page for `root`, or why it could not be read, as the page.
 fn written(root: &Path) -> String {
     match read(root) {
-        Ok(folded) => markdown(&repo::describe(root).name, &folded).join("\n"),
+        Ok(folded) => {
+            markdown(&repo::describe(root).name, &folded, Narrowing::default()).join("\n")
+        }
         Err(error) => format!("The sessions recorded here could not be read: {error}"),
     }
 }
@@ -127,14 +130,53 @@ impl niobe_tui::Overview for Page {
     }
 }
 
-/// The page for the sessions of the repository `name`, oldest first.
+/// The sessions of `folded`, oldest first, that `narrowing` keeps: those
+/// started on its day or after, and of them the newest it names.
+pub fn narrowed(folded: Vec<Folded>, narrowing: Narrowing) -> Vec<Folded> {
+    let mut kept: Vec<Folded> = folded
+        .into_iter()
+        .filter(|session| {
+            narrowing
+                .since
+                .is_none_or(|since| niobe_ledger::Date::of(session.started_at) >= since)
+        })
+        .collect();
+    if let Some(last) = narrowing.last {
+        let cut = kept.len().saturating_sub(last);
+        kept.drain(..cut);
+    }
+    kept
+}
+
+/// What `narrowing` kept, said as the page says it; `None` for every
+/// session.
+fn kept(narrowing: Narrowing) -> Option<String> {
+    match (narrowing.last, narrowing.since) {
+        (None, None) => None,
+        (Some(last), None) => Some(format!(
+            "the newest {}",
+            counted(last as u64, "session", "sessions")
+        )),
+        (None, Some(since)) => Some(format!("the sessions started on {since} or later")),
+        (Some(last), Some(since)) => Some(format!(
+            "the newest {} started on {since} or later",
+            counted(last as u64, "session", "sessions")
+        )),
+    }
+}
+
+/// The page for the sessions of the repository `name`, oldest first, which
+/// `narrowing` kept of those recorded.
 ///
 /// An empty `sessions` is a page of one line saying so.
-pub fn markdown(name: &str, sessions: &[Folded]) -> Vec<String> {
+pub fn markdown(name: &str, sessions: &[Folded], narrowing: Narrowing) -> Vec<String> {
     let mut lines = vec![format!("# What has been built in {}", inline(name))];
     let (Some(first), Some(last)) = (sessions.first(), sessions.last()) else {
         lines.push(String::new());
-        lines.push("No sessions recorded in this repository.".to_owned());
+        lines.push(match kept(narrowing) {
+            None => "No sessions recorded in this repository.".to_owned(),
+            Some(kept) => format!("No session recorded in this repository is among {kept}."),
+        });
         return lines;
     };
     lines.push(String::new());
@@ -144,6 +186,12 @@ pub fn markdown(name: &str, sessions: &[Folded]) -> Vec<String> {
         utc_minute(first.started_at),
         utc_minute(last.started_at)
     ));
+    if let Some(kept) = kept(narrowing) {
+        lines.push(String::new());
+        lines.push(format!(
+            "Read: {kept}. `niobe overview` alone reads every one."
+        ));
+    }
     section(&mut lines, "Highlights", highlights(sessions));
     section(&mut lines, "Lowlights", lowlights(sessions));
     section(&mut lines, "Left open", left_open(sessions));
@@ -493,19 +541,59 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "no page arrived");
             std::thread::yield_now();
         };
-        assert_eq!(written, markdown("catalog", &[]).join("\n"));
+        assert_eq!(
+            written,
+            markdown("catalog", &[], Narrowing::default()).join("\n")
+        );
         assert_eq!(page.drain(), None, "handed over once");
     }
 
     #[test]
     fn a_repository_with_no_sessions_says_so_in_one_line() {
         assert_eq!(
-            markdown("niobe", &[]),
+            markdown("niobe", &[], Narrowing::default()),
             [
                 "# What has been built in niobe",
                 "",
                 "No sessions recorded in this repository."
             ]
+        );
+    }
+
+    #[test]
+    fn the_overview_keeps_the_newest_sessions_started_on_or_after_a_day() {
+        let at = |id: u32, day: u64| Folded {
+            started_at: UNIX_EPOCH + Duration::from_secs(day * 86_400),
+            ..folded(id, &[])
+        };
+        let ids = |kept: Vec<Folded>| -> Vec<String> {
+            kept.iter().map(|session| session.id.to_string()).collect()
+        };
+        let all = || vec![at(1, 20_000), at(2, 20_010), at(3, 20_020)];
+        let since = niobe_ledger::Date::of(UNIX_EPOCH + Duration::from_secs(20_010 * 86_400));
+
+        assert_eq!(ids(narrowed(all(), Narrowing::default())), ["1", "2", "3"]);
+        let last = |n| Narrowing {
+            last: Some(n),
+            since: None,
+        };
+        assert_eq!(ids(narrowed(all(), last(2))), ["2", "3"]);
+        assert_eq!(ids(narrowed(all(), last(9))), ["1", "2", "3"]);
+        let from = Narrowing {
+            last: None,
+            since: Some(since),
+        };
+        assert_eq!(ids(narrowed(all(), from)), ["2", "3"]);
+        let both = Narrowing {
+            last: Some(1),
+            since: Some(since),
+        };
+        assert_eq!(ids(narrowed(all(), both)), ["3"]);
+        assert_eq!(
+            markdown("niobe", &[], from)[2],
+            format!(
+                "No session recorded in this repository is among the sessions started on {since} or later."
+            )
         );
     }
 

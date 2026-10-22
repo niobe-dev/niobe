@@ -186,7 +186,7 @@ fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(
     match command {
         Command::Shell | Command::Resume(_) => Ok(()),
         Command::Sessions => list_sessions(),
-        Command::Overview => print_overview(),
+        Command::Overview(narrowing) => print_overview(narrowing),
         Command::Profiles => list_profiles(profile),
         Command::Doctor { json } => run_doctor(json),
         Command::Trust { yes } => trust(yes),
@@ -868,10 +868,10 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
 /// from this process's own environment alone.
 /// Every session niobe recorded in this repository, folded, as one Markdown
 /// page on standard output.
-fn print_overview() -> Result<(), String> {
+fn print_overview(narrowing: args::Narrowing) -> Result<(), String> {
     let root = repo::root(&cwd()?);
-    let folded = overview::read(&root)?;
-    for line in overview::markdown(&repo::describe(&root).name, &folded) {
+    let folded = overview::narrowed(overview::read(&root)?, narrowing);
+    for line in overview::markdown(&repo::describe(&root).name, &folded, narrowing) {
         say!("{line}");
     }
     Ok(())
@@ -1419,7 +1419,9 @@ USAGE:
     niobe                  Open the shell on a new session
     niobe --resume <id>    Open the shell on an earlier session and continue it
     niobe sessions         List the sessions this repository can carry on
-    niobe overview         Print what every session here built and how it went, as Markdown
+    niobe overview         Print what every session here built and how it went, as Markdown;
+                           --last <n> keeps the newest n, --since <YYYY-MM-DD> those from that
+                           UTC day on
     niobe profiles         List the profiles the config defines, the selected one marked
     niobe doctor [--json]  Check what a session needs — the CLIs, their sign-in, the config,
                            the terminal — and say how to fix what is missing
