@@ -254,7 +254,7 @@ fn capped_marker(beyond: usize, width: usize, theme: &Theme) -> Line<'static> {
     );
     let said = text::truncate(&said, width);
     Line::from(Span::styled(
-        pad(&said, width),
+        text::pad(&said, width),
         Style::new().fg(theme.dim).bg(theme.diff_bg),
     ))
 }
@@ -279,7 +279,7 @@ fn wrapped_row(line: &DiffLine, width: usize, theme: &Theme) -> Vec<Line<'static
             Line::from(vec![
                 Span::styled(sign, Style::new().fg(sign_colour).bg(bg).bold()),
                 Span::styled(" ", Style::new().bg(bg)),
-                Span::styled(pad(&part, room), Style::new().fg(text_colour).bg(bg)),
+                Span::styled(text::pad(&part, room), Style::new().fg(text_colour).bg(bg)),
             ])
             .style(Style::new().bg(bg))
         })
@@ -299,11 +299,11 @@ fn look(line: &DiffLine, theme: &Theme) -> (&'static str, Color, Color, Color) {
 /// The row standing for unchanged lines left out, under a gutter of
 /// `number_width` digits.
 fn elided(number_width: usize, width: usize, theme: &Theme) -> Line<'static> {
-    let gutter = " ".repeat(number_width + 1);
+    let gutter = text::pad("", number_width + 1);
     Line::from(vec![
         Span::styled(gutter, Style::new().bg(theme.diff_bg)),
         Span::styled(
-            pad("…", width.saturating_sub(number_width + 1)),
+            text::pad("…", width.saturating_sub(number_width + 1)),
             Style::new().fg(theme.dim).bg(theme.diff_bg),
         ),
     ])
@@ -333,7 +333,7 @@ fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> L
         ),
         Span::styled(sign, Style::new().fg(number_colour).bg(bg).bold()),
         Span::styled(" ", Style::new().bg(bg)),
-        Span::styled(pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
+        Span::styled(text::pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
     ])
     .style(Style::new().bg(bg))
 }
@@ -361,7 +361,7 @@ fn marker(beyond: usize, open: bool, width: usize, theme: &Theme) -> Line<'stati
         false => text::truncate(&said, width),
     };
     Line::from(Span::styled(
-        pad(&said, width),
+        text::pad(&said, width),
         Style::new().fg(theme.dim).bg(theme.diff_bg),
     ))
 }
@@ -382,12 +382,6 @@ fn footer(gate: Gate, width: usize, theme: &Theme) -> Line<'static> {
             Style::new().fg(theme.dim),
         ),
     ])
-}
-
-/// `text` padded with spaces to `width` cells.
-fn pad(shown: &str, width: usize) -> String {
-    let fill = width.saturating_sub(text::width(shown));
-    format!("{shown}{}", " ".repeat(fill))
 }
 
 fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {

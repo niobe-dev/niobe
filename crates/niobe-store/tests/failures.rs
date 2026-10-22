@@ -110,14 +110,20 @@ fn two_shells_creating_the_store_at_once_both_open_it() {
                 .expect("the store opens")
                 .expect("and takes an event");
         }
-        assert_eq!(
-            Store::open(&path)
-                .expect("the store opens")
-                .sessions()
-                .expect("the store was just opened and can list its sessions")
-                .len(),
-            2
-        );
+        let store = Store::open(&path).expect("the store opens");
+        let sessions = store
+            .sessions()
+            .expect("the store was just opened and can list its sessions");
+        assert_eq!(sessions.len(), 2);
+        for summary in &sessions {
+            let events: Vec<Event> = store
+                .events(summary.id)
+                .expect("each session the openers created loads")
+                .into_iter()
+                .map(|s| s.event)
+                .collect();
+            assert_eq!(events, [user("hello")]);
+        }
     }
 }
 
@@ -249,17 +255,38 @@ fn a_read_only_store_is_read_as_it_is() {
     let sessions = store.sessions().expect("the list reads");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].first_prompt.as_deref(), Some("kept"));
-    assert_eq!(store.events(session).expect("the session reads").len(), 1);
+    let events: Vec<Event> = store
+        .events(session)
+        .expect("the session reads")
+        .into_iter()
+        .map(|s| s.event)
+        .collect();
+    assert_eq!(events, [user("kept")]);
 }
 
 #[test]
 fn a_store_opened_to_read_that_can_be_written_is_read_too() {
     let (_dir, path) = scratch();
-    Recorder::new(Store::open(&path).expect("the store opens"))
-        .record(&user("kept"))
-        .expect("a session in a temporary store takes an event");
+    let session = {
+        let mut recorder = Recorder::new(Store::open(&path).expect("the store opens"));
+        recorder
+            .record(&user("kept"))
+            .expect("a session in a temporary store takes an event");
+        recorder
+            .session()
+            .expect("recording an event created the session")
+    };
     let store = Store::open_to_read(&path).expect("the store is read");
-    assert_eq!(store.sessions().expect("the list reads").len(), 1);
+    let sessions = store.sessions().expect("the list reads");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].first_prompt.as_deref(), Some("kept"));
+    let events: Vec<Event> = store
+        .events(session)
+        .expect("the session reads")
+        .into_iter()
+        .map(|s| s.event)
+        .collect();
+    assert_eq!(events, [user("kept")]);
 }
 
 /// A row that is not even JSON — a torn write, or a file edited by hand —
@@ -303,10 +330,13 @@ fn a_row_that_is_not_json_fails_only_its_own_session() {
             ..
         }]
     ));
-    assert_eq!(
-        store.events(fine).expect("the other session loads").len(),
-        1
-    );
+    let fine_events: Vec<Event> = store
+        .events(fine)
+        .expect("the other session loads")
+        .into_iter()
+        .map(|s| s.event)
+        .collect();
+    assert_eq!(fine_events, [user("fine")]);
 }
 
 /// A log whose writer died mid-line ends in half a record. The read fails and

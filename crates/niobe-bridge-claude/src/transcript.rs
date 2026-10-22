@@ -1462,9 +1462,10 @@ fn typed_command(text: &str) -> Option<String> {
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");
-    let start = text.find(&open)? + open.len();
-    let length = text[start..].find(&close)?;
-    Some(text[start..start + length].trim())
+    let start = text.find(&open)?.checked_add(open.len())?;
+    let rest = text.get(start..)?;
+    let length = rest.find(&close)?;
+    Some(rest.get(..length)?.trim())
 }
 
 /// What a turn holds as prose, where it holds any.
@@ -3059,6 +3060,22 @@ mod tests {
             [("claude-haiku-4-5".to_owned(), 5)],
             "the agent's tokens are under its own model, and the spawn's record had none"
         );
+    }
+
+    #[test]
+    fn tag_parsing_handles_malformed_and_multibyte_utf8_safely() {
+        assert_eq!(
+            tag("<status>completed</status>", "status"),
+            Some("completed")
+        );
+        assert_eq!(
+            tag("before <status>   running   </status> after", "status"),
+            Some("running")
+        );
+        assert_eq!(tag("no close tag <status>running", "status"), None);
+        assert_eq!(tag("<status></status>", "status"), Some(""));
+        assert_eq!(tag("🦀<status>🎉</status>🔥", "status"), Some("🎉"));
+        assert_eq!(tag("<status>", "status"), None);
     }
 
     #[test]

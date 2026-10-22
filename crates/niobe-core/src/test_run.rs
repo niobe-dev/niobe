@@ -1761,4 +1761,159 @@ error: doctest failed, to rerun pass `--doc`
         let listing = "total 24\ndrwxr-xr-x  5 op  staff  160 Sep 25 10:00 .\n-rw-r--r--  1 op  staff  42 Sep 25 10:00 Cargo.toml\n";
         assert_eq!(counts("cargo test", listing, Some(0)), None);
     }
+
+    #[test]
+    fn a_single_failed_tests_struct_or_list_deserializes_via_one_or_many() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct Envelope {
+            #[serde(deserialize_with = "one_or_many")]
+            failures: Vec<FailedTests>,
+        }
+
+        let single_json = r#"{"failures":{"binary":"--lib","tests":["test1","test2"]}}"#;
+        let single: Envelope =
+            serde_json::from_str(single_json).expect("a single FailedTests object deserializes");
+        assert_eq!(
+            single.failures,
+            vec![FailedTests {
+                binary: "--lib".to_owned(),
+                tests: vec!["test1".to_owned(), "test2".to_owned()],
+            }]
+        );
+
+        let many_json =
+            r#"{"failures":[{"binary":"--lib","tests":["t1"]},{"binary":"--doc","tests":["t2"]}]}"#;
+        let many: Envelope =
+            serde_json::from_str(many_json).expect("a Vec<FailedTests> deserializes");
+        assert_eq!(
+            many.failures,
+            vec![
+                FailedTests {
+                    binary: "--lib".to_owned(),
+                    tests: vec!["t1".to_owned()],
+                },
+                FailedTests {
+                    binary: "--doc".to_owned(),
+                    tests: vec!["t2".to_owned()],
+                },
+            ]
+        );
+
+        let invalid_json = r#"{"failures":"invalid"}"#;
+        assert!(serde_json::from_str::<Envelope>(invalid_json).is_err());
+    }
+
+    #[test]
+    fn uncoloured_output_strips_complex_and_unterminated_ansi_escape_sequences() {
+        assert_eq!(uncoloured("hello \x1b[31"), "hello ");
+        assert_eq!(uncoloured("clear \x1b[2J screen"), "clear  screen");
+        assert_eq!(uncoloured("\x1b[1m\x1b[31mPASSED\x1b[0m"), "PASSED");
+    }
+
+    #[test]
+    fn a_summary_line_with_overflowing_counts_or_invalid_duration_is_refused() {
+        let overflow = "test result: ok. 18446744073709551616 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s";
+        assert_eq!(Summary::of(overflow), None);
+
+        let bad_time = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in fasts";
+        assert_eq!(Summary::of(bad_time), None);
+
+        let ok_failed = "test result: ok. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s";
+        assert_eq!(Summary::of(ok_failed), None);
+
+        let failed_zero = "test result: FAILED. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s";
+        assert_eq!(Summary::of(failed_zero), None);
+    }
+
+    #[test]
+    fn multiple_command_wrappers_and_tab_stripped_heredocs_are_parsed_correctly() {
+        let chained = "env RUST_LOG=info timeout 10s sudo cargo test";
+        assert!(is_test_run(chained));
+
+        let heredoc = "cat <<-EOF\n\tcargo test\nEOF";
+        assert!(!is_test_run(heredoc));
+    }
+
+    #[test]
+    fn a_failures_list_with_misaligned_indentation_or_blank_lines_is_rejected() {
+        let short_indent = FAILED.replace("    tests::wrong", "  tests::wrong");
+        assert_eq!(failures(&short_indent), []);
+
+        let extra_space = FAILED.replace("    tests::wrong", "     tests::wrong");
+        assert_eq!(failures(&extra_space), []);
+    }
+
+    #[test]
+    fn a_malformed_failed_tests_json_is_rejected_by_one_or_many_deserializer() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct Envelope {
+            #[serde(deserialize_with = "one_or_many")]
+            failures: Vec<FailedTests>,
+        }
+
+        assert!(serde_json::from_str::<Envelope>(r#"{"failures": 12345}"#).is_err());
+        assert!(serde_json::from_str::<Envelope>(r#"{"failures": false}"#).is_err());
+    }
+
+    #[test]
+    fn a_test_run_with_multiple_wrapper_commands_and_env_vars_is_recognised() {
+        assert!(is_test_run(
+            "env RUST_LOG=info CARGO_TERM_COLOR=always timeout 10s sudo cargo test"
+        ));
+    }
+
+    #[test]
+    fn a_failed_test_run_with_missing_exit_code_is_not_treated_as_failed() {
+        assert!(!failed("cargo test", FAILED, None));
+    }
+
+    #[test]
+    fn a_summary_with_overflowing_test_counts_returns_none() {
+        let overflow = "test result: ok. 18446744073709551616 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s";
+        assert_eq!(Summary::of(overflow), None);
+    }
+
+    #[test]
+    fn a_failing_test_run_with_ansi_color_codes_around_test_failures_extracts_failed_tests() {
+        let coloured_failures = FAILED
+            .replace("FAILED", "\x1b[1m\x1b[91mFAILED\x1b[0m")
+            .replace("failures:", "\x1b[1mfailures:\x1b[0m")
+            .replace(
+                "error: test failed",
+                "\x1b[1m\x1b[91merror\x1b[0m: test failed",
+            );
+
+        let extracted = failures(&coloured_failures);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].binary, "--lib");
+        assert_eq!(extracted[0].tests, vec!["tests::wrong"]);
+    }
+
+    #[test]
+    fn a_cargo_test_command_with_mixed_quotes_and_escaped_separators_is_recognised_as_a_test_run() {
+        assert!(is_test_run("echo 'a;b' && cargo test"));
+        assert!(is_test_run("echo \"foo; bar\" ; cargo test"));
+        assert!(!is_test_run("echo hello\\; cargo test"));
+        assert!(!is_test_run("git commit -m \"fix; cargo test passes\""));
+        assert!(!is_test_run("echo \"cargo test; echo hi\""));
+    }
+
+    #[test]
+    fn test_counts_failing_returns_true_only_when_failed_count_is_positive() {
+        let clean = TestCounts {
+            passed: 10,
+            failed: 0,
+            ignored: 1,
+            suites: 1,
+        };
+        assert!(!clean.failing());
+
+        let failed = TestCounts {
+            passed: 9,
+            failed: 1,
+            ignored: 0,
+            suites: 1,
+        };
+        assert!(failed.failing());
+    }
 }
