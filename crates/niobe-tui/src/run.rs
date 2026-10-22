@@ -63,6 +63,9 @@ struct Machine<'a> {
     /// again once the process is continued; or, for a stop the process could
     /// not catch, takes the terminal again as it finds it.
     suspend: &'a mut dyn FnMut(Hold) -> io::Result<()>,
+    /// Writes the bytes that call the operator back — a bell, a desktop
+    /// notification — to the terminal the shell draws on.
+    ring: &'a mut dyn FnMut(&str) -> io::Result<()>,
 }
 
 /// What the loop asks of the terminal around a stop.
@@ -242,6 +245,18 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
         }
     };
 
+    // Written beside the frames rather than through them: a bell is no cell
+    // of the screen, and the draw before it has been flushed.
+    let mut ring = |bytes: &str| -> io::Result<()> {
+        use std::io::Write;
+        let mut out = io::stdout();
+        out.write_all(bytes.as_bytes())?;
+        out.flush()
+    };
+    // What a resumed session left waiting was waiting before this shell
+    // opened, and is on its first frame for the operator to see.
+    app.alerts_seen();
+
     let ended = event_loop(
         &mut terminal,
         &mut app,
@@ -251,6 +266,7 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
             wait: &mut wait,
             clock: &clock,
             suspend: &mut suspend,
+            ring: &mut ring,
         },
     );
 
@@ -364,6 +380,9 @@ fn event_loop<B: Backend<Error = io::Error>>(
                 terminal.resize(area.into())?;
             }
             terminal.draw(|frame| ui::draw(frame, app))?;
+            // After the draw, so that the question the operator is called back
+            // for is on screen by the time the bell reaches them.
+            ring_for(app, machine.ring)?;
 
             // An image asked for is looked for again soon, as a reply is: the
             // operator is waiting to see it land in the prompt.
@@ -447,6 +466,19 @@ fn event_loop<B: Backend<Error = io::Error>>(
         ended = Ended::Open(target);
     }
     Ok(ended)
+}
+
+/// Calls the operator back, where something since the last pass calls for
+/// it and the shell was asked to.
+fn ring_for(app: &mut App, ring: &mut dyn FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+    let Some(alert) = app.take_alert() else {
+        return Ok(());
+    };
+    let bytes = app.alerts().sequence(alert, &app.repo().name);
+    match bytes.is_empty() {
+        true => Ok(()),
+        false => ring(&bytes),
+    }
 }
 
 /// What ends a session, whether its loop ended or failed: a command still

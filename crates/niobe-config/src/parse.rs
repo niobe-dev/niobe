@@ -18,7 +18,7 @@ use niobe_core::{Backend, Billing};
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
-use crate::{Config, ConfigError, DefaultProfile, Profile, Settings, ThemeName, Titles};
+use crate::{Config, ConfigError, DefaultProfile, Notify, Profile, Settings, ThemeName, Titles};
 
 /// What `backend` may be, in the order an error lists them.
 const BACKENDS: [Backend; 3] = [Backend::Claude, Backend::Codex, Backend::Native];
@@ -54,13 +54,14 @@ impl File<'_> {
                 "effects" => {}
                 "permissions" => config.allowed = self.permissions(value, &at)?,
                 "keys" => config.keys = self.keys(value, &at)?,
+                "notify" => config.notify = self.notify(value, &at)?,
                 "profiles" => config.profiles.extend(self.profiles(value, &at)?),
                 _ => {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
                         "unknown key; expected `default_profile`, `theme`, `titles`, \
-                         `profiles`, `permissions` or `keys`",
+                         `profiles`, `permissions`, `keys` or `notify`",
                     ));
                 }
             }
@@ -160,6 +161,26 @@ impl File<'_> {
     /// A rule that is not one is reported at its line: a config that silently
     /// dropped one would leave the operator expecting a prompt not to come
     /// back when it will.
+    /// The switches for calling the operator back.
+    fn notify(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Notify, ConfigError> {
+        let mut notify = Notify::default();
+        for (key, value) in in_file_order(self.table(value, at)?) {
+            let at = at.child(key.get_ref());
+            match key.get_ref().as_ref() {
+                "bell" => notify.bell = Some(self.boolean(value, &at)?),
+                "notification" => notify.notification = Some(self.boolean(value, &at)?),
+                _ => {
+                    return Err(self.invalid(
+                        &key.span(),
+                        &at,
+                        "unknown key; expected `bell` or `notification`",
+                    ));
+                }
+            }
+        }
+        Ok(notify)
+    }
+
     fn permissions(
         &self,
         value: &Spanned<DeValue<'_>>,
@@ -356,6 +377,13 @@ impl File<'_> {
         match value.get_ref() {
             DeValue::Table(table) => Ok(table),
             _ => Err(self.wrong_type(value, at, "a table")),
+        }
+    }
+
+    fn boolean(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<bool, ConfigError> {
+        match value.get_ref() {
+            DeValue::Boolean(on) => Ok(*on),
+            _ => Err(self.wrong_type(value, at, "a boolean")),
         }
     }
 

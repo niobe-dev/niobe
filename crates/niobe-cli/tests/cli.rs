@@ -998,6 +998,7 @@ fn the_help_names_every_shortcut_the_shell_lists_and_the_typed_commands() {
 
     for said in [
         "titles = \"first-prompt\"",
+        "[notify] bell = false",
         "/model",
         "/memory",
         "/resume",

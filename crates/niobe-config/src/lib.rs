@@ -56,6 +56,16 @@
 //! titles = "first-prompt"
 //! ```
 //!
+//! and whether the shell rings the bell and sends a desktop notification
+//! when the agent waits on the operator or a turn ends, each on unless a file
+//! turns it off:
+//!
+//! ```toml
+//! [notify]
+//! bell = false
+//! notification = false
+//! ```
+//!
 //! Which palettes there are is the shell's business, not this crate's, so the
 //! name is carried as written and the caller resolves it; [`ThemeName`] keeps
 //! the line so that a name nothing answers to is reported where it was
@@ -362,6 +372,42 @@ impl Titles {
     }
 }
 
+/// Whether the shell calls the operator back when the agent waits on them or
+/// a turn they sent ends: the terminal's bell, and a desktop notification
+/// where the terminal shows one. Each is on unless a config turns it off.
+///
+/// ```toml
+/// [notify]
+/// bell = false
+/// notification = false
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Notify {
+    bell: Option<bool>,
+    notification: Option<bool>,
+}
+
+impl Notify {
+    /// Whether the bell rings.
+    pub fn bell(&self) -> bool {
+        self.bell.unwrap_or(true)
+    }
+
+    /// Whether a desktop notification is sent, where the terminal shows one.
+    pub fn notification(&self) -> bool {
+        self.notification.unwrap_or(true)
+    }
+
+    /// `over`'s switches where it sets them, and these elsewhere: a file that
+    /// says nothing of the bell leaves it as the file before it said.
+    fn overlay(self, over: Self) -> Self {
+        Self {
+            bell: over.bell.or(self.bell),
+            notification: over.notification.or(self.notification),
+        }
+    }
+}
+
 /// One config file, or several laid over one another.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -370,6 +416,7 @@ pub struct Config {
     theme: Option<ThemeName>,
     titles: Option<Titles>,
     keys: Keymap,
+    notify: Notify,
     allowed: Allowlist,
     /// The `default_profile` of a file that has not been trusted, which is not
     /// in force.
@@ -515,6 +562,7 @@ impl Config {
         if !over.keys.is_empty() {
             self.keys = over.keys;
         }
+        self.notify = self.notify.overlay(over.notify);
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
         // where one is taken back. An untrusted file has none left to add.
@@ -635,6 +683,15 @@ impl Config {
     /// repository that rebinds one has moved a key of the shell's.
     pub fn keys(&self) -> &Keymap {
         &self.keys
+    }
+
+    /// Whether the shell calls the operator back, and how.
+    ///
+    /// Not gated on trust: a bell is nothing a backend is started with, and a
+    /// repository that turns one off or on has changed what the shell sends
+    /// the terminal it draws on and no more.
+    pub fn notify(&self) -> Notify {
+        self.notify
     }
 
     /// How a session is titled: by the model unless a config says
@@ -1399,6 +1456,40 @@ backend = "codex"
     }
 
     #[test]
+    fn the_bell_and_the_notification_are_on_until_a_config_turns_them_off() {
+        let none = parsed("");
+        assert!(none.notify().bell() && none.notify().notification());
+
+        let quiet = parsed("[notify]\nbell = false\n");
+        assert!(!quiet.notify().bell());
+        assert!(quiet.notify().notification());
+
+        let repo = Config::parse("[notify]\nnotification = false\n", &path("repo"))
+            .expect("the config is valid")
+            .untrusted();
+        let laid = quiet.overlay(repo);
+        assert!(
+            !laid.notify().bell(),
+            "a file silent on the bell turned it on"
+        );
+        assert!(!laid.notify().notification());
+        assert!(!laid.needs_trust(), "a switch for the bell is not gated");
+    }
+
+    #[test]
+    fn a_notify_switch_that_is_not_a_boolean_or_not_a_switch_is_refused_at_its_line() {
+        assert_eq!(
+            invalid("[notify]\nbell = \"off\"\n"),
+            "/configs/user/config.toml:2: notify.bell: expected a boolean, found a string"
+        );
+        assert_eq!(
+            invalid("[notify]\n\nsound = false\n"),
+            "/configs/user/config.toml:3: notify.sound: unknown key; expected `bell` or \
+             `notification`"
+        );
+    }
+
+    #[test]
     fn a_file_nobody_trusted_may_stop_titles_costing_tokens_and_may_not_start_them() {
         let user = parsed("titles = \"first-prompt\"\n");
         let spends = Config::parse("titles = \"model\"\n", &path("repo"))
@@ -1525,7 +1616,8 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `titles`, `profiles`, `permissions` or `keys`"
+             expected `default_profile`, `theme`, `titles`, `profiles`, `permissions`, `keys` \
+             or `notify`"
         );
     }
 

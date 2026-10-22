@@ -502,6 +502,9 @@ fn shell_command(slave: &File, cwd: &Path) -> Command {
         // does not must not start whatever this machine has installed.
         .env("PATH", "/usr/bin:/bin")
         .env_remove("COLORTERM")
+        // Which notification the shell sends is read off it, and the
+        // terminal running the tests is not the one under test.
+        .env_remove("TERM_PROGRAM")
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
@@ -1782,6 +1785,90 @@ const WRITES_DOWN_ITS_ARGUMENTS_CLAUDE: &str = "#!/bin/sh\n\
     printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
     printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
     done\n";
+
+/// Sends a turn in a terminal that says it is iTerm2 under the user config
+/// `config`, and gives back everything that reached the terminal.
+fn a_turn_ended_in_iterm(config: &str) -> String {
+    let repo = repo();
+    put_stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let home = user_config(config);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("TERM_PROGRAM", "iTerm.app")
+        .env("TERM", "xterm-256color")
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"go\r");
+    terminal.shows("answered-the-turn");
+    // The second turn's answer follows the first turn's end on the CLI's
+    // output, so once it is drawn the pass that folded that end, and called
+    // the operator back for it, has written all it would.
+    let mark = terminal.mark();
+    terminal.typed(b"again\r");
+    terminal.shows_since(mark, "answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "ended with {status}: {drawn}");
+    assert_handed_back(&drawn, cooked, "a quit after a turn ended");
+    drawn
+}
+
+/// A turn that ends calls the operator back: iTerm2 is sent its
+/// notification and the bell rings after it.
+#[test]
+fn a_turn_that_ends_rings_the_bell_and_sends_the_terminal_s_notification() {
+    let drawn = a_turn_ended_in_iterm(
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n",
+    );
+    assert!(
+        drawn.contains(": turn ended\x07\x07") && drawn.contains("\x1b]9;niobe · "),
+        "{drawn:?}"
+    );
+}
+
+/// With both switches off nothing calls the operator back: not one bell
+/// reaches the terminal.
+#[test]
+fn a_config_that_turns_the_bell_and_the_notification_off_sends_neither() {
+    let drawn = a_turn_ended_in_iterm(
+        "default_profile = \"max\"\n\n[notify]\nbell = false\nnotification = false\n\n\
+         [profiles.max]\nbackend = \"claude\"\n",
+    );
+    assert!(!drawn.contains('\x07'), "{drawn:?}");
+}
+
+/// A `claude` that answers a turn by asking whether it may run `cargo test`,
+/// as the CLI does, and then waits on the answer.
+const ASKS_TO_RUN_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"control_request\",\"request_id\":\"req_1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Bash\",\"input\":{\"command\":\"cargo test\"},\"description\":\"cargo test\",\"tool_use_id\":\"toolu_1\"}}'\n\
+    while read -r line; do :; done\n";
+
+/// A question only the operator can answer calls them back, with the
+/// notification that says so and the bell.
+#[test]
+fn a_permission_question_rings_the_bell_and_says_it_is_waiting_on_you() {
+    let repo = repo();
+    let home = stand_in(repo.path(), ASKS_TO_RUN_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("TERM_PROGRAM", "iTerm.app")
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"go\r");
+    terminal.shows(": waiting on you\x07\x07");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "ended with {status}: {drawn}");
+    assert_handed_back(&drawn, cooked, "a quit with a question waiting");
+}
 
 /// Continuing a session hands the CLI the conversation it recorded and the
 /// mode it was left in: without either, the operator reads the old session

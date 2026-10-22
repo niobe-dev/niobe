@@ -23,6 +23,7 @@
 //!   from the kernel, and the draw at the top of a tick failing on a terminal
 //!   that went in the moment before it.
 
+pub mod alert;
 pub mod app;
 mod arguments;
 pub mod bridge;
@@ -62,6 +63,7 @@ pub mod ui;
 pub mod usage;
 pub mod watch;
 
+pub use alert::{Alert, Alerts, Notification};
 pub use app::{
     Answer, App, Arrival, Ask, Call, ConfigFile, Entry, EntryKind, Picker, Places, Purpose, Repo,
     Section, SelectedProfile, Sheet, WorkingFile,

@@ -29,6 +29,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use ratatui::style::Style;
 
+use crate::alert::{Alert, Alerts};
 use crate::clock::{Clock, LocalTime, Stamp};
 use crate::history::{Browser, Listed, Newer, PromptRow, Recall, SessionRow, Target, View};
 use crate::images::{Attachments, DraftId, Fetched, Source, image_path};
@@ -335,6 +336,14 @@ pub struct Ask {
     /// Who asked is said on the question and nowhere in the answer: a
     /// standing answer is about the tool and its target, whoever asked.
     pub agent: Option<AgentId>,
+}
+
+/// What the operator has already been called back for: the questions waiting
+/// when the loop last asked, and whether a turn sent from here was running.
+#[derive(Debug, Clone, Default)]
+struct Called {
+    asks: BTreeSet<ToolCallId>,
+    working: bool,
 }
 
 impl Ask {
@@ -1340,6 +1349,10 @@ pub struct App {
     /// calls of the same turn and answering them out of order would put the
     /// wrong arguments in front of the operator.
     asks: VecDeque<Ask>,
+    /// What the shell sends to call the operator back, and what it has
+    /// already called them back for.
+    alerts: Alerts,
+    called: Called,
     /// Which of the front prompt's options Enter would give. Every prompt
     /// starts on the first, so Enter means the same thing whichever prompt it
     /// lands on.
@@ -1749,6 +1762,8 @@ impl App {
             withdrawn_quiet_since: None,
             arrival: None,
             asks: VecDeque::new(),
+            alerts: Alerts::none(),
+            called: Called::default(),
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
             ask_draft: String::new(),
@@ -4665,6 +4680,59 @@ impl App {
     pub fn with_keymap(mut self, keymap: niobe_core::Keymap) -> Self {
         self.keymap = keymap;
         self
+    }
+
+    /// The same shell, calling the operator back as `alerts` says when the
+    /// agent waits on them or a turn they sent ends.
+    #[must_use]
+    pub fn with_alerts(mut self, alerts: Alerts) -> Self {
+        self.alerts = alerts;
+        self
+    }
+
+    /// What the shell sends to call the operator back.
+    pub fn alerts(&self) -> Alerts {
+        self.alerts
+    }
+
+    /// Takes what is on screen now as what the operator has already been
+    /// called back for, so that a session folded in before the shell opened —
+    /// a question it left unanswered, a turn it left running — rings nothing
+    /// as it opens.
+    pub fn alerts_seen(&mut self) {
+        self.called = Called {
+            asks: self.asks.iter().map(|ask| ask.id.clone()).collect(),
+            working: self.working(),
+        };
+    }
+
+    /// Why the operator is to be called back since the loop last asked, if
+    /// anything is: a question no standing rule answers came up, or a turn
+    /// sent from here ended without being stopped. A question outranks the
+    /// end of its turn arriving in the same pass, and one call is made per
+    /// pass, however much came in.
+    ///
+    /// Asked after [`App::settle_rules`], so that a prompt a rule answers is
+    /// never rung for.
+    pub fn take_alert(&mut self) -> Option<Alert> {
+        let new_ask = self.asks.iter().any(|ask| {
+            !self.called.asks.contains(&ask.id)
+                && !self.allowed.allows(&ask.tool, ask.target.as_deref())
+        });
+        // Only the questions still waiting are remembered, so the set is as
+        // long as the queue and a call id the backend reuses later is rung for.
+        self.called.asks = self.asks.iter().map(|ask| ask.id.clone()).collect();
+        let working = self.working();
+        let ended = std::mem::replace(&mut self.called.working, working) && !working;
+        // The turn that ended is the last one counted, and a stop asked of it
+        // means the operator was here to ask.
+        let stopped = self.stop_asked_in.is_some()
+            && self.stop_asked_in == self.session.turns().len().checked_sub(1);
+        match (new_ask, ended && !stopped) {
+            (true, _) => Some(Alert::NeedsYou),
+            (false, true) => Some(Alert::TurnEnded),
+            (false, false) => None,
+        }
     }
 
     /// What each key of the F-key bar is drawn as: the digit that follows
@@ -10548,6 +10616,89 @@ mod tests {
             app.activity().map(|a| a.doing).as_deref(),
             Some("waiting on you")
         );
+    }
+
+    #[test]
+    fn a_question_no_rule_answers_calls_the_operator_back_once() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        assert_eq!(app.take_alert(), None, "a turn starting is no call");
+
+        app.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(app.take_alert(), Some(Alert::NeedsYou));
+        assert_eq!(app.take_alert(), None, "the same question rang twice");
+    }
+
+    #[test]
+    fn a_question_a_rule_answers_calls_nobody_back() {
+        let mut app = sent(
+            app()
+                .attached()
+                .with_rules([Rule::tool("Bash")].into_iter().collect()),
+            "go",
+        );
+        app.take_produced();
+        app.apply(&prompt(Some("rm -rf build")));
+        app.settle_rules();
+
+        assert_eq!(app.take_alert(), None);
+    }
+
+    #[test]
+    fn a_turn_sent_from_here_that_ends_calls_the_operator_back() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        assert_eq!(app.take_alert(), None);
+
+        app.apply(&Event::TurnEnded);
+        assert_eq!(app.take_alert(), Some(Alert::TurnEnded));
+        assert_eq!(app.take_alert(), None, "the same end rang twice");
+    }
+
+    #[test]
+    fn a_turn_the_operator_stopped_ends_without_calling_them_back() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        assert_eq!(app.take_alert(), None);
+
+        app.on_key(key(KeyCode::Esc));
+        app.apply(&Event::TurnEnded);
+        assert_eq!(app.take_alert(), None);
+
+        let mut app = sent(app, "again");
+        app.take_produced();
+        assert_eq!(app.take_alert(), None);
+        app.apply(&Event::TurnEnded);
+        assert_eq!(
+            app.take_alert(),
+            Some(Alert::TurnEnded),
+            "the stop of the turn before kept this one quiet"
+        );
+    }
+
+    #[test]
+    fn a_session_folded_in_before_the_shell_opened_rings_nothing_as_it_opens() {
+        let mut app = sent(app().attached(), "go");
+        app.take_produced();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.alerts_seen();
+
+        assert_eq!(app.take_alert(), None);
+    }
+
+    #[test]
+    fn a_turn_read_back_from_a_record_is_no_turn_to_call_anyone_back_for() {
+        let mut app = app().attached();
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        assert_eq!(app.take_alert(), None);
+
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(app.take_alert(), None);
     }
 
     #[test]

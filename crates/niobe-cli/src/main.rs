@@ -14,6 +14,7 @@
 // directly rather than through the TUI.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod alerts;
 mod args;
 mod backend;
 mod commands;
@@ -143,6 +144,10 @@ fn run(
             std::env::var("COLORTERM").ok().as_deref(),
             std::env::var("NO_COLOR").ok().as_deref(),
         ),
+        notification: alerts::notification_for(
+            std::env::var("TERM_PROGRAM").ok().as_deref(),
+            std::env::var("TERM").ok().as_deref(),
+        ),
     };
     let mut next = match command {
         Command::Shell => shell(profile, &asked)?,
@@ -211,6 +216,9 @@ struct Asked {
     /// drawn at. Read from the environment here because the shell does not
     /// read the environment.
     depth: Depth,
+    /// The desktop notification the terminal shows, where it shows one. Read
+    /// from the environment here for the same reason.
+    notification: Option<niobe_tui::Notification>,
 }
 
 /// The palette a session opens in: what `--theme` asked for, or what the
@@ -301,6 +309,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
                 .with_places(places(&loaded))
                 .with_depth(asked.depth)
                 .with_keymap(loaded.config.keys().clone())
+                .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -488,6 +497,7 @@ fn resume(
                 .with_places(places(&loaded))
                 .with_depth(asked.depth)
                 .with_keymap(loaded.config.keys().clone())
+                .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -700,6 +710,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
                 .with_places(places(&loaded))
                 .with_depth(asked.depth)
                 .with_keymap(loaded.config.keys().clone())
+                .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
                 .with_theme(theme),
         ),
         &loaded,
@@ -1466,6 +1477,12 @@ PROFILES:
     asks, which the claude CLI answers from its small model and bills into
     the session: some nine hundred tokens. A repository's config nobody has
     trusted can turn it off and not on.
+
+    [notify] bell = false and notification = false turn off how niobe calls
+    you back when a question waits on you or a turn you sent ends: the
+    terminal's bell, and a desktop notification on a terminal that shows one
+    (iTerm2, WezTerm, Ghostty and kitty; foot and rxvt-unicode). Inside tmux
+    only the bell is sent.
 
 TRUST:
     A repository's config arrives with the clone, and env, args, settings and
