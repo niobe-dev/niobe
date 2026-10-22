@@ -8,9 +8,11 @@
 - 6 prompts sent, 15 replies from the agent.
 - 24 of 27 tool calls finished without failing.
 - 3 sub-agents finished.
+- 0 test runs counted no test failing.
 
 ## Lowlights
 
+- 0 test runs failed.
 - 3 tool calls failed, 1 denied.
 - 2 errors reported.
 - 0 sub-agents failed.

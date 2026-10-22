@@ -228,6 +228,14 @@ fn highlights(sessions: &[Folded]) -> Vec<String> {
             grouped(finished)
         ),
         format!("- {} finished.", counted(agents, "sub-agent", "sub-agents")),
+        format!(
+            "- {} counted no test failing.",
+            counted(
+                sum(sessions, |s| s.test_runs().passed),
+                "test run",
+                "test runs"
+            )
+        ),
     ]
 }
 
@@ -235,6 +243,14 @@ fn highlights(sessions: &[Folded]) -> Vec<String> {
 /// command that opens it.
 fn lowlights(sessions: &[Folded]) -> Vec<String> {
     let mut lines = vec![
+        format!(
+            "- {} failed.",
+            counted(
+                sum(sessions, |s| s.test_runs().failed),
+                "test run",
+                "test runs"
+            )
+        ),
         format!(
             "- {} failed, {} denied.",
             counted(
@@ -266,6 +282,13 @@ fn lowlights(sessions: &[Folded]) -> Vec<String> {
         if s.tools().denied > 0 {
             what.push(counted(s.tools().denied, "denied call", "denied calls"));
         }
+        if s.test_runs().failed > 0 {
+            what.push(counted(
+                s.test_runs().failed,
+                "failed test run",
+                "failed test runs",
+            ));
+        }
         if s.errors() > 0 {
             what.push(counted(s.errors(), "error", "errors"));
         }
@@ -285,8 +308,8 @@ fn lowlights(sessions: &[Folded]) -> Vec<String> {
 }
 
 /// What the record shows was not finished: a session that stopped in the
-/// middle of a turn, on a question nobody answered, or with sub-agents still
-/// running.
+/// middle of a turn, on a question nobody answered, on a failing test run, or
+/// with sub-agents still running.
 fn left_open(sessions: &[Folded]) -> Vec<String> {
     let lines: Vec<String> = sessions
         .iter()
@@ -304,6 +327,9 @@ fn left_open(sessions: &[Folded]) -> Vec<String> {
                 ));
             } else if s.turn_running() {
                 what.push("stopped in the middle of a turn".to_owned());
+            }
+            if s.test_run().is_some_and(|run| run.failed) {
+                what.push("its last test run failed".to_owned());
             }
             if !s.running_agents().is_empty() {
                 what.push(format!(
@@ -594,6 +620,31 @@ mod tests {
             format!(
                 "No session recorded in this repository is among the sessions started on {since} or later."
             )
+        );
+    }
+
+    #[test]
+    fn a_session_whose_last_test_run_failed_is_left_open_and_counted() {
+        let run = |failed| Event::TestRun {
+            id: ToolCallId::new("t"),
+            counts: None,
+            exit_code: Some(if failed { 101 } else { 0 }),
+            failed,
+            failures: Vec::new(),
+        };
+        let red = folded(3, &[run(false), run(true)]);
+        let green = folded(4, &[run(true), run(false)]);
+        let sessions = [red, green];
+
+        assert_eq!(
+            left_open(&sessions),
+            ["- Session 3: its last test run failed — `niobe --resume 3`"]
+        );
+        let low = lowlights(&sessions);
+        assert_eq!(low[0], "- 2 test runs failed.");
+        assert!(
+            low.contains(&"- Session 3: 1 failed test run — `niobe --resume 3`".to_owned()),
+            "{low:?}"
         );
     }
 

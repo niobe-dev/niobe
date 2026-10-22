@@ -349,6 +349,37 @@ pub struct TestRunRecord {
     pub failures: Vec<FailedTests>,
 }
 
+/// A session's test runs, by how each came out. Every run is under exactly
+/// one of the three, so they add up to every run the session made.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TestRuns {
+    /// Runs whose whole output was read and counted no test failing.
+    pub passed: u64,
+    /// Runs known to have failed after their tests started.
+    pub failed: u64,
+    /// Runs neither: their output was cut before a summary, or they stopped
+    /// before a test ran. Not a pass, which nothing read.
+    pub unread: u64,
+}
+
+impl TestRuns {
+    fn count(&mut self, run: &TestRunRecord) {
+        let under = match (run.failed, run.counts) {
+            (true, _) => &mut self.failed,
+            (false, Some(_)) => &mut self.passed,
+            (false, None) => &mut self.unread,
+        };
+        *under = under.saturating_add(1);
+    }
+
+    /// Every run, however it came out.
+    pub fn all(&self) -> u64 {
+        self.passed
+            .saturating_add(self.failed)
+            .saturating_add(self.unread)
+    }
+}
+
 impl TestRunRecord {
     /// The run an [`Event::TestRun`] reported, with `failed` set wherever its
     /// counts say a test failed or it named one, whatever the event said.
@@ -534,6 +565,8 @@ pub struct SessionState {
     /// The latest test run, which replaces the one before it: an earlier
     /// run's result says nothing about the code as it is now.
     test_run: Option<TestRunRecord>,
+    /// Every test run the session made, by how each came out.
+    test_runs: TestRuns,
     agents_spawned: u64,
     agents_completed: u64,
     agents_failed: u64,
@@ -837,12 +870,9 @@ impl SessionState {
                 failures,
                 ..
             } => {
-                self.test_run = Some(TestRunRecord::new(
-                    *counts,
-                    *exit_code,
-                    *failed,
-                    failures.clone(),
-                ));
+                let run = TestRunRecord::new(*counts, *exit_code, *failed, failures.clone());
+                self.test_runs.count(&run);
+                self.test_run = Some(run);
             }
 
             // A spawn said again for an agent already running is the same
@@ -1367,6 +1397,11 @@ impl SessionState {
     /// which is not a run of no tests.
     pub fn test_run(&self) -> Option<&TestRunRecord> {
         self.test_run.as_ref()
+    }
+
+    /// Every test run the session made, by how each came out.
+    pub fn test_runs(&self) -> &TestRuns {
+        &self.test_runs
     }
 
     /// How many sub-agents were spawned.
@@ -2847,6 +2882,27 @@ mod tests {
             }),
             "an earlier run's counts are not carried over a run that was not read"
         );
+    }
+
+    #[test]
+    fn every_test_run_is_counted_as_passed_failed_or_unread() {
+        assert_eq!(SessionState::replay(&[]).test_runs(), &TestRuns::default());
+
+        let counted = |failed| TestCounts {
+            passed: 3,
+            failed,
+            ignored: 0,
+            suites: 1,
+        };
+        let state = SessionState::replay(&[
+            tested(Some(counted(1)), Some(101)),
+            tested(Some(counted(0)), Some(0)),
+            tested(Some(counted(0)), Some(0)),
+            tested(None, Some(0)),
+        ]);
+        let runs = state.test_runs();
+        assert_eq!((runs.passed, runs.failed, runs.unread), (2, 1, 1));
+        assert_eq!(runs.all(), 4);
     }
 
     #[test]
