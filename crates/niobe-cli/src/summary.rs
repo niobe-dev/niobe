@@ -75,10 +75,18 @@ fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> Strin
     if t.records == 0 || t.cost_fully_reported() {
         return label;
     }
-    format!(
+    let owed = format!(
         "{label} — {} of {} usage records no reported cost covers",
         grouped(t.records_unsettled),
         grouped(t.records)
+    );
+    if !t.settlement_unrecorded() {
+        return owed;
+    }
+    format!(
+        "{owed} ({}: its records do not say what a reported cost settles, so some \
+         of them were quite possibly billed)",
+        niobe_tui::OLDER_RECORDING
     )
 }
 
@@ -195,7 +203,7 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -257,6 +265,21 @@ mod tests {
         assert_eq!(
             summary[0],
             "tokens      3,000 — 2,400 in · 600 out · 0 cache read · 0 cache write"
+        );
+    }
+
+    #[test]
+    fn a_floor_an_older_recording_left_says_it_is_one() {
+        let mut turn = usage(Some(0.25));
+        if let Event::Usage(usage) = &mut turn {
+            usage.settles_model = None;
+        }
+        let summary = lines(&folded(&[usage(None), turn]));
+        assert_eq!(
+            summary[1],
+            "cost        ≥$0.25 — 1 of 2 usage records no reported cost covers (older \
+             recording: its records do not say what a reported cost settles, so some of them \
+             were quite possibly billed)"
         );
     }
 

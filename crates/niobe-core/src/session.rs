@@ -58,6 +58,10 @@ pub struct Totals {
     /// by one that did. While this is non-zero,
     /// [`Totals::reported_cost_usd`] is a floor, not the session's cost.
     pub records_unsettled: u64,
+    /// How many usage records reported a cost without saying whether it
+    /// settles the model's earlier records: records stored before the backend
+    /// said so.
+    pub costs_unsaid: u64,
     /// Those records, per model.
     ///
     /// A backend that reports money once per turn leaves the turn priced by
@@ -114,7 +118,7 @@ impl Owed {
                 reasoning: 0,
                 model: model.to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             },
             records: Vec::new(),
@@ -166,6 +170,14 @@ impl Totals {
         self.records_unsettled == 0
     }
 
+    /// Whether the floor may be lower than the bill only because the session
+    /// was recorded before its records said what they settle, so what reads
+    /// as owed for was quite possibly covered. Read off the records, not off
+    /// the day they were made. `false` where nothing is owed for.
+    pub fn settlement_unrecorded(&self) -> bool {
+        !self.cost_fully_reported() && self.costs_unsaid > 0
+    }
+
     fn add(&mut self, usage: &Usage) {
         self.input = self.input.saturating_add(usage.input);
         self.output = self.output.saturating_add(usage.output);
@@ -184,8 +196,11 @@ impl Totals {
         // Claude bridge emits for tokens no message reported — leaves nothing
         // owed rather than owing for itself.
         let cost = reported_cost(usage);
-        if usage.settles_model && cost.is_some() {
+        if usage.settles_model == Some(true) && cost.is_some() {
             self.clear_unsettled(&usage.model);
+        }
+        if usage.settles_model.is_none() && cost.is_some() {
+            bump(&mut self.costs_unsaid);
         }
 
         match cost {
@@ -1526,7 +1541,7 @@ mod tests {
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: cost,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -1538,7 +1553,7 @@ mod tests {
         let Event::Usage(mut usage) = on_model(model, 0, 0, Some(cost)) else {
             unreachable!("on_model builds a usage event")
         };
-        usage.settles_model = true;
+        usage.settles_model = Some(true);
         Event::Usage(usage)
     }
 
@@ -1584,6 +1599,42 @@ mod tests {
         assert_eq!(totals.records_unsettled, 0);
         assert!(totals.cost_fully_reported());
         assert!((totals.reported_cost_usd - 0.75).abs() < f64::EPSILON);
+    }
+
+    /// A record that reported a cost before the bridge said what it settles:
+    /// what every stored record of a session recorded before then is.
+    fn unsaid(model: &str, cost: f64) -> Event {
+        let Event::Usage(mut usage) = on_model(model, 0, 0, Some(cost)) else {
+            unreachable!("on_model builds a usage event")
+        };
+        usage.settles_model = None;
+        Event::Usage(usage)
+    }
+
+    #[test]
+    fn a_floor_left_by_records_that_never_said_what_they_settle_is_marked_so() {
+        let state = SessionState::replay(&[usage(100, 10, None), unsaid("opus-5", 0.75)]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 1);
+        assert!(totals.settlement_unrecorded());
+    }
+
+    #[test]
+    fn a_floor_under_records_that_said_they_settle_nothing_is_not_marked() {
+        let state = SessionState::replay(&[usage(100, 10, None), usage(0, 0, Some(0.75))]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 1);
+        assert!(!totals.settlement_unrecorded());
+    }
+
+    #[test]
+    fn a_whole_bill_is_not_marked_however_old_its_records_are() {
+        let state = SessionState::replay(&[unsaid("opus-5", 0.75)]);
+
+        assert!(state.totals().cost_fully_reported());
+        assert!(!state.totals().settlement_unrecorded());
     }
 
     #[test]
@@ -1812,7 +1863,7 @@ mod tests {
                 reasoning: 120,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(0.04),
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }),
             on_model("haiku-4-5", 300, 30, None),
@@ -1882,7 +1933,7 @@ mod tests {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             })
         };
@@ -3648,7 +3699,7 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -4287,7 +4338,7 @@ mod tests {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(1e308),
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             })
         };

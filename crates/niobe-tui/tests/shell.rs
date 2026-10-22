@@ -357,7 +357,7 @@ fn a_cleared_conversation_is_drawn_as_a_new_session() {
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     };
@@ -2902,7 +2902,7 @@ fn billed_turn(billing: niobe_core::Billing, worked_seconds: u64, cost_usd: Opti
         reasoning: 0,
         model: "opus-5".to_owned(),
         cost_usd,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     });
     for event in [&billing, &prompt, &usage] {
@@ -3064,7 +3064,7 @@ fn session_on_three_models() -> App {
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: Some(0.01),
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }));
     }
@@ -3408,7 +3408,7 @@ fn nothing_the_backends_did_not_report_appears_as_a_number() {
         reasoning: 0,
         model: "opus-5".to_owned(),
         cost_usd: None,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     }));
     // Its tokens were measured, so a cache hit of none is a figure; money

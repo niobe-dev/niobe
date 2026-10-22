@@ -121,7 +121,7 @@ fn session_events() -> Vec<Event> {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.04),
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }),
         // The prompt that request sent: its input, reads and writes.
@@ -350,7 +350,7 @@ fn session_events() -> Vec<Event> {
             reasoning: 1_200,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }),
         // The later, larger prompt is the one the pane shows: 25,400 of
@@ -608,7 +608,7 @@ pub fn metered_session() -> App {
         reasoning: 0,
         model: "haiku-4-5".to_owned(),
         cost_usd: None,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     }));
     let mut app = session_read_at_a_fixed_moment(&events);
@@ -816,7 +816,7 @@ pub fn session_with_finished_turns() -> App {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     };
@@ -948,7 +948,7 @@ pub fn session_whose_turn_total_differs() -> App {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }),
         ),
@@ -975,7 +975,7 @@ pub fn session_whose_turn_total_differs() -> App {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(0.31),
-                settles_model: true,
+                settles_model: Some(true),
                 fast: false,
             }),
         ),

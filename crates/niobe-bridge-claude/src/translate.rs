@@ -2003,7 +2003,7 @@ impl Translator {
             // The CLI reports no money per message; the turn's `result` does,
             // for the session so far, and settles this record along with it.
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast,
         };
         match model {
@@ -2418,7 +2418,7 @@ impl Translator {
                 let Event::Usage(usage) = event else {
                     return None;
                 };
-                (usage.settles_model && self.short.contains(&usage.model))
+                (usage.settles_model == Some(true) && self.short.contains(&usage.model))
                     .then(|| usage.model.clone())
             })
             .collect();
@@ -2689,7 +2689,7 @@ impl Translator {
             // had already billed, and the tokens above are those no message
             // reported. Between them the two cover every record emitted under
             // the model so far, so this figure settles them.
-            settles_model: true,
+            settles_model: Some(true),
             fast: false,
         })
     }
@@ -2711,7 +2711,7 @@ fn covered_elsewhere(model: String) -> Event {
         reasoning: 0,
         model,
         cost_usd: Some(0.0),
-        settles_model: true,
+        settles_model: Some(true),
         fast: false,
     })
 }
@@ -2733,7 +2733,7 @@ fn short_by_unknown(model: String) -> Event {
         reasoning: 0,
         model,
         cost_usd: None,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     })
 }
@@ -4760,7 +4760,7 @@ mod tests {
                 reasoning: 0,
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: true,
             })
         );

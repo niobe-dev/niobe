@@ -2003,7 +2003,7 @@ mod cut_off {
         events
             .iter()
             .filter_map(|event| match event {
-                Event::Usage(usage) if !usage.settles_model => Some(TokenCounts {
+                Event::Usage(usage) if usage.settles_model != Some(true) => Some(TokenCounts {
                     input: usage.input,
                     output: usage.output,
                     cache_read: usage.cache_read,

@@ -212,6 +212,9 @@ fn a_log_that_says_no_days_prices_nothing_it_was_not_billed_for() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(out.contains("cost        ≥$0.87 — 14 of 25"), "{out}");
+    // The log was written before its records said what a cost settles, and
+    // the floor says so.
+    assert!(out.contains("(older recording: "), "{out}");
 }
 
 /// Claude Opus 4.6 billed a prompt over 200K tokens at $10 per million input

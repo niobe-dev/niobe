@@ -4310,23 +4310,28 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let billed = Billed::of(app.session());
     let mut lines = Vec::new();
     match billed {
-        Billed::Both => lines.push(Line::from(vec![
-            Span::styled(format!("{METERED_PART} "), dim),
-            Span::styled(
-                cost_of(app.session().metered_totals(), app.prices()),
-                Style::new().fg(theme.fg),
-            ),
-        ])),
+        Billed::Both => {
+            let totals = app.session().metered_totals();
+            let head = format!("{METERED_PART} ");
+            let cost = cost_of(totals, app.prices());
+            let mut spans = vec![
+                Span::styled(head.clone(), dim),
+                Span::styled(cost.clone(), Style::new().fg(theme.fg)),
+            ];
+            let used = text::width(&head) + text::width(&cost);
+            push_age(&mut spans, totals, used, width, dim);
+            lines.push(Line::from(spans));
+        }
         Billed::Metered => {
             let cost = session_cost(app.session(), app.prices());
             let mut spans = vec![
                 Span::styled("session ", dim),
                 Span::styled(cost.clone(), Style::new().fg(theme.hot).bold()),
             ];
+            let used = text::width("session ") + text::width(&cost);
+            let used = push_age(&mut spans, app.session().totals(), used, width, dim);
             let rate = spend_rate(app).map(|rate| format!(" · {rate}/h worked"));
-            if let Some(rate) = rate.filter(|rate| {
-                text::width("session ") + text::width(&cost) + text::width(rate) <= width
-            }) {
+            if let Some(rate) = rate.filter(|rate| used + text::width(rate) <= width) {
                 spans.push(Span::styled(rate, dim));
             }
             lines.push(Line::from(spans));
@@ -4342,6 +4347,33 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         lines.push(budget_line(app, budget, width, theme));
     }
     lines
+}
+
+/// What a floor says where it may be low only because the session was
+/// recorded before its records said what a cost settles — so that a figure an
+/// older recording leaves is not read as the backend having reported nothing.
+pub const OLDER_RECORDING: &str = "older recording";
+
+/// Appends ` · older recording` to a cost row of `used` columns where
+/// `totals` is a floor [`OLDER_RECORDING`] explains and the row has room for
+/// it, and returns the columns the row then takes.
+fn push_age(
+    spans: &mut Vec<Span<'static>>,
+    totals: &Totals,
+    used: usize,
+    width: usize,
+    style: Style,
+) -> usize {
+    if !totals.settlement_unrecorded() {
+        return used;
+    }
+    let age = format!(" · {OLDER_RECORDING}");
+    let wide = used + text::width(&age);
+    if wide > width {
+        return used;
+    }
+    spans.push(Span::styled(age, style));
+    wide
 }
 
 /// The `budget ~$1.15/$5.00` row: what the session has spent, labelled as
@@ -5869,7 +5901,7 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: cost,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -6059,7 +6091,7 @@ mod tests {
     fn a_settled_turn_is_the_backends_own_figure_and_carries_no_mark() {
         let mut settled = priced(Some(1.1521625));
         if let niobe_core::event::Event::Usage(usage) = &mut settled {
-            usage.settles_model = true;
+            usage.settles_model = Some(true);
         }
         let session = SessionState::replay(&[priced(None), priced(None), settled]);
         assert_eq!(
@@ -6750,7 +6782,7 @@ mod tests {
                 reasoning: 0,
                 model: model.to_owned(),
                 cost_usd: cost,
-                settles_model: settles,
+                settles_model: Some(settles),
                 fast: false,
             })
         };
@@ -7415,7 +7447,7 @@ mod tests {
                 reasoning: 0,
                 model: (*model).to_owned(),
                 cost_usd: Some(0.01),
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }));
         }
@@ -7735,7 +7767,7 @@ mod tests {
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.01),
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }));
 
@@ -8271,6 +8303,40 @@ mod tests {
         app
     }
 
+    /// A metered session whose message records were folded with `then`
+    /// after them: a turn's cost that does or does not say what it settles.
+    fn floored_by(settles: Option<bool>) -> Vec<String> {
+        use niobe_core::event::Event;
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::Billing {
+            billing: Billing::Metered,
+        });
+        app.apply(&priced(None));
+        let mut turn = priced(Some(0.5));
+        if let Event::Usage(usage) = &mut turn {
+            usage.settles_model = settles;
+        }
+        app.apply(&turn);
+        money_lines(&app, 40, &crate::theme::CLASSIC)
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    #[test]
+    fn a_floor_left_by_a_recording_older_than_settlement_says_so() {
+        let said = floored_by(None);
+        assert!(said[0].starts_with("session ≥$0.50"), "{said:?}");
+        assert!(said[0].contains(OLDER_RECORDING), "{said:?}");
+    }
+
+    #[test]
+    fn a_floor_the_backend_left_carries_no_mark_of_age() {
+        let said = floored_by(Some(false));
+        assert!(said[0].starts_with("session ≥$0.50"), "{said:?}");
+        assert!(!said[0].contains(OLDER_RECORDING), "{said:?}");
+    }
+
     #[test]
     fn a_session_billed_both_ways_draws_only_what_it_spent_by_use() {
         use niobe_core::event::Event;
@@ -8414,7 +8480,7 @@ mod tests {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(cost),
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }));
             let rows = spend_of(&app, 66);
@@ -8448,7 +8514,7 @@ mod tests {
                 reasoning: 0,
                 model: (*model).to_owned(),
                 cost_usd: *cost,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }));
         }

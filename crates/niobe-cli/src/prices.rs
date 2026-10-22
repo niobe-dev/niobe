@@ -333,7 +333,7 @@ cache_write = 1.25
             reasoning: 0,
             model: "claude-opus-4-6".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }
     }

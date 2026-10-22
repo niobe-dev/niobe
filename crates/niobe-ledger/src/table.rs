@@ -277,7 +277,7 @@ cache_write = 0.625
             reasoning: 0,
             model: "m".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         };
         let cost = table().cost(&usage, date(2026, 1, 10));

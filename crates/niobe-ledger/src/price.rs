@@ -221,7 +221,7 @@ mod tests {
             reasoning: 0,
             model: "m".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }
     }

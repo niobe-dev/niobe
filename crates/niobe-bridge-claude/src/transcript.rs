@@ -2783,7 +2783,7 @@ mod tests {
                 reasoning: 0,
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             })]
         );
@@ -2814,7 +2814,7 @@ mod tests {
                 reasoning: 0,
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             })]
         );

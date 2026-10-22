@@ -197,11 +197,15 @@ pub struct Usage {
     /// `claude` CLI does — leaves the message records with no cost of their
     /// own. They are not unpriced: the turn's figure covers them. A consumer
     /// that counted them as unpriced would call a fully reported session a
-    /// floor forever. `false` is the safe reading, so a producer that says
-    /// nothing, and a record written before this was kept, price only
-    /// themselves.
-    #[serde(default)]
-    pub settles_model: bool,
+    /// floor forever. Anything but `Some(true)` prices the record alone.
+    ///
+    /// `None` is a record that does not say, which is every record stored
+    /// before this was kept: the bookkeeping is younger than the recording, so
+    /// what it left unsettled may have been billed all the same. Kept apart
+    /// from `Some(false)` so that a floor can say which it is, and never
+    /// written as a `false` the producer did not write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settles_model: Option<bool>,
     /// Whether the provider served the request in its fast mode, which it
     /// bills at a premium over the model's standard rates. `false` where the
     /// backend did not say, and in records written before this was kept.
@@ -1252,7 +1256,7 @@ mod tests {
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         };
         assert_eq!(usage.tokens(), 150);
@@ -1269,10 +1273,36 @@ mod tests {
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         };
         assert_eq!(usage.tokens(), 150);
+    }
+
+    #[test]
+    fn a_usage_record_written_before_settlement_was_kept_reads_as_unsaid() {
+        let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":0.5}"#;
+        let Event::Usage(old) = serde_json::from_str(json).expect("an old record reads") else {
+            panic!("a usage record read as something else");
+        };
+        assert_eq!(old.settles_model, None);
+
+        let said = json.replace(
+            "\"cost_usd\":0.5",
+            "\"cost_usd\":0.5,\"settles_model\":false",
+        );
+        let Event::Usage(said) = serde_json::from_str(&said).expect("a new record reads") else {
+            panic!("a usage record read as something else");
+        };
+        assert_eq!(said.settles_model, Some(false));
+
+        // Written and read back, an unsaid settlement stays unsaid rather than
+        // becoming a `false` the producer never wrote.
+        let line = serde_json::to_string(&Event::Usage(old)).expect("it serializes");
+        let Event::Usage(read) = serde_json::from_str(&line).expect("it reads back") else {
+            panic!("a usage record read back as something else: {line}");
+        };
+        assert_eq!(read.settles_model, None, "{line}");
     }
 
     #[test]
@@ -1507,7 +1537,7 @@ mod tests {
             reasoning: 0,
             model: "gpt-5-codex".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         };
         // Written and read back, as the store does: an unreported cost must
