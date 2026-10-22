@@ -103,7 +103,7 @@ fn a_model_the_table_does_not_list_has_no_window() {
     let table = bundled();
     let day = date(2026, 9, 24);
     assert_eq!(table.context_window("claude-opus-9", day), None);
-    assert_eq!(table.context_window("gpt-5.6", day), None);
+    assert_eq!(table.context_window("gpt-4o", day), None);
     assert_eq!(table.context_window("claude-opus-5 ", day), None);
 }
 
@@ -120,5 +120,28 @@ fn a_model_has_no_window_before_it_was_released() {
     assert_eq!(
         bundled().context_window("claude-sonnet-5-5", date(2026, 9, 27)),
         None
+    );
+}
+
+/// "1,050,000 context window" — the GPT-5.6 Sol, Terra and Luna pages under
+/// developers.openai.com/api/docs/models, each also giving "Maximum input
+/// tokens: 922,000" and "128,000 max output tokens", which add up to it.
+#[test]
+fn the_gpt_5_6_models_have_a_window_of_1_050_000() {
+    let table = bundled();
+    let day = date(2026, 10, 1);
+    for model in ["gpt-5.6-sol", "gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        assert_eq!(table.context_window(model, day), Some(1_050_000), "{model}");
+    }
+}
+
+/// "400,000 context window", with "Maximum input tokens: 272,000" and "128,000
+/// max output tokens" — the GPT-5.3-Codex page. The window is the 400K, not
+/// the prompt cap the price table names.
+#[test]
+fn gpt_5_3_codex_has_a_window_of_400_000_beyond_its_272_000_prompt_cap() {
+    assert_eq!(
+        bundled().context_window("gpt-5.3-codex", date(2026, 10, 1)),
+        Some(400_000)
     );
 }
