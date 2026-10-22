@@ -66,6 +66,15 @@
 //! notification = false
 //! ```
 //!
+//! and how long the operator is away before the first key back tells them
+//! what happened meanwhile, and whether it does of itself:
+//!
+//! ```toml
+//! [catch_up]
+//! after = 10
+//! automatic = false
+//! ```
+//!
 //! Which palettes there are is the shell's business, not this crate's, so the
 //! name is carried as written and the caller resolves it; [`ThemeName`] keeps
 //! the line so that a name nothing answers to is reported where it was
@@ -408,6 +417,42 @@ impl Notify {
     }
 }
 
+/// When the shell tells the operator what happened while they were away: the
+/// first key pressed after `after` minutes with none opens the catch-up,
+/// unless `automatic` is off, which leaves it to the View menu and `c`.
+///
+/// ```toml
+/// [catch_up]
+/// after = 10
+/// automatic = false
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CatchUp {
+    after: Option<u64>,
+    automatic: Option<bool>,
+}
+
+impl CatchUp {
+    /// How long with no key pressed is away, in minutes: five unless a
+    /// config says otherwise, and never under one.
+    pub fn after_minutes(&self) -> u64 {
+        self.after.unwrap_or(5)
+    }
+
+    /// Whether the first key back opens the catch-up of itself.
+    pub fn automatic(&self) -> bool {
+        self.automatic.unwrap_or(true)
+    }
+
+    /// `over`'s settings where it makes them, and these elsewhere.
+    fn overlay(self, over: Self) -> Self {
+        Self {
+            after: over.after.or(self.after),
+            automatic: over.automatic.or(self.automatic),
+        }
+    }
+}
+
 /// One config file, or several laid over one another.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -417,6 +462,7 @@ pub struct Config {
     titles: Option<Titles>,
     keys: Keymap,
     notify: Notify,
+    catch_up: CatchUp,
     allowed: Allowlist,
     /// The `default_profile` of a file that has not been trusted, which is not
     /// in force.
@@ -563,6 +609,7 @@ impl Config {
             self.keys = over.keys;
         }
         self.notify = self.notify.overlay(over.notify);
+        self.catch_up = self.catch_up.overlay(over.catch_up);
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
         // where one is taken back. An untrusted file has none left to add.
@@ -692,6 +739,14 @@ impl Config {
     /// the terminal it draws on and no more.
     pub fn notify(&self) -> Notify {
         self.notify
+    }
+
+    /// When the shell tells the operator what happened while they were away.
+    ///
+    /// Not gated on trust, for the reason [`Config::notify`] is not: it
+    /// changes what the shell draws, and nothing a backend is started with.
+    pub fn catch_up(&self) -> CatchUp {
+        self.catch_up
     }
 
     /// How a session is titled: by the model unless a config says
@@ -1477,6 +1532,49 @@ backend = "codex"
     }
 
     #[test]
+    fn the_catch_up_comes_of_itself_after_five_minutes_until_a_config_says_otherwise() {
+        let none = parsed("");
+        assert_eq!(
+            (none.catch_up().after_minutes(), none.catch_up().automatic()),
+            (5, true)
+        );
+
+        let longer = parsed("[catch_up]\nafter = 20\n");
+        let repo = Config::parse("[catch_up]\nautomatic = false\n", &path("repo"))
+            .expect("the config is valid")
+            .untrusted();
+        let laid = longer.overlay(repo);
+        assert_eq!(
+            (laid.catch_up().after_minutes(), laid.catch_up().automatic()),
+            (20, false),
+            "a file silent on how long kept the one before it"
+        );
+        assert!(!laid.needs_trust(), "the catch-up is not gated");
+    }
+
+    #[test]
+    fn a_catch_up_after_no_time_or_not_in_minutes_is_refused_at_its_line() {
+        assert_eq!(
+            invalid("[catch_up]\nafter = 0\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected one minute or more"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nafter = -3\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected one minute or more"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nafter = \"5m\"\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected a whole number of \
+             minutes, found a string"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nwhen = 5\n"),
+            "/configs/user/config.toml:2: catch_up.when: unknown key; expected `after` or \
+             `automatic`"
+        );
+    }
+
+    #[test]
     fn a_notify_switch_that_is_not_a_boolean_or_not_a_switch_is_refused_at_its_line() {
         assert_eq!(
             invalid("[notify]\nbell = \"off\"\n"),
@@ -1616,8 +1714,8 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `titles`, `profiles`, `permissions`, `keys` \
-             or `notify`"
+             expected `default_profile`, `theme`, `titles`, `profiles`, `permissions`, `keys`, \
+             `notify` or `catch_up`"
         );
     }
 

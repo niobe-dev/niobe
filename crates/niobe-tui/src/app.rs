@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use niobe_core::attention::Attention;
+use niobe_core::catch_up::{CatchUp, Mark};
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, CompactTrigger, Event, Mode, PermissionDecision,
@@ -1362,6 +1363,24 @@ pub struct App {
     /// already called them back for.
     alerts: Alerts,
     called: Called,
+    /// The session as it stood at the operator's last key, which what is
+    /// shown when they come back is counted from; and as it stood when they
+    /// were last shown what happened, which `c` counts from.
+    looked: Mark,
+    caught_up: Mark,
+    /// Whether an event has been folded in since `looked` was taken.
+    looked_stale: bool,
+    /// Whether `looked` was read from the session's record, and whether the
+    /// next key is the first since the session was taken up again, which is
+    /// one back from away however soon it comes.
+    looked_recorded: bool,
+    returned: bool,
+    /// When the operator last pressed a key, or the shell first ticked.
+    last_key: Option<Instant>,
+    /// How long with no key is away, and whether the first key back shows
+    /// what happened of itself.
+    away_after: Duration,
+    catch_up_automatic: bool,
     /// Which of the front prompt's options Enter would give. Every prompt
     /// starts on the first, so Enter means the same thing whichever prompt it
     /// lands on.
@@ -1774,6 +1793,14 @@ impl App {
             asks: VecDeque::new(),
             alerts: Alerts::none(),
             called: Called::default(),
+            looked: Mark::default(),
+            caught_up: Mark::default(),
+            looked_stale: false,
+            looked_recorded: false,
+            returned: false,
+            last_key: None,
+            away_after: AWAY_AFTER,
+            catch_up_automatic: true,
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
             ask_draft: String::new(),
@@ -1839,6 +1866,7 @@ impl App {
 
     /// Folds one event in, from wherever it came.
     fn fold_event(&mut self, event: &Event) {
+        self.looked_stale = true;
         let turns = self.session.turns().len();
         if matches!(event, Event::UserMessage { .. }) {
             match self.session.turn_running() {
@@ -1951,6 +1979,7 @@ impl App {
             | Event::McpServers { .. }
             | Event::Models { .. }
             | Event::TurnTotalDiffers { .. }
+            | Event::Looked
             | Event::Notice { .. }
             | Event::Error { .. } => None,
         }
@@ -2000,6 +2029,9 @@ impl App {
         // The entry a refusal was counted on is gone, and an index into the
         // entries that replace it would rewrite whichever one is there.
         self.unsaved = None;
+        // A mark holds the figures of the conversation that ended.
+        self.looked = Mark::default();
+        self.caught_up = Mark::default();
     }
 
     /// Records that the process this session runs in is leaving it with a
@@ -2046,6 +2078,16 @@ impl App {
                 error: Some("stopped: the session ended before the command did".to_owned()),
             });
         }
+        // What happened after the operator last looked is news on their first
+        // key back, the process that ran it having ended while they were
+        // away. A record that marks no look was kept before looks were kept,
+        // and what it holds was there to read before it was left.
+        if !self.looked_recorded {
+            self.looked = Mark::of(&self.session);
+        }
+        self.caught_up = self.looked.clone();
+        self.looked_stale = true;
+        self.returned = true;
     }
 
     /// Draws the rule under the turn the fold has just ended, below whatever
@@ -2466,6 +2508,14 @@ impl App {
 
             // The working line reads the phase off the fold.
             Event::CompactionStarted | Event::CompactionEnded => {}
+
+            // What the next catch-up is counted from, read back from a record
+            // as it was taken live.
+            Event::Looked => {
+                self.looked = Mark::of(&self.session);
+                self.looked_stale = false;
+                self.looked_recorded = true;
+            }
 
             // A conversation started over is a new session: what the shell
             // drew of the one before it goes, and the first row of this one
@@ -2917,6 +2967,59 @@ impl App {
     pub fn show_notable_only(&mut self) {
         self.hold_view();
         self.notable_only = !self.notable_only;
+    }
+
+    /// Shows what happened since the operator was last shown what happened,
+    /// or says in one line that nothing has.
+    pub fn show_catch_up(&mut self) {
+        let caught = CatchUp::since(&self.caught_up, &self.session);
+        match caught.is_empty() {
+            true => self.hint = Some(crate::catch_up::NOTHING.to_owned()),
+            false => self.open_catch_up(&caught),
+        }
+    }
+
+    /// Opens the sheet of what `caught` says happened, from which the next
+    /// catch-up of either kind counts.
+    fn open_catch_up(&mut self, caught: &CatchUp) {
+        let now = self.session.turn_running().then(|| self.doing());
+        self.sheet = Some(crate::catch_up::sheet(caught, now));
+        self.produce(Event::Looked);
+        self.caught_up = self.looked.clone();
+    }
+
+    /// Opens what happened while the operator was away, where this key is
+    /// the first after [`App::with_catch_up`]'s time with none and something
+    /// did, and says whether it did.
+    ///
+    /// The key that brings them back is spent on telling them, rather than
+    /// on a pane, a prompt or a question they have not read yet: what it was
+    /// meant for was meant before they knew what changed.
+    fn caught_up_on_return(&mut self) -> bool {
+        let Some(now) = self.now else {
+            return false;
+        };
+        let away = std::mem::take(&mut self.returned)
+            || self
+                .last_key
+                .is_some_and(|last| now.saturating_duration_since(last) >= self.away_after);
+        self.last_key = Some(now);
+        if !std::mem::take(&mut self.looked_stale) {
+            return false;
+        }
+        // Nothing a catch-up counts has happened, so the mark stands: what
+        // moved since, the five-hour window, is still measured from it.
+        let caught = CatchUp::since(&self.looked, &self.session);
+        if caught.is_empty() {
+            return false;
+        }
+        let shown =
+            away && self.catch_up_automatic && self.overlay().is_none() && self.trusting.is_none();
+        match shown {
+            true => self.open_catch_up(&caught),
+            false => self.produce(Event::Looked),
+        }
+        shown
     }
 
     /// Whether the Activity pane counts calls per tool: see
@@ -3852,6 +3955,7 @@ impl App {
             | Action::Diff
             | Action::GroupByAgent
             | Action::NotableOnly
+            | Action::CatchUp
             | Action::Pane(_)
             | Action::Theme
             | Action::Shortcuts
@@ -3909,6 +4013,7 @@ impl App {
             Action::Diff => self.open_diffs(),
             Action::GroupByAgent => self.group_by_agent(),
             Action::NotableOnly => self.show_notable_only(),
+            Action::CatchUp => self.show_catch_up(),
             Action::Pane(pane) => self.toggle_pane(pane),
             Action::Theme => self.pick_theme(),
             Action::Shortcuts => self.sheet = Some(self.shortcuts()),
@@ -4823,6 +4928,16 @@ impl App {
         self
     }
 
+    /// The same shell, telling the operator what happened while they were
+    /// away once `after` has passed with no key pressed: of itself on the
+    /// first key back where `automatic`, and on `c` or the View menu always.
+    #[must_use]
+    pub fn with_catch_up(mut self, after: Duration, automatic: bool) -> Self {
+        self.away_after = after;
+        self.catch_up_automatic = automatic;
+        self
+    }
+
     /// What the shell sends to call the operator back.
     pub fn alerts(&self) -> Alerts {
         self.alerts
@@ -5311,6 +5426,7 @@ impl App {
             KeyCode::Enter => self.fold_under_cursor(pane),
             KeyCode::Char('a') => self.group_by_agent(),
             KeyCode::Char('n') => self.show_notable_only(),
+            KeyCode::Char('c') => self.show_catch_up(),
             KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
@@ -6668,6 +6784,9 @@ impl App {
     /// to the composer, so typing an `f` is typing an `f` even though `F1` is a
     /// menu.
     pub fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        if self.caught_up_on_return() {
+            return;
+        }
         let covered = self.overlay().is_some();
         self.on_key_under(key);
         self.after_uncovering(covered);
@@ -7133,6 +7252,7 @@ impl App {
     pub fn tick(&mut self, now: Instant, at: Option<Stamp>) {
         self.now = Some(now);
         self.at = at;
+        self.last_key = self.last_key.or(Some(now));
         self.expire_quit(now);
         // The trust question is up from the first tick, which draws it, and
         // waits from there for a quiet keyboard as a permission question does.
@@ -8251,6 +8371,10 @@ fn left(seconds: u64) -> String {
     }
 }
 
+/// How long with no key pressed the operator is away, where the config
+/// does not say: long enough that a pause to read is not an absence.
+const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
+
 /// A share of a window as whole percent. Not clamped: a backend reporting more
 /// than the whole window is reporting something the operator has to see.
 pub fn percent(utilization: f64) -> u64 {
@@ -8590,6 +8714,17 @@ mod tests {
     use ratatui_textarea::Key;
     use std::time::{Duration, Instant};
 
+    impl App {
+        /// What the operator produced, without the looks the shell records
+        /// for the catch-up, which no test of what they said is about.
+        fn said(&mut self) -> Vec<Event> {
+            self.take_produced()
+                .into_iter()
+                .filter(|event| *event != Event::Looked)
+                .collect()
+        }
+    }
+
     fn app() -> App {
         App::new(Repo {
             name: "niobe".to_owned(),
@@ -8732,6 +8867,170 @@ mod tests {
         assert_eq!(app.composed(), "n", "nothing was typed");
         app.on_key(key(KeyCode::Char('n')));
         assert!(!app.notable_only(), "the key hides and shows them");
+    }
+
+    fn changed(path: &str) -> Event {
+        Event::FileChange {
+            path: path.to_owned(),
+            added: Some(4),
+            removed: Some(1),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
+        }
+    }
+
+    const AWAY: Duration = Duration::from_secs(6 * 60);
+
+    #[test]
+    fn the_first_key_after_minutes_away_shows_what_happened_and_is_spent_on_it() {
+        let mut app = laid_out();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(left + AWAY, None);
+
+        app.on_key(key(KeyCode::Char('x')));
+        let sheet = app.sheet().expect("something happened while away");
+        assert_eq!(sheet.title, crate::catch_up::TITLE);
+        assert_eq!(sheet.rows[..2], ["1 file changed:", "  src/lib.rs  +4 −1"]);
+        assert_eq!(app.composed(), "", "the key went on telling them");
+
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "nothing new, and not away");
+        assert_eq!(app.composed(), "x");
+    }
+
+    #[test]
+    fn a_key_pressed_as_things_happen_moves_the_mark_so_coming_back_tells_only_what_came_after() {
+        let mut app = laid_out();
+        let at = Instant::now();
+        app.tick(at, None);
+        app.apply(&changed("src/seen.rs"));
+        app.tick(at + Duration::from_secs(1), None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "a second is no absence");
+
+        app.apply(&changed("src/unseen.rs"));
+        app.tick(at + AWAY, None);
+        app.on_key(key(KeyCode::Char('y')));
+        let rows = &app.sheet().expect("a file changed while away").rows;
+        assert!(
+            rows.iter().any(|row| row.contains("src/unseen.rs")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("src/seen.rs")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn minutes_away_with_nothing_happening_open_nothing_and_the_key_lands() {
+        let mut app = laid_out();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none());
+        assert_eq!(app.composed(), "x");
+    }
+
+    #[test]
+    fn with_the_automatic_catch_up_off_c_in_a_pane_still_shows_it_and_says_when_nothing_is_new() {
+        let mut app = laid_out().with_catch_up(Duration::from_secs(60), false);
+        let left = Instant::now();
+        app.tick(left, None);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Tab));
+        assert!(app.sheet().is_none(), "not of itself");
+
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(
+            app.sheet().map(|sheet| sheet.title.as_str()),
+            Some(crate::catch_up::TITLE),
+            "c counts from the last catch-up shown, not the last key"
+        );
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('c')));
+        assert!(app.sheet().is_none());
+        assert_eq!(app.hint(), Some(crate::catch_up::NOTHING));
+    }
+
+    #[test]
+    fn a_conversation_started_over_counts_what_it_changes_from_nothing() {
+        let mut app = laid_out();
+        let at = Instant::now();
+        app.tick(at, None);
+        app.apply(&changed("src/lib.rs"));
+        app.on_key(key(KeyCode::Char('x')));
+        app.apply(&Event::Cleared);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(at + AWAY, None);
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(
+            app.sheet().is_some(),
+            "the same file changed once in each conversation is news in the new one"
+        );
+    }
+
+    #[test]
+    fn a_look_is_recorded_once_something_has_happened_and_read_back_as_the_mark() {
+        let mut live = laid_out();
+        let at = Instant::now();
+        live.tick(at, None);
+        live.on_key(key(KeyCode::Char('x')));
+        assert!(
+            !live.take_produced().contains(&Event::Looked),
+            "nothing had happened to look at"
+        );
+        live.apply(&changed("src/seen.rs"));
+        live.on_key(key(KeyCode::Char('y')));
+        live.on_key(key(KeyCode::Char('z')));
+        let looks = live
+            .take_produced()
+            .iter()
+            .filter(|event| **event == Event::Looked)
+            .count();
+        assert_eq!(looks, 1, "one look for one thing that happened");
+
+        // The process ended while the operator was away, after a file they
+        // never saw changed; the session taken up again tells them of it on
+        // the first key, however soon.
+        let mut app = laid_out();
+        app.apply(&changed("src/seen.rs"));
+        app.apply(&Event::Looked);
+        app.apply(&changed("src/unseen.rs"));
+        app.resumed();
+        app.tick(Instant::now(), None);
+        app.on_key(key(KeyCode::Char('x')));
+        let rows = &app
+            .sheet()
+            .expect("a file changed after the last look")
+            .rows;
+        assert!(
+            rows.iter().any(|row| row.contains("src/unseen.rs")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("src/seen.rs")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_record_that_marks_no_look_holds_nothing_to_catch_up_on() {
+        let mut app = laid_out();
+        app.apply(&changed("src/lib.rs"));
+        app.resumed();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "the record was there to read before");
+        assert_eq!(app.composed(), "x");
     }
 
     /// `t` turns the Activity pane's tools between kinds of work and tool
@@ -9383,7 +9682,7 @@ mod tests {
         app.submit();
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             vec![Event::UserMessage {
                 text: "look at this[Image #1] ".to_owned()
             }]
@@ -9436,7 +9735,7 @@ mod tests {
         app.submit();
         assert_eq!(app.composed(), "");
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PromptNotSent {
                 text: "hi".to_owned()
             }]
@@ -9485,7 +9784,7 @@ mod tests {
             });
         }
         app.submit();
-        app.take_produced()
+        app.said()
     }
 
     /// Typed as a prompt, the backend would move the model only when the next
@@ -9531,7 +9830,7 @@ mod tests {
     /// something: what it sent, what it said, what it opened and handed over,
     /// and whether it is ending.
     fn outcome(app: &mut App) -> String {
-        let sent = app.take_produced();
+        let sent = app.said();
         let handed = app.take_handoffs();
         format!(
             "sent {sent:?}\nsaid {:?}\nsheet {:?}\npicking {:?}\nbrowsing {:?}\n\
@@ -9656,7 +9955,7 @@ mod tests {
         };
         let mut app = working();
         app.on_key(key(KeyCode::F(2)));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         let refused = app.hint().map(str::to_owned);
         assert!(
             refused
@@ -9800,7 +10099,7 @@ mod tests {
         typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "one\ntwo".to_owned()
             }]
@@ -9816,7 +10115,7 @@ mod tests {
             typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::UserMessage {
                     text: "one\ntwo".to_owned()
                 }]
@@ -9839,7 +10138,7 @@ mod tests {
             typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::UserMessage {
                     text: "one\ntwo".to_owned()
                 }]
@@ -9877,12 +10176,12 @@ mod tests {
         app.submit();
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "h".to_owned()
             }]
         );
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -9891,7 +10190,7 @@ mod tests {
         app.apply(&Event::UserMessage {
             text: "from the store".to_owned(),
         });
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -10170,7 +10469,7 @@ mod tests {
         // Nothing is left for a key to answer, so nothing goes to a backend
         // that could not take it.
         app.on_key(key(KeyCode::Enter));
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -10276,7 +10575,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -10386,7 +10685,7 @@ mod tests {
         // answer was a standing one.
         for mut app in [by_target, by_tool] {
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::PermissionResponse {
                     id: "t1".into(),
                     decision: PermissionDecision::AllowAlways,
@@ -10423,10 +10722,7 @@ mod tests {
         assert_eq!(app.ask_selected(), Answer::No);
 
         assert!(app.take_rules().is_empty());
-        assert!(
-            app.take_produced().is_empty(),
-            "a number answered by itself"
-        );
+        assert!(app.said().is_empty(), "a number answered by itself");
     }
 
     #[test]
@@ -10441,7 +10737,7 @@ mod tests {
 
         assert_eq!(app.composed(), "x");
         assert!(app.asking().is_some());
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
     }
 
     #[test]
@@ -10706,7 +11002,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -10732,7 +11028,7 @@ mod tests {
 
         app.on_key(key(KeyCode::Tab));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
 
         app.on_key(key(KeyCode::Char('n')));
         app.on_key(key(KeyCode::Esc));
@@ -10748,7 +11044,7 @@ mod tests {
         app.apply(&prompt(Some("rm -rf build")));
         app.apply(&Event::TurnEnded);
         let mut app = sent(app, "again");
-        app.take_produced();
+        app.said();
 
         assert!(app.asking().is_none(), "the question is still up");
         assert_ne!(
@@ -10774,7 +11070,7 @@ mod tests {
     #[test]
     fn a_question_no_rule_answers_calls_the_operator_back_once() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_alert(), None, "a turn starting is no call");
 
         app.apply(&prompt(Some("rm -rf build")));
@@ -10790,7 +11086,7 @@ mod tests {
                 .with_rules([Rule::tool("Bash")].into_iter().collect()),
             "go",
         );
-        app.take_produced();
+        app.said();
         app.apply(&prompt(Some("rm -rf build")));
         app.settle_rules();
 
@@ -10800,7 +11096,7 @@ mod tests {
     #[test]
     fn a_turn_sent_from_here_that_ends_calls_the_operator_back() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_alert(), None);
 
         app.apply(&Event::TurnEnded);
@@ -10812,7 +11108,7 @@ mod tests {
     fn a_turn_the_operator_stopped_ends_without_calling_them_back() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_alert(), None);
 
         app.on_key(key(KeyCode::Esc));
@@ -10820,7 +11116,7 @@ mod tests {
         assert_eq!(app.take_alert(), None);
 
         let mut app = sent(app, "again");
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_alert(), None);
         app.apply(&Event::TurnEnded);
         assert_eq!(
@@ -10833,7 +11129,7 @@ mod tests {
     #[test]
     fn a_session_folded_in_before_the_shell_opened_rings_nothing_as_it_opens() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.apply(&prompt(Some("rm -rf build")));
 
         app.alerts_seen();
@@ -10858,14 +11154,14 @@ mod tests {
     fn esc_puts_the_question_off_and_leaves_it_waiting_in_the_transcript() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.apply(&prompt(Some("rm -rf build")));
 
         app.on_key(key(KeyCode::Esc));
 
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         assert!(app.asking().is_some(), "putting it off answered it");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert_eq!(
             app.activity().map(|a| a.doing).as_deref(),
             Some("waiting on you"),
@@ -10877,10 +11173,7 @@ mod tests {
         assert_eq!(app.composed(), "x");
         // … but not sent into a turn that is waiting on the answer.
         app.on_key(key(KeyCode::Enter));
-        assert!(
-            app.take_produced().is_empty(),
-            "a prompt went out past the question"
-        );
+        assert!(app.said().is_empty(), "a prompt went out past the question");
         assert_eq!(app.composed(), "x");
         let hint = app.hint().unwrap_or_default();
         assert!(hint.contains("waiting"), "{hint}");
@@ -10908,7 +11201,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.follows_tail());
         assert!(
-            app.take_produced().is_empty(),
+            app.said().is_empty(),
             "a question the operator could not see was answered"
         );
         app.on_key(key(KeyCode::Enter));
@@ -11016,7 +11309,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowByRule,
@@ -11047,7 +11340,7 @@ mod tests {
             Some(Some("cargo test && rm -rf ~")),
             "the chained command was let through by a rule about cargo"
         );
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     fn under_a_profile(models: &[&str]) -> App {
@@ -11079,7 +11372,7 @@ mod tests {
 
         app.on_key(back_tab());
         assert_eq!(app.session().mode(), Some(Mode::Ask));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(
             app.hint().is_some_and(|hint| hint.contains("not attached")),
             "{:?}",
@@ -11103,10 +11396,7 @@ mod tests {
         app.on_key(back_tab());
 
         assert_eq!(app.session().mode(), Some(Mode::Auto));
-        assert_eq!(
-            app.take_produced(),
-            [Event::ModeSelected { mode: Mode::Auto }]
-        );
+        assert_eq!(app.said(), [Event::ModeSelected { mode: Mode::Auto }]);
 
         app.on_key(back_tab());
         assert_eq!(app.session().mode(), Some(Mode::Plan));
@@ -11168,7 +11458,7 @@ mod tests {
         app.on_key(back_tab());
 
         assert_eq!(app.session().mode(), Some(Mode::Ask));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(
             app.hint()
                 .is_some_and(|hint| hint.contains("cannot run auto mode")),
@@ -11244,7 +11534,7 @@ mod tests {
 
         assert!(app.picking().is_none(), "the list stayed on screen");
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::ModelSelected {
                 model: "sonnet".to_owned()
             }]
@@ -11340,7 +11630,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::ModelSelected {
                 model: "claude-fable-5".to_owned()
             }],
@@ -11406,7 +11696,7 @@ mod tests {
         app.on_key(key(KeyCode::Esc));
 
         assert!(app.picking().is_none());
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -11778,7 +12068,7 @@ mod tests {
     #[test]
     fn esc_during_a_running_turn_asks_the_backend_to_stop_it() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
 
         app.on_key(key(ratatui::crossterm::event::KeyCode::Esc));
 
@@ -11809,7 +12099,7 @@ mod tests {
     #[test]
     fn ctrl_c_stops_a_running_turn_and_then_takes_two_more_presses_to_quit() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         let start = Instant::now();
 
         ctrl_c_at(&mut app, start);
@@ -11947,7 +12237,7 @@ mod tests {
     #[test]
     fn ctrl_c_closes_the_memory_view_and_stops_nothing() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(key(KeyCode::F(8)));
         assert!(app.memory().is_some());
 
@@ -11974,7 +12264,7 @@ mod tests {
         app.take_interrupt();
         app.apply(&Event::TurnEnded);
         let mut app = sent(app, "again");
-        app.take_produced();
+        app.said();
 
         app.on_key(ctrl_c());
 
@@ -11996,7 +12286,7 @@ mod tests {
     #[test]
     fn esc_after_a_stop_the_backend_would_not_take_asks_for_the_stop_again() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(key(KeyCode::Esc));
         assert!(app.take_interrupt());
         app.not_stopped("the pipe is closed");
@@ -12009,7 +12299,7 @@ mod tests {
     #[test]
     fn ctrl_c_after_a_stop_the_backend_would_not_take_stops_rather_than_quits() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(ctrl_c());
         assert!(app.take_interrupt());
         app.not_stopped("the pipe is closed");
@@ -12023,7 +12313,7 @@ mod tests {
     #[test]
     fn a_stop_the_backend_would_not_take_no_longer_says_the_turn_is_stopping() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(ctrl_c());
         assert_eq!(app.hint(), Some(STOPPING_HINT));
 
@@ -12035,7 +12325,7 @@ mod tests {
     #[test]
     fn a_turn_that_ended_after_a_stop_no_longer_says_it_is_stopping() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(key(KeyCode::Esc));
         assert_eq!(app.hint(), Some(STOPPING_HINT));
 
@@ -12409,7 +12699,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -12431,7 +12721,7 @@ mod tests {
             app.on_key(KeyEvent::new(KeyCode::Enter, held));
         }
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t1"));
     }
 
@@ -12457,7 +12747,7 @@ mod tests {
         for text in ["hello", "keep going", "j", "jk", "ok"] {
             let mut app = typed_at_the_question(text);
 
-            assert_eq!(app.take_produced(), [], "{text}");
+            assert_eq!(app.said(), [], "{text}");
             assert!(app.asking().is_some(), "{text}");
             assert_eq!(app.composed(), text, "{text}");
             assert_eq!(app.ask_focus(), AskFocus::Deferred, "{text}");
@@ -12488,7 +12778,7 @@ mod tests {
         }
 
         assert_eq!(app.composed(), "fix the tests");
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
     }
 
@@ -12502,7 +12792,7 @@ mod tests {
         read(&mut app, b"1", shown + Duration::from_millis(50));
         read(&mut app, b"\r", shown + Duration::from_millis(100));
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
     }
 
@@ -12524,7 +12814,7 @@ mod tests {
 
         assert_eq!(app.composed(), "start now");
         assert!(app.menu().is_none());
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.take_handoffs(), vec![]);
     }
 
@@ -12565,7 +12855,7 @@ mod tests {
         read(&mut app, b"\r", shown + ASK_QUIET * 22);
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -12583,7 +12873,7 @@ mod tests {
         first.apply(&prompt(Some("touch one.txt")));
         read(&mut first, b"\r", shown + ASK_QUIET * 2);
         assert_eq!(
-            first.take_produced(),
+            first.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -12597,7 +12887,7 @@ mod tests {
         read(&mut again, b"4", shown + ASK_QUIET * 2);
         read(&mut again, b"\r", shown + ASK_QUIET * 4);
         assert_eq!(
-            again.take_produced(),
+            again.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -12647,12 +12937,12 @@ mod tests {
         ] {
             app.on_key(KeyEvent::new(KeyCode::Enter, held));
         }
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.ask_draft(), "no");
 
         press(&mut app, KeyCode::Enter);
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -13501,7 +13791,7 @@ mod tests {
 
         app.resumed();
 
-        let produced = app.take_produced();
+        let produced = app.said();
         assert!(
             matches!(
                 produced.as_slice(),
@@ -13557,12 +13847,12 @@ mod tests {
     fn leaving_records_the_turn_it_cuts_and_nothing_when_none_runs() {
         let mut idle = app();
         idle.leave();
-        assert!(idle.take_produced().is_empty());
+        assert!(idle.said().is_empty());
 
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.leave();
-        assert_eq!(app.take_produced(), [Event::SessionLeft]);
+        assert_eq!(app.said(), [Event::SessionLeft]);
         assert!(!app.session().turn_running());
     }
 
@@ -13773,7 +14063,7 @@ mod tests {
 
         assert!(app.diffs_open());
         assert!(app.asking().is_some(), "the key answered the question");
-        assert!(app.take_produced().is_empty(), "{:?}", app.take_produced());
+        assert!(app.said().is_empty(), "{:?}", app.said());
     }
 
     /// Hands `bytes` to the shell the way the event loop does: decoded as one
@@ -13899,7 +14189,7 @@ mod tests {
         read(&mut app, b"hello\rworld\r", Instant::now());
 
         let sent: Vec<Event> = app
-            .take_produced()
+            .said()
             .into_iter()
             .filter(|event| matches!(event, Event::UserMessage { .. }))
             .collect();
@@ -13966,7 +14256,7 @@ mod tests {
 
         read(&mut app, b"run it\r", Instant::now());
 
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert_eq!(app.composer().lines(), ["run it", ""]);
     }
 
@@ -13999,7 +14289,7 @@ mod tests {
         );
 
         assert!(app.asking().is_some(), "the paste answered the question");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert!(app.take_rules().is_empty());
         assert_eq!(
             app.ask_selected(),
@@ -14018,11 +14308,11 @@ mod tests {
             app.composer().lines(),
             ["here is the log:", "error: boom", "at foo.rs:3"]
         );
-        assert!(app.take_produced().is_empty(), "the paste sent a turn");
+        assert!(app.said().is_empty(), "the paste sent a turn");
 
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "here is the log:\nerror: boom\nat foo.rs:3".to_owned()
             }]
@@ -14106,7 +14396,7 @@ mod tests {
         read(&mut app, b"\r", shown + Duration::from_millis(550));
 
         assert!(app.asking().is_some(), "typing ahead answered the question");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert!(app.take_rules().is_empty());
         assert_eq!(app.ask_selected(), Answer::Once);
         assert!(app.hint().is_some(), "nothing said the keys were not taken");
@@ -14122,7 +14412,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowAlways,
@@ -14143,7 +14433,7 @@ mod tests {
 
         read(&mut app, b"\r", shown + Duration::from_millis(1800));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -14162,7 +14452,7 @@ mod tests {
         read(&mut app, b"\r", first + Duration::from_millis(2100));
 
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
-        assert_eq!(app.take_produced().len(), 1);
+        assert_eq!(app.said().len(), 1);
     }
 
     /// Types `text` a key at a time, `every` apart from `from`, and gives
@@ -14230,7 +14520,7 @@ mod tests {
         // The words went on into the prompt behind the question, which waits:
         // letters answer nothing, so none of them was held back, and the
         // Enter that ended them sent nothing.
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         // What was being written for the question that went is not lost to
@@ -14239,7 +14529,7 @@ mod tests {
         read(&mut app, b"\x1b", last + every + ASK_QUIET * 2);
         read(&mut app, b"\r", last + every + ASK_QUIET * 4);
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t2".into(),
                 decision: PermissionDecision::Allow,
@@ -14254,7 +14544,7 @@ mod tests {
     fn written_through_a_withdrawal(ended: &Event) -> (App, Instant) {
         let shown = Instant::now();
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.tick(shown, None);
         app.apply(&prompt(Some("rm -rf build")));
         let every = Duration::from_millis(150);
@@ -14276,12 +14566,12 @@ mod tests {
         let (mut app, pressed) =
             written_through_a_withdrawal(&Event::PermissionWithdrawn { id: "t1".into() });
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
         assert_eq!(app.composed(), "no, use rg");
         read(&mut app, b"\r", pressed + ASK_QUIET * 2);
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "no, use rg".to_owned()
             }]
@@ -14295,13 +14585,13 @@ mod tests {
     fn a_burst_read_after_the_quiet_does_not_end_the_withdrawal_guard() {
         let (mut app, pressed) =
             written_through_a_withdrawal(&Event::PermissionWithdrawn { id: "t1".into() });
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
 
         let burst = pressed + ASK_QUIET * 2;
         read(&mut app, b"xy", burst);
         read(&mut app, b"\r", burst + Duration::from_millis(150));
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
     }
 
@@ -14309,7 +14599,7 @@ mod tests {
     fn an_enter_typed_through_a_question_its_turn_ended_on_sends_nothing() {
         let (mut app, _) = written_through_a_withdrawal(&Event::TurnEnded);
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
         assert_eq!(app.composed(), "no, use rg");
     }
@@ -14583,7 +14873,7 @@ mod tests {
         app.on_key(alt('s'));
         app.on_key(key(KeyCode::Char('n')));
         assert_eq!(under_cursor(&app), Some(crate::menu::Action::NewSession));
-        assert_eq!(app.take_produced(), [], "nothing is sent until Enter");
+        assert_eq!(app.said(), [], "nothing is sent until Enter");
         assert_eq!(app.composer().lines(), [""], "and nothing is typed");
     }
 
@@ -14673,7 +14963,7 @@ mod tests {
                     );
                     assert_eq!(app.ask_focus(), focus, "{column},{row}");
                     assert!(app.asking().is_some(), "{column},{row}");
-                    assert_eq!(app.take_produced(), [], "{column},{row}");
+                    assert_eq!(app.said(), [], "{column},{row}");
                     assert!(app.take_handoffs().is_empty(), "{column},{row}");
                 }
             }
@@ -14694,7 +14984,7 @@ mod tests {
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowAlways,
@@ -14734,7 +15024,7 @@ mod tests {
 
                 assert_eq!(opened_over(&app), [] as [&str; 0], "{}", item.label);
                 assert!(app.asking().is_some(), "{}", item.label);
-                assert_eq!(app.take_produced(), [], "{}", item.label);
+                assert_eq!(app.said(), [], "{}", item.label);
                 assert!(app.take_handoffs().is_empty(), "{}", item.label);
                 assert_eq!(
                     app.should_quit(),
@@ -14774,7 +15064,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::ModelSelected {
                 model: "sonnet".to_owned()
             }]
@@ -14802,7 +15092,7 @@ mod tests {
             app.finding().map(|query| query.lines().to_vec()),
             Some(vec!["2".to_owned()])
         );
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
         assert_eq!(
             app.ask_selected(),
@@ -14839,7 +15129,7 @@ mod tests {
         assert!(app.picking().is_none());
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
     }
 
@@ -14857,7 +15147,7 @@ mod tests {
         assert!(app.finding().is_none());
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
     }
 
@@ -14877,11 +15167,11 @@ mod tests {
         );
 
         assert!(app.picking().is_none());
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(TOO_SOON_HINT));
         app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 5));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -14976,7 +15266,7 @@ mod tests {
             app.on_key_read(closing, alone(shown + ASK_QUIET * 4));
             assert_eq!(app.overlay(), None, "{overlay:?} stayed open");
             assert!(
-                !app.take_produced()
+                !app.said()
                     .iter()
                     .any(|event| matches!(event, Event::PermissionResponse { .. })),
                 "{overlay:?}"
@@ -14986,12 +15276,12 @@ mod tests {
                 alone(shown + ASK_QUIET * 4 + ASK_QUIET / 5),
             );
 
-            assert_eq!(app.take_produced(), [], "{overlay:?}");
+            assert_eq!(app.said(), [], "{overlay:?}");
             assert!(app.asking().is_some(), "{overlay:?}");
             assert_eq!(app.hint(), Some(TOO_SOON_HINT), "{overlay:?}");
             app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 7));
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::PermissionResponse {
                     id: "t1".into(),
                     decision: PermissionDecision::Allow,
@@ -15022,7 +15312,7 @@ mod tests {
             },
         );
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(TOO_SOON_HINT));
     }
 
@@ -15031,7 +15321,7 @@ mod tests {
         let mut app = offering(&["compact", "clear"]);
         app.on_key(key(KeyCode::F(2)));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "/compact".to_owned()
             }]
@@ -15039,7 +15329,7 @@ mod tests {
         app.apply(&Event::TurnEnded);
         app.on_key(key(KeyCode::F(3)));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "/clear".to_owned()
             }]
@@ -15050,7 +15340,7 @@ mod tests {
     fn a_command_the_backend_does_not_list_is_not_sent_and_says_why() {
         let mut app = offering(&["compact"]);
         app.perform(crate::menu::Action::Doctor);
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(
             app.hint().is_some_and(|hint| hint.contains("/doctor")),
             "{:?}",
@@ -15062,9 +15352,9 @@ mod tests {
     fn a_backend_command_waits_for_the_running_turn() {
         let mut app = offering(&["compact", "clear"]);
         typed_then_enter(&mut app, "go", KeyModifiers::NONE);
-        app.take_produced();
+        app.said();
         app.on_key(key(KeyCode::F(3)));
-        assert_eq!(app.take_produced(), [], "a /clear mid-turn is not sent");
+        assert_eq!(app.said(), [], "a /clear mid-turn is not sent");
         assert!(app.hint().is_some_and(|hint| hint.contains("Esc")));
     }
 
@@ -15072,7 +15362,7 @@ mod tests {
     fn a_backend_command_leaves_the_images_of_the_prompt_being_written() {
         let mut app = offering(&["compact"]);
         app.on_key(key(KeyCode::F(2)));
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_turn_images(), Vec::new());
     }
 
@@ -15300,11 +15590,11 @@ mod tests {
     fn f7_lists_the_mcp_servers_in_the_shell_mid_turn_and_sends_nothing() {
         let mut app = with_mcp_servers();
         typed_then_enter(&mut app, "go", KeyModifiers::NONE);
-        app.take_produced();
+        app.said();
         assert!(app.working(), "the turn is not running");
 
         app.on_key(key(KeyCode::F(7)));
-        assert_eq!(app.take_produced(), [], "F7 sent a turn");
+        assert_eq!(app.said(), [], "F7 sent a turn");
         assert!(app.mcp().is_some(), "F7 opened no view");
         let shown = mcp_shown(&app);
         for said in ["notes", "connected", "2 tools", "remote docs", "failed"] {
@@ -15396,7 +15686,7 @@ mod tests {
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Char('r')));
         assert_eq!(app.take_mcp_reconnects(), ["remote docs"]);
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.mcp().is_some(), "r closed the view");
         assert!(
             app.hint().is_some_and(|hint| hint.contains("remote docs")),
@@ -15543,7 +15833,7 @@ mod tests {
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "/effort medium".to_owned()
             }]
@@ -15597,7 +15887,7 @@ mod tests {
                 "{action:?}: {:?}",
                 app.hint()
             );
-            assert_eq!(app.take_produced(), [], "{action:?}");
+            assert_eq!(app.said(), [], "{action:?}");
         }
     }
 
@@ -15758,7 +16048,7 @@ mod tests {
     fn send_prompt(app: &mut App, text: &str) {
         typed(app, text);
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
     }
 
     fn earlier(text: &str, session: &str) -> crate::history::PastPrompt {
@@ -15828,7 +16118,7 @@ mod tests {
             "half",
             "past the newest is the draft, as it was"
         );
-        assert!(app.take_produced().is_empty(), "recalling sends nothing");
+        assert!(app.said().is_empty(), "recalling sends nothing");
     }
 
     /// `/clear` starts a session of its own, and the prompts the operator
@@ -15939,7 +16229,7 @@ mod tests {
         app.on_key(key(KeyCode::Up));
         assert_eq!(app.composed(), "earlier");
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
 
         assert_eq!(app.composed(), "kept for later");
     }
@@ -15969,13 +16259,13 @@ mod tests {
         assert_eq!(app.composed(), "run the tests");
 
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
         assert!(app.take_turn_images().is_empty());
         assert_eq!(app.composed(), "[Image #1] what is this");
 
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "[Image #1] what is this".to_owned()
             }]
@@ -16000,7 +16290,7 @@ mod tests {
 
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "compare [Image #1] with the mock".to_owned()
             }]
@@ -16012,7 +16302,7 @@ mod tests {
         assert_eq!(app.composed(), "look at[Image #1] ");
 
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_turn_images(), [png(b"a")]);
     }
 
@@ -16030,12 +16320,12 @@ mod tests {
         typed(&mut app, " again");
 
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
         assert!(app.take_turn_images().is_empty());
         assert_eq!(app.composed(), "look at[Image #1] ");
 
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_turn_images(), [png(b"a")]);
     }
 
@@ -16054,7 +16344,7 @@ mod tests {
 
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "compare with the mock [Image #1] ".to_owned()
             }]
@@ -16177,7 +16467,7 @@ mod tests {
         assert_eq!(app.composed(), "my half-written draft");
         assert_eq!(app.recalled(), None);
         assert_eq!(app.hint(), None, "this Esc is not the F-key prefix");
-        assert!(app.take_produced().is_empty(), "nothing is sent");
+        assert!(app.said().is_empty(), "nothing is sent");
 
         app.on_key(key(KeyCode::Up));
         assert_eq!(app.composed(), "newest", "a new walk starts on the newest");
@@ -16212,10 +16502,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.browser().is_none());
         assert_eq!(app.composed(), "add etag support");
-        assert!(
-            app.take_produced().is_empty(),
-            "choosing a prompt sends nothing"
-        );
+        assert!(app.said().is_empty(), "choosing a prompt sends nothing");
     }
 
     #[test]
@@ -16235,7 +16522,7 @@ mod tests {
 
         assert_eq!(app.take_commands(), []);
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "rm the build dir and rebuild".to_owned()
             }]

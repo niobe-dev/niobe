@@ -1155,6 +1155,12 @@ pub enum Event {
         message: String,
     },
 
+    /// The operator pressed a key after something a catch-up counts had
+    /// happened: what the next one is counted from ([`crate::catch_up`]),
+    /// kept with the session so that one taken up again tells them what
+    /// happened after they last looked, even where the process that ran it
+    /// was ended while they were away.
+    Looked,
     /// Something went wrong.
     Error {
         /// The message, as it will be shown.

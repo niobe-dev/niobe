@@ -78,7 +78,8 @@ impl Attention {
             | Event::Commands { .. }
             | Event::McpServers { .. }
             | Event::Models { .. }
-            | Event::Notice { .. } => Self::Routine,
+            | Event::Notice { .. }
+            | Event::Looked => Self::Routine,
         }
     }
 }

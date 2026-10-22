@@ -310,6 +310,10 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
                 .with_depth(asked.depth)
                 .with_keymap(loaded.config.keys().clone())
                 .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
+                .with_catch_up(
+                    away_after(loaded.config.catch_up()),
+                    loaded.config.catch_up().automatic(),
+                )
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -498,6 +502,10 @@ fn resume(
                 .with_depth(asked.depth)
                 .with_keymap(loaded.config.keys().clone())
                 .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
+                .with_catch_up(
+                    away_after(loaded.config.catch_up()),
+                    loaded.config.catch_up().automatic(),
+                )
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -711,6 +719,10 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
                 .with_depth(asked.depth)
                 .with_keymap(loaded.config.keys().clone())
                 .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
+                .with_catch_up(
+                    away_after(loaded.config.catch_up()),
+                    loaded.config.catch_up().automatic(),
+                )
                 .with_theme(theme),
         ),
         &loaded,
@@ -941,6 +953,11 @@ fn say_tap(app: App, tap: Option<&Path>) -> App {
 /// The shell with a price sheet, so that a turn the backend has not priced yet
 /// shows what it is costing rather than nothing.
 ///
+/// How long with no key pressed the config calls away.
+fn away_after(catch_up: niobe_config::CatchUp) -> Duration {
+    Duration::from_secs(catch_up.after_minutes().saturating_mul(60))
+}
+
 /// A price file that will not read does not stop the session: the estimate is
 /// a convenience, the session is the point. It is said in the transcript
 /// rather than swallowed, because an operator who wrote a price file is owed
@@ -1484,6 +1501,12 @@ PROFILES:
     (iTerm2, WezTerm, Ghostty and kitty; foot and rxvt-unicode). Inside tmux
     only the bell is sent.
 
+    The first key you press after five minutes away opens what happened
+    meanwhile: the turns that ended, the files changed, the sub-agents started
+    and finished, what was asked and how far the five-hour window moved.
+    [catch_up] after = 10 sets the minutes, and automatic = false leaves it to
+    c in a side pane and View › What happened….
+
 TRUST:
     A repository's config arrives with the clone, and env, args, settings and
     auth_refresh are what a backend is started with — enough to point the
@@ -1621,6 +1644,8 @@ IN THE SHELL:
     n                      In a side pane, leave the routine entries (reads,
                            searches, notices) out of the transcript, each run
                            of them counted where it was
+    c                      In a side pane, what happened since you last
+                           caught up
     t                      In the Activity pane, count tools by name or by
                            kind of work
     Ctrl+End               Back to the newest line of the transcript

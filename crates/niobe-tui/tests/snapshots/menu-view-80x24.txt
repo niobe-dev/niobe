@@ -3,12 +3,12 @@
 ┃   115     cache.set(url, {    │ Diff              F5  Ctrl+T │               ┃
 ┃   116 +     etag: res.headers.│ Group by agent             a │               ┃
 ┃   117       body,             │ Notable only               n │               ┃
-┃   └ allowed by you            │ Usage pane             shown │               ┃
-┃                               │ Changes pane           shown │               ┃
-┃ ◆ claude                      │ Activity pane          shown │               ┃
-┃   Rewriting the 304 test aroun│ Theme…                       │               ┃
-┃                               └──────────────────────────────┘               ┃
-┃ ◆ claude                                                                     ┃
+┃   └ allowed by you            │ What happened…             c │               ┃
+┃                               │ Usage pane             shown │               ┃
+┃ ◆ claude                      │ Changes pane           shown │               ┃
+┃   Rewriting the 304 test aroun│ Activity pane          shown │               ┃
+┃                               │ Theme…                       │               ┃
+┃ ◆ claude                      └──────────────────────────────┘               ┃
 ┃   The notebook that demonstrates the fetcher needs the new call shape.       ┃
 ┃                                                                              ┃
 ┃ ✗ Bash           npm test                                      exit 1 · 0.4s █

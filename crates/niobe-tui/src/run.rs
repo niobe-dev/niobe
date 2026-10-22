@@ -646,6 +646,7 @@ fn send_produced(
             // variant fails to compile until someone decides whether it is.
             SessionEvent::SessionMeta(_)
             | SessionEvent::PromptNotSent { .. }
+            | SessionEvent::Looked
             | SessionEvent::Titled { .. }
             | SessionEvent::AssistantDelta { .. }
             | SessionEvent::AssistantMessage { .. }

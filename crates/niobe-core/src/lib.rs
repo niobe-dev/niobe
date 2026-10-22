@@ -9,6 +9,7 @@
 //! fold every consumer derives from.
 
 pub mod attention;
+pub mod catch_up;
 pub mod diff;
 pub mod event;
 pub mod image;

@@ -73,6 +73,8 @@ pub enum Action {
     GroupByAgent,
     /// Leaves the transcript's routine entries out, or shows them again.
     NotableOnly,
+    /// Shows what happened since the operator last caught up.
+    CatchUp,
     /// Shows a pane of the right-hand stack, or hides it.
     Pane(SidePane),
     /// Opens the list of themes.
@@ -119,6 +121,7 @@ impl Action {
             Action::Diff => "open every cut diff and whole command, or cut them again",
             Action::GroupByAgent => "group sub-agent rows by agent",
             Action::NotableOnly => "leave routine entries out of the transcript",
+            Action::CatchUp => "what happened since you last caught up",
             Action::Pane(_) => "show or hide that pane",
             Action::Theme => "pick the palette the shell draws in",
             Action::Shortcuts => "list the keys the shell answers to",
@@ -248,6 +251,7 @@ pub const MENUS: [Menu; 6] = [
             item("Diff", 0, "F5  Ctrl+T", Action::Diff),
             item("Group by agent", 0, "a", Action::GroupByAgent),
             item("Notable only", 0, "n", Action::NotableOnly),
+            item("What happened…", 0, "c", Action::CatchUp),
             item("Usage pane", 0, "", Action::Pane(SidePane::Usage)),
             item("Changes pane", 0, "", Action::Pane(SidePane::Changes)),
             item("Activity pane", 0, "", Action::Pane(SidePane::Activity)),
