@@ -93,7 +93,7 @@ fn prompt_line(prompt: &str) -> String {
 ///
 /// UTC because the local zone needs the system time-zone database, which is a
 /// dependency for one column; the header says which zone it is.
-fn utc_minute(at: SystemTime) -> String {
+pub(crate) fn utc_minute(at: SystemTime) -> String {
     let secs = at
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));

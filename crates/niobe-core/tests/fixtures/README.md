@@ -170,6 +170,23 @@ jq -s '{
 why the test compares it against that figure with a tolerance rather than for
 equality.
 
+### The tools and paths `niobe overview` lists
+
+`niobe-cli`'s `tests/overview.rs` records both logs as two sessions and holds
+the page's tool and path rows against these, read off the logs rather than
+the fold:
+
+```sh
+jq -s -r '[.[] | select(.type == "tool_call_end")] | group_by(.name)
+  | map("\(.[0].name) \(length) \(map(select(.outcome == "failed")) | length)")
+  | .[]' claude-session.jsonl producer-gaps.jsonl
+jq -r 'select(.type == "file_change") | [.path, .added, .removed] | @tsv' claude-session.jsonl
+```
+
+which print `Agent 3 0`, `Bash 12 3`, `Edit 2 0`, `Read 9 0` and `Write 1 0` —
+the calls that ended per tool and those that failed, the `Read` whose start
+the producer dropped among them — and `catalog/fetch.py` at +20 −4 and +1 −0.
+
 ### Recording a new one
 
 The recording was made by driving `niobe_bridge_claude::Session` with

@@ -166,7 +166,7 @@ fn tool_calls(session: &SessionState) -> String {
 }
 
 /// A count with thousands separated, so a token total reads at a glance.
-fn grouped(n: u64) -> String {
+pub(crate) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, digit) in digits.chars().enumerate() {

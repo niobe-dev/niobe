@@ -1,0 +1,42 @@
+# What has been built in catalog
+
+2 sessions recorded, the first started 2026-09-18 12:00 UTC and the last 2026-09-18 12:00 UTC.
+
+## Highlights
+
+- 0 turns ended.
+- 6 prompts sent, 15 replies from the agent.
+- 24 of 27 tool calls finished without failing.
+- 3 sub-agents finished.
+
+## Lowlights
+
+- 3 tool calls failed, 1 denied.
+- 2 errors reported.
+- 0 sub-agents failed.
+- Session 1: 3 failed calls, 1 denied call — `niobe --resume 1`
+- Session 2: 2 errors, ended on an error: the `claude` session ended: exit status 1 — `niobe --resume 2`
+
+## Left open
+
+- Session 1: stopped in the middle of a turn — `niobe --resume 1`
+
+## Most used tools
+
+| Tool | Calls | Failed |
+| --- | ---: | ---: |
+| Bash | 12 | 3 |
+| Read | 9 | 0 |
+| Agent | 3 | 0 |
+| Edit | 2 | 0 |
+| Write | 1 | 0 |
+
+## Most changed paths
+
+| Path | Added | Removed | Sessions |
+| --- | ---: | ---: | ---: |
+| catalog/fetch.py | 21 | 4 | 1 |
+
+## Usage
+
+- 562,988 tokens: 120 in · 19,606 out · 460,375 cache read · 82,887 cache write.

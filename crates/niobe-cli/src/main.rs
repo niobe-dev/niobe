@@ -26,6 +26,7 @@ mod history;
 mod images;
 mod journal;
 mod memory;
+mod overview;
 mod prices;
 mod printable;
 mod profiles;
@@ -185,6 +186,7 @@ fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(
     match command {
         Command::Shell | Command::Resume(_) => Ok(()),
         Command::Sessions => list_sessions(),
+        Command::Overview => print_overview(),
         Command::Profiles => list_profiles(profile),
         Command::Doctor { json } => run_doctor(json),
         Command::Trust { yes } => trust(yes),
@@ -861,6 +863,36 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
 /// can be carried on with is the one question that has to have an answer while
 /// the config is being fixed, and where the CLI keeps its sessions is then read
 /// from this process's own environment alone.
+/// Every session niobe recorded in this repository, folded, as one Markdown
+/// page on standard output.
+fn print_overview() -> Result<(), String> {
+    let root = repo::root(&cwd()?);
+    let mut folded = Vec::new();
+    if let Some(store) = repo::read_existing_store(&root)? {
+        for summary in store.sessions().map_err(|e| e.to_string())? {
+            let stored = store.events(summary.id).map_err(|e| e.to_string())?;
+            let mut state = niobe_core::session::SessionState::new();
+            for event in &stored {
+                state.apply(&event.event);
+            }
+            folded.push(overview::Folded {
+                id: summary.id,
+                // When its first event happened, which an imported session
+                // dates by the CLI's own record rather than by its import.
+                started_at: stored.first().map_or(summary.started_at, |event| event.at),
+                state,
+            });
+        }
+    }
+    // The store lists the newest first; a record of what was built reads
+    // from the start.
+    folded.sort_by_key(|session| session.id);
+    for line in overview::markdown(&repo::describe(&root).name, &folded) {
+        say!("{line}");
+    }
+    Ok(())
+}
+
 fn list_sessions() -> Result<(), String> {
     let root = repo::root(&cwd()?);
     let loaded = config::load(&root).ok();
@@ -1402,6 +1434,7 @@ USAGE:
     niobe                  Open the shell on a new session
     niobe --resume <id>    Open the shell on an earlier session and continue it
     niobe sessions         List the sessions this repository can carry on
+    niobe overview         Print what every session here built and how it went, as Markdown
     niobe profiles         List the profiles the config defines, the selected one marked
     niobe doctor [--json]  Check what a session needs — the CLIs, their sign-in, the config,
                            the terminal — and say how to fix what is missing

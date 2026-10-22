@@ -313,7 +313,10 @@ reviewers that encode both, for an agent working in this tree.
   prints and the sheet the shell values tokens with, at the rates of the days a session
   spent them — a session read back is priced only where its rates held across those days, and
   a log with no times is a floor; `profiles.rs` and `sessions.rs` are what
-  `niobe profiles` and `niobe sessions` print; `doctor.rs` is what `niobe doctor` prints — one row each for
+  `niobe profiles` and `niobe sessions` print; `overview.rs` is what `niobe overview` prints —
+  every session the store holds, folded, as one Markdown page of what went well and what went
+  wrong, what was left open, the tools used most and the paths changed most, with no figure a
+  model wrote; `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
   read from its files), the config files and whether the repository's is trusted, and the terminal,
   with the fix for each that is not fine, as text or as `--json` with nothing under the home
@@ -326,6 +329,8 @@ reviewers that encode both, for an agent working in this tree.
   `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
+  `tests/overview.rs` prints that page for a store of two recorded sessions, against a picture
+  and against counts `jq` reads off the recordings.
   `tests/billing.rs` folds the bridge's recordings into the shell and compares the Usage pane
   with the pictures in its `tests/snapshots/`, one per way a session is billed. `tests/agents.rs` folds the
   recording with sub-agents and narrows the transcript to each, against what the bridge said each

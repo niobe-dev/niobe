@@ -23,6 +23,9 @@ pub enum Command {
     /// List the sessions recorded in this repository, Niobe's own and the
     /// `claude` CLI's.
     Sessions,
+    /// Print every session recorded in this repository, folded, as one
+    /// Markdown page.
+    Overview,
     /// List the profiles the config defines, marking the selected one.
     Profiles,
     /// Check what a first session needs and say what is missing, with the fix.
@@ -235,6 +238,10 @@ fn command(args: &[&str]) -> Result<Command, String> {
         ["sessions", rest @ ..] => {
             no_more(rest)?;
             Command::Sessions
+        }
+        ["overview", rest @ ..] => {
+            no_more(rest)?;
+            Command::Overview
         }
         ["profiles", rest @ ..] => {
             no_more(rest)?;
@@ -450,6 +457,8 @@ mod tests {
     #[test]
     fn subcommands_take_nothing_extra() {
         assert_eq!(parsed(&["sessions"]), Ok(Command::Sessions));
+        assert_eq!(parsed(&["overview"]), Ok(Command::Overview));
+        assert!(parsed(&["overview", "--all"]).is_err());
         assert_eq!(
             parsed(&["sessions", "--all"]),
             Err("unexpected argument `--all`".to_owned())
