@@ -1618,6 +1618,9 @@ IN THE SHELL:
     Up / Down, Enter       In a side pane, move the cursor and fold the
                            section under it
     a                      In a side pane, group sub-agent rows by agent
+    n                      In a side pane, leave the routine entries (reads,
+                           searches, notices) out of the transcript, each run
+                           of them counted where it was
     t                      In the Activity pane, count tools by name or by
                            kind of work
     Ctrl+End               Back to the newest line of the transcript

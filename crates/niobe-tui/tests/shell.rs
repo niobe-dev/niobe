@@ -1963,6 +1963,49 @@ fn a_tab_in_what_a_call_does_is_drawn_as_a_space() {
     assert!(frame.contains("running Bash  printf 'a b'"), "{frame}");
 }
 
+/// A question no standing rule answers puts the turn's working line on the
+/// operator, and its call is an entry that needs them.
+#[test]
+fn a_question_mid_turn_says_the_turn_is_waiting_on_the_operator() {
+    let mut app = session_at_work();
+    app.apply(&Event::PermissionRequest {
+        id: "t1".into(),
+        tool: "Bash".to_owned(),
+        input: r#"{"command":"npm test -- fetch"}"#.to_owned(),
+        target: Some("npm test -- fetch".to_owned()),
+        proposal: None,
+        reason: None,
+        agent: None,
+    });
+    assert_eq!(
+        app.entries().last().map(|entry| entry.attention),
+        Some(niobe_core::Attention::NeedsYou)
+    );
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("waiting on you"), "{frame}");
+    assert_snapshot("waiting-on-you-80x24", &frame);
+}
+
+/// Notable only, the transcript keeps what was said, written and asked, and
+/// each run of reads and searches between is one row that counts them.
+#[test]
+fn notable_only_counts_the_routine_entries_it_leaves_out_at_both_sizes() {
+    let mut app = running_session();
+    let whole = screen(&mut app, 200, 60);
+    app.show_notable_only();
+    for (name, width, height) in [
+        ("notable-only-80x24", 80, 24),
+        ("notable-only-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("routine entr"), "{frame}");
+        assert_ne!(frame, whole);
+        assert_snapshot(name, &frame);
+    }
+    app.show_notable_only();
+    assert_eq!(screen(&mut app, 200, 60), whole, "the key shows them again");
+}
+
 #[test]
 fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
     let mut app = session_at_work();

@@ -29,6 +29,7 @@ use ratatui::widgets::{
     Widget, Wrap,
 };
 
+use niobe_core::attention::Attention;
 use niobe_core::event::{Billing, Context, SlashCommand, UsageWindow, UsageWindows};
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
@@ -1782,7 +1783,12 @@ fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
     let grouping = (!app.agents().is_empty()).then(|| app.grouped_by_agent());
     key_hints(
         app.session().mode().is_some(),
-        (app.focus(), grouping, app.tools_by_name()),
+        (
+            app.focus(),
+            grouping,
+            app.tools_by_name(),
+            app.notable_only(),
+        ),
         panes && !question_holds,
         (app.newline_key(), app.sends_enter_for_shift_enter()),
         theme,
@@ -1805,7 +1811,7 @@ fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
 /// other keys are reminders, and give way first.
 fn key_hints(
     reported: bool,
-    (focus, grouping, by_name): (Focus, Option<bool>, bool),
+    (focus, grouping, by_name, notable_only): (Focus, Option<bool>, bool, bool),
     panes: bool,
     newline: (&str, bool),
     theme: &Theme,
@@ -1840,6 +1846,10 @@ fn key_hints(
                 (Pane::Activity, false) => hints.push(key("t tool names", false)),
                 (Pane::Activity, true) => hints.push(key("t kinds of work", false)),
                 (Pane::Changes, _) => {}
+            }
+            match notable_only {
+                false => hints.push(key("n notable only", false)),
+                true => hints.push(key("n shows all", false)),
             }
             hints.push(key("Esc back", false));
         }
@@ -2124,6 +2134,12 @@ enum Slot {
         first: usize,
         calls: usize,
     },
+    /// A run of routine entries left out, where the transcript shows only
+    /// what is notable: the first of them, and how many.
+    Hidden {
+        first: usize,
+        count: usize,
+    },
 }
 
 impl DrawnEntries {
@@ -2149,13 +2165,13 @@ impl DrawnEntries {
             ..detail
         };
         let named = commands_key(commands);
-        let order = order(entries, headings.is_some());
+        let order = order(entries, headings.is_some(), detail.notable_only);
         self.moved |= self.drawn.len() > order.len();
         self.drawn.truncate(order.len());
         for (at, slot) in order.iter().enumerate() {
             let next_is_row = match order.get(at + 1) {
                 Some(Slot::Entry(next)) => entries.get(*next).is_some_and(is_row),
-                Some(Slot::Heading { .. }) | None => false,
+                Some(Slot::Heading { .. } | Slot::Hidden { .. }) | None => false,
             };
             let (key, entry, heading) = match *slot {
                 Slot::Entry(index) => {
@@ -2174,6 +2190,7 @@ impl DrawnEntries {
                         true,
                     )
                 }
+                Slot::Hidden { first, count } => (hidden_key(count, width, theme), first, false),
             };
             let draw = || match *slot {
                 Slot::Entry(index) => {
@@ -2195,6 +2212,7 @@ impl DrawnEntries {
                         &tag, &task, calls, width, detail, theme,
                     )]
                 }
+                Slot::Hidden { count, .. } => hidden(count, width, theme),
             };
             match self.drawn.get_mut(at) {
                 Some(drawn) if drawn.key == key => {
@@ -2405,8 +2423,43 @@ fn said_in(entry: &Entry) -> Vec<String> {
 /// prompt or turn's rule and the next — every sub-agent's rows are drawn
 /// together under a heading, at the place that agent first did something.
 /// The session's own entries, anything an agent did that is not a row of
-/// the calls table, and the turn's boundaries stay where they were.
-fn order(entries: &[Entry], grouped: bool) -> Vec<Slot> {
+/// the calls table, and the turn's boundaries stay where they were. Where
+/// `notable_only`, the routine entries are left out, see [`notable`].
+fn order(entries: &[Entry], grouped: bool, notable_only: bool) -> Vec<Slot> {
+    let order = by_agent(entries, grouped);
+    match notable_only {
+        true => notable(entries, order),
+        false => order,
+    }
+}
+
+/// `order` without its routine entries, each run of them one
+/// [`Slot::Hidden`] where they were.
+///
+/// A heading over a sub-agent's rows stays where every row under it is
+/// left out: it says what the agent did, in a line, and the count under it
+/// says how much of that is left out.
+fn notable(entries: &[Entry], order: Vec<Slot>) -> Vec<Slot> {
+    let mut shown: Vec<Slot> = Vec::with_capacity(order.len());
+    for slot in order {
+        let routine = match slot {
+            Slot::Entry(at) => entries
+                .get(at)
+                .is_some_and(|entry| entry.attention < Attention::Notable),
+            Slot::Heading { .. } | Slot::Hidden { .. } => false,
+        };
+        match (routine, slot, shown.last_mut()) {
+            (true, _, Some(Slot::Hidden { count, .. })) => *count += 1,
+            (true, Slot::Entry(first), _) => shown.push(Slot::Hidden { first, count: 1 }),
+            _ => shown.push(slot),
+        }
+    }
+    shown
+}
+
+/// The entries in the order they are drawn, each turn's sub-agent rows
+/// together under a heading where `grouped`.
+fn by_agent(entries: &[Entry], grouped: bool) -> Vec<Slot> {
     if !grouped {
         return (0..entries.len()).map(Slot::Entry).collect();
     }
@@ -2508,6 +2561,34 @@ fn heading_key(
     hasher.finish()
 }
 
+/// The row standing where `count` routine entries are left out, and the
+/// blank line after it that every entry keeps.
+fn hidden(count: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let entries = match count {
+        1 => "entry",
+        _ => "entries",
+    };
+    let said = format!("… {count} routine {entries} hidden");
+    vec![
+        Line::from(Span::styled(
+            text::truncate(&said, width),
+            Style::new().fg(theme.dim),
+        )),
+        Line::default(),
+    ]
+}
+
+/// What a [`hidden`] row is drawn from, as one number.
+fn hidden_key(count: usize, width: usize, theme: &Theme) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "hidden".hash(&mut hasher);
+    count.hash(&mut hasher);
+    width.hash(&mut hasher);
+    theme.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// A transcript line as the entry it belongs to and its place among that
 /// entry's lines, with every line the entry was drawn as, so it can be found
 /// again after a switch lays the entries out again.
@@ -2574,6 +2655,7 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme, named:
         at,
         calls,
         agent,
+        attention: _,
     } = entry;
     (kind, head, meta, streaming, at, calls, agent).hash(&mut hasher);
     match streaming {
@@ -2653,6 +2735,7 @@ fn transcript_detail(app: &App) -> Detail {
         // Worked out from the entries where they are drawn.
         columns: crate::calls::Columns::default(),
         grouped: false,
+        notable_only: app.notable_only(),
         now: app.stamp(),
     }
 }
@@ -7839,6 +7922,70 @@ mod tests {
             rows[diff_ends - 2],
             "",
             "a diff keeps its blank line: {rows:?}"
+        );
+    }
+
+    /// Notable only, each run of routine entries is one row saying how many
+    /// it left out, where they were; what is notable is drawn as it was.
+    #[test]
+    fn notable_only_leaves_each_run_of_routine_entries_as_a_count_where_it_was() {
+        use niobe_core::event::{Event, ToolOutcome};
+        let mut app = App::new(crate::app::Repo::default());
+        let read = |app: &mut App, id: &str| {
+            app.apply(&Event::ToolCallStart {
+                id: id.into(),
+                name: if id == "t2" { "Grep" } else { "Read" }.to_owned(),
+                input: String::new(),
+                summary: Some(format!("{id} does")),
+                agent: None,
+            });
+            app.apply(&Event::ToolCallEnd {
+                id: id.into(),
+                name: "Read".to_owned(),
+                input: String::new(),
+                output: String::new(),
+                bytes: 64,
+                outcome: ToolOutcome::Ok,
+                summary: Some(format!("{id} does")),
+                exit_code: None,
+                error: None,
+                command: None,
+            });
+        };
+        read(&mut app, "t1");
+        read(&mut app, "t2");
+        edited(&mut app, "after", 1);
+        read(&mut app, "t3");
+
+        let theme = Theme::default();
+        let detail = Detail {
+            notable_only: true,
+            ..Detail::default()
+        };
+        let (entries, commands, drawn) = app.entries_to_draw();
+        drawn.update(entries, commands, 60, detail, None, &theme);
+        let rows: Vec<String> = drawn
+            .lines(0, 40)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let text = rows.join("\n");
+        assert!(rows[0].starts_with("… 2 routine entries hidden"), "{text}");
+        assert!(
+            !text.contains("t1 does") && !text.contains("t3 does"),
+            "{text}"
+        );
+        assert!(text.contains("⚙ Write after.rs"), "{text}");
+        assert!(text.contains("wrote after"), "{text}");
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("… 1 routine entry hidden")),
+            "the read after the reply is counted where it was: {text}"
         );
     }
 

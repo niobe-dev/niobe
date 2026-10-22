@@ -68,6 +68,9 @@ pub(crate) struct Detail {
     /// Whether the sub-agents' rows are drawn under a heading per agent,
     /// which names the agent in place of every row's tag.
     pub(crate) grouped: bool,
+    /// Whether the transcript leaves out its routine entries, each run of
+    /// them drawn as one row that says how many it left out.
+    pub(crate) notable_only: bool,
     /// The moment being drawn, which a test run in progress is timed
     /// against. `None` where the shell has not read its clock.
     pub(crate) now: Option<Stamp>,
@@ -1160,6 +1163,7 @@ mod tests {
             diffs_open: false,
             columns: Columns::of(app.entries()),
             grouped: false,
+            notable_only: false,
             now: None,
         };
         lines(&app.entries()[0], 80, detail, &Theme::default())

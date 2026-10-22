@@ -8,6 +8,7 @@
 //! is the one type every backend produces into and [`SessionState`] is the
 //! fold every consumer derives from.
 
+pub mod attention;
 pub mod diff;
 pub mod event;
 pub mod image;
@@ -18,6 +19,7 @@ pub mod session;
 pub mod test_run;
 pub mod work;
 
+pub use attention::Attention;
 pub use event::{
     AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Event, Mode,
     OPERATOR_SHELL, PermissionDecision, SessionMeta, TokenCounts, ToolCallId, ToolOutcome, Usage,

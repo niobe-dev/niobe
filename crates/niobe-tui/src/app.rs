@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use niobe_core::attention::Attention;
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, CompactTrigger, Event, Mode, PermissionDecision,
@@ -705,6 +706,11 @@ pub struct Entry {
     /// see [`crate::tags`]. It is worked out again whenever an agent is
     /// spawned, because a new one can take an older one's word.
     pub agent: Option<String>,
+    /// How much the entry asks of the operator: the highest of the events
+    /// that built it, as [`Attention::of`] reads each, or what the shell
+    /// says it is for an entry of its own. What the transcript hides, where
+    /// it is asked to show only what is notable.
+    pub attention: Attention,
 }
 
 /// One tool call as the transcript shows it: what it does, how it ended and
@@ -1236,6 +1242,9 @@ pub struct App {
     /// Whether the sub-agents' rows are drawn together under each agent
     /// rather than interleaved as they happened.
     by_agent: bool,
+    /// Whether the transcript leaves its routine entries out, drawing each
+    /// run of them as a row that says how many.
+    notable_only: bool,
     /// Whether the Activity pane counts calls per tool rather than per kind
     /// of work.
     tools_by_name: bool,
@@ -1719,6 +1728,7 @@ impl App {
             compaction: None,
             calls_folded: false,
             by_agent: false,
+            notable_only: false,
             tools_by_name: false,
             diffs_open: false,
             answered: BTreeMap::new(),
@@ -1856,9 +1866,93 @@ impl App {
         };
         self.last_folded_at = ended_at;
         let ended = self.just_ended.take();
+        let (from, reply) = (self.entries.len(), self.reply);
         self.fold_into_transcript(event, ended);
+        self.raise(event, from, reply, ended);
         if self.session.turns().len() > turns {
             self.rule_turn(ended_at);
+        }
+    }
+
+    /// Raises every entry `event` put in the transcript or added to — the
+    /// entries from `from` on, and the one it went into — to what it asks of
+    /// the operator. `reply` is the reply that was streaming before it, and
+    /// `ended` the call that ended with the event before it.
+    fn raise(
+        &mut self,
+        event: &Event,
+        from: usize,
+        reply: Option<usize>,
+        ended: Option<(usize, usize, Option<Gate>)>,
+    ) {
+        let level = Attention::of(event);
+        if level == Attention::Routine {
+            return;
+        }
+        // A conversation started over drew its entries again from the top.
+        let from = match from > self.entries.len() {
+            true => 0,
+            false => from,
+        };
+        let into = self.went_into(event, reply, ended);
+        for at in (from..self.entries.len()).chain(into) {
+            if let Some(entry) = self.entries.get_mut(at) {
+                entry.attention = entry.attention.max(level);
+            }
+        }
+    }
+
+    /// The entry already in the transcript that `event` went into, where it
+    /// went into one rather than adding its own.
+    fn went_into(
+        &self,
+        event: &Event,
+        reply: Option<usize>,
+        ended: Option<(usize, usize, Option<Gate>)>,
+    ) -> Option<usize> {
+        match event {
+            Event::AssistantMessage { agent: None, .. } => reply,
+            Event::FileChange { .. } | Event::TestRun { .. } => ended.map(|(at, _, _)| at),
+            // A question a standing rule answers asked nobody: the rules
+            // answer it after it is folded in, so it is read off them here.
+            Event::PermissionRequest {
+                id, tool, target, ..
+            } => match self.allowed.allows(tool, target.as_deref()) {
+                true => None,
+                false => self.tool_entries.get(id).map(|&(at, _)| at),
+            },
+            Event::SessionMeta(_)
+            | Event::UserMessage { .. }
+            | Event::PromptNotSent { .. }
+            | Event::Titled { .. }
+            | Event::AssistantDelta { .. }
+            | Event::AssistantMessage { agent: Some(_), .. }
+            | Event::ToolCallStart { .. }
+            | Event::ToolCallEnd { .. }
+            | Event::TurnEnded
+            | Event::Usage(_)
+            | Event::UsageWindows(_)
+            | Event::Billing { .. }
+            | Event::Context(_)
+            | Event::Cleared
+            | Event::CompactionStarted
+            | Event::CompactionEnded
+            | Event::Compacted { .. }
+            | Event::SessionLeft
+            | Event::PermissionResponse { .. }
+            | Event::PermissionWithdrawn { .. }
+            | Event::ModeSelected { .. }
+            | Event::ModelSelected { .. }
+            | Event::ModelRefused { .. }
+            | Event::AgentSpawn { .. }
+            | Event::AgentProgress { .. }
+            | Event::AgentExit { .. }
+            | Event::Commands { .. }
+            | Event::McpServers { .. }
+            | Event::Models { .. }
+            | Event::TurnTotalDiffers { .. }
+            | Event::Notice { .. }
+            | Event::Error { .. } => None,
         }
     }
 
@@ -1990,6 +2084,7 @@ impl App {
             took,
         };
         self.push(Entry {
+            attention: Attention::of(&Event::TurnEnded),
             kind: EntryKind::Turn(rule),
             head: String::new(),
             meta: String::new(),
@@ -2020,6 +2115,7 @@ impl App {
     fn push_prompt(&mut self, text: &str) {
         self.images.seen(text);
         self.push(Entry {
+            attention: Attention::Routine,
             kind: EntryKind::User,
             head: "you".to_owned(),
             meta: String::new(),
@@ -2051,6 +2147,7 @@ impl App {
                     let head = self.agent_name();
                     self.reply = Some(self.entries.len());
                     self.push(Entry {
+                        attention: Attention::Routine,
                         kind: EntryKind::Agent,
                         head,
                         meta: String::new(),
@@ -2069,6 +2166,7 @@ impl App {
             } => {
                 self.agent_entries.insert(self.entries.len(), agent.clone());
                 self.push(Entry {
+                    attention: Attention::Routine,
                     kind: EntryKind::SubAgent,
                     head: self.sub_agent_label(agent),
                     meta: "sub-agent".to_owned(),
@@ -2088,6 +2186,7 @@ impl App {
                 None => {
                     let head = self.agent_name();
                     self.push(Entry {
+                        attention: Attention::Routine,
                         kind: EntryKind::Agent,
                         head,
                         meta: String::new(),
@@ -2130,6 +2229,7 @@ impl App {
                         }
                         let agent = agent.as_ref().map(|agent| self.sub_agent_tag(agent));
                         self.push(Entry {
+                            attention: Attention::Routine,
                             kind: EntryKind::Tool,
                             head,
                             meta: String::new(),
@@ -2173,6 +2273,7 @@ impl App {
                         let mut call = Call::started(what_it_does(summary.as_deref(), input), None);
                         call.ended(ending, None);
                         self.push(Entry {
+                            attention: Attention::Routine,
                             kind: match call.failed() {
                                 true => EntryKind::Failure,
                                 false => EntryKind::Tool,
@@ -2275,6 +2376,7 @@ impl App {
                     self.interrupt_what_the_fold_stopped();
                 }
                 self.push(Entry {
+                    attention: Attention::Routine,
                     kind: EntryKind::Failure,
                     head: if *fatal { "fatal" } else { "error" }.to_owned(),
                     meta: String::new(),
@@ -2287,6 +2389,7 @@ impl App {
             }
 
             Event::Notice { message } => self.push(Entry {
+                attention: Attention::Routine,
                 kind: EntryKind::Notice,
                 head: self.agent_name(),
                 meta: String::new(),
@@ -2314,6 +2417,7 @@ impl App {
                     unfinished,
                 );
                 self.push(Entry {
+                    attention: Attention::Routine,
                     kind: EntryKind::Notice,
                     head: self.agent_name(),
                     meta: String::new(),
@@ -2332,6 +2436,7 @@ impl App {
             } => {
                 self.compaction = Some(self.entries.len());
                 self.push(Entry {
+                    attention: Attention::Routine,
                     kind: EntryKind::Compacted(CompactionRow {
                         trigger: *trigger,
                         before: *before,
@@ -2368,6 +2473,7 @@ impl App {
             Event::Cleared => {
                 self.start_over();
                 self.push(Entry {
+                    attention: Attention::Routine,
                     kind: EntryKind::Notice,
                     head: "cleared".to_owned(),
                     meta: String::new(),
@@ -2461,6 +2567,7 @@ impl App {
                         self.agent_entries.insert(self.entries.len(), agent);
                     }
                     self.push(Entry {
+                        attention: Attention::Notable,
                         kind: EntryKind::Failure,
                         head: "denied".to_owned(),
                         meta: match what.is_empty() {
@@ -2793,6 +2900,23 @@ impl App {
     pub fn group_by_agent(&mut self) {
         self.hold_view();
         self.by_agent = !self.by_agent;
+    }
+
+    /// Whether the transcript leaves its routine entries out: see
+    /// [`App::show_notable_only`].
+    pub fn notable_only(&self) -> bool {
+        self.notable_only
+    }
+
+    /// Leaves the transcript's routine entries out — reads, searches, the
+    /// stream of a reply, the backend's notices — each run of them drawn as
+    /// one row that says how many, or draws them all again.
+    ///
+    /// A long session is read for what it said, wrote and asked; the rows
+    /// between are how the agent got there, and are one key away.
+    pub fn show_notable_only(&mut self) {
+        self.hold_view();
+        self.notable_only = !self.notable_only;
     }
 
     /// Whether the Activity pane counts calls per tool: see
@@ -3138,6 +3262,7 @@ impl App {
     /// session, so the operator is not surprised by the prompt returning.
     pub fn not_remembered(&mut self, rule: &Rule, error: &str) {
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
             meta: rule.to_string(),
@@ -3158,6 +3283,7 @@ impl App {
     /// prompt.
     pub fn kept_until_trusted(&mut self, rule: &Rule) {
         self.push(Entry {
+            attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: "not kept".to_owned(),
             meta: rule.to_string(),
@@ -3176,6 +3302,7 @@ impl App {
     /// turn that is still waiting is not read as one that was answered.
     pub fn not_answered(&mut self, error: &str) {
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not answered".to_owned(),
             meta: String::new(),
@@ -3215,6 +3342,7 @@ impl App {
             count: 1,
         });
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
             meta: events(1),
@@ -3234,6 +3362,7 @@ impl App {
             return;
         };
         self.push(Entry {
+            attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: "saved again".to_owned(),
             meta: format!("{} not saved", events(unsaved.count)),
@@ -3289,6 +3418,7 @@ impl App {
     /// that moved.
     fn not_changed(&mut self, what: &str, error: &str) {
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not changed".to_owned(),
             meta: what.to_owned(),
@@ -3405,6 +3535,7 @@ impl App {
         };
         self.budget_warned = true;
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Notice,
             head: "budget".to_owned(),
             meta,
@@ -3720,6 +3851,7 @@ impl App {
             | Action::Find
             | Action::Diff
             | Action::GroupByAgent
+            | Action::NotableOnly
             | Action::Pane(_)
             | Action::Theme
             | Action::Shortcuts
@@ -3776,6 +3908,7 @@ impl App {
             Action::Find => self.open_find(),
             Action::Diff => self.open_diffs(),
             Action::GroupByAgent => self.group_by_agent(),
+            Action::NotableOnly => self.show_notable_only(),
             Action::Pane(pane) => self.toggle_pane(pane),
             Action::Theme => self.pick_theme(),
             Action::Shortcuts => self.sheet = Some(self.shortcuts()),
@@ -4861,6 +4994,7 @@ impl App {
     #[must_use]
     pub fn with_notice(mut self, head: &str, meta: &str, body: &str) -> Self {
         self.push(Entry {
+            attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: head.to_owned(),
             meta: meta.to_owned(),
@@ -5176,6 +5310,7 @@ impl App {
             KeyCode::Down => self.scroller_mut(pane).move_cursor(true),
             KeyCode::Enter => self.fold_under_cursor(pane),
             KeyCode::Char('a') => self.group_by_agent(),
+            KeyCode::Char('n') => self.show_notable_only(),
             KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
@@ -6023,6 +6158,7 @@ impl App {
         self.stop_asked_in = None;
         self.forget_stopping_hint();
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not stopped".to_owned(),
             meta: "turn".to_owned(),
@@ -7155,6 +7291,7 @@ impl App {
     /// Says in the transcript that the prompt above it went nowhere.
     fn say_not_attached(&mut self) {
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Notice,
             head: "no backend".to_owned(),
             meta: "not sent".to_owned(),
@@ -7240,6 +7377,7 @@ impl App {
             self.first_prompt_unsent = true;
         }
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not sent".to_owned(),
             meta: String::new(),
@@ -8579,6 +8717,21 @@ mod tests {
         assert_eq!(app.composed(), "a", "nothing was typed");
         app.on_key(key(KeyCode::Char('a')));
         assert!(!app.grouped_by_agent(), "the key groups and ungroups");
+    }
+
+    #[test]
+    fn n_leaves_the_routine_out_from_a_pane_and_is_typed_in_the_composer() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(!app.notable_only());
+        assert_eq!(app.composed(), "n");
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(app.notable_only());
+        assert_eq!(app.composed(), "n", "nothing was typed");
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(!app.notable_only(), "the key hides and shows them");
     }
 
     /// `t` turns the Activity pane's tools between kinds of work and tool
@@ -11910,6 +12063,98 @@ mod tests {
             summary: summary.map(str::to_owned),
             agent: None,
         }
+    }
+
+    fn end(id: &str, name: &str) -> Event {
+        Event::ToolCallEnd {
+            id: id.into(),
+            name: name.to_owned(),
+            input: "{}".to_owned(),
+            output: String::new(),
+            bytes: 0,
+            outcome: ToolOutcome::Ok,
+            summary: None,
+            exit_code: None,
+            error: None,
+            command: None,
+        }
+    }
+
+    fn attention(app: &App) -> Vec<Attention> {
+        app.entries().iter().map(|entry| entry.attention).collect()
+    }
+
+    #[test]
+    fn each_entry_is_as_high_as_the_highest_event_that_built_it() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&start("t1", "Read", "{}", Some("src/lib.rs")));
+        app.apply(&end("t1", "Read"));
+        app.apply(&start("t2", "Edit", "{}", Some("src/lib.rs")));
+        app.apply(&end("t2", "Edit"));
+        app.apply(&Event::FileChange {
+            path: "src/lib.rs".to_owned(),
+            added: Some(1),
+            removed: Some(1),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "do".to_owned(),
+        });
+        assert_eq!(
+            attention(&app).last(),
+            Some(&Attention::Routine),
+            "a reply still arriving is the stream"
+        );
+        app.apply(&Event::AssistantMessage {
+            text: "done".to_owned(),
+            agent: None,
+        });
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(
+            attention(&app),
+            [
+                Attention::Notable,
+                Attention::Routine,
+                Attention::Notable,
+                Attention::Notable,
+                Attention::Notable,
+            ],
+            "the prompt, the read, the edit, the reply and the turn's rule"
+        );
+    }
+
+    #[test]
+    fn a_question_no_rule_answers_leaves_its_call_needing_the_operator() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&start("t1", "Bash", "{}", Some("rm -rf build")));
+        app.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(attention(&app).last(), Some(&Attention::NeedsYou));
+
+        let mut ruled = sent(
+            self::app()
+                .attached()
+                .with_rules([Rule::tool("Bash")].into_iter().collect()),
+            "go",
+        );
+        ruled.apply(&start("t1", "Bash", "{}", Some("rm -rf build")));
+        ruled.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(
+            attention(&ruled).last(),
+            Some(&Attention::Routine),
+            "a standing rule answered it, and nobody was asked"
+        );
+    }
+
+    #[test]
+    fn what_the_shell_says_went_wrong_needs_the_operator_and_a_cleared_session_is_notable() {
+        let mut app = sent(app().attached(), "go");
+        app.not_sent("the pipe closed");
+        assert_eq!(attention(&app).last(), Some(&Attention::NeedsYou));
+
+        app.apply(&Event::Cleared);
+        assert_eq!(attention(&app), [Attention::Notable]);
     }
 
     #[test]

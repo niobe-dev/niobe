@@ -67,7 +67,10 @@ reviewers that encode both, for an agent working in this tree.
   names the programs that did it; `image.rs` is an image the operator attached to a
   prompt — its bytes and the kind they were read as, from their signature, never from a name —
   refused past the 5 MB a model takes, and the `[Image #N]` placeholder a prompt holds where it
-  went. Depends on no other workspace crate and on no wire format.
+  went; `attention.rs` is how much an event asks of the operator — it needs them, it is notable,
+  or it is routine — read from the event alone, never by a model, so the shell's transcript can
+  leave the routine out and a session read back reads as it did live. Depends on no other
+  workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
@@ -109,7 +112,9 @@ reviewers that encode both, for an agent working in this tree.
   taking it; `jsonl.rs` reads a JSON Lines event log.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
-  go to — `ui.rs` draws it, its Activity pane counting tool calls by kind of work with what
+  go to — and each transcript entry's attention, the highest of the events that built it, `ui.rs`
+  draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
+  a row that counts them, its Activity pane counting tool calls by kind of work with what
   did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the
