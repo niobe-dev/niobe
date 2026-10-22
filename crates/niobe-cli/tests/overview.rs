@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, UNIX_EPOCH};
 
+use niobe_core::session::SessionState;
 use niobe_store::{Store, read_log};
 
 const FIXTURES: &str = "../niobe-core/tests/fixtures";
@@ -137,6 +138,58 @@ fn the_overview_narrowed_to_the_newest_session_reads_that_one_alone() {
     );
     assert!(page.contains("Session 2:"), "{page}");
     assert!(!page.contains("Session 1:"), "{page}");
+}
+
+/// The page's totals are the sums of each recording folded on its own, here
+/// and not by the binary: the store and the page between them lose nothing.
+#[test]
+fn the_overviews_totals_are_the_sums_of_each_session_folded_alone() {
+    let (_dir, root) = repository();
+    let page = printed(&root);
+
+    let folds: Vec<SessionState> = ["claude-session.jsonl", "producer-gaps.jsonl"]
+        .iter()
+        .map(|log| {
+            let text = std::fs::read_to_string(fixtures().join(log)).expect("the fixture reads");
+            SessionState::replay(&read_log(&text).expect("the fixture parses"))
+        })
+        .collect();
+    let sum = |of: fn(&SessionState) -> u64| folds.iter().map(of).sum::<u64>();
+    let grouped = |n: u64| {
+        let digits = n.to_string();
+        let mut out = String::new();
+        for (i, digit) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
+                out.push(',');
+            }
+            out.push(digit);
+        }
+        out
+    };
+
+    for line in [
+        format!(
+            "- {} tokens: {} in · {} out · {} cache read · {} cache write.",
+            grouped(sum(|s| s.totals().tokens())),
+            grouped(sum(|s| s.totals().input)),
+            grouped(sum(|s| s.totals().output)),
+            grouped(sum(|s| s.totals().cache_read)),
+            grouped(sum(|s| s.totals().cache_write)),
+        ),
+        format!(
+            "- {} prompts sent, {} replies from the agent.",
+            sum(SessionState::user_messages),
+            sum(SessionState::assistant_messages)
+        ),
+        format!(
+            "- {} of {} tool calls finished without failing.",
+            sum(|s| s.tools().finished - s.tools().failed),
+            sum(|s| s.tools().finished)
+        ),
+        format!("- {} errors reported.", sum(SessionState::errors)),
+    ] {
+        assert!(page.contains(&line), "{line} is not in\n{page}");
+    }
 }
 
 #[test]
