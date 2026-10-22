@@ -1446,6 +1446,9 @@ pub struct App {
     /// what the view of one shows: the transcript keeps what a row draws,
     /// and this the arguments and the output the row was drawn from.
     recorded: Vec<(ToolCallId, crate::detail::Recorded)>,
+    /// Where in `recorded` each call drawn in the transcript is, by the
+    /// entry it is drawn in and its place among that entry's calls.
+    call_at: BTreeMap<(usize, usize), usize>,
     /// The MCP servers the operator asked to be reconnected that the loop has
     /// not handed to the backend yet, oldest first.
     mcp_reconnects: Vec<String>,
@@ -1837,6 +1840,7 @@ impl App {
             mcp: None,
             detail: None,
             recorded: Vec::new(),
+            call_at: BTreeMap::new(),
             mcp_reconnects: Vec::new(),
             reconnecting: None,
             hidden: BTreeSet::new(),
@@ -2023,6 +2027,7 @@ impl App {
         self.entries.clear();
         self.tool_entries.clear();
         self.recorded.clear();
+        self.call_at.clear();
         self.only_agent = None;
         self.agent_entries.clear();
         self.agents.clear();
@@ -2286,11 +2291,13 @@ impl App {
                 if call.testing {
                     call.last_run = self.test_times.get(&call.what).copied();
                 }
+                let recorded = self.recorded.len().saturating_sub(1);
                 match self.open_run(&head, agent.as_ref()) {
                     Some(at) => {
                         if let Some(entry) = self.entries.get_mut(at) {
                             self.tool_entries
                                 .insert(id.clone(), (at, entry.calls.len()));
+                            self.call_at.insert((at, entry.calls.len()), recorded);
                             entry.calls.push(call);
                             entry.streaming = true;
                         }
@@ -2298,6 +2305,7 @@ impl App {
                     None => {
                         let at = self.entries.len();
                         self.tool_entries.insert(id.clone(), (at, 0));
+                        self.call_at.insert((at, 0), recorded);
                         if let Some(agent) = agent {
                             self.agent_entries.insert(at, agent.clone());
                         }
@@ -2365,7 +2373,10 @@ impl App {
                             calls: vec![call],
                             agent: None,
                         });
-                        Some((self.entries.len().saturating_sub(1), 0))
+                        let place = (self.entries.len().saturating_sub(1), 0);
+                        self.call_at
+                            .insert(place, self.recorded.len().saturating_sub(1));
+                        Some(place)
                     }
                 };
                 if name == crate::shell::OPERATOR_SHELL
@@ -6631,15 +6642,45 @@ impl App {
                 let copied = selection.text(|line| drawn.plain_line(line));
                 (!copied.is_empty()).then_some(crate::desktop::Handoff::Copy(copied))
             }
-            None => self
-                .transcript_drawn
-                .and_then(|(area, _)| {
+            None => {
+                let link = self.transcript_drawn.and_then(|(area, _)| {
                     self.drawn
                         .link_at(pressed, usize::from(area.width), &self.entries)
-                })
-                .map(crate::desktop::Handoff::Open),
+                });
+                if link.is_none() {
+                    self.open_call_at(pressed.line);
+                }
+                link.map(crate::desktop::Handoff::Open)
+            }
         };
         self.handoffs.extend(handoff);
+    }
+
+    /// Opens the call drawn on transcript line `line` whole, where a call is
+    /// drawn there; a run of calls folded into one entry opens the list of
+    /// calls on the run's first, since which of them was meant is not said
+    /// by a click on the run.
+    fn open_call_at(&mut self, line: usize) {
+        let Some(at) = self.drawn.entry_at(line) else {
+            return;
+        };
+        let calls = self.entries.get(at).map_or(0, |entry| entry.calls.len());
+        let Some(&first) = self.call_at.get(&(at, 0)) else {
+            return;
+        };
+        match calls {
+            1 => {
+                if let Some((_, call)) = self.recorded.get(first) {
+                    self.detail = Some(crate::detail::Detail::of(call));
+                }
+            }
+            _ => {
+                self.pick_call();
+                if let Some(picker) = self.picking.as_mut() {
+                    picker.at = first;
+                }
+            }
+        }
     }
 
     /// The run of the transcript the operator selected, for the draw to mark.

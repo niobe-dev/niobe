@@ -1660,7 +1660,8 @@ IN THE SHELL:
     Ctrl+V                 Attach the image on the clipboard to the prompt;
                            a pasted or dropped path to an image attaches it
     drag                   Copy what it covers
-    click                  Open the link under it
+    click                  Open the link under it, or the tool call whose
+                           row it is, read whole
     Ctrl+Z                 Suspend niobe, handing the terminal back
 {fkeys}
     Ctrl+Q                 Quit

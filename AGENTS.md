@@ -216,7 +216,8 @@ reviewers that encode both, for an agent working in this tree.
   with none opens — that key is spent on it — and `c` in a side pane or View › What happened…
   opens since the last one shown. `detail.rs` is one tool call read whole — the arguments it
   started with and the output its end carried, each headed by its size, nothing cut — opened from
-  the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows; it
+  the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows, or by a click on the
+  call's row, a run of calls opening that list on its first; it
   wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. `s` in a side
   pane or View › Just one agent… narrows the transcript to one sub-agent's own entries — what the
   bridge read under that agent's id, and nothing of the session's — and its title says whose,

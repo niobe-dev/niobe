@@ -2140,6 +2140,9 @@ struct Drawn {
     /// The entry drawn, or for a heading the first entry under it.
     entry: usize,
     heading: bool,
+    /// Whether this is the row that counts a run of routine entries left
+    /// out, rather than an entry drawn.
+    hidden: bool,
     lines: Vec<Line<'static>>,
     /// Where [`DrawnEntries::searched`] is in `lines`, counted from their
     /// first, once they have been searched. Kept with the lines, so a search
@@ -2223,6 +2226,7 @@ impl DrawnEntries {
                 }
                 Slot::Hidden { first, count } => (hidden_key(count, width, theme), first, false),
             };
+            let counted = matches!(slot, Slot::Hidden { .. });
             let draw = || match *slot {
                 Slot::Entry(index) => {
                     let Some(entry) = entries.get(index) else {
@@ -2250,6 +2254,7 @@ impl DrawnEntries {
                     self.moved |= drawn.entry != entry || drawn.heading != heading;
                     drawn.entry = entry;
                     drawn.heading = heading;
+                    drawn.hidden = counted;
                 }
                 Some(drawn) => {
                     self.moved = true;
@@ -2257,6 +2262,7 @@ impl DrawnEntries {
                         key,
                         entry,
                         heading,
+                        hidden: counted,
                         lines: draw(),
                         found: None,
                     }
@@ -2267,6 +2273,7 @@ impl DrawnEntries {
                         key,
                         entry,
                         heading,
+                        hidden: counted,
                         lines: draw(),
                         found: None,
                     });
@@ -2387,6 +2394,21 @@ impl DrawnEntries {
             })
             .unwrap_or(anchor.offset.min(last));
         Some(first.saturating_add(offset))
+    }
+
+    /// The entry drawn on line `line` of the whole transcript, where an entry
+    /// is drawn there whole rather than a heading over agents' rows or the
+    /// count of entries left out.
+    pub(crate) fn entry_at(&self, line: usize) -> Option<usize> {
+        let mut first = 0usize;
+        for drawn in &self.drawn {
+            let offset = line.checked_sub(first)?;
+            if offset < drawn.lines.len() {
+                return (!drawn.heading && !drawn.hidden).then_some(drawn.entry);
+            }
+            first = first.saturating_add(drawn.lines.len());
+        }
+        None
     }
 
     /// Line `line` of the whole transcript as drawn, without its styles.

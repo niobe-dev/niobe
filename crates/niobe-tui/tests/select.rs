@@ -285,3 +285,94 @@ fn a_click_or_a_drag_over_an_open_dialog_reaches_nothing_under_it() {
         assert_eq!(app.take_handoffs(), vec![], "{name}: a drag copied it");
     }
 }
+
+/// The running session after one more call of its own, a `Grep` that
+/// returned `output`.
+fn searched(output: &str) -> App {
+    let mut app = running_session();
+    app.apply(&Event::UserMessage {
+        text: "Where is it used?".to_owned(),
+    });
+    app.apply(&Event::ToolCallStart {
+        id: "g1".into(),
+        name: "Grep".to_owned(),
+        input: "{\"pattern\":\"etag\"}".to_owned(),
+        summary: Some("etag".to_owned()),
+        agent: None,
+    });
+    app.apply(&Event::ToolCallEnd {
+        id: "g1".into(),
+        name: "Grep".to_owned(),
+        input: "{\"pattern\":\"etag\"}".to_owned(),
+        output: output.to_owned(),
+        bytes: output.len() as u64,
+        outcome: niobe_core::event::ToolOutcome::Ok,
+        summary: Some("etag".to_owned()),
+        exit_code: None,
+        error: None,
+        command: None,
+    });
+    app
+}
+
+#[test]
+fn a_click_on_a_calls_row_opens_the_call_whole() {
+    let mut app = searched("catalog/fetch.ts:41: etag");
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+
+    click(&mut app, cell_of(&frame, "⚙ Grep"));
+
+    let detail = app.detail().expect("the click opened the call");
+    assert_eq!(
+        detail.text(),
+        "{\"pattern\":\"etag\"}catalog/fetch.ts:41: etag"
+    );
+    assert!(
+        app.take_handoffs().is_empty(),
+        "nothing went to the desktop"
+    );
+}
+
+#[test]
+fn a_drag_across_a_calls_row_selects_it_and_opens_nothing() {
+    let mut app = searched("catalog/fetch.ts:41: etag");
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    let (column, row) = cell_of(&frame, "⚙ Grep");
+
+    drag(&mut app, (column, row), (column + 8, row));
+
+    assert!(app.detail().is_none());
+    assert!(matches!(
+        app.take_handoffs().as_slice(),
+        [Handoff::Copy(copied)] if copied.contains("Grep")
+    ));
+}
+
+#[test]
+fn a_click_on_a_run_of_calls_opens_the_list_on_the_runs_first() {
+    let mut app = running_session();
+    let frame = screen(&mut app, WIDTH, 60);
+    // The session's reads are one run, drawn as one group row.
+    click(&mut app, cell_of(&frame, "Read ×3"));
+
+    let picker = app.picking().expect("the click opened the list of calls");
+    assert_eq!(
+        picker.options[picker.at].note.as_deref(),
+        Some("catalog/fetch.ts · 7.2 kB")
+    );
+    assert!(app.detail().is_none());
+}
+
+#[test]
+fn a_click_on_a_link_in_a_reply_still_opens_the_link() {
+    let mut app = replied("See https://example.com/etags for the spec.");
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+
+    click(&mut app, cell_of(&frame, "example.com"));
+
+    assert!(app.detail().is_none());
+    assert!(matches!(
+        app.take_handoffs().as_slice(),
+        [Handoff::Open(link)] if link == "https://example.com/etags"
+    ));
+}
