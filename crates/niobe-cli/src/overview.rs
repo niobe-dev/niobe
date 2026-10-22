@@ -10,11 +10,14 @@
 //! summary a model wrote would be a guess with the look of a record.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::SystemTime;
 
 use niobe_core::session::SessionState;
 use niobe_store::SessionId;
 
+use crate::repo;
 use crate::sessions::utc_minute;
 use crate::summary::grouped;
 
@@ -30,6 +33,98 @@ pub struct Folded {
     pub started_at: SystemTime,
     /// Its events, folded.
     pub state: SessionState,
+}
+
+/// Every session the store at `root` holds, folded, oldest first; none where
+/// nothing has been recorded there.
+pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
+    let Some(store) = repo::read_existing_store(root)? else {
+        return Ok(Vec::new());
+    };
+    let mut folded = Vec::new();
+    for summary in store.sessions().map_err(|e| e.to_string())? {
+        let stored = store.events(summary.id).map_err(|e| e.to_string())?;
+        let mut state = SessionState::new();
+        for event in &stored {
+            state.apply(&event.event);
+        }
+        folded.push(Folded {
+            id: summary.id,
+            // When its first event happened, which an imported session dates
+            // by the CLI's own record rather than by its import.
+            started_at: stored.first().map_or(summary.started_at, |event| event.at),
+            state,
+        });
+    }
+    // The store lists the newest first; a record of what was built reads
+    // from the start.
+    folded.sort_by_key(|session| session.id);
+    Ok(folded)
+}
+
+/// The page, for the shell's overview: written on a thread of its own each
+/// time the overview opens, since folding every session a repository has
+/// recorded takes as long as there are sessions, and the shell has a frame to
+/// draw every tick.
+#[derive(Debug)]
+pub struct Page {
+    root: PathBuf,
+    writing: Option<Receiver<String>>,
+}
+
+impl Page {
+    /// The page for the repository at `root`.
+    pub fn at(root: PathBuf) -> Self {
+        Self {
+            root,
+            writing: None,
+        }
+    }
+}
+
+/// The page for `root`, or why it could not be read, as the page.
+fn written(root: &Path) -> String {
+    match read(root) {
+        Ok(folded) => markdown(&repo::describe(root).name, &folded).join("\n"),
+        Err(error) => format!("The sessions recorded here could not be read: {error}"),
+    }
+}
+
+impl niobe_tui::Overview for Page {
+    fn load(&mut self) {
+        if self.writing.is_some() {
+            return;
+        }
+        let (sent, received) = mpsc::channel();
+        let root = self.root.clone();
+        let started = std::thread::Builder::new()
+            .name("overview".to_owned())
+            .spawn(move || {
+                // Nobody left to hand it to is a shell that has closed.
+                let _ = sent.send(written(&root));
+            });
+        if started.is_err() {
+            // A process that can start no thread still shows the page:
+            // written here, at the cost of the frames it takes.
+            let (sent, received) = mpsc::channel();
+            let _ = sent.send(written(&self.root));
+            self.writing = Some(received);
+            return;
+        }
+        self.writing = Some(received);
+    }
+
+    fn drain(&mut self) -> Option<String> {
+        let page = match self.writing.as_ref()?.try_recv() {
+            Ok(page) => Some(page),
+            Err(TryRecvError::Empty) => return None,
+            // The writer ended without a page: the dialog goes on saying it
+            // is reading, and opening it again starts another.
+            Err(TryRecvError::Disconnected) => None,
+        };
+        self.writing = None;
+        page
+    }
 }
 
 /// The page for the sessions of the repository `name`, oldest first.
@@ -375,6 +470,31 @@ mod tests {
                 command: None,
             },
         ]
+    }
+
+    /// The shell's page is the one `niobe overview` prints, written off the
+    /// caller's thread and handed over once.
+    #[test]
+    fn the_shells_page_is_written_on_a_thread_and_handed_over_once() {
+        use niobe_tui::Overview as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = dir.path().join("catalog");
+        std::fs::create_dir_all(root.join(".git")).expect("a .git directory");
+        let mut page = Page::at(root.clone());
+        assert_eq!(page.drain(), None, "nothing was asked for");
+
+        page.load();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let written = loop {
+            if let Some(written) = page.drain() {
+                break written;
+            }
+            assert!(std::time::Instant::now() < deadline, "no page arrived");
+            std::thread::yield_now();
+        };
+        assert_eq!(written, markdown("catalog", &[]).join("\n"));
+        assert_eq!(page.drain(), None, "handed over once");
     }
 
     #[test]

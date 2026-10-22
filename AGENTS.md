@@ -222,7 +222,10 @@ reviewers that encode both, for an agent working in this tree.
   wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. `s` in a side
   pane or View › Just one agent… narrows the transcript to one sub-agent's own entries — what the
   bridge read under that agent's id, and nothing of the session's — and its title says whose,
-  until the key again shows everything. A dialog, and a
+  until the key again shows everything. `overview.rs` is the trait the loop asks for the project
+  overview that `o` in a side pane or View › Project overview… opens — written by the binary each
+  time it opens, never waited on — read in the dialog a call is read in, its lines broken
+  between words. A dialog, and a
   permission question in the transcript, casts a shadow on what is under it. Snapshot pictures of the screen live in
   `tests/snapshots/`, and `snapshots.rs` is the one switch that has a test rewrite them —
   `UPDATE_SNAPSHOTS=1` exactly, and never on a CI runner.
@@ -316,7 +319,7 @@ reviewers that encode both, for an agent working in this tree.
   `niobe profiles` and `niobe sessions` print; `overview.rs` is what `niobe overview` prints —
   every session the store holds, folded, as one Markdown page of what went well and what went
   wrong, what was left open, the tools used most and the paths changed most, with no figure a
-  model wrote; `doctor.rs` is what `niobe doctor` prints — one row each for
+  model wrote, and the page the shell's overview shows, written on a thread of its own; `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
   read from its files), the config files and whether the repository's is trusted, and the terminal,
   with the fix for each that is not fine, as text or as `--json` with nothing under the home

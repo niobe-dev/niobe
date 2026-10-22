@@ -57,6 +57,10 @@ pub struct Detail {
     /// How wide the text was last drawn, and how many lines of it: what a
     /// key scrolls by.
     drawn: Option<(usize, usize)>,
+    /// Whether a line too long for the view breaks between words, as prose
+    /// does, rather than at the last cell that fits, as output read byte for
+    /// byte must.
+    words: bool,
 }
 
 /// A row of the view.
@@ -128,7 +132,29 @@ impl Detail {
             rows,
             top: (0, 0),
             drawn: None,
+            words: false,
         }
+    }
+
+    /// A page of `text` under `title`, read whole as a call is, with `none`
+    /// standing where there is no text.
+    pub fn page(title: &str, text: &str, none: &'static str) -> Self {
+        let mut held = String::with_capacity(text.len());
+        let mut rows = Vec::new();
+        push_text(&mut held, &mut rows, text, none);
+        Self {
+            title: title.to_owned(),
+            text: held,
+            rows,
+            top: (0, 0),
+            drawn: None,
+            words: true,
+        }
+    }
+
+    /// What the dialog is drawn under.
+    pub(crate) fn title(&self) -> &str {
+        &self.title
     }
 
     /// The text the view holds: the arguments, then what the call returned,
@@ -160,7 +186,11 @@ impl Detail {
     fn lines_of(&self, at: usize, width: usize) -> Vec<String> {
         match self.rows.get(at) {
             Some(Row::Text(range)) => {
-                let lines = text::wrap_exact(self.text.get(range.clone()).unwrap_or(""), width);
+                let line = self.text.get(range.clone()).unwrap_or("");
+                let lines = match self.words {
+                    true => text::wrap(line, width),
+                    false => text::wrap_exact(line, width),
+                };
                 match lines.is_empty() {
                     true => vec![String::new()],
                     false => lines,

@@ -1080,6 +1080,7 @@ fn the_help_names_every_shortcut_the_shell_lists_and_the_typed_commands() {
         "what happened since you last",
         "shows its whole input and output",
         "show one sub-agent's entries alone;",
+        "every session recorded here: what",
         "/model",
         "/memory",
         "/resume",

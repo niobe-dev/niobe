@@ -1438,6 +1438,9 @@ pub struct App {
     /// Whether the Memory view wants what the agent is given read, which the
     /// loop does once and hands back.
     memory_wanted: bool,
+    /// Whether the project overview has been opened since the binary was
+    /// last asked to write it.
+    overview_wanted: bool,
     /// The MCP view, while it is open.
     mcp: Option<crate::mcp::View>,
     /// One tool call read whole, while it is open.
@@ -1837,6 +1840,7 @@ impl App {
             sheet: None,
             memory: None,
             memory_wanted: false,
+            overview_wanted: false,
             mcp: None,
             detail: None,
             recorded: Vec::new(),
@@ -4137,6 +4141,7 @@ impl App {
             | Action::CatchUp
             | Action::Calls
             | Action::OneAgent
+            | Action::Overview
             | Action::Pane(_)
             | Action::Theme
             | Action::Shortcuts
@@ -4196,6 +4201,7 @@ impl App {
             Action::NotableOnly => self.show_notable_only(),
             Action::CatchUp => self.show_catch_up(),
             Action::Calls => self.pick_call(),
+            Action::Overview => self.open_overview(),
             Action::OneAgent => self.pick_agent(),
             Action::Pane(pane) => self.toggle_pane(pane),
             Action::Theme => self.pick_theme(),
@@ -4330,6 +4336,18 @@ impl App {
 
     /// Opens the Memory view, and asks for what the agent is given to be
     /// read for it.
+    /// Opens the project overview on a line saying it is being read, and
+    /// asks for it: written each time it opens, so the session running now is
+    /// in it as far as it has gone.
+    fn open_overview(&mut self) {
+        self.detail = Some(crate::detail::Detail::page(
+            crate::overview::TITLE,
+            "",
+            crate::overview::READING,
+        ));
+        self.overview_wanted = true;
+    }
+
     fn open_memory(&mut self) {
         self.memory = Some(crate::memory::View::default());
         self.memory_wanted = true;
@@ -5617,6 +5635,7 @@ impl App {
             KeyCode::Char('c') => self.show_catch_up(),
             KeyCode::Char('d') => self.pick_call(),
             KeyCode::Char('s') => self.pick_agent(),
+            KeyCode::Char('o') => self.open_overview(),
             KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
@@ -7816,6 +7835,29 @@ impl App {
             view.files = Some(files);
             view.at = 0;
             view.reading = None;
+        }
+    }
+
+    /// Whether the project overview has been opened since this was last
+    /// asked.
+    pub fn take_overview_request(&mut self) -> bool {
+        std::mem::take(&mut self.overview_wanted)
+    }
+
+    /// The project overview the binary wrote, for the open overview. A page
+    /// that lands after the dialog was closed, or once a tool call was opened
+    /// in its place, is dropped.
+    pub fn set_overview(&mut self, page: &str) {
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|open| open.title() == crate::overview::TITLE)
+        {
+            self.detail = Some(crate::detail::Detail::page(
+                crate::overview::TITLE,
+                page,
+                "nothing is recorded here to read",
+            ));
         }
     }
 
@@ -15470,6 +15512,44 @@ mod tests {
             "{\"file_path\":\"b.rs\"}fn b() {}\n\tfn c() {}\n"
         );
         assert_eq!(app.overlay(), Some(Overlay::Detail));
+    }
+
+    #[test]
+    fn o_in_a_side_pane_opens_the_overview_and_asks_the_binary_for_it() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = App::new(Repo::default());
+        app.focus = Focus::Pane(Pane::Activity);
+        app.on_key(key(KeyCode::Char('o')));
+        assert!(app.take_overview_request(), "the page is asked for");
+        assert!(!app.take_overview_request(), "once");
+        let open = app.detail().expect("the overview is open");
+        assert_eq!(open.title(), crate::overview::TITLE);
+
+        app.set_overview("# What has been built in niobe");
+        let open = app.detail().expect("the page is in it");
+        assert_eq!(open.text(), "# What has been built in niobe");
+    }
+
+    #[test]
+    fn a_page_that_lands_after_its_dialog_closed_opens_nothing() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = App::new(Repo::default());
+        app.perform(crate::menu::Action::Overview);
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.detail().is_none());
+        app.set_overview("late");
+        assert!(app.detail().is_none(), "a closed overview stays closed");
+    }
+
+    #[test]
+    fn an_empty_page_says_nothing_is_recorded() {
+        let mut app = App::new(Repo::default());
+        app.perform(crate::menu::Action::Overview);
+        app.set_overview("");
+        let open = app.detail().expect("the overview is open");
+        assert!(open.text().is_empty());
     }
 
     #[test]

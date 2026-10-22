@@ -1,17 +1,17 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
-┏━ > add etag support to the cat┌───────────────────────────────┐ading… ━━━━━━━┓
-┃   115     cache.set(url, {    │ Diff               F5  Ctrl+T │              ┃
-┃   116 +     etag: res.headers.│ Group by agent              a │              ┃
-┃   117       body,             │ Notable only                n │              ┃
-┃   └ allowed by you            │ What happened…              c │              ┃
-┃                               │ Tool calls…                 d │              ┃
-┃ ◆ claude                      │ Just one agent…             s │              ┃
-┃   Rewriting the 304 test aroun│ Usage pane              shown │              ┃
-┃                               │ Changes pane            shown │              ┃
-┃ ◆ claude                      │ Activity pane           shown │              ┃
-┃   The notebook that demonstrat│ Theme…                        │ shape.       ┃
-┃                               └───────────────────────────────┘              ┃
-┃ ✗ Bash           npm test                                      exit 1 · 0.4s █
+┏━ > add etag support to the cat┌─────────────────────────────────┐ing… ━━━━━━━┓
+┃   115     cache.set(url, {    │ Diff                 F5  Ctrl+T │            ┃
+┃   116 +     etag: res.headers.│ Group by agent                a │            ┃
+┃   117       body,             │ Notable only                  n │            ┃
+┃   └ allowed by you            │ What happened…                c │            ┃
+┃                               │ Tool calls…                   d │            ┃
+┃ ◆ claude                      │ Just one agent…               s │            ┃
+┃   Rewriting the 304 test aroun│ Project overview…             o │            ┃
+┃                               │ Usage pane                shown │            ┃
+┃ ◆ claude                      │ Changes pane              shown │            ┃
+┃   The notebook that demonstrat│ Activity pane             shown │hape.       ┃
+┃                               │ Theme…                          │            ┃
+┃ ✗ Bash           npm test     └─────────────────────────────────┘it 1 · 0.4s █
 ┃   └ 1 failing: fetch returns the cached body on a 304                        █
 ┃                                                                              █
 ┃ ◆ claude                                                                     █

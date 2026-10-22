@@ -467,6 +467,13 @@ fn call_detail(p: &str) -> App {
     app
 }
 
+fn overview_page(p: &str) -> App {
+    let mut app = running_session();
+    app.perform(niobe_tui::menu::Action::Overview);
+    app.set_overview(&format!("# What has been built in {p}\n\n| {p} | 1 | 0 |"));
+    app
+}
+
 fn refused_answer(p: &str) -> App {
     let mut app = with(vec![
         Event::ToolCallStart {
@@ -573,6 +580,7 @@ const SITES: &[Site] = &[
     ("proposed-write-open", write_open, "line"),
     ("proposed-command-open", command_open, "echo"),
     ("call-detail", call_detail, "output"),
+    ("overview", overview_page, "built"),
 ];
 
 #[test]

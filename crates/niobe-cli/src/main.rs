@@ -397,6 +397,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
                 root.clone(),
                 selected.as_ref().map(|selected| selected.profile.clone()),
             ),
+            overview: &mut overview::Page::at(root.clone()),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -632,6 +633,7 @@ fn resume(
                 root.clone(),
                 selected.as_ref().map(|selected| selected.profile.clone()),
             ),
+            overview: &mut overview::Page::at(root.clone()),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -833,6 +835,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
                 root.clone(),
                 selected.as_ref().map(|selected| selected.profile.clone()),
             ),
+            overview: &mut overview::Page::at(root.clone()),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -867,26 +870,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
 /// page on standard output.
 fn print_overview() -> Result<(), String> {
     let root = repo::root(&cwd()?);
-    let mut folded = Vec::new();
-    if let Some(store) = repo::read_existing_store(&root)? {
-        for summary in store.sessions().map_err(|e| e.to_string())? {
-            let stored = store.events(summary.id).map_err(|e| e.to_string())?;
-            let mut state = niobe_core::session::SessionState::new();
-            for event in &stored {
-                state.apply(&event.event);
-            }
-            folded.push(overview::Folded {
-                id: summary.id,
-                // When its first event happened, which an imported session
-                // dates by the CLI's own record rather than by its import.
-                started_at: stored.first().map_or(summary.started_at, |event| event.at),
-                state,
-            });
-        }
-    }
-    // The store lists the newest first; a record of what was built reads
-    // from the start.
-    folded.sort_by_key(|session| session.id);
+    let folded = overview::read(&root)?;
     for line in overview::markdown(&repo::describe(&root).name, &folded) {
         say!("{line}");
     }
@@ -1351,6 +1335,7 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
             desktop: &mut desktop::System::new(),
             history: &mut NoHistory::default(),
             memory: &mut niobe_tui::NoMemory::default(),
+            overview: &mut niobe_tui::NoOverview::default(),
         },
     )
     .map_err(|e| e.to_string())
@@ -1724,6 +1709,8 @@ IN THE SHELL:
                            shows its whole input and output
     s                      In a side pane, show one sub-agent's entries alone;
                            again shows everything
+    o                      In a side pane, every session recorded here: what
+                           was built, what went wrong, what was left open
     t                      In the Activity pane, count tools by name or by
                            kind of work
     Ctrl+End               Back to the newest line of the transcript

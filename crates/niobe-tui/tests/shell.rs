@@ -6553,6 +6553,33 @@ fn a_tool_call_read_whole_shows_its_arguments_and_its_output_at_both_sizes() {
     }
 }
 
+/// The project overview, while the binary writes it and once it has.
+#[test]
+fn the_project_overview_reads_whole_once_the_binary_has_written_it() {
+    let mut app = running_session().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::Overview);
+    assert!(app.take_overview_request(), "opening it asks for the page");
+    let reading = screen(&mut app, 80, 24);
+    assert!(
+        reading.contains("reading every session recorded here"),
+        "{reading}"
+    );
+    assert_snapshot("overview-reading-neo-80x24", &reading);
+
+    app.set_overview(OVERVIEW);
+    for (name, width, height) in [
+        ("overview-neo-80x24", 80, 24),
+        ("overview-neo-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("## Highlights"), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+}
+
+/// A page as `niobe overview` writes one, cut short.
+const OVERVIEW: &str = "# What has been built in catalog\n\n2 sessions recorded, the first started 2026-09-18 12:00 UTC and the last 2026-09-18 12:00 UTC.\n\n## Highlights\n\n- 0 turns ended.\n- 6 prompts sent, 15 replies from the agent.\n- 24 of 27 tool calls finished without failing.\n\n## Lowlights\n\n- 3 tool calls failed, 1 denied.\n- Session 1: 3 failed calls, 1 denied call — `niobe --resume 1`\n\n## Most used tools\n\n| Tool | Calls | Failed |\n| --- | ---: | ---: |\n| Bash | 12 | 3 |\n| Read | 9 | 0 |";
+
 /// Narrowed to one sub-agent, the transcript draws that agent's entries
 /// alone and its title says so.
 #[test]

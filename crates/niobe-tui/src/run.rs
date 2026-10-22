@@ -25,6 +25,7 @@ use crate::images::{Images, NoImages};
 use crate::input::{Input, Wait};
 use crate::journal::{Journal, Unrecorded};
 use crate::memory::{Memory, NoMemory};
+use crate::overview::{NoOverview, Overview};
 use crate::rules::{Forgotten, Reach, Rules};
 use crate::shell::{NoShell, Shell};
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued};
@@ -112,6 +113,9 @@ pub struct Around<'a> {
     /// What reads the files the agent is given as its memory, for the Memory
     /// view, asked once each time the view opens and never waited on.
     pub memory: &'a mut dyn Memory,
+    /// What writes the project overview, asked once each time it opens and
+    /// never waited on.
+    pub overview: &'a mut dyn Overview,
 }
 
 // By hand, because not every one of them can say what it holds.
@@ -176,6 +180,7 @@ pub fn ask_trust(app: App, question: trust::Question) -> io::Result<Option<trust
             desktop: &mut NoDesktop,
             history: &mut NoHistory::default(),
             memory: &mut NoMemory::default(),
+            overview: &mut NoOverview::default(),
         },
     )?;
     Ok(match ended {
@@ -334,6 +339,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         desktop,
         history,
         memory,
+        overview,
     } = around;
     let mut ended = Ended::Quit;
     // Whether a program that ran on the terminal since the last draw left
@@ -355,6 +361,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
             fold_images(app, images);
             fold_history(app, journal, history);
             fold_memory(app, memory);
+            fold_overview(app, overview);
             // Whatever a read of the repository has finished with since the last
             // tick. Nothing is waited on here: an unfinished or failed read says
             // nothing and the pane keeps what it had.
@@ -512,6 +519,17 @@ fn fold_history(app: &mut App, journal: &dyn Journal, history: &mut dyn History)
     }
     if let Some(past) = history.drain() {
         app.set_past(past);
+    }
+}
+
+/// Passes on the overview the dialog asked for, and hands it the page once
+/// written, as [`fold_memory`] does the agent's files.
+fn fold_overview(app: &mut App, overview: &mut dyn Overview) {
+    if app.take_overview_request() {
+        overview.load();
+    }
+    if let Some(page) = overview.drain() {
+        app.set_overview(&page);
     }
 }
 

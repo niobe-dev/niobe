@@ -80,6 +80,9 @@ pub enum Action {
     /// Narrows the transcript to one sub-agent's entries, or draws them all
     /// again.
     OneAgent,
+    /// Shows every session recorded here, folded: what was built and how
+    /// it went.
+    Overview,
     /// Shows a pane of the right-hand stack, or hides it.
     Pane(SidePane),
     /// Opens the list of themes.
@@ -129,6 +132,7 @@ impl Action {
             Action::CatchUp => "what happened since you last caught up",
             Action::Calls => "read a tool call's whole input and output",
             Action::OneAgent => "show one sub-agent's entries alone, or all of them again",
+            Action::Overview => "what every session here built and how it went",
             Action::Pane(_) => "show or hide that pane",
             Action::Theme => "pick the palette the shell draws in",
             Action::Shortcuts => "list the keys the shell answers to",
@@ -261,6 +265,7 @@ pub const MENUS: [Menu; 6] = [
             item("What happened…", 0, "c", Action::CatchUp),
             item("Tool calls…", 1, "d", Action::Calls),
             item("Just one agent…", 0, "s", Action::OneAgent),
+            item("Project overview…", 0, "o", Action::Overview),
             item("Usage pane", 0, "", Action::Pane(SidePane::Usage)),
             item("Changes pane", 0, "", Action::Pane(SidePane::Changes)),
             item("Activity pane", 0, "", Action::Pane(SidePane::Activity)),
