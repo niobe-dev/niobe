@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use niobe_store::{Store, read_log};
 
@@ -138,9 +138,34 @@ fn repo_with_the_fixture_recorded() -> tempfile::TempDir {
     let session = store.create_session().expect("a session is created");
     let text = std::fs::read_to_string(fixture_path()).expect("the fixture reads");
     for event in read_log(&text).expect("the fixture parses") {
-        store.append(session, &event).expect("an append succeeds");
+        store
+            .append_at(session, &event, recorded_on())
+            .expect("an append succeeds");
     }
     dir
+}
+
+/// Noon UTC on 18 September 2026, the day the fixture was recorded.
+const RECORDED_ON_MS: u64 = 1_789_732_800_000;
+
+fn recorded_on() -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(RECORDED_ON_MS)
+}
+
+/// A copy of `log` in `dir` with every line dated `at`, in milliseconds since
+/// the Unix epoch, as a log a store's session was written out to would be.
+fn dated(dir: &Path, log: &str, at: u64) -> PathBuf {
+    let lines: Vec<String> = log
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let open = line.strip_suffix('}').expect("every line is an object");
+            format!("{open},\"at\":{at}}}")
+        })
+        .collect();
+    let path = dir.join("dated.jsonl");
+    std::fs::write(&path, lines.join("\n")).expect("the dated log is written");
+    path
 }
 
 /// The summary without its first line, which names where the events came from
@@ -151,17 +176,22 @@ fn body(summary: &str) -> Vec<&str> {
 
 #[test]
 fn replaying_the_fixture_prints_its_totals() {
-    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let fixture = fixture_path();
-    let output = niobe(here, &["replay", fixture.to_str().expect("a UTF-8 path")]);
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let text = std::fs::read_to_string(fixture_path()).expect("the fixture reads");
+    let fixture = dated(dir.path(), &text, RECORDED_ON_MS);
+    let output = niobe(
+        dir.path(),
+        &["replay", fixture.to_str().expect("a UTF-8 path")],
+    );
     let out = stdout(&output);
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(out.contains("562,988"), "{out}");
     // $0.86552395 the recording reported, plus the fourteen records it did not
-    // price at the rates in force for their models: $0.0767031 of haiku-4-5
-    // and $0.1151232 of sonnet-5, which is $1.0573503 in all. Marked `~`,
-    // because the part of it Niobe worked out is an estimate.
+    // price at the rates in force for their models on the day it ran:
+    // $0.0767031 of haiku-4-5 and $0.1151232 of sonnet-5, which is $1.0573503
+    // in all. Marked `~`, because the part of it Niobe worked out is an
+    // estimate.
     assert!(out.contains("~$1.06"), "{out}");
     assert!(
         out.contains("14 of 25 usage records no reported cost covers"),
@@ -170,10 +200,59 @@ fn replaying_the_fixture_prints_its_totals() {
     assert!(!out.contains("reasoning"), "{out}");
 }
 
+/// A log with no times could have been spent on any day, the days before the
+/// table priced its models among them: what the recording reported,
+/// $0.86552395, is all that is stood behind.
+#[test]
+fn a_log_that_says_no_days_prices_nothing_it_was_not_billed_for() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = fixture_path();
+    let output = niobe(here, &["replay", fixture.to_str().expect("a UTF-8 path")]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(out.contains("cost        ≥$0.87 — 14 of 25"), "{out}");
+}
+
+/// Claude Opus 4.6 billed a prompt over 200K tokens at $10 per million input
+/// tokens until 13 March 2026, and at $5 from then: 250,000 tokens are $2.50
+/// on the 1st of March and $1.25 on the 20th, whenever the log is read.
+#[test]
+fn a_replayed_log_is_priced_at_the_rates_of_the_days_it_ran() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let usage = r#"{"type":"usage","input":250000,"output":0,"cache_read":0,"cache_write":0,"reasoning":0,"model":"claude-opus-4-6","cost_usd":null}"#;
+    let replayed = |at: &[u64]| {
+        let lines: Vec<String> = at
+            .iter()
+            .map(|at| {
+                let open = usage.strip_suffix('}').expect("an object");
+                format!("{open},\"at\":{at}}}")
+            })
+            .collect();
+        let log = dir.path().join("log.jsonl");
+        std::fs::write(&log, lines.join("\n")).expect("the log is written");
+        let output = niobe(dir.path(), &["replay", log.to_str().expect("a UTF-8 path")]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        stdout(&output)
+    };
+    const FIRST_OF_MARCH: u64 = 1_772_366_400_000;
+    const TWENTIETH_OF_MARCH: u64 = 1_774_008_000_000;
+
+    let before = replayed(&[FIRST_OF_MARCH]);
+    assert!(before.contains("cost        ~$2.50 — 1 of 1"), "{before}");
+    let after = replayed(&[TWENTIETH_OF_MARCH]);
+    assert!(after.contains("cost        ~$1.25 — 1 of 1"), "{after}");
+    // Spent on both sides of the change, at rates the fold cannot tell apart,
+    // and nothing else in the log to stand behind.
+    let across = replayed(&[FIRST_OF_MARCH, TWENTIETH_OF_MARCH]);
+    assert!(across.contains("cost        unpriced — 2 of 2"), "{across}");
+}
+
 #[test]
 fn a_resumed_session_shows_the_totals_the_log_it_recorded_folds_to() {
     let repo = repo_with_the_fixture_recorded();
-    let fixture = fixture_path();
+    let text = std::fs::read_to_string(fixture_path()).expect("the fixture reads");
+    let fixture = dated(repo.path(), &text, RECORDED_ON_MS);
 
     let resumed = niobe(repo.path(), &["--resume", "1"]);
     let replayed = niobe(
@@ -851,19 +930,16 @@ fn a_config_that_is_not_toml_names_the_line() {
     );
 }
 
-/// What no reported cost covers is valued at today's rates, whenever the
-/// session ran; the help says so rather than promise the rates of that day.
+/// What no reported cost covers is valued at the rates of the days it was
+/// spent, and the help says when that is a floor instead.
 #[test]
-fn the_help_says_a_session_read_back_is_estimated_at_todays_rates() {
+fn the_help_says_a_session_read_back_is_estimated_at_the_rates_of_its_days() {
     let setup = Configured::new("", "");
     let out = stdout(&setup.run(&["--help"]));
 
-    assert!(out.contains("at the rates in"), "{out}");
-    assert!(
-        out.contains("resumed later is estimated at today's"),
-        "{out}"
-    );
-    assert!(!out.contains("the rates of the day it ran."), "{out}");
+    assert!(out.contains("force on the days they were spent"), "{out}");
+    assert!(out.contains("at the rates of the days it ran"), "{out}");
+    assert!(!out.contains("today's"), "{out}");
 }
 
 /// The CLI resumes a session only from the directory it started in, and

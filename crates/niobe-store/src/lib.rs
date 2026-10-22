@@ -22,7 +22,7 @@ mod jsonl;
 mod recorder;
 mod store;
 
-pub use jsonl::{LogError, read_log};
+pub use jsonl::{LogError, read_dated_log, read_log};
 pub use recorder::Recorder;
 pub use store::{
     SCHEMA_VERSION, SessionId, SessionSummary, Store, StoreError, StoredEvent, StoredPrompt,

@@ -44,7 +44,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::event::Event;
 use niobe_ledger::Date;
-use niobe_store::{Recorder, SessionId, read_log};
+use niobe_store::{Recorder, SessionId, read_dated_log};
 use niobe_tui::app::{App, ConfigFile, Places};
 use niobe_tui::history::{NoHistory, Target};
 use niobe_tui::journal::Unrecorded;
@@ -64,6 +64,7 @@ macro_rules! say {
 
 use crate::args::{Command, Invocation, Resume};
 use crate::journal::StoreJournal;
+use crate::prices::Spent;
 use crate::rules::ConfigRules;
 
 fn main() -> ExitCode {
@@ -304,6 +305,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
     let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
     let app = say_untrusted(
         say_prices(
+            Spent::on(today()),
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_places(places(&loaded))
@@ -494,28 +496,7 @@ fn resume(
     let selected = loaded.select(profile)?;
     budget_fits(asked, selected.as_ref())?;
     let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
-    let mut app = say_untrusted(
-        say_prices(
-            App::new(repo::describe(&root))
-                .with_rules(loaded.config.allowed().clone())
-                .with_places(places(&loaded))
-                .with_depth(asked.depth)
-                .with_keymap(loaded.config.keys().clone())
-                .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
-                .with_catch_up(
-                    away_after(loaded.config.catch_up()),
-                    loaded.config.catch_up().automatic(),
-                )
-                .with_theme(chosen_theme(asked, &loaded)?),
-        ),
-        &loaded,
-    );
-    if let Some(selected) = &selected {
-        app = app.with_profile(config::named(*selected));
-    }
-    if let Some(budget) = asked.budget {
-        app = app.with_budget(budget);
-    }
+    let theme = chosen_theme(asked, &loaded)?;
 
     let started = Instant::now();
     // Without a terminal the session is only read and printed, so the store
@@ -535,6 +516,33 @@ fn resume(
         return Err(niobe_store::StoreError::NoSuchSession(session).to_string());
     }
     let stored = store.events(session).map_err(|e| e.to_string())?;
+    let spent = Spent::of(
+        usage_times(stored.iter().map(|s| (&s.event, Some(s.at)))),
+        (!piped).then(today),
+    );
+    let mut app = say_untrusted(
+        say_prices(
+            spent,
+            App::new(repo::describe(&root))
+                .with_rules(loaded.config.allowed().clone())
+                .with_places(places(&loaded))
+                .with_depth(asked.depth)
+                .with_keymap(loaded.config.keys().clone())
+                .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
+                .with_catch_up(
+                    away_after(loaded.config.catch_up()),
+                    loaded.config.catch_up().automatic(),
+                )
+                .with_theme(theme),
+        ),
+        &loaded,
+    );
+    if let Some(selected) = &selected {
+        app = app.with_profile(config::named(*selected));
+    }
+    if let Some(budget) = asked.budget {
+        app = app.with_budget(budget);
+    }
     // At the times the store recorded, not at the time it was read: a session
     // resumed on Thursday did not happen on Thursday.
     let clock = niobe_tui::clock::Clock::system();
@@ -711,8 +719,14 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     )?;
+    let piped = !std::io::stdout().is_terminal();
+    let spent = Spent::of(
+        usage_times(events.iter().map(|(event, at)| (event, *at))),
+        (!piped).then(today),
+    );
     let mut app = say_untrusted(
         say_prices(
+            spent,
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_places(places(&loaded))
@@ -745,7 +759,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     }
     let elapsed = started.elapsed();
 
-    if !std::io::stdout().is_terminal() {
+    if piped {
         print_summary(
             &format!(
                 "claude session {session} · {} events · read and folded in {}",
@@ -962,15 +976,13 @@ fn away_after(catch_up: niobe_config::CatchUp) -> Duration {
 /// a convenience, the session is the point. It is said in the transcript
 /// rather than swallowed, because an operator who wrote a price file is owed
 /// the reason it is not in force.
-fn say_prices(app: App) -> App {
+///
+/// `spent` is the days the session's tokens were spent on: today for a live
+/// one, and for one read back the days its records were made, so that a rate
+/// changed since is not laid over tokens bought before it.
+fn say_prices(spent: Spent, app: App) -> App {
     match prices::load() {
-        // Today's rates, for a session read back as for a live one: what is
-        // owed is folded per model with no day on it, so there is no older
-        // day to price it at. The help and the price table say so.
-        Ok(loaded) => app.with_prices(Box::new(prices::Sheet::new(
-            loaded.table,
-            Date::of(SystemTime::now()),
-        ))),
+        Ok(loaded) => app.with_prices(Box::new(prices::Sheet::new(loaded.table, spent, today()))),
         Err(error) => app.with_notice(
             "no running cost estimate",
             "price table",
@@ -980,6 +992,19 @@ fn say_prices(app: App) -> App {
             ),
         ),
     }
+}
+
+/// The UTC day it is now, which the price table is read on.
+fn today() -> Date {
+    Date::of(SystemTime::now())
+}
+
+/// The times of a session's usage records, which the days its tokens were
+/// spent on are read from.
+fn usage_times<'a>(
+    events: impl Iterator<Item = (&'a Event, Option<SystemTime>)>,
+) -> impl Iterator<Item = Option<SystemTime>> {
+    events.filter_map(|(event, at)| matches!(event, Event::Usage(_)).then_some(at))
 }
 
 /// The files the shell may name or hand to the desktop: the config files the
@@ -1240,16 +1265,30 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
     let text = log_text(log)?;
 
     let started = Instant::now();
-    let events = read_log(&text).map_err(|e| format!("{}: {e}", log.display()))?;
-    // The same price sheet the shell and `--resume` get: a replayed log and a
-    // resumed session that fold to the same totals must print the same cost,
-    // or one of the two figures is teaching the operator to distrust both.
-    let app = say_prices(App::new(repo::describe(&cwd()?)).with_depth(asked.depth));
+    let events = read_dated_log(&text).map_err(|e| format!("{}: {e}", log.display()))?;
+    // The same price sheet the shell and `--resume` get, read for the days the
+    // log's lines say: a replayed log and a resumed session that fold to the
+    // same totals on the same days must print the same cost, or one of the
+    // two figures is teaching the operator to distrust both.
+    let spent = Spent::of(
+        usage_times(events.iter().map(|(event, at)| (event, *at))),
+        None,
+    );
+    let app = say_prices(
+        spent,
+        App::new(repo::describe(&cwd()?)).with_depth(asked.depth),
+    );
     let mut app = match asked.theme {
         Some(theme) => app.with_theme(theme),
         None => app,
     };
-    app.extend(&events);
+    let clock = niobe_tui::clock::Clock::system();
+    for (event, at) in &events {
+        match at {
+            Some(at) => app.apply_at(event, clock.at(*at)),
+            None => app.apply(event),
+        }
+    }
     let elapsed = started.elapsed();
 
     if !std::io::stdout().is_terminal() {
@@ -1542,8 +1581,10 @@ PRICES:
     Costs are computed from a price table bundled into niobe: USD per million
     tokens for each model id, each price dated from the day it took effect.
     They value the tokens a backend reported no cost for, at the rates in
-    force today: a session replayed or resumed later is estimated at today's
-    rates, not those of the day it ran. A cost the backend reported is shown
+    force on the days they were spent: a session resumed later is estimated
+    at the rates of the days it ran, and one whose rates changed while it ran,
+    or a replayed log whose lines carry no \"at\", is shown as a floor. A cost
+    the backend reported is shown
     as it reported it. A model id the table does not list is unpriced;
     nothing is guessed from a similar id.
     ~/.config/niobe/prices.toml ($XDG_CONFIG_HOME/niobe when that is set) has

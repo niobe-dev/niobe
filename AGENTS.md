@@ -117,7 +117,8 @@ reviewers that encode both, for an agent working in this tree.
   on, for the shell's history, and the newest plan usage windows a profile's sessions recorded,
   which a new session shows, dated, until its own backend reports. `recorder.rs` is
   the write side a running session holds, and says whether another holds a session without
-  taking it; `jsonl.rs` reads a JSON Lines event log.
+  taking it; `jsonl.rs` reads a JSON Lines event log, each line dated where it carries an
+  `at` in the milliseconds the store dates an event by.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — and each transcript entry's attention, the highest of the events that built it, `ui.rs`
@@ -309,7 +310,9 @@ reviewers that encode both, for an agent working in this tree.
   the `git` reads of the working tree made on a thread of its own as the shell's `Watch`;
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
   operator's trust decision about that file; `prices.rs` is the price table `niobe prices`
-  prints and the sheet the shell values tokens with; `profiles.rs` and `sessions.rs` are what
+  prints and the sheet the shell values tokens with, at the rates of the days a session
+  spent them — a session read back is priced only where its rates held across those days, and
+  a log with no times is a floor; `profiles.rs` and `sessions.rs` are what
   `niobe profiles` and `niobe sessions` print; `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
   read from its files), the config files and whether the repository's is trusted, and the terminal,
