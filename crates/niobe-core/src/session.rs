@@ -805,16 +805,27 @@ impl SessionState {
             // The last report replaces the one before it: a window is a level,
             // not a quantity, so summing two reports of it would be nonsense.
             // A report that names no window says only whether the plan is
-            // spending beyond its fee; the levels before it still stand.
+            // spending beyond its fee; the levels before it still stand. One
+            // that does not say whether extra is allowed leaves what was last
+            // said: silence is not a change of mind.
             Event::UsageWindows(windows) => {
-                self.usage_windows = match (windows.is_empty(), self.usage_windows) {
-                    (true, Some(before)) => Some(UsageWindows {
+                let measured = !windows.is_empty();
+                let said = match (windows.overage, self.usage_windows) {
+                    (crate::event::Overage::Unreported, Some(before)) => before.overage,
+                    (overage, _) => overage,
+                };
+                let windows = match (windows.is_empty(), self.usage_windows) {
+                    (true, Some(before)) => UsageWindows {
                         using_overage: windows.using_overage,
                         ..before
-                    }),
-                    _ => Some(*windows),
+                    },
+                    _ => *windows,
                 };
-                self.window_reported |= !windows.is_empty();
+                self.usage_windows = Some(UsageWindows {
+                    overage: said,
+                    ..windows
+                });
+                self.window_reported |= measured;
             }
 
             // The last report stands for what the session is billed from here
@@ -3242,12 +3253,14 @@ mod tests {
             five_hour: level,
             seven_day: None,
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         }));
 
         state.apply(&Event::UsageWindows(UsageWindows {
             five_hour: None,
             seven_day: None,
             using_overage: true,
+            overage: crate::event::Overage::Unreported,
         }));
 
         assert_eq!(
@@ -3256,7 +3269,36 @@ mod tests {
                 five_hour: level,
                 seven_day: None,
                 using_overage: true,
+                overage: crate::event::Overage::Unreported,
             })
+        );
+    }
+
+    /// Whether extra usage is allowed is a standing answer: a later report that
+    /// does not say leaves it, and one that does replaces it.
+    #[test]
+    fn what_was_said_about_extra_usage_stands_until_the_backend_says_otherwise() {
+        use crate::event::{Overage, OverageRefusal, UsageWindows};
+        let report = |overage| {
+            Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: false,
+                overage,
+            })
+        };
+        let mut state = SessionState::new();
+        state.apply(&report(Overage::Refused(OverageRefusal::OutOfCredits)));
+        state.apply(&report(Overage::Unreported));
+        assert_eq!(
+            state.usage_windows().map(|windows| windows.overage),
+            Some(Overage::Refused(OverageRefusal::OutOfCredits))
+        );
+
+        state.apply(&report(Overage::Allowed));
+        assert_eq!(
+            state.usage_windows().map(|windows| windows.overage),
+            Some(Overage::Allowed)
         );
     }
 
@@ -3282,6 +3324,7 @@ mod tests {
                     resets_at: Some(1_790_118_000),
                 }),
                 using_overage: false,
+                overage: crate::event::Overage::Unreported,
             }));
         }
 
@@ -3453,6 +3496,7 @@ mod tests {
                 five_hour: Some(window),
                 seven_day: None,
                 using_overage: false,
+                overage: crate::event::Overage::Unreported,
             }),
             Event::ModeSelected { mode: Mode::Plan },
             Event::Cleared,
@@ -3712,6 +3756,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         })
     }
 
@@ -4048,6 +4093,7 @@ mod tests {
                 five_hour: None,
                 seven_day: None,
                 using_overage: true,
+                overage: crate::event::Overage::Unreported,
             }),
             Event::TurnEnded,
         ]);
@@ -4117,6 +4163,7 @@ mod tests {
                     resets_at: RESET,
                 }),
                 using_overage: false,
+                overage: crate::event::Overage::Unreported,
             }),
             Event::TurnEnded,
         ]);

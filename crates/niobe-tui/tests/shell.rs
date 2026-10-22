@@ -879,6 +879,7 @@ fn a_window_resetting_past_what_the_clock_holds_is_drawn_without_its_reset() {
         }),
         seven_day: None,
         using_overage: false,
+        overage: niobe_core::event::Overage::Unreported,
     }));
 
     let frame = screen(&mut app, 200, 60);
@@ -3031,6 +3032,7 @@ fn a_plan_spending_beyond_its_flat_fee_is_marked_in_the_usage_pane() {
             resets_at: Some(1_790_118_000),
         }),
         using_overage: true,
+        overage: niobe_core::event::Overage::Unreported,
     }));
 
     let frame = screen(&mut app, 120, 30);

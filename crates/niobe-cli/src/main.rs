@@ -1987,6 +1987,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
         for event in [meta, windows] {
             store

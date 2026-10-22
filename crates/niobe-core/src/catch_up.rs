@@ -181,6 +181,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         })
     }
 

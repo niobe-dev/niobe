@@ -304,6 +304,48 @@ pub struct UsageWindows {
     /// nothing further is being charged.
     #[serde(default)]
     pub using_overage: bool,
+    /// Whether the plan may spend beyond its flat fee at all, where the
+    /// backend said. Apart from [`UsageWindows::using_overage`], which is
+    /// whether it is spending now: a plan can be allowed extra it has not
+    /// needed yet, and a plan refused extra says so before anything is cut
+    /// off. [`Overage::Unreported`] in a record written before this was kept.
+    #[serde(default)]
+    pub overage: Overage,
+}
+
+/// Whether a plan may spend beyond its flat fee, as its backend reported.
+///
+/// Three states and not a flag, because the backend saying nothing and the
+/// backend saying no are different things to tell an operator: only the
+/// second is a promise that no extra is being charged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Overage {
+    /// The backend did not say.
+    #[default]
+    Unreported,
+    /// Extra usage is allowed: past the windows, the work goes on and is
+    /// billed beyond the fee.
+    Allowed,
+    /// Extra usage is refused, and why where the backend said.
+    Refused(OverageRefusal),
+}
+
+/// Why a backend refused a plan extra usage, in Niobe's terms rather than any
+/// backend's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverageRefusal {
+    /// The credits extra usage is paid from have run out.
+    OutOfCredits,
+    /// Extra usage was never set up for the account.
+    NotSetUp,
+    /// Someone with the say over the account turned it off.
+    TurnedOff,
+    /// The limit extra usage may spend up to is zero.
+    ZeroLimit,
+    /// The backend gave no reason, or one this build does not know.
+    Unstated,
 }
 
 impl UsageWindows {
@@ -1220,6 +1262,36 @@ mod tests {
     }
 
     #[test]
+    fn a_window_stored_before_overage_was_kept_reads_it_as_unreported() {
+        let stored = r#"{"five_hour":null,"seven_day":null,"using_overage":true}"#;
+        let windows: UsageWindows =
+            serde_json::from_str(stored).expect("a stored record reads back");
+        assert_eq!(windows.overage, Overage::Unreported);
+        assert!(windows.using_overage);
+    }
+
+    #[test]
+    fn a_refusal_of_extra_usage_and_its_reason_survive_the_store() {
+        for overage in [
+            Overage::Unreported,
+            Overage::Allowed,
+            Overage::Refused(OverageRefusal::OutOfCredits),
+            Overage::Refused(OverageRefusal::Unstated),
+        ] {
+            let windows = UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: false,
+                overage,
+            };
+            let stored =
+                serde_json::to_string(&Event::UsageWindows(windows)).expect("an event is written");
+            let read: Event = serde_json::from_str(&stored).expect("and read back");
+            assert_eq!(read, Event::UsageWindows(windows), "{stored}");
+        }
+    }
+
+    #[test]
     fn a_window_whose_level_is_not_a_number_survives_the_store() {
         let windows = UsageWindows {
             five_hour: Some(UsageWindow {
@@ -1228,6 +1300,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: true,
+            overage: crate::event::Overage::Unreported,
         };
 
         let stored =
@@ -1240,6 +1313,7 @@ mod tests {
                 five_hour: None,
                 seven_day: None,
                 using_overage: true,
+                overage: crate::event::Overage::Unreported,
             })
         );
     }
@@ -1495,6 +1569,7 @@ mod tests {
                 resets_at: Some(1_790_118_000),
             }),
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         });
 
         let line = serde_json::to_string(&event).expect("an event serializes");

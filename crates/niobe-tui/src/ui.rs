@@ -30,7 +30,9 @@ use ratatui::widgets::{
 };
 
 use niobe_core::attention::Attention;
-use niobe_core::event::{Billing, Context, SlashCommand, UsageWindow, UsageWindows};
+use niobe_core::event::{
+    Billing, Context, Overage, OverageRefusal, SlashCommand, UsageWindow, UsageWindows,
+};
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
@@ -3602,7 +3604,7 @@ fn usage_label_widest(app: &App) -> usize {
         PlanWindows::Reported(windows) | PlanWindows::Carried { windows, .. } => [
             (windows.five_hour.is_some(), "5h"),
             (windows.seven_day.is_some(), "7d"),
-            (windows.using_overage, "extra"),
+            (extra(&windows).is_some(), "extra"),
         ]
         .into_iter()
         .filter(|(shown, _)| *shown)
@@ -3645,10 +3647,8 @@ fn usage_figure_columns(app: &App) -> usize {
                 .map(|window| share + reset_clause(app, &window).as_deref().map_or(0, text::width))
                 .max()
                 .unwrap_or(0);
-            let extra = match windows.using_overage {
-                true => text::width(NO_FIGURE) + text::width(OVERAGE_ON),
-                false => 0,
-            };
+            let extra =
+                extra(&windows).map_or(0, |(said, _)| text::width(NO_FIGURE) + text::width(&said));
             reported.max(extra)
         }
     };
@@ -3712,7 +3712,7 @@ fn window_rows(app: &App) -> usize {
     let levels = |windows: UsageWindows| {
         usize::from(windows.five_hour.is_some())
             + usize::from(windows.seven_day.is_some())
-            + usize::from(windows.using_overage)
+            + usize::from(extra(&windows).is_some())
     };
     match app.plan_windows() {
         PlanWindows::None => 0,
@@ -3845,14 +3845,18 @@ fn level_lines(
     // money side is an em dash. A `$0.00` there would be a figure nobody
     // measured, and the one it would be mistaken for is zero.
     //
-    // The row is absent rather than `off` where the flag is not set: the flag
-    // is "spending extra, or the backend did not say", so drawing `off` would
+    // The row is absent where the backend said neither that the plan is
+    // spending extra nor whether it may: drawing `off` from silence would
     // promise something nothing reported.
-    if windows.using_overage {
+    if let Some((said, spending)) = extra(windows) {
+        let style = match spending {
+            true => Style::new().fg(theme.hot).bold(),
+            false => dim,
+        };
         lines.push(Line::from(vec![
             Span::styled(usage_label("extra", labels), dim),
             Span::styled(NO_FIGURE, dim),
-            Span::styled(OVERAGE_ON, Style::new().fg(theme.hot).bold()),
+            Span::styled(said, style),
         ]));
     }
 
@@ -3888,6 +3892,32 @@ const NO_FIGURE: &str = "—";
 
 /// What the overage row says of the plan spending beyond its flat fee.
 const OVERAGE_ON: &str = " · on";
+
+/// What the `extra` row says after its em dash, and whether it is the plan
+/// spending beyond its fee, which is drawn hot. `None` where the backend said
+/// neither that it is spending nor whether it may, which is no row at all.
+///
+/// Spending is said first whatever else was: the CLI keeps reporting extra
+/// in use at the moment the extra itself runs out.
+fn extra(windows: &UsageWindows) -> Option<(String, bool)> {
+    if windows.using_overage {
+        return Some((OVERAGE_ON.to_owned(), true));
+    }
+    match windows.overage {
+        Overage::Unreported => None,
+        Overage::Allowed => Some((" · allowed".to_owned(), false)),
+        Overage::Refused(why) => {
+            let why = match why {
+                OverageRefusal::OutOfCredits => " · no credits left",
+                OverageRefusal::NotSetUp => " · not set up",
+                OverageRefusal::TurnedOff => " · turned off",
+                OverageRefusal::ZeroLimit => " · its limit is zero",
+                OverageRefusal::Unstated => "",
+            };
+            Some((format!(" · off{why}"), false))
+        }
+    }
+}
 
 /// What a model's tokens get: the widest figure [`compact`] produces for a
 /// session under a hundred million tokens (`999k`, `12.3M`) and a column of
@@ -6939,6 +6969,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
         let spent = priced(Some(0.25));
         let context = niobe_core::event::Event::Context(Context {
@@ -6976,6 +7007,7 @@ mod tests {
             five_hour: Some(window(0.37, None)),
             seven_day: Some(window(0.12, None)),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         };
         for app in [fresh(None), fresh(Some(carried))] {
             assert_eq!(
@@ -7001,6 +7033,7 @@ mod tests {
             // Day 20_004 is a Tuesday.
             seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert_eq!(
@@ -7018,6 +7051,7 @@ mod tests {
             five_hour: Some(window(0.51, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert_eq!(
@@ -7034,6 +7068,7 @@ mod tests {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 9 * 3_600))),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert_eq!(rows_of(&app, 66), vec!["5h   —".to_owned()]);
@@ -7057,6 +7092,7 @@ mod tests {
             five_hour: Some(window(1.0, None)),
             seven_day: None,
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
         let rows = rows_of(&app, 66);
 
@@ -7064,6 +7100,62 @@ mod tests {
         assert!(
             !rows.iter().any(|row| row.contains("$0.00")),
             "a figure nobody reported reached the pane: {rows:?}"
+        );
+    }
+
+    /// What the backend said about extra usage, in the pane's words: a refusal
+    /// with its reason, an allowance, and nothing where it said nothing.
+    #[test]
+    fn whether_extra_usage_is_allowed_is_said_where_the_backend_said_it() {
+        for (overage, row) in [
+            (
+                Overage::Refused(OverageRefusal::OutOfCredits),
+                Some("extra — · off · no credits left"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::NotSetUp),
+                Some("extra — · off · not set up"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::TurnedOff),
+                Some("extra — · off · turned off"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::ZeroLimit),
+                Some("extra — · off · its limit is zero"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::Unstated),
+                Some("extra — · off"),
+            ),
+            (Overage::Allowed, Some("extra — · allowed")),
+            (Overage::Unreported, None),
+        ] {
+            let app = windowed(UsageWindows {
+                five_hour: Some(window(0.4, None)),
+                seven_day: None,
+                using_overage: false,
+                overage,
+            });
+            let rows = rows_of(&app, 66);
+            let extra = rows.iter().find(|row| row.starts_with("extra"));
+            assert_eq!(extra.map(String::as_str), row, "{overage:?}: {rows:?}");
+        }
+    }
+
+    /// Spending beyond the fee is what the row says while it happens, whatever
+    /// the backend says of whether more may follow.
+    #[test]
+    fn a_plan_spending_extra_says_on_even_where_more_is_refused() {
+        let app = windowed(UsageWindows {
+            five_hour: Some(window(1.0, None)),
+            seven_day: None,
+            using_overage: true,
+            overage: Overage::Refused(OverageRefusal::OutOfCredits),
+        });
+        assert_eq!(
+            rows_of(&app, 66).last().map(String::as_str),
+            Some("extra — · on")
         );
     }
 
@@ -7076,6 +7168,7 @@ mod tests {
             five_hour: Some(window(0.51, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert!(!rows_of(&app, 66).iter().any(|row| row.contains("extra")));
@@ -7091,11 +7184,13 @@ mod tests {
                 five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600))),
                 seven_day: None,
                 using_overage: false,
+                overage: niobe_core::event::Overage::Unreported,
             },
             UsageWindows {
                 five_hour: Some(window(0.51, None)),
                 seven_day: Some(window(0.71, None)),
                 using_overage: true,
+                overage: niobe_core::event::Overage::Unreported,
             },
         ] {
             let app = windowed(windows);
@@ -7113,6 +7208,7 @@ mod tests {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         for width in [39, 45, 66] {
@@ -7141,6 +7237,7 @@ mod tests {
             five_hour: Some(window(0.37, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.12, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(
@@ -7160,11 +7257,13 @@ mod tests {
             five_hour: Some(window(0.37, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
         app.apply(&niobe_core::event::Event::UsageWindows(UsageWindows {
             five_hour: Some(window(0.40, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(rows_of(&app, 66), vec!["5h  40% ▓▓▓▓▓░░░░░░░".to_owned()]);
@@ -7183,6 +7282,7 @@ mod tests {
             // A week before the Tuesday the window comes back on.
             seven_day: Some(window(0.64, Some(A_FRIDAY - 3 * 86_400 + 9 * 3_600))),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         let rows = rows_of(&app, 66);
@@ -7209,6 +7309,7 @@ mod tests {
             five_hour: Some(window(1.0, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.64, Some(A_FRIDAY + 4 * 86_400 + 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         let rows = rows_of(&app, 66);
@@ -7225,6 +7326,7 @@ mod tests {
             five_hour: Some(window(1.0, Some(A_FRIDAY + 14 * 3_600))),
             seven_day: Some(window(0.64, Some(A_FRIDAY + 4 * 86_400 + 3_600))),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
         assert!(rows_of(&app, 66)[0].contains("100%"));
 
@@ -7256,6 +7358,7 @@ mod tests {
             five_hour: Some(window(0.37, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.64, Some(A_FRIDAY - 3 * 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(
@@ -7308,6 +7411,7 @@ mod tests {
             // The Thursday before the Friday it is read on.
             seven_day: Some(window(0.40, Some(A_FRIDAY - 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert!(
@@ -7334,11 +7438,13 @@ mod tests {
             five_hour: Some(window(0.83, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
         let live = UsageWindows {
             five_hour: Some(window(0.05, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         };
         app.apply(&niobe_core::event::Event::UsageWindows(live));
 
@@ -7355,11 +7461,13 @@ mod tests {
             five_hour: Some(window(0.83, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         };
         let other = UsageWindows {
             five_hour: Some(window(0.21, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         };
         let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
 
@@ -7414,6 +7522,7 @@ mod tests {
             five_hour: Some(window(0.37, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         };
         for app in [
             fresh(None).with_profile(metered()),
@@ -8398,6 +8507,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
         app.apply(&priced(Some(1.25)));
 

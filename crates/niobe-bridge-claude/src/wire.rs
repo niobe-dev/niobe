@@ -679,11 +679,11 @@ pub(crate) struct CacheCreation {
 
 /// A `rate_limit_event`: how much of the plan's metered windows is gone.
 ///
-/// The message also carries `status`, `rateLimitType`, `resetsAt`,
-/// `overageStatus` and `overageDisabledReason`. Only the windows and the
-/// overage flag are read: the rest restates the window the CLI happens to be
-/// closest to, and a status word nothing draws would widen the shared
-/// vocabulary for a figure no pane shows.
+/// The message also carries `status`, `rateLimitType` and `resetsAt`, which
+/// are not read: they restate the window the CLI happens to be closest to, and
+/// a status word nothing draws would widen the shared vocabulary for a figure
+/// no pane shows. The windows, the overage flag, and whether overage is
+/// allowed and why not, are.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RateLimit {
     pub(crate) rate_limit_info: Option<RateLimitInfo>,
@@ -699,6 +699,20 @@ pub(crate) struct RateLimitInfo {
     /// rather than as a promise that nothing extra is being charged.
     #[serde(rename = "isUsingOverage", default, deserialize_with = "lenient_flag")]
     pub(crate) is_using_overage: bool,
+    /// Whether the plan may spend beyond its fee: `allowed`, `allowed_warning`
+    /// or `rejected` in Claude Code 2.1.309's own schema. Empty where the CLI
+    /// did not say, or said it in a shape this does not read.
+    #[serde(rename = "overageStatus", default, deserialize_with = "lenient_text")]
+    pub(crate) overage_status: String,
+    /// Why overage is refused, from the CLI's own list (`out_of_credits`,
+    /// `overage_not_provisioned`, `org_level_disabled` and the rest). Empty
+    /// where it gave none.
+    #[serde(
+        rename = "overageDisabledReason",
+        default,
+        deserialize_with = "lenient_text"
+    )]
+    pub(crate) overage_disabled_reason: String,
 }
 
 /// The two windows a plan is metered against.

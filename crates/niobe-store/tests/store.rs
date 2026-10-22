@@ -872,6 +872,7 @@ fn five_hour(utilization: f64) -> Event {
         }),
         seven_day: None,
         using_overage: false,
+        overage: niobe_core::event::Overage::Unreported,
     })
 }
 
@@ -899,6 +900,7 @@ fn the_newest_windows_a_profile_recorded_come_back_with_when_they_were_recorded(
     // A report that names no window is not a level, and is passed over.
     let silent = Event::UsageWindows(niobe_core::event::UsageWindows {
         using_overage: true,
+        overage: niobe_core::event::Overage::Unreported,
         ..niobe_core::event::UsageWindows::default()
     });
     store

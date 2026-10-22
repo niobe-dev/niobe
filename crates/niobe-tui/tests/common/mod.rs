@@ -145,6 +145,7 @@ fn session_events() -> Vec<Event> {
                 resets_at: Some(READ_AT + 4 * 86_400 + 79 * 60),
             }),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }),
         Event::AgentSpawn {
             id: "a1".into(),
@@ -804,6 +805,7 @@ pub fn session_with_finished_turns() -> App {
             }),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         })
     };
     let spent = |input, output, cache_read, cache_write| {

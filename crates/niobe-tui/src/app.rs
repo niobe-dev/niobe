@@ -8615,6 +8615,7 @@ fn since_reset(windows: UsageWindows, now: u64) -> UsageWindows {
         using_overage: windows.using_overage
             && !has_reset(windows.five_hour)
             && !has_reset(windows.seven_day),
+        overage: windows.overage,
         five_hour: reset(windows.five_hour, None),
         seven_day: reset(windows.seven_day, Some(SEVEN_DAYS)),
     }
@@ -12228,6 +12229,7 @@ mod tests {
                 resets_at: Some(now + 367_200),
             }),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }
     }
 
@@ -12278,6 +12280,7 @@ mod tests {
                 resets_at: None,
             }),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(

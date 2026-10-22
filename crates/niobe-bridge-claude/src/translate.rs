@@ -97,8 +97,9 @@ use std::path::{Path, PathBuf};
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Context, Event,
-    McpServer, McpStatus, Mode, ModelOption, PermissionDecision, SessionMeta, SlashCommand,
-    TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    McpServer, McpStatus, Mode, ModelOption, Overage, OverageRefusal, PermissionDecision,
+    SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow,
+    UsageWindows,
 };
 use niobe_core::proposal::{Action, Proposal};
 use niobe_core::session::TestRunRecord;
@@ -3614,11 +3615,39 @@ fn rate_limit(event: wire::RateLimit, out: &mut Vec<Event>) {
         five_hour: read_window(windows.five_hour),
         seven_day: read_window(windows.seven_day),
         using_overage: info.is_using_overage,
+        overage: overage(&info.overage_status, &info.overage_disabled_reason),
     };
-    if windows.is_empty() && !windows.using_overage {
+    if windows.is_empty() && !windows.using_overage && windows.overage == Overage::Unreported {
         return;
     }
     out.push(Event::UsageWindows(windows));
+}
+
+/// Whether the plan may spend beyond its fee, read from the CLI's
+/// `overageStatus` and `overageDisabledReason`, whose values are the ones
+/// Claude Code 2.1.309's schema lists.
+///
+/// A status this does not know is the CLI not having said anything this
+/// bridge can stand behind, never a guess at which way it went; a reason it
+/// does not know still leaves the refusal, with no reason.
+fn overage(status: &str, reason: &str) -> Overage {
+    match status {
+        "allowed" | "allowed_warning" => Overage::Allowed,
+        "rejected" => Overage::Refused(match reason {
+            "out_of_credits" => OverageRefusal::OutOfCredits,
+            "overage_not_provisioned" | "no_limits_configured" => OverageRefusal::NotSetUp,
+            "org_level_disabled"
+            | "org_level_disabled_until"
+            | "org_service_level_disabled"
+            | "seat_tier_level_disabled"
+            | "member_level_disabled" => OverageRefusal::TurnedOff,
+            "seat_tier_zero_credit_limit"
+            | "group_zero_credit_limit"
+            | "member_zero_credit_limit" => OverageRefusal::ZeroLimit,
+            _ => OverageRefusal::Unstated,
+        }),
+        _ => Overage::Unreported,
+    }
 }
 
 /// One window, kept only where the CLI measured it: a level that is not a
@@ -6190,6 +6219,108 @@ mod tests {
                     resets_at: Some(1_790_118_000),
                 }),
                 using_overage: false,
+                overage: Overage::Refused(OverageRefusal::OutOfCredits),
+            })]
+        );
+    }
+
+    /// Each status and reason Claude Code 2.1.309's schema lists, and what
+    /// the bridge makes of it; an unknown status is nothing said.
+    #[test]
+    fn whether_extra_usage_is_allowed_is_read_as_the_cli_said_it() {
+        for (status, reason, read) in [
+            ("allowed", "", Overage::Allowed),
+            ("allowed_warning", "", Overage::Allowed),
+            (
+                "rejected",
+                "out_of_credits",
+                Overage::Refused(OverageRefusal::OutOfCredits),
+            ),
+            (
+                "rejected",
+                "overage_not_provisioned",
+                Overage::Refused(OverageRefusal::NotSetUp),
+            ),
+            (
+                "rejected",
+                "no_limits_configured",
+                Overage::Refused(OverageRefusal::NotSetUp),
+            ),
+            (
+                "rejected",
+                "org_level_disabled",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "org_level_disabled_until",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "org_service_level_disabled",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "seat_tier_level_disabled",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "member_level_disabled",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "seat_tier_zero_credit_limit",
+                Overage::Refused(OverageRefusal::ZeroLimit),
+            ),
+            (
+                "rejected",
+                "group_zero_credit_limit",
+                Overage::Refused(OverageRefusal::ZeroLimit),
+            ),
+            (
+                "rejected",
+                "member_zero_credit_limit",
+                Overage::Refused(OverageRefusal::ZeroLimit),
+            ),
+            (
+                "rejected",
+                "fetch_error",
+                Overage::Refused(OverageRefusal::Unstated),
+            ),
+            (
+                "rejected",
+                "unknown",
+                Overage::Refused(OverageRefusal::Unstated),
+            ),
+            ("rejected", "", Overage::Refused(OverageRefusal::Unstated)),
+            ("something_new", "out_of_credits", Overage::Unreported),
+            ("", "", Overage::Unreported),
+        ] {
+            assert_eq!(overage(status, reason), read, "{status} / {reason}");
+        }
+    }
+
+    /// A message that says only that overage is refused still reaches the
+    /// session: it is the backend saying no, which is worth showing.
+    #[test]
+    fn a_refusal_of_extra_usage_with_no_window_is_still_reported() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"overageStatus":"rejected","overageDisabledReason":"out_of_credits"}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: false,
+                overage: Overage::Refused(OverageRefusal::OutOfCredits),
             })]
         );
     }
@@ -6230,6 +6361,7 @@ mod tests {
                 five_hour: None,
                 seven_day: None,
                 using_overage: true,
+                overage: niobe_core::event::Overage::Unreported,
             })]
         );
     }
@@ -6271,6 +6403,7 @@ mod tests {
                 }),
                 seven_day: None,
                 using_overage: false,
+                overage: niobe_core::event::Overage::Unreported,
             })],
             "a window without a reset time was dropped or given one"
         );
