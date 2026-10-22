@@ -218,6 +218,11 @@ fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
             " oldest first ",
             "↑↓ choose · Enter read · Esc close",
         ),
+        Purpose::Agent => (
+            "Sub-agents",
+            " oldest first ",
+            "↑↓ choose · Enter show its entries alone · Esc close",
+        ),
     }
 }
 
@@ -350,7 +355,7 @@ impl PickColumns {
             Purpose::Model | Purpose::Effort => choice.value.clone(),
             // Where the call is in the list is what choosing sends, and the
             // list already says it by where the row is.
-            Purpose::Call => String::new(),
+            Purpose::Call | Purpose::Agent => String::new(),
         };
         if !self.described {
             return (value, String::new());
@@ -1200,14 +1205,16 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     app.measured_session(area);
     app.drew_jump(None);
     let border = Border::of(app.focus() == Focus::Session, theme);
-    let block = session_frame(
-        app.caption(),
-        app.titled(),
-        &app.repo().name,
-        border,
-        area.width,
-        theme,
-    );
+    // Narrowed to one agent, the transcript says so where the eye reads
+    // what the session is about: below it is not the whole session.
+    let (caption, titled) = match app.only_agent_tag() {
+        Some(tag) => (
+            Some(format!("only {tag}'s entries · s in a side pane shows all")),
+            true,
+        ),
+        None => (app.caption(), app.titled()),
+    };
+    let block = session_frame(caption, titled, &app.repo().name, border, area.width, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -1445,13 +1452,17 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
     };
     let detail = transcript_detail(app);
     let headings = app.grouped_by_agent().then(|| app.agent_headings());
+    let only = app.only_agent_tag();
     let (entries, commands, drawn) = app.entries_to_draw();
     drawn.update(
         entries,
         commands,
         usize::from(width),
         detail,
-        headings.as_deref(),
+        Arrangement {
+            headings: headings.as_deref(),
+            only: only.as_deref(),
+        },
         theme,
     );
     let changed = match crate::find::Query::new(&query) {
@@ -1938,8 +1949,13 @@ fn draw_transcript(
 
     let detail = transcript_detail(app);
     let headings = app.grouped_by_agent().then(|| app.agent_headings());
+    let only = app.only_agent_tag();
     let (entries, commands, drawn) = app.entries_to_draw();
-    drawn.update(entries, commands, width, detail, headings.as_deref(), theme);
+    let arranged = Arrangement {
+        headings: headings.as_deref(),
+        only: only.as_deref(),
+    };
+    drawn.update(entries, commands, width, detail, arranged, theme);
     let above = drawn.line_count();
     app.keep_view();
     let total = above + question.len();
@@ -2135,7 +2151,7 @@ struct Drawn {
 
 /// What the transcript draws at one place, before it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slot {
+pub(crate) enum Slot {
     Entry(usize),
     /// The heading over a sub-agent's rows in a turn: the first of them, and
     /// how many calls they hold.
@@ -2157,24 +2173,30 @@ impl DrawnEntries {
     /// The columns are worked out here, from every entry, because a row is
     /// drawn in the columns the widest row needs; and so is whether an entry
     /// keeps the blank line after it, which depends on what is drawn next.
-    /// `headings` is each sub-agent's tag and task where the rows are grouped
-    /// by agent, and `None` where they are drawn as they happened.
+    /// `arranged` says whether the rows are grouped by agent and narrowed to
+    /// one agent's: see [`Arrangement`].
     fn update(
         &mut self,
         entries: &[Entry],
         commands: &[SlashCommand],
         width: usize,
         detail: Detail,
-        headings: Option<&[(String, String)]>,
+        arranged: Arrangement<'_>,
         theme: &Theme,
     ) {
+        let headings = arranged.headings.filter(|_| arranged.only.is_none());
         let detail = Detail {
             columns: crate::calls::Columns::of(entries),
             grouped: headings.is_some(),
             ..detail
         };
         let named = commands_key(commands);
-        let order = order(entries, headings.is_some(), detail.notable_only);
+        let order = order(
+            entries,
+            headings.is_some(),
+            detail.notable_only,
+            arranged.only,
+        );
         self.moved |= self.drawn.len() > order.len();
         self.drawn.truncate(order.len());
         for (at, slot) in order.iter().enumerate() {
@@ -2426,7 +2448,22 @@ fn said_in(entry: &Entry) -> Vec<String> {
     said
 }
 
+/// How the transcript's entries are arranged, beside how each is drawn.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Arrangement<'a> {
+    /// Each sub-agent's tag and task, where the rows are grouped by agent;
+    /// `None` where they are drawn as they happened.
+    pub(crate) headings: Option<&'a [(String, String)]>,
+    /// The tag of the one sub-agent whose entries alone are drawn, where the
+    /// operator narrowed the transcript to it; it is then drawn as it
+    /// happened, since there is nothing to group.
+    pub(crate) only: Option<&'a str>,
+}
+
 /// The order the transcript draws `entries` in.
+///
+/// Where `only` names a sub-agent, its entries alone, as they happened: its
+/// words, its calls and its refused calls, and nothing of the session's.
 ///
 /// As they happened, unless `grouped`: then within each turn — between one
 /// prompt or turn's rule and the next — every sub-agent's rows are drawn
@@ -2434,8 +2471,19 @@ fn said_in(entry: &Entry) -> Vec<String> {
 /// The session's own entries, anything an agent did that is not a row of
 /// the calls table, and the turn's boundaries stay where they were. Where
 /// `notable_only`, the routine entries are left out, see [`notable`].
-fn order(entries: &[Entry], grouped: bool, notable_only: bool) -> Vec<Slot> {
-    let order = by_agent(entries, grouped);
+pub(crate) fn order(
+    entries: &[Entry],
+    grouped: bool,
+    notable_only: bool,
+    only: Option<&str>,
+) -> Vec<Slot> {
+    let order = match only {
+        Some(tag) => (0..entries.len())
+            .filter(|&at| entries[at].agent.as_deref() == Some(tag))
+            .map(Slot::Entry)
+            .collect(),
+        None => by_agent(entries, grouped),
+    };
     match notable_only {
         true => notable(entries, order),
         false => order,
@@ -7905,7 +7953,14 @@ mod tests {
 
         let theme = Theme::default();
         let (entries, commands, drawn) = app.entries_to_draw();
-        drawn.update(entries, commands, 60, Detail::default(), None, &theme);
+        drawn.update(
+            entries,
+            commands,
+            60,
+            Detail::default(),
+            Arrangement::default(),
+            &theme,
+        );
         let rows: Vec<String> = drawn
             .lines(0, 12)
             .iter()
@@ -7972,7 +8027,14 @@ mod tests {
             ..Detail::default()
         };
         let (entries, commands, drawn) = app.entries_to_draw();
-        drawn.update(entries, commands, 60, detail, None, &theme);
+        drawn.update(
+            entries,
+            commands,
+            60,
+            detail,
+            Arrangement::default(),
+            &theme,
+        );
         let rows: Vec<String> = drawn
             .lines(0, 40)
             .iter()
@@ -8038,7 +8100,10 @@ mod tests {
                 commands,
                 60,
                 Detail::default(),
-                headings.as_deref(),
+                Arrangement {
+                    headings: headings.as_deref(),
+                    only: None,
+                },
                 &theme,
             );
             drawn

@@ -1648,6 +1648,8 @@ IN THE SHELL:
                            caught up
     d                      In a side pane, list the tool calls; Enter on one
                            shows its whole input and output
+    s                      In a side pane, show one sub-agent's entries alone;
+                           again shows everything
     t                      In the Activity pane, count tools by name or by
                            kind of work
     Ctrl+End               Back to the newest line of the transcript

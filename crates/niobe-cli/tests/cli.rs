@@ -1003,6 +1003,7 @@ fn the_help_names_every_shortcut_the_shell_lists_and_the_typed_commands() {
         "[catch_up] after = 10",
         "what happened since you last",
         "shows its whole input and output",
+        "show one sub-agent's entries alone;",
         "/model",
         "/memory",
         "/resume",

@@ -1,16 +1,16 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
- ┏━ > add etag support to the ca┌──────────────────────────────┐loading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃    44 +     headers.set("If-N│ Diff              F5  Ctrl+T │            ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
- ┃    45 +   }                  │ Group by agent             a │            ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
- ┃    46 +   const res = await f│ Notable only               n │            ┃ │ ───────────────────────────────────── │
- ┃    47 +   if (res.status === │ What happened…             c │y;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
- ┃    48     return res;        │ Tool calls…                d │            ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃       …                      │ Usage pane             shown │            ┃ │ ───────────────────────────────────── │
- ┃   115     cache.set(url, {   │ Changes pane           shown │            ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   116 +     etag: res.headers│ Activity pane          shown │            ┃ └───────────────────────────────────────┘
- ┃   117       body,            │ Theme…                       │            ┃ ┌─────────────── Changes ───────────────┐
- ┃   └ allowed by you           └──────────────────────────────┘            ┃ │ ⎇ main ↑3                             █
- ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┏━ > add etag support to the ca┌───────────────────────────────┐oading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃    44 +     headers.set("If-N│ Diff               F5  Ctrl+T │           ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃    45 +   }                  │ Group by agent              a │           ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃    46 +   const res = await f│ Notable only                n │           ┃ │ ───────────────────────────────────── │
+ ┃    47 +   if (res.status === │ What happened…              c │;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃    48     return res;        │ Tool calls…                 d │           ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃       …                      │ Just one agent…             s │           ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {   │ Usage pane              shown │           ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   116 +     etag: res.headers│ Changes pane            shown │           ┃ └───────────────────────────────────────┘
+ ┃   117       body,            │ Activity pane           shown │           ┃ ┌─────────────── Changes ───────────────┐
+ ┃   └ allowed by you           │ Theme…                        │           ┃ │ ⎇ main ↑3                             █
+ ┃                              └───────────────────────────────┘           ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃ ◆ claude                                                                 ┃ │   .                                   █
  ┃   Rewriting the 304 test around the cached body.                         █ │     CHANGELOG.md                +0 −0 │
  ┃                                                                          █ │   catalog/                            │

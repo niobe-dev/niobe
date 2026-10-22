@@ -217,7 +217,10 @@ reviewers that encode both, for an agent working in this tree.
   opens since the last one shown. `detail.rs` is one tool call read whole — the arguments it
   started with and the output its end carried, each headed by its size, nothing cut — opened from
   the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows; it
-  wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. A dialog, and a
+  wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. `s` in a side
+  pane or View › Just one agent… narrows the transcript to one sub-agent's own entries — what the
+  bridge read under that agent's id, and nothing of the session's — and its title says whose,
+  until the key again shows everything. A dialog, and a
   permission question in the transcript, casts a shadow on what is under it. Snapshot pictures of the screen live in
   `tests/snapshots/`, and `snapshots.rs` is the one switch that has a test rewrite them —
   `UPDATE_SNAPSHOTS=1` exactly, and never on a CI runner.
@@ -320,7 +323,9 @@ reviewers that encode both, for an agent working in this tree.
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
   `tests/billing.rs` folds the bridge's recordings into the shell and compares the Usage pane
-  with the pictures in its `tests/snapshots/`, one per way a session is billed.
+  with the pictures in its `tests/snapshots/`, one per way a session is billed. `tests/agents.rs` folds the
+  recording with sub-agents and narrows the transcript to each, against what the bridge said each
+  agent sent.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
   `version.rs` is the workspace version: the eight places the root manifest writes it, and
   what the conventional-commit subjects since the last release tag call for (§8). `headers.rs`

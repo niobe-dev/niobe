@@ -513,6 +513,9 @@ pub enum Purpose {
     /// A tool call of the conversation, to read whole. A choice's value is
     /// where the call is in the order the calls started.
     Call,
+    /// A sub-agent, whose entries alone the transcript is narrowed to. A
+    /// choice's value is the agent's id.
+    Agent,
 }
 
 /// The effort levels offered, in the order the `claude` CLI's `/effort`
@@ -1249,6 +1252,9 @@ pub struct App {
     /// Whether the sub-agents' rows are drawn together under each agent
     /// rather than interleaved as they happened.
     by_agent: bool,
+    /// The one sub-agent whose entries alone the transcript draws, where the
+    /// operator narrowed it to one.
+    only_agent: Option<AgentId>,
     /// Whether the transcript leaves its routine entries out, drawing each
     /// run of them as a row that says how many.
     notable_only: bool,
@@ -1759,6 +1765,7 @@ impl App {
             compaction: None,
             calls_folded: false,
             by_agent: false,
+            only_agent: None,
             notable_only: false,
             tools_by_name: false,
             diffs_open: false,
@@ -2016,6 +2023,7 @@ impl App {
         self.entries.clear();
         self.tool_entries.clear();
         self.recorded.clear();
+        self.only_agent = None;
         self.agent_entries.clear();
         self.agents.clear();
         self.run = None;
@@ -3837,6 +3845,65 @@ impl App {
         }
     }
 
+    /// Opens the list of the session's sub-agents, on the newest, to narrow
+    /// the transcript to one; or, where it is narrowed, draws everything
+    /// again; or says there are no sub-agents yet.
+    fn pick_agent(&mut self) {
+        if self.only_agent.is_some() {
+            self.hold_view();
+            self.only_agent = None;
+            return;
+        }
+        if self.agents.is_empty() {
+            self.hint = Some(NO_AGENTS_HINT.to_owned());
+            return;
+        }
+        let options: Vec<Choice> = self
+            .agents
+            .iter()
+            .zip(self.agent_tags())
+            .map(|(agent, tag)| Choice {
+                value: agent.id.to_string(),
+                name: Some(tag),
+                note: Some(match agent.is_running() {
+                    true => format!("{} · running", agent.task()),
+                    false => agent.task().to_owned(),
+                }),
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Agent,
+            at: options.len().saturating_sub(1),
+            options,
+            more: 0,
+        });
+    }
+
+    /// The tag of the one sub-agent the transcript is narrowed to, where it
+    /// is: see [`App::pick_agent`].
+    pub fn only_agent_tag(&self) -> Option<String> {
+        self.only_agent.as_ref().map(|id| self.sub_agent_tag(id))
+    }
+
+    /// The entries the transcript draws, in the order it draws them, as the
+    /// operator last arranged it — a run of routine entries it leaves out
+    /// is not among them.
+    pub fn entries_shown(&self) -> Vec<&Entry> {
+        let only = self.only_agent_tag();
+        crate::ui::order(
+            &self.entries,
+            self.by_agent,
+            self.notable_only,
+            only.as_deref(),
+        )
+        .into_iter()
+        .filter_map(|slot| match slot {
+            crate::ui::Slot::Entry(at) => self.entries.get(at),
+            crate::ui::Slot::Heading { .. } | crate::ui::Slot::Hidden { .. } => None,
+        })
+        .collect()
+    }
+
     /// Opens the list of the conversation's tool calls, on the newest, or
     /// says there are none yet.
     fn pick_call(&mut self) {
@@ -3892,6 +3959,7 @@ impl App {
             }
             Purpose::Effort => None,
             Purpose::Call => None,
+            Purpose::Agent => None,
             Purpose::Theme => picker
                 .options
                 .iter()
@@ -3939,6 +4007,10 @@ impl App {
                 if let Some(theme) = Theme::by_name(&chosen) {
                     self.set_theme(theme);
                 }
+            }
+            Purpose::Agent => {
+                self.hold_view();
+                self.only_agent = Some(chosen.into());
             }
             Purpose::Call => {
                 let call = chosen
@@ -4053,6 +4125,7 @@ impl App {
             | Action::NotableOnly
             | Action::CatchUp
             | Action::Calls
+            | Action::OneAgent
             | Action::Pane(_)
             | Action::Theme
             | Action::Shortcuts
@@ -4112,6 +4185,7 @@ impl App {
             Action::NotableOnly => self.show_notable_only(),
             Action::CatchUp => self.show_catch_up(),
             Action::Calls => self.pick_call(),
+            Action::OneAgent => self.pick_agent(),
             Action::Pane(pane) => self.toggle_pane(pane),
             Action::Theme => self.pick_theme(),
             Action::Shortcuts => self.sheet = Some(self.shortcuts()),
@@ -5531,6 +5605,7 @@ impl App {
             KeyCode::Char('n') => self.show_notable_only(),
             KeyCode::Char('c') => self.show_catch_up(),
             KeyCode::Char('d') => self.pick_call(),
+            KeyCode::Char('s') => self.pick_agent(),
             KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
@@ -8495,6 +8570,9 @@ fn left(seconds: u64) -> String {
         (d, h, _) => format!("{d}d {h}h"),
     }
 }
+
+/// What asking for one sub-agent's entries says before there are any agents.
+const NO_AGENTS_HINT: &str = "No sub-agents yet: the list holds the ones this conversation started";
 
 /// What asking for the list of tool calls says before there are any.
 const NO_CALLS_HINT: &str = "No tool calls yet: the list holds this conversation's calls";
@@ -15351,6 +15429,56 @@ mod tests {
             "{\"file_path\":\"b.rs\"}fn b() {}\n\tfn c() {}\n"
         );
         assert_eq!(app.overlay(), Some(Overlay::Detail));
+    }
+
+    #[test]
+    fn asking_for_one_agent_before_there_are_any_says_so_and_opens_nothing() {
+        let mut app = app();
+
+        app.perform(crate::menu::Action::OneAgent);
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.hint(), Some(NO_AGENTS_HINT));
+    }
+
+    #[test]
+    fn s_in_a_side_pane_narrows_the_transcript_to_one_agent_and_again_shows_all() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "look around".to_owned(),
+        });
+        for (id, path) in [("a1", "one.rs"), ("a2", "two.rs")] {
+            app.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: Some("Explore".to_owned()),
+                label: format!("read {path}"),
+            });
+            app.apply(&Event::AssistantMessage {
+                text: format!("Reading {path}."),
+                agent: Some(id.into()),
+            });
+        }
+        let everything = app.entries_shown().len();
+        app.focus = Focus::Pane(Pane::Activity);
+
+        app.on_key(key(KeyCode::Char('s')));
+        let picker = app.picking().expect("s opens the list of sub-agents");
+        assert_eq!(picker.purpose, Purpose::Agent);
+        assert_eq!(picker.at, 1, "the list opens on the newest agent");
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Enter));
+
+        let bodies: Vec<&str> = app
+            .entries_shown()
+            .iter()
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["Reading one.rs."]);
+        app.focus = Focus::Pane(Pane::Activity);
+        app.on_key(key(KeyCode::Char('s')));
+        assert!(app.only_agent_tag().is_none());
+        assert_eq!(app.entries_shown().len(), everything);
     }
 
     #[test]

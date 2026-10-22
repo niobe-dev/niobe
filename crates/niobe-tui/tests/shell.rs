@@ -6552,3 +6552,24 @@ fn a_tool_call_read_whole_shows_its_arguments_and_its_output_at_both_sizes() {
         assert_snapshot(name, &frame);
     }
 }
+
+/// Narrowed to one sub-agent, the transcript draws that agent's entries
+/// alone and its title says so.
+#[test]
+fn a_transcript_narrowed_to_one_agent_draws_its_entries_and_says_whose() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_with_two_agents_at_work().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::OneAgent);
+    assert_snapshot("agents-neo-80x24", &screen(&mut app, 80, 24));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let tag = app.only_agent_tag().expect("Enter narrows the transcript");
+    for (name, width, height) in [
+        ("one-agent-neo-80x24", 80, 24),
+        ("one-agent-neo-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains(&format!("only {tag}'s entries")), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+}
