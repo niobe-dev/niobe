@@ -75,6 +75,8 @@ pub enum Action {
     NotableOnly,
     /// Shows what happened since the operator last caught up.
     CatchUp,
+    /// Lists the conversation's tool calls, to read one whole.
+    Calls,
     /// Shows a pane of the right-hand stack, or hides it.
     Pane(SidePane),
     /// Opens the list of themes.
@@ -122,6 +124,7 @@ impl Action {
             Action::GroupByAgent => "group sub-agent rows by agent",
             Action::NotableOnly => "leave routine entries out of the transcript",
             Action::CatchUp => "what happened since you last caught up",
+            Action::Calls => "read a tool call's whole input and output",
             Action::Pane(_) => "show or hide that pane",
             Action::Theme => "pick the palette the shell draws in",
             Action::Shortcuts => "list the keys the shell answers to",
@@ -252,6 +255,7 @@ pub const MENUS: [Menu; 6] = [
             item("Group by agent", 0, "a", Action::GroupByAgent),
             item("Notable only", 0, "n", Action::NotableOnly),
             item("What happened…", 0, "c", Action::CatchUp),
+            item("Tool calls…", 1, "d", Action::Calls),
             item("Usage pane", 0, "", Action::Pane(SidePane::Usage)),
             item("Changes pane", 0, "", Action::Pane(SidePane::Changes)),
             item("Activity pane", 0, "", Action::Pane(SidePane::Activity)),

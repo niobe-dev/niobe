@@ -6486,3 +6486,69 @@ fn a_backends_title_is_not_drawn_as_the_prompt_the_operator_typed() {
     assert!(top.contains("Cached manifests"), "{top}");
     assert!(!top.contains("> Cached manifests"), "{top}");
 }
+
+/// Every call of the recorded session opens from the list of calls, and what
+/// the view holds is the arguments the call started with and the output its
+/// end carried, byte for byte: nothing is cut on the way in.
+#[test]
+fn every_call_of_a_recorded_session_opens_whole_byte_for_byte() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let events: Vec<Event> = include_str!("../../niobe-core/tests/fixtures/claude-session.jsonl")
+        .lines()
+        .enumerate()
+        .map(|(n, line)| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line {} of the fixture: {e}", n + 1))
+        })
+        .collect();
+    let mut expected: Vec<(niobe_core::event::ToolCallId, String)> = Vec::new();
+    for event in &events {
+        match event {
+            Event::ToolCallStart { id, input, .. } => {
+                expected.push((id.clone(), input.clone()));
+            }
+            Event::ToolCallEnd { id, output, .. } => {
+                let started = expected
+                    .iter_mut()
+                    .find(|(started, _)| started == id)
+                    .expect("every end in the fixture has its start");
+                started.1.push_str(output);
+            }
+            _ => {}
+        }
+    }
+    let mut app = App::new(Repo::default());
+    app.extend(&events);
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    assert_eq!(expected.len(), 26, "the fixture's calls");
+    for (at, (_, whole)) in expected.iter().enumerate() {
+        app.perform(niobe_tui::menu::Action::Calls);
+        for _ in at..expected.len() - 1 {
+            app.on_key(key(KeyCode::Up));
+        }
+        app.on_key(key(KeyCode::Enter));
+        let detail = app.detail().expect("Enter opens the call");
+        assert_eq!(detail.text(), whole, "call {at}");
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.detail().is_none());
+    }
+}
+
+/// The list of calls and one call read whole, as the operator sees them.
+#[test]
+fn a_tool_call_read_whole_shows_its_arguments_and_its_output_at_both_sizes() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::Calls);
+    assert_snapshot("calls-neo-80x24", &screen(&mut app, 80, 24));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    for (name, width, height) in [("call-neo-80x24", 80, 24), ("call-neo-200x60", 200, 60)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("input · "), "{frame}");
+        assert!(frame.contains("output · "), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+}

@@ -4,12 +4,12 @@
 ┃   116 +     etag: res.headers.│ Group by agent             a │               ┃
 ┃   117       body,             │ Notable only               n │               ┃
 ┃   └ allowed by you            │ What happened…             c │               ┃
-┃                               │ Usage pane             shown │               ┃
-┃ ◆ claude                      │ Changes pane           shown │               ┃
-┃   Rewriting the 304 test aroun│ Activity pane          shown │               ┃
-┃                               │ Theme…                       │               ┃
-┃ ◆ claude                      └──────────────────────────────┘               ┃
-┃   The notebook that demonstrates the fetcher needs the new call shape.       ┃
+┃                               │ Tool calls…                d │               ┃
+┃ ◆ claude                      │ Usage pane             shown │               ┃
+┃   Rewriting the 304 test aroun│ Changes pane           shown │               ┃
+┃                               │ Activity pane          shown │               ┃
+┃ ◆ claude                      │ Theme…                       │               ┃
+┃   The notebook that demonstrat└──────────────────────────────┘l shape.       ┃
 ┃                                                                              ┃
 ┃ ✗ Bash           npm test                                      exit 1 · 0.4s █
 ┃   └ 1 failing: fetch returns the cached body on a 304                        █

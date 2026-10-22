@@ -32,6 +32,7 @@ mod calls;
 mod catch_up;
 pub mod clock;
 pub mod desktop;
+pub mod detail;
 mod find;
 pub mod history;
 mod hunks;

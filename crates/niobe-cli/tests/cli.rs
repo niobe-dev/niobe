@@ -1002,6 +1002,7 @@ fn the_help_names_every_shortcut_the_shell_lists_and_the_typed_commands() {
         "leave the routine entries (reads,",
         "[catch_up] after = 10",
         "what happened since you last",
+        "shows its whole input and output",
         "/model",
         "/memory",
         "/resume",

@@ -214,7 +214,10 @@ reviewers that encode both, for an agent working in this tree.
   answered and the loop writes after the frame that shows it. `catch_up.rs` is the sheet of what
   happened since the operator last looked, a row a figure, which the first key after minutes
   with none opens — that key is spent on it — and `c` in a side pane or View › What happened…
-  opens since the last one shown. A dialog, and a
+  opens since the last one shown. `detail.rs` is one tool call read whole — the arguments it
+  started with and the output its end carried, each headed by its size, nothing cut — opened from
+  the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows; it
+  wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. A dialog, and a
   permission question in the transcript, casts a shadow on what is under it. Snapshot pictures of the screen live in
   `tests/snapshots/`, and `snapshots.rs` is the one switch that has a test rewrite them —
   `UPDATE_SNAPSHOTS=1` exactly, and never on a CI runner.

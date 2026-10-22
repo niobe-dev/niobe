@@ -447,6 +447,26 @@ fn memory_reading(p: &str) -> App {
     app
 }
 
+fn call_detail(p: &str) -> App {
+    let mut app = running_session();
+    app.apply(&Event::ToolCallEnd {
+        id: "payload".into(),
+        name: format!("mcp__{p}"),
+        input: format!("{{\"q\":\"{p}\"}}"),
+        output: format!("first {p}\nsecond {p}"),
+        bytes: 64,
+        outcome: niobe_core::event::ToolOutcome::Ok,
+        summary: Some(p.to_owned()),
+        exit_code: None,
+        error: None,
+        command: None,
+    });
+    app.perform(niobe_tui::menu::Action::Calls);
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.detail().is_some(), "the call did not open");
+    app
+}
+
 fn refused_answer(p: &str) -> App {
     let mut app = with(vec![
         Event::ToolCallStart {
@@ -552,6 +572,7 @@ const SITES: &[Site] = &[
     ("proposed-edit-open", edit_open, "old"),
     ("proposed-write-open", write_open, "line"),
     ("proposed-command-open", command_open, "echo"),
+    ("call-detail", call_detail, "output"),
 ];
 
 #[test]

@@ -1001,3 +1001,69 @@ fn a_key_in_the_history_dialogs_sessions_over_twenty_thousand_prompts_lands_and_
          {median:?} to land and draw, over the {FRAME_BUDGET:?} budget"
     );
 }
+
+/// How large an output the view of one call is timed reading: a megabyte.
+const LARGE_OUTPUT: usize = 1 << 20;
+
+/// A call whose output is a megabyte is opened from the list of calls and
+/// paged through: what is wrapped is what is on screen, so the frame costs a
+/// screenful whether the megabyte is short lines or one line of minified
+/// JSON. Each frame is a key and the draw after it: opening the call, or a
+/// page down through it.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_call_with_a_megabyte_of_output_opens_and_pages_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lines = "x".repeat(99) + "\n";
+    for (shape, output) in [
+        ("short lines", lines.repeat(LARGE_OUTPUT / lines.len())),
+        ("one line", "{\"k\":1},".repeat(LARGE_OUTPUT / 8)),
+    ] {
+        let mut app = running_session();
+        app.apply(&Event::ToolCallEnd {
+            id: "large".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"cat big.json\"}".to_owned(),
+            bytes: output.len() as u64,
+            output,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some("cat big.json".to_owned()),
+            exit_code: Some(0),
+            error: None,
+            command: None,
+        });
+        let _ = screen(&mut app, 200, 60);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        let mut frames: Vec<Duration> = (0..FRAMES)
+            .map(|frame| {
+                let started = Instant::now();
+                if frame % 8 == 0 {
+                    app.on_key(key(KeyCode::Esc));
+                    app.perform(niobe_tui::menu::Action::Calls);
+                    app.on_key(key(KeyCode::Enter));
+                } else {
+                    app.on_key(key(KeyCode::PageDown));
+                }
+                let _ = screen(&mut app, 200, 60);
+                started.elapsed()
+            })
+            .collect();
+        assert!(app.detail().is_some(), "the call is open");
+        frames.sort_unstable();
+        let median = frames[FRAMES / 2];
+        let slowest = frames[FRAMES - 1];
+
+        assert!(
+            median <= FRAME_BUDGET,
+            "{shape}: the median frame reading a {LARGE_OUTPUT}-byte output took {median:?}, \
+             over the {FRAME_BUDGET:?} budget"
+        );
+        assert!(
+            slowest <= FRAME_BUDGET * 2,
+            "{shape}: the slowest frame, opening the call, took {slowest:?}"
+        );
+    }
+}

@@ -426,12 +426,14 @@ enum Overlay {
     List,
     /// The search in the transcript.
     Search,
+    /// One tool call read whole.
+    Detail,
 }
 
 impl Overlay {
     /// Every overlay there is.
     #[cfg(test)]
-    const ALL: [Overlay; 7] = [
+    const ALL: [Overlay; 8] = [
         Overlay::Menu,
         Overlay::Sheet,
         Overlay::Memory,
@@ -439,6 +441,7 @@ impl Overlay {
         Overlay::History,
         Overlay::List,
         Overlay::Search,
+        Overlay::Detail,
     ];
 }
 
@@ -507,6 +510,9 @@ pub enum Purpose {
     Effort,
     /// The palette the shell is drawn in.
     Theme,
+    /// A tool call of the conversation, to read whole. A choice's value is
+    /// where the call is in the order the calls started.
+    Call,
 }
 
 /// The effort levels offered, in the order the `claude` CLI's `/effort`
@@ -1428,6 +1434,12 @@ pub struct App {
     memory_wanted: bool,
     /// The MCP view, while it is open.
     mcp: Option<crate::mcp::View>,
+    /// One tool call read whole, while it is open.
+    detail: Option<crate::detail::Detail>,
+    /// Every tool call of the conversation, in the order they started, with
+    /// what the view of one shows: the transcript keeps what a row draws,
+    /// and this the arguments and the output the row was drawn from.
+    recorded: Vec<(ToolCallId, crate::detail::Recorded)>,
     /// The MCP servers the operator asked to be reconnected that the loop has
     /// not handed to the backend yet, oldest first.
     mcp_reconnects: Vec<String>,
@@ -1816,6 +1828,8 @@ impl App {
             memory: None,
             memory_wanted: false,
             mcp: None,
+            detail: None,
+            recorded: Vec::new(),
             mcp_reconnects: Vec::new(),
             reconnecting: None,
             hidden: BTreeSet::new(),
@@ -2001,6 +2015,7 @@ impl App {
         self.cleared_prompts.extend(sent);
         self.entries.clear();
         self.tool_entries.clear();
+        self.recorded.clear();
         self.agent_entries.clear();
         self.agents.clear();
         self.run = None;
@@ -2248,6 +2263,15 @@ impl App {
                 summary,
                 agent,
             } => {
+                self.recorded.push((
+                    id.clone(),
+                    crate::detail::Recorded {
+                        name: name.clone(),
+                        what: what_it_does(summary.as_deref(), input),
+                        input: input.clone(),
+                        ended: None,
+                    },
+                ));
                 let head = tool_label(name);
                 let mut call = Call::started(what_it_does(summary.as_deref(), input), self.at);
                 call.programs = programs_of(name, None, summary.as_deref());
@@ -2304,6 +2328,11 @@ impl App {
                     exit_code: *exit_code,
                     error: error.clone(),
                 };
+                self.record_end(
+                    id,
+                    (name, input, summary.as_deref()),
+                    (output, *bytes, *outcome),
+                );
                 let gate = self.gate(id);
                 let started = self.tool_entries.remove(id);
                 let ended = match started {
@@ -3779,6 +3808,63 @@ impl App {
         });
     }
 
+    /// Keeps what the call `id` returned for the view of it, as the end
+    /// carried it; an end whose start never arrived is kept from the end's
+    /// own copy of what the start said.
+    fn record_end(
+        &mut self,
+        id: &ToolCallId,
+        (name, input, summary): (&str, &str, Option<&str>),
+        (output, bytes, outcome): (&str, u64, ToolOutcome),
+    ) {
+        let ended = Some((output.to_owned(), bytes, outcome));
+        match self
+            .recorded
+            .iter_mut()
+            .rev()
+            .find(|(started, _)| started == id)
+        {
+            Some((_, call)) => call.ended = ended,
+            None => self.recorded.push((
+                id.clone(),
+                crate::detail::Recorded {
+                    name: name.to_owned(),
+                    what: what_it_does(summary, input),
+                    input: input.to_owned(),
+                    ended,
+                },
+            )),
+        }
+    }
+
+    /// Opens the list of the conversation's tool calls, on the newest, or
+    /// says there are none yet.
+    fn pick_call(&mut self) {
+        if self.recorded.is_empty() {
+            self.hint = Some(NO_CALLS_HINT.to_owned());
+            return;
+        }
+        let options: Vec<Choice> = self
+            .recorded
+            .iter()
+            .enumerate()
+            .map(|(at, (_, call))| Choice {
+                value: at.to_string(),
+                name: Some(tool_label(&call.name)),
+                note: Some(match &call.ended {
+                    Some((_, bytes, _)) => format!("{} · {}", call.what, human_bytes(*bytes)),
+                    None => format!("{} · running", call.what),
+                }),
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Call,
+            at: options.len().saturating_sub(1),
+            options,
+            more: 0,
+        });
+    }
+
     /// Opens the list of themes, on the one in force.
     fn pick_theme(&mut self) {
         let options: Vec<Choice> = crate::theme::Theme::all()
@@ -3805,6 +3891,7 @@ impl App {
                 in_force(&picker.options, self.session.models(), self.session.model())
             }
             Purpose::Effort => None,
+            Purpose::Call => None,
             Purpose::Theme => picker
                 .options
                 .iter()
@@ -3851,6 +3938,15 @@ impl App {
             Purpose::Theme => {
                 if let Some(theme) = Theme::by_name(&chosen) {
                     self.set_theme(theme);
+                }
+            }
+            Purpose::Call => {
+                let call = chosen
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|at| self.recorded.get(at));
+                if let Some((_, call)) = call {
+                    self.detail = Some(crate::detail::Detail::of(call));
                 }
             }
         }
@@ -3956,6 +4052,7 @@ impl App {
             | Action::GroupByAgent
             | Action::NotableOnly
             | Action::CatchUp
+            | Action::Calls
             | Action::Pane(_)
             | Action::Theme
             | Action::Shortcuts
@@ -4014,6 +4111,7 @@ impl App {
             Action::GroupByAgent => self.group_by_agent(),
             Action::NotableOnly => self.show_notable_only(),
             Action::CatchUp => self.show_catch_up(),
+            Action::Calls => self.pick_call(),
             Action::Pane(pane) => self.toggle_pane(pane),
             Action::Theme => self.pick_theme(),
             Action::Shortcuts => self.sheet = Some(self.shortcuts()),
@@ -4670,10 +4768,15 @@ impl App {
             };
             return true;
         }
-        if self.sheet.is_some() || self.memory.is_some() || self.mcp.is_some() {
+        if self.sheet.is_some()
+            || self.memory.is_some()
+            || self.mcp.is_some()
+            || self.detail.is_some()
+        {
             self.sheet = None;
             self.memory = None;
             self.mcp = None;
+            self.detail = None;
             return true;
         }
         if on_menu_bar {
@@ -5427,6 +5530,7 @@ impl App {
             KeyCode::Char('a') => self.group_by_agent(),
             KeyCode::Char('n') => self.show_notable_only(),
             KeyCode::Char('c') => self.show_catch_up(),
+            KeyCode::Char('d') => self.pick_call(),
             KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
@@ -6193,6 +6297,7 @@ impl App {
             (self.sheet.is_some(), Overlay::Sheet),
             (self.memory.is_some(), Overlay::Memory),
             (self.mcp.is_some(), Overlay::Mcp),
+            (self.detail.is_some(), Overlay::Detail),
             (self.browser.is_some(), Overlay::History),
             (self.picking.is_some(), Overlay::List),
             (self.find.is_some(), Overlay::Search),
@@ -6646,6 +6751,7 @@ impl App {
             || self.sheet.is_some()
             || self.memory.is_some()
             || self.mcp.is_some()
+            || self.detail.is_some()
         {
             return;
         }
@@ -6884,6 +6990,12 @@ impl App {
         }
         if self.mcp.is_some() {
             self.on_mcp_key(key);
+            return;
+        }
+        if let Some(detail) = self.detail.as_mut() {
+            if detail.on_key(key) == crate::detail::Outcome::Close {
+                self.detail = None;
+            }
             return;
         }
         // The history dialog takes it the same way: what is typed there
@@ -7588,6 +7700,19 @@ impl App {
             view.files = Some(files);
             view.at = 0;
             view.reading = None;
+        }
+    }
+
+    /// The tool call open to be read whole, while one is.
+    pub fn detail(&self) -> Option<&crate::detail::Detail> {
+        self.detail.as_ref()
+    }
+
+    /// Told by the draw how the open call is laid out: see
+    /// [`crate::detail::Detail::measured`].
+    pub(crate) fn measured_detail(&mut self, width: usize, room: usize) {
+        if let Some(detail) = self.detail.as_mut() {
+            detail.measured(width, room);
         }
     }
 
@@ -8370,6 +8495,9 @@ fn left(seconds: u64) -> String {
         (d, h, _) => format!("{d}d {h}h"),
     }
 }
+
+/// What asking for the list of tool calls says before there are any.
+const NO_CALLS_HINT: &str = "No tool calls yet: the list holds this conversation's calls";
 
 /// How long with no key pressed the operator is away, where the config
 /// does not say: long enough that a pause to read is not an absence.
@@ -15180,6 +15308,84 @@ mod tests {
         );
     }
 
+    /// Folds in a `Read` of `path` that returned `output`, start and end.
+    fn read_call(app: &mut App, id: &str, path: &str, output: &str) {
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: format!("{{\"file_path\":\"{path}\"}}"),
+            summary: Some(path.to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: format!("{{\"file_path\":\"{path}\"}}"),
+            output: output.to_owned(),
+            bytes: output.len() as u64,
+            outcome: ToolOutcome::Ok,
+            summary: Some(path.to_owned()),
+            exit_code: None,
+            error: None,
+            command: None,
+        });
+    }
+
+    #[test]
+    fn d_in_a_side_pane_lists_the_calls_on_the_newest_and_enter_reads_it_whole() {
+        let mut app = app();
+        read_call(&mut app, "t1", "a.rs", "fn a() {}");
+        read_call(&mut app, "t2", "b.rs", "fn b() {}\n\tfn c() {}\n");
+        app.focus = Focus::Pane(Pane::Activity);
+
+        app.on_key(key(KeyCode::Char('d')));
+        let picker = app.picking().expect("d opens the list of calls");
+        assert_eq!(picker.purpose, Purpose::Call);
+        assert_eq!(picker.options.len(), 2);
+        assert_eq!(picker.at, 1, "the list opens on the newest call");
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("Enter reads the call under the cursor");
+        assert_eq!(
+            detail.text(),
+            "{\"file_path\":\"b.rs\"}fn b() {}\n\tfn c() {}\n"
+        );
+        assert_eq!(app.overlay(), Some(Overlay::Detail));
+    }
+
+    #[test]
+    fn asking_for_the_calls_before_there_are_any_says_so_and_opens_nothing() {
+        let mut app = app();
+
+        app.perform(crate::menu::Action::Calls);
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.hint(), Some(NO_CALLS_HINT));
+    }
+
+    #[test]
+    fn a_call_whose_start_never_arrived_is_listed_from_its_end() {
+        let mut app = app();
+        app.apply(&Event::ToolCallEnd {
+            id: "orphan".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"ls\"}".to_owned(),
+            output: "Cargo.toml".to_owned(),
+            bytes: 10,
+            outcome: ToolOutcome::Ok,
+            summary: Some("ls".to_owned()),
+            exit_code: Some(0),
+            error: None,
+            command: None,
+        });
+
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("the call is listed");
+        assert_eq!(detail.text(), "{\"command\":\"ls\"}Cargo.toml");
+    }
+
     /// A shell with `overlay` open, and the key that closes it: the key an
     /// operator holds or presses twice — Enter wherever Enter closes it.
     ///
@@ -15206,6 +15412,12 @@ mod tests {
                 key(KeyCode::Enter),
             ),
             Overlay::Search => (app(), ctrl('f'), key(KeyCode::Esc)),
+            Overlay::Detail => {
+                let mut app = app();
+                read_call(&mut app, "t1", "README.md", "# niobe");
+                app.pick_call();
+                (app, key(KeyCode::Enter), key(KeyCode::Esc))
+            }
         };
         app.on_key(opening);
         assert_eq!(app.overlay(), Some(overlay), "{overlay:?} did not open");

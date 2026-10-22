@@ -181,6 +181,7 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
     }
     crate::memory::draw(frame, body, app, &theme);
     crate::mcp::draw(frame, body, app, &theme);
+    crate::detail::draw(frame, body, app, &theme);
     crate::browse::draw(frame, body, app, &theme);
     // The open menu hangs from the bar over everything, a list included: it
     // was opened last.
@@ -212,6 +213,11 @@ fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
             "↑↓ choose · Enter set · Esc leave it",
         ),
         Purpose::Theme => ("Theme", "", "↑↓ choose · Enter switch · Esc keep this one"),
+        Purpose::Call => (
+            "Tool calls",
+            " oldest first ",
+            "↑↓ choose · Enter read · Esc close",
+        ),
     }
 }
 
@@ -342,6 +348,9 @@ impl PickColumns {
         let value = match purpose {
             Purpose::Theme => choice.value.to_lowercase(),
             Purpose::Model | Purpose::Effort => choice.value.clone(),
+            // Where the call is in the list is what choosing sends, and the
+            // list already says it by where the row is.
+            Purpose::Call => String::new(),
         };
         if !self.described {
             return (value, String::new());

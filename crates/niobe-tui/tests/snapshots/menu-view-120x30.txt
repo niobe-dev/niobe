@@ -4,12 +4,12 @@
  ┃    45 +   }                  │ Group by agent             a │            ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
  ┃    46 +   const res = await f│ Notable only               n │            ┃ │ ───────────────────────────────────── │
  ┃    47 +   if (res.status === │ What happened…             c │y;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
- ┃    48     return res;        │ Usage pane             shown │            ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃       …                      │ Changes pane           shown │            ┃ │ ───────────────────────────────────── │
- ┃   115     cache.set(url, {   │ Activity pane          shown │            ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   116 +     etag: res.headers│ Theme…                       │            ┃ └───────────────────────────────────────┘
- ┃   117       body,            └──────────────────────────────┘            ┃ ┌─────────────── Changes ───────────────┐
- ┃   └ allowed by you                                                       ┃ │ ⎇ main ↑3                             █
+ ┃    48     return res;        │ Tool calls…                d │            ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃       …                      │ Usage pane             shown │            ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {   │ Changes pane           shown │            ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   116 +     etag: res.headers│ Activity pane          shown │            ┃ └───────────────────────────────────────┘
+ ┃   117       body,            │ Theme…                       │            ┃ ┌─────────────── Changes ───────────────┐
+ ┃   └ allowed by you           └──────────────────────────────┘            ┃ │ ⎇ main ↑3                             █
  ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃ ◆ claude                                                                 ┃ │   .                                   █
  ┃   Rewriting the 304 test around the cached body.                         █ │     CHANGELOG.md                +0 −0 │

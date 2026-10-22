@@ -1646,6 +1646,8 @@ IN THE SHELL:
                            of them counted where it was
     c                      In a side pane, what happened since you last
                            caught up
+    d                      In a side pane, list the tool calls; Enter on one
+                           shows its whole input and output
     t                      In the Activity pane, count tools by name or by
                            kind of work
     Ctrl+End               Back to the newest line of the transcript
