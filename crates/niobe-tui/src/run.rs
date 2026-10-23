@@ -375,6 +375,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // session has spent under the budget this run was given, not about
             // what a recording being read back spent under one it knew nothing of.
             app.settle_budget();
+            app.settle_spikes();
             run_commands(app, shell);
             fetch_images(app, images);
             let lent = hand_off(app, desktop, machine.suspend)?;

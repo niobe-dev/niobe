@@ -72,6 +72,9 @@ profile it calls `claude`. `niobe --help` lists the commands, the config keys an
 shell answers to; `niobe sessions` lists the sessions you can carry on with
 `niobe --resume <id>`.
 
+A turn that spends more than three times the tokens the session's earlier turns averaged is
+named in the transcript when it ends, with how many times the average it spent.
+
 To choose how a backend is run, write a profile in `~/.config/niobe/config.toml`. A config file
 replaces the implied profile, so name the one you want as the default:
 

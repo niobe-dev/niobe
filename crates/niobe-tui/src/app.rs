@@ -1552,6 +1552,10 @@ pub struct App {
     /// Whether the budget warning has already been given, so that it is said
     /// once rather than on every usage record after the line is crossed.
     budget_warned: bool,
+    /// How many of the session's ended turns have been judged for a spike,
+    /// from the first time the event loop asked. `None` until then: the turns
+    /// a session read back holds were spent before this run looked.
+    spikes_judged: Option<usize>,
     /// Whether a backend is listening. The shell holds no backend handle; this
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
@@ -1937,6 +1941,7 @@ impl App {
             budget_usd: None,
             prices: None,
             budget_warned: false,
+            spikes_judged: None,
             attached: false,
             modes_before: VecDeque::new(),
             sent_here: false,
@@ -3768,6 +3773,44 @@ impl App {
     /// The most this session may spend, where the operator set a budget.
     pub fn budget(&self) -> Option<f64> {
         self.budget_usd
+    }
+
+    /// Says so when a turn that ended since the last call spent more than
+    /// three times what the session's turns before it averaged.
+    ///
+    /// Called by the event loop and never by [`App::apply`], for the reason
+    /// [`App::settle_budget`] is: the turns a session read back holds are
+    /// taken as judged on the first call, so that opening an old session does
+    /// not call out what it spent long ago.
+    pub fn settle_spikes(&mut self) {
+        let ended = self.session.turns().len();
+        // A cleared conversation starts its turns over, and is judged from
+        // its own first turn.
+        let from = self.spikes_judged.map_or(ended, |judged| judged.min(ended));
+        self.spikes_judged = Some(ended);
+        let found: Vec<crate::spike::Spike> = (from..ended)
+            .filter_map(|index| crate::spike::at(self.session.turns(), index))
+            .collect();
+        for spike in found {
+            self.push(Entry {
+                attention: Attention::Notable,
+                kind: EntryKind::Notice,
+                head: "spike".to_owned(),
+                meta: format!("turn {} · {}× the average", spike.turn, spike.times),
+                body: format!(
+                    "Turn {} spent {} tokens, against the {} the session's turns before it \
+                     averaged.",
+                    spike.turn,
+                    crate::ui::compact(spike.tokens),
+                    crate::ui::compact(spike.average),
+                ),
+                streaming: false,
+                at: self.at,
+                calls: Vec::new(),
+                agent: None,
+            });
+            self.scroll_to_tail();
+        }
     }
 
     /// Says once when the session has spent most of its budget.
@@ -12410,6 +12453,96 @@ mod tests {
             "a list opened over the question the turn is waiting on"
         );
         assert!(app.asking().is_some());
+    }
+
+    /// A turn that spent `input` tokens and ended.
+    fn turn_of(input: u64) -> [Event; 3] {
+        [
+            Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            Event::Usage(Usage {
+                input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: None,
+                settles_model: Some(false),
+                fast: false,
+            }),
+            Event::TurnEnded,
+        ]
+    }
+
+    fn spikes(app: &App) -> Vec<&Entry> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.head == "spike")
+            .collect()
+    }
+
+    #[test]
+    fn a_turn_past_three_times_the_average_is_named_once_by_its_number() {
+        let mut app = app();
+        app.settle_spikes();
+        for input in [1_000, 1_200, 5_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        app.settle_spikes();
+
+        let spikes = spikes(&app);
+        assert_eq!(spikes.len(), 1, "{spikes:?}");
+        assert_eq!(spikes[0].meta, "turn 3 · 4× the average");
+        assert!(
+            spikes[0].body.contains("5000 tokens") && spikes[0].body.contains("1100"),
+            "{}",
+            spikes[0].body
+        );
+    }
+
+    #[test]
+    fn a_spike_in_a_session_read_back_is_not_called_out_again() {
+        let mut app = app();
+        for input in [1_000, 1_000, 9_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+        }
+        app.settle_spikes();
+        assert!(spikes(&app).is_empty(), "{:?}", spikes(&app));
+
+        for event in turn_of(90_000) {
+            app.apply(&event);
+        }
+        app.settle_spikes();
+        assert_eq!(spikes(&app).len(), 1, "a turn ended live is still judged");
+    }
+
+    #[test]
+    fn a_cleared_conversation_is_judged_from_its_own_turns() {
+        let mut app = app();
+        app.settle_spikes();
+        for input in [1_000, 1_000, 1_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        app.apply(&Event::Cleared);
+        app.settle_spikes();
+        for input in [100, 100, 900] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        assert_eq!(spikes(&app).len(), 1, "{:?}", spikes(&app));
     }
 
     #[test]

@@ -222,7 +222,9 @@ reviewers that encode both, for an agent working in this tree.
   pane's breakdown — each model's share in whole percent that add up to 100, what each model
   is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
   pane is drawn with, `tree.rs` groups the working tree's files under the directories they
-  share, and `clock.rs` is the time the shell draws by, read by the loop once a tick and handed
+  share, and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
+  turns averaged, which the loop, never the fold, calls out by the turn's number, and
+  `clock.rs` is the time the shell draws by, read by the loop once a tick and handed
   in, and absent where the machine has no timezone or a log recorded no times. `alert.rs` is how
   the shell calls the operator back — the bell, and the `OSC 9` or `OSC 777` notification the
   binary says the terminal shows — when a question no standing rule answers comes up or a turn

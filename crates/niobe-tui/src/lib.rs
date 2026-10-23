@@ -55,6 +55,7 @@ mod select;
 pub mod shell;
 mod slash;
 pub mod snapshots;
+mod spike;
 mod tags;
 pub mod terminal;
 mod text;
