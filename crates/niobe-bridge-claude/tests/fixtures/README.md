@@ -343,6 +343,21 @@ exit code the summary names, from the stream and from the transcript alike:
 ``the background command `sleep 3; echo about-to-fail; exit 3` failed with exit
 code 3``.
 
+## `replace-all.jsonl`
+
+One `Edit` with `replace_all: true`, recorded from Claude Code 2.1.309 on 23
+October 2026 the way `refusals.jsonl` was, with the edit allowed over the
+control channel. `palette.txt` was committed as five lines, three of them
+holding `colour`; the model read it and replaced `colour` with `color`
+everywhere. The edits to the lines are those listed for `refusals.jsonl`.
+
+The call names one occurrence (`old_string: "colour"`), and the CLI's result
+says only that every occurrence was replaced. The count is in the report beside
+it: `replaceAll: true` and a `structuredPatch` of one hunk, `oldStart 1`,
+`oldLines 5`, `newStart 1`, `newLines 5`, removing and adding three lines.
+`git diff --numstat` read `3	3	palette.txt` afterwards, and the test expects
+the change to count `+3 −3`.
+
 ## `refusals.jsonl`
 
 Four calls that did not do what was asked, recorded from Claude Code 2.1.309 on

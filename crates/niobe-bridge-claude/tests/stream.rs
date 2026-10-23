@@ -829,6 +829,32 @@ mod reported_hunks {
     }
 }
 
+/// An `Edit` with `replace_all` that matched three times, recorded from Claude
+/// Code 2.1.309: the call names one occurrence, and the patch the CLI reported
+/// beside its result is what says there were three. `git diff --numstat` read
+/// `3 3` for the file afterwards.
+#[test]
+fn a_replace_all_is_counted_from_the_patch_the_cli_reported_as_git_counts_it() {
+    let mut translator = Translator::new("max").in_dir("/repo");
+    let counts: Vec<(String, Option<u64>, Option<u64>)> =
+        include_str!("fixtures/replace-all.jsonl")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .filter_map(|event| match event {
+                Event::FileChange {
+                    path,
+                    added,
+                    removed,
+                    ..
+                } => Some((path, added, removed)),
+                _ => None,
+            })
+            .collect();
+
+    assert_eq!(counts, [("palette.txt".to_owned(), Some(3), Some(3))]);
+}
+
 /// Calls the CLI did not run, recorded from Claude Code 2.1.309: one refused
 /// over the control channel, one by a rule the CLI was started with, and one
 /// a `PreToolUse` hook blocked. Nothing tells the translator about any of
