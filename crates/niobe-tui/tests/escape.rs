@@ -306,8 +306,36 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 new: false,
             }],
             files: vec![],
+            began: None,
         });
         app.apply(&Event::UserMessage { text: "hi".into() });
+        app
+    }));
+    all.extend(check("outside the edit tools", |p| {
+        let start = std::time::Instant::now();
+        let read = |ms: u64, path: Option<String>| Repo {
+            read: true,
+            began: Some(start + std::time::Duration::from_millis(ms)),
+            working: path
+                .into_iter()
+                .map(|path| WorkingFile {
+                    path,
+                    added: Some(1),
+                    removed: Some(0),
+                    new: false,
+                })
+                .collect(),
+            ..Repo::default()
+        };
+        let mut app = App::new(Repo::default());
+        app.apply(&Event::UserMessage { text: "hi".into() });
+        app.settle_tree(start);
+        app.set_repo(read(1, None));
+        app.settle_tree(start + std::time::Duration::from_millis(2));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(start + std::time::Duration::from_millis(3));
+        app.set_repo(read(4, Some(format!("fmt{p}.rs"))));
+        app.settle_tree(start + std::time::Duration::from_millis(5));
         app
     }));
     all.extend(check("mention", |p| {

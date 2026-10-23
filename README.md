@@ -74,6 +74,9 @@ shell answers to; `niobe sessions` lists the sessions you can carry on with
 
 A turn that spends more than three times the tokens the session's earlier turns averaged is
 named in the transcript when it ends, with how many times the average it spent.
+A turn that changed files without an edit call saying so — a `sed` or a formatter run through the
+shell — names them when it ends, read from git, so the session's own edit figures are not taken
+for the whole of what it changed.
 
 To choose how a backend is run, write a profile in `~/.config/niobe/config.toml`. A config file
 replaces the implied profile, so name the one you want as the default:

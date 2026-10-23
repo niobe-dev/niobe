@@ -376,6 +376,11 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // what a recording being read back spent under one it knew nothing of.
             app.settle_budget();
             app.settle_spikes();
+            // A turn that began or ended wants the working tree read as of
+            // now, to name what it changed that no edit call reported.
+            if app.settle_tree(std::time::Instant::now()) {
+                watch.changed();
+            }
             run_commands(app, shell);
             fetch_images(app, images);
             let lent = hand_off(app, desktop, machine.suspend)?;

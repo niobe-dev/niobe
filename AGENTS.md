@@ -223,7 +223,9 @@ reviewers that encode both, for an agent working in this tree.
   is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
   pane is drawn with, `tree.rs` groups the working tree's files under the directories they
   share, and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
-  turns averaged, which the loop, never the fold, calls out by the turn's number, and
+  turns averaged, which the loop, never the fold, calls out by the turn's number; the loop also
+  has the app name the files a turn changed that no edit call reported, from a read of the
+  working tree that began after the turn started and one that began after it ended; and
   `clock.rs` is the time the shell draws by, read by the loop once a tick and handed
   in, and absent where the machine has no timezone or a log recorded no times. `alert.rs` is how
   the shell calls the operator back — the bell, and the `OSC 9` or `OSC 777` notification the
@@ -345,7 +347,8 @@ reviewers that encode both, for an agent working in this tree.
   config files, layers them under the trust record and names the selected profile to the shell;
   `repo.rs` is where the session runs — the repository's root, name and branch, the store under
   `.niobe/`, kept to the operator alone and refused where a link would write it elsewhere, and
-  the `git` reads of the working tree made on a thread of its own as the shell's `Watch`;
+  the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
+  each dated by when it began and, where the shell asked for it, sent though nothing changed;
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
   operator's trust decision about that file; `prices.rs` is the price table `niobe prices`
   prints and the sheet the shell values tokens with, at the rates of the days a session

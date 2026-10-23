@@ -76,6 +76,10 @@ pub struct Repo {
     /// path the agent names it by, relative to that directory. What `@`
     /// completes a file from.
     pub files: Vec<String>,
+    /// When the read this came from began, where it came from one. What the
+    /// shell compares a turn's end with: only a read that began after the
+    /// turn ended says what the turn left behind.
+    pub began: Option<Instant>,
 }
 
 /// One file the working tree has changed, measured from the repository.
@@ -1552,6 +1556,12 @@ pub struct App {
     /// Whether the budget warning has already been given, so that it is said
     /// once rather than on every usage record after the line is crossed.
     budget_warned: bool,
+    /// The working tree a running turn began on, held until a read after
+    /// the turn's end can be compared with it. `None` between turns.
+    tree_watch: Option<TreeWatch>,
+    /// The files the running turn's edit calls changed, by the path each
+    /// call named.
+    turn_edits: BTreeSet<String>,
     /// How many of the session's ended turns have been judged for a spike,
     /// from the first time the event loop asked. `None` until then: the turns
     /// a session read back holds were spent before this run looked.
@@ -1694,6 +1704,69 @@ enum Scroll {
     Down(usize),
     Head,
     Tail,
+}
+
+/// What the shell holds of the working tree across one turn, to name what
+/// the turn changed that no edit call reported.
+#[derive(Debug, Clone)]
+struct TreeWatch {
+    /// How many turns had ended when this one began.
+    ended_before: usize,
+    /// When the shell asked for the tree the turn began on.
+    asked: Instant,
+    /// That tree, once a read that began after `asked` came back.
+    before: Option<Vec<WorkingFile>>,
+    /// When the shell asked for the tree the turn ended on, once it has.
+    ended: Option<Instant>,
+}
+
+/// How many files a notice of changes outside the edit tools names before it
+/// counts the rest.
+const OUTSIDE_LISTED: usize = 8;
+
+/// A file a turn changed that no edit call reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Outside {
+    /// Changed, or changed again, as the working tree now counts it.
+    Changed(WorkingFile),
+    /// Put back as the last commit holds it.
+    Restored(String),
+}
+
+/// The files whose counts differ between `before` and `after` — changed,
+/// newly changed, or put back as committed — that no path in `edited` names.
+fn changed_outside(
+    before: &[WorkingFile],
+    after: &[WorkingFile],
+    edited: &BTreeSet<String>,
+) -> Vec<Outside> {
+    let counts = |file: &WorkingFile| (file.added, file.removed, file.new);
+    let was: BTreeMap<&str, _> = before
+        .iter()
+        .map(|f| (f.path.as_str(), counts(f)))
+        .collect();
+    let now: BTreeSet<&str> = after.iter().map(|f| f.path.as_str()).collect();
+    let unedited = |path: &str| !edited.iter().any(|named| same_file(path, named));
+    let moved = after
+        .iter()
+        .filter(|file| was.get(file.path.as_str()) != Some(&counts(file)))
+        .filter(|file| unedited(&file.path))
+        .cloned()
+        .map(Outside::Changed);
+    let restored = before
+        .iter()
+        .filter(|file| !now.contains(file.path.as_str()) && unedited(&file.path))
+        .map(|file| Outside::Restored(file.path.clone()));
+    moved.chain(restored).collect()
+}
+
+/// Whether the repository's `listed` path and the path an edit call
+/// `named` are one file: the call may name it from the directory the
+/// session runs in, below the repository's root, or absolutely.
+fn same_file(listed: &str, named: &str) -> bool {
+    listed == named
+        || named.ends_with(&format!("/{listed}"))
+        || listed.ends_with(&format!("/{named}"))
 }
 
 /// The share of a budget at which the shell says so.
@@ -1942,6 +2015,8 @@ impl App {
             prices: None,
             budget_warned: false,
             spikes_judged: None,
+            tree_watch: None,
+            turn_edits: BTreeSet::new(),
             attached: false,
             modes_before: VecDeque::new(),
             sent_here: false,
@@ -2510,12 +2585,13 @@ impl App {
             }
 
             Event::FileChange {
+                path,
                 added,
                 removed,
                 hunks,
                 scope,
-                ..
             } => {
+                self.turn_edits.insert(path.clone());
                 if let Some((at, index, gate)) = ended
                     && let Some(call) = self
                         .entries
@@ -2571,7 +2647,13 @@ impl App {
                     attention: Attention::Routine,
                     kind: EntryKind::Failure,
                     head: if *fatal { "fatal" } else { "error" }.to_owned(),
-                    meta: String::new(),
+                    // A failure that ends a turn — a budget the backend
+                    // stopped on among them — says which, since the rule that
+                    // numbers the turn is drawn only once it has ended.
+                    meta: match self.session.turn_running() {
+                        true => format!("in turn {}", self.session.turns().len().saturating_add(1)),
+                        false => String::new(),
+                    },
                     body: message.clone(),
                     streaming: false,
                     at: self.at,
@@ -3773,6 +3855,107 @@ impl App {
     /// The most this session may spend, where the operator set a budget.
     pub fn budget(&self) -> Option<f64> {
         self.budget_usd
+    }
+
+    /// Names the files a turn changed that none of its edit calls reported —
+    /// a shell command it ran, a formatter, or something outside the session
+    /// — once a read of the working tree that began after the turn ended has
+    /// come back to compare with one that began after the turn started.
+    ///
+    /// Returns whether the loop should ask the watch for a read now. Called
+    /// by the event loop and never by [`App::apply`]: a recorded session has
+    /// no working tree to read. A file is told by its line counts against
+    /// the last commit, so a change that leaves them as they were — a line
+    /// replaced by one of the same count in a file already changed — is not
+    /// seen, and nothing is said that the counts do not show.
+    pub fn settle_tree(&mut self, now: Instant) -> bool {
+        let ended = self.session.turns().len();
+        let Some(watch) = self.tree_watch.as_mut() else {
+            if self.session.turn_running() {
+                self.turn_edits.clear();
+                self.tree_watch = Some(TreeWatch {
+                    ended_before: ended,
+                    asked: now,
+                    before: None,
+                    ended: None,
+                });
+                return true;
+            }
+            return false;
+        };
+        let fresh = |since: Instant| self.repo.read && self.repo.began.is_some_and(|b| b >= since);
+        let turn_over = ended > watch.ended_before;
+        if watch.before.is_none() && !turn_over && fresh(watch.asked) {
+            watch.before = Some(self.repo.working.clone());
+        }
+        if !turn_over {
+            return false;
+        }
+        let (Some(before), Some(asked_end)) = (&watch.before, watch.ended) else {
+            if watch.before.is_none() {
+                self.tree_watch = None;
+                return false;
+            }
+            watch.ended = Some(now);
+            return true;
+        };
+        if !fresh(asked_end) {
+            return false;
+        }
+        let changed = changed_outside(before, &self.repo.working, &self.turn_edits);
+        let turn = watch.ended_before.saturating_add(1);
+        self.tree_watch = None;
+        if !changed.is_empty() {
+            self.say_outside(turn, &changed);
+        }
+        false
+    }
+
+    /// The notice of what `turn` changed outside the edit tools.
+    fn say_outside(&mut self, turn: usize, changed: &[Outside]) {
+        let side = |count: Option<u64>| count.map_or_else(|| "—".to_owned(), |n| n.to_string());
+        let named: Vec<String> = changed
+            .iter()
+            .take(OUTSIDE_LISTED)
+            .map(|outside| match outside {
+                Outside::Changed(file) => {
+                    format!(
+                        "{} +{} −{}",
+                        file.path,
+                        side(file.added),
+                        side(file.removed)
+                    )
+                }
+                Outside::Restored(path) => format!("{path} (put back as committed)"),
+            })
+            .collect();
+        let rest = changed.len().saturating_sub(OUTSIDE_LISTED);
+        let more = match rest {
+            0 => String::new(),
+            n => format!(", and {n} more"),
+        };
+        let files = match changed.len() {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        self.push(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: "outside the edit tools".to_owned(),
+            meta: format!("turn {turn} · {files}"),
+            body: format!(
+                "Turn {turn} changed {}{more} with no edit call saying so: a shell command \
+                 it ran, a formatter, or something outside the session. Each is counted \
+                 against the last commit, as the Working tree counts it; the session's own \
+                 edit figures leave them out.",
+                named.join(", "),
+            ),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+        self.scroll_to_tail();
     }
 
     /// Says so when a turn that ended since the last call spent more than
@@ -12482,6 +12665,151 @@ mod tests {
             .iter()
             .filter(|entry| entry.head == "spike")
             .collect()
+    }
+
+    fn file(path: &str, added: u64, removed: u64) -> WorkingFile {
+        WorkingFile {
+            path: path.to_owned(),
+            added: Some(added),
+            removed: Some(removed),
+            new: false,
+        }
+    }
+
+    /// The working tree as a read that began at `began` found it.
+    fn tree_read(began: Instant, working: &[WorkingFile]) -> Repo {
+        Repo {
+            read: true,
+            began: Some(began),
+            working: working.to_vec(),
+            ..Repo::default()
+        }
+    }
+
+    fn outside(app: &App) -> Vec<&Entry> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.head == "outside the edit tools")
+            .collect()
+    }
+
+    #[test]
+    fn a_file_a_turn_changed_with_no_edit_call_is_named_when_the_turn_ends() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        assert!(
+            app.settle_tree(at(0)),
+            "a turn asks for the tree it began on"
+        );
+
+        // What was uncommitted before the turn is not the turn's.
+        app.set_repo(tree_read(at(1), &[file("notes.md", 5, 0)]));
+        assert!(!app.settle_tree(at(2)));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::TurnEnded);
+        assert!(
+            app.settle_tree(at(3)),
+            "an ended turn asks for the tree again"
+        );
+
+        // A read that began before the turn ended says nothing of its end.
+        app.set_repo(tree_read(at(2), &[file("notes.md", 5, 0)]));
+        assert!(!app.settle_tree(at(4)));
+        assert!(outside(&app).is_empty());
+
+        app.set_repo(tree_read(
+            at(5),
+            &[
+                file("notes.md", 5, 0),
+                file("src/lib.rs", 4, 1),
+                file("src/main.rs", 2, 2),
+            ],
+        ));
+        assert!(!app.settle_tree(at(6)));
+        app.settle_tree(at(7));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].meta, "turn 1 · 1 file");
+        assert!(
+            said[0].body.contains("src/main.rs +2 −2"),
+            "{}",
+            said[0].body
+        );
+        assert!(
+            !said[0].body.contains("lib.rs") && !said[0].body.contains("notes.md"),
+            "{}",
+            said[0].body
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_edits_account_for_every_change_says_nothing() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "fix it".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[file("src/lib.rs", 4, 1)]));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+    }
+
+    #[test]
+    fn a_turn_that_ended_before_its_tree_was_read_is_not_judged() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "hi".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.apply(&Event::TurnEnded);
+        assert!(!app.settle_tree(at(1)), "nothing to compare an end with");
+        app.set_repo(tree_read(at(2), &[file("a.rs", 1, 0)]));
+        app.settle_tree(at(3));
+        assert!(outside(&app).is_empty());
+    }
+
+    #[test]
+    fn an_error_that_ends_a_turn_names_the_turn_it_ended() {
+        let mut app = app();
+        for event in turn_of(1_000) {
+            app.apply(&event);
+        }
+        app.apply(&Event::Error {
+            message: "between turns".to_owned(),
+            fatal: false,
+        });
+        app.apply(&Event::UserMessage {
+            text: "go on".to_owned(),
+        });
+        app.apply(&Event::Error {
+            message: "the turn ended as `error_max_budget_usd`: Reached maximum budget ($0.4)"
+                .to_owned(),
+            fatal: false,
+        });
+        app.apply(&Event::TurnEnded);
+
+        let errors: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "error")
+            .map(|entry| entry.meta.as_str())
+            .collect();
+        assert_eq!(errors, ["", "in turn 2"]);
     }
 
     #[test]
