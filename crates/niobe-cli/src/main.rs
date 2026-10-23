@@ -17,6 +17,7 @@
 mod alerts;
 mod args;
 mod backend;
+mod bench;
 mod commands;
 mod config;
 mod consent;
@@ -46,6 +47,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::event::Event;
+use niobe_core::permission::Rule;
 use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_dated_log};
 use niobe_tui::app::{App, ConfigFile, Places};
@@ -141,6 +143,7 @@ fn run(
         profile,
         budget,
         theme,
+        allow,
     }: Invocation,
 ) -> Result<u8, String> {
     let profile = profile.as_deref();
@@ -160,7 +163,14 @@ fn run(
         Command::Shell => shell(profile, &asked)?,
         Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked)?,
         Command::Resume(Resume::Imported(session)) => import(&session, profile, &asked)?,
-        Command::Print { prompt, json } => return print_turn(&prompt, json, profile, &asked),
+        Command::Print { prompt, json } => {
+            return print_turn(&prompt, json, profile, &allow, &asked);
+        }
+        Command::Bench {
+            suite,
+            json,
+            timeout,
+        } => return run_bench(&suite, json, timeout, profile, &allow, &asked),
         // Handed on whole: `run_other` matches every command itself.
         other => return run_other(other, profile, &asked).map(|()| 0),
     };
@@ -190,7 +200,9 @@ fn open(target: &Target, profile: Option<&str>, asked: &Asked) -> Result<Option<
 /// The commands that do not open a shell on a session.
 fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     match command {
-        Command::Shell | Command::Resume(_) | Command::Print { .. } => Ok(()),
+        Command::Shell | Command::Resume(_) | Command::Print { .. } | Command::Bench { .. } => {
+            Ok(())
+        }
         Command::Sessions => list_sessions(),
         Command::Overview(narrowing) => print_overview(narrowing),
         Command::Cost { narrowing, format } => print_cost(narrowing, format),
@@ -888,6 +900,7 @@ fn print_turn(
     prompt: &str,
     json: bool,
     profile: Option<&str>,
+    allow: &[Rule],
     asked: &Asked,
 ) -> Result<u8, String> {
     let root = repo::root(&cwd()?);
@@ -925,11 +938,15 @@ fn print_turn(
         );
     }
 
+    let mut allowed = loaded.config.allowed().clone();
+    for rule in allow {
+        allowed.insert(rule.clone());
+    }
     let mut journal = StoreJournal::pending(root.clone());
     let turn = headless::run(
         backend.bridge(),
         &mut journal,
-        loaded.config.allowed(),
+        &allowed,
         prompt,
         asked.budget,
         &mut || std::thread::sleep(Duration::from_millis(10)),
@@ -987,7 +1004,72 @@ fn print_json(turn: &headless::Turn, session: Option<i64>) -> serde_json::Value 
         ),
     ]);
     fields.extend(cost::figures(&turn.state));
+    let windows = turn.state.usage_windows().map(|windows| {
+        serde_json::json!({
+            "five_hour": windows.five_hour.map(|window| window.utilization),
+            "seven_day": windows.seven_day.map(|window| window.utilization),
+        })
+    });
+    fields.insert("windows".to_owned(), serde_json::json!(windows));
     serde_json::Value::Object(fields)
+}
+
+/// `niobe bench`: every task of the suite at `suite` run as its own `niobe -p`
+/// under the profile and budget this run was given, then the results.
+///
+/// It exits 0 once the suite has run, whatever passed: a bench measures, and
+/// a pass rate is a figure to compare rather than a verdict to stop a job on.
+fn run_bench(
+    suite: &Path,
+    json: bool,
+    timeout: Option<Duration>,
+    profile: Option<&str>,
+    allow: &[Rule],
+    asked: &Asked,
+) -> Result<u8, String> {
+    let tasks = bench::tasks(suite)?;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find the niobe binary to run each task with: {e}"))?;
+    let timeout = timeout.unwrap_or(bench::TURN_TIMEOUT);
+    let mut flags = Vec::new();
+    if let Some(profile) = profile {
+        flags.extend(["--profile".to_owned(), profile.to_owned()]);
+    }
+    if let Some(budget) = asked.budget {
+        flags.extend(["--budget".to_owned(), budget.to_string()]);
+    }
+    for rule in allow {
+        flags.extend(["--allow".to_owned(), rule.to_string()]);
+    }
+
+    let started_at = SystemTime::now();
+    let mut ran = Vec::with_capacity(tasks.len());
+    for (number, task) in tasks.iter().enumerate() {
+        note(&format!(
+            "task {} of {}: {}",
+            number + 1,
+            tasks.len(),
+            task.name
+        ));
+        ran.push(bench::run(&exe, task, &flags, timeout));
+    }
+    let name = suite
+        .canonicalize()
+        .ok()
+        .and_then(|dir| {
+            dir.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| suite.display().to_string());
+    match json {
+        true => say!("{}", bench::document(&name, started_at, &ran, timeout)),
+        false => {
+            for line in bench::table(&ran, timeout) {
+                say!("{line}");
+            }
+        }
+    }
+    Ok(0)
 }
 
 /// Says something the operator is owed knowing on standard error, where a
@@ -1560,6 +1642,12 @@ USAGE:
                            its outcome, reply and spend in the shape schema/print.schema.json
                            publishes. [permissions] rules answer the calls they allow and
                            every other call is refused. The session is saved as any other
+    niobe bench <suite>    Run each task of a suite as one -p turn in a copy of its files and
+                           judge it by its check.sh; --json in the shape
+                           schema/bench.schema.json publishes, --timeout <seconds> per turn
+                           (900 by default). Each turn may edit and write inside its copy
+                           and, beyond --allow, nowhere else. bench/ in niobe's repository
+                           is a suite
     niobe sessions         List the sessions this repository can carry on
     niobe overview         Print what every session here built and how it went, as Markdown;
                            --last <n> keeps the newest n, --since <YYYY-MM-DD> those from that
@@ -1582,6 +1670,8 @@ OPTIONS:
                            (refused on a profile billed as a plan)
     --theme <name>         Draw the shell in this palette: cyber, classic, neo
                            or modern
+    --allow <rule>         For -p and bench: answer the calls this rule covers, as a
+                           [permissions] rule would, for this run alone; may be repeated
     -h, --help             Print this help
     -V, --version          Print the version
 

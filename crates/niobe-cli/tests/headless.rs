@@ -174,6 +174,23 @@ fn a_prompt_a_standing_rule_allows_is_allowed() {
 }
 
 #[test]
+fn a_rule_given_with_allow_answers_for_this_run_alone() {
+    let setup = Setup::new(ASKS_CLAUDE, METERED);
+    let output = setup.run(&["-p", "run the tests", "--allow", "Bash(cargo test)"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let answer = std::fs::read_to_string(setup.repo().join("answer.json"))
+        .expect("the stand-in was answered");
+    assert!(answer.contains("\"allow\""), "{answer}");
+
+    let config = std::fs::read_to_string(setup.dir.path().join("config/niobe/config.toml"))
+        .expect("the user config reads");
+    assert!(
+        !config.contains("cargo test"),
+        "nothing is written: {config}"
+    );
+}
+
+#[test]
 fn a_failed_turn_exits_one_with_the_backends_reason() {
     let setup = Setup::new(FAILS_CLAUDE, METERED);
     let output = setup.run(&["-p", "fix the failing test", "--json"]);

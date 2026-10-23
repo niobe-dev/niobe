@@ -96,6 +96,14 @@ the cost in the job summary:
     exit $status
 ```
 
+`niobe bench bench/` runs each task of a suite as its own `-p` turn, in a copy of the files the
+task starts from, and judges it by the task's own check. It prints the pass rate, the tokens and
+time each turn took, and where each left the five-hour window. `--json` prints it in the shape
+[`schema/bench.schema.json`](schema/bench.schema.json) publishes. [`bench/`](bench/README.md)
+holds twenty small tasks to compare one profile or setting against another. Each turn may edit
+and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for that run alone, as
+`--allow` does for `-p`.
+
 `niobe cost` lists each session recorded in the repository with the tokens it spent and the
 money its backend reported, never an estimate. `niobe cost --json` prints it in the shape
 [`schema/cost.schema.json`](schema/cost.schema.json) publishes, and `--csv` as rows for a

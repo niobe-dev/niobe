@@ -9,6 +9,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use niobe_core::permission::Rule;
 use niobe_ledger::Date;
 use niobe_store::SessionId;
 use niobe_tui::Theme;
@@ -30,6 +31,17 @@ pub enum Command {
         prompt: String,
         /// `--json` was given.
         json: bool,
+    },
+    /// Run every task of a suite as one headless turn in a copy of its
+    /// repository, judge each by its check, and print what each spent.
+    Bench {
+        /// The suite's directory.
+        suite: PathBuf,
+        /// `--json` was given: the results in the shape
+        /// `schema/bench.schema.json` names.
+        json: bool,
+        /// How long a task's turn may run, where `--timeout` said.
+        timeout: Option<std::time::Duration>,
     },
     /// List the sessions recorded in this repository, Niobe's own and the
     /// `claude` CLI's.
@@ -100,6 +112,10 @@ pub struct Invocation {
     /// The palette `--theme` named, if it was given. It beats the one a config
     /// names, and `F9` beats both for the rest of the session.
     pub theme: Option<Theme>,
+    /// The rules each `--allow` gave, which answer a headless turn's prompts
+    /// beside the config's for this run alone. The operator typed them, so
+    /// they need no trust; they are never written anywhere.
+    pub allow: Vec<Rule>,
 }
 
 /// The arguments after the program name, as text, or a sentence for the
@@ -129,16 +145,19 @@ pub fn utf8(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, Str
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
     const NO_PROFILE: &str = "`--profile` needs a profile name; `niobe profiles` lists them";
     const NO_BUDGET: &str = "`--budget` needs an amount in dollars, as in `--budget 0.50`";
+    const NO_RULE: &str = "`--allow` needs a rule, as in `--allow \"Bash(cargo test)\"`";
     let no_theme = || format!("`--theme` needs a theme name; expected {}", theme::listed());
 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (profile, rest) = take_flag(&args, "--profile", NO_PROFILE)?;
     let (budget, rest) = take_flag(&rest, "--budget", NO_BUDGET)?;
     let (theme, rest) = take_flag(&rest, "--theme", &no_theme())?;
+    let (allow, rest) = take_every(&rest, "--allow", NO_RULE)?;
     let command = command(&rest)?;
 
     let runs_a_session = matches!(command, Command::Shell | Command::Resume(_));
-    let runs_a_turn = runs_a_session || matches!(command, Command::Print { .. });
+    let runs_a_turn =
+        runs_a_session || matches!(command, Command::Print { .. } | Command::Bench { .. });
     let names_a_profile = runs_a_turn
         || matches!(
             command,
@@ -146,14 +165,23 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
         );
     if profile.is_some() && !names_a_profile {
         return Err(
-            "`--profile` applies to the shell, `--resume`, `-p` and `profiles`, and to nothing \
-             else"
+            "`--profile` applies to the shell, `--resume`, `-p`, `bench` and `profiles`, and to \
+             nothing else"
                 .to_owned(),
         );
     }
     if budget.is_some() && !runs_a_turn {
         return Err(
-            "`--budget` applies to the shell, `--resume` and `-p`, and to nothing else".to_owned(),
+            "`--budget` applies to the shell, `--resume`, `-p` and `bench`, and to nothing else"
+                .to_owned(),
+        );
+    }
+    let headless = matches!(command, Command::Print { .. } | Command::Bench { .. });
+    if !allow.is_empty() && !headless {
+        return Err(
+            "`--allow` applies to `-p` and `bench`, and to nothing else: in the shell, a \
+             prompt answered with always is the way to add a rule"
+                .to_owned(),
         );
     }
     if theme.is_some() && !runs_a_session && !matches!(command, Command::Replay(_)) {
@@ -168,7 +196,39 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
         profile: profile.map(str::to_owned),
         budget: budget.map(budget_usd).transpose()?,
         theme: theme.map(named_theme).transpose()?,
+        allow: allow
+            .into_iter()
+            .map(|rule| Rule::parse(rule).map_err(|e| format!("`--allow {rule}`: {e}")))
+            .collect::<Result<_, _>>()?,
     })
+}
+
+/// Removes every `<flag> <value>` and `<flag>=<value>` from `args`, for a
+/// flag that may be given more than once.
+fn take_every<'a>(
+    args: &[&'a str],
+    flag: &str,
+    missing: &str,
+) -> Result<(Vec<&'a str>, Vec<&'a str>), String> {
+    let equals = format!("{flag}=");
+    let mut found = Vec::new();
+    let mut rest = Vec::with_capacity(args.len());
+    let mut args = args.iter();
+    while let Some(&arg) = args.next() {
+        let value = if arg == flag {
+            args.next().copied().ok_or_else(|| missing.to_owned())?
+        } else if let Some(value) = arg.strip_prefix(&equals) {
+            value
+        } else {
+            rest.push(arg);
+            continue;
+        };
+        if value.trim().is_empty() || value.starts_with('-') {
+            return Err(missing.to_owned());
+        }
+        found.push(value);
+    }
+    Ok((found, rest))
 }
 
 /// The palette `--theme` named.
@@ -258,6 +318,7 @@ fn command(args: &[&str]) -> Result<Command, String> {
         }
         ["-p" | "--print", rest @ ..] => print(rest, false)?,
         ["--json", "-p" | "--print", rest @ ..] => print(rest, true)?,
+        ["bench", rest @ ..] => bench(rest)?,
         ["sessions", rest @ ..] => {
             no_more(rest)?;
             Command::Sessions
@@ -385,6 +446,33 @@ fn print(rest: &[&str], json: bool) -> Result<Command, String> {
     Ok(Command::Print {
         prompt: (*prompt).to_owned(),
         json,
+    })
+}
+
+/// `niobe bench <suite> [--json] [--timeout <seconds>]`.
+fn bench(rest: &[&str]) -> Result<Command, String> {
+    const NO_SUITE: &str = "`bench` needs a suite directory, as in `niobe bench bench/`";
+    const NO_TIMEOUT: &str = "`--timeout` needs a whole number of seconds, as in `--timeout 600`";
+    let (timeout, rest) = take_flag(rest, "--timeout", NO_TIMEOUT)?;
+    let timeout = timeout
+        .map(|secs| match secs.parse::<u64>() {
+            Ok(secs) if secs > 0 => Ok(std::time::Duration::from_secs(secs)),
+            _ => Err(NO_TIMEOUT.to_owned()),
+        })
+        .transpose()?;
+    let mut json = false;
+    let mut suite = None;
+    for arg in rest {
+        match arg {
+            "--json" if !json => json = true,
+            path if suite.is_none() && !path.starts_with('-') => suite = Some(PathBuf::from(path)),
+            extra => return Err(format!("unexpected argument `{extra}`")),
+        }
+    }
+    Ok(Command::Bench {
+        suite: suite.ok_or(NO_SUITE)?,
+        json,
+        timeout,
     })
 }
 
@@ -590,6 +678,62 @@ mod tests {
     }
 
     #[test]
+    fn allow_gives_a_headless_run_its_rules_and_nothing_else_takes_one() {
+        let ran = invocation(&[
+            "-p",
+            "fix it",
+            "--allow",
+            "Edit",
+            "--allow=Bash(cargo test)",
+        ])
+        .expect("rules for a headless turn");
+        assert_eq!(
+            ran.allow,
+            vec![
+                Rule::parse("Edit").expect("a rule"),
+                Rule::parse("Bash(cargo test)").expect("a rule"),
+            ]
+        );
+        assert!(invocation(&["--allow", "Edit"]).is_err(), "not the shell");
+        assert!(invocation(&["-p", "fix it", "--allow"]).is_err());
+        let copied = invocation(&["-p", "fix it", "--allow", "Bash(git status:*)"])
+            .expect_err("Claude Code's own form is refused");
+        assert!(copied.contains("Bash(git status *)"), "{copied}");
+    }
+
+    #[test]
+    fn a_bench_names_its_suite_and_may_give_each_turn_a_deadline() {
+        assert_eq!(
+            parsed(&["bench", "bench/", "--json", "--timeout", "60"]),
+            Ok(Command::Bench {
+                suite: PathBuf::from("bench/"),
+                json: true,
+                timeout: Some(std::time::Duration::from_secs(60)),
+            })
+        );
+        assert_eq!(
+            parsed(&["bench", "suite"]),
+            Ok(Command::Bench {
+                suite: PathBuf::from("suite"),
+                json: false,
+                timeout: None,
+            })
+        );
+        for wrong in [
+            &["bench"][..],
+            &["bench", "a", "b"][..],
+            &["bench", "a", "--timeout", "0"][..],
+            &["bench", "a", "--timeout", "soon"][..],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+        let flagged = invocation(&["bench", "a", "--profile", "api", "--budget", "1"])
+            .expect("a bench runs each turn under a profile and a budget");
+        assert_eq!(flagged.profile.as_deref(), Some("api"));
+        assert_eq!(flagged.budget, Some(1.0));
+    }
+
+    #[test]
     fn a_headless_turn_takes_its_prompt_whole_and_json_either_side_of_it() {
         let print = |prompt: &str, json| {
             Ok(Command::Print {
@@ -687,6 +831,7 @@ mod tests {
                 profile: Some("work".to_owned()),
                 budget: None,
                 theme: None,
+                allow: Vec::new(),
             })
         );
         assert_eq!(profile(&["--profile=work"]), Ok(Some("work".to_owned())));
@@ -697,6 +842,7 @@ mod tests {
                 profile: Some("work".to_owned()),
                 budget: None,
                 theme: None,
+                allow: Vec::new(),
             })
         );
         assert_eq!(
@@ -760,6 +906,7 @@ mod tests {
                 profile: None,
                 budget: Some(1.25),
                 theme: None,
+                allow: Vec::new(),
             })
         );
         assert_eq!(invocation(&[]).map(|i| i.budget), Ok(None));

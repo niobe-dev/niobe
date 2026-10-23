@@ -69,7 +69,7 @@ pub fn rule_for(path: &str) -> Option<Rule> {
     let is_agent_definition = path.starts_with(".claude/");
     match Path::new(name).extension().and_then(|e| e.to_str()) {
         Some("rs") => Some(Rule::LineComment("// ")),
-        Some("toml" | "yml" | "yaml") => Some(Rule::LineComment("# ")),
+        Some("toml" | "yml" | "yaml" | "py") => Some(Rule::LineComment("# ")),
         Some("md") if is_agent_definition => Some(Rule::Frontmatter),
         Some("md") => Some(Rule::HtmlComment),
         Some("sh") => Some(Rule::Script),
@@ -142,6 +142,10 @@ mod tests {
             Some(Rule::LineComment("# "))
         );
         assert_eq!(rule_for(".gitignore"), Some(Rule::LineComment("# ")));
+        assert_eq!(
+            rule_for("bench/01-last-n/files/items.py"),
+            Some(Rule::LineComment("# "))
+        );
         assert_eq!(rule_for("AGENTS.md"), Some(Rule::HtmlComment));
     }
 

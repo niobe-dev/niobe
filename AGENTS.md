@@ -325,10 +325,19 @@ reviewers that encode both, for an agent working in this tree.
   `schema/cost.schema.json` publishes at the repository's root, with no money on a plan or where
   nothing said how a session was billed and no figure priced by the table; `headless.rs` is
   `niobe -p`: one turn sent through the same `Bridge` and recorded through the same `Journal` as
-  the shell's, each permission prompt answered by the standing rules and every other refused with
+  the shell's, each permission prompt answered by the standing rules — the config's, and those
+  `--allow` gave for that run alone, which nothing writes down — and every other refused with
   words that tell the agent no one is there, and an outcome — finished, failed, or stopped on the
   budget, read off the figures rather than the backend's wording — that the binary exits 0, 1 or
-  3 on, with `--json` in the shape `schema/print.schema.json` publishes; `doctor.rs` is what `niobe doctor` prints — one row each for
+  3 on, with `--json` in the shape `schema/print.schema.json` publishes, where the plan's windows
+  stood when it ended included; `bench.rs` is `niobe bench` — each task of a suite (`bench/` at
+  the repository's root holds twenty, each with its prompt, its files, a `check.sh` with hidden
+  tests beside it and a reference solution) run as its own `niobe -p` in a copy of the task's
+  files under the system's temporary directory, allowed to edit and write inside that copy and
+  nowhere else beyond the bench's own `--allow` rules, ended at its deadline, then judged by the
+  task's check run from the suite so that the agent cannot rewrite it, with a failing task's
+  copy kept, as a table or as `--json` in the shape `schema/bench.schema.json` publishes;
+  `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
   read from its files), the config files and whether the repository's is trusted, and the terminal,
   with the fix for each that is not fine, as text or as `--json` with nothing under the home
@@ -347,6 +356,9 @@ reviewers that encode both, for an agent working in this tree.
   `tests/headless.rs` runs `niobe -p` against stand-in `claude` scripts — a reply, a prompt
   refused and one a rule allows, a failure and a budget stop — and checks its JSON against the
   published schema with the validator in `tests/schema/`, which `tests/cost.rs` uses too.
+  `tests/bench.rs` runs `niobe bench` against stand-in `claude` scripts — a task passed and one
+  failed, a turn that never ends and the CLI under it ended with it — and checks that every task
+  of the bundled suite fails as laid out and passes with its solution laid over it.
   `tests/cost.rs` exports a store of a recording billed by use, the same on a plan and one that
   never said, checks the JSON against the published schema and its figures against `jq`.
   `tests/overview.rs` prints that page for a store of two recorded sessions, against a picture
@@ -558,6 +570,7 @@ Every file that can carry a comment starts with the SPDX header, followed by a b
 Exempt, because the format has no comments or the bytes are compared exactly: `LICENSE`,
 `CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt` and `*.svg`, and recorded output
 under `tests/fixtures/` as `*.txt` or `*.json`, and the published JSON Schemas under `schema/`.
+Python (`.py`), which the bench suite's tasks are written in, carries the `#` lines.
 The list lives in
 `xtask/src/headers.rs`; a file type with neither a rule nor an exemption fails the check, so a new
 kind of file forces a decision. Run `cargo xtask headers`.
