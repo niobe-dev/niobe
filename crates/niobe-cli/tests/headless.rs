@@ -191,6 +191,35 @@ fn a_rule_given_with_allow_answers_for_this_run_alone() {
 }
 
 #[test]
+fn a_terse_turn_appends_the_prompt_to_the_clis_system_prompt_and_says_so() {
+    let answers_and_says_its_arguments = ANSWERS_CLAUDE.replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > argv.txt\n",
+        1,
+    );
+    let setup = Setup::new(&answers_and_says_its_arguments, METERED);
+    let output = setup.run(&["-p", "fix it", "--terse", "on", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(json(&output)["terse"], true);
+    let argv = std::fs::read_to_string(setup.repo().join("argv.txt")).expect("the CLI ran");
+    let after = argv
+        .lines()
+        .skip_while(|arg| *arg != "--append-system-prompt")
+        .nth(1)
+        .expect("a system prompt is appended");
+    assert!(
+        after.starts_with("Keep your replies to the user terse"),
+        "{argv}"
+    );
+
+    let plain = Setup::new(&answers_and_says_its_arguments, METERED);
+    let output = plain.run(&["-p", "fix it", "--json"]);
+    assert_eq!(json(&output)["terse"], false);
+    let argv = std::fs::read_to_string(plain.repo().join("argv.txt")).expect("the CLI ran");
+    assert!(!argv.contains("--append-system-prompt"), "{argv}");
+}
+
+#[test]
 fn a_failed_turn_exits_one_with_the_backends_reason() {
     let setup = Setup::new(FAILS_CLAUDE, METERED);
     let output = setup.run(&["-p", "fix the failing test", "--json"]);

@@ -37,10 +37,24 @@ pub struct Attach {
     /// prompt. Only a new session is: one carried on was titled, if it was,
     /// when it began.
     pub title: bool,
+    /// Whether a new conversation is asked for terse replies, with
+    /// [`TERSE`] appended to the backend's system prompt. A conversation
+    /// carried on keeps the prompt it began with.
+    pub terse: bool,
     /// A directory to keep a copy of the backend's stream in, where one was
     /// asked for with [`STREAM_DIR_VAR`] and found fit by [`stream_tap`].
     pub tap: Option<PathBuf>,
 }
+
+/// What a terse conversation appends to the backend's system prompt.
+///
+/// Prose is what it shortens. Code, commands, paths, errors and security
+/// warnings are where a shortened word costs correctness rather than tokens,
+/// so they are named as what stays whole.
+pub const TERSE: &str = "Keep your replies to the user terse: short sentences, no preamble, no \
+    restating the request, and no account of what you are about to do or have just done beyond \
+    what the user needs to act on. Keep code, commands, file paths, error messages and security \
+    warnings exact and whole; never shorten or paraphrase them.";
 
 /// The environment variable that names a directory to keep a copy of what
 /// crosses the `claude` CLI's pipes in, so that a recording is taken from the
@@ -474,7 +488,13 @@ fn claude_options(
 ) -> Result<Options, String> {
     let mut options = Options::new(root, profile.name);
     options.env = profile.profile.env().clone();
-    options.args = profile.profile.args().to_vec();
+    // Before the profile's own arguments, so that a profile appending a
+    // system prompt of its own still has the last word.
+    options.args = match with.terse && with.resume.is_none() {
+        true => vec!["--append-system-prompt".to_owned(), TERSE.to_owned()],
+        false => Vec::new(),
+    };
+    options.args.extend_from_slice(profile.profile.args());
     options.billing = profile.profile.billing();
     options.settings = crate::config::settings_path(profile, home, root)?;
     options.resume = with.resume.clone();
@@ -804,6 +824,7 @@ mod tests {
                 mode: Some(niobe_core::event::Mode::Plan),
                 budget_usd: None,
                 title: false,
+                terse: false,
                 tap: None,
             },
             Some(claude.path().as_os_str().to_owned()),
@@ -931,6 +952,40 @@ mod tests {
             .expect("the profile names no settings file to be missing");
 
         assert_eq!(options.billing, Some(niobe_core::Billing::Metered));
+    }
+
+    #[test]
+    fn a_terse_new_conversation_appends_the_prompt_before_the_profiles_own_arguments() {
+        let config =
+            config("[profiles.max]\nbackend = \"claude\"\nargs = [\"--add-dir\", \"/other\"]\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let args = |with: &Attach| {
+            claude_options(Path::new("/repo"), &selected, with, NO_HOME)
+                .expect("the profile names no settings file to be missing")
+                .args
+        };
+
+        let terse = Attach {
+            terse: true,
+            ..Attach::default()
+        };
+        assert_eq!(
+            args(&terse),
+            ["--append-system-prompt", TERSE, "--add-dir", "/other"]
+        );
+        assert_eq!(args(&Attach::default()), ["--add-dir", "/other"]);
+        let carried_on = Attach {
+            resume: Some("abc".to_owned()),
+            ..terse
+        };
+        assert_eq!(
+            args(&carried_on),
+            ["--add-dir", "/other"],
+            "a conversation keeps the prompt it began with"
+        );
     }
 
     #[test]
@@ -1099,6 +1154,7 @@ mod tests {
                 mode: Some(Mode::Plan),
                 budget_usd: Some(0.5),
                 title: false,
+                terse: false,
                 tap: None,
             },
             NO_HOME,

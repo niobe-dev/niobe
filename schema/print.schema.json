@@ -13,6 +13,7 @@
         "reason",
         "reply",
         "session",
+        "terse",
         "started_at",
         "billing",
         "tokens",
@@ -52,6 +53,10 @@
             "null"
           ],
           "minimum": 1
+        },
+        "terse": {
+          "description": "Whether the turn's conversation asked the agent for terse replies, by --terse or the config's terse.",
+          "type": "boolean"
         },
         "started_at": {
           "description": "When the prompt was sent, RFC 3339 in UTC to the second.",

@@ -56,6 +56,14 @@
 //! titles = "first-prompt"
 //! ```
 //!
+//! and whether a new conversation asks the agent to keep its replies terse —
+//! code, commands, errors and security warnings left whole — which is off
+//! unless a file turns it on:
+//!
+//! ```toml
+//! terse = true
+//! ```
+//!
 //! and whether the shell rings the bell and sends a desktop notification
 //! when the agent waits on the operator or a turn ends, each on unless a file
 //! turns it off:
@@ -460,6 +468,7 @@ pub struct Config {
     default_profile: Option<DefaultProfile>,
     theme: Option<ThemeName>,
     titles: Option<Titles>,
+    terse: Option<bool>,
     keys: Keymap,
     notify: Notify,
     catch_up: CatchUp,
@@ -601,6 +610,9 @@ impl Config {
         }
         if over.titles.is_some() {
             self.titles = over.titles;
+        }
+        if over.terse.is_some() {
+            self.terse = over.terse;
         }
         // A file that rebinds keys says what every rebound key is: bindings
         // laid together could put one key on two actions, so the later file's
@@ -754,6 +766,16 @@ impl Config {
     /// the model's titles off and cannot turn them on ([`Config::untrusted`]).
     pub fn titles(&self) -> Titles {
         self.titles.unwrap_or_default()
+    }
+
+    /// Whether a new conversation asks the agent for terse replies, which is
+    /// off unless a config says `terse = true`.
+    ///
+    /// Not gated on trust: what it puts in front of a backend is an
+    /// instruction Niobe wrote and the file only switches, which shortens
+    /// replies and lets nothing a repository wrote reach the backend.
+    pub fn terse(&self) -> bool {
+        self.terse.unwrap_or(false)
     }
 
     /// The profile a session runs under: the one `requested` names, or else
@@ -1588,6 +1610,24 @@ backend = "codex"
     }
 
     #[test]
+    fn terse_replies_are_off_until_a_file_turns_them_on_and_the_later_file_wins() {
+        assert!(!parsed("").terse());
+        assert!(parsed("terse = true\n").terse());
+        let repo = Config::parse("terse = false\n", &path("repo"))
+            .expect("a valid file")
+            .untrusted();
+        assert!(!parsed("terse = true\n").overlay(repo).terse());
+        let on = Config::parse("terse = true\n", &path("repo"))
+            .expect("a valid file")
+            .untrusted();
+        assert!(
+            parsed("").overlay(on).terse(),
+            "an untrusted file may switch it"
+        );
+        assert!(invalid("terse = \"yes\"\n").contains("terse"));
+    }
+
+    #[test]
     fn a_file_nobody_trusted_may_stop_titles_costing_tokens_and_may_not_start_them() {
         let user = parsed("titles = \"first-prompt\"\n");
         let spends = Config::parse("titles = \"model\"\n", &path("repo"))
@@ -1714,8 +1754,8 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `titles`, `profiles`, `permissions`, `keys`, \
-             `notify` or `catch_up`"
+             expected `default_profile`, `theme`, `titles`, `terse`, `profiles`, `permissions`, \
+             `keys`, `notify` or `catch_up`"
         );
     }
 

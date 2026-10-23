@@ -94,7 +94,9 @@ reviewers that encode both, for an agent working in this tree.
   run yet: nothing tells an expired login from another failure) and, where the backend cannot tell, how the
   account behind it is billed, the `[permissions]` rules a session answers
   prompts with before asking, whether a new session is titled by the model (`titles`), which a
-  file nobody trusted can turn off and not on, and whether the shell rings the bell and sends a
+  file nobody trusted can turn off and not on, whether a new conversation asks for terse replies
+  (`terse`, off unless a file turns it on, from any file since the words are Niobe's own), and
+  whether the shell rings the bell and sends a
   desktop notification when it calls the operator back (`[notify]`), and how many minutes
   with no key pressed are away and whether the first key back shows what happened
   (`[catch_up]`). `parse.rs` walks the spanned TOML document by hand so that an
@@ -305,7 +307,8 @@ reviewers that encode both, for an agent working in this tree.
   directory only, never a repository's. `desktop.rs` copies what the operator selected with `pbcopy`, or `wl-copy`, `xclip` or `xsel`, and opens a clicked link with `open` or `xdg-open`, each with no terminal, in a process group of its own and not waited on; a memory file the operator asks to edit goes to `$VISUAL` or `$EDITOR` — or `open -t` on macOS and `vi` elsewhere — on the terminal the shell lends it, waited on, and never to `open` or `xdg-open`, which run a `.command` or `.desktop` file rather than show it. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing in them running; the CLI's group is let go of once it is seen empty, as each command's is. `consent.rs` builds that trust question, and the rows `niobe trust` prints, from the file as written, values included, since
   the operator is deciding on them, and records the answer as `niobe trust` does, for the text
   that was shown. `backend.rs` is the only module
-  that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
+  that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in,
+  and where the words a terse conversation appends to the CLI's system prompt are written.
   `args.rs` parses the command line by hand; `config.rs` finds the user's and the repository's
   config files, layers them under the trust record and names the selected profile to the shell;
   `repo.rs` is where the session runs — the repository's root, name and branch, the store under

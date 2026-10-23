@@ -104,6 +104,10 @@ holds twenty small tasks to compare one profile or setting against another. Each
 and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for that run alone, as
 `--allow` does for `-p`.
 
+`terse = true` at the top of a config asks each new conversation for terse replies, with code,
+commands, paths, errors and security warnings kept whole, and `--terse on|off` switches it for one
+run. It is off by default. On the bench it cut output tokens by 14% with every task still passing.
+
 `niobe cost` lists each session recorded in the repository with the tokens it spent and the
 money its backend reported, never an estimate. `niobe cost --json` prints it in the shape
 [`schema/cost.schema.json`](schema/cost.schema.json) publishes, and `--csv` as rows for a

@@ -112,6 +112,9 @@ pub struct Invocation {
     /// The palette `--theme` named, if it was given. It beats the one a config
     /// names, and `F9` beats both for the rest of the session.
     pub theme: Option<Theme>,
+    /// What `--terse on` or `--terse off` asked, beating the config's
+    /// `terse`; `None` where it was not given.
+    pub terse: Option<bool>,
     /// The rules each `--allow` gave, which answer a headless turn's prompts
     /// beside the config's for this run alone. The operator typed them, so
     /// they need no trust; they are never written anywhere.
@@ -145,6 +148,7 @@ pub fn utf8(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, Str
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
     const NO_PROFILE: &str = "`--profile` needs a profile name; `niobe profiles` lists them";
     const NO_BUDGET: &str = "`--budget` needs an amount in dollars, as in `--budget 0.50`";
+    const NO_TERSE: &str = "`--terse` needs `on` or `off`";
     const NO_RULE: &str = "`--allow` needs a rule, as in `--allow \"Bash(cargo test)\"`";
     let no_theme = || format!("`--theme` needs a theme name; expected {}", theme::listed());
 
@@ -153,6 +157,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
     let (budget, rest) = take_flag(&rest, "--budget", NO_BUDGET)?;
     let (theme, rest) = take_flag(&rest, "--theme", &no_theme())?;
     let (allow, rest) = take_every(&rest, "--allow", NO_RULE)?;
+    let (terse, rest) = take_flag(&rest, "--terse", NO_TERSE)?;
     let command = command(&rest)?;
 
     let runs_a_session = matches!(command, Command::Shell | Command::Resume(_));
@@ -177,6 +182,12 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
         );
     }
     let headless = matches!(command, Command::Print { .. } | Command::Bench { .. });
+    if terse.is_some() && !runs_a_turn {
+        return Err(
+            "`--terse` applies to the shell, `--resume`, `-p` and `bench`, and to nothing else"
+                .to_owned(),
+        );
+    }
     if !allow.is_empty() && !headless {
         return Err(
             "`--allow` applies to `-p` and `bench`, and to nothing else: in the shell, a \
@@ -196,6 +207,13 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
         profile: profile.map(str::to_owned),
         budget: budget.map(budget_usd).transpose()?,
         theme: theme.map(named_theme).transpose()?,
+        terse: terse
+            .map(|said| match said {
+                "on" => Ok(true),
+                "off" => Ok(false),
+                _ => Err(NO_TERSE.to_owned()),
+            })
+            .transpose()?,
         allow: allow
             .into_iter()
             .map(|rule| Rule::parse(rule).map_err(|e| format!("`--allow {rule}`: {e}")))
@@ -702,6 +720,18 @@ mod tests {
     }
 
     #[test]
+    fn terse_is_switched_on_or_off_for_a_session_or_a_turn() {
+        let on = invocation(&["-p", "fix it", "--terse", "on"]).expect("a terse turn");
+        assert_eq!(on.terse, Some(true));
+        let off = invocation(&["bench", "b", "--terse=off"]).expect("a bench not terse");
+        assert_eq!(off.terse, Some(false));
+        assert_eq!(invocation(&[]).map(|i| i.terse), Ok(None));
+        assert!(invocation(&["--terse", "on"]).is_ok(), "the shell takes it");
+        assert!(invocation(&["-p", "x", "--terse", "yes"]).is_err());
+        assert!(invocation(&["sessions", "--terse", "on"]).is_err());
+    }
+
+    #[test]
     fn a_bench_names_its_suite_and_may_give_each_turn_a_deadline() {
         assert_eq!(
             parsed(&["bench", "bench/", "--json", "--timeout", "60"]),
@@ -831,6 +861,7 @@ mod tests {
                 profile: Some("work".to_owned()),
                 budget: None,
                 theme: None,
+                terse: None,
                 allow: Vec::new(),
             })
         );
@@ -842,6 +873,7 @@ mod tests {
                 profile: Some("work".to_owned()),
                 budget: None,
                 theme: None,
+                terse: None,
                 allow: Vec::new(),
             })
         );
@@ -906,6 +938,7 @@ mod tests {
                 profile: None,
                 budget: Some(1.25),
                 theme: None,
+                terse: None,
                 allow: Vec::new(),
             })
         );

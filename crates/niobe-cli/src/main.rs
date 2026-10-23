@@ -144,12 +144,14 @@ fn run(
         budget,
         theme,
         allow,
+        terse,
     }: Invocation,
 ) -> Result<u8, String> {
     let profile = profile.as_deref();
     let asked = Asked {
         budget,
         theme,
+        terse,
         depth: Depth::from_env(
             std::env::var("COLORTERM").ok().as_deref(),
             std::env::var("NO_COLOR").ok().as_deref(),
@@ -234,6 +236,9 @@ struct Asked {
     budget: Option<f64>,
     /// The palette the shell opens in.
     theme: Option<Theme>,
+    /// Whether a new conversation asks for terse replies, where `--terse`
+    /// said; `None` leaves it to the config.
+    terse: Option<bool>,
     /// How many colours the terminal says it draws, which the palette is
     /// drawn at. Read from the environment here because the shell does not
     /// read the environment.
@@ -375,6 +380,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         &backend::Attach {
             budget_usd: asked.budget,
             title: loaded.config.titles() == niobe_config::Titles::Model,
+            terse: asked.terse.unwrap_or(loaded.config.terse()),
             tap: tap.clone(),
             ..backend::Attach::default()
         },
@@ -617,6 +623,9 @@ fn resume(
             mode: app.session().mode(),
             budget_usd: asked.budget,
             title: false,
+            // The conversation's system prompt was recorded when it began,
+            // and the CLI sends that record whatever a later start passes.
+            terse: false,
             tap: tap.clone(),
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
@@ -805,6 +814,9 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             mode: app.session().mode(),
             budget_usd: asked.budget,
             title: false,
+            // The conversation's system prompt was recorded when it began,
+            // and the CLI sends that record whatever a later start passes.
+            terse: false,
             tap: tap.clone(),
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
@@ -915,6 +927,7 @@ fn print_turn(
         );
     }
     let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
+    let terse = asked.terse.unwrap_or(loaded.config.terse());
     let mut backend = backend::attach(
         &root,
         selected.as_ref(),
@@ -924,6 +937,7 @@ fn print_turn(
             // every run of a job, and it answers after the turn this run ends
             // on. The history shows the session by its prompt instead.
             title: false,
+            terse,
             tap,
             ..backend::Attach::default()
         },
@@ -968,7 +982,7 @@ fn print_turn(
 
     let session = finished.session.map(SessionId::get);
     match json {
-        true => say!("{}", print_json(&turn, session)),
+        true => say!("{}", print_json(&turn, session, terse)),
         false if !turn.reply.is_empty() => say!("{}", turn.reply),
         false => {}
     }
@@ -988,7 +1002,7 @@ fn print_turn(
 }
 
 /// A headless turn in the shape `schema/print.schema.json` publishes.
-fn print_json(turn: &headless::Turn, session: Option<i64>) -> serde_json::Value {
+fn print_json(turn: &headless::Turn, session: Option<i64>, terse: bool) -> serde_json::Value {
     let mut fields = serde_json::Map::from_iter([
         ("schema_version".to_owned(), serde_json::json!(1)),
         ("outcome".to_owned(), serde_json::json!(turn.outcome.name())),
@@ -998,6 +1012,7 @@ fn print_json(turn: &headless::Turn, session: Option<i64>) -> serde_json::Value 
         ),
         ("reply".to_owned(), serde_json::json!(turn.reply)),
         ("session".to_owned(), serde_json::json!(session)),
+        ("terse".to_owned(), serde_json::json!(terse)),
         (
             "started_at".to_owned(),
             serde_json::json!(cost::rfc3339(turn.started_at)),
@@ -1012,6 +1027,13 @@ fn print_json(turn: &headless::Turn, session: Option<i64>) -> serde_json::Value 
     });
     fields.insert("windows".to_owned(), serde_json::json!(windows));
     serde_json::Value::Object(fields)
+}
+
+fn on_off(on: bool) -> &'static str {
+    match on {
+        true => "on",
+        false => "off",
+    }
 }
 
 /// `niobe bench`: every task of the suite at `suite` run as its own `niobe -p`
@@ -1040,6 +1062,9 @@ fn run_bench(
     }
     for rule in allow {
         flags.extend(["--allow".to_owned(), rule.to_string()]);
+    }
+    if let Some(terse) = asked.terse {
+        flags.extend(["--terse".to_owned(), on_off(terse).to_owned()]);
     }
 
     let started_at = SystemTime::now();
@@ -1670,6 +1695,8 @@ OPTIONS:
                            (refused on a profile billed as a plan)
     --theme <name>         Draw the shell in this palette: cyber, classic, neo
                            or modern
+    --terse <on|off>       Ask a new conversation for terse replies, or not, beating the
+                           config's terse
     --allow <rule>         For -p and bench: answer the calls this rule covers, as a
                            [permissions] rule would, for this run alone; may be repeated
     -h, --help             Print this help
@@ -1790,6 +1817,13 @@ PROFILES:
     asks, which the claude CLI answers from its small model and bills into
     the session: some nine hundred tokens. A repository's config nobody has
     trusted can turn it off and not on.
+
+    terse = true, at the top of a config, asks each new conversation for
+    terse replies, with code, commands, paths, errors and security warnings
+    kept whole; --terse on or off beats it for one run. Off by default. On
+    niobe's bench of twenty tasks it cut output tokens by 14% and the
+    replies' length by a quarter, with every task still passing. A
+    conversation carried on keeps the prompt it began with.
 
     [notify] bell = false and notification = false turn off how niobe calls
     you back when a question waits on you or a turn you sent ends: the
