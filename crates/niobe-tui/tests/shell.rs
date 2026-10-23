@@ -3537,7 +3537,10 @@ fn no_pane_draws_its_text_against_its_border() {
 
         for (at, row) in frame.lines().enumerate() {
             let cells = &rows[at];
-            for pair in borders(row).chunks_exact(2) {
+            for pair in borders(row).chunks(2) {
+                if pair.len() < 2 {
+                    continue;
+                }
                 let (left, right) = (pair[0], pair[1]);
                 assert_eq!(
                     cells.get(left + 1).copied(),
