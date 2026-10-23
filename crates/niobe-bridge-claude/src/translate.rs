@@ -76,6 +76,9 @@
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
 //!   rest is not surfaced, because no pane reads it and widening the shared
 //!   vocabulary for figures nothing draws would be a change nobody could see.
+//!   A `system`/`status` that names a mode other than the one last reported
+//!   is a [`Event::ModeSelected`] too: it is how the CLI says it left plan
+//!   mode when a plan was approved.
 //! * A sub-agent's own figures are what the CLI reports for that agent alone,
 //!   and they become [`Event::AgentProgress`]: the model its messages name,
 //!   the step `system`/`task_progress` says it is on, the first line of the
@@ -553,6 +556,9 @@ pub struct Translator {
     /// Whether the CLI's last request state was `compacting`, so that the
     /// state after it is reported as the compaction's end.
     compacting: bool,
+    /// The mode the CLI last said it gates calls in, as it spells it, so a
+    /// `status` that repeats it says nothing new.
+    mode: Option<String>,
 }
 
 /// What a sub-agent's own transcript says about it that its messages, folded
@@ -632,6 +638,7 @@ impl Translator {
             read_spilled: None,
             file_exists: None,
             compacting: false,
+            mode: None,
         }
     }
 
@@ -1056,6 +1063,22 @@ impl Translator {
         Event::McpServers { servers: listed }
     }
 
+    /// Reports `spelt`, the mode the CLI says it now gates calls in.
+    fn reported_mode(&mut self, spelt: String, out: &mut Vec<Event>) {
+        match read_mode(&spelt) {
+            Some(mode) => out.push(Event::ModeSelected { mode }),
+            // The CLI gates calls in ways Niobe has no word for —
+            // `acceptEdits`, `bypassPermissions`, `dontAsk` — and a profile
+            // can ask for one through its own arguments. Naming it beats
+            // showing a mode the session is not in.
+            None => out.push(warn(format!(
+                "the CLI is gating tool calls as `{spelt}`, which this version of Niobe does \
+                 not model. No mode is reported until the session is moved to one it does."
+            ))),
+        }
+        self.mode = Some(spelt);
+    }
+
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
         match system.subtype.as_deref() {
             Some("init") => {
@@ -1076,18 +1099,7 @@ impl Translator {
                     out.push(event);
                 }
                 if let Some(mode) = system.permission_mode {
-                    match read_mode(&mode) {
-                        Some(mode) => out.push(Event::ModeSelected { mode }),
-                        // The CLI gates calls in ways Niobe has no word for —
-                        // `acceptEdits`, `bypassPermissions`, `dontAsk` — and
-                        // a profile can ask for one through its own arguments.
-                        // Naming it beats showing a mode the session is not in.
-                        None => out.push(warn(format!(
-                            "the CLI is gating tool calls as `{mode}`, which this version of \
-                             Niobe does not model. No mode is reported until the session is \
-                             moved to one it does."
-                        ))),
-                    }
+                    self.reported_mode(mode, out);
                 }
             }
             // The last request's size is of a conversation the model no
@@ -1117,6 +1129,14 @@ impl Translator {
                     (false, false) | (true, true) => {}
                 }
                 self.compacting = compacting;
+                // The CLI moves itself out of plan mode when the operator
+                // approves a plan, back to the mode it was in before, and a
+                // `status` mid-turn is the only place it says so.
+                if let Some(mode) = system.permission_mode
+                    && self.mode.as_ref() != Some(&mode)
+                {
+                    self.reported_mode(mode, out);
+                }
             }
             // A running guess at the thinking tokens of the message being
             // produced (`estimated_tokens`, and the step since the last one).
@@ -6058,6 +6078,43 @@ mod tests {
                 "`{spelt}` did not read as {mode}"
             );
         }
+    }
+
+    #[test]
+    fn a_mode_the_cli_moves_to_mid_turn_reaches_the_session() {
+        let mut translator = Translator::new("max");
+        translator.line(r#"{"type":"system","subtype":"init","permissionMode":"plan"}"#);
+
+        // As Claude Code 2.1.309 reports a plan the operator approved: the
+        // CLI goes back to the mode it was in before plan, mid-turn.
+        let events = translator
+            .line(r#"{"type":"system","subtype":"status","status":null,"permissionMode":"auto"}"#);
+
+        assert_eq!(events, [Event::ModeSelected { mode: Mode::Auto }]);
+    }
+
+    #[test]
+    fn a_status_that_repeats_the_mode_the_cli_is_in_selects_nothing() {
+        let mut translator = Translator::new("max");
+        translator.line(r#"{"type":"system","subtype":"init","permissionMode":"plan"}"#);
+
+        let events = translator.line(
+            r#"{"type":"system","subtype":"status","status":"requesting","permissionMode":"plan"}"#,
+        );
+
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_mode_niobe_does_not_model_is_reported_once_however_often_a_status_repeats_it() {
+        let mut translator = Translator::new("max");
+        let status = r#"{"type":"system","subtype":"status","permissionMode":"bypassPermissions"}"#;
+
+        let first = translator.line(status);
+        let again = translator.line(status);
+
+        assert_eq!(warnings(&first).len(), 1, "{first:?}");
+        assert!(again.is_empty(), "{again:?}");
     }
 
     #[test]
