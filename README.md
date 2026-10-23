@@ -108,6 +108,11 @@ and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for 
 commands, paths, errors and security warnings kept whole, and `--terse on|off` switches it for one
 run. It is off by default. On the bench it cut output tokens by 14% with every task still passing.
 
+Each new conversation in the shell is asked to state the choices it makes — work left out of scope,
+one approach taken over another — on a line that opens `DECISION:`. The Activity pane lists them
+under *Decisions, as the agent says*: the agent's own account of its reasoning, which it may have
+wrong. `decisions = false` at the top of a config stops asking; `niobe -p` never asks.
+
 `trim = true` at the top of a config has the agent read a cargo command's output without cargo's
 build progress and the tests that passed. Every failure, panic, compiler error and `test result:`
 line is kept, and the whole output is written to `.niobe/trim/` and named under what the agent

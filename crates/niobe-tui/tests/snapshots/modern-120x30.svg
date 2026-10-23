@@ -584,15 +584,10 @@
 <rect x="702" y="450" width="9" height="18" fill="#252526"/>
 <text x="702" y="463" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3c3c3c">│</text>
 <rect x="711" y="450" width="9" height="18" fill="#252526"/>
-<rect x="720" y="450" width="63" height="18" fill="#252526"/>
-<text x="720" y="463" textLength="63" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcdcaa" font-weight="bold">▾ Tools</text>
-<rect x="783" y="450" width="90" height="18" fill="#252526"/>
-<text x="783" y="463" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d4d4d4">  8 calls </text>
-<rect x="873" y="450" width="27" height="18" fill="#252526"/>
-<text x="873" y="463" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#f14c4c">✗ 2</text>
-<rect x="900" y="450" width="99" height="18" fill="#252526"/>
-<text x="900" y="463" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#858585"> · 0 denied</text>
-<rect x="999" y="450" width="63" height="18" fill="#252526"/>
+<rect x="720" y="450" width="270" height="18" fill="#252526"/>
+<text x="720" y="463" textLength="270" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcdcaa" font-weight="bold">▾ Decisions, as the agent says</text>
+<rect x="990" y="450" width="72" height="18" fill="#252526"/>
+<text x="990" y="463" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d4d4d4">  0     </text>
 <rect x="1062" y="450" width="9" height="18" fill="#252526"/>
 <text x="1062" y="463" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3c3c3c">│</text>
 <rect x="1071" y="450" width="9" height="18" fill="#252526"/>
@@ -609,13 +604,9 @@
 <rect x="702" y="468" width="9" height="18" fill="#252526"/>
 <text x="702" y="481" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3c3c3c">│</text>
 <rect x="711" y="468" width="9" height="18" fill="#252526"/>
-<rect x="720" y="468" width="144" height="18" fill="#252526"/>
-<text x="720" y="481" textLength="144" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#858585">  Exploring code</text>
-<rect x="864" y="468" width="45" height="18" fill="#252526"/>
-<text x="864" y="481" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d4d4d4">   3 </text>
-<rect x="909" y="468" width="99" height="18" fill="#252526"/>
-<text x="909" y="481" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4fc1ff">▓▓▓▓▓▓▓▓▓▓▓</text>
-<rect x="1008" y="468" width="54" height="18" fill="#252526"/>
+<rect x="720" y="468" width="153" height="18" fill="#252526"/>
+<text x="720" y="481" textLength="153" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#858585">  none stated yet</text>
+<rect x="873" y="468" width="189" height="18" fill="#252526"/>
 <rect x="1062" y="468" width="9" height="18" fill="#252526"/>
 <text x="1062" y="481" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3c3c3c">│</text>
 <rect x="1071" y="468" width="9" height="18" fill="#252526"/>
@@ -640,9 +631,15 @@
 <rect x="702" y="486" width="9" height="18" fill="#252526"/>
 <text x="702" y="499" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3c3c3c">│</text>
 <rect x="711" y="486" width="9" height="18" fill="#252526"/>
-<rect x="720" y="486" width="90" height="18" fill="#252526"/>
-<text x="720" y="499" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#858585">    Read 3</text>
-<rect x="810" y="486" width="252" height="18" fill="#252526"/>
+<rect x="720" y="486" width="63" height="18" fill="#252526"/>
+<text x="720" y="499" textLength="63" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcdcaa" font-weight="bold">▾ Tools</text>
+<rect x="783" y="486" width="90" height="18" fill="#252526"/>
+<text x="783" y="499" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d4d4d4">  8 calls </text>
+<rect x="873" y="486" width="27" height="18" fill="#252526"/>
+<text x="873" y="499" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#f14c4c">✗ 2</text>
+<rect x="900" y="486" width="99" height="18" fill="#252526"/>
+<text x="900" y="499" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#858585"> · 0 denied</text>
+<rect x="999" y="486" width="63" height="18" fill="#252526"/>
 <rect x="1062" y="486" width="9" height="18" fill="#252526"/>
 <text x="1062" y="499" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3c3c3c">│</text>
 <rect x="1071" y="486" width="9" height="18" fill="#252526"/>

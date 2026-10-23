@@ -41,6 +41,10 @@ pub struct Attach {
     /// [`TERSE`] appended to the backend's system prompt. A conversation
     /// carried on keeps the prompt it began with.
     pub terse: bool,
+    /// Whether a new conversation is asked to state its decisions, with
+    /// [`decisions_asked`] appended to the backend's system prompt. A
+    /// conversation carried on keeps the prompt it began with.
+    pub decisions: bool,
     /// A directory to keep a copy of the backend's stream in, where one was
     /// asked for with [`STREAM_DIR_VAR`] and found fit by [`stream_tap`].
     pub tap: Option<PathBuf>,
@@ -59,6 +63,26 @@ pub const TERSE: &str = "Keep your replies to the user terse: short sentences, n
     restating the request, and no account of what you are about to do or have just done beyond \
     what the user needs to act on. Keep code, commands, file paths, error messages and security \
     warnings exact and whole; never shorten or paraphrase them.";
+
+/// What a conversation that states its decisions appends to the backend's
+/// system prompt, which names the marker [`niobe_core::decision`] reads them
+/// by.
+///
+/// It asks for the choices an engineer would want to know were made — scope
+/// above all, since work left out is what a reader of the diff cannot see —
+/// and for one line each, so a decision reads as a row of the pane rather
+/// than a paragraph of the reply.
+pub fn decisions_asked() -> String {
+    format!(
+        "When you make a choice the user would want to know about — leaving something out of \
+         scope, skipping or deferring work, picking one approach over another, or doing \
+         something other than what was asked — state it in your reply on a line of its own \
+         that begins with `{marker}` followed by one short sentence saying what you decided \
+         and why. Do not use `{marker}` for anything else, and do not state routine steps \
+         this way.",
+        marker = niobe_core::decision::MARKER,
+    )
+}
 
 /// The environment variable that names a directory to keep a copy of what
 /// crosses the `claude` CLI's pipes in, so that a recording is taken from the
@@ -478,6 +502,28 @@ fn resumed_options(
     Ok(options)
 }
 
+/// What a new conversation appends to the backend's system prompt, as one
+/// text, so that what reaches the model does not turn on how the CLI treats
+/// the flag given twice.
+/// `None` for a conversation carried on, which keeps the prompt it began
+/// with, and for one asked for nothing.
+fn appended(with: &Attach) -> Option<String> {
+    if with.resume.is_some() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if with.terse {
+        parts.push(TERSE.to_owned());
+    }
+    if with.decisions {
+        parts.push(decisions_asked());
+    }
+    match parts.is_empty() {
+        true => None,
+        false => Some(parts.join("\n\n")),
+    }
+}
+
 /// What the `claude` bridge is spawned with under `profile`.
 ///
 /// Written apart from the spawn so that what a profile turns into can be
@@ -494,10 +540,9 @@ fn claude_options(
     options.env = profile.profile.env().clone();
     // Before the profile's own arguments, so that a profile appending a
     // system prompt of its own still has the last word.
-    options.args = match with.terse && with.resume.is_none() {
-        true => vec!["--append-system-prompt".to_owned(), TERSE.to_owned()],
-        false => Vec::new(),
-    };
+    options.args = appended(with)
+        .map(|prompt| vec!["--append-system-prompt".to_owned(), prompt])
+        .unwrap_or_default();
     options.args.extend_from_slice(profile.profile.args());
     options.billing = profile.profile.billing();
     options.settings = crate::config::settings_path(profile, home, root)?;
@@ -836,6 +881,7 @@ mod tests {
                 budget_usd: None,
                 title: false,
                 terse: false,
+                decisions: false,
                 tap: None,
                 trim: None,
             },
@@ -967,6 +1013,17 @@ mod tests {
     }
 
     #[test]
+    fn a_decision_stated_the_way_the_prompt_asks_is_one_the_shell_reads() {
+        let asked = decisions_asked();
+        assert!(asked.contains("`DECISION:`"), "{asked}");
+        let reply = "Fixed it.\nDECISION: left the exporter alone; it is out of scope.";
+        assert_eq!(
+            niobe_core::decision::decisions(reply),
+            ["left the exporter alone; it is out of scope."]
+        );
+    }
+
+    #[test]
     fn a_terse_new_conversation_appends_the_prompt_before_the_profiles_own_arguments() {
         let config =
             config("[profiles.max]\nbackend = \"claude\"\nargs = [\"--add-dir\", \"/other\"]\n");
@@ -989,6 +1046,20 @@ mod tests {
             ["--append-system-prompt", TERSE, "--add-dir", "/other"]
         );
         assert_eq!(args(&Attach::default()), ["--add-dir", "/other"]);
+        let both = Attach {
+            decisions: true,
+            ..terse.clone()
+        };
+        assert_eq!(
+            args(&both),
+            [
+                "--append-system-prompt",
+                &format!("{TERSE}\n\n{}", decisions_asked()),
+                "--add-dir",
+                "/other"
+            ],
+            "one prompt, holding both"
+        );
         let carried_on = Attach {
             resume: Some("abc".to_owned()),
             ..terse
@@ -1212,6 +1283,7 @@ mod tests {
                 budget_usd: Some(0.5),
                 title: false,
                 terse: false,
+                decisions: false,
                 tap: None,
                 trim: None,
             },

@@ -381,6 +381,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
                     away_after(loaded.config.catch_up()),
                     loaded.config.catch_up().automatic(),
                 )
+                .with_decisions_asked(loaded.config.decisions())
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -420,6 +421,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
             budget_usd: asked.budget,
             title: loaded.config.titles() == niobe_config::Titles::Model,
             terse: asked.terse.unwrap_or(loaded.config.terse()),
+            decisions: loaded.config.decisions(),
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
             ..backend::Attach::default()
@@ -666,6 +668,7 @@ fn resume(
             // The conversation's system prompt was recorded when it began,
             // and the CLI sends that record whatever a later start passes.
             terse: false,
+            decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
         },
@@ -858,6 +861,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             // The conversation's system prompt was recorded when it began,
             // and the CLI sends that record whatever a later start passes.
             terse: false,
+            decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
         },
@@ -980,6 +984,9 @@ fn print_turn(
             // on. The history shows the session by its prompt instead.
             title: false,
             terse,
+            // Not asked: a run with no shell has no pane to list them in,
+            // and the words would be spent on every run of a job.
+            decisions: false,
             tap,
             trim: trim_for(&root, loaded.config.trim())?,
             ..backend::Attach::default()
@@ -1886,6 +1893,13 @@ PROFILES:
     niobe's bench of twenty tasks it cut output tokens by 14% and the
     replies' length by a quarter, with every task still passing. A
     conversation carried on keeps the prompt it began with.
+
+    decisions = false, at the top of a config, stops asking each new
+    conversation to state the choices it makes — work left out of scope, one
+    approach taken over another — each on a line that opens DECISION:. On by
+    default. The Activity pane lists them under Decisions, as the agent says:
+    the agent's own account of its reasoning, which it may have wrong. A
+    run with -p never asks.
 
     trim = true, at the top of a config, has the agent read a cargo command's
     output without cargo's build progress and the tests that passed; every

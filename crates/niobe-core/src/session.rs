@@ -21,6 +21,7 @@
 //! far. That record says so ([`crate::event::Usage::settles_model`]), and the
 //! records it covers stop being owed for.
 
+use crate::decision;
 use crate::test_run::{self, FailedTests, TestCounts};
 use crate::work::{self, Work};
 use std::collections::{BTreeMap, BTreeSet};
@@ -359,6 +360,19 @@ impl FileChanges {
     }
 }
 
+/// A decision a reply stated, as the agent tells it.
+///
+/// The agent's own account of its reasoning, read out of its words by
+/// [`crate::decision`], and so never more than what it says it did: whatever
+/// shows one says whose account it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionRecord {
+    /// One line, as the reply stated it.
+    pub summary: String,
+    /// The sub-agent whose reply stated it, or `None` for the session's own.
+    pub agent: Option<AgentId>,
+}
+
 /// A test run the session made, as it reported itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TestRunRecord {
@@ -590,6 +604,9 @@ pub struct SessionState {
     /// list that reorders itself under the operator is a list nobody can read.
     files: Vec<FileChanges>,
     files_at: BTreeMap<String, usize>,
+    /// Every decision the session's replies stated, in the order they were
+    /// stated.
+    decisions: Vec<DecisionRecord>,
     /// The latest test run, which replaces the one before it: an earlier
     /// run's result says nothing about the code as it is now.
     test_run: Option<TestRunRecord>,
@@ -728,12 +745,14 @@ impl SessionState {
                 bump(&mut self.assistant_messages);
                 self.pending_assistant.clear();
                 self.last_assistant = Some(text.clone());
+                self.decided(text, None);
             }
             Event::AssistantMessage {
                 text,
                 agent: Some(agent),
             } => {
                 self.agents_said.insert(agent.clone(), text.clone());
+                self.decided(text, Some(agent));
             }
 
             Event::ToolCallStart {
@@ -1102,6 +1121,19 @@ impl SessionState {
     /// Each is counted as started in the conversation it goes on in, so that
     /// its end is an end and not one without a start. The turn that typed the
     /// clear is still open, and its end is the old conversation's.
+    /// Keeps each decision `reply` states, under the agent that stated it.
+    fn decided(&mut self, reply: &str, agent: Option<&AgentId>) {
+        self.decisions
+            .extend(
+                decision::decisions(reply)
+                    .into_iter()
+                    .map(|summary| DecisionRecord {
+                        summary,
+                        agent: agent.cloned(),
+                    }),
+            );
+    }
+
     fn started_over(&mut self) -> Self {
         let running_agents = std::mem::take(&mut self.running_agents);
         let pending_permissions = std::mem::take(&mut self.pending_permissions);
@@ -1430,6 +1462,12 @@ impl SessionState {
             .as_deref()
             .and_then(words)
             .or_else(|| self.first_prompt.as_deref().and_then(words))
+    }
+
+    /// Every decision the session's replies stated, oldest first: the
+    /// agent's account of what it chose, never a fact the fold checked.
+    pub fn decisions(&self) -> &[DecisionRecord] {
+        &self.decisions
     }
 
     /// The latest test run the session made. `None` where it has made none,
@@ -2003,6 +2041,56 @@ mod tests {
             Some("Reading fetch.ts and its callers.")
         );
         assert_eq!(state.assistant_messages(), 1);
+    }
+
+    #[test]
+    fn a_decision_a_reply_states_is_kept_with_the_agent_that_stated_it() {
+        let mut state = SessionState::new();
+        state.apply(&Event::AssistantMessage {
+            text: "Done.\nDECISION: left the exporter alone; out of scope.".to_owned(),
+            agent: None,
+        });
+        state.apply(&Event::AssistantMessage {
+            text: "DECISION: read only the parser".to_owned(),
+            agent: Some("a1".into()),
+        });
+        state.apply(&Event::AssistantDelta {
+            text: "DECISION: still streaming".to_owned(),
+        });
+
+        let kept: Vec<_> = state
+            .decisions()
+            .iter()
+            .map(|d| (d.summary.as_str(), d.agent.as_ref().map(AgentId::as_str)))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("left the exporter alone; out of scope.", None),
+                ("read only the parser", Some("a1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clear_starts_the_decisions_over_and_a_compaction_does_not() {
+        let mut state = SessionState::new();
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
+        state.apply(&said("DECISION: before"));
+        state.apply(&Event::CompactionStarted);
+        state.apply(&Event::CompactionEnded);
+        assert_eq!(state.decisions().len(), 1, "a compaction keeps them");
+
+        state.apply(&Event::Cleared);
+        assert!(
+            state.decisions().is_empty(),
+            "a clear is a new conversation"
+        );
+        state.apply(&said("DECISION: after"));
+        assert_eq!(state.decisions()[0].summary, "after");
     }
 
     #[test]

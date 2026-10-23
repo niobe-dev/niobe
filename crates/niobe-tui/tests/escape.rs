@@ -469,6 +469,13 @@ fn call_detail(p: &str) -> App {
     app
 }
 
+fn decision_stated(p: &str) -> App {
+    with(vec![Event::AssistantMessage {
+        text: format!("DECISION: kept {p} out of scope"),
+        agent: None,
+    }])
+}
+
 fn overview_page(p: &str) -> App {
     let mut app = running_session();
     app.perform(niobe_tui::menu::Action::Overview);
@@ -583,6 +590,7 @@ const SITES: &[Site] = &[
     ("proposed-command-open", command_open, "echo"),
     ("call-detail", call_detail, "output"),
     ("overview", overview_page, "built"),
+    ("decision", decision_stated, "Decisions, as the agent says"),
 ];
 
 #[test]

@@ -25,7 +25,7 @@ use niobe_core::event::{
     SlashCommand, TokenCounts, ToolCallId, ToolOutcome, UsageWindow, UsageWindows,
 };
 use niobe_core::permission::{Allowlist, Rule};
-use niobe_core::session::{SessionState, TestRunRecord};
+use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
 use ratatui_textarea::{Input, TextArea, WrapMode};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -148,19 +148,26 @@ pub enum Section {
     WorkingTree,
     /// The sub-agents the session spawned, running and finished.
     SubAgents,
+    /// The decisions the agent's replies stated, as it tells them.
+    Decisions,
     /// The tools it called, and how often.
     Tools,
 }
 
 impl Section {
     /// Every section, in the order the panes draw them.
-    pub const ALL: [Section; 3] = [Section::WorkingTree, Section::SubAgents, Section::Tools];
+    pub const ALL: [Section; 4] = [
+        Section::WorkingTree,
+        Section::SubAgents,
+        Section::Decisions,
+        Section::Tools,
+    ];
 
     /// The pane this section is drawn in.
     pub fn pane(self) -> Pane {
         match self {
             Section::WorkingTree => Pane::Changes,
-            Section::SubAgents | Section::Tools => Pane::Activity,
+            Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
         }
     }
 }
@@ -1276,6 +1283,10 @@ pub struct App {
     /// business, so they are kept here rather than widening the shared state —
     /// and the event model, which carries no time — for a pane.
     agents: Vec<SubAgent>,
+    /// When each decision in [`SessionState::decisions`] was stated, in the
+    /// same order, so a pane reads the two together and cannot pair a
+    /// decision with another one's time.
+    decided_at: Vec<Option<Stamp>>,
     composer: TextArea<'static>,
     /// Whether the composer has been drawn in a box too short for all of its
     /// rows since its first row was last put back at the top. The editor keeps
@@ -1374,6 +1385,9 @@ pub struct App {
     /// What the shell sends to call the operator back, and what it has
     /// already called them back for.
     alerts: Alerts,
+    /// Whether the backend was asked to state its decisions, which is what an
+    /// empty Decisions section means: none stated, or none asked for.
+    decisions_asked: bool,
     called: Called,
     /// The session as it stood at the operator's last key, which what is
     /// shown when they come back is counted from; and as it stood when they
@@ -1778,6 +1792,7 @@ impl App {
             answered: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
+            decided_at: Vec::new(),
             composer,
             composer_scrolled: false,
             scroll: 0,
@@ -1817,6 +1832,7 @@ impl App {
             arrival: None,
             asks: VecDeque::new(),
             alerts: Alerts::none(),
+            decisions_asked: true,
             called: Called::default(),
             looked: Mark::default(),
             caught_up: Mark::default(),
@@ -1907,6 +1923,11 @@ impl App {
             }
         }
         self.session.apply(event);
+        // The fold carries no times, so when each decision was stated is kept
+        // here: the ones the event added get this moment, and a clear that
+        // started them over drops theirs.
+        self.decided_at
+            .resize(self.session.decisions().len(), self.at);
         self.reconnect_answered(event);
         if matches!(event, Event::UsageWindows(_)) {
             self.windows_at = self.at;
@@ -5175,6 +5196,19 @@ impl App {
         self
     }
 
+    /// The same shell, knowing whether the backend was asked to state the
+    /// decisions it makes. Asked unless this says otherwise.
+    #[must_use]
+    pub fn with_decisions_asked(mut self, asked: bool) -> Self {
+        self.decisions_asked = asked;
+        self
+    }
+
+    /// Whether the backend was asked to state the decisions it makes.
+    pub fn decisions_asked(&self) -> bool {
+        self.decisions_asked
+    }
+
     /// The same shell, telling the operator what happened while they were
     /// away once `after` has passed with no key pressed: of itself on the
     /// first key back where `automatic`, and on `c` or the View menu always.
@@ -5748,6 +5782,19 @@ impl App {
             .iter()
             .find(|agent| &agent.id == id)
             .map(|agent| agent.label.clone())
+    }
+
+    /// Each decision the session's replies stated, with the moment it was
+    /// stated at.
+    ///
+    /// The two are handed out together because they are kept apart: the
+    /// decision is in the session fold, which has no times, and the time is
+    /// here. A pane that paired them by index could pair the wrong two.
+    pub fn decisions(&self) -> impl Iterator<Item = (&DecisionRecord, Option<Stamp>)> {
+        self.session
+            .decisions()
+            .iter()
+            .zip(self.decided_at.iter().copied())
     }
 
     /// When a sub-agent was spawned, where the shell had a clock at the time.
@@ -13682,6 +13729,44 @@ mod tests {
             app.stamp().is_none(),
             "a fold left a clock the loop never read"
         );
+    }
+
+    #[test]
+    fn a_decision_is_handed_out_with_the_time_its_reply_was_stated_at() {
+        let mut app = app();
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
+        app.tick(Instant::now(), Some(at(49_260, 13, 41)));
+        app.apply(&said(
+            "DECISION: reuse the existing cache\nDECISION: keep the flag",
+        ));
+        app.tick(Instant::now(), Some(at(50_580, 14, 3)));
+        app.apply(&said("No decision here."));
+        app.apply(&said("DECISION: do not widen the layering table"));
+
+        let made: Vec<_> = app
+            .decisions()
+            .map(|(decision, at)| (decision.summary.as_str(), at.and_then(Stamp::local)))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                ("reuse the existing cache", LocalTime::new(13, 41)),
+                ("keep the flag", LocalTime::new(13, 41)),
+                ("do not widen the layering table", LocalTime::new(14, 3)),
+            ]
+        );
+
+        app.apply(&Event::Cleared);
+        assert_eq!(app.decisions().count(), 0, "a clear starts them over");
+        app.apply(&said("DECISION: after the clear"));
+        let after: Vec<_> = app
+            .decisions()
+            .map(|(_, at)| at.and_then(Stamp::local))
+            .collect();
+        assert_eq!(after, [LocalTime::new(14, 3)], "paired with its own time");
     }
 
     #[test]

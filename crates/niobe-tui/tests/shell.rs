@@ -4687,6 +4687,25 @@ fn the_focused_border_is_in_the_colour_the_theme_keeps_for_it() {
 /// The arrows walk the focused pane's section headers and Enter folds the one
 /// under the cursor, leaving the transcript and the composer alone.
 #[test]
+fn work_the_agent_says_it_left_out_of_scope_is_a_decision_in_the_activity_pane() {
+    let mut app = running_session();
+    app.apply(&Event::AssistantMessage {
+        text: "The etag path is done.\n\
+               DECISION: left the CSV exporter alone; it was not part of the request."
+            .to_owned(),
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("▾ Decisions, as the agent says  1"),
+        "{frame}"
+    );
+    assert!(frame.contains("left the CSV exporter alone"), "{frame}");
+}
+
+#[test]
 fn a_focused_pane_folds_the_section_under_its_cursor() {
     use ratatui::crossterm::event::KeyCode;
 
@@ -4696,10 +4715,12 @@ fn a_focused_pane_folds_the_section_under_its_cursor() {
     press(&mut app, KeyCode::Tab);
     let _ = screen(&mut app, 200, 60);
     press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     let frame = screen(&mut app, 200, 60);
 
     assert!(frame.contains("▸ Tools"), "{frame}");
+    assert!(frame.contains("▾ Decisions"), "{frame}");
     assert!(
         !app.folded(Section::SubAgents),
         "one section, the one under the cursor"

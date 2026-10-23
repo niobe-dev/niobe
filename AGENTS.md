@@ -79,7 +79,10 @@ reviewers that encode both, for an agent working in this tree.
   five-hour window moved — as the fold now less a `Mark` of it, so every figure is the fold of
   the events after the mark and no model sums anything up; the shell records the mark as
   `Event::Looked` on a key pressed after something it counts, so a session taken up again
-  tells the operator what happened after they last looked. Depends on no other
+  tells the operator what happened after they last looked. `decision.rs` reads the
+  decisions a reply states — each line that opens `DECISION:`, outside fenced code — which
+  the binary asks the agent for and the fold keeps as the agent's own account, never as a
+  fact it checked. Depends on no other
   workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
@@ -100,6 +103,8 @@ reviewers that encode both, for an agent working in this tree.
   prompts with before asking, whether a new session is titled by the model (`titles`), which a
   file nobody trusted can turn off and not on, whether a new conversation asks for terse replies
   (`terse`, off unless a file turns it on, from any file since the words are Niobe's own),
+  whether a new conversation is asked to state its decisions (`decisions`, on unless a file
+  turns it off, from any file for the same reason),
   whether the agent reads cargo's output trimmed (`trim`, the same), and
   whether the shell rings the bell and sends a
   desktop notification when it calls the operator back (`[notify]`), and how many minutes
@@ -130,7 +135,8 @@ reviewers that encode both, for an agent working in this tree.
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — and each transcript entry's attention, the highest of the events that built it, `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
-  a row that counts them, its Activity pane counting tool calls by kind of work with what
+  a row that counts them, its Activity pane listing the decisions the agent's replies stated,
+  newest first under a heading that says they are its own account, and counting tool calls by kind of work with what
   did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the
@@ -319,7 +325,8 @@ reviewers that encode both, for an agent working in this tree.
   the operator is deciding on them, and records the answer as `niobe trust` does, for the text
   that was shown. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in,
-  and where the words a terse conversation appends to the CLI's system prompt are written.
+  and where the words a terse conversation, and one asked for its decisions, append to the
+  CLI's system prompt are written.
   `trim.rs` is `trim = true`: `niobe hook trim --raw <dir>`, the `PostToolUse` hook on `Bash` the
   CLI runs after a shell call succeeds, which hands back the call's report with its output trimmed
   by `niobe-core`'s `trim.rs`, the whole of it written to `.niobe/trim/` and named in the report
