@@ -60,7 +60,11 @@ reviewers that encode both, for an agent working in this tree.
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
-  every backend reads a test run the same way; `work.rs` puts each tool call under the kind of
+  every backend reads a test run the same way; `trim.rs` is a cargo command's output with cargo's progress
+  lines and libtest's passing-test lines left out, every other line kept in order, so that it
+  reads the same to `test_run.rs` as the whole; `tests/trim.rs` trims the cargo runs recorded in
+  `tests/fixtures/trim/`, whose README carries the byte counts it asserts, worked out with `grep`;
+  `work.rs` puts each tool call under the kind of
   work it did — exploring code, editing files, building and testing, version control, the web,
   delegating, an MCP server, housekeeping — from the tool's name or, for a shell call, from the
   whole command the backend reports on the call's end, read with `test_run.rs`'s splitting, and
@@ -95,7 +99,8 @@ reviewers that encode both, for an agent working in this tree.
   account behind it is billed, the `[permissions]` rules a session answers
   prompts with before asking, whether a new session is titled by the model (`titles`), which a
   file nobody trusted can turn off and not on, whether a new conversation asks for terse replies
-  (`terse`, off unless a file turns it on, from any file since the words are Niobe's own), and
+  (`terse`, off unless a file turns it on, from any file since the words are Niobe's own),
+  whether the agent reads cargo's output trimmed (`trim`, the same), and
   whether the shell rings the bell and sends a
   desktop notification when it calls the operator back (`[notify]`), and how many minutes
   with no key pressed are away and whether the first key back shows what happened
@@ -309,6 +314,12 @@ reviewers that encode both, for an agent working in this tree.
   that was shown. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in,
   and where the words a terse conversation appends to the CLI's system prompt are written.
+  `trim.rs` is `trim = true`: `niobe hook trim --raw <dir>`, the `PostToolUse` hook on `Bash` the
+  CLI runs after a shell call succeeds, which hands back the call's report with its output trimmed
+  by `niobe-core`'s `trim.rs`, the whole of it written to `.niobe/trim/` and named in the report
+  (`niobeRawOutputPath`) and in a note under what the agent reads; and the settings the CLI is
+  started with, the profile's own file with the hook added, written there too, since the CLI reads
+  only the last `--settings` it is given. `main` answers the hook before reading anything else.
   `args.rs` parses the command line by hand; `config.rs` finds the user's and the repository's
   config files, layers them under the trust record and names the selected profile to the shell;
   `repo.rs` is where the session runs — the repository's root, name and branch, the store under

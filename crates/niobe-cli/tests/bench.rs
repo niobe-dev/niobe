@@ -220,7 +220,22 @@ fn a_turn_that_never_ends_is_ended_at_its_deadline_and_takes_its_cli_with_it() {
     assert_eq!(results["summary"]["tokens"], Value::Null);
     assert!(schema::refusals("bench.schema.json", &results).is_empty());
 
-    let pid = std::fs::read_to_string(&pid_file).expect("the stand-in started");
+    // The stand-in may start after the deadline that ended its niobe: macOS
+    // can hold up a script's first run for seconds while it assesses the new
+    // file. Started late, it finds its input closed and ends all the same.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let pid = loop {
+        match std::fs::read_to_string(&pid_file) {
+            Ok(pid) if !pid.trim().is_empty() => break pid,
+            _ => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the stand-in claude never started"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     while alive(pid.trim()) {
         assert!(

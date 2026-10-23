@@ -108,6 +108,16 @@ and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for 
 commands, paths, errors and security warnings kept whole, and `--terse on|off` switches it for one
 run. It is off by default. On the bench it cut output tokens by 14% with every task still passing.
 
+`trim = true` at the top of a config has the agent read a cargo command's output without cargo's
+build progress and the tests that passed. Every failure, panic, compiler error and `test result:`
+line is kept, and the whole output is written to `.niobe/trim/` and named under what the agent
+reads, so it can read the rest when it needs to; those files stay until they are deleted. It is off
+by default. On the cargo runs recorded in
+[`crates/niobe-core/tests/fixtures/trim/`](crates/niobe-core/tests/fixtures/trim/README.md) it
+left 7% of the bytes, before the line it adds saying where the rest is. Only a command that
+succeeds is trimmed: the `claude` CLI hands a failing one
+to the agent as it is, and lets no hook change it. A command RTK already filtered is left alone.
+
 `niobe cost` lists each session recorded in the repository with the tokens it spent and the
 money its backend reported, never an estimate. `niobe cost --json` prints it in the shape
 [`schema/cost.schema.json`](schema/cost.schema.json) publishes, and `--csv` as rows for a

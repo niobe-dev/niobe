@@ -63,6 +63,12 @@ pub fn config_path(root: &Path) -> PathBuf {
     root.join(DIR).join(niobe_config::FILE_NAME)
 }
 
+/// Where a session under `trim = true` keeps the whole outputs it trimmed,
+/// and the settings it starts the `claude` CLI with.
+pub fn trim_dir(root: &Path) -> PathBuf {
+    root.join(DIR).join(crate::trim::DIR)
+}
+
 /// Where the session store of `root` is, whether or not it exists yet.
 pub fn store_path(root: &Path) -> PathBuf {
     root.join(DIR).join(STORE_FILE)

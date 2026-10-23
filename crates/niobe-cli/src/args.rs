@@ -121,6 +121,22 @@ pub struct Invocation {
     pub allow: Vec<Rule>,
 }
 
+/// The directory `niobe hook trim --raw <dir>` names, where `args` are exactly
+/// that: the hook the `claude` CLI runs under `trim = true`, which nobody
+/// types and which is answered before the rest of the command line is read.
+/// The directory is the session's own and need not be text.
+pub fn hook_trim(args: impl IntoIterator<Item = OsString>) -> Option<PathBuf> {
+    let mut args = args.into_iter();
+    let words = [args.next()?, args.next()?, args.next()?];
+    let dir = args.next()?;
+    let fits = words
+        .iter()
+        .map(|w| w.to_str())
+        .eq([Some("hook"), Some("trim"), Some("--raw")])
+        && args.next().is_none();
+    fits.then(|| PathBuf::from(dir))
+}
+
 /// The arguments after the program name, as text, or a sentence for the
 /// operator naming the first that is not UTF-8.
 ///
@@ -729,6 +745,23 @@ mod tests {
         assert!(invocation(&["--terse", "on"]).is_ok(), "the shell takes it");
         assert!(invocation(&["-p", "x", "--terse", "yes"]).is_err());
         assert!(invocation(&["sessions", "--terse", "on"]).is_err());
+    }
+
+    #[test]
+    fn the_trim_hook_is_read_only_in_the_one_form_the_cli_is_given() {
+        let os = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert_eq!(
+            hook_trim(os(&["hook", "trim", "--raw", "/r/.niobe/trim"])),
+            Some(PathBuf::from("/r/.niobe/trim"))
+        );
+        assert_eq!(hook_trim(os(&["hook", "trim"])), None);
+        assert_eq!(
+            hook_trim(os(&["hook", "trim", "--raw", "/d", "extra"])),
+            None
+        );
+        assert_eq!(hook_trim(os(&["hook", "tidy", "--raw", "/d"])), None);
+        assert_eq!(hook_trim(os(&["-p", "hook", "trim", "--raw"])), None);
     }
 
     #[test]

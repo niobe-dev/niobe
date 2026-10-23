@@ -18,6 +18,7 @@ pub mod permission;
 pub mod proposal;
 pub mod session;
 pub mod test_run;
+pub mod trim;
 pub mod work;
 
 pub use attention::Attention;

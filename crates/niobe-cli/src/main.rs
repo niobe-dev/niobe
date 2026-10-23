@@ -40,6 +40,7 @@ mod sessions;
 mod stdout;
 mod summary;
 mod themes;
+mod trim;
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -73,6 +74,9 @@ use crate::prices::Spent;
 use crate::rules::ConfigRules;
 
 fn main() -> ExitCode {
+    if let Some(dir) = args::hook_trim(std::env::args_os().skip(1)) {
+        return hook_trim(&dir);
+    }
     // Before the arguments: `--theme` may name one of the user's own.
     themes::register(config::user_file(
         std::env::var_os("XDG_CONFIG_HOME"),
@@ -197,6 +201,40 @@ fn open(target: &Target, profile: Option<&str>, asked: &Asked) -> Result<Option<
         }
         Target::Claude(id) => import(id, profile, asked),
     }
+}
+
+/// Where a session started under `trim = true` keeps the outputs it trims,
+/// and the binary that trims them; `None` where the config leaves it off.
+/// Refused where `.niobe/` leads out of the repository, since the whole
+/// outputs would be written wherever it leads.
+fn trim_for(root: &Path, on: bool) -> Result<Option<trim::Trim>, String> {
+    if !on {
+        return Ok(None);
+    }
+    let dir = repo::trim_dir(root);
+    repo::writes_inside(root, &dir)?;
+    let exe = std::env::current_exe().map_err(|e| {
+        format!("`trim = true` runs niobe as a hook, and its path is not known: {e}")
+    })?;
+    Ok(Some(trim::Trim { exe, dir }))
+}
+
+/// `niobe hook trim --raw <dir>`, which the `claude` CLI runs after each shell
+/// call of a session under `trim = true`: the call on standard input, and on
+/// standard output what the agent reads in place of its output, or nothing.
+///
+/// Answered before anything else is read — the user's themes, the config —
+/// because the CLI waits on it after every shell command. Written to
+/// standard output as it is, not through `printable`: the reader is the CLI,
+/// which parses it as JSON, and JSON escapes every control character itself.
+fn hook_trim(dir: &Path) -> ExitCode {
+    if let Some(answer) = trim::hook(io::stdin().lock(), dir) {
+        let mut out = io::stdout().lock();
+        // A CLI that stopped reading has nothing to be told; the call is then
+        // handed back as it was, which is what no answer means.
+        let _unread = out.write_all(answer.as_bytes()).and_then(|()| out.flush());
+    }
+    ExitCode::SUCCESS
 }
 
 /// The commands that do not open a shell on a session.
@@ -382,6 +420,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
             title: loaded.config.titles() == niobe_config::Titles::Model,
             terse: asked.terse.unwrap_or(loaded.config.terse()),
             tap: tap.clone(),
+            trim: trim_for(&root, loaded.config.trim())?,
             ..backend::Attach::default()
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
@@ -627,6 +666,7 @@ fn resume(
             // and the CLI sends that record whatever a later start passes.
             terse: false,
             tap: tap.clone(),
+            trim: trim_for(&root, loaded.config.trim())?,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -818,6 +858,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             // and the CLI sends that record whatever a later start passes.
             terse: false,
             tap: tap.clone(),
+            trim: trim_for(&root, loaded.config.trim())?,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -939,6 +980,7 @@ fn print_turn(
             title: false,
             terse,
             tap,
+            trim: trim_for(&root, loaded.config.trim())?,
             ..backend::Attach::default()
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
@@ -1824,6 +1866,15 @@ PROFILES:
     niobe's bench of twenty tasks it cut output tokens by 14% and the
     replies' length by a quarter, with every task still passing. A
     conversation carried on keeps the prompt it began with.
+
+    trim = true, at the top of a config, has the agent read a cargo command's
+    output without cargo's build progress and the tests that passed; every
+    failure, error and test result is kept, and the whole output is written
+    to .niobe/trim/, until deleted, and named under what the agent reads. Off
+    by default. On the recorded cargo runs in niobe's tests it left 7% of the
+    bytes, before the line naming where the rest is. Only a
+    command that succeeds is trimmed: the claude CLI hands a failing one to
+    the agent as it is, and lets no hook change it.
 
     [notify] bell = false and notification = false turn off how niobe calls
     you back when a question waits on you or a turn you sent ends: the

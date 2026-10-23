@@ -13,6 +13,7 @@
     reason = "test helpers: a failed expectation is the test failing"
 )]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2014,4 +2015,86 @@ auth_refresh = "true\n* personal  claude  /user"
         );
     }
     assert!(out.contains('\u{2424}'), "the break is shown: {out}");
+}
+
+#[test]
+fn the_trim_hook_hands_the_cli_a_trimmed_test_run_and_keeps_the_whole_of_it() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let raw = dir.path().join(".niobe").join("trim");
+    let tests: String = (0..60)
+        .map(|n| format!("test tests::case_{n} ... ok\n"))
+        .collect();
+    let whole = format!(
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.66s\n\
+         \x20    Running unittests src/lib.rs (target/debug/deps/demo-1)\n\
+         \n\
+         running 60 tests\n\
+         {tests}\
+         \n\
+         test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\
+         \n"
+    );
+    let call = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": "cargo test 2>&1" },
+        "tool_response": { "stdout": whole, "stderr": "", "interrupted": false },
+        "tool_use_id": "toolu_1",
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .args(["hook", "trim", "--raw"])
+        .arg(&raw)
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    child
+        .stdin
+        .take()
+        .expect("standard input is piped")
+        .write_all(call.to_string().as_bytes())
+        .expect("the call is written");
+    let output = child.wait_with_output().expect("the hook ends");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let answer: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the hook prints JSON");
+    let report = &answer["hookSpecificOutput"]["updatedToolOutput"];
+    assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    let kept = report["stdout"].as_str().expect("stdout is text");
+    assert!(kept.contains("test result: ok. 60 passed"), "{kept}");
+    assert!(!kept.contains("tests::case_1 ... ok"), "{kept}");
+    let path = raw.join("toolu_1.txt");
+    assert_eq!(report["niobeRawOutputPath"], path.display().to_string());
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the whole output is kept"),
+        whole
+    );
+}
+
+#[test]
+fn the_trim_hook_answers_nothing_for_a_call_it_leaves_alone() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .args(["hook", "trim", "--raw"])
+        .arg(dir.path().join("trim"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    child
+        .stdin
+        .take()
+        .expect("standard input is piped")
+        .write_all(br#"{"tool_name":"Read","tool_input":{},"tool_response":{}}"#)
+        .expect("the call is written");
+    let output = child.wait_with_output().expect("the hook ends");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }

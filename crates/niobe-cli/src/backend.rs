@@ -44,6 +44,10 @@ pub struct Attach {
     /// A directory to keep a copy of the backend's stream in, where one was
     /// asked for with [`STREAM_DIR_VAR`] and found fit by [`stream_tap`].
     pub tap: Option<PathBuf>,
+    /// Where the agent's cargo output is trimmed through the hook, where the
+    /// config says `trim = true`. Unlike [`Attach::terse`] it holds for a
+    /// conversation carried on too: the CLI reads its hooks at every start.
+    pub trim: Option<crate::trim::Trim>,
 }
 
 /// What a terse conversation appends to the backend's system prompt.
@@ -497,6 +501,13 @@ fn claude_options(
     options.args.extend_from_slice(profile.profile.args());
     options.billing = profile.profile.billing();
     options.settings = crate::config::settings_path(profile, home, root)?;
+    if let Some(trim) = &with.trim {
+        options.settings = Some(crate::trim::settings(
+            trim,
+            profile.name,
+            options.settings.as_deref(),
+        )?);
+    }
     options.resume = with.resume.clone();
     options.budget_usd = with.budget_usd;
     options.tap = with.tap.clone();
@@ -826,6 +837,7 @@ mod tests {
                 title: false,
                 terse: false,
                 tap: None,
+                trim: None,
             },
             Some(claude.path().as_os_str().to_owned()),
             NO_HOME,
@@ -985,6 +997,51 @@ mod tests {
             args(&carried_on),
             ["--add-dir", "/other"],
             "a conversation keeps the prompt it began with"
+        );
+    }
+
+    #[test]
+    fn a_trimmed_session_starts_the_cli_under_its_settings_with_the_hook_added() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let own = dir.path().join("own.json");
+        std::fs::write(&own, r#"{"env":{"A":"1"}}"#).expect("the settings are written");
+        let config = config(&format!(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"{}\"\n",
+            own.display()
+        ));
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let trim = crate::trim::Trim {
+            exe: PathBuf::from("/bin/niobe"),
+            dir: dir.path().join(".niobe").join(crate::trim::DIR),
+        };
+        let with = Attach {
+            resume: Some("abc".to_owned()),
+            trim: Some(trim.clone()),
+            ..Attach::default()
+        };
+
+        let options = claude_options(dir.path(), &selected, &with, NO_HOME)
+            .expect("the settings are found and copied");
+
+        let settings = options.settings.expect("the CLI is handed settings");
+        assert_eq!(
+            settings,
+            trim.dir
+                .join("claude-settings-max.json")
+                .display()
+                .to_string(),
+            "a conversation carried on is trimmed too"
+        );
+        let written = std::fs::read_to_string(&settings).expect("the copy is there");
+        assert!(written.contains(r#""A": "1""#), "{written}");
+        assert!(written.contains("hook trim --raw"), "{written}");
+        assert_eq!(
+            std::fs::read_to_string(&own).expect("the profile's file is there"),
+            r#"{"env":{"A":"1"}}"#,
+            "the profile's own file is left as it was"
         );
     }
 
@@ -1156,6 +1213,7 @@ mod tests {
                 title: false,
                 terse: false,
                 tap: None,
+                trim: None,
             },
             NO_HOME,
         )

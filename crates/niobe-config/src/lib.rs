@@ -64,6 +64,14 @@
 //! terse = true
 //! ```
 //!
+//! and whether a cargo command's output reaches the agent without cargo's
+//! progress and the tests that passed, the whole of it kept under `.niobe/` —
+//! off unless a file turns it on:
+//!
+//! ```toml
+//! trim = true
+//! ```
+//!
 //! and whether the shell rings the bell and sends a desktop notification
 //! when the agent waits on the operator or a turn ends, each on unless a file
 //! turns it off:
@@ -469,6 +477,7 @@ pub struct Config {
     theme: Option<ThemeName>,
     titles: Option<Titles>,
     terse: Option<bool>,
+    trim: Option<bool>,
     keys: Keymap,
     notify: Notify,
     catch_up: CatchUp,
@@ -613,6 +622,9 @@ impl Config {
         }
         if over.terse.is_some() {
             self.terse = over.terse;
+        }
+        if over.trim.is_some() {
+            self.trim = over.trim;
         }
         // A file that rebinds keys says what every rebound key is: bindings
         // laid together could put one key on two actions, so the later file's
@@ -776,6 +788,16 @@ impl Config {
     /// replies and lets nothing a repository wrote reach the backend.
     pub fn terse(&self) -> bool {
         self.terse.unwrap_or(false)
+    }
+
+    /// Whether the agent reads a cargo command's output trimmed, which is off
+    /// unless a config says `trim = true`.
+    ///
+    /// Not gated on trust, for the reason [`Config::terse`] is not: what it
+    /// puts in front of a backend is a hook that runs Niobe's own binary,
+    /// which leaves lines out of what the agent reads and keeps all of it.
+    pub fn trim(&self) -> bool {
+        self.trim.unwrap_or(false)
     }
 
     /// The profile a session runs under: the one `requested` names, or else
@@ -1628,6 +1650,16 @@ backend = "codex"
     }
 
     #[test]
+    fn trimmed_output_is_off_until_a_file_turns_it_on_and_the_later_file_wins() {
+        assert!(!parsed("").trim());
+        assert!(parsed("trim = true\n").trim());
+        let repo = Config::parse("trim = false\n", &path("repo"))
+            .expect("a config that turns trimming off parses");
+        assert!(!parsed("trim = true\n").overlay(repo).trim());
+        assert!(invalid("trim = 1\n").contains("trim"));
+    }
+
+    #[test]
     fn a_file_nobody_trusted_may_stop_titles_costing_tokens_and_may_not_start_them() {
         let user = parsed("titles = \"first-prompt\"\n");
         let spends = Config::parse("titles = \"model\"\n", &path("repo"))
@@ -1754,8 +1786,8 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `titles`, `terse`, `profiles`, `permissions`, \
-             `keys`, `notify` or `catch_up`"
+             expected `default_profile`, `theme`, `titles`, `terse`, `trim`, `profiles`, \
+             `permissions`, `keys`, `notify` or `catch_up`"
         );
     }
 
