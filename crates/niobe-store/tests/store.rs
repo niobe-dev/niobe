@@ -382,6 +382,7 @@ fn a_turn_total_that_differed_comes_back_with_what_a_report_of_it_needs() {
         output: 8,
         cache_read,
         cache_write: 0,
+        cache_write_1h: None,
     };
     let differs = Event::TurnTotalDiffers {
         per_message: counts(6, 234_375),

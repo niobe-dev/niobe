@@ -900,6 +900,7 @@ pub fn session_whose_turn_total_differs() -> App {
         output,
         cache_read,
         cache_write,
+        cache_write_1h: None,
     };
     let events = [
         (

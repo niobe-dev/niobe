@@ -190,6 +190,7 @@ impl From<Counts> for TokenCounts {
             output: counts.output,
             cache_read: counts.cache_read,
             cache_write: counts.cache_write,
+            cache_write_1h: None,
         }
     }
 }
@@ -491,6 +492,10 @@ pub struct Translator {
     mcp_status_refused: bool,
     /// Per-message usage since the last `result`, for the turn reconciliation.
     turn: Counts,
+    /// Of the per-message cache writes since the last `result`, the ones
+    /// bought for an hour: `None` once a message gave no split, since the
+    /// share of the others would read as the turn's.
+    turn_1h: Option<u64>,
     /// The messages since the last `result` whose stream ended before their
     /// `message_delta`, as a report names them, for the turn reconciliation.
     unfinished: Vec<String>,
@@ -609,6 +614,7 @@ impl Translator {
             mcp_status_wanted: false,
             mcp_status_refused: false,
             turn: Counts::default(),
+            turn_1h: Some(0),
             unfinished: Vec::new(),
             reported: BTreeMap::new(),
             unknown_spend: None,
@@ -1459,6 +1465,7 @@ impl Translator {
         self.restored_unknown = false;
         self.unattributed.clear();
         self.turn = Counts::default();
+        self.turn_1h = Some(0);
         self.unfinished.clear();
         self.context = None;
         // The conversation after a clear is a stored session of its own,
@@ -2031,6 +2038,10 @@ impl Translator {
             .or_else(|| self.model.clone());
         let counts = Counts::from(usage);
         self.turn.add(counts);
+        self.turn_1h = self
+            .turn_1h
+            .zip(usage.cache_write_1h())
+            .map(|(sum, hour)| sum.saturating_add(hour));
         let record = Usage {
             input: counts.input,
             output: counts.output,
@@ -2399,17 +2410,31 @@ impl Translator {
     /// stop for numbers nobody contradicted.
     fn reconcile_turn(&mut self, usage: Option<&wire::Usage>, out: &mut Vec<Event>) {
         let summed = std::mem::take(&mut self.turn);
+        let summed_1h = self.turn_1h.replace(0);
         let unfinished = std::mem::take(&mut self.unfinished);
-        let Some(reported) = usage.map(Counts::from) else {
+        let Some(usage) = usage else {
             return;
         };
+        let reported = Counts::from(usage);
         if reported.is_empty() {
             return;
         }
-        if reported != summed {
+        let reported_1h = usage.cache_write_1h();
+        // The split is compared only where both sides gave one: a CLI that
+        // reports no split has said nothing that could disagree.
+        let split_differs = summed_1h
+            .zip(reported_1h)
+            .is_some_and(|(summed, reported)| summed != reported);
+        if reported != summed || split_differs {
             out.push(Event::TurnTotalDiffers {
-                per_message: summed.into(),
-                reported: reported.into(),
+                per_message: TokenCounts {
+                    cache_write_1h: summed_1h,
+                    ..summed.into()
+                },
+                reported: TokenCounts {
+                    cache_write_1h: reported_1h,
+                    ..reported.into()
+                },
                 backend_session: self.backend_session.clone(),
                 unfinished,
             });
@@ -3958,6 +3983,62 @@ mod tests {
             events.iter().all(|event| !matches!(event, Event::Usage(_))),
             "a mismatch invented a record to close the gap"
         );
+    }
+
+    fn written_for_an_hour(write: u64, hour: u64) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"message_delta","usage":{{"input_tokens":2,"output_tokens":10,"cache_creation_input_tokens":{write},"cache_creation":{{"ephemeral_5m_input_tokens":{},"ephemeral_1h_input_tokens":{hour}}}}}}}}}"#,
+            write - hour
+        )
+    }
+
+    fn closed_with_an_hour(write: u64, hour: u64) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","usage":{{"input_tokens":4,"output_tokens":20,"cache_creation_input_tokens":{write},"cache_creation":{{"ephemeral_5m_input_tokens":{},"ephemeral_1h_input_tokens":{hour}}}}}}}"#,
+            write - hour
+        )
+    }
+
+    #[test]
+    fn a_turn_whose_one_hour_cache_writes_do_not_add_up_is_reported() {
+        let mut translator = translator();
+        translator.line(&written_for_an_hour(300, 300));
+        translator.line(&written_for_an_hour(200, 0));
+
+        let events = translator.line(&closed_with_an_hour(500, 500));
+
+        let differs = differences(&events);
+        assert_eq!(differs.len(), 1, "{events:?}");
+        let (per_message, reported, _, _) = differs[0];
+        assert_eq!(per_message.cache_write, reported.cache_write);
+        assert_eq!(
+            (per_message.cache_write_1h, reported.cache_write_1h),
+            (Some(300), Some(500))
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_one_hour_cache_writes_add_up_is_not_reported() {
+        let mut translator = translator();
+        translator.line(&written_for_an_hour(300, 300));
+        translator.line(&written_for_an_hour(200, 100));
+
+        let events = translator.line(&closed_with_an_hour(500, 400));
+
+        assert!(differences(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_turn_with_a_message_that_gave_no_split_does_not_compare_the_one_hour_share() {
+        let mut translator = translator();
+        translator.line(&written_for_an_hour(300, 300));
+        translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":2,"output_tokens":10,"cache_creation_input_tokens":200}}}"#,
+        );
+
+        let events = translator.line(&closed_with_an_hour(500, 500));
+
+        assert!(differences(&events).is_empty(), "{events:?}");
     }
 
     type Difference<'a> = (

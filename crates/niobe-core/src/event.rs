@@ -237,6 +237,12 @@ pub struct TokenCounts {
     pub cache_read: u64,
     /// Input tokens written into the prompt cache.
     pub cache_write: u64,
+    /// Of the cache writes, the ones bought for an hour rather than for five
+    /// minutes. `None` where a side gave no split, or summed a record that
+    /// gave none: a share counted from part of the writes would read as all
+    /// of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
 }
 
 impl TokenCounts {
@@ -256,16 +262,25 @@ impl TokenCounts {
             output: other.output.saturating_sub(self.output),
             cache_read: other.cache_read.saturating_sub(self.cache_read),
             cache_write: other.cache_write.saturating_sub(self.cache_write),
+            cache_write_1h: self
+                .cache_write_1h
+                .zip(other.cache_write_1h)
+                .map(|(this, other)| other.saturating_sub(this)),
         }
     }
 
-    /// These counts and `other`'s, summed field by field.
+    /// These counts and `other`'s, summed field by field. The one-hour share
+    /// is summed only where both have one.
     pub fn plus(&self, other: &Self) -> Self {
         Self {
             input: self.input.saturating_add(other.input),
             output: self.output.saturating_add(other.output),
             cache_read: self.cache_read.saturating_add(other.cache_read),
             cache_write: self.cache_write.saturating_add(other.cache_write),
+            cache_write_1h: self
+                .cache_write_1h
+                .zip(other.cache_write_1h)
+                .map(|(this, other)| this.saturating_add(other)),
         }
     }
 }

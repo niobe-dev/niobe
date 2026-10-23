@@ -3986,6 +3986,7 @@ mod tests {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: None,
         };
         let differs = |per_message, reported| Event::TurnTotalDiffers {
             per_message,

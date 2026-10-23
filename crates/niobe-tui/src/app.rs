@@ -8884,10 +8884,17 @@ fn turn_total_differs(
 ) -> String {
     let more = per_message.short_of(reported).total();
     let fewer = reported.short_of(per_message).total();
+    let split = per_message.cache_write_1h.zip(reported.cache_write_1h);
     let said = match (more, fewer) {
-        (0, 0) => {
-            "The CLI's total for this turn does not match what its messages reported.".to_owned()
-        }
+        (0, 0) => match split {
+            Some((messages, total)) if messages != total => format!(
+                "The CLI's total for this turn bought {total} of its cache writes for an hour; \
+                 its messages said {messages}. Each cache write is priced at the lifetime its \
+                 message gave."
+            ),
+            _ => "The CLI's total for this turn does not match what its messages reported."
+                .to_owned(),
+        },
         (more, 0) => format!(
             "The CLI counted {more} tokens for this turn beyond what its messages reported. \
              The session's totals hold them where the CLI's bill carried them; no message \
@@ -8912,12 +8919,17 @@ fn turn_total_differs(
     format!("{said}\n{}", detail.join(" · "))
 }
 
-/// Token counts as a report gives them, each figure named.
+/// Token counts as a report gives them, each figure named, and the cache
+/// writes bought for an hour where the counts split them.
 fn figures(counts: &TokenCounts) -> String {
-    format!(
+    let figures = format!(
         "{} in, {} out, {} cache read, {} cache write",
         counts.input, counts.output, counts.cache_read, counts.cache_write
-    )
+    );
+    match counts.cache_write_1h {
+        Some(hour) => format!("{figures}, {hour} for an hour"),
+        None => figures,
+    }
 }
 
 /// A count of things in the transcript, as a figure.
@@ -10360,6 +10372,7 @@ mod tests {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: None,
         };
         app.apply(&Event::UserMessage {
             text: "one".to_owned(),
@@ -10391,6 +10404,46 @@ mod tests {
         );
         assert!(detail.contains("reported 40 in"), "{detail}");
         assert_eq!(app.session().errors(), 0);
+    }
+
+    #[test]
+    fn a_turn_whose_one_hour_cache_writes_alone_differ_says_how() {
+        let mut app = app();
+        let counts = |cache_write_1h| TokenCounts {
+            input: 4,
+            output: 20,
+            cache_read: 0,
+            cache_write: 500,
+            cache_write_1h,
+        };
+        app.apply(&Event::UserMessage {
+            text: "one".to_owned(),
+        });
+        app.apply(&Event::TurnTotalDiffers {
+            per_message: counts(Some(300)),
+            reported: counts(Some(500)),
+            backend_session: None,
+            unfinished: Vec::new(),
+        });
+
+        let last = app.entries().last().expect("an entry");
+        let (said, detail) = last.body.split_once('\n').expect("words, then the detail");
+        assert_eq!(
+            said,
+            "The CLI's total for this turn bought 500 of its cache writes for an hour; \
+             its messages said 300. Each cache write is priced at the lifetime its message \
+             gave."
+        );
+        assert!(
+            detail.contains(
+                "per message 4 in, 20 out, 0 cache read, 500 cache write, 300 for an hour"
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("500 cache write, 500 for an hour"),
+            "{detail}"
+        );
     }
 
     #[test]

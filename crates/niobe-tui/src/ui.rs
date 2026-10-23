@@ -7794,6 +7794,7 @@ mod tests {
             output: 0,
             cache_read,
             cache_write: 0,
+            cache_write_1h: None,
         };
         app.apply(&niobe_core::event::Event::TurnTotalDiffers {
             per_message: counts(10, 0),

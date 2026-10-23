@@ -2076,6 +2076,7 @@ mod cut_off {
         output: 9_175,
         cache_read: 352_445,
         cache_write: 7_496,
+        cache_write_1h: None,
     };
 
     fn translated() -> Vec<Event> {
@@ -2091,6 +2092,7 @@ mod cut_off {
                     output: usage.output,
                     cache_read: usage.cache_read,
                     cache_write: usage.cache_write,
+                    cache_write_1h: None,
                 }),
                 _ => None,
             })
