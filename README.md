@@ -39,6 +39,15 @@ CLI you already have and reads what the CLI says. It does not read the CLI's cre
 set a user agent or open a connection of its own; [SECURITY.md](SECURITY.md) names the check
 that enforces each of those.
 
+It is not Claude Code's own screen either. The CLI it drives says `/vim`, `/terminal-setup`,
+`/statusline`, `/privacy-settings`, `/upgrade`, `/plugin`, `/add-dir` and `/tasks` are not
+available there, and Niobe does not draw them in their place. `/fast` is refused by the CLI to a
+session it is driven in. Claude Code's names for what Niobe has its own of open Niobe's views
+instead: `/status` the settings, `/permissions` the standing answers, `/export` the transcript
+export, `/bug` the bug report, `/login` and `/logout` the sign-in, and the rest F1 lists. A
+command the CLI does not list, such as `/todos`, is held on the first Enter, since the CLI would
+hand it to the model as text and spend a turn.
+
 ## Install
 
 On macOS (arm64, x86_64) or Linux (x86_64, arm64):

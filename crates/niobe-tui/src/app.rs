@@ -530,6 +530,25 @@ pub enum Purpose {
     Rewind,
 }
 
+/// The Shortcuts sheet's rows on what a typed command does: the names that
+/// open the shell's own view rather than reach the backend, each beside the
+/// menu item it opens, and the hold on a command the backend did not list.
+fn typed_rows() -> [String; 3] {
+    let own = crate::menu::TYPED
+        .iter()
+        .filter(|typed| !typed.backend)
+        .filter_map(|typed| {
+            crate::menu::label(typed.action).map(|label| format!("/{} {label}", typed.name))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    [
+        "Typed as a prompt, these open the shell's own:".to_owned(),
+        own,
+        "A command the backend does not list is held once: Enter again sends it.".to_owned(),
+    ]
+}
+
 /// The command `text` opens with where it is a word the backend did not
 /// list among `listed`, which must not be empty. A word with a `/` inside it
 /// is a path, not a command.
@@ -4927,6 +4946,8 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" · "),
         );
+        rows.push(String::new());
+        rows.extend(typed_rows());
         if !self.keymap.is_empty() {
             rows.push(
                 "Rebound in your config: ".to_owned()
@@ -10476,6 +10497,27 @@ mod tests {
             crate::menu::Action::Resume,
         );
         typed_as_asked(app, "/resume", crate::menu::Action::Resume);
+    }
+
+    #[test]
+    fn the_shortcuts_name_the_typed_commands_that_open_the_shells_own_and_the_hold() {
+        let mut app = app();
+        app.perform(crate::menu::Action::Shortcuts);
+        let rows = app.sheet().expect("F1 opens the sheet").rows.join("\n");
+        for named in [
+            "/status Settings",
+            "/permissions Permissions",
+            "/export Export transcript",
+            "/bug Report a bug",
+            "/login Login / Logout",
+        ] {
+            assert!(rows.contains(named), "{named} missing from:\n{rows}");
+        }
+        assert!(
+            !rows.contains("/compact"),
+            "a backend command is the backend's:\n{rows}"
+        );
+        assert!(rows.contains("Enter again"), "{rows}");
     }
 
     #[test]

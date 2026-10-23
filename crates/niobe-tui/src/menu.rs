@@ -283,6 +283,15 @@ pub const MENUS: [Menu; 6] = [
     },
 ];
 
+/// What the menus call the item that performs `action`, where one does.
+pub fn label(action: Action) -> Option<&'static str> {
+    MENUS
+        .iter()
+        .flat_map(|menu| menu.items)
+        .find(|item| item.action == action)
+        .map(|item| item.label)
+}
+
 /// A command the shell answers itself when a prompt is that command, so that
 /// typing it does what its menu item and its F-key do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
