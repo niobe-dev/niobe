@@ -78,6 +78,12 @@ pub enum Action {
         /// The command, exactly as it would run.
         command: String,
     },
+    /// Stop planning and carry out `plan`: the agent was asked to plan before
+    /// it acts, and asks whether the plan it wrote may go ahead.
+    Plan {
+        /// The plan, as the agent wrote it, in markdown.
+        plan: String,
+    },
 }
 
 #[cfg(test)]
@@ -108,6 +114,20 @@ mod tests {
         );
         let stored = serde_json::to_string(&proposal).expect("a proposal serializes");
         assert!(!stored.contains("existed"), "{stored}");
+        let read: Proposal = serde_json::from_str(&stored).expect("and reads back");
+        assert_eq!(read, proposal);
+    }
+
+    #[test]
+    fn a_plan_is_stored_and_read_back_as_a_plan() {
+        let proposal = Proposal::new(
+            Action::Plan {
+                plan: "1. Guard it.".to_owned(),
+            },
+            ["plan"],
+        );
+        let stored = serde_json::to_string(&proposal).expect("a proposal serializes");
+        assert!(stored.contains(r#""kind":"plan""#), "{stored}");
         let read: Proposal = serde_json::from_str(&stored).expect("and reads back");
         assert_eq!(read, proposal);
     }

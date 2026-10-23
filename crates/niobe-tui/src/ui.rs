@@ -3319,6 +3319,25 @@ fn option_row(
 /// as it is written into the config is shown where `spelled` asks for it,
 /// which Ctrl+T does: it is for the operator who wants the exact text.
 fn option_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
+    let plan = ask
+        .proposed
+        .as_ref()
+        .is_some_and(|proposed| proposed.is_plan());
+    match (answer, plan) {
+        (Answer::Once, true) => (
+            "Go ahead with the plan".to_owned(),
+            "the agent stops planning".to_owned(),
+        ),
+        (Answer::No, true) => (
+            "Keep planning".to_owned(),
+            "Tab says what to change".to_owned(),
+        ),
+        (answer, _) => answer_words(answer, ask, spelled),
+    }
+}
+
+/// What an answer to any call but a plan is called, and what choosing it does.
+fn answer_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
     match answer {
         Answer::Once => ("Allow once".to_owned(), "this call only".to_owned()),
         Answer::AlwaysTool => (
@@ -8820,5 +8839,30 @@ mod tests {
         let mut app = bare();
         sent(&mut app, 76_000, "opus-5", Some(200_000));
         assert_eq!(context_of(&app, 15), ["  38%  76k"]);
+    }
+
+    #[test]
+    fn a_plan_is_approved_or_planned_further_in_those_words() {
+        let ask = Ask {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: r#"{"plan":"1. Guard it."}"#.to_owned(),
+            target: None,
+            proposed: Some(crate::proposed::Proposed::new(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: "1. Guard it.".to_owned(),
+                },
+                ["plan"],
+            ))),
+            reason: None,
+            turn: 1,
+            agent: None,
+        };
+
+        assert_eq!(
+            option_words(Answer::Once, &ask, false).0,
+            "Go ahead with the plan"
+        );
+        assert_eq!(option_words(Answer::No, &ask, false).0, "Keep planning");
     }
 }

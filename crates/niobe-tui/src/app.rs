@@ -358,12 +358,14 @@ struct Called {
 impl Ask {
     /// Whether this prompt can be given `answer`. A standing answer about the
     /// target needs a target to be about, and a standing answer is offered
-    /// only where its rule can be written into a config and read back.
+    /// only where its rule can be written into a config and read back — and
+    /// never to a plan, which it would let go ahead unread every time after.
     pub fn offers(&self, answer: Answer) -> bool {
+        let plan = self.proposed.as_ref().is_some_and(Proposed::is_plan);
         match answer {
             Answer::Once | Answer::No => true,
-            Answer::AlwaysTool => self.tool_rule().is_some(),
-            Answer::AlwaysTarget => self.target_rule().is_some(),
+            Answer::AlwaysTool => !plan && self.tool_rule().is_some(),
+            Answer::AlwaysTarget => !plan && self.target_rule().is_some(),
         }
     }
 
@@ -11045,6 +11047,29 @@ mod tests {
             untargeted.ask_options(),
             [Answer::Once, Answer::AlwaysTool, Answer::No]
         );
+    }
+
+    /// A standing answer to a plan would let every later plan go ahead
+    /// unread, which is what asking for a plan was meant to stop.
+    #[test]
+    fn a_plan_offers_no_standing_answer() {
+        let mut app = app();
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: r#"{"plan":"1. Guard it."}"#.to_owned(),
+            target: None,
+            proposal: Some(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: "1. Guard it.".to_owned(),
+                },
+                ["plan"],
+            )),
+            reason: None,
+            agent: None,
+        });
+
+        assert_eq!(app.ask_options(), [Answer::Once, Answer::No]);
     }
 
     #[test]

@@ -228,7 +228,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
     }));
     /// What a proposal does, built around a payload.
     type Proposing = fn(&str) -> Action;
-    let actions: [(&str, Proposing); 3] = [
+    let actions: [(&str, Proposing); 4] = [
         ("proposed-edit", |p: &str| Action::Replace {
             path: format!("src/{p}.rs"),
             old: format!("old {p}\nkept"),
@@ -242,6 +242,9 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
         }),
         ("proposed-command", |p: &str| Action::Command {
             command: format!("echo {p}"),
+        }),
+        ("proposed-plan", |p: &str| Action::Plan {
+            plan: format!("# {p}\n\n1. **{p}**\n2. `{p}`"),
         }),
     ];
     for (name, action) in actions {

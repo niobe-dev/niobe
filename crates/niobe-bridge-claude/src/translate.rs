@@ -2225,8 +2225,8 @@ impl Translator {
     }
 
     /// What a call to the CLI's tool `tool` would do, read from its `input`,
-    /// for the tools whose arguments are known here: `Edit`, `Write` and
-    /// `Bash`. `None` for any other tool, and for arguments not of the shape
+    /// for the tools whose arguments are known here: `Edit`, `Write`, `Bash`
+    /// and `ExitPlanMode`. `None` for any other tool, and for arguments not of the shape
     /// the tool takes, which the question then shows as they are.
     fn proposal_of(&self, tool: &str, input: &serde_json::Value) -> Option<Proposal> {
         let text = |key: &str| input.get(key)?.as_str().map(str::to_owned);
@@ -2261,6 +2261,12 @@ impl Translator {
                     command: text("command")?,
                 },
                 ["command"],
+            )),
+            "ExitPlanMode" => Some(Proposal::new(
+                Action::Plan {
+                    plan: text("plan")?,
+                },
+                ["plan"],
             )),
             _ => None,
         }
@@ -5852,6 +5858,24 @@ mod tests {
         assert!(!proposal.covers("dangerouslyDisableSandbox"));
     }
 
+    #[test]
+    fn leaving_plan_mode_proposes_the_plan_and_leaves_its_file_to_be_shown() {
+        // As Claude Code 2.1.309 asks it, plan and the file it was saved to.
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"1. Guard mean().\n2. Run it.","planFilePath":"/home/u/.claude/plans/p.md"},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        )
+        .expect("a plan is read");
+        assert_eq!(
+            proposal.action(),
+            &Action::Plan {
+                plan: "1. Guard mean().\n2. Run it.".to_owned()
+            }
+        );
+        assert!(proposal.covers("plan"));
+        assert!(!proposal.covers("planFilePath"));
+    }
+
     /// Arguments of another shape than the tool's are not read as the tool's:
     /// the question shows them as they are.
     #[test]
@@ -5864,6 +5888,7 @@ mod tests {
             ),
             ("Write", r#"{"file_path":"/f"}"#),
             ("Bash", r#"{"cmd":"ls"}"#),
+            ("ExitPlanMode", r#"{"planFilePath":"/p.md"}"#),
             ("Read", r#"{"file_path":"/f"}"#),
             ("mcp__notion__search", r#"{"command":"ls"}"#),
         ] {

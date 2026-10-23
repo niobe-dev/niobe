@@ -55,8 +55,8 @@ reviewers that encode both, for an agent working in this tree.
   F1 to F12 and the Ctrl letters nothing else answers to — checked once for a key two actions would
   share or another action's own, so the config that writes them and the shell that draws them agree;
   `proposal.rs` is what a call
-  waiting on the operator would do — replace text in a file, write a file whole, run a command —
-  as the backend read it out of the call's arguments, and which arguments that reading covers; `test_run.rs` recognises a shell
+  waiting on the operator would do — replace text in a file, write a file whole, run a command,
+  let a plan go ahead — as the backend read it out of the call's arguments, and which arguments that reading covers; `test_run.rs` recognises a shell
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
@@ -211,7 +211,8 @@ reviewers that encode both, for an agent working in this tree.
   the JSON as sent behind Ctrl+T, `proposed.rs` draws what a question's call would do where the
   backend read it — an edit as the lines it removes and adds, wrapped and cut where a transcript
   diff is, a file written as the lines it will hold and whether what it held is lost, a command
-  once — and the arguments that reading does not cover by key, `tags.rs` names each sub-agent by one short word of the kind of agent
+  once, a plan whole as its markdown, with no standing answer offered and its refusal named
+  "keep planning" — and the arguments that reading does not cover by key, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
   it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
@@ -249,7 +250,7 @@ reviewers that encode both, for an agent working in this tree.
   `translate.rs` turns one message of it into events and owns no process — and reads the CLI's
   own mark of a call it did not run for want of permission, beside the result live and as the
   transcript's `permissionDecision`, as refused, whoever refused it — and reads an `Edit`,
-  `Write` or `Bash` permission prompt's arguments as what the call would do, and the MCP
+  `Write`, `Bash` or `ExitPlanMode` permission prompt's arguments as what the call would do, and the MCP
   servers every `init` lists, each with the tools of the session's that are its own, and the
   CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or
   address (never its arguments, environment or headers) — which it keeps for every later
