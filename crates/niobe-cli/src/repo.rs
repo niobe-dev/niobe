@@ -570,6 +570,14 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver
     }
 }
 
+/// The files the working tree of the repository at `root` holds changed or
+/// untracked, as git names them from the root, read once; `None` where git
+/// cannot read it.
+pub fn uncommitted(root: &Path) -> Option<Vec<String>> {
+    let repo = read(root, "", &mut Counts::default()).ok()?;
+    Some(repo.working.into_iter().map(|file| file.path).collect())
+}
+
 /// Everything the shell shows about the repository at `root`, in one pass.
 ///
 /// `counts` is what the last read counted in the files git does not track,

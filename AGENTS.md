@@ -351,7 +351,7 @@ reviewers that encode both, for an agent working in this tree.
   a log with no times is a floor; `profiles.rs` and `sessions.rs` are what
   `niobe profiles` and `niobe sessions` print; `overview.rs` is what `niobe overview` prints —
   every session the store holds, or the newest `--last` or those `--since` a day, folded, as one Markdown page of what went well and what went
-  wrong, what was left open, the tools used most, the paths changed most and the decisions the
+  wrong, what was left open — the files the sessions changed that git still lists uncommitted among it — the tools used most, the paths changed most and the decisions the
   agents stated, newest first and marked as their own account, with no figure a
   model wrote, and the page the shell's overview shows, written on a thread of its own; `cost.rs` is
   what `niobe cost` prints — the same sessions, each with its tokens per kind and per model and

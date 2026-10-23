@@ -199,6 +199,33 @@ fn the_overviews_totals_are_the_sums_of_each_session_folded_alone() {
 }
 
 #[test]
+fn a_file_the_sessions_changed_that_git_still_lists_as_changed_is_left_open() {
+    let (_dir, root) = repository();
+    std::fs::remove_dir_all(root.join(".git")).expect("the stand-in .git is removed");
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .expect("git runs");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::create_dir_all(root.join("catalog")).expect("a directory can be made");
+    std::fs::write(root.join("catalog/fetch.py"), "print()\n").expect("a file can be written");
+    std::fs::write(root.join("unrelated.txt"), "x\n").expect("a file can be written");
+
+    let page = printed(&root);
+
+    assert!(
+        page.contains("- 1 file the sessions changed is not committed: `catalog/fetch.py`\n"),
+        "{page}"
+    );
+    assert!(!page.contains("unrelated.txt"), "{page}");
+}
+
+#[test]
 fn a_repository_with_nothing_recorded_says_so_in_one_line() {
     let dir = tempfile::tempdir().expect("a temporary directory can be created");
     let root = dir.path().join("empty");

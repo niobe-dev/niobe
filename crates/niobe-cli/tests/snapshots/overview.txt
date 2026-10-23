@@ -22,6 +22,7 @@
 ## Left open
 
 - Session 1: stopped in the middle of a turn — `niobe --resume 1`
+- Whether what the sessions changed is committed could not be read from git.
 
 ## Most used tools
 

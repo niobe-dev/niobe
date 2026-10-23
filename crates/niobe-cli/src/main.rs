@@ -1157,7 +1157,13 @@ fn note(text: &str) {
 fn print_overview(narrowing: args::Narrowing) -> Result<(), String> {
     let root = repo::root(&cwd()?);
     let folded = overview::narrowed(overview::read(&root)?, narrowing);
-    for line in overview::markdown(&repo::describe(&root).name, &folded, narrowing) {
+    let uncommitted = repo::uncommitted(&root);
+    for line in overview::markdown(
+        &repo::describe(&root).name,
+        &folded,
+        narrowing,
+        uncommitted.as_deref(),
+    ) {
         say!("{line}");
     }
     Ok(())
