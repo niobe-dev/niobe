@@ -209,3 +209,46 @@ fn a_repository_with_nothing_recorded_says_so_in_one_line() {
         "# What has been built in empty\n\nNo sessions recorded in this repository.\n"
     );
 }
+
+#[test]
+fn each_decision_a_reply_stated_is_listed_at_the_time_its_reply_was_stored() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let root = dir.path().join("catalog");
+    std::fs::create_dir_all(root.join(".git")).expect("a .git directory can be made");
+    std::fs::create_dir(root.join(".niobe")).expect("a .niobe directory can be made");
+    let store = Store::open(&root.join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
+    let session = store.create_session().expect("a session is created");
+    let said = |text: &str| niobe_core::Event::AssistantMessage {
+        text: text.to_owned(),
+        agent: None,
+    };
+    let at = |minutes: u64| UNIX_EPOCH + Duration::from_millis(RECORDED_ON_MS + minutes * 60_000);
+    for (event, minutes) in [
+        (
+            niobe_core::Event::UserMessage {
+                text: "add etags".to_owned(),
+            },
+            0,
+        ),
+        (said("DECISION: reused the LRU rather than a second map"), 3),
+        (said("Done.\nDECISION: left the CSV exporter alone"), 7),
+    ] {
+        store
+            .append_at(session, &event, at(minutes))
+            .expect("an append succeeds");
+    }
+
+    let page = printed(&root);
+
+    assert!(
+        page.contains(
+            "## Decisions, as the agents said\n\n\
+             As each session's agent stated them in its replies: its own account of what it \
+             chose, which nothing here checked. Newest first.\n\n\
+             - 2026-09-18 12:07 UTC, session 1: left the CSV exporter alone\n\
+             - 2026-09-18 12:03 UTC, session 1: reused the LRU rather than a second map\n"
+        ),
+        "{page}"
+    );
+}

@@ -295,6 +295,7 @@ mod tests {
             id: id.to_string().parse().expect("a number is a session id"),
             started_at: UNIX_EPOCH + Duration::from_secs(started),
             state,
+            decided_at: Vec::new(),
         }
     }
 
