@@ -323,7 +323,8 @@ reviewers that encode both, for an agent working in this tree.
   `trim.rs` is `trim = true`: `niobe hook trim --raw <dir>`, the `PostToolUse` hook on `Bash` the
   CLI runs after a shell call succeeds, which hands back the call's report with its output trimmed
   by `niobe-core`'s `trim.rs`, the whole of it written to `.niobe/trim/` and named in the report
-  (`niobeRawOutputPath`) and in a note under what the agent reads; and the settings the CLI is
+  (`niobeRawOutputPath`) and in a note under what the agent reads, and clears out the whole
+  outputs there older than fourteen days; and the settings the CLI is
   started with, the profile's own file with the hook added, written there too, since the CLI reads
   only the last `--settings` it is given. `main` answers the hook before reading anything else.
   `args.rs` parses the command line by hand; `config.rs` finds the user's and the repository's

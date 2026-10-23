@@ -23,6 +23,8 @@
 //! [`DIR`] under the repository's `.niobe/`, which ignores all of it for git:
 //! the outputs hold whatever the commands printed, and the settings whatever
 //! the operator put in theirs.
+//! A whole output is kept for [`KEEP_DAYS`] days: each one the hook writes
+//! clears out those older than that.
 //!
 //! The hook changes nothing it cannot account for. A call that is not a
 //! shell command, a command `rtk` already ran (RTK, a hook of its own, filters
@@ -57,6 +59,13 @@ const SETTINGS: &str = "claude-settings-";
 /// The most of its input the hook reads: the CLI hands it the command's whole
 /// output, and one past this is handed back untrimmed rather than held.
 const INPUT_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// How many days a whole output is kept after the hook wrote it. It is read
+/// back while the session that ran the command is open, and from the CLI's
+/// own transcript when that session is imported; a store's session holds the
+/// whole output in its own record. Past this, an import reads the call as
+/// the agent read it, trimmed.
+const KEEP_DAYS: u64 = 14;
 
 /// The CLI's shell tool, the one call whose output is trimmed.
 const SHELL_TOOL: &str = "Bash";
@@ -259,6 +268,7 @@ pub fn hook(input: impl Read, dir: &Path) -> Option<String> {
     let path = dir.join(format!("{}.txt", file_name(id)?));
     prepare(dir).ok()?;
     write_new(&path, whole.as_bytes()).ok()?;
+    prune(dir, std::time::SystemTime::now());
 
     let mut updated = report.clone();
     let note = note(trimmed.left_out(), whole.len(), trimmed.text().len(), &path);
@@ -279,6 +289,41 @@ pub fn hook(input: impl Read, dir: &Path) -> Option<String> {
         }
     });
     Some(answer.to_string())
+}
+
+/// Removes the whole outputs in `dir` written more than [`KEEP_DAYS`] before
+/// `now`, so that a repository the hook runs in every day does not keep
+/// every command's output for ever. Only a file the hook would have written
+/// is removed — a regular file named as [`file_name`] names one, `.txt` —
+/// never a link, the settings copies or anything else put there. A file
+/// that cannot be read or removed is left as it is: tidying up never fails
+/// the call.
+fn prune(dir: &Path, now: std::time::SystemTime) {
+    let keep = std::time::Duration::from_secs(KEEP_DAYS.saturating_mul(86_400));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ours = path.extension().is_some_and(|ext| ext == "txt")
+            && path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(file_name)
+                .is_some();
+        // `DirEntry::metadata` does not follow a link, so a link is seen as one.
+        let expired = entry
+            .metadata()
+            .ok()
+            .filter(|meta| meta.is_file())
+            .and_then(|meta| {
+                let written = meta.modified().ok()?;
+                now.duration_since(written).ok()
+            });
+        if ours && expired.is_some_and(|age| age > keep) {
+            let _left = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// Whether `command` is one RTK rewrote to run through itself, whose output
@@ -432,6 +477,75 @@ mod tests {
             std::fs::read_to_string(path).expect("the whole output is kept"),
             format!("built\n\n{progress}")
         );
+    }
+
+    fn aged(path: &Path, days: u64) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("the file was just written");
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+        file.set_modified(then).expect("a file's time can be set");
+    }
+
+    #[test]
+    fn whole_outputs_kept_past_their_time_are_removed_and_nothing_else_is() {
+        let scratch = scratch();
+        let dir = scratch.path().join(DIR);
+        prepare(&dir).expect("the directory is made");
+        let old = dir.join("toolu_old.txt");
+        let recent = dir.join("toolu_recent.txt");
+        let settings = dir.join("claude-settings-max.json");
+        let foreign = dir.join("notes.md");
+        for path in [&old, &recent, &settings, &foreign] {
+            std::fs::write(path, "kept?").expect("a file is written");
+        }
+        for path in [&old, &settings, &foreign] {
+            aged(path, KEEP_DAYS + 1);
+        }
+        aged(&recent, KEEP_DAYS - 1);
+        let ignore = dir.join(".gitignore");
+        aged(&ignore, KEEP_DAYS + 1);
+
+        prune(&dir, std::time::SystemTime::now());
+
+        assert!(!old.exists(), "an output past its time was kept");
+        for path in [&recent, &settings, &foreign, &ignore] {
+            assert!(path.exists(), "{} was removed", path.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_named_like_an_output_is_not_followed_or_removed() {
+        let scratch = scratch();
+        let dir = scratch.path().join(DIR);
+        prepare(&dir).expect("the directory is made");
+        let target = scratch.path().join("elsewhere.txt");
+        std::fs::write(&target, "not niobe's").expect("a file is written");
+        aged(&target, KEEP_DAYS + 1);
+        let link = dir.join("toolu_link.txt");
+        std::os::unix::fs::symlink(&target, &link).expect("a link is made");
+
+        prune(&dir, std::time::SystemTime::now());
+
+        assert!(target.exists());
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+    }
+
+    #[test]
+    fn a_trimmed_call_clears_out_the_outputs_kept_past_their_time() {
+        let scratch = scratch();
+        let dir = scratch.path().join(DIR);
+        prepare(&dir).expect("the directory is made");
+        let old = dir.join("toolu_old.txt");
+        std::fs::write(&old, "old").expect("a file is written");
+        aged(&old, KEEP_DAYS + 1);
+
+        hook(call("cargo test", &passing_run(), "").as_bytes(), &dir).expect("trimmed");
+
+        assert!(!old.exists());
+        assert!(dir.join("toolu_0142GXHC7zQ9PAiqnZ8Gt66Z.txt").exists());
     }
 
     #[test]
