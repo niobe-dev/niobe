@@ -235,7 +235,13 @@ fn walk_back(trace: &[Vec<usize>], n: usize, m: usize, offset: usize) -> Vec<Ste
         while x > step_x {
             script.push(Step::Keep);
             x -= 1;
-            y -= 1;
+            #[allow(
+                unused_assignments,
+                reason = "y decrements along diagonal with x, but is re-assigned from_y at step end"
+            )]
+            {
+                y -= 1;
+            }
         }
         script.push(match down {
             true => Step::Add,
