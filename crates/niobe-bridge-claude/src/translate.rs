@@ -734,10 +734,11 @@ impl Translator {
     /// answer goes out, the translator reads that result as the denial it is,
     /// and does not report the closing list as a second refusal.
     ///
-    /// This is the only thing that marks such a call denied. Recorded against
-    /// Claude Code 2.1.278: the CLI sends no `system`/`permission_denied` for a
+    /// Recorded against Claude Code 2.1.278, this is the only thing that marks
+    /// such a call denied: the CLI sends no `system`/`permission_denied` for a
     /// call refused over the control channel, only for one it refuses by its
-    /// own rules.
+    /// own rules. From 2.1.309 the CLI marks every refusal beside its result
+    /// too, which the translator reads without being told.
     pub fn refused(&mut self, id: &ToolCallId) {
         self.denied.insert(id.as_str().to_owned(), None);
     }
@@ -1603,6 +1604,12 @@ impl Translator {
             .filter_map(|meta| meta.id.clone())
             .filter(|id| envelope.interrupted(id))
             .collect();
+        let refused: Vec<String> = envelope
+            .tool_result_meta
+            .iter()
+            .filter_map(|meta| meta.id.clone())
+            .filter(|id| envelope.refused(id))
+            .collect();
         let reported = envelope.tool_use_result;
         let Some(wire::Content::Blocks(blocks)) = envelope.message.content else {
             // A `user` message with plain text is the turn Niobe itself wrote,
@@ -1643,12 +1650,15 @@ impl Translator {
             // run. What says which came first: the `permission_denied` the CLI
             // sends for a refusal of its own, or the driver's word for one
             // made over the control channel.
+            // The CLI's own note beside the result says so too, from 2.1.309
+            // on every kind of refusal, which is what marks one the driver did
+            // not answer.
             // An interrupt reaches the model as a rejection, which says
             // nothing the operator does not know; the CLI's note beside the
             // result is what says it was their stop.
             let outcome = match (
                 is_error.unwrap_or(false),
-                self.denied.contains_key(&tool_use_id),
+                self.denied.contains_key(&tool_use_id) || refused.contains(&tool_use_id),
                 interrupted.contains(&tool_use_id),
             ) {
                 (_, true, _) => ToolOutcome::Denied,

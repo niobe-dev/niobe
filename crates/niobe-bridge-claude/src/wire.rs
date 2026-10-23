@@ -290,9 +290,11 @@ pub(crate) struct Envelope {
     /// it.
     #[serde(default)]
     pub(crate) tool_use_result: Option<serde_json::Value>,
-    /// On a `user` line that carries a tool result for a call that did not
-    /// run to its end: why, per call. Only the live stream carries it — the
-    /// CLI's own transcripts leave it out.
+    /// On a `user` line that carries a tool result: why a call did not run
+    /// to its end, and from 2.1.309 how its permission was settled, per call.
+    /// The live stream carries it under this name; a transcript keeps only
+    /// the decision, as `permissionDecision`, which the transcript reader
+    /// puts here.
     #[serde(default)]
     pub(crate) tool_result_meta: Vec<ResultMeta>,
     /// On an `assistant` line: the id of the API request the message is the
@@ -321,8 +323,41 @@ pub(crate) struct ResultMeta {
     pub(crate) id: Option<String>,
     /// `user-rejected` for a call cut off by an interrupt, `permission-rule`
     /// for one refused over the control channel, as recorded from 2.1.278 and
-    /// 2.1.285.
+    /// 2.1.285. Recorded from 2.1.309, `permission-rule` also marks a call the
+    /// CLI's own rules refused and one a `PreToolUse` hook blocked, and no
+    /// call that ran, a tool's own error included.
+    #[serde(default)]
     pub(crate) non_execution_kind: Option<String>,
+    /// How the call's permission was settled, from 2.1.309: `decision` is
+    /// `accept` or `reject`, beside who settled it.
+    #[serde(default)]
+    pub(crate) permission_decision: Option<PermissionDecision>,
+}
+
+/// How the CLI settled whether a call may run, as it says beside the call's
+/// result on the live stream and in the transcript's `permissionDecision`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PermissionDecision {
+    /// `accept` or `reject`.
+    #[serde(default)]
+    pub(crate) decision: Option<String>,
+}
+
+impl ResultMeta {
+    /// Whether this says the call did not run because it was not allowed to:
+    /// refused by the operator, by a rule or by a hook.
+    pub(crate) fn refused(&self) -> bool {
+        let rejected = self
+            .permission_decision
+            .as_ref()
+            .and_then(|settled| settled.decision.as_deref())
+            == Some("reject");
+        match self.non_execution_kind.as_deref() {
+            Some("permission-rule") => true,
+            Some(_) => false,
+            None => rejected,
+        }
+    }
 }
 
 impl Envelope {
@@ -371,6 +406,13 @@ impl Envelope {
             meta.id.as_deref() == Some(id)
                 && meta.non_execution_kind.as_deref() == Some("user-rejected")
         })
+    }
+
+    /// Whether this line says call `id` was not allowed to run.
+    pub(crate) fn refused(&self, id: &str) -> bool {
+        self.tool_result_meta
+            .iter()
+            .any(|meta| meta.id.as_deref() == Some(id) && meta.refused())
     }
 
     /// Whether the tool this line answers started work that carries on after

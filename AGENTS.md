@@ -240,7 +240,9 @@ reviewers that encode both, for an agent working in this tree.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
-  `translate.rs` turns one message of it into events and owns no process — and reads an `Edit`,
+  `translate.rs` turns one message of it into events and owns no process — and reads the CLI's
+  own mark of a call it did not run for want of permission, beside the result live and as the
+  transcript's `permissionDecision`, as refused, whoever refused it — and reads an `Edit`,
   `Write` or `Bash` permission prompt's arguments as what the call would do, and the MCP
   servers every `init` lists, each with the tools of the session's that are its own, and the
   CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or

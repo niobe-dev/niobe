@@ -247,8 +247,11 @@ What the recording settles:
   result arrives. Without that, the call reads as a tool that broke.
 - **The tool result for that call carries `tool_result_meta`**:
   `[{"id": …, "non_execution_kind": "permission-rule"}]`. The CLI's own
-  transcript of the same session does not keep it, so a session read back
-  from disk could not rely on it. The bridge does not read it.
+  transcript of the same session does not keep it on 2.1.278. Recorded from
+  2.1.309 (`refusals.jsonl`), the mark is on every kind of refusal and on no
+  call that ran, and the transcript keeps a `permissionDecision` beside the
+  result, so the bridge reads either as the call refused, and this recording
+  folds to `Denied` without the driver's word.
 - **The `control_request` carries `display_name` and `permission_suggestions`**
   (here, a switch to `acceptEdits` for the session). The bridge reads neither.
 - **The `Edit`'s result carries the CLI's own diff of the file** in
@@ -288,10 +291,10 @@ What it settles is how a shell command's exit status is read:
   `backgroundTaskId` on a command it moved to the background, and
   `interrupted: true`. A success with none of those is a command that exited
   zero, and the bridge says so; with any of them it names no status.
-- **A refusal made over the control channel reads as a failure here**, with
-  the refusal's words as its reason: the recording cannot say the call was
-  refused, and the driver is what tells the translator (see
-  `stdio-answers.jsonl`).
+- **A refusal made over the control channel reads as a refusal here**, with
+  the refusal's words as its reason: the CLI marks the result
+  `non_execution_kind: permission-rule`, which the bridge reads as it does the
+  driver's word (see `stdio-answers.jsonl` and `refusals.jsonl`).
 
 A failed command's status is in `sub-agents.jsonl`: its result opens with
 `Exit code 1` on a line of its own, and the rest is the command's output. The
@@ -339,6 +342,35 @@ The bridge shows each end as a notice naming the command, how it ended and the
 exit code the summary names, from the stream and from the transcript alike:
 ``the background command `sleep 3; echo about-to-fail; exit 3` failed with exit
 code 3``.
+
+## `refusals.jsonl`
+
+Four calls that did not do what was asked, recorded from Claude Code 2.1.309 on
+23 October 2026 by writing each turn to `claude -p --input-format stream-json
+--output-format stream-json --verbose --permission-prompt-tool stdio` and
+answering its permission prompts by hand. The first three turns are one
+process, started with `--disallowedTools "Bash(touch b.txt)"` and a project
+`PreToolUse` hook on `Bash` that exits 2 for a command naming `c.txt`; the
+fourth is a second process. The lines are the CLI's own. The only edits: paths
+rewritten to `/repo` and the hook's to `/hooks/block.sh`, `system`/`init` cut
+down to the keys that say what ran, the `result`'s `subagent_stats` and the
+`commands_changed` and `thinking_tokens` lines left out.
+
+| Turn | The call | How it was stopped | `tool_result_meta` beside its result |
+| ---- | -------- | ------------------ | ------------------------------------ |
+| 1 | `touch a.txt` | refused over the control channel | `non_execution_kind: permission-rule`, `permission_decision: {decision: reject, source: user_reject}` |
+| 2 | `touch b.txt` | the CLI's own rule, from `--disallowedTools` | `permission-rule`, `{reject, source: config, reason_type: rule}`, and a `system`/`permission_denied` too |
+| 3 | `touch c.txt` | the hook, `blocked by the test hook` | `permission-rule`, `{reject, source: hook, reason_type: hook}` |
+| 4 | `Read` of a file that is not there | nothing: the tool ran and failed | no `non_execution_kind`; `{accept, source: config, reason_type: mode}` |
+
+So `permission-rule` marks a call not allowed to run, whoever refused it, and
+a tool's own error is not one: the bridge reads the first three as `Denied`
+and the fourth as `Failed`. The CLI's transcript of the first process keeps the
+same decisions under `permissionDecision` on each result's record, with
+`reasonCode` (`rule:cliArg`, `hook:PreToolUse`) in place of
+`non_execution_kind`. An `Edit` of a file the session had not read, which
+2.1.27x refused as `File has not been read yet`, ran on 2.1.309 and is not
+here.
 
 ## `commands-changed.jsonl`
 

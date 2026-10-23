@@ -829,6 +829,54 @@ mod reported_hunks {
     }
 }
 
+/// Calls the CLI did not run, recorded from Claude Code 2.1.309: one refused
+/// over the control channel, one by a rule the CLI was started with, and one
+/// a `PreToolUse` hook blocked. Nothing tells the translator about any of
+/// them but the lines themselves.
+mod refusals {
+    use super::*;
+
+    const REFUSALS: &str = include_str!("fixtures/refusals.jsonl");
+    const ANSWERS: &str = include_str!("fixtures/stdio-answers.jsonl");
+
+    fn endings(recording: &str) -> Vec<(String, ToolOutcome)> {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        recording
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .filter_map(|event| match event {
+                Event::ToolCallEnd { name, outcome, .. } => Some((name, outcome)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_call_the_cli_marks_as_not_run_by_a_permission_reads_as_refused() {
+        assert_eq!(
+            endings(REFUSALS),
+            [
+                ("Bash".to_owned(), ToolOutcome::Denied),
+                ("Bash".to_owned(), ToolOutcome::Denied),
+                ("Bash".to_owned(), ToolOutcome::Denied),
+                ("Read".to_owned(), ToolOutcome::Failed),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_refused_over_the_control_channel_reads_as_refused_without_the_driver_saying_so() {
+        assert_eq!(
+            endings(ANSWERS),
+            [
+                ("Edit".to_owned(), ToolOutcome::Ok),
+                ("Write".to_owned(), ToolOutcome::Denied),
+            ]
+        );
+    }
+}
+
 /// A live session on a model with its 1M-token window selected, where the
 /// messages and the bill name the model differently. The numbers are the
 /// recording's own `result` lines, as `tests/fixtures/README.md` sets out.
@@ -1424,11 +1472,11 @@ mod shell {
             endings(SHELL),
             vec![
                 (ToolOutcome::Ok, Some(0), None),
-                // Refused over the control channel, which the recording
-                // cannot say on its own: the driver tells the translator, and
-                // `tests/answers.rs` is where that is checked.
+                // Refused over the control channel, which the CLI marks
+                // beside the result as `permission-rule`: the recording says
+                // it on its own, as the driver's word does live.
                 (
-                    ToolOutcome::Failed,
+                    ToolOutcome::Denied,
                     None,
                     Some(
                         "The operator denied this call in Niobe and answered instead: Do not \
