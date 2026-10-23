@@ -31,7 +31,7 @@ use common::{
     at_work, metered_session, paint, running_session, screen, session_whose_turn_total_differs,
     session_with_a_long_write, session_with_a_markdown_reply, session_with_a_tab_indented_reply,
     session_with_finished_turns, session_with_test_records, session_with_two_agents_at_work,
-    style_at, styles, styles_at, unmetered_session,
+    style_at, styles, styles_at, svg, unmetered_session,
 };
 use niobe_core::event::{
     AgentId, Backend, CompactTrigger, Event, Mode, PermissionDecision, Usage, UsageWindow,
@@ -147,6 +147,46 @@ fn every_theme_paints_the_shell_at_both_sizes() {
                 &paint(&mut running_session().with_theme(theme), width, height),
             );
         }
+    }
+}
+
+/// The pictures the README shows, one per theme at 120x30, each drawn as a
+/// terminal draws it: the designed themes in 24-bit colour, `classic` in the
+/// sixteen names. Written by the harness rather than captured, so the front
+/// page cannot show a shell the code no longer draws; regenerated with the
+/// other pictures by `UPDATE_SNAPSHOTS=1`.
+#[test]
+fn every_theme_has_the_picture_the_readme_shows() {
+    for theme in THEMES {
+        let name = theme.name.to_lowercase();
+        let depth = match theme.name {
+            "CLASSIC" => Depth::Sixteen,
+            _ => Depth::TrueColour,
+        };
+        let picture = svg(
+            &mut running_session().with_depth(depth).with_theme(theme),
+            120,
+            30,
+        );
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots")
+            .join(format!("{name}-120x30.svg"));
+        if niobe_tui::snapshots::updating().unwrap_or_else(|refused| panic!("{refused}")) {
+            std::fs::write(&path, &picture).expect("the snapshot directory is committed");
+            continue;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "no picture at {}: {e}\nrun `UPDATE_SNAPSHOTS=1 cargo test` to write one",
+                path.display()
+            )
+        });
+        assert!(
+            picture == expected,
+            "the README's picture {} no longer shows what the shell draws; look at it and, \
+             if it is right, run `UPDATE_SNAPSHOTS=1 cargo test`",
+            path.display()
+        );
     }
 }
 

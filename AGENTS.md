@@ -227,7 +227,7 @@ reviewers that encode both, for an agent working in this tree.
   time it opens, never waited on — read in the dialog a call is read in, its lines broken
   between words. A dialog, and a
   permission question in the transcript, casts a shadow on what is under it. Snapshot pictures of the screen live in
-  `tests/snapshots/`, and `snapshots.rs` is the one switch that has a test rewrite them —
+  `tests/snapshots/`, with the SVG picture of each theme the README shows, and `snapshots.rs` is the one switch that has a test rewrite them —
   `UPDATE_SNAPSHOTS=1` exactly, and never on a CI runner.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
@@ -541,7 +541,7 @@ Every file that can carry a comment starts with the SPDX header, followed by a b
   frontmatter from the file's first line.
 
 Exempt, because the format has no comments or the bytes are compared exactly: `LICENSE`,
-`CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt`, and recorded output
+`CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt` and `*.svg`, and recorded output
 under `tests/fixtures/` as `*.txt` or `*.json`. The list lives in
 `xtask/src/headers.rs`; a file type with neither a rule nor an exemption fails the check, so a new
 kind of file forces a decision. Run `cargo xtask headers`.

@@ -1148,3 +1148,159 @@ pub fn at_work(app: App, elapsed: Duration) -> App {
     app.tick(started + elapsed, None);
     app
 }
+
+/// The width of a cell in a picture, in its own units.
+const CELL_WIDTH: u16 = 9;
+
+/// The height of a cell in a picture: about twice its width, as a terminal
+/// font's cell is.
+const CELL_HEIGHT: u16 = 18;
+
+/// What a cell with no colour of its own is drawn in: the terminal's own
+/// foreground and background, which a picture has to pick for it.
+const PICTURE_FG: &str = "#d0d0d0";
+const PICTURE_BG: &str = "#121212";
+
+/// The sixteen ANSI names, in the values xterm gives them. A terminal draws
+/// them in its own scheme, so a picture of a theme that uses them is one
+/// terminal's reading of it, and these are the values that reading is in.
+fn ansi(colour: Color) -> Option<&'static str> {
+    Some(match colour {
+        Color::Black => "#000000",
+        Color::Red => "#cd0000",
+        Color::Green => "#00cd00",
+        Color::Yellow => "#cdcd00",
+        Color::Blue => "#4682ee",
+        Color::Magenta => "#cd00cd",
+        Color::Cyan => "#00cdcd",
+        Color::Gray => "#e5e5e5",
+        Color::DarkGray => "#7f7f7f",
+        Color::LightRed => "#ff0000",
+        Color::LightGreen => "#00ff00",
+        Color::LightYellow => "#ffff00",
+        Color::LightBlue => "#5c5cff",
+        Color::LightMagenta => "#ff00ff",
+        Color::LightCyan => "#00ffff",
+        Color::White => "#ffffff",
+        _ => return None,
+    })
+}
+
+/// A colour as a picture writes it, or `None` for the terminal's own.
+fn hex(colour: Option<Color>) -> Option<String> {
+    match colour? {
+        Color::Reset => None,
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        named => ansi(named).map(str::to_owned),
+    }
+}
+
+/// A cell's text escaped for SVG.
+fn escaped(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// How one run of cells is drawn: its colours, after reversal, and its weight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Look {
+    fg: String,
+    bg: Option<String>,
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underlined: bool,
+}
+
+fn look(style: Style) -> Look {
+    use ratatui::style::Modifier;
+    let fg = hex(style.fg);
+    let bg = hex(style.bg);
+    let (fg, bg) = match style.add_modifier.contains(Modifier::REVERSED) {
+        true => (
+            bg.or_else(|| Some(PICTURE_BG.to_owned())),
+            fg.or_else(|| Some(PICTURE_FG.to_owned())),
+        ),
+        false => (fg, bg),
+    };
+    Look {
+        fg: fg.unwrap_or_else(|| PICTURE_FG.to_owned()),
+        bg,
+        bold: style.add_modifier.contains(Modifier::BOLD),
+        dim: style.add_modifier.contains(Modifier::DIM),
+        italic: style.add_modifier.contains(Modifier::ITALIC),
+        underlined: style.add_modifier.contains(Modifier::UNDERLINED),
+    }
+}
+
+/// Draws one frame and returns it as an SVG picture: every cell's character
+/// in its colours, the sixteen names in xterm's values.
+///
+/// For the README, and drawn by the snapshot harness so that the pictures a
+/// stranger is shown are the shell as it draws today, not a screenshot that
+/// drifted from it.
+pub fn svg(app: &mut App, width: u16, height: u16) -> String {
+    let terminal = drawn(app, width, height);
+    let buffer = terminal.backend().buffer();
+    let (w, h) = (width * CELL_WIDTH, height * CELL_HEIGHT);
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" \
+         viewBox=\"0 0 {w} {h}\" font-family=\"Menlo, 'DejaVu Sans Mono', Consolas, monospace\" \
+         font-size=\"15\">\n<rect width=\"{w}\" height=\"{h}\" fill=\"{PICTURE_BG}\"/>\n"
+    );
+    for y in 0..height {
+        let mut x = 0;
+        while x < width {
+            let start = x;
+            let first = look(buffer.cell((x, y)).map_or_else(Style::new, Cell::style));
+            let mut text = String::new();
+            while x < width {
+                let cell = buffer.cell((x, y));
+                let style = cell.map_or_else(Style::new, Cell::style);
+                if look(style) != first {
+                    break;
+                }
+                text.push_str(cell.map_or(" ", Cell::symbol));
+                x += 1;
+            }
+            let cells = x - start;
+            let (left, top) = (start * CELL_WIDTH, y * CELL_HEIGHT);
+            if let Some(bg) = &first.bg {
+                out.push_str(&format!(
+                    "<rect x=\"{left}\" y=\"{top}\" width=\"{}\" height=\"{CELL_HEIGHT}\" fill=\"{bg}\"/>\n",
+                    cells * CELL_WIDTH
+                ));
+            }
+            if text.trim().is_empty() {
+                continue;
+            }
+            let mut attributes = format!("fill=\"{}\"", first.fg);
+            for (on, attribute) in [
+                (first.bold, " font-weight=\"bold\""),
+                (first.dim, " opacity=\"0.6\""),
+                (first.italic, " font-style=\"italic\""),
+                (first.underlined, " text-decoration=\"underline\""),
+            ] {
+                if on {
+                    attributes.push_str(attribute);
+                }
+            }
+            out.push_str(&format!(
+                "<text x=\"{left}\" y=\"{}\" textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\" \
+                 xml:space=\"preserve\" {attributes}>{}</text>\n",
+                top + CELL_HEIGHT - 5,
+                cells * CELL_WIDTH,
+                escaped(&text)
+            ));
+        }
+    }
+    out.push_str("</svg>\n");
+    out
+}

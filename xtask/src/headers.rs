@@ -44,13 +44,14 @@ pub enum Rule {
 pub fn rule_for(path: &str) -> Option<Rule> {
     let name = path.rsplit('/').next().unwrap_or(path);
 
-    // A snapshot is a picture compared cell for cell, and a recorded output
+    // A snapshot is a picture compared cell for cell — as text, or as the SVG
+    // the README shows — and a recorded output
     // under `fixtures/` is read against the byte count recorded beside it. A
     // JSON or JSON Lines file under `fixtures/` is one a CLI wrote, and JSON
     // has no comments.
     let is_fixture = path.contains("/tests/fixtures/");
-    let is_recorded_text =
-        (path.contains("/tests/snapshots/") || is_fixture) && name.ends_with(".txt");
+    let is_recorded_text = (path.contains("/tests/snapshots/") || is_fixture)
+        && (name.ends_with(".txt") || name.ends_with(".svg"));
     let is_recorded_json = is_fixture && (name.ends_with(".json") || name.ends_with(".jsonl"));
     if (path == name && EXEMPT_AT_ROOT.contains(&name)) || is_recorded_text || is_recorded_json {
         return Some(Rule::Exempt);
@@ -149,6 +150,10 @@ mod tests {
         );
         assert_eq!(
             rule_for("crates/niobe-tui/tests/snapshots/empty-80x24.txt"),
+            Some(Rule::Exempt)
+        );
+        assert_eq!(
+            rule_for("crates/niobe-tui/tests/snapshots/cyber-120x30.svg"),
             Some(Rule::Exempt)
         );
         assert_eq!(

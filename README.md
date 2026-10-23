@@ -10,6 +10,19 @@ did, decided and touched, what it is doing now and what it cost, on screen while
 Every cost figure is either one the backend reported or labelled as an estimate; where there
 is no figure, the screen shows an em dash.
 
+![Niobe in the cyber theme: a diff in the transcript, a failed test run, the Usage pane, the
+working tree and the sub-agents at work](crates/niobe-tui/tests/snapshots/cyber-120x30.svg)
+
+The same session in the other themes — `classic`, `neo` and `modern`, chosen with `--theme`:
+
+| classic | neo | modern |
+| --- | --- | --- |
+| ![classic](crates/niobe-tui/tests/snapshots/classic-120x30.svg) | ![neo](crates/niobe-tui/tests/snapshots/neo-120x30.svg) | ![modern](crates/niobe-tui/tests/snapshots/modern-120x30.svg) |
+
+These pictures are drawn by the shell's own snapshot tests, so they show what the code draws
+today. `classic` is drawn in the sixteen colours your terminal's scheme gives it; the pictures
+use xterm's.
+
 Niobe drives the official `claude` CLI as a subprocess, so a session runs on whatever that CLI
 is already signed in with. Niobe never reads the CLI's credential files and makes no network
 calls of its own. Profiles for the `codex` CLI can be written, but that bridge does not start
