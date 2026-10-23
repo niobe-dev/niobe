@@ -370,4 +370,66 @@ mod tests {
         };
         assert_eq!(rates.cost(&usage), Some(u128::MAX));
     }
+
+    #[test]
+    fn a_rate_change_takes_effect_exactly_on_its_from_date_and_uses_previous_rate_the_day_before() {
+        let day1 = Date::new(2026, 1, 10).expect("date");
+        let day2 = Date::new(2026, 2, 1).expect("date");
+        let day_before_day2 = Date::new(2026, 1, 31).expect("date");
+
+        let p1 = Price {
+            from: day1,
+            rates: rates(),
+            long_context: None,
+            fast: None,
+        };
+        let p2 = Price {
+            from: day2,
+            rates: Rates {
+                input: rate(1_000_000),
+                ..rates()
+            },
+            long_context: None,
+            fast: None,
+        };
+
+        let schedule = crate::Schedule {
+            prices: vec![p1, p2],
+            origin: crate::Origin::Bundled,
+        };
+
+        assert_eq!(schedule.at(day1).expect("price").from(), day1);
+        assert_eq!(schedule.at(day_before_day2).expect("price").from(), day1);
+        assert_eq!(schedule.at(day2).expect("price").from(), day2);
+    }
+
+    #[test]
+    fn prompt_token_count_addition_saturates_without_overflowing_in_long_context_evaluation() {
+        let long = Rates {
+            input: rate(6_000_000),
+            ..rates()
+        };
+        let price = Price {
+            from: Date::new(2026, 1, 1).expect("date"),
+            rates: rates(),
+            long_context: Some(LongContext {
+                above: 1_000_000,
+                rates: long,
+            }),
+            fast: None,
+        };
+
+        let overflowing_usage = Usage {
+            input: u64::MAX,
+            cache_read: u64::MAX,
+            cache_write: u64::MAX,
+            ..usage()
+        };
+
+        // Long context threshold is evaluated using saturating_add and does not overflow.
+        assert_eq!(
+            price.cost(&overflowing_usage),
+            long.cost(&overflowing_usage)
+        );
+    }
 }

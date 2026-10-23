@@ -787,4 +787,32 @@ mod tests {
             assert_eq!(error(&text), expected, "\n{text}");
         }
     }
+
+    #[test]
+    fn a_rate_with_more_than_six_decimal_places_is_refused_with_line_number() {
+        let text = one_model(
+            "from = 2026-07-24\ninput = 0.1234567\noutput = 25\ncache_read = 0.5\ncache_write = 6.25\n",
+        );
+        assert_eq!(
+            error(&text),
+            "p.toml:6: model[0].price[0].input: `0.1234567`: expected dollars per million tokens as a decimal with at most six places, such as `2.50`"
+        );
+
+        let invalid_date_text = one_model(
+            "from = 2025-02-29\ninput = 5\noutput = 25\ncache_read = 0.5\ncache_write = 6.25\n",
+        );
+        assert_eq!(
+            error(&invalid_date_text),
+            "p.toml:5: invalid date, expected day between 01 and 28"
+        );
+    }
+
+    #[test]
+    fn duplicate_ids_within_the_same_model_array_are_refused() {
+        let text = "[[model]]\nids = [\"m-1\", \"m-1\"]\n\n[[model.price]]\nfrom = 2026-01-01\ninput = 1\noutput = 2\ncache_read = 0.1\ncache_write = 1.25\n";
+        assert_eq!(
+            error(text),
+            "p.toml:2: model[0].ids[1]: `m-1` is listed twice"
+        );
+    }
 }

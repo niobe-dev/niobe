@@ -308,4 +308,46 @@ cache_write = 0.625
             "/u/prices.toml"
         );
     }
+
+    #[test]
+    fn a_zero_token_usage_record_on_a_known_model_prices_as_zero_dollars_api_equivalent() {
+        let usage = Usage {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: Some(0),
+            reasoning: 0,
+            model: "m".to_owned(),
+            cost_usd: None,
+            settles_model: Some(false),
+            fast: false,
+        };
+        let cost = table().cost(&usage, date(2026, 1, 10));
+        assert_eq!(cost, Cost::ApiEquivalent(0.0));
+        assert_eq!(cost.provenance(), Provenance::ApiEquivalent);
+        assert_eq!(cost.usd(), Some(0.0));
+    }
+
+    #[test]
+    fn an_overlay_can_replace_context_windows_while_leaving_unmentioned_models_and_prices_intact() {
+        let path = PathBuf::from("/u/windows.toml");
+        let user = PriceTable::parse(
+            "[[context]]\nids = [\"m\"]\n[[context.window]]\nfrom = 2026-02-01\ntokens = 500_000\n",
+            Origin::File(path),
+        )
+        .expect("the user window table is valid");
+        let merged = table().overlay(user);
+
+        // Price remains intact from the base table
+        assert_eq!(
+            merged
+                .price("m", date(2026, 1, 10))
+                .map(|p| p.rates().input().micros()),
+            Some(1_000_000)
+        );
+        // Window from overlay takes effect
+        assert_eq!(merged.context_window("m", date(2026, 2, 1)), Some(500_000));
+        assert_eq!(merged.context_window("m", date(2026, 1, 15)), None);
+    }
 }
