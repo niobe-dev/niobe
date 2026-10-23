@@ -2457,6 +2457,7 @@ impl App {
             // itself: a reply it was writing reads as cut off where it
             // stopped, rather than as finished.
             Event::SessionLeft => {
+                self.say_asks_went_unanswered();
                 self.forget_asks();
                 self.interrupt_what_the_fold_stopped();
                 if let Some(entry) = self.finish_reply() {
@@ -3202,6 +3203,37 @@ impl App {
 
     /// Drops every prompt waiting, and whatever the operator had begun
     /// answering the one on screen with.
+    /// Says in the transcript which questions the session left unanswered as
+    /// it ended, before they are taken off the screen: a question that only
+    /// vanished would read as answered somewhere.
+    fn say_asks_went_unanswered(&mut self) {
+        let tools: Vec<String> = self.asks.iter().map(|ask| tool_label(&ask.tool)).collect();
+        let body = match tools.as_slice() {
+            [] => return,
+            [tool] => format!(
+                "The question about {tool} was never answered: the session that asked it \
+                 ended, and no call is waiting on it now."
+            ),
+            tools => format!(
+                "{} questions were never answered ({}): the session that asked them ended, \
+                 and no call is waiting on them now.",
+                tools.len(),
+                tools.join(", ")
+            ),
+        };
+        self.push(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: self.agent_name(),
+            meta: String::new(),
+            body,
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
     fn forget_asks(&mut self) {
         if self.asks.is_empty() {
             return;
@@ -14135,6 +14167,46 @@ mod tests {
         app.apply_at(&said("again"), millis(2_826_000));
         app.apply_at(&Event::TurnEnded, millis(2_826_100));
         app
+    }
+
+    /// A record that ends on a question nobody answered was left by a
+    /// process that is gone, and the CLI a resume starts asked nothing: the
+    /// question does not come up again, nothing says a call is waiting, and
+    /// no answer nobody gave is written for it.
+    #[test]
+    fn a_question_the_record_ends_on_is_not_put_to_the_resumed_session() {
+        let mut app = app();
+        app.apply(&said("clean up"));
+        app.apply(&prompt(None));
+        assert!(app.asking().is_some(), "the question came up live");
+
+        app.resumed();
+        app.leave();
+
+        assert!(app.asking().is_none(), "the question was put again");
+        assert!(app.session().pending_permissions().is_empty());
+        assert!(!app.session().turn_running());
+        let produced = app.take_produced();
+        assert!(
+            !produced
+                .iter()
+                .any(|event| matches!(event, Event::PermissionResponse { .. })),
+            "{produced:?}"
+        );
+        assert!(produced.contains(&Event::SessionLeft), "{produced:?}");
+        let notices: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Notice)
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                "The question about Bash was never answered: the session that asked it ended, \
+              and no call is waiting on it now."
+            ]
+        );
     }
 
     /// The process that ran a command is gone with the session that started
