@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/niobe-dev/niobe/blob/main/schema/cost.schema.json",
+  "title": "niobe cost --json",
+  "description": "Every session a repository's store holds, with the tokens it spent and the money its backend reported. Nothing in it is an estimate: tokens no reported cost covers are counted, never priced. A field is added without moving schema_version; it moves when one changes meaning or goes away.",
+  "type": "object",
+  "required": ["schema_version", "repository", "sessions"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "The version of this shape.",
+      "const": 1
+    },
+    "repository": {
+      "description": "The name of the repository the sessions ran in: its root directory's name.",
+      "type": "string"
+    },
+    "sessions": {
+      "description": "Oldest first, as the store numbers them, narrowed by --last and --since.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/session" }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "session": {
+      "type": "object",
+      "required": ["id", "started_at", "billing", "tokens", "models", "cost"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "The number `niobe --resume` and `niobe sessions` name the session by.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "started_at": {
+          "description": "When its first event happened, RFC 3339 in UTC to the second.",
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "billing": {
+          "description": "How the session was billed, by what the backend or the profile said: by use, on a flat-rate plan, each for part of it, or nothing said.",
+          "enum": ["metered", "plan", "both", "unknown"]
+        },
+        "tokens": {
+          "description": "Every token the session spent, whatever it was billed by.",
+          "type": "object",
+          "required": ["input", "output", "cache_read", "cache_write", "cache_write_1h", "reasoning", "total"],
+          "additionalProperties": false,
+          "properties": {
+            "input": { "$ref": "#/$defs/count", "description": "Input billed at the full rate." },
+            "output": { "$ref": "#/$defs/count" },
+            "cache_read": { "$ref": "#/$defs/count", "description": "Input served from the prompt cache." },
+            "cache_write": { "$ref": "#/$defs/count", "description": "Input written into the prompt cache." },
+            "cache_write_1h": { "$ref": "#/$defs/count", "description": "Of cache_write, the tokens written to live an hour: a share of it, not added to total." },
+            "reasoning": { "$ref": "#/$defs/count" },
+            "total": { "$ref": "#/$defs/count", "description": "input + output + cache_read + cache_write + reasoning." }
+          }
+        },
+        "models": {
+          "description": "The total, per model id as the backend reported it; the values add up to tokens.total.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/count" }
+        },
+        "cost": {
+          "description": "The money spent, or null on a plan and where nothing said how the session was billed: no money moved there that a backend reported as spent. On a session billed both ways it is the part billed by use.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["reported_usd", "complete", "records", "records_uncovered", "older_recording"],
+              "additionalProperties": false,
+              "properties": {
+                "reported_usd": {
+                  "description": "The sum of the costs the backend reported, in USD; null where it reported none. A floor of the bill while complete is false.",
+                  "type": ["number", "null"],
+                  "minimum": 0
+                },
+                "complete": {
+                  "description": "Whether every usage record is covered by a reported cost, so that reported_usd is the bill rather than a floor.",
+                  "type": "boolean"
+                },
+                "records": { "$ref": "#/$defs/count", "description": "The usage records the backend reported." },
+                "records_uncovered": { "$ref": "#/$defs/count", "description": "Of records, those no reported cost covers." },
+                "older_recording": {
+                  "description": "Whether the floor may be lower than the bill only because the session was recorded before its records said what a reported cost covers.",
+                  "type": "boolean"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

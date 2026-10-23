@@ -20,6 +20,7 @@ mod backend;
 mod commands;
 mod config;
 mod consent;
+mod cost;
 mod desktop;
 mod doctor;
 mod history;
@@ -187,6 +188,7 @@ fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(
         Command::Shell | Command::Resume(_) => Ok(()),
         Command::Sessions => list_sessions(),
         Command::Overview(narrowing) => print_overview(narrowing),
+        Command::Cost { narrowing, format } => print_cost(narrowing, format),
         Command::Profiles => list_profiles(profile),
         Command::Doctor { json } => run_doctor(json),
         Command::Trust { yes } => trust(yes),
@@ -877,6 +879,15 @@ fn print_overview(narrowing: args::Narrowing) -> Result<(), String> {
     Ok(())
 }
 
+fn print_cost(narrowing: args::Narrowing, format: cost::Format) -> Result<(), String> {
+    let root = repo::root(&cwd()?);
+    let folded = overview::narrowed(overview::read(&root)?, narrowing);
+    for line in cost::lines(&repo::describe(&root).name, &folded, format) {
+        say!("{line}");
+    }
+    Ok(())
+}
+
 fn list_sessions() -> Result<(), String> {
     let root = repo::root(&cwd()?);
     let loaded = config::load(&root).ok();
@@ -1422,6 +1433,9 @@ USAGE:
     niobe overview         Print what every session here built and how it went, as Markdown;
                            --last <n> keeps the newest n, --since <YYYY-MM-DD> those from that
                            UTC day on
+    niobe cost             List each session here with its tokens and the money its backend
+                           reported; --json in the shape schema/cost.schema.json publishes,
+                           --csv as rows; --last and --since as for overview
     niobe profiles         List the profiles the config defines, the selected one marked
     niobe doctor [--json]  Check what a session needs — the CLIs, their sign-in, the config,
                            the terminal — and say how to fix what is missing

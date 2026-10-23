@@ -78,6 +78,11 @@ terminal, and says how to fix what is not; `niobe doctor --json` prints the same
 `niobe profiles` lists the profiles in force and, where none is written, the three lines that
 make the implied one explicit.
 
+`niobe cost` lists each session recorded in the repository with the tokens it spent and the
+money its backend reported, never an estimate. `niobe cost --json` prints it in the shape
+[`schema/cost.schema.json`](schema/cost.schema.json) publishes, and `--csv` as rows for a
+spreadsheet; `--last <n>` and `--since <YYYY-MM-DD>` narrow it as they do `niobe overview`.
+
 A terminal that eats an F-key can give the bar's action another one: `[keys]` with
 `mcp = "ctrl+l"` in the config, and the bar, the menus and the help draw the new key.
 `niobe --help` lists the actions and the keys that can be bound.

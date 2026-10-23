@@ -319,7 +319,11 @@ reviewers that encode both, for an agent working in this tree.
   `niobe profiles` and `niobe sessions` print; `overview.rs` is what `niobe overview` prints —
   every session the store holds, or the newest `--last` or those `--since` a day, folded, as one Markdown page of what went well and what went
   wrong, what was left open, the tools used most and the paths changed most, with no figure a
-  model wrote, and the page the shell's overview shows, written on a thread of its own; `doctor.rs` is what `niobe doctor` prints — one row each for
+  model wrote, and the page the shell's overview shows, written on a thread of its own; `cost.rs` is
+  what `niobe cost` prints — the same sessions, each with its tokens per kind and per model and
+  the money its backend reported, as a table, as `--csv` or as `--json` in the shape
+  `schema/cost.schema.json` publishes at the repository's root, with no money on a plan or where
+  nothing said how a session was billed and no figure priced by the table; `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
   read from its files), the config files and whether the repository's is trusted, and the terminal,
   with the fix for each that is not fine, as text or as `--json` with nothing under the home
@@ -334,6 +338,8 @@ reviewers that encode both, for an agent working in this tree.
   `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
+  `tests/cost.rs` exports a store of a recording billed by use, the same on a plan and one that
+  never said, checks the JSON against the published schema and its figures against `jq`.
   `tests/overview.rs` prints that page for a store of two recorded sessions, against a picture
   and against counts `jq` reads off the recordings.
   `tests/billing.rs` folds the bridge's recordings into the shell and compares the Usage pane
@@ -542,7 +548,8 @@ Every file that can carry a comment starts with the SPDX header, followed by a b
 
 Exempt, because the format has no comments or the bytes are compared exactly: `LICENSE`,
 `CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt` and `*.svg`, and recorded output
-under `tests/fixtures/` as `*.txt` or `*.json`. The list lives in
+under `tests/fixtures/` as `*.txt` or `*.json`, and the published JSON Schemas under `schema/`.
+The list lives in
 `xtask/src/headers.rs`; a file type with neither a rule nor an exemption fails the check, so a new
 kind of file forces a decision. Run `cargo xtask headers`.
 

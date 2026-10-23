@@ -14,6 +14,8 @@ use niobe_store::SessionId;
 use niobe_tui::Theme;
 use niobe_tui::theme;
 
+use crate::cost::Format;
+
 /// What the operator asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -27,6 +29,14 @@ pub enum Command {
     /// Print every session recorded in this repository, folded, as one
     /// Markdown page, narrowed to the sessions the flags name.
     Overview(Narrowing),
+    /// List every session recorded in this repository with what it spent,
+    /// narrowed as the overview is, in the format the flags name.
+    Cost {
+        /// Which sessions.
+        narrowing: Narrowing,
+        /// How they print.
+        format: Format,
+    },
     /// List the profiles the config defines, marking the selected one.
     Profiles,
     /// Check what a first session needs and say what is missing, with the fix.
@@ -241,6 +251,7 @@ fn command(args: &[&str]) -> Result<Command, String> {
             Command::Sessions
         }
         ["overview", rest @ ..] => Command::Overview(narrowing(rest)?),
+        ["cost", rest @ ..] => cost(rest)?,
         ["profiles", rest @ ..] => {
             no_more(rest)?;
             Command::Profiles
@@ -343,6 +354,30 @@ fn narrowing(mut rest: &[&str]) -> Result<Narrowing, String> {
         rest = after;
     }
     Ok(narrowing)
+}
+
+/// `niobe cost`: a format flag, at most one, among the overview's narrowing.
+fn cost(rest: &[&str]) -> Result<Command, String> {
+    let mut format = Format::Table;
+    let mut others = Vec::with_capacity(rest.len());
+    for arg in rest {
+        let named = match *arg {
+            "--json" => Format::Json,
+            "--csv" => Format::Csv,
+            other => {
+                others.push(other);
+                continue;
+            }
+        };
+        if format != Format::Table {
+            return Err("`niobe cost` prints one format: `--json` or `--csv`".to_owned());
+        }
+        format = named;
+    }
+    Ok(Command::Cost {
+        narrowing: narrowing(&others)?,
+        format,
+    })
 }
 
 /// A day written `YYYY-MM-DD`, and only one that exists.
@@ -517,6 +552,45 @@ mod tests {
             &["overview", "--last", "five"][..],
             &["overview", "--since", "2026-02-30"][..],
             &["overview", "--since", "yesterday"][..],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn the_cost_takes_one_format_among_the_overview_narrowing() {
+        assert_eq!(
+            parsed(&["cost"]),
+            Ok(Command::Cost {
+                narrowing: Narrowing::default(),
+                format: Format::Table
+            })
+        );
+        assert_eq!(
+            parsed(&["cost", "--last", "2", "--csv"]),
+            Ok(Command::Cost {
+                narrowing: Narrowing {
+                    last: Some(2),
+                    since: None
+                },
+                format: Format::Csv
+            })
+        );
+        assert_eq!(
+            parsed(&["cost", "--json"]).map(|command| matches!(
+                command,
+                Command::Cost {
+                    format: Format::Json,
+                    ..
+                }
+            )),
+            Ok(true)
+        );
+        for wrong in [
+            &["cost", "--json", "--csv"][..],
+            &["cost", "--json", "--json"][..],
+            &["cost", "--markdown"][..],
+            &["cost", "--last"][..],
         ] {
             assert!(parsed(wrong).is_err(), "{wrong:?}");
         }

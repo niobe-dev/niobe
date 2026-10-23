@@ -134,6 +134,13 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+impl SessionId {
+    /// The number the database allocated, as `niobe cost --json` writes it.
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
 impl std::str::FromStr for SessionId {
     type Err = std::num::ParseIntError;
 
