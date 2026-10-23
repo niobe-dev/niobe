@@ -5533,6 +5533,11 @@ fn a_command_is_offered_only_where_it_opens_the_prompt_and_esc_leaves_it_as_type
     );
     press(&mut app, KeyCode::Enter);
     assert!(
+        app.take_produced().is_empty(),
+        "a command the backend did not list is held once"
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(
         !app.take_produced().is_empty(),
         "with the list closed, Enter sends"
     );

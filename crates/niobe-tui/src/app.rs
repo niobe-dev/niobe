@@ -530,6 +530,24 @@ pub enum Purpose {
     Rewind,
 }
 
+/// The command `text` opens with where it is a word the backend did not
+/// list among `listed`, which must not be empty. A word with a `/` inside it
+/// is a path, not a command.
+fn unlisted_command<'a>(text: &'a str, listed: &[SlashCommand]) -> Option<&'a str> {
+    if listed.is_empty() {
+        return None;
+    }
+    let word = text
+        .trim_start()
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()?;
+    let command_like = word
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'));
+    (command_like && !listed.iter().any(|command| command.name == word)).then_some(word)
+}
+
 /// The most characters of a prompt the rewind list names it by.
 const REWIND_LABEL: usize = 60;
 
@@ -1488,6 +1506,9 @@ pub struct App {
     /// prompt before a clear belongs to a conversation the backend has put
     /// away, with whatever it kept of the files.
     sent_since: usize,
+    /// A prompt opening with a command the backend did not list, held back
+    /// once: Enter on it again sends it.
+    unlisted_held: Option<String>,
     /// The prompts the operator asked to have the files put back to before,
     /// that the loop has not handed to the backend yet, oldest first.
     rewinds: Vec<usize>,
@@ -1888,6 +1909,7 @@ impl App {
             sent_since: 0,
             rewinds: Vec::new(),
             rewinding: None,
+            unlisted_held: None,
             reconnecting: None,
             hidden: BTreeSet::new(),
             places: Places::default(),
@@ -7822,6 +7844,9 @@ impl App {
             self.run_typed(typed, argument);
             return;
         }
+        if self.held_unlisted(&text) {
+            return;
+        }
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
             let draft = self.take_composer_for_the_shell();
             self.produce(Event::ModelSelected { model });
@@ -7842,6 +7867,29 @@ impl App {
         }
         self.give_back(&draft);
         self.scroll_to_tail();
+    }
+
+    /// Whether `text` is held back rather than sent: a prompt that opens
+    /// with a command the backend did not list, the first time Enter sends
+    /// it. A backend may pass such a command to the model as text, which
+    /// spends a whole turn on a word; the second Enter on the same prompt
+    /// sends it, for a command the backend answers though it lists it not.
+    /// Nothing is held where the backend has listed no commands at all.
+    fn held_unlisted(&mut self, text: &str) -> bool {
+        let Some(name) = unlisted_command(text, self.session.commands()) else {
+            self.unlisted_held = None;
+            return false;
+        };
+        if self.unlisted_held.as_deref() == Some(text) {
+            self.unlisted_held = None;
+            return false;
+        }
+        self.hint = Some(format!(
+            "The backend does not list /{name}, so it may reach the model as text and spend a \
+             turn. Enter again sends it anyway"
+        ));
+        self.unlisted_held = Some(text.to_owned());
+        true
     }
 
     /// Says in the transcript that the prompt above it went nowhere.
@@ -10281,6 +10329,38 @@ mod tests {
         app.said()
     }
 
+    /// A command the backend does not list may reach the model as text and
+    /// spend a whole turn: Claude Code 2.1.309 passes `/todos` on that way.
+    #[test]
+    fn a_command_the_backend_does_not_list_is_held_until_enter_comes_again() {
+        let mut app = offering_model(app());
+
+        assert_eq!(submitted(&mut app, "/todos"), []);
+        let hint = app.hint().expect("the shell says why it held it");
+        assert!(
+            hint.contains("/todos") && hint.contains("Enter again"),
+            "{hint}"
+        );
+        assert_eq!(app.composer().lines(), ["/todos"], "the prompt is kept");
+
+        app.submit();
+        assert_eq!(app.said().len(), 1, "sent the second time");
+    }
+
+    #[test]
+    fn a_listed_command_a_path_and_a_backend_that_listed_nothing_are_sent_at_once() {
+        let mut listing = offering_model(app());
+        assert_eq!(
+            submitted(&mut listing, "/model").len(),
+            0,
+            "the shell's own"
+        );
+        assert_eq!(submitted(&mut listing, "/usr/bin/env is missing").len(), 1);
+
+        let mut unlisted = app();
+        assert_eq!(submitted(&mut unlisted, "/todos").len(), 1);
+    }
+
     /// Typed as a prompt, the backend would move the model only when the next
     /// turn starts and say nothing of it until then; asked for the way the
     /// picker asks, the menu row names it at once.
@@ -10302,8 +10382,14 @@ mod tests {
     fn a_model_command_the_picker_cannot_stand_for_goes_to_the_backend_as_typed() {
         for text in ["/model haiku please", "/models haiku"] {
             let mut app = offering_model(app().attached());
+            let mut said = submitted(&mut app, text);
+            if text.starts_with("/models") {
+                assert_eq!(said, [], "not listed, so held once");
+                app.submit();
+                said = app.said();
+            }
             assert_eq!(
-                submitted(&mut app, text),
+                said,
                 [Event::UserMessage {
                     text: text.to_owned()
                 }]
@@ -10472,7 +10558,7 @@ mod tests {
             "/config theme dark",
             "/help me",
         ] {
-            let mut app = offering(&["review", "config"]);
+            let mut app = offering(&["review", "config", "help"]);
             assert_eq!(
                 submitted(&mut app, text),
                 [Event::UserMessage {
