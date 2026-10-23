@@ -1721,7 +1721,8 @@ USAGE:
                            UTC day on
     niobe cost             List each session here with its tokens and the money its backend
                            reported; --json in the shape schema/cost.schema.json publishes,
-                           --csv as rows; --last and --since as for overview
+                           --csv as rows, --by-day as each UTC day's tokens summed; --last
+                           and --since as for overview
     niobe profiles         List the profiles the config defines, the selected one marked
     niobe doctor [--json]  Check what a session needs — the CLIs, their sign-in, the config,
                            the terminal — and say how to fix what is missing

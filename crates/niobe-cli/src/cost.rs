@@ -2,7 +2,10 @@
 // Copyright (c) Viacheslav Shynkarenko
 
 //! What `niobe cost` prints: each session the store holds, with the tokens it
-//! spent and the money its backend reported, as a table, as JSON or as CSV.
+//! spent and the money its backend reported, as a table, as JSON or as CSV,
+//! or the tokens of each day's sessions summed, with `--by-day`. Every
+//! figure is folded from the stored events, so a session recorded before
+//! the day table existed is counted in it.
 //!
 //! The JSON is the shape `schema/cost.schema.json` publishes, so that
 //! something else can depend on it. Nothing here prices anything: the money
@@ -11,6 +14,7 @@
 //! reader could take for a bill. A session billed on a plan has no money at
 //! all, as the shell shows none: a plan is limited by its windows.
 
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use niobe_core::session::{SessionState, Totals};
@@ -35,6 +39,8 @@ pub enum Format {
     Json,
     /// One row per session under a header row.
     Csv,
+    /// A table of the sessions started on each day, with their tokens.
+    Days,
 }
 
 /// The columns of the CSV, in order.
@@ -46,6 +52,7 @@ const CSV_HEADER: &str = "id,started_at,billing,input,output,cache_read,cache_wr
 pub fn lines(repository: &str, sessions: &[Folded], format: Format) -> Vec<String> {
     match format {
         Format::Table => table(sessions),
+        Format::Days => days(sessions),
         Format::Json => vec![document(repository, sessions).to_string()],
         Format::Csv => std::iter::once(CSV_HEADER.to_owned())
             .chain(sessions.iter().map(csv_row))
@@ -205,6 +212,41 @@ fn table(sessions: &[Folded]) -> Vec<String> {
     lines
 }
 
+/// The sessions summed by the UTC day each started on, oldest day first.
+/// Tokens only: a day's money would add a plan's nothing to a metered bill,
+/// which is a figure nobody was charged.
+fn days(sessions: &[Folded]) -> Vec<String> {
+    if sessions.is_empty() {
+        return vec!["No sessions recorded in this repository.".to_owned()];
+    }
+    let mut by_day: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for folded in sessions {
+        let day = rfc3339(folded.started_at)
+            .get(..10)
+            .unwrap_or_default()
+            .to_owned();
+        let (count, tokens) = by_day.entry(day).or_default();
+        *count = count.saturating_add(1);
+        *tokens = tokens.saturating_add(folded.state.totals().tokens());
+    }
+    let mut lines = vec![format!(
+        "{:<10}  {:>8}  {:>12}",
+        "DAY", "SESSIONS", "TOKENS"
+    )];
+    lines.extend(
+        by_day.iter().map(|(day, (count, tokens))| {
+            format!("{day:<10}  {count:>8}  {:>12}", grouped(*tokens))
+        }),
+    );
+    lines.push(String::new());
+    lines.push(
+        "Each day is the UTC day a session started on, and its tokens are every token \
+         that day's sessions reported, wherever they were billed."
+            .to_owned(),
+    );
+    lines
+}
+
 /// What `totals` cost as the shell labels it, with no estimate beside it,
 /// and the mark the Usage pane gives a floor an older recording left.
 fn labelled(totals: &Totals) -> String {
@@ -219,7 +261,60 @@ fn labelled(totals: &Totals) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niobe_core::event::{Event, Usage};
     use std::time::Duration;
+
+    fn session(id: u32, started: u64, input: u64) -> Folded {
+        let mut state = SessionState::new();
+        state.apply(&Event::Usage(Usage {
+            input,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: Some(0),
+            reasoning: 0,
+            model: "opus-5".to_owned(),
+            cost_usd: None,
+            settles_model: Some(false),
+            fast: false,
+        }));
+        Folded {
+            id: id.to_string().parse().expect("a number is a session id"),
+            started_at: UNIX_EPOCH + Duration::from_secs(started),
+            state,
+        }
+    }
+
+    #[test]
+    fn the_days_table_sums_each_utc_days_sessions_oldest_first() {
+        // 1_789_732_800 is 2026-09-18T12:00:00Z; 43_199 s later is the day's
+        // last second, and 43_200 s later the next day's first.
+        let sessions = [
+            session(1, 1_789_732_800, 1_000),
+            session(2, 1_789_732_800 + 43_199, 2_500),
+            session(3, 1_789_732_800 + 43_200, 40),
+        ];
+
+        assert_eq!(
+            lines("repo", &sessions, Format::Days),
+            [
+                "DAY         SESSIONS        TOKENS",
+                "2026-09-18         2         3,500",
+                "2026-09-19         1            40",
+                "",
+                "Each day is the UTC day a session started on, and its tokens are every token \
+                 that day's sessions reported, wherever they were billed.",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_days_table_of_no_sessions_says_so() {
+        assert_eq!(
+            lines("repo", &[], Format::Days),
+            ["No sessions recorded in this repository."]
+        );
+    }
 
     #[test]
     fn a_moment_is_written_in_rfc_3339_utc_to_the_second() {

@@ -510,7 +510,7 @@ fn bench(rest: &[&str]) -> Result<Command, String> {
     })
 }
 
-/// `niobe cost`: a format flag, at most one, among the overview's narrowing.
+/// `niobe cost`: a format flag (`--json`, `--csv`, `--by-day`), at most one, among the overview's narrowing.
 fn cost(rest: &[&str]) -> Result<Command, String> {
     let mut format = Format::Table;
     let mut others = Vec::with_capacity(rest.len());
@@ -518,13 +518,16 @@ fn cost(rest: &[&str]) -> Result<Command, String> {
         let named = match *arg {
             "--json" => Format::Json,
             "--csv" => Format::Csv,
+            "--by-day" => Format::Days,
             other => {
                 others.push(other);
                 continue;
             }
         };
         if format != Format::Table {
-            return Err("`niobe cost` prints one format: `--json` or `--csv`".to_owned());
+            return Err(
+                "`niobe cost` prints one format: `--json`, `--csv` or `--by-day`".to_owned(),
+            );
         }
         format = named;
     }
@@ -850,6 +853,13 @@ mod tests {
             })
         );
         assert_eq!(
+            parsed(&["cost", "--by-day"]),
+            Ok(Command::Cost {
+                narrowing: Narrowing::default(),
+                format: Format::Days
+            })
+        );
+        assert_eq!(
             parsed(&["cost", "--json"]).map(|command| matches!(
                 command,
                 Command::Cost {
@@ -861,6 +871,7 @@ mod tests {
         );
         for wrong in [
             &["cost", "--json", "--csv"][..],
+            &["cost", "--by-day", "--json"][..],
             &["cost", "--json", "--json"][..],
             &["cost", "--markdown"][..],
             &["cost", "--last"][..],
