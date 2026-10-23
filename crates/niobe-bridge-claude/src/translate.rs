@@ -1543,9 +1543,11 @@ impl Translator {
         // A message that names the sub-agent call it belongs to is that
         // agent's: its words and its calls are the agent's, not the session's.
         let agent = envelope.parent_tool_use_id.map(AgentId::new);
+        let written_by_cli = envelope.message.model.as_deref() == Some(CLI_WRITTEN);
         let blocks = match envelope.message.content {
             Some(wire::Content::Blocks(blocks)) => blocks,
             Some(wire::Content::Text(text)) => {
+                let text = lines_kept_where(written_by_cli, text);
                 out.push(Event::AssistantMessage { text, agent });
                 return;
             }
@@ -1603,6 +1605,7 @@ impl Translator {
         // The text first: it is what the model said before it acted, and the
         // transcript reads in that order.
         if !text.is_empty() {
+            let text = lines_kept_where(written_by_cli, text);
             out.push(Event::AssistantMessage { text, agent });
         }
         out.append(&mut calls);
@@ -2871,6 +2874,43 @@ fn is_window_of(session: &str, model: &str) -> bool {
 /// standing rule does not already allow", which is Niobe's `ask`. The rest —
 /// `acceptEdits`, `bypassPermissions`, `dontAsk` — are modes the shell has no
 /// word for, and a wrong word for one is worse than none.
+/// The model the CLI names on a message it wrote itself rather than asked a
+/// model for: the answer to a local command such as `/cost`, or a refusal.
+const CLI_WRITTEN: &str = "<synthetic>";
+
+/// `text` with each of its lines kept where `plain` says the CLI wrote it.
+///
+/// The shell draws a reply as markdown, where a single line break joins two
+/// lines into one paragraph. The CLI's own text is plain, laid out a line a
+/// figure (`/cost` puts each usage window on a line of its own), so each such
+/// break is made a markdown hard break. A fenced block already keeps its
+/// lines, and a break beside a blank line is a paragraph's end, so neither is
+/// touched. A model's reply is left as the model wrote it.
+fn lines_kept_where(plain: bool, text: String) -> String {
+    if !plain {
+        return text;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut kept = String::with_capacity(text.len() + lines.len() * 2);
+    let mut fenced = false;
+    for (at, line) in lines.iter().enumerate() {
+        kept.push_str(line);
+        let Some(next) = lines.get(at + 1) else {
+            break;
+        };
+        let fence = ["```", "~~~"]
+            .iter()
+            .any(|mark| line.trim_start().starts_with(mark));
+        if fence {
+            fenced = !fenced;
+        } else if !fenced && !line.trim().is_empty() && !next.trim().is_empty() {
+            kept.push_str("  ");
+        }
+        kept.push('\n');
+    }
+    kept
+}
+
 pub(crate) fn read_mode(mode: &str) -> Option<Mode> {
     match mode {
         "plan" => Some(Mode::Plan),
@@ -6078,6 +6118,41 @@ mod tests {
                 "`{spelt}` did not read as {mode}"
             );
         }
+    }
+
+    #[test]
+    fn a_reply_the_cli_writes_itself_keeps_each_of_its_lines() {
+        let mut translator = Translator::new("max");
+
+        // `/cost` as Claude Code 2.1.309 answers it, without the model.
+        let events = translator.line(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Using your subscription\n\nCurrent session: 17% used\nCurrent week: 35% used\n\n```\nkept as\nwritten\n```"}]}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::AssistantMessage {
+                text: "Using your subscription\n\nCurrent session: 17% used  \nCurrent week: 35% used\n\n```\nkept as\nwritten\n```".to_owned(),
+                agent: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_reply_the_model_wrote_is_left_as_markdown() {
+        let mut translator = Translator::new("max");
+
+        let events = translator.line(
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"one\ntwo"}]}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::AssistantMessage {
+                text: "one\ntwo".to_owned(),
+                agent: None,
+            }]
+        );
     }
 
     #[test]
