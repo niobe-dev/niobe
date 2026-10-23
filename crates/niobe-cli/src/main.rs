@@ -177,7 +177,8 @@ fn run(
             suite,
             json,
             timeout,
-        } => return run_bench(&suite, json, timeout, profile, &allow, &asked),
+            ab,
+        } => return run_bench(&suite, json, timeout, ab, profile, &allow, &asked),
         // Handed on whole: `run_other` matches every command itself.
         other => return run_other(other, profile, &asked).map(|()| 0),
     };
@@ -1095,6 +1096,7 @@ fn run_bench(
     suite: &Path,
     json: bool,
     timeout: Option<Duration>,
+    ab: Option<bench::Technique>,
     profile: Option<&str>,
     allow: &[Rule],
     asked: &Asked,
@@ -1114,19 +1116,14 @@ fn run_bench(
         flags.extend(["--allow".to_owned(), rule.to_string()]);
     }
     if let Some(terse) = asked.terse {
+        if let Some(technique) = ab {
+            return Err(format!(
+                "`--ab {}` runs the suite with it off and then on; leave `{}` out",
+                technique.name(),
+                technique.flag()
+            ));
+        }
         flags.extend(["--terse".to_owned(), on_off(terse).to_owned()]);
-    }
-
-    let started_at = SystemTime::now();
-    let mut ran = Vec::with_capacity(tasks.len());
-    for (number, task) in tasks.iter().enumerate() {
-        note(&format!(
-            "task {} of {}: {}",
-            number + 1,
-            tasks.len(),
-            task.name
-        ));
-        ran.push(bench::run(&exe, task, &flags, timeout));
     }
     let name = suite
         .canonicalize()
@@ -1136,15 +1133,67 @@ fn run_bench(
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| suite.display().to_string());
+
+    let Some(technique) = ab else {
+        let started_at = SystemTime::now();
+        let ran = run_suite(&exe, &tasks, &flags, timeout, "");
+        match json {
+            true => say!("{}", bench::document(&name, started_at, &ran, timeout)),
+            false => {
+                for line in bench::table(&ran, timeout) {
+                    say!("{line}");
+                }
+            }
+        }
+        return Ok(0);
+    };
+    let side = |on: bool| {
+        let mut flags = flags.clone();
+        flags.extend([technique.flag().to_owned(), on_off(on).to_owned()]);
+        flags
+    };
+    let started_without = SystemTime::now();
+    let without = run_suite(&exe, &tasks, &side(false), timeout, "without-");
+    let started_with = SystemTime::now();
+    let with = run_suite(&exe, &tasks, &side(true), timeout, "with-");
     match json {
-        true => say!("{}", bench::document(&name, started_at, &ran, timeout)),
+        true => say!(
+            "{}",
+            bench::ab_document(
+                technique,
+                bench::document(&name, started_without, &without, timeout),
+                bench::document(&name, started_with, &with, timeout),
+            )
+        ),
         false => {
-            for line in bench::table(&ran, timeout) {
+            for line in bench::ab_table(technique, &without, &with, timeout) {
                 say!("{line}");
             }
         }
     }
     Ok(0)
+}
+
+/// Every task of a suite, run in turn with `flags`, each saying on standard
+/// error which it is as it starts.
+fn run_suite(
+    exe: &Path,
+    tasks: &[bench::Task],
+    flags: &[String],
+    timeout: Duration,
+    side: &str,
+) -> Vec<bench::Ran> {
+    let mut ran = Vec::with_capacity(tasks.len());
+    for (number, task) in tasks.iter().enumerate() {
+        note(&format!(
+            "task {} of {}: {side}{}",
+            number + 1,
+            tasks.len(),
+            task.name
+        ));
+        ran.push(bench::run(exe, task, flags, timeout, side));
+    }
+    ran
 }
 
 /// Says something the operator is owed knowing on standard error, where a
@@ -1743,8 +1792,9 @@ USAGE:
                            judge it by its check.sh; --json in the shape
                            schema/bench.schema.json publishes, --timeout <seconds> per turn
                            (900 by default). Each turn may edit and write inside its copy
-                           and, beyond --allow, nowhere else. bench/ in niobe's repository
-                           is a suite
+                           and, beyond --allow, nowhere else. --ab terse runs the suite
+                           without terse, then with it, and sets the two side by side.
+                           bench/ in niobe's repository is a suite
     niobe sessions         List the sessions this repository can carry on
     niobe overview         Print what every session here built and how it went, as Markdown;
                            --last <n> keeps the newest n, --since <YYYY-MM-DD> those from that

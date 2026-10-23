@@ -372,7 +372,8 @@ reviewers that encode both, for an agent working in this tree.
   files under the system's temporary directory, allowed to edit and write inside that copy and
   nowhere else beyond the bench's own `--allow` rules, ended at its deadline, then judged by the
   task's check run from the suite so that the agent cannot rewrite it, with a failing task's
-  copy kept, as a table or as `--json` in the shape `schema/bench.schema.json` publishes;
+  copy kept, as a table or as `--json` in the shape `schema/bench.schema.json` publishes, and
+  with `--ab terse` the suite without the technique and then with it, side by side;
   `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
   read from its files), the config files and whether the repository's is trusted, and the terminal,

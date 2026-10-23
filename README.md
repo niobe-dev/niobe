@@ -109,9 +109,10 @@ the cost in the job summary:
 task starts from, and judges it by the task's own check. It prints the pass rate, the tokens and
 time each turn took, and where each left the five-hour window. `--json` prints it in the shape
 [`schema/bench.schema.json`](schema/bench.schema.json) publishes. [`bench/`](bench/README.md)
-holds twenty small tasks to compare one profile or setting against another. Each turn may edit
-and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for that run alone, as
-`--allow` does for `-p`.
+holds twenty small tasks to compare one profile or setting against another; `--ab terse` runs
+the suite without terse replies and then with them, and sets the two side by side. Each turn may
+edit and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for that run
+alone, as `--allow` does for `-p`.
 
 `terse = true` at the top of a config asks each new conversation for terse replies, with code,
 commands, paths, errors and security warnings kept whole, and `--terse on|off` switches it for one

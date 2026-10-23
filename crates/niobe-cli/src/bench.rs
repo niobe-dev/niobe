@@ -46,6 +46,37 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(120);
 /// How often a running process is looked at.
 const POLL: Duration = Duration::from_millis(20);
 
+/// A technique `--ab` measures: the suite run without it, then with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Technique {
+    /// The terse instruction a new conversation is given with `--terse on`.
+    Terse,
+}
+
+impl Technique {
+    /// The technique `name` calls, as `--ab` takes it.
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "terse" => Some(Self::Terse),
+            _ => None,
+        }
+    }
+
+    /// What `--ab` calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Terse => "terse",
+        }
+    }
+
+    /// The flag each turn is given to have it on or off.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::Terse => "--terse",
+        }
+    }
+}
+
 /// One task of a suite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
@@ -146,8 +177,11 @@ fn prompt_of(text: &str) -> String {
 /// The turn may also edit and write files inside its copy and nowhere else:
 /// a task is a change to that copy, and a bench nobody can leave running
 /// would be one whose every edit waits on a prompt nobody is there to answer.
-pub fn run(exe: &Path, task: &Task, flags: &[String], timeout: Duration) -> Ran {
-    let work = scratch(&task.name);
+///
+/// `side` tells this run's copies from another's in the same bench, so that
+/// an `--ab` run's second pass does not clear a copy its first one kept.
+pub fn run(exe: &Path, task: &Task, flags: &[String], timeout: Duration, side: &str) -> Ran {
+    let work = scratch(&format!("{side}{}", task.name));
     let started = Instant::now();
     let laid_out = lay_out(&task.dir.join("files"), &work).and_then(|()| work.canonicalize());
     let ended = match laid_out {
@@ -357,6 +391,18 @@ fn tokens(ran: &Ran) -> Option<u64> {
     report(&ran.ended).and_then(|report| report["tokens"]["total"].as_u64())
 }
 
+/// The tokens a turn's model wrote, where it reported its spend.
+fn output_tokens(ran: &Ran) -> Option<u64> {
+    report(&ran.ended).and_then(|report| report["tokens"]["output"].as_u64())
+}
+
+/// The sum of `of` over every turn, where every turn reported it.
+fn reported_sum(ran: &[Ran], of: impl Fn(&Ran) -> Option<u64>) -> Option<u64> {
+    ran.iter()
+        .map(of)
+        .try_fold(0u64, |sum, n| n.map(|n| sum.saturating_add(n)))
+}
+
 /// Where the five-hour window stood when a turn ended, where its backend
 /// reported it.
 fn five_hour(ran: &Ran) -> Option<f64> {
@@ -380,6 +426,7 @@ pub fn document(suite: &str, started_at: SystemTime, ran: &[Ran], timeout: Durat
             "pass_rate": share(passed, ran.len()),
             "tokens": (reported.len() == ran.len()).then(|| reported.iter().sum::<u64>()),
             "tokens_reported_by": reported.len(),
+            "output_tokens": reported_sum(ran, output_tokens),
             "wall_ms": millis(ran.iter().map(|ran| ran.wall).sum()),
             "five_hour": {
                 "first": windows.first(),
@@ -387,6 +434,84 @@ pub fn document(suite: &str, started_at: SystemTime, ran: &[Ran], timeout: Durat
             },
         },
     })
+}
+
+/// An `--ab` run's results: the suite without `technique`, then with it,
+/// each in the shape [`document`] gives, and how far each figure moved — a
+/// fraction of the first run's, `null` where either run left it unreported
+/// or the first was zero.
+pub fn ab_document(technique: Technique, without: Value, with: Value) -> Value {
+    let moved = |key: &str| change(&without["summary"][key], &with["summary"][key]);
+    let passed = |document: &Value| document["summary"]["passed"].as_i64().unwrap_or(0);
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "technique": technique.name(),
+        "change": {
+            "passed": passed(&with) - passed(&without),
+            "output_tokens": moved("output_tokens"),
+            "tokens": moved("tokens"),
+            "wall_ms": moved("wall_ms"),
+        },
+        "without": without,
+        "with": with,
+    })
+}
+
+/// How far `to` moved from `from`, as a fraction of `from`.
+fn change(from: &Value, to: &Value) -> Option<f64> {
+    let (from, to) = (from.as_u64()?, to.as_u64()?);
+    (from > 0).then(|| (to as f64 - from as f64) / from as f64)
+}
+
+/// An `--ab` run's results as tables to read: each run's, then the two side
+/// by side.
+pub fn ab_table(
+    technique: Technique,
+    without: &[Ran],
+    with: &[Ran],
+    timeout: Duration,
+) -> Vec<String> {
+    let name = technique.name();
+    let mut lines = vec![format!("Without {name}"), String::new()];
+    lines.extend(table(without, timeout));
+    lines.extend([String::new(), format!("With {name}"), String::new()]);
+    lines.extend(table(with, timeout));
+    lines.push(String::new());
+    lines.push(format!(
+        "{:<14}  {:>12}  {:>12}  {:>8}",
+        "", "WITHOUT", "WITH", "CHANGE"
+    ));
+    let passed = |ran: &[Ran]| ran.iter().filter(|ran| ran.passed).count() as u64;
+    let wall = |ran: &[Ran]| millis(ran.iter().map(|ran| ran.wall).sum());
+    for (label, from, to) in [
+        ("passed", Some(passed(without)), Some(passed(with))),
+        (
+            "output tokens",
+            reported_sum(without, output_tokens),
+            reported_sum(with, output_tokens),
+        ),
+        (
+            "tokens",
+            reported_sum(without, tokens),
+            reported_sum(with, tokens),
+        ),
+        ("wall ms", Some(wall(without)), Some(wall(with))),
+    ] {
+        let figure = |n: Option<u64>| n.map_or_else(|| "—".to_owned(), grouped);
+        let moved = match (from, to) {
+            (Some(from), Some(to)) if from > 0 => {
+                let percent = (to as f64 - from as f64) / from as f64 * 100.0;
+                format!("{percent:+.1}%").replace('-', "−")
+            }
+            _ => "—".to_owned(),
+        };
+        lines.push(format!(
+            "{label:<14}  {:>12}  {:>12}  {moved:>8}",
+            figure(from),
+            figure(to)
+        ));
+    }
+    lines
 }
 
 fn task_json(ran: &Ran, timeout: Duration) -> Value {
