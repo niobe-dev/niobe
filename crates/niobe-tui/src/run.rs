@@ -632,11 +632,10 @@ fn send_produced(
         // produces is a record of what happened here, and the backend has no
         // use for what it did not ask for.
         match &event {
-            SessionEvent::UserMessage { text } => {
-                if let Err(error) = backend.send(text, &images) {
-                    app.not_sent(&error.to_string());
-                }
-            }
+            SessionEvent::UserMessage { text } => match backend.send(text, &images) {
+                Ok(()) => app.sent_to_backend(text),
+                Err(error) => app.not_sent(&error.to_string()),
+            },
             SessionEvent::PermissionResponse {
                 id,
                 decision,
@@ -712,6 +711,13 @@ fn send_produced(
     for server in app.take_mcp_reconnects() {
         if let Err(error) = backend.reconnect_mcp(&server) {
             app.not_reconnected(&server, &error.to_string());
+        }
+    }
+
+    // Asked for from the F6 list; what went back arrives through the drain.
+    for prompt in app.take_rewinds() {
+        if let Err(error) = backend.rewind(prompt) {
+            app.not_rewound(&error.to_string());
         }
     }
 

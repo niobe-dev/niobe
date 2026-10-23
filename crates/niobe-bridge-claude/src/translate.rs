@@ -477,6 +477,11 @@ pub struct Translator {
     /// The reconnects Niobe asked for that the CLI has not answered yet, by
     /// `request_id`, each with the server it names: the answer names neither.
     reconnects: BTreeMap<String, String>,
+    /// The rewinds Niobe asked for that the CLI has not answered yet, by the
+    /// `request_id` of each of their two requests.
+    rewinds: BTreeMap<String, Rewind>,
+    /// Control requests an answer called for, not yet taken to be written.
+    requests: Vec<String>,
     /// What the CLI's last answer to `mcp_status` said of each server, by
     /// name, which every later `init` lists again without.
     mcp_said: BTreeMap<String, McpServer>,
@@ -614,6 +619,8 @@ impl Translator {
             title_requests: BTreeSet::new(),
             mcp_status_requests: BTreeSet::new(),
             reconnects: BTreeMap::new(),
+            rewinds: BTreeMap::new(),
+            requests: Vec::new(),
             mcp_said: BTreeMap::new(),
             mcp_listed: BTreeMap::new(),
             mcp_omitted: BTreeMap::new(),
@@ -798,6 +805,30 @@ impl Translator {
             .insert(request_id.to_owned(), server.to_owned());
     }
 
+    /// Tells the translator that `dry` asks the CLI what putting the files
+    /// back as they were before the prompt it sent as `prompt_id` would
+    /// change. Where the answer says they can go back, the request that puts
+    /// them back is asked as `real`, and taken with [`Self::take_requests`]:
+    /// asked before the dry run's answer, the CLI could put the files back
+    /// first and the dry run say nothing would change. `prompt` is how the
+    /// prompt is named to the operator.
+    pub fn asked_to_rewind(&mut self, dry: &str, real: &str, prompt_id: &str, prompt: &str) {
+        self.rewinds.insert(
+            dry.to_owned(),
+            Rewind::Dry {
+                real: real.to_owned(),
+                prompt_id: prompt_id.to_owned(),
+                prompt: prompt.to_owned(),
+            },
+        );
+    }
+
+    /// The control requests the CLI's answers called for since the last
+    /// call, each a line for its standard input, oldest first.
+    pub fn take_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.requests)
+    }
+
     /// Whether the MCP servers should be asked about again since the last
     /// call: an `init` listed one standing otherwise than the CLI last said
     /// — so why it failed, if it did, is not known — or a reconnect was
@@ -924,6 +955,14 @@ impl Translator {
         if self.answered_of_mcp(&outcome, out) {
             return;
         }
+        if let Some(rewind) = outcome
+            .request_id
+            .as_deref()
+            .and_then(|id| self.rewinds.remove(id))
+        {
+            self.answered_rewind(rewind, outcome, out);
+            return;
+        }
         let asked_model = outcome
             .request_id
             .as_deref()
@@ -980,6 +1019,48 @@ impl Translator {
             out.push(Event::ModelRefused {
                 back_to: self.taken_model.clone().or_else(|| self.model.clone()),
             });
+        }
+    }
+
+    /// Reads an answer to one of a rewind's two requests. A dry run that
+    /// says the files can go back asks for them to be put back, and is kept
+    /// for that answer to say what went back; one that says they cannot is
+    /// said at once, with its reason.
+    fn answered_rewind(
+        &mut self,
+        rewind: Rewind,
+        outcome: wire::ControlOutcome,
+        out: &mut Vec<Event>,
+    ) {
+        let taken = outcome.subtype.as_deref() == Some("success");
+        match rewind {
+            Rewind::Dry {
+                real,
+                prompt_id,
+                prompt,
+            } => match (taken, outcome.response) {
+                (true, Some(answer)) if answer.can_rewind == Some(true) => {
+                    let would = Would {
+                        files: answer
+                            .files_changed
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|path| self.relative(path))
+                            .collect(),
+                        insertions: answer.insertions,
+                        deletions: answer.deletions,
+                    };
+                    self.requests
+                        .push(rewind_request(&real, &prompt_id, false).to_string());
+                    self.rewinds.insert(real, Rewind::Real { prompt, would });
+                }
+                (true, Some(answer)) => out.push(not_rewound(&prompt, answer.error)),
+                (_, _) => out.push(not_rewound(&prompt, outcome.error)),
+            },
+            Rewind::Real { prompt, would } => out.push(match taken {
+                true => rewound(&prompt, &would),
+                false => not_rewound(&prompt, outcome.error),
+            }),
         }
     }
 
@@ -2880,6 +2961,79 @@ fn is_window_of(session: &str, model: &str) -> bool {
 /// standing rule does not already allow", which is Niobe's `ask`. The rest —
 /// `acceptEdits`, `bypassPermissions`, `dontAsk` — are modes the shell has no
 /// word for, and a wrong word for one is worse than none.
+/// One of the two requests a rewind is made of.
+#[derive(Debug)]
+enum Rewind {
+    /// The dry run: the request that puts the files back once it says they
+    /// can go, the id of the prompt they go back to before, and how that
+    /// prompt is named.
+    Dry {
+        real: String,
+        prompt_id: String,
+        prompt: String,
+    },
+    /// The request that puts the files back, with how the prompt is named
+    /// and what the dry run said would go back.
+    Real { prompt: String, would: Would },
+}
+
+/// What a dry run of a rewind said would go back.
+#[derive(Debug)]
+struct Would {
+    /// The files, as the operator reads their paths.
+    files: Vec<String>,
+    insertions: Option<u64>,
+    deletions: Option<u64>,
+}
+
+/// `rewind_files`, asking the CLI to put the files back as they were before
+/// the prompt it was sent as `prompt_id`, or with `dry_run` only to say what
+/// that would change.
+pub(crate) fn rewind_request(
+    request_id: &str,
+    prompt_id: &str,
+    dry_run: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "rewind_files",
+            "user_message_id": prompt_id,
+            "dry_run": dry_run,
+        },
+    })
+}
+
+/// What the session is told once the CLI has put the files back as they
+/// were before `prompt`: which went back, or that none had changed.
+fn rewound(prompt: &str, would: &Would) -> Event {
+    let message = match would.files.is_empty() {
+        true => format!("No file had changed since \"{prompt}\", so none was put back."),
+        false => {
+            let lines = match (would.insertions, would.deletions) {
+                (Some(added), Some(removed)) => format!(" (+{added} −{removed})"),
+                _ => String::new(),
+            };
+            format!(
+                "Files put back as they were before \"{prompt}\": {}{lines}. The \
+                 conversation keeps everything said since.",
+                would.files.join(", ")
+            )
+        }
+    };
+    Event::Notice { message }
+}
+
+/// What the session is told where the CLI would not put the files back as
+/// they were before `prompt`, with its reason where it gave one.
+fn not_rewound(prompt: &str, reason: Option<String>) -> Event {
+    warn(format!(
+        "no files were put back as they were before \"{prompt}\": {}",
+        reason.as_deref().unwrap_or("the CLI gave no reason")
+    ))
+}
+
 /// The model the CLI names on a message it wrote itself rather than asked a
 /// model for: the answer to a local command such as `/cost`, or a refusal.
 const CLI_WRITTEN: &str = "<synthetic>";
@@ -6143,6 +6297,93 @@ mod tests {
                 "`{spelt}` did not read as {mode}"
             );
         }
+    }
+
+    /// The answers Claude Code 2.1.309 gave a dry run and then the rewind
+    /// itself, started with `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`.
+    #[test]
+    fn files_put_back_before_a_prompt_are_one_notice_naming_them() {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "make mean() return 0");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":true,"filesChanged":["/repo/stats.py","/repo/src/io.py"],"insertions":3,"deletions":2}}}"#,
+        );
+        let asked = translator.take_requests();
+        let done = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":true,"skippedLinks":0}}}"#,
+        );
+
+        assert!(dry.is_empty(), "{dry:?}");
+        assert_eq!(asked, [rewind_request("niobe-2", "p-1", false).to_string()]);
+        assert_eq!(
+            done,
+            [Event::Notice {
+                message: "Files put back as they were before \"make mean() return 0\": \
+                          stats.py, src/io.py (+3 −2). The conversation keeps everything \
+                          said since."
+                    .to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_rewind_the_cli_cannot_do_is_said_with_its_reason_and_not_asked_for() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "/cost");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":false,"error":"No file checkpoint found for this message."}}}"#,
+        );
+
+        assert!(translator.take_requests().is_empty());
+        assert_eq!(
+            warnings(&dry),
+            [
+                "no files were put back as they were before \"/cost\": No file checkpoint \
+              found for this message."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rewind_the_cli_refuses_outright_is_said_with_its_reason() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "fix it");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-1","error":"Failed to rewind: File checkpointing is not enabled"}}"#,
+        );
+
+        assert!(translator.take_requests().is_empty());
+        assert_eq!(
+            warnings(&dry),
+            [
+                "no files were put back as they were before \"fix it\": Failed to rewind: \
+              File checkpointing is not enabled"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rewind_that_changed_no_file_says_so() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "explain it");
+
+        translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":true,"filesChanged":[],"insertions":0,"deletions":0}}}"#,
+        );
+        let done = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":true}}}"#,
+        );
+
+        assert_eq!(
+            done,
+            [Event::Notice {
+                message: "No file had changed since \"explain it\", so none was put back."
+                    .to_owned()
+            }]
+        );
     }
 
     #[test]

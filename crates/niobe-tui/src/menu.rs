@@ -113,7 +113,7 @@ impl Action {
             Action::Compact => "have the backend summarise, as /compact",
             Action::Resume => "carry an earlier session on",
             Action::History => "the prompts sent before",
-            Action::Rewind => "go back to a checkpoint, as /rewind",
+            Action::Rewind => "put the files back as they were before a prompt",
             Action::Stop => "stop the running turn",
             Action::Export => "copy the transcript to the clipboard",
             Action::Memory => "show what the agent is told and remembers",
@@ -232,7 +232,7 @@ pub const MENUS: [Menu; 6] = [
             item("Resume…", 0, "", Action::Resume),
             item("History…", 0, "Ctrl+R", Action::History),
             item("Find in transcript", 0, "Ctrl+F", Action::Find),
-            ruled("Rewind to checkpoint", 2, "F6", Action::Rewind),
+            ruled("Rewind files…", 2, "F6", Action::Rewind),
             item("Stop current run", 0, "Esc", Action::Stop),
             ruled("Export transcript", 0, "", Action::Export),
         ],
@@ -330,7 +330,7 @@ pub const TYPED: [Typed; 14] = [
     typed("model", Action::SwitchModel, false),
     typed("quit", Action::Quit, false),
     typed("resume", Action::Resume, false),
-    typed("rewind", Action::Rewind, true),
+    typed("rewind", Action::Rewind, false),
 ];
 
 /// The command `prompt` is, where the shell answers it, with what was typed

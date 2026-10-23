@@ -686,6 +686,11 @@ impl Bridge for Claude {
             .map_err(BridgeError::from)
     }
 
+    fn rewind(&mut self, prompt: usize) -> Result<(), BridgeError> {
+        self.carry_on()?;
+        self.session.rewind(prompt).map_err(BridgeError::from)
+    }
+
     fn drain(&mut self) -> Vec<Event> {
         self.session.drain()
     }

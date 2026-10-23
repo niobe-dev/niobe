@@ -525,7 +525,13 @@ pub enum Purpose {
     /// A sub-agent, whose entries alone the transcript is narrowed to. A
     /// choice's value is the agent's id.
     Agent,
+    /// A prompt sent from here, to put the files back as they were before.
+    /// A choice's value is where the prompt is among those sent.
+    Rewind,
 }
+
+/// The most characters of a prompt the rewind list names it by.
+const REWIND_LABEL: usize = 60;
 
 /// The effort levels offered, in the order the `claude` CLI's `/effort`
 /// lists them in its argument hint (Claude Code 2.1.287). Its `auto` and
@@ -1474,6 +1480,20 @@ pub struct App {
     /// The server a reconnect was asked of that the backend has not answered
     /// for: the hint says so until its answer arrives or a key replaces it.
     reconnecting: Option<String>,
+    /// Every prompt the loop handed to the backend, oldest first, by its
+    /// first line: F6 puts the files back as they were before one of them,
+    /// named to the backend by where it is in this list.
+    sent: Vec<String>,
+    /// Where in `sent` the conversation in front of the model starts: a
+    /// prompt before a clear belongs to a conversation the backend has put
+    /// away, with whatever it kept of the files.
+    sent_since: usize,
+    /// The prompts the operator asked to have the files put back to before,
+    /// that the loop has not handed to the backend yet, oldest first.
+    rewinds: Vec<usize>,
+    /// The hint said while a rewind is waiting on the backend's answer, which
+    /// the answer replaces where no key has already.
+    rewinding: Option<String>,
     /// The panes of the right-hand stack the operator hid.
     hidden: BTreeSet<crate::menu::SidePane>,
     /// The files outside the session the shell can name or have opened.
@@ -1864,6 +1884,10 @@ impl App {
             recorded: Vec::new(),
             call_at: BTreeMap::new(),
             mcp_reconnects: Vec::new(),
+            sent: Vec::new(),
+            sent_since: 0,
+            rewinds: Vec::new(),
+            rewinding: None,
             reconnecting: None,
             hidden: BTreeSet::new(),
             places: Places::default(),
@@ -1931,6 +1955,7 @@ impl App {
         self.decided_at
             .resize(self.session.decisions().len(), self.at);
         self.reconnect_answered(event);
+        self.rewind_answered(event);
         if matches!(event, Event::UsageWindows(_)) {
             self.windows_at = self.at;
             self.windows_recorded = false;
@@ -2601,6 +2626,7 @@ impl App {
             // says where that went.
             Event::Cleared => {
                 self.start_over();
+                self.sent_since = self.sent.len();
                 self.push(Entry {
                     attention: Attention::Routine,
                     kind: EntryKind::Notice,
@@ -4037,6 +4063,7 @@ impl App {
                 in_force(&picker.options, self.session.models(), self.session.model())
             }
             Purpose::Effort => None,
+            Purpose::Rewind => None,
             Purpose::Call => None,
             Purpose::Agent => None,
             Purpose::Theme => picker
@@ -4082,6 +4109,15 @@ impl App {
         match purpose {
             Purpose::Model => self.produce(Event::ModelSelected { model: chosen }),
             Purpose::Effort => self.send_command("effort", Some(&chosen)),
+            Purpose::Rewind => {
+                if let Ok(prompt) = chosen.parse::<usize>() {
+                    let named = self.sent.get(prompt).cloned().unwrap_or_default();
+                    let hint = format!("Putting the files back as they were before \"{named}\"…");
+                    self.hint = Some(hint.clone());
+                    self.rewinding = Some(hint);
+                    self.rewinds.push(prompt);
+                }
+            }
             Purpose::Theme => {
                 if let Some(theme) = Theme::by_name(&chosen) {
                     self.set_theme(theme);
@@ -4174,7 +4210,7 @@ impl App {
             Action::Doctor => self.listed("doctor"),
             Action::Mcp => true,
             Action::Effort => self.listed("effort"),
-            Action::Rewind => self.listed("rewind"),
+            Action::Rewind => self.sent.len() > self.sent_since,
             Action::Hooks => self.listed("hooks"),
             Action::SignIn => false,
             Action::Resume => self.remembers,
@@ -4233,11 +4269,7 @@ impl App {
                 false => self.hint = Some(NO_RECORD_HINT.to_owned()),
             },
             Action::History => self.open_history(View::Prompts),
-            Action::Rewind => self.send_or_say(
-                "rewind",
-                "The backend lists no /rewind to a session niobe drives, so it has no \
-                 checkpoint to go back to",
-            ),
+            Action::Rewind => self.pick_rewind(),
             Action::Stop => match self.working() {
                 true => {
                     self.focus = Focus::Session;
@@ -4517,6 +4549,72 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Opens the list of the prompts sent to the conversation in front of
+    /// the model, newest first, to put the files back as they were before
+    /// one of them.
+    fn pick_rewind(&mut self) {
+        let offered = self.sent.get(self.sent_since..).unwrap_or_default();
+        if offered.is_empty() {
+            self.hint = Some(
+                "No prompt has gone to the backend from here since the conversation started, \
+                 so there is nothing to put the files back before"
+                    .to_owned(),
+            );
+            return;
+        }
+        let options = offered
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(at, prompt)| Choice {
+                value: self.sent_since.saturating_add(at).to_string(),
+                name: Some(prompt.clone()),
+                note: None,
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Rewind,
+            options,
+            at: 0,
+            more: 0,
+        });
+    }
+
+    /// Records that the loop handed `prompt` to the backend: it is one F6
+    /// can put the files back before.
+    pub fn sent_to_backend(&mut self, prompt: &str) {
+        let first = prompt.trim().lines().next().unwrap_or_default();
+        self.sent.push(crate::text::truncate(first, REWIND_LABEL));
+    }
+
+    /// The prompts the operator asked to have the files put back to before
+    /// since the last call, each by where it is among those sent, oldest
+    /// first, for the loop to hand to the backend.
+    pub fn take_rewinds(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.rewinds)
+    }
+
+    /// Takes the "putting back" hint down once the backend has said what it
+    /// put back, or why it put nothing back, which the transcript shows.
+    fn rewind_answered(&mut self, event: &Event) {
+        let (Event::Notice { message } | Event::Error { message, .. }) = event else {
+            return;
+        };
+        if !message.contains("put back") {
+            return;
+        }
+        if let Some(hint) = self.rewinding.take()
+            && self.hint.as_deref() == Some(hint.as_str())
+        {
+            self.hint = None;
+        }
+    }
+
+    /// The backend would not take the rewind.
+    pub fn not_rewound(&mut self, error: &str) {
+        self.hint = Some(format!("No files were put back: {error}"));
     }
 
     /// Whether `r` in the MCP view reaches a backend: only one listening can
@@ -16642,6 +16740,62 @@ mod tests {
             );
             assert_eq!(app.said(), [], "{action:?}");
         }
+    }
+
+    #[test]
+    fn f6_offers_the_prompts_sent_from_here_newest_first_and_hands_out_the_one_chosen() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.sent_to_backend("make mean() return 0\nand say why");
+        app.sent_to_backend("now the median");
+
+        app.on_key(key(KeyCode::F(6)));
+        let picker = app.picking().expect("the prompts are offered");
+        assert_eq!(picker.purpose, Purpose::Rewind);
+        let named: Vec<_> = picker
+            .options
+            .iter()
+            .map(|choice| choice.name.as_deref())
+            .collect();
+        assert_eq!(
+            named,
+            [Some("now the median"), Some("make mean() return 0")]
+        );
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_rewinds(), [0]);
+        assert!(app.picking().is_none());
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("make mean() return 0")),
+            "{:?}",
+            app.hint()
+        );
+
+        app.apply(&Event::Notice {
+            message: "Files put back as they were before \"make mean() return 0\": a.py."
+                .to_owned(),
+        });
+        assert_eq!(app.hint(), None, "the transcript says what went back");
+    }
+
+    #[test]
+    fn a_conversation_started_over_offers_no_prompt_from_before_it() {
+        let mut app = app();
+        app.sent_to_backend("before");
+        app.apply(&Event::Cleared);
+        app.sent_to_backend("after");
+
+        app.perform(crate::menu::Action::Rewind);
+
+        let picker = app.picking().expect("the prompt since is offered");
+        assert_eq!(picker.options.len(), 1);
+        assert_eq!(picker.options[0].name.as_deref(), Some("after"));
+        assert_eq!(
+            picker.options[0].value, "1",
+            "counted among every prompt sent"
+        );
     }
 
     #[test]

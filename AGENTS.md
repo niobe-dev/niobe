@@ -154,7 +154,8 @@ reviewers that encode both, for an agent working in this tree.
   with, and where each is drawn so a click lands on it, and the commands that, typed as a
   prompt, do what an action does — `/model`, `/memory`, `/mcp`, `/resume`, `/help` and the
   rest — so each action has one path however it is asked for; F7 and `/mcp` open the MCP
-  view; a backend
+  view; F6 and `/rewind` list the prompts sent from here since the conversation started, newest
+  first, to put the files back as they were before one, the conversation kept; a backend
   command is sent only where the backend listed it, and an action no backend offers says why —
   `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
@@ -261,7 +262,10 @@ reviewers that encode both, for an agent working in this tree.
   `initialize` what it offers — the answer is where the slash commands a
   session starts with are listed, `commands_changed` only reports a change to them — asks it
   `mcp_status` whenever an `init` lists a server standing otherwise than it last said, and after
-  `mcp_reconnect`, which it sends for the MCP view's `r` — asks it once,
+  `mcp_reconnect`, which it sends for the MCP view's `r` — starts it with
+  `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` and sends each prompt with a `uuid`, which
+  `rewind_files` names to put the files back as they were before that prompt: a dry run first,
+  for which files, and the rewind itself only once the dry run has answered, said as one notice — asks it once,
   where the config leaves titles on, to title a new session from its first prompt that is not a
   command (`generate_session_title`, which the CLI answers from its small model and bills into the
   session's running totals), and the only place the models the signed-in account can run are

@@ -93,6 +93,19 @@ pub trait Bridge: std::fmt::Debug {
         Err("this backend cannot be asked to reconnect an MCP server".into())
     }
 
+    /// Asks the backend to put the files its agent changed back as they were
+    /// before the `prompt`th prompt sent through this bridge, counted from
+    /// the first at zero, keeping everything said since.
+    ///
+    /// Returns once the backend has the request; what went back arrives
+    /// through [`Bridge::drain`]. The default refuses, for the reason
+    /// [`Bridge::answer`] does: a rewind nobody took must be said, or the
+    /// operator would take files for put back that are not.
+    fn rewind(&mut self, prompt: usize) -> Result<(), BridgeError> {
+        let _ = prompt;
+        Err("this backend keeps no files to put back as they were before a prompt".into())
+    }
+
     /// Everything the backend has produced since the last call, oldest first.
     /// Never blocks; an empty answer means nothing has arrived yet, never that
     /// the session is over.
