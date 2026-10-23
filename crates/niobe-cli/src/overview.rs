@@ -546,6 +546,7 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: None,
+                untrimmed: None,
             },
         ]
     }

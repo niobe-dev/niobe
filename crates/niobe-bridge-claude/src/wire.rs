@@ -445,6 +445,14 @@ pub(crate) struct ShellReport {
     /// file it wrote from one that has since changed.
     #[serde(default)]
     pub(crate) persisted_output_size: Option<u64>,
+    /// Set by Niobe's own hook, where it trimmed the output the model read:
+    /// the file it wrote the whole of it to. Not the CLI's: the hook adds it
+    /// to the result it hands back, and the CLI passes it through.
+    #[serde(default)]
+    pub(crate) niobe_raw_output_path: Option<String>,
+    /// How many bytes the hook wrote to that file.
+    #[serde(default)]
+    pub(crate) niobe_raw_output_size: Option<u64>,
 }
 
 /// One hunk of a [`FileReport`]: a unified diff's `@@` header and the lines

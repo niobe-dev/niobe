@@ -311,6 +311,7 @@ fn searched(output: &str) -> App {
         exit_code: None,
         error: None,
         command: None,
+        untrimmed: None,
     });
     app
 }

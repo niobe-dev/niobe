@@ -13,6 +13,10 @@
 //! into several where it crosses a multiple of [`CHUNK`], each wrapped on its
 //! own, so such a line can show a short row there; that is the price of
 //! drawing a megabyte of minified JSON at the speed of a screenful.
+//!
+//! Where Niobe trimmed what a call returned before the model read it, the
+//! view opens on what the model read and `w` turns it to the whole of it and
+//! back, so the evidence the shorter copy was made from is a key away.
 
 use std::ops::Range;
 
@@ -61,6 +65,10 @@ pub struct Detail {
     /// does, rather than at the last cell that fits, as output read byte for
     /// byte must.
     words: bool,
+    /// The rows of the other reading of what the call returned, where it has
+    /// two: the whole of it while the trimmed copy shows, and the other way
+    /// about. `w` swaps them with [`Detail::rows`].
+    other: Option<Vec<Row>>,
 }
 
 /// A row of the view.
@@ -96,15 +104,21 @@ pub struct Recorded {
     /// The arguments it ran with.
     pub input: String,
     /// What it returned, its size in bytes and how it ended; `None` while it
-    /// runs.
+    /// runs. Where Niobe trimmed it, this is the copy the model read and the
+    /// size is of the whole.
     pub ended: Option<(String, u64, ToolOutcome)>,
+    /// What it returned before Niobe trimmed it, where it did.
+    pub untrimmed: Option<String>,
 }
 
 impl Detail {
     /// The view of `call`, at its top.
     pub fn of(call: &Recorded) -> Self {
+        let untrimmed = call.untrimmed.as_deref().filter(|_| call.ended.is_some());
         let mut text = String::with_capacity(
-            call.input.len() + call.ended.as_ref().map_or(0, |(output, ..)| output.len()),
+            call.input.len()
+                + call.ended.as_ref().map_or(0, |(output, ..)| output.len())
+                + untrimmed.map_or(0, str::len),
         );
         let mut rows = vec![Row::Heading(format!(
             "input · {}",
@@ -112,14 +126,36 @@ impl Detail {
         ))];
         push_text(&mut text, &mut rows, &call.input, "no arguments");
         rows.push(Row::Blank);
+        let mut other = None;
         match &call.ended {
             Some((output, bytes, outcome)) => {
-                rows.push(Row::Heading(format!(
-                    "output · {}{}",
-                    sized(*bytes),
-                    ended(*outcome)
-                )));
-                push_text(&mut text, &mut rows, output, "nothing returned");
+                let mut whole = rows.clone();
+                match untrimmed {
+                    Some(untrimmed) => {
+                        rows.push(Row::Heading(format!(
+                            "output, trimmed by niobe · {}, of {} whole{}",
+                            sized(output.len() as u64),
+                            sized(*bytes),
+                            ended(*outcome)
+                        )));
+                        whole.push(Row::Heading(format!(
+                            "output, whole · {}{}",
+                            sized(*bytes),
+                            ended(*outcome)
+                        )));
+                        push_text(&mut text, &mut rows, output, "nothing returned");
+                        push_text(&mut text, &mut whole, untrimmed, "nothing returned");
+                        other = Some(whole);
+                    }
+                    None => {
+                        rows.push(Row::Heading(format!(
+                            "output · {}{}",
+                            sized(*bytes),
+                            ended(*outcome)
+                        )));
+                        push_text(&mut text, &mut rows, output, "nothing returned");
+                    }
+                }
             }
             None => {
                 rows.push(Row::Heading("output".to_owned()));
@@ -133,6 +169,7 @@ impl Detail {
             top: (0, 0),
             drawn: None,
             words: false,
+            other,
         }
     }
 
@@ -149,6 +186,7 @@ impl Detail {
             top: (0, 0),
             drawn: None,
             words: true,
+            other: None,
         }
     }
 
@@ -158,7 +196,8 @@ impl Detail {
     }
 
     /// The text the view holds: the arguments, then what the call returned,
-    /// byte for byte as the event carried them.
+    /// then the whole of that where Niobe trimmed it, byte for byte as the
+    /// event carried them.
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -176,10 +215,32 @@ impl Detail {
             KeyCode::PageDown | KeyCode::Char(' ') => self.down(room.max(1), width),
             KeyCode::Home => self.top = (0, 0),
             KeyCode::End => self.top = self.end(width, room),
+            KeyCode::Char('w') => self.turn(),
             _ => {}
         }
         self.top = self.top.min(self.end(width, room));
         Outcome::Stay
+    }
+
+    /// Shows the other reading of what the call returned, where it has one,
+    /// from the top of that reading's output.
+    fn turn(&mut self) {
+        let Some(other) = self.other.as_mut() else {
+            return;
+        };
+        std::mem::swap(&mut self.rows, other);
+        let output = self
+            .rows
+            .iter()
+            .rposition(|row| matches!(row, Row::Heading(_)))
+            .unwrap_or(0);
+        self.top = (output, 0);
+    }
+
+    /// Whether `w` turns the view to another reading of what the call
+    /// returned.
+    fn turns(&self) -> bool {
+        self.other.is_some()
     }
 
     /// The lines of row `at` at `width`.
@@ -366,7 +427,10 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
             }),
     );
     let title = text::truncate(&text::controls_shown(&detail.title), text_width);
-    let footer = " ↑↓ PgUp PgDn Home End scroll · Esc close ";
+    let footer = match detail.turns() {
+        true => " ↑↓ PgUp PgDn Home End scroll · w trimmed/whole · Esc close ",
+        false => " ↑↓ PgUp PgDn Home End scroll · Esc close ",
+    };
     let inner = crate::ui::dialog(frame, body, (width, lines.len()), (&title, footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
     app.measured_detail(text_width, room);
@@ -396,6 +460,7 @@ mod tests {
             what: "cargo test".to_owned(),
             input: input.to_owned(),
             ended: Some((output.to_owned(), output.len() as u64, ToolOutcome::Ok)),
+            untrimmed: None,
         }
     }
 
@@ -493,6 +558,63 @@ mod tests {
         let detail = Detail::of(&call("{}", "red\u{1b}[31m"));
 
         assert_eq!(shown(&detail, 40, 20)[4], "red\u{241b}[31m");
+    }
+
+    fn trimmed() -> Recorded {
+        let whole = "   Compiling demo\ntest a ... ok\ntest result: ok. 1 passed\n";
+        Recorded {
+            ended: Some((
+                "test result: ok. 1 passed\n".to_owned(),
+                whole.len() as u64,
+                ToolOutcome::Ok,
+            )),
+            untrimmed: Some(whole.to_owned()),
+            ..call("{}", "")
+        }
+    }
+
+    #[test]
+    fn a_trimmed_output_opens_on_what_the_model_read_and_w_turns_it_to_the_whole_and_back() {
+        let mut detail = Detail::of(&trimmed());
+
+        assert_eq!(
+            shown(&detail, 80, 20)[3..],
+            [
+                "output, trimmed by niobe · 26 bytes, of 58 bytes whole",
+                "test result: ok. 1 passed",
+                "",
+            ]
+        );
+
+        assert_eq!(detail.on_key(key(KeyCode::Char('w'))), Outcome::Stay);
+        assert_eq!(
+            shown(&detail, 80, 20)[3..],
+            [
+                "output, whole · 58 bytes",
+                "   Compiling demo",
+                "test a ... ok",
+                "test result: ok. 1 passed",
+                "",
+            ]
+        );
+
+        detail.on_key(key(KeyCode::Char('w')));
+        detail.on_key(key(KeyCode::Home));
+        assert_eq!(
+            shown(&detail, 80, 20)[3],
+            "output, trimmed by niobe · 26 bytes, of 58 bytes whole"
+        );
+    }
+
+    #[test]
+    fn w_does_nothing_where_nothing_was_trimmed() {
+        let mut detail = Detail::of(&call("{}", "out"));
+        let before = shown(&detail, 40, 20);
+
+        detail.on_key(key(KeyCode::Char('w')));
+
+        assert_eq!(shown(&detail, 40, 20), before);
+        assert!(!detail.turns());
     }
 
     #[test]

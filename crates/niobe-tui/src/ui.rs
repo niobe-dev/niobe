@@ -8069,6 +8069,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         let written: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
         app.apply(&Event::FileChange {
@@ -8110,6 +8111,7 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: None,
+                untrimmed: None,
             });
         }
         edited(&mut app, "after", 2);
@@ -8177,6 +8179,7 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: None,
+                untrimmed: None,
             });
         };
         read(&mut app, "t1");

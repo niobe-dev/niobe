@@ -223,7 +223,8 @@ reviewers that encode both, for an agent working in this tree.
   happened since the operator last looked, a row a figure, which the first key after minutes
   with none opens — that key is spent on it — and `c` in a side pane or View › What happened…
   opens since the last one shown. `detail.rs` is one tool call read whole — the arguments it
-  started with and the output its end carried, each headed by its size, nothing cut — opened from
+  started with and the output its end carried, each headed by its size, nothing cut, and where
+  Niobe's hook trimmed that output, the whole of it behind `w` — opened from
   the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows, or by a click on the
   call's row, a run of calls opening that list on its first; it
   wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. `s` in a side
@@ -268,7 +269,8 @@ reviewers that encode both, for an agent working in this tree.
   `NIOBE_STREAM_DIR`, one file per CLI process holding its argv and every line that crossed its pipes
   in order, written on a thread of its own, so a recording needs no shim on `PATH`; `spilled.rs` reads the file the CLI saves a shell output
   too large to hand over to, so a whole test run is counted from it rather than from the
-  preview, and both the driver and the transcript reader hand it to the translator;
+  preview, and the file under `.niobe/trim/` Niobe's hook wrote an output it trimmed to, which the
+  call's end carries as its `untrimmed` output, and both the driver and the transcript reader hand it to the translator;
   `memory.rs` finds the files the CLI gives the agent as memory by the CLI's documented lookup —
   the user's, every directory's from the root down, their `@` imports and the CLI's
   auto-memory index and its notes — since the CLI does not say which it loaded;

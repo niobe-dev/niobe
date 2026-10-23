@@ -2287,6 +2287,7 @@ impl App {
                         what: what_it_does(summary.as_deref(), input),
                         input: input.clone(),
                         ended: None,
+                        untrimmed: None,
                     },
                 ));
                 let head = tool_label(name);
@@ -2341,6 +2342,7 @@ impl App {
                 exit_code,
                 error,
                 command,
+                untrimmed,
             } => {
                 let ending = Ending {
                     outcome: *outcome,
@@ -2352,6 +2354,7 @@ impl App {
                     id,
                     (name, input, summary.as_deref()),
                     (output, *bytes, *outcome),
+                    untrimmed.as_deref(),
                 );
                 let gate = self.gate(id);
                 let started = self.tool_entries.remove(id);
@@ -3839,15 +3842,20 @@ impl App {
         id: &ToolCallId,
         (name, input, summary): (&str, &str, Option<&str>),
         (output, bytes, outcome): (&str, u64, ToolOutcome),
+        untrimmed: Option<&str>,
     ) {
         let ended = Some((output.to_owned(), bytes, outcome));
+        let untrimmed = untrimmed.map(str::to_owned);
         match self
             .recorded
             .iter_mut()
             .rev()
             .find(|(started, _)| started == id)
         {
-            Some((_, call)) => call.ended = ended,
+            Some((_, call)) => {
+                call.ended = ended;
+                call.untrimmed = untrimmed;
+            }
             None => self.recorded.push((
                 id.clone(),
                 crate::detail::Recorded {
@@ -3855,6 +3863,7 @@ impl App {
                     what: what_it_does(summary, input),
                     input: input.to_owned(),
                     ended,
+                    untrimmed,
                 },
             )),
         }
@@ -6165,6 +6174,7 @@ impl App {
             exit_code: ran.exit_code,
             error: ran.error,
             command: Some(command),
+            untrimmed: None,
         });
         if let Some(tested) = tested {
             self.produce(tested);
@@ -9745,6 +9755,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
 
         assert_eq!(app.entries().len(), 1, "the end opened a second entry");
@@ -9780,6 +9791,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -9792,6 +9804,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
 
         assert_eq!(app.entries()[0].kind, EntryKind::Failure);
@@ -12659,6 +12672,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         }
     }
 
@@ -13680,6 +13694,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::FileChange {
             path: "a.rs".to_owned(),
@@ -13756,6 +13771,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "and then".to_owned(),
@@ -13855,6 +13871,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         }
     }
 
@@ -14274,6 +14291,7 @@ mod tests {
             exit_code: Some(2),
             error: Some("no such file".to_owned()),
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "then".to_owned(),
@@ -15492,6 +15510,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
     }
 
@@ -15629,6 +15648,7 @@ mod tests {
             exit_code: Some(0),
             error: None,
             command: None,
+            untrimmed: None,
         });
 
         app.perform(crate::menu::Action::Calls);
@@ -15636,6 +15656,40 @@ mod tests {
 
         let detail = app.detail().expect("the call is listed");
         assert_eq!(detail.text(), "{\"command\":\"ls\"}Cargo.toml");
+    }
+
+    #[test]
+    fn a_call_niobe_trimmed_opens_on_what_the_model_read_with_the_whole_a_key_away() {
+        let mut app = app();
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"cargo build\"}".to_owned(),
+            summary: Some("cargo build".to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"cargo build\"}".to_owned(),
+            output: "Finished".to_owned(),
+            bytes: 19,
+            outcome: ToolOutcome::Ok,
+            summary: Some("cargo build".to_owned()),
+            exit_code: None,
+            error: None,
+            command: Some("cargo build".to_owned()),
+            untrimmed: Some("Compiling a\nFinished".to_owned()),
+        });
+
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("the call is listed");
+        assert_eq!(
+            detail.text(),
+            "{\"command\":\"cargo build\"}FinishedCompiling a\nFinished"
+        );
     }
 
     /// A shell with `overlay` open, and the key that closes it: the key an

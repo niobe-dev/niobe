@@ -175,6 +175,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         };
         assert_eq!(Attention::of(&read), Attention::Routine);
         let notice = Event::Notice {

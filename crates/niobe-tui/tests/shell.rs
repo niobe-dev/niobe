@@ -1475,6 +1475,7 @@ fn session_that_updated_its_memory() -> App {
             outcome: niobe_core::event::ToolOutcome::Ok,
             summary: Some(path.clone()),
             command: None,
+            untrimmed: None,
             exit_code: None,
             error: None,
         });

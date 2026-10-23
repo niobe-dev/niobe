@@ -2065,6 +2065,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         state.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -2077,6 +2078,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
 
         let tools = state.tools();
@@ -2231,6 +2233,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         }
     }
 
@@ -2512,6 +2515,7 @@ mod tests {
             exit_code,
             error,
             command,
+            untrimmed: None,
         }
     }
 
@@ -2672,6 +2676,7 @@ mod tests {
             exit_code: Some(0),
             error: None,
             command: None,
+            untrimmed: None,
         });
         assert!(state.in_flight_tools().is_empty());
         assert_eq!(state.tools().unmatched_ends, 0);
@@ -3186,6 +3191,7 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: None,
+                untrimmed: None,
             },
             changed(path, Some(1), Some(1)),
         ]
@@ -4517,6 +4523,7 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: command.map(str::to_owned),
+                untrimmed: None,
             },
         ]
     }

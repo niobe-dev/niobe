@@ -670,7 +670,9 @@ impl Translator {
     ///
     /// Only a `cargo test` run's result is read, and only once, when its call
     /// ends: the CLI hands the model the first 2 KB of an output past about
-    /// 30 KB, and a whole workspace's test run is past that.
+    /// 30 KB, and a whole workspace's test run is past that. The same reader
+    /// reads back the whole of an output Niobe's hook trimmed, from the file
+    /// the hook wrote it to.
     #[must_use]
     pub(crate) fn reading_spilled_with(mut self, read: ReadSpilled) -> Self {
         self.read_spilled = Some(read);
@@ -1678,11 +1680,16 @@ impl Translator {
                 ToolOutcome::Interrupted => Some(STOPPED.to_owned()),
             };
 
+            let untrimmed = match (outcome, name == SHELL_TOOL) {
+                (ToolOutcome::Ok, true) => untrimmed(reported.as_ref(), self.read_spilled),
+                _ => None,
+            };
+            let bytes = untrimmed.as_ref().map_or(bytes, |whole| whole.len() as u64);
             let tested = test_run(
                 &name,
                 &arguments,
                 outcome,
-                &output,
+                untrimmed.as_deref().unwrap_or(&output),
                 reported.as_ref(),
                 exit_code,
                 self.read_spilled,
@@ -1710,6 +1717,7 @@ impl Translator {
                 exit_code,
                 error,
                 command,
+                untrimmed,
             });
             out.extend(change);
             out.extend(tested);
@@ -3098,6 +3106,24 @@ fn test_run(
         whole.as_deref(),
         exit_code,
     ))
+}
+
+/// The whole of what a shell command printed, where Niobe's hook trimmed what
+/// the model read of it: the file the hook names in the result, read with
+/// `read` as long as it holds the bytes the hook said it wrote. Only a file
+/// named `<id>.txt` in a `.niobe/trim` directory is read, which is where the
+/// hook writes, so a result naming any other path reads nothing.
+fn untrimmed(reported: Option<&serde_json::Value>, read: Option<ReadSpilled>) -> Option<String> {
+    let report = serde_json::from_value::<wire::ShellReport>(reported?.clone()).ok()?;
+    let path = PathBuf::from(report.niobe_raw_output_path?);
+    let dir = path.parent()?;
+    let kept = path.extension()? == "txt"
+        && dir.file_name()? == "trim"
+        && dir.parent()?.file_name()? == ".niobe";
+    if !kept {
+        return None;
+    }
+    read?(&path, report.niobe_raw_output_size?)
 }
 
 /// The whole of what a shell command printed, where it can be had.
@@ -7462,7 +7488,9 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             .expect("no test panics holding it")
             .push(path.to_owned());
         let text = match path.to_str()? {
-            "/whole.txt" | "/once.txt" => PASSING_RUN,
+            "/whole.txt" | "/once.txt" | "/repo/.niobe/trim/t1.txt" | "/repo/trim/t1.txt" => {
+                PASSING_RUN
+            }
             "/preview.txt" => PASSING_RUN.get(..200)?,
             _ => return None,
         };
@@ -7493,6 +7521,69 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                 r#","persistedOutputPath":"{path}","persistedOutputSize":{size}"#
             )),
         )
+    }
+
+    /// The result of a passing run Niobe's hook trimmed, naming `path` as
+    /// where it wrote the whole.
+    fn trimmed_by_niobe(path: &str, size: usize) -> String {
+        result_with(
+            "t1",
+            "test result: ok. 2 passed\n[niobe left out 2 lines]",
+            &shell_report(&format!(
+                r#","niobeRawOutputPath":"{path}","niobeRawOutputSize":{size}"#
+            )),
+        )
+    }
+
+    fn ended_call(events: &[Event]) -> (&str, u64, Option<&str>) {
+        events
+            .iter()
+            .find_map(|event| match event {
+                Event::ToolCallEnd {
+                    output,
+                    bytes,
+                    untrimmed,
+                    ..
+                } => Some((output.as_str(), *bytes, untrimmed.as_deref())),
+                _ => None,
+            })
+            .expect("the result ends the call")
+    }
+
+    #[test]
+    fn an_output_niobe_trimmed_carries_its_whole_and_is_sized_and_counted_by_it() {
+        let mut translator = translator().reading_spilled_with(read_spilled);
+        shell_call(&mut translator);
+
+        let events = translator.line(&trimmed_by_niobe(
+            "/repo/.niobe/trim/t1.txt",
+            PASSING_RUN.len(),
+        ));
+
+        let (output, bytes, untrimmed) = ended_call(&events);
+        assert!(output.starts_with("test result: ok. 2 passed"));
+        assert_eq!(untrimmed, Some(PASSING_RUN));
+        assert_eq!(bytes, PASSING_RUN.len() as u64);
+        let counts: Vec<_> = test_runs(&events).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].map(|c| (c.passed, c.suites)), Some((2, 1)));
+    }
+
+    #[test]
+    fn a_trimmed_output_is_read_back_only_from_niobes_own_directory_and_at_its_size() {
+        for (path, size) in [
+            ("/repo/trim/t1.txt", PASSING_RUN.len()),
+            ("/repo/.niobe/trim/t1.txt", PASSING_RUN.len() + 1),
+        ] {
+            let mut translator = translator().reading_spilled_with(read_spilled);
+            shell_call(&mut translator);
+
+            let events = translator.line(&trimmed_by_niobe(path, size));
+
+            let (output, bytes, untrimmed) = ended_call(&events);
+            assert_eq!(untrimmed, None, "{path}");
+            assert_eq!(bytes, output.len() as u64, "{path}");
+        }
     }
 
     #[test]

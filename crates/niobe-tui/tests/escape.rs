@@ -202,6 +202,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 exit_code: Some(1),
                 error: Some(format!("err {p}")),
                 command: None,
+                untrimmed: None,
             },
         ])
     }));
@@ -460,6 +461,7 @@ fn call_detail(p: &str) -> App {
         exit_code: None,
         error: None,
         command: None,
+        untrimmed: None,
     });
     app.perform(niobe_tui::menu::Action::Calls);
     app.on_key(key(KeyCode::Enter));

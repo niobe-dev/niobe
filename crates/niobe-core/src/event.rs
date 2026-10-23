@@ -815,6 +815,13 @@ pub enum Event {
         /// kept before calls carried it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
+        /// What the tool returned before Niobe's own trimming left lines out
+        /// of it ([`crate::trim`]), where it did: `output` is then the
+        /// shorter copy the model read, and `bytes` the size of this. `None`
+        /// where nothing was trimmed, and where the whole could not be read
+        /// back as it was written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        untrimmed: Option<String>,
     },
 
     /// The backend finished answering the operator's last prompt: every call
@@ -1734,6 +1741,7 @@ mod tests {
             exit_code: Some(2),
             error: Some("no such file".to_owned()),
             command: None,
+            untrimmed: None,
         };
         let line = serde_json::to_string(&ended).expect("an event serializes");
         let read: Event = serde_json::from_str(&line).expect("what was written reads back");

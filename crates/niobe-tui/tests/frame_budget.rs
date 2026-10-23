@@ -279,6 +279,7 @@ fn session_of_diffs() -> App {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::FileChange {
             path,
@@ -473,6 +474,7 @@ fn write_of(written: &str) -> Vec<Event> {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         },
         Event::FileChange {
             path,
@@ -686,6 +688,7 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
     }
     let _ = screen(&mut app, 200, 60);
@@ -1033,6 +1036,7 @@ fn a_call_with_a_megabyte_of_output_opens_and_pages_inside_a_frame_budget() {
             exit_code: Some(0),
             error: None,
             command: None,
+            untrimmed: None,
         });
         let _ = screen(&mut app, 200, 60);
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);

@@ -117,6 +117,8 @@ by default. On the cargo runs recorded in
 left 7% of the bytes, before the line it adds saying where the rest is. Only a command that
 succeeds is trimmed: the `claude` CLI hands a failing one
 to the agent as it is, and lets no hook change it. A command RTK already filtered is left alone.
+In the shell, a trimmed call's row opens on what the agent read, and `w` turns it to the whole
+output and back.
 
 `niobe cost` lists each session recorded in the repository with the tokens it spent and the
 money its backend reported, never an estimate. `niobe cost --json` prints it in the shape

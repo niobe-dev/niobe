@@ -1153,6 +1153,7 @@ mod tests {
             exit_code: None,
             error: error.map(str::to_owned),
             command: None,
+            untrimmed: None,
         }
     }
 
@@ -1426,6 +1427,7 @@ mod tests {
                     exit_code,
                     error,
                     command,
+                    untrimmed: None,
                 },
                 other => other,
             };
@@ -1694,6 +1696,7 @@ mod tests {
             exit_code: Some(0),
             error: None,
             command: Some(command.to_owned()),
+            untrimmed: None,
         });
     }
 
@@ -1940,6 +1943,7 @@ mod tests {
             exit_code: Some(status),
             error: (status != 0).then(|| format!("Exit code {status}")),
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::TestRun {
             id: "t1".into(),
@@ -2205,6 +2209,7 @@ mod tests {
             exit_code: Some(0),
             error: None,
             command: None,
+            untrimmed: None,
         });
         drawn(&app, false)
     }
@@ -2264,6 +2269,7 @@ mod tests {
                 exit_code: Some(0),
                 error: None,
                 command: None,
+                untrimmed: None,
             },
             second(to),
         );
