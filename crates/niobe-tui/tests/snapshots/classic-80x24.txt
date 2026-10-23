@@ -1,5 +1,5 @@
   a  Black on Cyan
-  b  Black on Cyan, bold | underlined
+  b  LightYellow on Cyan, bold | underlined
   c  Black on Cyan, bold
   d  Black on Cyan, dim
   e  White on Blue

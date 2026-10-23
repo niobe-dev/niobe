@@ -1,5 +1,5 @@
   a  White on DarkGray
-  b  White on DarkGray, bold | underlined
+  b  LightBlue on DarkGray, bold | underlined
   c  White on DarkGray, bold
   d  White on DarkGray, dim
   e  LightBlue on DarkGray

@@ -2,27 +2,27 @@
 <rect width="1080" height="540" fill="#121212"/>
 <rect x="0" y="0" width="9" height="18" fill="#323233"/>
 <rect x="9" y="0" width="9" height="18" fill="#323233"/>
-<text x="9" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" font-weight="bold" text-decoration="underline">N</text>
+<text x="9" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4fc1ff" font-weight="bold" text-decoration="underline">N</text>
 <rect x="18" y="0" width="54" height="18" fill="#323233"/>
 <text x="18" y="13" textLength="54" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc">iobe  </text>
 <rect x="72" y="0" width="9" height="18" fill="#323233"/>
-<text x="72" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" font-weight="bold" text-decoration="underline">S</text>
+<text x="72" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4fc1ff" font-weight="bold" text-decoration="underline">S</text>
 <rect x="81" y="0" width="72" height="18" fill="#323233"/>
 <text x="81" y="13" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc">ession  </text>
 <rect x="153" y="0" width="9" height="18" fill="#323233"/>
-<text x="153" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" font-weight="bold" text-decoration="underline">C</text>
+<text x="153" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4fc1ff" font-weight="bold" text-decoration="underline">C</text>
 <rect x="162" y="0" width="72" height="18" fill="#323233"/>
 <text x="162" y="13" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc">ontext  </text>
 <rect x="234" y="0" width="9" height="18" fill="#323233"/>
-<text x="234" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" font-weight="bold" text-decoration="underline">M</text>
+<text x="234" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4fc1ff" font-weight="bold" text-decoration="underline">M</text>
 <rect x="243" y="0" width="54" height="18" fill="#323233"/>
 <text x="243" y="13" textLength="54" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc">odel  </text>
 <rect x="297" y="0" width="9" height="18" fill="#323233"/>
-<text x="297" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" font-weight="bold" text-decoration="underline">V</text>
+<text x="297" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4fc1ff" font-weight="bold" text-decoration="underline">V</text>
 <rect x="306" y="0" width="45" height="18" fill="#323233"/>
 <text x="306" y="13" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc">iew  </text>
 <rect x="351" y="0" width="9" height="18" fill="#323233"/>
-<text x="351" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" font-weight="bold" text-decoration="underline">H</text>
+<text x="351" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4fc1ff" font-weight="bold" text-decoration="underline">H</text>
 <rect x="360" y="0" width="279" height="18" fill="#323233"/>
 <text x="360" y="13" textLength="279" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc">elp                            </text>
 <rect x="639" y="0" width="54" height="18" fill="#323233"/>

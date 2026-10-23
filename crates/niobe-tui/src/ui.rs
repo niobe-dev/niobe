@@ -841,12 +841,18 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     frame.render_widget(Paragraph::new(left).style(bar), area);
     if !identity.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(segment_spans(identity)))
-                .alignment(Alignment::Right)
-                .style(bar),
-            area,
-        );
+        // Only the identity's own cells: a paragraph's style is laid over its
+        // whole area, which over the row would repaint the menus' titles.
+        let line = Line::from(segment_spans(identity));
+        let width = u16::try_from(line.width())
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        let right = Rect {
+            x: area.right().saturating_sub(width),
+            width,
+            ..area
+        };
+        frame.render_widget(Paragraph::new(line).style(bar), right);
     }
 }
 

@@ -1,5 +1,5 @@
   a  White on Black
-  b  White on Black, bold | underlined
+  b  LightGreen on Black, bold | underlined
   c  LightGreen on Black
   d  LightMagenta on Black, bold | reversed
   e  LightMagenta on Black, reversed

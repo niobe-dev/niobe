@@ -6131,6 +6131,55 @@ fn an_open_menu_hangs_from_its_name_with_the_keys_that_do_each_item() {
 /// An open menu in `classic`, colours and all, over the transcript: Far's
 /// white-on-cyan menu with its item under the cursor white on black, and the
 /// menu's shadow redrawing what it falls on in dark grey on black.
+/// The menu row's styles, cell by cell, beside its text: the identity on the
+/// right of the row is drawn after the menus and must leave theirs alone.
+fn menu_row(app: &mut App) -> (Vec<char>, Vec<ratatui::style::Style>) {
+    let text = screen(app, 160, 30);
+    let row: Vec<char> = text.lines().next().unwrap_or_default().chars().collect();
+    let cells = styles(app, 160, 30).into_iter().take(160).collect();
+    (row, cells)
+}
+
+fn title_at(row: &[char], name: &str) -> usize {
+    let name: Vec<char> = name.chars().collect();
+    row.windows(name.len())
+        .position(|window| window == name.as_slice())
+        .unwrap_or_else(|| panic!("{} is not on the menu row", String::from_iter(&name)))
+}
+
+#[test]
+fn every_menu_title_keeps_its_hot_letter_and_the_open_one_is_inverted_in_every_theme() {
+    for theme in THEMES {
+        let mut app = running_session().with_theme(theme);
+        let (row, cells) = menu_row(&mut app);
+        assert!(
+            String::from_iter(&row).trim_end().len() > 60,
+            "the identity is on the row, so it is drawn over it"
+        );
+        for menu in niobe_tui::menu::MENUS {
+            let at = title_at(&row, menu.name);
+            assert_eq!(
+                cells[at].fg,
+                Some(theme.hot),
+                "{} {}",
+                theme.name,
+                menu.name
+            );
+        }
+
+        app.on_key(alt('v'));
+        let (row, cells) = menu_row(&mut app);
+        let at = title_at(&row, "View");
+        assert_eq!(cells[at].fg, Some(theme.hot), "{}", theme.name);
+        assert_eq!(
+            (cells[at + 1].fg, cells[at + 1].bg),
+            (Some(theme.menu_bg), Some(theme.menu_fg)),
+            "{}: the open menu's title is inverted",
+            theme.name
+        );
+    }
+}
+
 #[test]
 fn an_open_menu_in_classic_is_painted_in_far_managers_colours() {
     let mut app = running_session()

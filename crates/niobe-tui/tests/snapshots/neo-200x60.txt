@@ -1,5 +1,5 @@
   a  Green on Black
-  b  Green on Black, bold | underlined
+  b  LightGreen on Black, bold | underlined
   c  Green on Black, bold
   d  Green on Black, dim
   e  LightGreen on Black
