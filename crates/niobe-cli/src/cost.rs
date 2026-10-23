@@ -3,7 +3,7 @@
 
 //! What `niobe cost` prints: each session the store holds, with the tokens it
 //! spent and the money its backend reported, as a table, as JSON or as CSV,
-//! or the tokens of each day's sessions summed, with `--by-day`. Every
+//! or the tokens of each day's sessions summed by profile, with `--by-day`. Every
 //! figure is folded from the stored events, so a session recorded before
 //! the day table existed is counted in it.
 //!
@@ -39,7 +39,8 @@ pub enum Format {
     Json,
     /// One row per session under a header row.
     Csv,
-    /// A table of the sessions started on each day, with their tokens.
+    /// A table of the sessions started on each day under each profile, with
+    /// their tokens.
     Days,
 }
 
@@ -212,36 +213,48 @@ fn table(sessions: &[Folded]) -> Vec<String> {
     lines
 }
 
-/// The sessions summed by the UTC day each started on, oldest day first.
-/// Tokens only: a day's money would add a plan's nothing to a metered bill,
-/// which is a figure nobody was charged.
+/// The sessions summed by the UTC day each started on and the profile it
+/// ran under, oldest day first. Tokens only: a day's money would add a
+/// plan's nothing to a metered bill, which is a figure nobody was charged.
+/// A session that never said its profile is counted under `—`.
 fn days(sessions: &[Folded]) -> Vec<String> {
     if sessions.is_empty() {
         return vec!["No sessions recorded in this repository.".to_owned()];
     }
-    let mut by_day: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut by_day: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
     for folded in sessions {
         let day = rfc3339(folded.started_at)
             .get(..10)
             .unwrap_or_default()
             .to_owned();
-        let (count, tokens) = by_day.entry(day).or_default();
+        let profile = folded
+            .state
+            .meta()
+            .map_or_else(|| "—".to_owned(), |meta| meta.profile.clone());
+        let (count, tokens) = by_day.entry((day, profile)).or_default();
         *count = count.saturating_add(1);
         *tokens = tokens.saturating_add(folded.state.totals().tokens());
     }
+    let profile_width = by_day
+        .keys()
+        .map(|(_, profile)| profile.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("PROFILE".len());
     let mut lines = vec![format!(
-        "{:<10}  {:>8}  {:>12}",
-        "DAY", "SESSIONS", "TOKENS"
+        "{:<10}  {:<profile_width$}  {:>8}  {:>12}",
+        "DAY", "PROFILE", "SESSIONS", "TOKENS"
     )];
-    lines.extend(
-        by_day.iter().map(|(day, (count, tokens))| {
-            format!("{day:<10}  {count:>8}  {:>12}", grouped(*tokens))
-        }),
-    );
+    lines.extend(by_day.iter().map(|((day, profile), (count, tokens))| {
+        format!(
+            "{day:<10}  {profile:<profile_width$}  {count:>8}  {:>12}",
+            grouped(*tokens)
+        )
+    }));
     lines.push(String::new());
     lines.push(
         "Each day is the UTC day a session started on, and its tokens are every token \
-         that day's sessions reported, wherever they were billed."
+         that day's sessions reported under that profile, wherever they were billed."
             .to_owned(),
     );
     lines
@@ -261,7 +274,7 @@ fn labelled(totals: &Totals) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use niobe_core::event::{Event, Usage};
+    use niobe_core::event::{Backend, Event, SessionMeta, Usage};
     use std::time::Duration;
 
     fn session(id: u32, started: u64, input: u64) -> Folded {
@@ -286,24 +299,33 @@ mod tests {
     }
 
     #[test]
-    fn the_days_table_sums_each_utc_days_sessions_oldest_first() {
+    fn the_days_table_sums_each_utc_days_sessions_by_profile_oldest_first() {
         // 1_789_732_800 is 2026-09-18T12:00:00Z; 43_199 s later is the day's
         // last second, and 43_200 s later the next day's first.
+        let mut on_max = session(4, 1_789_732_800 + 60, 7);
+        on_max.state.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "opus-5".to_owned(),
+            backend_session: None,
+        }));
         let sessions = [
             session(1, 1_789_732_800, 1_000),
             session(2, 1_789_732_800 + 43_199, 2_500),
             session(3, 1_789_732_800 + 43_200, 40),
+            on_max,
         ];
 
         assert_eq!(
             lines("repo", &sessions, Format::Days),
             [
-                "DAY         SESSIONS        TOKENS",
-                "2026-09-18         2         3,500",
-                "2026-09-19         1            40",
+                "DAY         PROFILE  SESSIONS        TOKENS",
+                "2026-09-18  max             1             7",
+                "2026-09-18  —               2         3,500",
+                "2026-09-19  —               1            40",
                 "",
                 "Each day is the UTC day a session started on, and its tokens are every token \
-                 that day's sessions reported, wherever they were billed.",
+                 that day's sessions reported under that profile, wherever they were billed.",
             ]
         );
     }
