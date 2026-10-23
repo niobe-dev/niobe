@@ -359,6 +359,8 @@ reviewers that encode both, for an agent working in this tree.
   what `niobe cost` prints — the same sessions, each with its tokens per kind and per model and
   the money its backend reported, as a table, as `--csv`, as `--by-day` — each UTC day's
   sessions and tokens summed by profile, with no money, since a day's would add a plan's nothing to a bill —
+  or `--by-turn`, each turn's tokens and a row for what no ended turn's figure holds, so a
+  session's rows add up to its total —
   or as `--json` in the shape
   `schema/cost.schema.json` publishes at the repository's root, with no money on a plan or where
   nothing said how a session was billed and no figure priced by the table; `headless.rs` is

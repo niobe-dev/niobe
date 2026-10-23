@@ -242,3 +242,65 @@ fn the_table_reads_a_plan_as_a_dash_and_a_floor_with_its_mark() {
         "--last 2 left it out: {printed}"
     );
 }
+
+/// A repository holding the recorded session with each of its turns ended
+/// where the next prompt begins and at the end of the log, since the
+/// recording predates the event that says a turn ended.
+fn repository_with_ended_turns() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let root = dir.path().join("catalog");
+    std::fs::create_dir_all(root.join(".git")).expect("a .git directory can be made");
+    std::fs::create_dir(root.join(".niobe")).expect("a .niobe directory can be made");
+    let store = Store::open(&root.join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
+    let session = store.create_session().expect("a session is created");
+    let text = std::fs::read_to_string(fixtures().join("claude-session.jsonl"))
+        .expect("the fixture reads");
+    let mut events = Vec::new();
+    let mut prompted = false;
+    for event in read_log(&text).expect("the fixture parses") {
+        if matches!(event, Event::UserMessage { .. }) {
+            if prompted {
+                events.push(Event::TurnEnded);
+            }
+            prompted = true;
+        }
+        events.push(event);
+    }
+    events.push(Event::TurnEnded);
+    for event in &events {
+        store
+            .append_at(
+                session,
+                event,
+                UNIX_EPOCH + Duration::from_millis(RECORDED_ON_MS),
+            )
+            .expect("an append succeeds");
+    }
+    (dir, root)
+}
+
+#[test]
+fn each_turn_is_listed_with_the_tokens_its_usage_records_hold() {
+    let (_dir, root) = repository_with_ended_turns();
+
+    // Each usage record's input, output and cache counts, summed between one
+    // prompt and the next with the `jq` program in the fixtures' README.
+    let expected = [44_767, 48_532, 49_940, 50_810, 40_791, 328_148];
+    let table = cost(&root, &["--by-turn"]);
+    let rows: Vec<(String, String)> = table
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            (columns[1].to_owned(), columns[2].replace(',', ""))
+        })
+        .collect();
+    let listed: Vec<(String, String)> = (1..)
+        .zip(expected)
+        .map(|(turn, tokens): (u64, u64)| (turn.to_string(), tokens.to_string()))
+        .collect();
+    assert_eq!(rows, listed, "{table}");
+    assert_eq!(expected.iter().sum::<u64>(), 562_988, "the session's total");
+}
