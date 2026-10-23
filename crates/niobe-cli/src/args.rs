@@ -16,6 +16,7 @@ use niobe_tui::Theme;
 use niobe_tui::theme;
 
 use crate::cost::Format;
+use crate::playback::Speed;
 
 /// What the operator asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +80,13 @@ pub enum Command {
     /// List the prices in force today, or every price one model has had.
     Prices(Option<String>),
     /// Fold a JSON Lines event log, for development.
-    Replay(PathBuf),
+    Replay {
+        /// The JSON Lines event log.
+        log: PathBuf,
+        /// How many times the recorded pace the shell is handed the events
+        /// at; `None` folds them all before the shell opens.
+        speed: Option<Speed>,
+    },
     /// Print the help.
     Help,
     /// Print the version.
@@ -211,7 +218,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
                 .to_owned(),
         );
     }
-    if theme.is_some() && !runs_a_session && !matches!(command, Command::Replay(_)) {
+    if theme.is_some() && !runs_a_session && !matches!(command, Command::Replay { .. }) {
         return Err(
             "`--theme` applies to the shell, `--resume` and `replay`, and to nothing else"
                 .to_owned(),
@@ -389,10 +396,10 @@ fn command(args: &[&str]) -> Result<Command, String> {
             Command::Prices(Some((*model).to_owned()))
         }
         ["replay"] => return Err("`replay` needs a log file".to_owned()),
-        ["replay", file, rest @ ..] => {
-            no_more(rest)?;
-            Command::Replay(PathBuf::from(file))
-        }
+        ["replay", file, rest @ ..] => Command::Replay {
+            log: PathBuf::from(file),
+            speed: replay_speed(rest)?,
+        },
         [other, ..] => return Err(format!("unknown argument `{other}`")),
     };
     Ok(command)
@@ -508,6 +515,18 @@ fn bench(rest: &[&str]) -> Result<Command, String> {
         json,
         timeout,
     })
+}
+
+/// `niobe replay`'s `--speed <n>`, a positive number, where it is given.
+fn replay_speed(rest: &[&str]) -> Result<Option<Speed>, String> {
+    match rest {
+        [] => Ok(None),
+        ["--speed", n] => Speed::parse(n)
+            .map(Some)
+            .ok_or_else(|| format!("`--speed` takes a positive number, not `{n}`")),
+        ["--speed"] => Err("`--speed` takes a positive number".to_owned()),
+        [other, ..] => Err(format!("unexpected argument `{other}`")),
+    }
 }
 
 /// `niobe cost`: a format flag (`--json`, `--csv`, `--by-day`), at most one, among the overview's narrowing.
@@ -634,9 +653,27 @@ mod tests {
     fn replay_takes_a_file() {
         assert_eq!(
             parsed(&["replay", "log.jsonl"]),
-            Ok(Command::Replay(PathBuf::from("log.jsonl")))
+            Ok(Command::Replay {
+                log: PathBuf::from("log.jsonl"),
+                speed: None
+            })
+        );
+        assert_eq!(
+            parsed(&["replay", "log.jsonl", "--speed", "4"]),
+            Ok(Command::Replay {
+                log: PathBuf::from("log.jsonl"),
+                speed: Speed::parse("4")
+            })
         );
         assert!(parsed(&["replay"]).is_err());
+        for speed in ["0", "-1", "inf", "NaN", "fast"] {
+            assert!(
+                parsed(&["replay", "log.jsonl", "--speed", speed]).is_err(),
+                "{speed}"
+            );
+        }
+        assert!(parsed(&["replay", "log.jsonl", "--speed"]).is_err());
+        assert!(parsed(&["replay", "log.jsonl", "extra"]).is_err());
     }
 
     #[test]

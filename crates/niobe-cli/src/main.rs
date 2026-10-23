@@ -30,6 +30,7 @@ mod images;
 mod journal;
 mod memory;
 mod overview;
+mod playback;
 mod prices;
 mod printable;
 mod profiles;
@@ -251,7 +252,7 @@ fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(
         Command::Trust { yes } => trust(yes),
         Command::Untrust => untrust(),
         Command::Prices(model) => list_prices(model.as_deref()),
-        Command::Replay(log) => replay(&log, asked),
+        Command::Replay { log, speed } => replay(&log, speed, asked),
         Command::Help => {
             print_help();
             Ok(())
@@ -1564,7 +1565,7 @@ fn list_prices(model: Option<&str>) -> Result<(), String> {
 
 /// Folds a JSON Lines event log into the shell, for development. Nothing typed
 /// into a replayed log is recorded. Without a terminal, prints the fold.
-fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
+fn replay(log: &Path, speed: Option<playback::Speed>, asked: &Asked) -> Result<(), String> {
     let text = log_text(log)?;
 
     let started = Instant::now();
@@ -1586,15 +1587,22 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
         None => app,
     };
     let clock = niobe_tui::clock::Clock::system();
-    for (event, at) in &events {
-        match at {
-            Some(at) => app.apply_at(event, clock.at(*at)),
-            None => app.apply(event),
+    let terminal = std::io::stdout().is_terminal();
+    // At a speed the shell is handed the events as it would a live session's,
+    // so it opens on none of them; without one, or with no terminal to watch
+    // on, they are folded here at once.
+    let at_speed = speed.filter(|_| terminal);
+    if at_speed.is_none() {
+        for (event, at) in &events {
+            match at {
+                Some(at) => app.apply_at(event, clock.at(*at)),
+                None => app.apply(event),
+            }
         }
     }
     let elapsed = started.elapsed();
 
-    if !std::io::stdout().is_terminal() {
+    if !terminal {
         print_summary(
             &format!(
                 "replayed {} events from {} in {}",
@@ -1610,11 +1618,20 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
 
     // A recorded log is being looked at, not continued: nothing is attached
     // and nothing is kept.
+    let mut detached = Detached;
+    let mut playback;
+    let backend: &mut dyn niobe_tui::Bridge = match at_speed {
+        Some(speed) => {
+            playback = playback::Playback::new(events, speed);
+            &mut playback
+        }
+        None => &mut detached,
+    };
     niobe_tui::run(
         app,
         niobe_tui::Around {
             journal: &mut Unrecorded,
-            backend: &mut Detached,
+            backend,
             rules: &mut Forgotten,
             watch: &mut Unwatched,
             shell: &mut NoShell,
@@ -1730,7 +1747,9 @@ USAGE:
                            backend with that, once you agree
     niobe untrust          Take that back
     niobe prices [model]   List the prices in force today, or every price a model has had
-    niobe replay <file>    Fold a JSON Lines event log into the shell (development)
+    niobe replay <file>    Fold a JSON Lines event log into the shell (development);
+                           --speed <n> plays it into the panes at n times the pace it was
+                           recorded at, no gap longer than two seconds
 
 OPTIONS:
     --profile <name>       Run under this profile instead of the default one
