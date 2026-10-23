@@ -288,7 +288,9 @@ reviewers that encode both, for an agent working in this tree.
   memory; a sub-agent's
   own messages — its calls, its edits, its model and its tokens — are read from the file the CLI
   keeps for that agent beside the session's and folded in where the CLI's timestamps put them,
-  and its answer from the same file; `conformance.rs`
+  and its answer from the same file; a shell command the CLI ran in the
+  background ends, where the CLI says it did, as a notice naming the command, how it
+  ended and the exit code the CLI's summary names; `conformance.rs`
   names the CLI releases every shape in the crate was recorded from, which is what a session says
   once when it is driving a release nobody recorded. `tests/stream.rs` and `tests/transcript.rs`
   fold the recordings in `tests/fixtures/`, whose README carries the arithmetic the tests assert —

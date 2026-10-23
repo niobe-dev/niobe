@@ -437,6 +437,9 @@ pub struct Translator {
     /// The sub-agents this session has spawned, by the id of the call that
     /// spawned each, and whether each is still running.
     agents: BTreeMap<String, Running>,
+    /// The shell commands the CLI moved to the background and has not said
+    /// the end of, by the id of the call that started each: its command.
+    background: BTreeMap<String, String>,
     /// The model each sub-agent was last reported answering with, by the id of
     /// the call that spawned it, so that a model is reported when it changes
     /// rather than with every message the agent writes.
@@ -590,6 +593,7 @@ impl Translator {
             asked: Vec::new(),
             withdrawn: Vec::new(),
             agents: BTreeMap::new(),
+            background: BTreeMap::new(),
             agent_models: BTreeMap::new(),
             recorded_agents: BTreeMap::new(),
             denied: BTreeMap::new(),
@@ -1223,11 +1227,10 @@ impl Translator {
     /// The CLI's word, on the live stream, that something it ran in the
     /// background has stopped.
     ///
-    /// Only a sub-agent's end is read. A background command's is passed
-    /// over: its call already ended when the command was put in the
-    /// background, the model reads the output for itself, and the transcript
-    /// the CLI writes of the same session passes it over too, so a session
-    /// read back folds to what it showed live.
+    /// A sub-agent's end ends the agent. A background command's call already
+    /// ended when the command was put in the background, so its end is a
+    /// notice: without it the operator sees the model answer output they
+    /// were never shown arriving.
     ///
     /// What the agent answered and how large its conversation ended up are
     /// reported before its end, because nothing is reported about an agent
@@ -1236,7 +1239,11 @@ impl Translator {
         let Some(id) = system.tool_use_id else { return };
         let answer = system.summary.as_deref().and_then(opening_line);
         self.agent_progress(&id, None, total_tokens(system.usage.as_ref()), answer, out);
-        out.append(&mut self.task_stopped(&id, system.status.as_deref()));
+        out.append(&mut self.task_stopped(
+            &id,
+            system.status.as_deref(),
+            system.summary.as_deref(),
+        ));
     }
 
     /// The CLI's word on a sub-agent it is running: the step it is on and how
@@ -1286,19 +1293,30 @@ impl Translator {
     }
 
     /// The events for the CLI saying that the background task call `id`
-    /// started has stopped, with `status` in the CLI's spelling.
+    /// started has stopped, with `status` in the CLI's spelling and its
+    /// `summary` of it.
     ///
-    /// Nothing, where `id` spawned no sub-agent: the CLI notifies about
-    /// background commands the same way. Nothing either for a sub-agent that
-    /// has already ended — one that is sent another message runs again and
-    /// notifies again, and only the first end is one this session saw begin.
+    /// A notice, where `id` put a shell command in the background
+    /// ([`background_ended`]). Nothing, where it did neither that nor spawn a
+    /// sub-agent. Nothing either for a sub-agent that has already ended — one
+    /// that is sent another message runs again and notifies again, and only
+    /// the first end is one this session saw begin.
     ///
     /// The live stream spells the statuses `completed`, `failed` and
     /// `stopped`, which are the CLI's own schema for the message; its
     /// transcripts also say `killed` for a task stopped from outside. Both
     /// read as cancelled.
-    pub(crate) fn task_stopped(&mut self, id: &str, status: Option<&str>) -> Vec<Event> {
+    pub(crate) fn task_stopped(
+        &mut self,
+        id: &str,
+        status: Option<&str>,
+        summary: Option<&str>,
+    ) -> Vec<Event> {
         let mut out = Vec::new();
+        if let Some(command) = self.background.remove(id) {
+            out.push(background_ended(&command, status, summary));
+            return out;
+        }
         if !self.is_agent(Some(id)) {
             return out;
         }
@@ -1698,6 +1716,12 @@ impl Translator {
                 true => string_at(&arguments, "command").map(str::to_owned),
                 false => None,
             };
+            if outcome == ToolOutcome::Ok
+                && let Some(command) = &command
+                && moved_to_background(reported.as_ref())
+            {
+                self.background.insert(tool_use_id.clone(), command.clone());
+            }
             let id = ToolCallId::new(tool_use_id);
             let tested = tested.map(|run| Event::TestRun {
                 id: id.clone(),
@@ -3384,6 +3408,56 @@ fn opening_line(text: &str) -> Option<String> {
         .map(|line| line.trim().trim_start_matches('#').trim())
         .find(|line| !line.is_empty())
         .map(str::to_owned)
+}
+
+/// Whether a shell call's report says the CLI moved its command to the
+/// background, so that its result is of its launch and its end comes later.
+fn moved_to_background(reported: Option<&serde_json::Value>) -> bool {
+    reported
+        .and_then(|report| serde_json::from_value::<wire::ShellReport>(report.clone()).ok())
+        .is_some_and(|report| report.background_task_id.is_some())
+}
+
+/// The notice that a shell command the CLI ran in the background ended, with
+/// `status` and `summary` as its notification spells them.
+///
+/// A notice, and not an error, whatever the status: the command failing is
+/// the command's outcome, which the model reads and answers as it does a
+/// failed call, and the session goes on. The exit code is the CLI's, read out
+/// of its summary (`… failed with exit code 3`), since the notification
+/// carries none of its own.
+fn background_ended(command: &str, status: Option<&str>, summary: Option<&str>) -> Event {
+    let how = match status {
+        Some("completed") => "finished".to_owned(),
+        Some("failed") => "failed".to_owned(),
+        Some("stopped" | "killed") => "was stopped".to_owned(),
+        Some(other) => format!("ended as `{other}`"),
+        None => "ended".to_owned(),
+    };
+    let code = summary
+        .and_then(exit_code_in)
+        .map(|code| format!(" with exit code {code}"))
+        .unwrap_or_default();
+    let mut lines = command.lines();
+    let first = lines.next().unwrap_or_default().trim();
+    let more = match lines.next() {
+        Some(_) => " …",
+        None => "",
+    };
+    Event::Notice {
+        message: format!("the background command `{first}{more}` {how}{code}"),
+    }
+}
+
+/// The status the CLI's summary of a background command names, after its
+/// `exit code`.
+fn exit_code_in(summary: &str) -> Option<i32> {
+    let (_, after) = summary.rsplit_once("exit code ")?;
+    let digits: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    digits.parse().ok()
 }
 
 /// The count a background task's `usage` carries, where it carries one.
@@ -7181,6 +7255,64 @@ mod tests {
         assert_eq!(
             exits(&events),
             [("toolu_a".to_owned(), AgentOutcome::Failed)]
+        );
+    }
+
+    /// A shell call put in the background, and the notification of its end.
+    fn backgrounded(translator: &mut Translator, command: &str) {
+        translator.line(&call(
+            "toolu_bash",
+            "Bash",
+            &format!(r#"{{"command":{}}}"#, serde_json::json!(command)),
+        ));
+        translator.line(&result_with(
+            "toolu_bash",
+            "Command running in background with ID: b1.",
+            &shell_report(r#","backgroundTaskId":"b1""#),
+        ));
+    }
+
+    fn command_notified(status: &str, summary: &str) -> String {
+        format!(
+            r#"{{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_bash","status":"{status}","output_file":"/tmp/b1.output","summary":"{summary}"}}"#
+        )
+    }
+
+    #[test]
+    fn a_background_commands_end_is_told_once_with_the_exit_code_its_summary_names() {
+        let mut translator = translator();
+        backgrounded(&mut translator, "cargo test\n--release");
+
+        let ended = translator.line(&command_notified(
+            "failed",
+            r#"Background command \"Run the tests\" failed with exit code 101"#,
+        ));
+        let again = translator.line(&command_notified("failed", "failed"));
+
+        assert_eq!(
+            ended,
+            [Event::Notice {
+                message: "the background command `cargo test …` failed with exit code 101"
+                    .to_owned()
+            }]
+        );
+        assert!(again.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn a_background_command_stopped_without_a_summary_says_only_that() {
+        let mut translator = translator();
+        backgrounded(&mut translator, "sleep 60");
+
+        let events = translator.line(
+            r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_bash","status":"stopped"}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::Notice {
+                message: "the background command `sleep 60` was stopped".to_owned()
+            }]
         );
     }
 

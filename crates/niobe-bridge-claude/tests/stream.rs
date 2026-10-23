@@ -2364,3 +2364,68 @@ fn a_recorded_banner_at_the_notice_level_is_a_notice_in_the_clis_words() {
         "{events:#?}"
     );
 }
+
+/// `background-commands.jsonl`: two shell commands the model put in the
+/// background, one that exited 0 and one that exited 3, each ending in a
+/// `task_notification` after the turn that started them.
+mod background {
+    use super::*;
+
+    const BACKGROUND: &str = include_str!("fixtures/background-commands.jsonl");
+
+    fn events() -> Vec<Event> {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        BACKGROUND
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .collect()
+    }
+
+    #[test]
+    fn each_background_commands_end_is_a_notice_naming_the_command_and_its_status() {
+        let notices: Vec<String> = events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Notice { message } => Some(message),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            notices,
+            [
+                "the background command `sleep 2; echo finished-in-background` finished with \
+                 exit code 0",
+                "the background command `sleep 3; echo about-to-fail; exit 3` failed with exit \
+                 code 3",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_commands_end_is_neither_an_agent_nor_an_error() {
+        let events = events();
+
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                Event::AgentSpawn { .. } | Event::AgentExit { .. } | Event::Error { .. }
+            )),
+            "{events:#?}"
+        );
+    }
+
+    #[test]
+    fn a_command_put_in_the_background_names_no_status_on_its_call() {
+        let statuses: Vec<Option<i32>> = events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::ToolCallEnd { exit_code, .. } => Some(exit_code),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(statuses, [None, None]);
+    }
+}

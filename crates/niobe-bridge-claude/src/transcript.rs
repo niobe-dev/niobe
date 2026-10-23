@@ -1318,10 +1318,13 @@ impl Fold {
 
     /// The CLI's word, in its own markup, that background work stopped. What
     /// it says about a sub-agent is how it ended; its `<summary>` is the
-    /// CLI's wording and not the agent's, and is not read.
+    /// CLI's wording and not the agent's, and is read only for the status a
+    /// background command exited with.
     fn notified(&mut self, text: &str) {
         if let Some(id) = tag(text, "tool-use-id") {
-            let mut ended = self.translator.task_stopped(id, tag(text, "status"));
+            let mut ended =
+                self.translator
+                    .task_stopped(id, tag(text, "status"), tag(text, "summary"));
             self.out.append(&mut ended);
         }
     }
