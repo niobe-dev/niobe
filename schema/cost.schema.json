@@ -45,7 +45,7 @@
         "tokens": {
           "description": "Every token the session spent, whatever it was billed by.",
           "type": "object",
-          "required": ["input", "output", "cache_read", "cache_write", "cache_write_1h", "reasoning", "total"],
+          "required": ["input", "output", "cache_read", "cache_write", "cache_write_1h", "cache_write_unsplit", "reasoning", "total"],
           "additionalProperties": false,
           "properties": {
             "input": { "$ref": "#/$defs/count", "description": "Input billed at the full rate." },
@@ -53,6 +53,7 @@
             "cache_read": { "$ref": "#/$defs/count", "description": "Input served from the prompt cache." },
             "cache_write": { "$ref": "#/$defs/count", "description": "Input written into the prompt cache." },
             "cache_write_1h": { "$ref": "#/$defs/count", "description": "Of cache_write, the tokens written to live an hour: a share of it, not added to total." },
+            "cache_write_unsplit": { "$ref": "#/$defs/count", "description": "Of cache_write, the tokens in records that did not say how long they were bought for: neither lifetime, so cache_write_1h is a share of the rest." },
             "reasoning": { "$ref": "#/$defs/count" },
             "total": { "$ref": "#/$defs/count", "description": "input + output + cache_read + cache_write + reasoning." }
           }

@@ -330,7 +330,8 @@ reviewers that encode both, for an agent working in this tree.
   directory beyond `~`; `summary.rs` is what `niobe replay` and
   `--resume` print where standard output is not a terminal, a cost left a floor by a session
   recorded before its records said what a cost settles marked as an older recording, as the
-  Usage pane marks it; every line the binary prints goes
+  Usage pane marks it, and a cache-write total with the share of it bought for an hour and the
+  share no record split, which `niobe overview` prints the same way; every line the binary prints goes
   through `printable.rs`, which shows a character that would act on the terminal as one that
   says where it was, and `stdout.rs`, which writes it without panicking, so a reader that stops
   reading ends the run quietly.

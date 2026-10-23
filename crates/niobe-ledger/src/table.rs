@@ -273,7 +273,7 @@ cache_write = 0.625
             output: 0,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "m".to_owned(),
             cost_usd: None,

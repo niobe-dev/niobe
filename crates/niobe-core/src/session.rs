@@ -48,6 +48,10 @@ pub struct Totals {
     /// hour at a higher rate, and a consumer that prices the session needs the
     /// share to price it at all.
     pub cache_write_1h: u64,
+    /// Of [`Totals::cache_write`], the tokens in records whose backend did not
+    /// say how long they were bought for, so that a share of the hour is never
+    /// read off writes nobody split.
+    pub cache_write_unsplit: u64,
     /// Reasoning tokens.
     pub reasoning: u64,
     /// How many usage records were folded in.
@@ -114,7 +118,7 @@ impl Owed {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: None,
                 reasoning: 0,
                 model: model.to_owned(),
                 cost_usd: None,
@@ -131,7 +135,10 @@ impl Owed {
         total.output = total.output.saturating_add(usage.output);
         total.cache_read = total.cache_read.saturating_add(usage.cache_read);
         total.cache_write = total.cache_write.saturating_add(usage.cache_write);
-        total.cache_write_1h = total.cache_write_1h.saturating_add(usage.cache_write_1h);
+        total.cache_write_1h = match (total.cache_write_1h, usage.cache_write_1h) {
+            (None, None) => None,
+            (sum, more) => Some(sum.unwrap_or(0).saturating_add(more.unwrap_or(0))),
+        };
         total.reasoning = total.reasoning.saturating_add(usage.reasoning);
         self.records.push(usage.clone());
     }
@@ -183,7 +190,13 @@ impl Totals {
         self.output = self.output.saturating_add(usage.output);
         self.cache_read = self.cache_read.saturating_add(usage.cache_read);
         self.cache_write = self.cache_write.saturating_add(usage.cache_write);
-        self.cache_write_1h = self.cache_write_1h.saturating_add(usage.cache_write_1h);
+        match usage.cache_write_1h {
+            Some(one_hour) => self.cache_write_1h = self.cache_write_1h.saturating_add(one_hour),
+            None => {
+                self.cache_write_unsplit =
+                    self.cache_write_unsplit.saturating_add(usage.cache_write);
+            }
+        }
         self.reasoning = self.reasoning.saturating_add(usage.reasoning);
         bump(&mut self.records);
         self.tokens_by_model
@@ -1548,7 +1561,7 @@ mod tests {
             output,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: cost,
@@ -1870,7 +1883,7 @@ mod tests {
                 output: 300,
                 cache_read: 18_000,
                 cache_write: 900,
-                cache_write_1h: 400,
+                cache_write_1h: Some(400),
                 reasoning: 120,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(0.04),
@@ -1948,14 +1961,23 @@ mod tests {
                 fast: false,
             })
         };
-        let state = SessionState::replay(&[write(100, 100), write(50, 0), write(10, 4)]);
+        let state = SessionState::replay(&[
+            write(100, Some(100)),
+            write(50, Some(0)),
+            write(10, Some(4)),
+            write(30, None),
+        ]);
 
         let totals = state.totals();
-        assert_eq!(totals.cache_write, 160);
+        assert_eq!(totals.cache_write, 190);
         assert_eq!(totals.cache_write_1h, 104);
         assert_eq!(
+            totals.cache_write_unsplit, 30,
+            "the writes no record split are neither lifetime"
+        );
+        assert_eq!(
             totals.tokens(),
-            160,
+            190,
             "the one-hour writes are already in the write total"
         );
     }
@@ -3739,7 +3761,7 @@ mod tests {
             output,
             cache_read,
             cache_write,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
@@ -4381,7 +4403,7 @@ mod tests {
                 output: 1,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(1e308),

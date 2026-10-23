@@ -41,4 +41,4 @@
 
 ## Usage
 
-- 562,988 tokens: 120 in · 19,606 out · 460,375 cache read · 82,887 cache write.
+- 562,988 tokens: 120 in · 19,606 out · 460,375 cache read · 82,887 cache write (40,054 for an hour).

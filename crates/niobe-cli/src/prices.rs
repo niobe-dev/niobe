@@ -329,7 +329,7 @@ cache_write = 1.25
             output: 0,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "claude-opus-4-6".to_owned(),
             cost_usd: None,

@@ -155,6 +155,11 @@ fn the_overviews_totals_are_the_sums_of_each_session_folded_alone() {
         })
         .collect();
     let sum = |of: fn(&SessionState) -> u64| folds.iter().map(of).sum::<u64>();
+    assert_eq!(
+        sum(|s| s.totals().cache_write_unsplit),
+        0,
+        "every record in both recordings split its writes"
+    );
     let grouped = |n: u64| {
         let digits = n.to_string();
         let mut out = String::new();
@@ -169,12 +174,13 @@ fn the_overviews_totals_are_the_sums_of_each_session_folded_alone() {
 
     for line in [
         format!(
-            "- {} tokens: {} in · {} out · {} cache read · {} cache write.",
+            "- {} tokens: {} in · {} out · {} cache read · {} cache write ({} for an hour).",
             grouped(sum(|s| s.totals().tokens())),
             grouped(sum(|s| s.totals().input)),
             grouped(sum(|s| s.totals().output)),
             grouped(sum(|s| s.totals().cache_read)),
             grouped(sum(|s| s.totals().cache_write)),
+            grouped(sum(|s| s.totals().cache_write_1h)),
         ),
         format!(
             "- {} prompts sent, {} replies from the agent.",

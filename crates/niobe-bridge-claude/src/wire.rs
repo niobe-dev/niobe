@@ -638,21 +638,25 @@ impl Usage {
     }
 
     /// Of the cache writes, the ones bought for an hour rather than for the
-    /// default five minutes. Zero where the CLI reported no split.
+    /// default five minutes. `None` where the CLI reported no split, beside
+    /// the total or in any iteration.
     ///
     /// The split beside the total wins where there is one; otherwise it is
     /// summed over the iterations. Reading only the first would price every
     /// one-hour write on a 2.1.278 `message_delta` as a five-minute one — in
     /// the session recorded on 19 September 2026, every cache write it made.
-    pub(crate) fn cache_write_1h(&self) -> u64 {
+    pub(crate) fn cache_write_1h(&self) -> Option<u64> {
         match &self.cache_creation {
-            Some(split) => split.ephemeral_1h_input_tokens,
+            Some(split) => Some(split.ephemeral_1h_input_tokens),
             None => self
                 .iterations
                 .iter()
                 .filter_map(|iteration| iteration.cache_creation.as_ref())
-                .fold(0, |sum, split| {
-                    sum.saturating_add(split.ephemeral_1h_input_tokens)
+                .fold(None, |sum: Option<u64>, split| {
+                    Some(
+                        sum.unwrap_or(0)
+                            .saturating_add(split.ephemeral_1h_input_tokens),
+                    )
                 }),
         }
     }
@@ -1005,12 +1009,12 @@ mod tests {
     }
 
     #[test]
-    fn cache_writes_without_a_reported_split_are_no_one_hour_writes() {
+    fn cache_writes_without_a_reported_split_have_no_split() {
         let usage: Usage = serde_json::from_str(r#"{"cache_creation_input_tokens":99}"#)
             .expect("usage without a split");
 
         assert_eq!(usage.cache_creation_input_tokens, 99);
-        assert_eq!(usage.cache_write_1h(), 0);
+        assert_eq!(usage.cache_write_1h(), None);
     }
 
     #[test]
@@ -1021,7 +1025,7 @@ mod tests {
         .expect("usage with both lifetimes");
 
         assert_eq!(usage.cache_creation_input_tokens, 90);
-        assert_eq!(usage.cache_write_1h(), 60);
+        assert_eq!(usage.cache_write_1h(), Some(60));
     }
 
     #[test]
@@ -1033,7 +1037,7 @@ mod tests {
         )
         .expect("a message_delta's usage");
 
-        assert_eq!(usage.cache_write_1h(), 10_059);
+        assert_eq!(usage.cache_write_1h(), Some(10_059));
     }
 
     #[test]

@@ -175,10 +175,11 @@ pub struct Usage {
     /// Of [`Usage::cache_write`], the tokens written to live for an hour
     /// rather than the default five minutes. A provider that offers both bills
     /// the hour at a higher rate, so a cost derived from the total alone would
-    /// be wrong in whichever direction it guessed. Zero where the backend does
-    /// not report the split, and in records written before it was kept.
-    #[serde(default)]
-    pub cache_write_1h: u64,
+    /// be wrong in whichever direction it guessed. `None` where the backend
+    /// did not report the split, and in records written before it was kept:
+    /// not "all five-minute", which nobody said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
     /// Reasoning tokens, where the backend reports them separately.
     pub reasoning: u64,
     /// The model these counts were billed against.
@@ -1326,7 +1327,7 @@ mod tests {
             output: 20,
             cache_read: 30,
             cache_write: 40,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
@@ -1343,7 +1344,7 @@ mod tests {
             output: 20,
             cache_read: 30,
             cache_write: 40,
-            cache_write_1h: 25,
+            cache_write_1h: Some(25),
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
@@ -1380,14 +1381,16 @@ mod tests {
     }
 
     #[test]
-    fn a_usage_record_without_one_hour_writes_reads_them_as_zero() {
+    fn a_usage_record_without_one_hour_writes_reads_the_split_as_unreported() {
         let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":null}"#;
         let event: Event = serde_json::from_str(json).expect("a record from before the field");
         let Event::Usage(usage) = event else {
             panic!("the record is a usage record: {event:?}");
         };
         assert_eq!(usage.cache_write, 4);
-        assert_eq!(usage.cache_write_1h, 0);
+        assert_eq!(usage.cache_write_1h, None);
+        let line = serde_json::to_string(&Event::Usage(usage)).expect("a record serializes");
+        assert!(!line.contains("cache_write_1h"), "{line}");
     }
 
     #[test]
@@ -1608,7 +1611,7 @@ mod tests {
             output: 1,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "gpt-5-codex".to_owned(),
             cost_usd: None,

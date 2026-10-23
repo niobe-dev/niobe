@@ -140,7 +140,7 @@ fn a_session_billed_by_use_carries_the_tokens_and_money_its_records_hold() {
         metered["tokens"],
         json!({
             "input": 120, "output": 19_606, "cache_read": 460_375, "cache_write": 82_887,
-            "cache_write_1h": 40_054, "reasoning": 0,
+            "cache_write_1h": 40_054, "cache_write_unsplit": 0, "reasoning": 0,
             "total": 120 + 19_606 + 460_375 + 82_887,
         })
     );

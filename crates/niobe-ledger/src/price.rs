@@ -92,8 +92,10 @@ impl Rates {
     /// has one-hour cache writes and these rates have no price for them.
     fn cost(&self, usage: &Usage) -> Option<u128> {
         // A record claiming more one-hour writes than writes is read as all of
-        // its writes being one-hour ones, the dearer reading.
-        let one_hour = usage.cache_write_1h.min(usage.cache_write);
+        // its writes being one-hour ones, the dearer reading. One that did not
+        // split them is priced at the five-minute rate, the backend's default
+        // lifetime; what it costs is an estimate and is labelled as one.
+        let one_hour = usage.cache_write_1h.unwrap_or(0).min(usage.cache_write);
         let five_minute = usage.cache_write - one_hour;
         let one_hour_cost = match (one_hour, self.cache_write_1h) {
             (0, _) => 0,
@@ -217,7 +219,7 @@ mod tests {
             output: 0,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "m".to_owned(),
             cost_usd: None,
@@ -245,7 +247,7 @@ mod tests {
             reasoning: 100,
             cache_read: 1_000,
             cache_write: 30_000,
-            cache_write_1h: 20_000,
+            cache_write_1h: Some(20_000),
             ..usage()
         };
         // 1 × 3 + 10 × 15 + 100 × 15 + 1,000 × 0.3 + 10,000 × 3.75 + 20,000 × 6,
@@ -263,7 +265,7 @@ mod tests {
     fn more_one_hour_writes_than_writes_are_read_as_all_writes_being_one_hour() {
         let usage = Usage {
             cache_write: 10,
-            cache_write_1h: 25,
+            cache_write_1h: Some(25),
             ..usage()
         };
         assert_eq!(rates().cost(&usage), Some(10 * 6_000_000));
@@ -280,7 +282,7 @@ mod tests {
             ..usage()
         };
         let one_hour = Usage {
-            cache_write_1h: 10,
+            cache_write_1h: Some(10),
             ..five_minute.clone()
         };
         assert_eq!(rates.cost(&five_minute), Some(10 * 3_750_000));

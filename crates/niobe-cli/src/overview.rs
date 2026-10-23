@@ -20,7 +20,7 @@ use niobe_store::SessionId;
 use crate::args::Narrowing;
 use crate::repo;
 use crate::sessions::utc_minute;
-use crate::summary::grouped;
+use crate::summary::{cache_write, grouped};
 
 /// How many tools and how many paths are listed before the rest are counted.
 const ROWS: usize = 10;
@@ -458,12 +458,16 @@ fn usage(sessions: &[Folded]) -> Vec<String> {
         return vec!["— no usage was reported.".to_owned()];
     }
     vec![format!(
-        "- {} tokens: {} in · {} out · {} cache read · {} cache write.",
+        "- {} tokens: {} in · {} out · {} cache read · {}.",
         grouped(sum(sessions, |s| s.totals().tokens())),
         grouped(sum(sessions, |s| s.totals().input)),
         grouped(sum(sessions, |s| s.totals().output)),
         grouped(sum(sessions, |s| s.totals().cache_read)),
-        grouped(sum(sessions, |s| s.totals().cache_write))
+        cache_write(
+            sum(sessions, |s| s.totals().cache_write),
+            sum(sessions, |s| s.totals().cache_write_1h),
+            sum(sessions, |s| s.totals().cache_write_unsplit),
+        )
     )]
 }
 

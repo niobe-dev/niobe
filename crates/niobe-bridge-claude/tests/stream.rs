@@ -186,7 +186,7 @@ fn a_turn_in_flight_says_which_tokens_no_cost_covers() {
 #[test]
 fn each_message_says_which_lifetime_its_cache_writes_were_bought_for() {
     let events = translated();
-    let split: Vec<(u64, u64)> = usage_records(&events)
+    let split: Vec<(u64, Option<u64>)> = usage_records(&events)
         .into_iter()
         .filter(|usage| usage.cost_usd.is_none())
         .map(|usage| (usage.cache_write, usage.cache_write_1h))
@@ -197,7 +197,14 @@ fn each_message_says_which_lifetime_its_cache_writes_were_bought_for() {
     // the table in `tests/fixtures/README.md` is where they are written down.
     assert_eq!(
         split,
-        [(100, 100), (50, 0), (10, 10), (10, 10), (10, 10), (5, 5)]
+        [
+            (100, Some(100)),
+            (50, Some(0)),
+            (10, Some(10)),
+            (10, Some(10)),
+            (10, Some(10)),
+            (5, Some(5))
+        ]
     );
 
     let state = SessionState::replay(&events);
@@ -239,7 +246,8 @@ fn usage_is_folded_from_the_stream_events_not_from_the_assistant_snapshot() {
     assert_eq!(first.cache_read, 1_000);
     assert_eq!(first.cache_write, 100);
     assert_eq!(
-        first.cache_write_1h, 100,
+        first.cache_write_1h,
+        Some(100),
         "the CLI bought the hour, not the five minutes"
     );
     assert_eq!(first.model, "claude-sonnet-5");
@@ -996,7 +1004,7 @@ mod fast_mode_refused {
             ),
             (2, 4, 10_234, 12_253)
         );
-        assert_eq!(message.cache_write_1h, 12_253);
+        assert_eq!(message.cache_write_1h, Some(12_253));
     }
 
     /// The only place the stream says fast mode was turned off is the CLI's
@@ -1268,7 +1276,8 @@ fn a_message_delta_says_its_cache_writes_were_bought_for_an_hour_inside_its_iter
     assert!(!per_message.is_empty());
     for usage in per_message {
         assert_eq!(
-            usage.cache_write_1h, usage.cache_write,
+            usage.cache_write_1h,
+            Some(usage.cache_write),
             "every write this session made was an hour's: {usage:?}"
         );
     }
@@ -2040,7 +2049,7 @@ mod cut_off {
 
         assert_eq!(
             (cut.input, cut.output, cut.cache_write, cut.cache_write_1h),
-            (2, 8, 2_811, 2_811)
+            (2, 8, 2_811, Some(2_811))
         );
         assert_eq!(cut.model, "claude-opus-5-5");
         assert!(

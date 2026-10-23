@@ -549,7 +549,7 @@ fn a_session_owing_for_many_requests_redraws_inside_a_frame_budget() {
             output: 50,
             cache_read: 1_000 * (n % 300),
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: TIERED_MODELS[(n % 2) as usize].to_owned(),
             cost_usd: None,

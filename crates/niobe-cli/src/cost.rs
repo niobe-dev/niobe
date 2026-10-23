@@ -39,7 +39,7 @@ pub enum Format {
 
 /// The columns of the CSV, in order.
 const CSV_HEADER: &str = "id,started_at,billing,input,output,cache_read,cache_write,\
-                          cache_write_1h,reasoning,tokens,reported_usd,cost_complete,\
+                          cache_write_1h,cache_write_unsplit,reasoning,tokens,reported_usd,cost_complete,\
                           records,records_uncovered,older_recording";
 
 /// What `sessions` print as, one line per element.
@@ -121,6 +121,7 @@ fn session_json(folded: &Folded) -> Value {
             "cache_read": t.cache_read,
             "cache_write": t.cache_write,
             "cache_write_1h": t.cache_write_1h,
+            "cache_write_unsplit": t.cache_write_unsplit,
             "reasoning": t.reasoning,
             "total": t.tokens(),
         },
@@ -147,6 +148,7 @@ fn csv_row(folded: &Folded) -> String {
         t.cache_read.to_string(),
         t.cache_write.to_string(),
         t.cache_write_1h.to_string(),
+        t.cache_write_unsplit.to_string(),
         t.reasoning.to_string(),
         t.tokens().to_string(),
         field(m.and_then(reported)),

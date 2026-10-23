@@ -29,7 +29,7 @@ fn usage(model: &str) -> Usage {
         output: 0,
         cache_read: 0,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model: model.to_owned(),
         cost_usd: None,
@@ -58,7 +58,7 @@ fn claude_opus_5_on_the_claude_api_matches_a_hand_computed_cost() {
         output: 3_000,
         cache_read: 200_000,
         cache_write: 40_000,
-        cache_write_1h: 30_000,
+        cache_write_1h: Some(30_000),
         ..usage("claude-opus-5")
     };
     assert_eq!(usd(bundled().cost(&usage, date(2026, 9, 16))), 0.5975);
@@ -109,7 +109,7 @@ fn claude_opus_5_5_reads_its_cache_at_five_percent_of_input() {
         output: 2_000,
         cache_read: 500_000,
         cache_write: 30_000,
-        cache_write_1h: 10_000,
+        cache_write_1h: Some(10_000),
         ..usage("claude-opus-5-5")
     };
     let cost = usd(bundled().cost(&usage, date(2026, 9, 24)));
@@ -135,7 +135,7 @@ fn claude_sonnet_5_5_on_the_claude_api_matches_a_hand_computed_cost() {
         output: 500,
         cache_read: 20_000,
         cache_write: 4_000,
-        cache_write_1h: 4_000,
+        cache_write_1h: Some(4_000),
         ..usage("claude-sonnet-5-5[1m]")
     };
     assert_eq!(usd(bundled().cost(&usage, date(2026, 10, 1))), 0.027);
@@ -166,7 +166,7 @@ fn claude_haiku_5_5_is_priced_by_the_length_of_each_requests_prompt() {
         output: 2_000,
         cache_read: 50_000,
         cache_write: 4_000,
-        cache_write_1h: 4_000,
+        cache_write_1h: Some(4_000),
         ..usage("claude-haiku-5-5")
     };
     assert_eq!(usd(table.cost(&short, day)), 0.0033);
@@ -182,7 +182,7 @@ fn claude_haiku_5_5_is_priced_by_the_length_of_each_requests_prompt() {
         output: 1_000,
         cache_read: 80_000,
         cache_write: 5_000,
-        cache_write_1h: 5_000,
+        cache_write_1h: Some(5_000),
         ..usage("claude-haiku-5-5[1m]")
     };
     assert_eq!(usd(table.cost(&long, day)), 0.0265);
@@ -215,7 +215,7 @@ fn claude_sonnet_5_on_a_bedrock_eu_profile_matches_a_hand_computed_cost() {
         output: 8_000,
         cache_read: 400_000,
         cache_write: 20_000,
-        cache_write_1h: 20_000,
+        cache_write_1h: Some(20_000),
         ..usage("eu.anthropic.claude-sonnet-5[1m]")
     };
     assert_eq!(usd(bundled().cost(&usage, date(2026, 9, 16))), 0.374);
@@ -406,7 +406,7 @@ fn one_hour_writes_on_a_model_with_no_one_hour_rate_are_unpriced_not_guessed() {
     let usage = Usage {
         input: 1_000,
         cache_write: 1_000,
-        cache_write_1h: 1_000,
+        cache_write_1h: Some(1_000),
         ..usage("gpt-5.6-terra")
     };
     assert_eq!(bundled().cost(&usage, date(2026, 9, 16)), Cost::Unpriced);
@@ -454,7 +454,7 @@ fn request(case: &Case) -> Usage {
         output: scale,
         cache_read: scale,
         cache_write: scale + one_hour,
-        cache_write_1h: one_hour,
+        cache_write_1h: Some(one_hour),
         fast: matches!(case.tier, Tier::Fast),
         ..usage(case.id)
     }

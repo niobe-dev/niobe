@@ -440,7 +440,7 @@ fn reported_costs_come_back_bit_for_bit() {
                     output: 1,
                     cache_read: 0,
                     cache_write: 0,
-                    cache_write_1h: 0,
+                    cache_write_1h: Some(0),
                     reasoning: 0,
                     model: "opus-5".to_owned(),
                     cost_usd: Some(*cost),
