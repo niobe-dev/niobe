@@ -23,6 +23,14 @@ pub enum Command {
     Shell,
     /// Open the shell on an earlier session and keep recording into it.
     Resume(Resume),
+    /// Run one turn with no terminal and print its reply, or with `--json`
+    /// its outcome and spend in the shape `schema/print.schema.json` names.
+    Print {
+        /// What the turn is asked.
+        prompt: String,
+        /// `--json` was given.
+        json: bool,
+    },
     /// List the sessions recorded in this repository, Niobe's own and the
     /// `claude` CLI's.
     Sessions,
@@ -130,20 +138,22 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
     let command = command(&rest)?;
 
     let runs_a_session = matches!(command, Command::Shell | Command::Resume(_));
-    let names_a_profile = runs_a_session
+    let runs_a_turn = runs_a_session || matches!(command, Command::Print { .. });
+    let names_a_profile = runs_a_turn
         || matches!(
             command,
             Command::Profiles | Command::Help | Command::Version
         );
     if profile.is_some() && !names_a_profile {
         return Err(
-            "`--profile` applies to the shell, `--resume` and `profiles`, and to nothing else"
+            "`--profile` applies to the shell, `--resume`, `-p` and `profiles`, and to nothing \
+             else"
                 .to_owned(),
         );
     }
-    if budget.is_some() && !runs_a_session {
+    if budget.is_some() && !runs_a_turn {
         return Err(
-            "`--budget` applies to the shell and `--resume`, and to nothing else".to_owned(),
+            "`--budget` applies to the shell, `--resume` and `-p`, and to nothing else".to_owned(),
         );
     }
     if theme.is_some() && !runs_a_session && !matches!(command, Command::Replay(_)) {
@@ -246,6 +256,8 @@ fn command(args: &[&str]) -> Result<Command, String> {
             no_more(rest)?;
             Command::Resume(resume(&flag["--resume=".len()..])?)
         }
+        ["-p" | "--print", rest @ ..] => print(rest, false)?,
+        ["--json", "-p" | "--print", rest @ ..] => print(rest, true)?,
         ["sessions", rest @ ..] => {
             no_more(rest)?;
             Command::Sessions
@@ -354,6 +366,26 @@ fn narrowing(mut rest: &[&str]) -> Result<Narrowing, String> {
         rest = after;
     }
     Ok(narrowing)
+}
+
+/// `niobe -p <prompt> [--json]`: the prompt is one argument, as a shell
+/// quotes it, so that a prompt is never split into flags it happens to
+/// contain.
+fn print(rest: &[&str], json: bool) -> Result<Command, String> {
+    const NO_PROMPT: &str = "`-p` needs a prompt, as in `niobe -p \"fix the failing test\"`";
+    let (prompt, rest) = rest.split_first().ok_or(NO_PROMPT)?;
+    if prompt.trim().is_empty() {
+        return Err(NO_PROMPT.to_owned());
+    }
+    let json = match rest {
+        [] => json,
+        ["--json"] if !json => true,
+        [extra, ..] => return Err(format!("unexpected argument `{extra}`")),
+    };
+    Ok(Command::Print {
+        prompt: (*prompt).to_owned(),
+        json,
+    })
 }
 
 /// `niobe cost`: a format flag, at most one, among the overview's narrowing.
@@ -555,6 +587,40 @@ mod tests {
         ] {
             assert!(parsed(wrong).is_err(), "{wrong:?}");
         }
+    }
+
+    #[test]
+    fn a_headless_turn_takes_its_prompt_whole_and_json_either_side_of_it() {
+        let print = |prompt: &str, json| {
+            Ok(Command::Print {
+                prompt: prompt.to_owned(),
+                json,
+            })
+        };
+        assert_eq!(parsed(&["-p", "fix it"]), print("fix it", false));
+        assert_eq!(
+            parsed(&["--print", "fix it", "--json"]),
+            print("fix it", true)
+        );
+        assert_eq!(parsed(&["--json", "-p", "fix it"]), print("fix it", true));
+        assert_eq!(
+            parsed(&["-p", "--budget is not a flag in here"]),
+            print("--budget is not a flag in here", false),
+            "a prompt is one argument, whatever it says"
+        );
+        for wrong in [
+            &["-p"][..],
+            &["-p", "  "][..],
+            &["-p", "fix it", "again"][..],
+            &["--json", "-p", "fix it", "--json"][..],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+        let budgeted = invocation(&["-p", "fix it", "--budget", "0.5", "--profile", "work"])
+            .expect("a headless turn takes a budget and a profile");
+        assert_eq!(budgeted.budget, Some(0.5));
+        assert_eq!(budgeted.profile.as_deref(), Some("work"));
+        assert!(invocation(&["-p", "fix it", "--theme", "neo"]).is_err());
     }
 
     #[test]

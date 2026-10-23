@@ -23,6 +23,7 @@ mod consent;
 mod cost;
 mod desktop;
 mod doctor;
+mod headless;
 mod history;
 mod images;
 mod journal;
@@ -78,12 +79,12 @@ fn main() -> ExitCode {
     ));
     let parsed = args::utf8(std::env::args_os().skip(1)).and_then(|args| args::parse(&args));
     let result = match parsed {
-        Ok(invocation) => run(invocation).and_then(|()| stdout::outcome()),
+        Ok(invocation) => run(invocation).and_then(|status| stdout::outcome().map(|()| status)),
         Err(usage) => Err(format!("{usage}\nRun `niobe --help` for usage.")),
     };
 
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(status) => ExitCode::from(status),
         Err(message) => ExitCode::from(report(&message, &mut io::stderr())),
     }
 }
@@ -131,6 +132,9 @@ fn report(message: &str, stderr: &mut dyn Write) -> u8 {
     }
 }
 
+/// Runs what the command line asked for, and says what the process exits
+/// with where it did not fail: zero, but for a headless turn the budget
+/// stopped.
 fn run(
     Invocation {
         command,
@@ -138,7 +142,7 @@ fn run(
         budget,
         theme,
     }: Invocation,
-) -> Result<(), String> {
+) -> Result<u8, String> {
     let profile = profile.as_deref();
     let asked = Asked {
         budget,
@@ -156,8 +160,9 @@ fn run(
         Command::Shell => shell(profile, &asked)?,
         Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked)?,
         Command::Resume(Resume::Imported(session)) => import(&session, profile, &asked)?,
+        Command::Print { prompt, json } => return print_turn(&prompt, json, profile, &asked),
         // Handed on whole: `run_other` matches every command itself.
-        other => return run_other(other, profile, &asked),
+        other => return run_other(other, profile, &asked).map(|()| 0),
     };
     // The operator chose another session in the history dialog: the one the
     // shell held has ended and is saved, and the chosen one opens the way
@@ -165,7 +170,7 @@ fn run(
     while let Some(target) = next {
         next = open(&target, profile, &asked)?;
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Opens `target` in place of the session that just ended, and returns the
@@ -185,7 +190,7 @@ fn open(target: &Target, profile: Option<&str>, asked: &Asked) -> Result<Option<
 /// The commands that do not open a shell on a session.
 fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     match command {
-        Command::Shell | Command::Resume(_) => Ok(()),
+        Command::Shell | Command::Resume(_) | Command::Print { .. } => Ok(()),
         Command::Sessions => list_sessions(),
         Command::Overview(narrowing) => print_overview(narrowing),
         Command::Cost { narrowing, format } => print_cost(narrowing, format),
@@ -870,6 +875,128 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
 /// from this process's own environment alone.
 /// Every session niobe recorded in this repository, folded, as one Markdown
 /// page on standard output.
+/// `niobe -p`: one turn under the selected profile with no terminal, its
+/// reply on standard output — or with `--json` its outcome, reply and spend —
+/// and what the operator is owed knowing on standard error, so that a reply
+/// piped on stays the reply.
+///
+/// A repository's config nobody trusted cannot be agreed to here, since
+/// nobody is at the terminal: what only a trusted file may set stays out, as
+/// it does in the shell until the operator says otherwise, and the run says
+/// so.
+fn print_turn(
+    prompt: &str,
+    json: bool,
+    profile: Option<&str>,
+    asked: &Asked,
+) -> Result<u8, String> {
+    let root = repo::root(&cwd()?);
+    let loaded = config::load(&root)?;
+    let selected = loaded.select(profile)?;
+    budget_fits(asked, selected.as_ref())?;
+    repo::store_stays_inside(&root)?;
+    if loaded.untrusted.is_some() {
+        note(
+            "this repository's config is not trusted, so what only a trusted file may set is \
+             left out; `niobe trust` shows it",
+        );
+    }
+    let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
+    let mut backend = backend::attach(
+        &root,
+        selected.as_ref(),
+        &backend::Attach {
+            budget_usd: asked.budget,
+            // Not titled: a title is one more request to the model, billed on
+            // every run of a job, and it answers after the turn this run ends
+            // on. The history shows the session by its prompt instead.
+            title: false,
+            tap,
+            ..backend::Attach::default()
+        },
+        std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
+        std::env::var_os("HOME"),
+    )?;
+    if !backend.attached() {
+        return Err(
+            "the selected profile runs no backend niobe can start yet, so the prompt has \
+             nowhere to go; `niobe profiles` lists them"
+                .to_owned(),
+        );
+    }
+
+    let mut journal = StoreJournal::pending(root.clone());
+    let turn = headless::run(
+        backend.bridge(),
+        &mut journal,
+        loaded.config.allowed(),
+        prompt,
+        asked.budget,
+        &mut || std::thread::sleep(Duration::from_millis(10)),
+    );
+    // The backend is ended before the journal is closed, so that nothing it
+    // says while going is written into a session the store has finished.
+    drop(backend);
+    let finished = journal.finish();
+    if finished.unsaved > 0 {
+        note(&format!(
+            "the session store did not save {} of the turn's events: {}",
+            finished.unsaved,
+            finished
+                .error
+                .as_deref()
+                .unwrap_or("the session store stopped")
+        ));
+    }
+
+    let session = finished.session.map(SessionId::get);
+    match json {
+        true => say!("{}", print_json(&turn, session)),
+        false if !turn.reply.is_empty() => say!("{}", turn.reply),
+        false => {}
+    }
+    if let Some(session) = session {
+        note(&format!(
+            "session {session} saved — `niobe --resume {session}` continues it"
+        ));
+    }
+    match &turn.outcome {
+        headless::Outcome::Finished => Ok(0),
+        headless::Outcome::Budget(why) => {
+            note(&format!("the turn stopped on its budget: {why}"));
+            Ok(headless::BUDGET_STOPPED)
+        }
+        headless::Outcome::Failed(why) => Err(format!("the turn failed: {why}")),
+    }
+}
+
+/// A headless turn in the shape `schema/print.schema.json` publishes.
+fn print_json(turn: &headless::Turn, session: Option<i64>) -> serde_json::Value {
+    let mut fields = serde_json::Map::from_iter([
+        ("schema_version".to_owned(), serde_json::json!(1)),
+        ("outcome".to_owned(), serde_json::json!(turn.outcome.name())),
+        (
+            "reason".to_owned(),
+            serde_json::json!(turn.outcome.reason()),
+        ),
+        ("reply".to_owned(), serde_json::json!(turn.reply)),
+        ("session".to_owned(), serde_json::json!(session)),
+        (
+            "started_at".to_owned(),
+            serde_json::json!(cost::rfc3339(turn.started_at)),
+        ),
+    ]);
+    fields.extend(cost::figures(&turn.state));
+    serde_json::Value::Object(fields)
+}
+
+/// Says something the operator is owed knowing on standard error, where a
+/// headless run's notes go so as not to land in the reply it prints. A note
+/// that cannot be written is let go: the outcome is in the exit status.
+fn note(text: &str) {
+    let _ = writeln!(io::stderr(), "niobe: {}", printable::printable(text));
+}
+
 fn print_overview(narrowing: args::Narrowing) -> Result<(), String> {
     let root = repo::root(&cwd()?);
     let folded = overview::narrowed(overview::read(&root)?, narrowing);
@@ -1429,6 +1556,10 @@ what the agent did, decided and touched, what it is doing now and what it cost.
 USAGE:
     niobe                  Open the shell on a new session
     niobe --resume <id>    Open the shell on an earlier session and continue it
+    niobe -p <prompt>      Run one turn with no terminal and print the reply; --json prints
+                           its outcome, reply and spend in the shape schema/print.schema.json
+                           publishes. [permissions] rules answer the calls they allow and
+                           every other call is refused. The session is saved as any other
     niobe sessions         List the sessions this repository can carry on
     niobe overview         Print what every session here built and how it went, as Markdown;
                            --last <n> keeps the newest n, --since <YYYY-MM-DD> those from that
@@ -1461,10 +1592,12 @@ ENVIRONMENT:
                            shell says so once when it is on. Off by default.
 
 EXIT STATUS:
-    0   The session ended, including because the terminal it drew on went away
-    1   Something failed; the reason was written to standard error, which
-        discards it when standard error is closed or /dev/null
+    0   The session ended, including because the terminal it drew on went away;
+        for -p, the turn finished
+    1   Something failed, a -p turn included; the reason was written to standard
+        error, which discards it when standard error is closed or /dev/null
     2   Something failed and the reason could not be written to standard error
+    3   A -p turn stopped because it had spent what --budget allowed
 
 KEYS:
     Each of the F-key bar's ten actions has its own function key, and a

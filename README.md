@@ -78,6 +78,24 @@ terminal, and says how to fix what is not; `niobe doctor --json` prints the same
 `niobe profiles` lists the profiles in force and, where none is written, the three lines that
 make the implied one explicit.
 
+`niobe -p "fix the failing test"` runs one turn with no terminal, for a script or a CI job, and
+prints the reply. The `[permissions]` rules answer the calls they allow and every other call is
+refused, and the session is saved like any other. It exits 0 when the turn finished, 1 when it
+failed and 3 when it stopped on its `--budget`, so a job can tell "this cost too much" from "this
+did not work". `--json` prints the outcome, the reply and the spend in the shape
+[`schema/print.schema.json`](schema/print.schema.json) publishes. A GitHub Actions step that puts
+the cost in the job summary:
+
+```yaml
+- name: Ask niobe
+  run: |
+    status=0
+    niobe -p "fix the failing test" --budget 2 --json > turn.json || status=$?
+    jq -r '"**niobe** \(.outcome) · \(.tokens.total) tokens · $\(.cost.reported_usd // "—")"' \
+      turn.json >> "$GITHUB_STEP_SUMMARY"
+    exit $status
+```
+
 `niobe cost` lists each session recorded in the repository with the tokens it spent and the
 money its backend reported, never an estimate. `niobe cost --json` prints it in the shape
 [`schema/cost.schema.json`](schema/cost.schema.json) publishes, and `--csv` as rows for a

@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use niobe_core::session::{SessionState, Totals};
 use niobe_tui::{Billed, OLDER_RECORDING, cost_of};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::overview::Folded;
 use crate::sessions::civil_from_days;
@@ -72,7 +72,7 @@ fn money(session: &SessionState) -> Option<&Totals> {
 }
 
 /// A moment as RFC 3339 in UTC, to the second.
-fn rfc3339(at: SystemTime) -> String {
+pub(crate) fn rfc3339(at: SystemTime) -> String {
     let secs = at
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
@@ -100,7 +100,16 @@ fn document(repository: &str, sessions: &[Folded]) -> Value {
 }
 
 fn session_json(folded: &Folded) -> Value {
-    let session = &folded.state;
+    let mut session = figures(&folded.state);
+    session.insert("id".to_owned(), json!(folded.id.get()));
+    session.insert("started_at".to_owned(), json!(rfc3339(folded.started_at)));
+    Value::Object(session)
+}
+
+/// What `session` spent, in the fields every published shape names a
+/// session's spend by: its billing, its tokens per kind and per model, and the
+/// money its backend reported.
+pub(crate) fn figures(session: &SessionState) -> Map<String, Value> {
     let t = session.totals();
     let cost = money(session).map(|m| {
         json!({
@@ -111,23 +120,24 @@ fn session_json(folded: &Folded) -> Value {
             "older_recording": m.settlement_unrecorded(),
         })
     });
-    json!({
-        "id": folded.id.get(),
-        "started_at": rfc3339(folded.started_at),
-        "billing": billing(Billed::of(session)),
-        "tokens": {
-            "input": t.input,
-            "output": t.output,
-            "cache_read": t.cache_read,
-            "cache_write": t.cache_write,
-            "cache_write_1h": t.cache_write_1h,
-            "cache_write_unsplit": t.cache_write_unsplit,
-            "reasoning": t.reasoning,
-            "total": t.tokens(),
-        },
-        "models": t.tokens_by_model,
-        "cost": cost,
-    })
+    Map::from_iter([
+        ("billing".to_owned(), json!(billing(Billed::of(session)))),
+        (
+            "tokens".to_owned(),
+            json!({
+                "input": t.input,
+                "output": t.output,
+                "cache_read": t.cache_read,
+                "cache_write": t.cache_write,
+                "cache_write_1h": t.cache_write_1h,
+                "cache_write_unsplit": t.cache_write_unsplit,
+                "reasoning": t.reasoning,
+                "total": t.tokens(),
+            }),
+        ),
+        ("models".to_owned(), json!(t.tokens_by_model)),
+        ("cost".to_owned(), json!(cost)),
+    ])
 }
 
 /// A field of the CSV: empty where there is no figure, never a zero.

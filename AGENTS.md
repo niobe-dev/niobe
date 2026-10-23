@@ -323,7 +323,12 @@ reviewers that encode both, for an agent working in this tree.
   what `niobe cost` prints — the same sessions, each with its tokens per kind and per model and
   the money its backend reported, as a table, as `--csv` or as `--json` in the shape
   `schema/cost.schema.json` publishes at the repository's root, with no money on a plan or where
-  nothing said how a session was billed and no figure priced by the table; `doctor.rs` is what `niobe doctor` prints — one row each for
+  nothing said how a session was billed and no figure priced by the table; `headless.rs` is
+  `niobe -p`: one turn sent through the same `Bridge` and recorded through the same `Journal` as
+  the shell's, each permission prompt answered by the standing rules and every other refused with
+  words that tell the agent no one is there, and an outcome — finished, failed, or stopped on the
+  budget, read off the figures rather than the backend's wording — that the binary exits 0, 1 or
+  3 on, with `--json` in the shape `schema/print.schema.json` publishes; `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
   read from its files), the config files and whether the repository's is trusted, and the terminal,
   with the fix for each that is not fine, as text or as `--json` with nothing under the home
@@ -339,6 +344,9 @@ reviewers that encode both, for an agent working in this tree.
   `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
+  `tests/headless.rs` runs `niobe -p` against stand-in `claude` scripts — a reply, a prompt
+  refused and one a rule allows, a failure and a budget stop — and checks its JSON against the
+  published schema with the validator in `tests/schema/`, which `tests/cost.rs` uses too.
   `tests/cost.rs` exports a store of a recording billed by use, the same on a plan and one that
   never said, checks the JSON against the published schema and its figures against `jq`.
   `tests/overview.rs` prints that page for a store of two recorded sessions, against a picture
