@@ -125,7 +125,13 @@ main() {
     archive="niobe-$triple.tar.gz"
 
     scratch=$(mktemp -d)
-    trap 'rm -rf "$scratch"' EXIT INT TERM
+    staged=""
+    trap 'rm -rf "$scratch"; [ -z "$staged" ] || rm -f "$staged"' EXIT
+    # A trapped signal is only noted while a command runs, and the script then
+    # goes on: told to stop, the install has to end here, or it carries on
+    # and puts niobe in place. The exit runs the cleanup above.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     say "downloading $archive ($version)"
     download "$base/$archive" "$scratch/$archive"
@@ -155,23 +161,24 @@ main() {
     # keeps its file and a failed copy leaves the old one in place. Run before
     # the rename, so a binary that does not run on this machine replaces
     # nothing.
-    staged="$install_dir/.niobe.new"
+    staging="$install_dir/.niobe.new"
     # A directory there would take the copy inside it, and a link would send
     # it wherever it points; only a file of an earlier, cut-off install is
     # overwritten.
-    if [ -d "$staged" ] || [ -L "$staged" ]; then
-        fail "$staged is in the way; remove it, nothing was installed"
+    if [ -d "$staging" ] || [ -L "$staging" ]; then
+        fail "$staging is in the way; remove it, nothing was installed"
     fi
+    # Named from here on, so that the cleanup on exit removes the copy
+    # whichever way the install ends before the rename.
+    staged=$staging
     cp "$scratch/niobe" "$staged"
     chmod 755 "$staged"
     if ! installed=$("$staged" --version 2>&1); then
-        rm -f "$staged"
         fail "the niobe in $archive does not run on this machine ($installed); nothing was installed"
     fi
-    mv -f "$staged" "$target" || {
-        rm -f "$staged"
+    mv -f "$staged" "$target" ||
         fail "could not put niobe at $target; nothing was installed"
-    }
+    staged=""
 
     say "installed $installed to $target"
     case ":$PATH:" in

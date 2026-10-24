@@ -799,3 +799,70 @@ fn a_directory_at_the_staging_name_is_refused_and_left_alone() {
     );
     assert!(!root.path().join("bin/niobe").exists());
 }
+
+/// The shells the installer is run under here: `sh`, and `dash` where the
+/// machine has it, since that is the `sh` of Debian and Ubuntu and treats a
+/// trapped signal differently from bash.
+fn shells() -> Vec<&'static str> {
+    let mut shells = vec!["sh"];
+    if Path::new("/bin/dash").is_file() {
+        shells.push("/bin/dash");
+    }
+    shells
+}
+
+#[test]
+fn an_installer_told_to_stop_while_it_checks_the_binary_installs_nothing() {
+    for shell in shells() {
+        let root = tempfile::tempdir().expect("a temporary directory can be made");
+        let pid = root.path().join("installer.pid");
+        // The stand-in is what the installer runs to check the binary before
+        // it moves it into place: it sends the installer the SIGTERM a
+        // `timeout` or a service manager would, then answers as niobe.
+        let stand_in = format!(
+            "#!/bin/sh\n\
+             tries=0\n\
+             while [ ! -s '{pid}' ] && [ \"$tries\" -lt 500 ]; do sleep 0.01; tries=$((tries + 1)); done\n\
+             kill -TERM \"$(cat '{pid}')\"\n\
+             echo 'niobe 9.9.9'\n",
+            pid = pid.display()
+        );
+        let release = release_of(root.path(), &stand_in);
+
+        let child = Command::new(shell)
+            .arg(installer())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("HOME", root.path())
+            .env("NIOBE_INSTALL_DIR", root.path().join("bin"))
+            .env(
+                "NIOBE_DOWNLOAD_URL",
+                format!("file://{}", release.display()),
+            )
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the shell is on this machine");
+        fs::write(&pid, child.id().to_string()).expect("the temporary directory is writable");
+        let output = child
+            .wait_with_output()
+            .expect("the installer was started and is waited on");
+
+        assert_eq!(
+            output.status.code(),
+            Some(143),
+            "{shell}: {}",
+            said(&output)
+        );
+        assert!(
+            !said(&output).contains("installed niobe"),
+            "{shell}: {}",
+            said(&output)
+        );
+        assert!(
+            !root.path().join("bin/niobe").exists(),
+            "{shell}: niobe was installed after the installer was told to stop"
+        );
+        assert_nothing_staged(root.path());
+    }
+}
