@@ -6,7 +6,7 @@
 
 - 0 turns ended.
 - 6 prompts sent, 15 replies from the agent.
-- 24 of 27 tool calls finished without failing.
+- 23 of 27 tool calls finished without failing.
 - 3 sub-agents finished.
 - 0 test runs counted no test failing.
 

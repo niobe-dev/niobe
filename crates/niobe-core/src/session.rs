@@ -274,6 +274,9 @@ pub struct ToolTotals {
     pub failed: u64,
     /// Calls the operator denied.
     pub denied: u64,
+    /// Calls that ended because the operator stopped them: they neither
+    /// failed nor were refused, and they did not run to their end either.
+    pub stopped: u64,
     /// Bytes of tool output, before trimming.
     pub output_bytes: u64,
     /// Finished calls per tool name.
@@ -295,6 +298,17 @@ pub struct ToolTotals {
     /// finished nor failed — the agent did not fail them, the session stopped
     /// them.
     pub interrupted: u64,
+}
+
+impl ToolTotals {
+    /// The calls that ran to their end and did not fail: every finished call
+    /// but those that failed, were denied or were stopped.
+    pub fn succeeded(&self) -> u64 {
+        self.finished
+            .saturating_sub(self.failed)
+            .saturating_sub(self.denied)
+            .saturating_sub(self.stopped)
+    }
 }
 
 /// The calls of one kind of work.
@@ -811,7 +825,7 @@ impl SessionState {
                     }
                     // The operator's own stop: the tool neither failed nor
                     // was refused, so it counts against neither.
-                    ToolOutcome::Interrupted => {}
+                    ToolOutcome::Interrupted => bump(&mut self.tools.stopped),
                 }
                 if self.in_flight_tools.remove(id).is_none() {
                     // A call that was cut short and has now ended: it ran to
@@ -4689,6 +4703,26 @@ mod tests {
             (calls, failed, denied),
             (tools.finished, tools.failed, tools.denied)
         );
+    }
+
+    #[test]
+    fn a_call_denied_or_stopped_is_not_one_that_succeeded() {
+        let events: Vec<Event> = [
+            ended("a", "Read", None, ToolOutcome::Ok),
+            ended("b", "Bash", Some("cargo test"), ToolOutcome::Failed),
+            ended("c", "Bash", Some("rm -rf build"), ToolOutcome::Denied),
+            ended("d", "Bash", Some("sleep 60"), ToolOutcome::Interrupted),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let tools = SessionState::replay(&events).tools().clone();
+
+        assert_eq!(
+            (tools.finished, tools.failed, tools.denied, tools.stopped),
+            (4, 1, 1, 1)
+        );
+        assert_eq!(tools.succeeded(), 1);
     }
 
     #[test]

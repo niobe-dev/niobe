@@ -187,11 +187,11 @@ fn the_overviews_totals_are_the_sums_of_each_session_folded_alone() {
             sum(SessionState::user_messages),
             sum(SessionState::assistant_messages)
         ),
-        format!(
-            "- {} of {} tool calls finished without failing.",
-            sum(|s| s.tools().finished - s.tools().failed),
-            sum(|s| s.tools().finished)
-        ),
+        // `jq -s '[.[] | select(.type == "tool_call_end") | .outcome] |
+        // group_by(.) | map({(.[0]): length}) | add' claude-session.jsonl
+        // producer-gaps.jsonl` reads 23 ok, 3 failed and 1 denied: the denied
+        // call did not run, so it is no call that finished without failing.
+        "- 23 of 27 tool calls finished without failing.".to_owned(),
         format!("- {} errors reported.", sum(SessionState::errors)),
     ] {
         assert!(page.contains(&line), "{line} is not in\n{page}");

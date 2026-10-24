@@ -237,7 +237,7 @@ fn highlights(sessions: &[Folded]) -> Vec<String> {
     let prompts = sum(sessions, SessionState::user_messages);
     let replies = sum(sessions, SessionState::assistant_messages);
     let finished = sum(sessions, |s| s.tools().finished);
-    let failed = sum(sessions, |s| s.tools().failed);
+    let succeeded = sum(sessions, |s| s.tools().succeeded());
     let agents = sum(sessions, SessionState::agents_completed);
     vec![
         format!("- {} ended.", counted(turns, "turn", "turns")),
@@ -248,7 +248,7 @@ fn highlights(sessions: &[Folded]) -> Vec<String> {
         ),
         format!(
             "- {} of {} tool calls finished without failing.",
-            grouped(finished.saturating_sub(failed)),
+            grouped(succeeded),
             grouped(finished)
         ),
         format!("- {} finished.", counted(agents, "sub-agent", "sub-agents")),
@@ -851,6 +851,24 @@ mod tests {
                 "| Bash | 2 | 1 |",
                 "| Read | 1 | 0 |",
             ]
+        );
+    }
+
+    #[test]
+    fn a_denied_or_stopped_call_is_not_counted_as_finishing_without_failing() {
+        let session = folded(
+            1,
+            &[
+                call("a", "Read", ToolOutcome::Ok),
+                call("b", "Bash", ToolOutcome::Failed),
+                call("c", "Bash", ToolOutcome::Denied),
+                call("d", "Bash", ToolOutcome::Interrupted),
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            highlights(&[session])[2],
+            "- 1 of 4 tool calls finished without failing."
         );
     }
 
