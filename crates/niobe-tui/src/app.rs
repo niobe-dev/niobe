@@ -1554,7 +1554,9 @@ pub struct App {
     /// business; `None` leaves an unpriced turn reading as one.
     prices: Option<Box<dyn Prices>>,
     /// Whether the budget warning has already been given, so that it is said
-    /// once rather than on every usage record after the line is crossed.
+    /// once rather than on every usage record after the line is crossed. A
+    /// clear sets it back, since the conversation after one has the whole
+    /// budget again.
     budget_warned: bool,
     /// The working tree a running turn began on, held until a read after
     /// the turn's end can be compared with it. `None` between turns.
@@ -2252,6 +2254,10 @@ impl App {
         // nothing of any of them, and then name all their changes as one
         // turn's. The next turn begins a watch of its own.
         self.tree_watch = None;
+        // The backend starts its running cost over at a clear, and stops the
+        // new conversation on the budget by that figure, so the conversation
+        // can near the budget again and is warned when it does.
+        self.budget_warned = false;
     }
 
     /// Records that the process this session runs in is leaving it with a
@@ -4034,7 +4040,9 @@ impl App {
         }
     }
 
-    /// Says once when the session has spent most of its budget.
+    /// Says once when the session has spent most of its budget, and once
+    /// more for each conversation a clear starts, which the backend counts
+    /// against the budget from nothing.
     ///
     /// Called by the event loop and never by [`App::apply`], for the reason
     /// [`App::settle_rules`] is: folding a recorded session would warn about
@@ -13194,6 +13202,32 @@ mod tests {
             "the warning let the budget read as a hard ceiling: {}",
             warnings[0].body
         );
+    }
+
+    #[test]
+    fn a_cleared_conversation_is_warned_about_its_own_budget_again() {
+        // The CLI starts its running cost over at a clear, and its budget
+        // with it, so the conversation after one can spend the whole budget
+        // again and is stopped on it again.
+        let mut app = metered().with_budget(1.0);
+        app.apply(&priced(0.85));
+        app.settle_budget();
+        app.apply(&Event::Cleared);
+        app.settle_budget();
+        assert!(
+            app.entries().iter().all(|entry| entry.head != "budget"),
+            "the conversation after the clear was warned before it spent anything"
+        );
+
+        app.apply(&priced(0.9));
+        app.settle_budget();
+        let warnings: Vec<&Entry> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "budget")
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].meta, "$0.90 of $1.00");
     }
 
     #[test]
