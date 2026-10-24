@@ -241,8 +241,8 @@ fn wrap_paragraph<R: Row>(
                 if line_width != 0 {
                     lines.push(std::mem::take(&mut line));
                 }
-                line_width = width(&chunk);
-                line.push_word(&chunk, mark);
+                line_width = width(chunk);
+                line.push_word(chunk, mark);
             }
             continue;
         }
@@ -293,7 +293,11 @@ pub fn wrap_exact(text: &str, columns: usize) -> Vec<String> {
     for line in text.split('\n') {
         match line.is_empty() {
             true => lines.push(String::new()),
-            false => lines.extend(split_to_width(&expand_tabs(line), columns)),
+            false => lines.extend(
+                split_to_width(&expand_tabs(line), columns)
+                    .into_iter()
+                    .map(str::to_owned),
+            ),
         }
     }
     lines
@@ -314,23 +318,25 @@ pub fn wrap_keeping_spaces(text: &str, columns: usize) -> Vec<String> {
     }
 }
 
-/// Cuts a string into pieces no wider than `columns` cells.
-pub fn split_to_width(text: &str, columns: usize) -> Vec<String> {
+/// Cuts a string into pieces no wider than `columns` cells, each a slice of
+/// `text`, so that cutting allocates nothing but the list.
+pub fn split_to_width(text: &str, columns: usize) -> Vec<&str> {
     let mut chunks = Vec::new();
-    let mut chunk = String::new();
     let mut chunk_width = 0;
+    let (mut start, mut at) = (0, 0);
 
     for (grapheme, w) in graphemes(text) {
-        if chunk_width + w > columns && !chunk.is_empty() {
-            chunks.push(std::mem::take(&mut chunk));
+        if chunk_width + w > columns && start < at {
+            chunks.push(&text[start..at]);
+            start = at;
             chunk_width = 0;
         }
-        chunk.push_str(grapheme);
+        at += grapheme.len();
         chunk_width += w;
     }
 
-    if !chunk.is_empty() {
-        chunks.push(chunk);
+    if start < text.len() {
+        chunks.push(&text[start..]);
     }
     chunks
 }
