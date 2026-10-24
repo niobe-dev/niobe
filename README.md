@@ -136,7 +136,8 @@ wrong. `decisions = false` at the top of a config stops asking; `niobe -p` never
 `trim = true` at the top of a config has the agent read a cargo command's output without cargo's
 build progress and the tests that passed. Every failure, panic, compiler error and `test result:`
 line is kept, and the whole output is written to `.niobe/trim/` and named under what the agent
-reads, so it can read the rest when it needs to; those files stay until they are deleted. It is off
+reads, so it can read the rest when it needs to; the hook deletes those files fourteen days after
+they were written. It is off
 by default. On the cargo runs recorded in
 [`crates/niobe-core/tests/fixtures/trim/`](crates/niobe-core/tests/fixtures/trim/README.md) it
 left 7% of the bytes, before the line it adds saying where the rest is. Only a command that
