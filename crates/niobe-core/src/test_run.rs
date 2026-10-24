@@ -147,8 +147,10 @@ pub fn is_test_run(command: &str) -> bool {
 /// split out either, since what it prints is captured and its status is not
 /// the command's; its text is kept in the word as it was written, quotes and
 /// all, and a `)` quoted inside it does not close it. Nor is the
-/// body of a here-document, which is the input of the command that opened it,
-/// nor a comment, from an unquoted `#` that starts a word to the end of its
+/// body of a here-document, which is the input of the command that opened it
+/// — inside a `$(…)` too, where a quote or a bracket in the body is the
+/// body's own text and closes nothing, as in the `git commit -m "$(cat
+/// <<'EOF' … EOF)"` a commit message is written with — nor a comment, from an unquoted `#` that starts a word to the end of its
 /// line: writing a script that runs `cargo test` is not running it.
 pub(crate) fn simple_commands(command: &str) -> Vec<Vec<String>> {
     simple_commands_marked(command)
@@ -247,6 +249,12 @@ pub(crate) fn simple_commands_marked(command: &str) -> Vec<Vec<Word>> {
                 open.pop();
                 split.push(c);
             }
+            (Some(Quoted::Substitution | Quoted::Parenthesis), '<') if heredoc_at(&chars, at) => {
+                at = split.heredoc_in_substitution(&chars, at);
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis), '\n') => {
+                at = split.heredoc_bodies_in_substitution(&chars, at);
+            }
             (Some(Quoted::Substitution | Quoted::Parenthesis | Quoted::Backticks), _) => {
                 split.push(c);
             }
@@ -324,36 +332,53 @@ impl Split {
     /// command it redirects, and keeps the delimiter for the body the next
     /// line starts; returns where it ended.
     fn heredoc(&mut self, chars: &[char], at: usize) -> usize {
-        let mut at = at + 1;
-        let strip_tabs = chars.get(at + 1) == Some(&'-');
-        if strip_tabs {
-            at += 1;
-        }
+        let opened = Heredoc::at(chars, at);
         self.words.push(Word {
-            text: if strip_tabs { "<<-" } else { "<<" }.to_owned(),
+            text: if opened.strip_tabs { "<<-" } else { "<<" }.to_owned(),
             quoted: false,
         });
-        while chars.get(at + 1).is_some_and(|&c| c == ' ' || c == '\t') {
-            at += 1;
-        }
-        let mut delimiter = String::new();
-        while let Some(&c) = chars.get(at + 1) {
-            if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') {
-                break;
-            }
-            if !matches!(c, '\'' | '"' | '\\') {
-                delimiter.push(c);
-            }
-            at += 1;
-        }
-        if !delimiter.is_empty() {
+        if !opened.delimiter.is_empty() {
             self.words.push(Word {
-                text: delimiter.clone(),
+                text: opened.delimiter.clone(),
                 quoted: false,
             });
-            self.heredocs.push((delimiter, strip_tabs));
         }
-        at
+        self.expect_body(opened)
+    }
+
+    /// Reads the `<<WORD` or `<<-WORD` starting at `at` inside a `$(…)`,
+    /// whose text is kept as written, and keeps the delimiter for the body
+    /// the next line starts; returns where it ended.
+    fn heredoc_in_substitution(&mut self, chars: &[char], at: usize) -> usize {
+        let opened = Heredoc::at(chars, at);
+        self.push_written(chars, at, opened.end);
+        self.expect_body(opened)
+    }
+
+    /// Keeps the delimiter of a here-document just opened, whose body the
+    /// next line starts; returns where its opening ended.
+    fn expect_body(&mut self, opened: Heredoc) -> usize {
+        if !opened.delimiter.is_empty() {
+            self.heredocs.push((opened.delimiter, opened.strip_tabs));
+        }
+        opened.end
+    }
+
+    /// Keeps the bodies of the here-documents opened inside a `$(…)` on the
+    /// line ending at `at` as text of the substitution, as written: a quote
+    /// or a bracket in a body is the body's, never the shell's. Returns where
+    /// the last body ended.
+    fn heredoc_bodies_in_substitution(&mut self, chars: &[char], at: usize) -> usize {
+        let end = self.skip_heredoc_bodies(chars, at);
+        self.push_written(chars, at, end);
+        end
+    }
+
+    /// Pushes `chars` from `from` to `to`, both included, as they were
+    /// written, stopping at the end of `chars`.
+    fn push_written(&mut self, chars: &[char], from: usize, to: usize) {
+        let to = to.saturating_add(1).min(chars.len());
+        self.word.extend(chars.get(from..to).unwrap_or_default());
     }
 
     /// Passes over the bodies of the here-documents the line ending at `at`
@@ -382,6 +407,46 @@ impl Split {
             }
         }
         at
+    }
+}
+
+/// A `<<WORD` or `<<-WORD` read from where it starts.
+#[derive(Debug)]
+struct Heredoc {
+    /// The line its body ends at, its quoting taken off.
+    delimiter: String,
+    /// Whether leading tabs are stripped from its lines (`<<-`).
+    strip_tabs: bool,
+    /// Where its opening ends.
+    end: usize,
+}
+
+impl Heredoc {
+    /// The here-document whose `<<` starts at `at`.
+    fn at(chars: &[char], at: usize) -> Self {
+        let mut at = at + 1;
+        let strip_tabs = chars.get(at + 1) == Some(&'-');
+        if strip_tabs {
+            at += 1;
+        }
+        while chars.get(at + 1).is_some_and(|&c| c == ' ' || c == '\t') {
+            at += 1;
+        }
+        let mut delimiter = String::new();
+        while let Some(&c) = chars.get(at + 1) {
+            if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') {
+                break;
+            }
+            if !matches!(c, '\'' | '"' | '\\') {
+                delimiter.push(c);
+            }
+            at += 1;
+        }
+        Self {
+            delimiter,
+            strip_tabs,
+            end: at,
+        }
     }
 }
 
@@ -1843,6 +1908,32 @@ error: doctest failed, to rerun pass `--doc`
 
         let failed_zero = "test result: FAILED. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s";
         assert_eq!(Summary::of(failed_zero), None);
+    }
+
+    #[test]
+    fn a_here_document_inside_a_substitution_is_text_however_it_is_quoted() {
+        // How the Claude CLI writes a commit message: a quote or a bracket in
+        // the message is the message's, not the shell's, and what runs after
+        // the commit is still a command of its own.
+        let commit = "git commit -m \"$(cat <<'EOF'\nfix: don't stop at (1\nEOF\n)\" && cargo test";
+        assert!(is_test_run(commit), "{commit:?} runs the tests");
+        assert_eq!(
+            simple_commands(commit),
+            [
+                vec![
+                    "git".to_owned(),
+                    "commit".to_owned(),
+                    "-m".to_owned(),
+                    "$(cat <<'EOF'\nfix: don't stop at (1\nEOF\n)".to_owned(),
+                ],
+                Vec::new(),
+                vec!["cargo".to_owned(), "test".to_owned()],
+            ]
+        );
+
+        let written = "x=$(cat <<-EOF\n\tit's `cargo test; done\n\tEOF\n)";
+        assert!(!is_test_run(written), "{written:?} runs no tests");
+        assert_eq!(simple_commands(written).len(), 1, "{written:?}");
     }
 
     #[test]

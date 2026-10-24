@@ -1130,6 +1130,14 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_in_a_commit_messages_here_document_leaves_what_follows_the_commit_a_command() {
+        assert_eq!(
+            read("git commit -m \"$(cat <<'EOF'\nfix: don't stop\nEOF\n)\" && git push"),
+            (Work::VersionControl, named(&["git commit", "git push"]))
+        );
+    }
+
+    #[test]
     fn the_ellipsis_an_older_records_line_ends_with_is_not_a_program() {
         let older = of_call("Bash", None, Some("cargo test | …"), "{}");
         assert_eq!(
