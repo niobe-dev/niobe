@@ -6046,6 +6046,27 @@ impl App {
         self.composer_scrolled = false;
     }
 
+    /// The row of the box the composer's cursor was drawn on in the frame
+    /// just drawn, counted from the box's top.
+    ///
+    /// The editor keeps the row it scrolled to to itself; what it does say is
+    /// that a move to stay in sight puts the cursor on the first row in sight,
+    /// so that move, from the first character, reads it, and a jump puts the
+    /// cursor back where it was, a selection kept as it was. `None` where the
+    /// cursor is past the editor's `u16` positions, which a jump cannot reach.
+    pub(crate) fn composer_cursor_row(&mut self) -> Option<usize> {
+        use ratatui_textarea::CursorMove;
+
+        let ratatui_textarea::DataCursor(row, col) = self.composer.cursor();
+        let (row, col) = (u16::try_from(row).ok()?, u16::try_from(col).ok()?);
+        let at = self.composer.screen_cursor().row;
+        self.composer.move_cursor(CursorMove::Jump(0, 0));
+        self.composer.move_cursor(CursorMove::InViewport);
+        let top = self.composer.screen_cursor().row;
+        self.composer.move_cursor(CursorMove::Jump(row, col));
+        at.checked_sub(top)
+    }
+
     /// Whether the composer is drawn from its first row, as it is wherever
     /// the box holds every row it wraps to and no selection keeps it
     /// scrolled.

@@ -6797,3 +6797,78 @@ fn a_transcript_narrowed_to_one_agent_draws_its_entries_and_says_whose() {
         assert_snapshot(name, &frame);
     }
 }
+
+/// The cells the composer's cursor is drawn on: the editor's cursor style,
+/// which the badge shares but for the badge's bold.
+fn cursor_cells(app: &mut App, width: u16, height: u16) -> usize {
+    let theme = app.theme().to_owned();
+    styles(app, width, height)
+        .into_iter()
+        .filter(|style| {
+            style.bg == Some(theme.hot)
+                && style.fg == Some(theme.pane_bg)
+                && !style.add_modifier.contains(ratatui::style::Modifier::BOLD)
+        })
+        .count()
+}
+
+/// Types `x` after what is in the composer up to the last one before its
+/// last line wraps onto a row more, so that line's last row is full.
+fn fill_the_last_row(app: &mut App, width: u16, height: u16) {
+    use ratatui::crossterm::event::KeyCode;
+
+    let rows = composer_box(&screen(app, width, height)).len();
+    let mut typed = 0;
+    while composer_box(&screen(app, width, height)).len() == rows && typed < 400 {
+        press(app, KeyCode::Char('x'));
+        typed += 1;
+    }
+    press(app, KeyCode::Backspace);
+}
+
+#[test]
+fn the_cursor_is_drawn_after_a_line_that_fills_the_composers_row_exactly() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let new_line = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+    let one_row = |app: &mut App| press(app, KeyCode::Char('x'));
+    let wrapped = |app: &mut App| type_keys(app, &numbered_words(100));
+    let scrolled = |app: &mut App| {
+        for _ in 0..12 {
+            type_keys(app, "line");
+            app.on_key(new_line);
+        }
+        press(app, KeyCode::Char('x'));
+    };
+    type Setup<'a> = &'a dyn Fn(&mut App);
+    let setups: [(&str, Setup); 3] = [
+        ("one row", &one_row),
+        ("the last row of a wrapped line", &wrapped),
+        ("a composer scrolled past its first rows", &scrolled),
+    ];
+    for (name, setup) in setups {
+        let mut app = running_session();
+        setup(&mut app);
+        assert_eq!(cursor_cells(&mut app, 80, 30), 1, "{name}: before the fill");
+        fill_the_last_row(&mut app, 80, 30);
+        let frame = screen(&mut app, 80, 30);
+        assert_eq!(
+            cursor_cells(&mut app, 80, 30),
+            1,
+            "{name}: the cursor after a full row is out of sight:\n{frame}"
+        );
+        // The cursor is drawn in the cell after the row's last `x`.
+        let theme = app.theme().to_owned();
+        let at = styles(&mut app, 80, 30)
+            .iter()
+            .position(|style| {
+                style.bg == Some(theme.hot)
+                    && style.fg == Some(theme.pane_bg)
+                    && !style.add_modifier.contains(ratatui::style::Modifier::BOLD)
+            })
+            .expect("the cursor is drawn");
+        let row: Vec<char> = frame.lines().nth(at / 80).expect("a row").chars().collect();
+        assert_eq!(row[at % 80 - 1], 'x', "{name}:\n{frame}");
+        assert_eq!(row[at % 80 + 1], ' ', "{name}:\n{frame}");
+    }
+}

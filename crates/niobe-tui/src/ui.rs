@@ -1592,11 +1592,90 @@ fn draw_ask_bar(
         Constraint::Length(said_width),
     ])
     .areas(rest);
-    editing(app).render(editor, frame.buffer_mut());
+    let text = text_room(editor, editing(app).is_empty());
+    editing(app).render(text, frame.buffer_mut());
     if app.finding().is_none() {
-        colour_commands(frame.buffer_mut(), editor, app, theme);
+        colour_commands(frame.buffer_mut(), text, app, theme);
+        draw_cursor_past_a_full_row(frame.buffer_mut(), text, app);
     }
     frame.render_widget(Paragraph::new(said).style(pane), right);
+}
+
+/// The part of the bar's editor `editor` the text is drawn and wrapped in:
+/// all of it but its last column, which is the cursor's.
+///
+/// The editor draws the cursor at the end of a line in the cell after the
+/// line's last, and cuts what does not fit in its room, so a line as wide as
+/// the room hid the cursor. The column kept is where
+/// [`draw_cursor_past_a_full_row`] draws it. An empty editor keeps nothing:
+/// its placeholder is fitted to the whole room, and the cursor is drawn in
+/// front of it.
+fn text_room(editor: Rect, empty: bool) -> Rect {
+    match empty || editor.width <= 1 {
+        true => editor,
+        false => Rect {
+            width: editor.width - 1,
+            ..editor
+        },
+    }
+}
+
+/// The columns [`text_room`] leaves the text of an editor `columns` wide
+/// that is not empty.
+fn text_columns(columns: usize) -> usize {
+    match columns {
+        0 | 1 => columns,
+        columns => columns - 1,
+    }
+}
+
+/// Draws the composer's cursor in the column [`text_room`] keeps, where the
+/// editor put it past the end of a row its line fills: the editor draws it
+/// only inside the room it was given.
+///
+/// Where the row ends is measured as ratatui drew it, a glyph at a time,
+/// since a family joined by zero-width joiners is drawn narrower than the
+/// editor sums it and the editor then drew the cursor itself.
+fn draw_cursor_past_a_full_row(buffer: &mut ratatui::buffer::Buffer, text: Rect, app: &mut App) {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    let composer = app.composer();
+    let ratatui_textarea::DataCursor(row, col) = composer.cursor();
+    let Some(line) = composer.lines().get(row) else {
+        return;
+    };
+    if col != line.chars().count() {
+        return;
+    }
+    let Some(last) = line.graphemes(true).next_back() else {
+        return;
+    };
+    let first_of_last = line.chars().count() - last.chars().count();
+    let last_glyph = first_of_last..first_of_last + 1;
+    let drawn_to = text::editor_spots(
+        line,
+        usize::from(text.width),
+        composer.tab_length(),
+        std::slice::from_ref(&last_glyph),
+    )
+    .first()
+    .map_or(0, |(_, column, cells)| column + cells);
+    if drawn_to < usize::from(text.width) {
+        return;
+    }
+    let style = composer.cursor_style();
+    let Some(down) = app.composer_cursor_row() else {
+        return;
+    };
+    let Ok(down) = u16::try_from(down) else {
+        return;
+    };
+    if down >= text.height {
+        return;
+    }
+    if let Some(cell) = buffer.cell_mut((text.right(), text.y + down)) {
+        cell.set_symbol(" ").set_style(style);
+    }
 }
 
 /// `ranges` of bytes of `line`, in order and apart, as ranges of its
@@ -1681,13 +1760,15 @@ fn said_width(app: &App, said: &[Line<'static>], width: u16) -> usize {
 /// the badge, the marker and the right-hand end leave it.
 fn editor_rows(app: &App, said: &[Line<'static>], width: u16) -> usize {
     let said = said_width(app, said, width);
-    let columns = usize::from(width)
-        .saturating_sub(lead_width(app))
-        .saturating_sub(match said {
-            0 => 0,
-            said => said + 1,
-        })
-        .max(1);
+    let columns = text_columns(
+        usize::from(width)
+            .saturating_sub(lead_width(app))
+            .saturating_sub(match said {
+                0 => 0,
+                said => said + 1,
+            })
+            .max(1),
+    );
     let editor = editing(app);
     editor
         .lines()
