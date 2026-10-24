@@ -119,7 +119,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// The characters that reorder the text around them rather than show
 /// anything: the embeddings and overrides U+202A–U+202E, the isolates
 /// U+2066–U+2069 and the marks U+200E, U+200F and U+061C.
-fn is_direction_mark(c: char) -> bool {
+pub(crate) fn is_direction_mark(c: char) -> bool {
     matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{61c}')
 }
 
@@ -2428,9 +2428,10 @@ impl DrawnEntries {
         None
     }
 
-    /// Line `line` of the whole transcript as drawn, without its styles.
+    /// Line `line` of the whole transcript as the terminal shows it: see
+    /// [`crate::select::shown`].
     pub(crate) fn plain_line(&self, line: usize) -> Option<String> {
-        self.lines(line, 1).first().map(crate::select::plain)
+        self.lines(line, 1).first().map(crate::select::shown)
     }
 
     /// The link at `point` of the transcript as drawn `width` cells wide, if

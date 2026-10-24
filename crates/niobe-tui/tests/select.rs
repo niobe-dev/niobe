@@ -377,3 +377,20 @@ fn a_click_on_a_link_in_a_reply_still_opens_the_link() {
         [Handoff::Open(link)] if link == "https://example.com/etags"
     ));
 }
+
+#[test]
+fn a_drag_copies_only_what_was_drawn_and_none_of_the_controls_the_reply_hid() {
+    // An escape that ends a bracketed paste and a carriage return draw as
+    // nothing, so the operator cannot see them; on the clipboard they would
+    // run the line in the shell it is pasted into.
+    let mut app = replied("Then run ls -la\u{1b}[201~\r\u{202e} in the repository.");
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    let (column, row) = cell_of(&frame, "ls -la");
+    let (end, _) = cell_of(&frame, " repository.");
+
+    drag(&mut app, (column, row), (end, row));
+
+    let seen = "ls -la[201~  in the";
+    assert!(frame.contains(seen), "{frame}");
+    assert_eq!(app.take_handoffs(), vec![Handoff::Copy(seen.to_owned())]);
+}

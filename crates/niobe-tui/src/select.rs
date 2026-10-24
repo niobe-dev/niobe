@@ -115,6 +115,24 @@ pub(crate) fn plain(line: &Line<'_>) -> String {
         .collect()
 }
 
+/// The text of a drawn line as the terminal shows it: without its styles,
+/// the control characters ratatui drops as it lays the line out, or the
+/// direction marks the draw takes out after.
+///
+/// For text that leaves the shell, which must be what the operator saw. A
+/// reply can hold an escape that ends a bracketed paste, or a carriage
+/// return, and both draw as nothing: on the clipboard they would act in the
+/// shell the text is pasted into, running a line the operator meant to read
+/// first. Every character dropped here draws in no cell, so the columns of
+/// what is left are the columns it was drawn in.
+pub(crate) fn shown(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .flat_map(|span| span.content.chars())
+        .filter(|c| !c.is_control() && !crate::ui::is_direction_mark(*c))
+        .collect()
+}
+
 /// The part of `drawn` in the cells from `from` up to `to`. A character two
 /// cells wide is in it where either of its cells is.
 fn cells(drawn: &str, from: usize, to: usize) -> String {
