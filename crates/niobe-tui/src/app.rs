@@ -2186,7 +2186,9 @@ impl App {
     /// Forgets what the shell holds of the session so far, as a session
     /// opened afresh holds none of it. The plan's windows, the repository's
     /// working tree, the history of prompts, the profile and the rules kept
-    /// are not the session's, and stay.
+    /// are not the session's, and stay. Nor does a sub-agent still running:
+    /// the fold carries it into the new conversation, and the Activity pane
+    /// counts it there, so it keeps its row under that count.
     fn start_over(&mut self) {
         let sent: Vec<PromptRow> = self
             .own_prompts()
@@ -2203,7 +2205,8 @@ impl App {
         self.call_at.clear();
         self.only_agent = None;
         self.agent_entries.clear();
-        self.agents.clear();
+        let running = self.session.running_agents();
+        self.agents.retain(|agent| running.contains(&agent.id));
         self.run = None;
         self.reply = None;
         self.compaction = None;
@@ -2223,7 +2226,8 @@ impl App {
         }
         self.first_prompt_unsent = false;
         self.turn_began_at = None;
-        self.turn_began_with = (0, 0);
+        // An agent carried over was not spawned by the next turn.
+        self.turn_began_with = (self.agents.len(), 0);
         self.turns_took = Some(Duration::ZERO);
         self.last_folded_at = None;
         self.stop_asked_in = None;
@@ -11142,6 +11146,16 @@ mod tests {
             kind: None,
             label: "explorer".to_owned(),
         });
+        app.apply(&Event::AgentSpawn {
+            id: "a0".into(),
+            parent: None,
+            kind: None,
+            label: "reviewer".to_owned(),
+        });
+        app.apply(&Event::AgentExit {
+            id: "a0".into(),
+            outcome: AgentOutcome::Completed,
+        });
         app.apply(&Event::ToolCallStart {
             id: "t1".into(),
             name: "Read".to_owned(),
@@ -11175,11 +11189,20 @@ mod tests {
 
         assert!(app.tool_entries.is_empty(), "the calls' rows");
         assert!(app.agent_entries.is_empty(), "the agents' lines");
-        assert!(app.agents.is_empty(), "the agents");
+        let carried: Vec<&AgentId> = app.agents.iter().map(|agent| &agent.id).collect();
+        assert_eq!(
+            carried,
+            [&AgentId::from("a1")],
+            "only the agent still running, which the fold carries"
+        );
         assert!(app.answered.is_empty(), "the answers given");
         assert!(app.follow, "the view follows the new conversation");
         assert_eq!(app.stop_asked_in, None, "a stop asked of a turn gone");
-        assert_eq!(app.turn_began_with, (0, 0));
+        assert_eq!(
+            app.turn_began_with,
+            (1, 0),
+            "counted from the agent carried"
+        );
         assert_eq!(app.turns_took, Some(Duration::ZERO));
     }
 

@@ -8024,6 +8024,42 @@ mod tests {
         ]
     }
 
+    /// A sub-agent still running when the conversation is cleared goes on in
+    /// the new one, and the fold counts it running there: the section lists
+    /// it under the header that counts it, rather than saying none was
+    /// spawned beneath `1 running`.
+    #[test]
+    fn a_sub_agent_running_across_a_clear_is_listed_under_the_count_of_it() {
+        use niobe_core::event::{AgentId, Event};
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::UserMessage {
+            text: "look around".to_owned(),
+        });
+        for id in ["a1", "a2"] {
+            app.apply(&Event::AgentSpawn {
+                id: AgentId::new(id),
+                parent: None,
+                kind: None,
+                label: format!("explore {id}"),
+            });
+        }
+        app.apply(&Event::AgentExit {
+            id: AgentId::new("a2"),
+            outcome: niobe_core::event::AgentOutcome::Completed,
+        });
+        app.apply(&Event::TurnEnded);
+        app.apply(&Event::Cleared);
+
+        let theme = Theme::default();
+        let rows: Vec<String> = agent_rows(&app, app.session(), 60, &theme)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(rows[0].contains("1 running"), "{rows:?}");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[1].contains("explore a1"), "{rows:?}");
+    }
+
     fn decision_text(app: &App, width: usize) -> Vec<String> {
         decision_rows(app, width, &Theme::default())
             .iter()
