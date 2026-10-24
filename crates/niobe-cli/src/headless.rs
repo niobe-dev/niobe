@@ -12,9 +12,11 @@
 //!
 //! What a caller needs is whether to trust the run, so the outcome is one of
 //! three, each with its own exit status: the turn finished, it stopped on the
-//! budget, or it failed. A budget stop is read off the figures — the turn
-//! ended in an error with as much spent as the budget allowed — rather than
-//! off the backend's wording of it.
+//! budget, or it failed. A turn failed where it ended on an error; a warning
+//! the turn went on from, such as a request the backend retried, does not
+//! fail it. A budget stop is read off the figures — the turn ended in an
+//! error with as much spent as the budget allowed — rather than off the
+//! backend's wording of it.
 
 use std::time::SystemTime;
 
@@ -155,6 +157,14 @@ pub fn run(
                 Event::TurnEnded => Some(ended(failure.take(), &state, budget)),
                 _ => None,
             };
+            // A warning is the turn's failure only where the turn ends on it:
+            // the backend reports a turn that failed with the warning just
+            // before its end, while one it went on from — a request retried,
+            // a CLI release nobody recorded, a write slow to be read — is
+            // followed by the rest of the turn.
+            if !matches!(event, Event::Error { fatal: false, .. }) {
+                failure = None;
+            }
             if outcome.is_none() {
                 outcome = ending;
             }
@@ -447,6 +457,56 @@ mod tests {
         );
         let (unbudgeted, ..) = ran(batches(), &Allowlist::new(), None);
         assert!(matches!(unbudgeted.outcome, Outcome::Failed(_)));
+    }
+
+    fn warning(message: &str) -> Event {
+        Event::Error {
+            message: message.to_owned(),
+            fatal: false,
+        }
+    }
+
+    #[test]
+    fn a_warning_the_turn_went_on_from_does_not_fail_a_turn_that_finished() {
+        let (turn, ..) = ran(
+            vec![
+                vec![warning(
+                    "this session is running Claude Code 9.9.9, and Niobe's reading of the \
+                     protocol was recorded from 2.1.278",
+                )],
+                vec![warning(
+                    "a request failed (overloaded), and the CLI is retrying it: attempt 1 of 10",
+                )],
+                vec![metered(), cost(0.02)],
+                ended_turn("done"),
+            ],
+            &Allowlist::new(),
+            Some(0.01),
+        );
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(turn.reply, "done");
+    }
+
+    #[test]
+    fn a_turn_that_ends_on_an_error_after_earlier_warnings_failed_on_that_error() {
+        let (turn, ..) = ran(
+            vec![
+                vec![warning(
+                    "a request failed (overloaded), and the CLI is retrying it",
+                )],
+                vec![
+                    cost(0.02),
+                    warning("the turn ended as `error_during_execution`: overloaded"),
+                    Event::TurnEnded,
+                ],
+            ],
+            &Allowlist::new(),
+            None,
+        );
+        assert_eq!(
+            turn.outcome,
+            Outcome::Failed("the turn ended as `error_during_execution`: overloaded".to_owned())
+        );
     }
 
     #[test]
