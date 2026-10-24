@@ -2261,11 +2261,18 @@ impl App {
     }
 
     /// Records that the process this session runs in is leaving it with a
-    /// turn still running, or that one before it did: a record that ends in
-    /// the middle of a turn, taken up again. The turn ends there, cut, so the
-    /// next prompt opens a turn of its own.
+    /// turn or a sub-agent still running, or that one before it did: a record
+    /// that ends in the middle of a turn, or between turns while an agent
+    /// worked on in the background, taken up again. The turn ends there, cut,
+    /// so the next prompt opens a turn of its own, and every agent still
+    /// running is cut short with it.
+    ///
+    /// An agent in the background outlives its turn but not the process, and
+    /// a backend started again does not carry it on, so nothing would ever
+    /// report its end: left running, it would read as working for the rest
+    /// of the session.
     pub fn leave(&mut self) {
-        if self.session.turn_running() {
+        if self.session.turn_running() || !self.session.running_agents().is_empty() {
             self.produce(Event::SessionLeft);
         }
     }
@@ -15452,6 +15459,52 @@ mod tests {
         app.leave();
         assert_eq!(app.said(), [Event::SessionLeft]);
         assert!(!app.session().turn_running());
+    }
+
+    /// A sub-agent working in the background outlives the turn that spawned
+    /// it, and not the process that ran it: a record that stops between turns
+    /// with one still running, taken up again, holds an agent nothing will
+    /// ever report the end of.
+    #[test]
+    fn leaving_between_turns_cuts_a_sub_agent_still_running_in_the_background() {
+        let mut app = app();
+        app.apply(&said("review it"));
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "Review fetch.py".to_owned(),
+        });
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Read".to_owned(),
+            input: "fetch.py".to_owned(),
+            summary: None,
+            agent: Some("a1".into()),
+        });
+        app.apply(&Event::TurnEnded);
+        assert_eq!(
+            app.session().running_agents().len(),
+            1,
+            "the agent runs on past its turn"
+        );
+
+        app.resumed();
+        app.leave();
+
+        assert_eq!(app.said(), [Event::SessionLeft]);
+        assert!(app.session().running_agents().is_empty());
+        assert_eq!(app.session().agents_interrupted(), 1);
+        assert!(app.agents().iter().all(|agent| !agent.is_running()));
+        assert!(
+            app.session().in_flight_tools().is_empty(),
+            "the call the agent had open"
+        );
+        assert_eq!(
+            app.session().turns().len(),
+            1,
+            "no turn is ended that was not running"
+        );
     }
 
     #[test]

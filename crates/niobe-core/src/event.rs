@@ -927,13 +927,14 @@ pub enum Event {
         after: Option<u64>,
     },
 
-    /// The process the session ran in stopped while a turn was running — the
-    /// operator quit, or it was killed and this is recorded when the session
-    /// is taken up again.
+    /// The process the session ran in stopped while a turn, or a sub-agent
+    /// working in the background after its turn, was running — the operator
+    /// quit, or it was killed and this is recorded when the session is taken
+    /// up again.
     ///
     /// The turn ends here, cut: the next prompt opens a turn of its own rather
     /// than joining one a process that is gone was running, and nothing the
-    /// turn had running reports an end after this. What the turn is timed to
+    /// turn or an agent had running reports an end after this. What the turn is timed to
     /// is the event before this one, since nothing happened in it after that.
     SessionLeft,
 
