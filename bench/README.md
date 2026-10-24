@@ -32,7 +32,10 @@ temporary directory and makes it a git repository. It runs the prompt there
 as one `niobe -p` turn under the profile and `--budget` it was given, then
 runs `check.sh` from this directory, not from the copy, so the agent cannot
 change what judges it. The turn may edit and write files inside its copy and
-nowhere else. Anything more, such as running the tests itself, needs an
+nowhere else, and not under the dot-named entries at the copy's root —
+`.claude/`, `.mcp.json`, `.git/`, `.niobe/` — which the CLI and Niobe run
+with: the CLI reads its settings again when they change, so a turn that
+could write them could allow itself a shell. Anything more, such as running the tests itself, needs an
 `--allow` rule given to `niobe bench`, which passes it to each turn:
 `--allow "Bash(python3 *)"`. A task that does not pass keeps its copy, and the
 results say where.

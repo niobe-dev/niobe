@@ -120,7 +120,8 @@ time each turn took, and where each left the five-hour window. `--json` prints i
 [`schema/bench.schema.json`](schema/bench.schema.json) publishes. [`bench/`](bench/README.md)
 holds twenty small tasks to compare one profile or setting against another; `--ab terse` runs
 the suite without terse replies and then with them, and sets the two side by side. Each turn may
-edit and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for that run
+edit and write files inside its copy, but for the dot-named entries at its root that the CLI
+and Niobe run with, such as `.claude/`; `--allow "Bash(python3 *)"` gives it more, for that run
 alone, as `--allow` does for `-p`.
 
 `terse = true` at the top of a config asks each new conversation for terse replies, with code,

@@ -323,6 +323,32 @@ fn a_turn_may_edit_inside_its_copy_and_nowhere_else() {
     assert_eq!(ran["tasks"][0]["passed"], true, "{ran:#}");
 }
 
+/// The CLI reads its project settings, skills and MCP servers from the
+/// dot-named entries at the root it runs in, and reads its settings again
+/// when they change mid-session: an edit there would let the turn allow
+/// itself what the bench does not, a shell included.
+#[test]
+fn a_turn_may_not_edit_what_the_cli_or_niobe_runs_with() {
+    for path in [
+        ".claude/settings.local.json",
+        ".claude/settings.json",
+        ".claude/skills/x/SKILL.md",
+        ".mcp.json",
+        ".git/config",
+        ".niobe/config.toml",
+    ] {
+        let setup = Setup::new(&asks_to_edit(path));
+        setup.answered("dotted", "deny");
+        let ran = results(&setup.bench(&["--json"]));
+        assert_eq!(ran["tasks"][0]["passed"], true, "{path}: {ran:#}");
+    }
+
+    let nested = Setup::new(&asks_to_edit("src/deep/items_2.py"));
+    nested.answered("nested", "allow");
+    let ran = results(&nested.bench(&["--json"]));
+    assert_eq!(ran["tasks"][0]["passed"], true, "{ran:#}");
+}
+
 fn alive(pid: &str) -> bool {
     Command::new("kill")
         .args(["-0", pid])

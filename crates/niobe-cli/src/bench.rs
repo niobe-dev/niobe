@@ -174,8 +174,9 @@ fn prompt_of(text: &str) -> String {
 /// profile, budget and rules the bench was given — and judges it by its
 /// check.
 ///
-/// The turn may also edit and write files inside its copy and nowhere else:
-/// a task is a change to that copy, and a bench nobody can leave running
+/// The turn may also edit and write files inside its copy, but not under the
+/// dot-named entries at its root, and nowhere else: a task is a change to
+/// that copy, and a bench nobody can leave running
 /// would be one whose every edit waits on a prompt nobody is there to answer.
 ///
 /// `side` tells this run's copies from another's in the same bench, so that
@@ -188,7 +189,9 @@ pub fn run(exe: &Path, task: &Task, flags: &[String], timeout: Duration, side: &
         Ok(copy) => {
             let mut flags = flags.to_vec();
             for tool in ["Edit", "Write"] {
-                flags.extend(["--allow".to_owned(), inside(tool, &copy)]);
+                for rule in inside(tool, &copy) {
+                    flags.extend(["--allow".to_owned(), rule]);
+                }
             }
             turn(exe, &work, &task.prompt, &flags, timeout)
         }
@@ -212,11 +215,27 @@ pub fn run(exe: &Path, task: &Task, flags: &[String], timeout: Duration, side: &
     }
 }
 
-/// The rule that lets `tool` act on any path under `dir`, as the backend
-/// names one: absolute, with the links in `dir` resolved, which is why `dir`
-/// is the canonical path rather than the temporary directory as named.
-fn inside(tool: &str, dir: &Path) -> String {
-    format!("{tool}({}/*)", dir.display())
+/// The rules that let `tool` act on any path under `dir` but those under a
+/// dot-named entry at its root, as the backend names a path: absolute, with
+/// the links in `dir` resolved, which is why `dir` is the canonical path
+/// rather than the temporary directory as named.
+///
+/// The dot-named entries are what the turn runs with rather than what it is
+/// asked to change: the CLI's project settings, skills and agents under
+/// `.claude/`, its MCP servers in `.mcp.json`, the copy's `.git/` and
+/// Niobe's own `.niobe/`. The CLI reads its settings files again when they
+/// change mid-session, so a turn allowed to write `.claude/settings.local.json`
+/// could allow itself a shell, which would reach past the copy. A rule cannot
+/// leave a name out, so there is one for each first character a name not
+/// starting with a dot may have here; a name starting with anything else is
+/// asked about, and refused, as a path outside the copy is.
+fn inside(tool: &str, dir: &Path) -> Vec<String> {
+    ('a'..='z')
+        .chain('A'..='Z')
+        .chain('0'..='9')
+        .chain(['_'])
+        .map(|first| format!("{tool}({}/{first}*)", dir.display()))
+        .collect()
 }
 
 /// A directory of its own for `name`'s copy, outside any repository, emptied

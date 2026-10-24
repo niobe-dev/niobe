@@ -376,8 +376,9 @@ reviewers that encode both, for an agent working in this tree.
   stood when it ended included; `bench.rs` is `niobe bench` — each task of a suite (`bench/` at
   the repository's root holds twenty, each with its prompt, its files, a `check.sh` with hidden
   tests beside it and a reference solution) run as its own `niobe -p` in a copy of the task's
-  files under the system's temporary directory, allowed to edit and write inside that copy and
-  nowhere else beyond the bench's own `--allow` rules, ended at its deadline, then judged by the
+  files under the system's temporary directory, allowed to edit and write inside that copy, but
+  not under the dot-named entries at its root such as `.claude/`, whose settings the CLI
+  reads again mid-session, and nowhere else beyond the bench's own `--allow` rules, ended at its deadline, then judged by the
   task's check run from the suite so that the agent cannot rewrite it, with a failing task's
   copy kept, as a table or as `--json` in the shape `schema/bench.schema.json` publishes, and
   with `--ab terse` the suite without the technique and then with it, side by side;
