@@ -2015,6 +2015,7 @@ mod tests {
     /// script can be held at its first instruction for seconds, and with a
     /// `yes` on every core thirty of them ran out. Every wait returns as soon
     /// as what it waits for happens.
+    #[cfg(unix)]
     const PATIENCE: Duration = Duration::from_secs(60);
 
     fn options() -> Options {
@@ -3583,6 +3584,7 @@ read -r rest
     /// The opening of a turn and its end, as the CLI writes them, for a
     /// stand-in to say once it has read the turn: the conversation is `s-9`,
     /// gated in plan mode.
+    #[cfg(unix)]
     const ONE_TURN: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"plan"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
 
     /// Starts a stand-in whose caller carries a session on past a stop
@@ -3679,6 +3681,7 @@ read -r rest
     /// A turn that launches a sub-agent in the background and ends while it
     /// works, as the CLI writes it: the `Agent` call, its result saying the
     /// agent was launched, and the turn's end.
+    #[cfg(unix)]
     const BACKGROUND_AGENT: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review catalog/fetch.py for bugs."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review catalog/fetch.py"}}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
 
     /// The CLI's process group ends with it, and a sub-agent it ran in the
@@ -3716,6 +3719,7 @@ read -r rest
 
     /// A turn that launches two sub-agents in the background, the second of
     /// which reports its end before the turn does.
+    #[cfg(unix)]
     const TWO_BACKGROUND_AGENTS: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review it."}},{"type":"tool_use","id":"toolu_done","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Check the docs","prompt":"Check them."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]},{"type":"tool_result","tool_use_id":"toolu_done","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review"}}' '{"type":"system","subtype":"task_notification","tool_use_id":"toolu_done","status":"completed","summary":"The docs are right."}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
 
     /// An agent that exited before the stop is not cancelled by it as well:

@@ -17,7 +17,9 @@
 //! sends Shift+Enter in. Where `poll(2)` cannot see the terminal, crossterm
 //! both waits and reads.
 
-use std::io::{self, IsTerminal};
+use std::io;
+#[cfg(unix)]
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event};
@@ -40,6 +42,8 @@ pub(crate) enum Input {
     Idle,
     /// The terminal the shell reads from is gone; nothing will come from it
     /// again.
+    // Only `poll(2)` reports a hangup, and the shell polls only on Unix.
+    #[cfg_attr(not(unix), allow(dead_code))]
     HungUp,
 }
 
