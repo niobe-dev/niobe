@@ -935,7 +935,8 @@ pub struct Printed {
     pub cut: bool,
     /// The last lines, as they would read on a terminal: a line a carriage
     /// return rewrote is what it was rewritten to, and nothing that would
-    /// move a terminal's cursor or change its colours is left in.
+    /// move a terminal's cursor or change its colours is left in; a line
+    /// longer than [`Printed::LINE`] characters is its end behind an `…`.
     pub tail: Vec<String>,
 }
 
@@ -944,6 +945,14 @@ impl Printed {
     /// glance at how it ended, not a scrollback. The whole output is in the
     /// session store.
     const LINES: usize = 12;
+
+    /// How many characters of one of those lines the transcript keeps: its
+    /// end, where a line says how it went. A line is wrapped rather than cut
+    /// at the pane's edge, so that a path in it can be read whole, and a
+    /// minified file or a binary printed whole is one line a megabyte long,
+    /// which wrapped is thousands of rows under one call. Longer than any
+    /// path; the whole line is in the call read whole.
+    const LINE: usize = 1024;
 
     /// The end of `output`, which is what was kept of `bytes` printed in
     /// all.
@@ -957,9 +966,18 @@ impl Printed {
         let tail = lines
             .iter()
             .skip(above)
-            .map(|line| terminal_line(line))
+            .map(|line| end_of(&terminal_line(line), Self::LINE))
             .collect();
         Self { above, cut, tail }
+    }
+}
+
+/// The last `most` characters of `line`, behind an ellipsis that says the
+/// rest was left out, or the whole of it where it is no longer.
+fn end_of(line: &str, most: usize) -> String {
+    match line.char_indices().rev().nth(most.saturating_sub(1)) {
+        Some((from, _)) if from > 0 => format!("…{}", line.get(from..).unwrap_or_default()),
+        _ => line.to_owned(),
     }
 }
 
@@ -13416,6 +13434,20 @@ mod tests {
         assert_eq!(terminal_line("[#####     ] 50%\r"), "[#####     ] 50%");
         assert_eq!(terminal_line("10%\r20%\r100%"), "100%");
         assert_eq!(terminal_line("plain"), "plain");
+    }
+
+    #[test]
+    fn a_line_longer_than_is_kept_keeps_its_end_behind_an_ellipsis() {
+        assert_eq!(end_of("abcdef", 6), "abcdef");
+        assert_eq!(end_of("abcdef", 4), "…cdef");
+        assert_eq!(end_of("", 4), "");
+        assert_eq!(end_of("añbçdé", 3), "…çdé");
+
+        let line = format!("{}{}", "é".repeat(Printed::LINE), "end");
+        let printed = Printed::of(&line, line.len() as u64);
+        assert_eq!(printed.tail.len(), 1);
+        assert_eq!(printed.tail[0].chars().count(), Printed::LINE + 1);
+        assert!(printed.tail[0].starts_with('…') && printed.tail[0].ends_with("éend"));
     }
 
     #[test]

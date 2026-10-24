@@ -470,9 +470,9 @@ fn printed_lines(
     if let Some(above) = above {
         lines.push(Line::from(Span::styled(above, dim.italic())));
     }
-    // Wrapped rather than cut at the edge: what a command printed is read
-    // here and nowhere else in the shell, and a path cut at the pane's edge
-    // has nothing that opens it.
+    // Wrapped rather than cut at the edge: a path cut at the pane's edge has
+    // nothing that opens it. A line is already no longer than
+    // `Printed::LINE`, so wrapping one is a few rows, never thousands.
     lines.extend(printed.tail.iter().flat_map(|line| {
         let mut parts = text::wrap(line, room.max(1));
         if parts.is_empty() {
@@ -2212,6 +2212,22 @@ mod tests {
             untrimmed: None,
         });
         drawn(&app, false)
+    }
+
+    #[test]
+    fn one_vast_line_a_command_printed_is_drawn_as_its_end_in_a_few_rows() {
+        let line = format!("{}tests passed", "x".repeat(1_000_000));
+
+        let rows = printed_rows(&line, line.len() as u64);
+
+        assert!(rows.len() < 40, "{} rows under the call", rows.len());
+        assert!(rows[1].trim_start().starts_with('…'), "{:?}", rows[1]);
+        let printed: String = rows.iter().skip(1).map(|row| row.trim()).collect();
+        assert!(
+            printed.ends_with("tests passed"),
+            "the end of the line was lost: {:?}",
+            rows.last()
+        );
     }
 
     #[test]
