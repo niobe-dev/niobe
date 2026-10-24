@@ -723,6 +723,26 @@ fn recorded(root: &Path, count: usize) {
     );
 }
 
+/// Waits until a session recorded in `root` holds `text` as a prompt.
+///
+/// What a shell draws is no sign of what it has stored: its journal writes on
+/// a thread of its own, behind the screen, so a test that reads the store
+/// from another process waits on the store itself.
+fn prompt_recorded(root: &Path, text: &str) {
+    let db = root.join(".niobe").join("sessions.db");
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(store) = Store::open(&db)
+            && let Ok(prompts) = store.prompts()
+            && prompts.iter().any(|prompt| prompt.text == text)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("no session in {} recorded {text:?}", root.display());
+}
+
 /// Runs the binary in `cwd` with standard output on a pipe, which is what makes
 /// `--resume` print the fold instead of opening the shell.
 fn niobe(cwd: &Path, args: &[&str]) -> Output {
@@ -2023,6 +2043,7 @@ fn a_session_another_niobe_holds_is_not_opened_from_the_history() {
     holding.typed(b"recorded-before\r");
     holding.shows("answered-the-turn");
     lines_written(&repo.path().join("args.log"), 1);
+    prompt_recorded(repo.path(), "recorded-before");
 
     let (terminal, slave) = Terminal::open();
     let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
