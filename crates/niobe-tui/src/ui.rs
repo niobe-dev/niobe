@@ -3719,7 +3719,10 @@ const METER_CELLS: usize = 12;
 /// A share of a window as its column draws it: a percent, no wider than the
 /// column holds, and an em dash for a level that is not one — below nothing,
 /// or not a number — rather than a `0%` nobody measured. A level above
-/// nothing that rounds to nothing reads `<1%`, as [`share_label`] draws it.
+/// nothing that rounds to nothing reads `<1%`, and one short of the whole
+/// that rounds to it reads `>99%`, as [`share_label`] draws them: `100%` says
+/// the window is gone, which the meter beside it, keeping a cell of track,
+/// does not. A level of the whole or past it is drawn as it is.
 fn window_share(utilization: f64) -> String {
     if !utilization.is_finite() || utilization < 0.0 {
         return format!("{:>3} ", "—");
@@ -3727,7 +3730,7 @@ fn window_share(utilization: f64) -> String {
     share_label(
         crate::app::percent(utilization).min(999),
         utilization > 0.0,
-        false,
+        utilization < 1.0,
     )
 }
 
@@ -7824,6 +7827,21 @@ mod tests {
         compacted(&mut app, None);
         assert_eq!(context_of(&app, 39), ["context —"]);
         assert_eq!(context_rows(&app), 1);
+    }
+
+    /// A context short of its window by less than half a point rounds to the
+    /// whole of it, and `100%` would say the window is full while the meter
+    /// beside it keeps a cell of room: the figure says it is nearly full.
+    #[test]
+    fn a_context_just_short_of_its_window_does_not_read_as_full() {
+        let mut app = bare();
+        sent(&mut app, 199_200, "opus-5", Some(200_000));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context >99% ▓▓▓▓▓▓▓▓▓▓▓░ 199k / 200k"]
+        );
+        assert_eq!(window_share(0.996), ">99%");
+        assert_eq!(window_share(1.0), "100%");
     }
 
     /// Past the window, the bar is full and the figure says by how much.
