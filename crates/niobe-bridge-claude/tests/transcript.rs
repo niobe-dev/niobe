@@ -1033,6 +1033,39 @@ fn a_turn_after_the_last_accounting_is_counted_from_its_message_and_the_rest_fro
     assert!((cost(1) - 0.048_520_2).abs() < 1e-9, "{}", cost(1));
 }
 
+/// A process that ran two turns and left wrote one `cost-state` for both, as
+/// the README records it. Neither turn's own tokens are known: the record is
+/// the process's whole spend, and drawn under its last turn it would read as
+/// that turn's — 58,556 tokens, by
+/// `jq -s '[.[] | select(.type=="cost-state") | .modelUsage[] | .inputTokens+.outputTokens+.cacheReadInputTokens+.cacheCreationInputTokens] | add'`,
+/// where the second turn's message spent 30,296. The session's total still
+/// holds it.
+#[test]
+fn an_accounting_of_several_turns_is_counted_in_the_session_and_in_none_of_its_turns() {
+    let events = transcript::events(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resumed-transcript.jsonl"),
+        "max",
+        Path::new("/repo"),
+    )
+    .expect("the transcript reads");
+    let state = SessionState::replay(&events);
+
+    let turns: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+    assert_eq!(turns, [None, None], "{:?}", state.turns());
+    assert_eq!(state.totals().tokens(), 58_556);
+}
+
+/// Where each process ran one turn, each `cost-state` is that turn's bill,
+/// and the turn is counted with it: 19,716 tokens, then 43,310 less 19,716,
+/// by the same `jq` over `resumed-open-transcript.jsonl`.
+#[test]
+fn an_accounting_of_one_turn_is_that_turns_spend() {
+    let state = SessionState::replay(&resumed_and_open());
+
+    let turns: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+    assert_eq!(turns, [Some(19_716), Some(43_310 - 19_716)]);
+}
+
 /// The open turn's tokens are measured, so they are in the totals; what it
 /// cost was never written down, so the bill is a floor. The totals come to
 /// what the CLI recorded once that process left, as the README shows.

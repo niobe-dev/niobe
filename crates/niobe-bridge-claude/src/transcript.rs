@@ -947,6 +947,12 @@ struct Fold {
     /// one after the last is counted by nothing but itself. See
     /// [`Fold::assistant`].
     accountings: usize,
+    /// Whether a message since the operator last spoke was left to an
+    /// accounting still ahead to count.
+    awaited: bool,
+    /// Whether a turn that has ended since the last accounting left messages
+    /// to the next one, which then bills more than the turn it lands in.
+    awaited_before: bool,
     /// The `message.id` of every API response whose tokens have been counted,
     /// so that the records that repeat one are not billed again.
     counted: BTreeMap<String, ()>,
@@ -990,6 +996,8 @@ impl Fold {
             out: Vec::new(),
             times: Vec::new(),
             accountings,
+            awaited: false,
+            awaited_before: false,
             counted: BTreeMap::new(),
             last_usage: BTreeMap::new(),
             mode: None,
@@ -1160,6 +1168,9 @@ impl Fold {
             .as_ref()
             .and_then(|id| self.last_usage.get(id).cloned())
             .or(message.usage);
+        if usage.is_some() && first_time && self.accountings > 0 {
+            self.awaited = true;
+        }
         if let Some(usage) = usage
             && first_time
             && self.accountings == 0
@@ -1375,21 +1386,40 @@ impl Fold {
         // closes a turn on the live stream as well, so it is folded by the
         // same path: what is reported is the difference from what the
         // per-message records already accounted for.
-        self.fold(wire::Message::Result(wire::Outcome {
-            subtype: Some("success".to_owned()),
-            is_error: false,
-            // The transcript states no per-turn total, so there is nothing for
-            // the per-message records to be reconciled against.
-            usage: None,
-            model_usage: record.model_usage,
-            total_cost_usd: record.total_cost_usd,
-            // A refusal is in the transcript as the tool result it became; the
-            // CLI keeps no list of them here.
-            permission_denials: Vec::new(),
-            result: None,
-            errors: Vec::new(),
-            terminal_reason: None,
-        }));
+        //
+        // An accounting that also covers the messages of a turn already
+        // ended is the spend of more than the turn it lands in, and which
+        // part was whose is not written down: the turn is ended before it,
+        // so that it is counted in the session and in no turn's figure,
+        // rather than as the last turn's. One that covers a single turn is
+        // that turn's bill, and ends it as a `result` does.
+        let spans_turns = std::mem::take(&mut self.awaited_before);
+        self.awaited = false;
+        if spans_turns {
+            self.answered = false;
+            self.out.push(Event::TurnEnded);
+        }
+        let mut billed = self
+            .translator
+            .message(wire::Message::Result(wire::Outcome {
+                subtype: Some("success".to_owned()),
+                is_error: false,
+                // The transcript states no per-turn total, so there is nothing for
+                // the per-message records to be reconciled against.
+                usage: None,
+                model_usage: record.model_usage,
+                total_cost_usd: record.total_cost_usd,
+                // A refusal is in the transcript as the tool result it became; the
+                // CLI keeps no list of them here.
+                permission_denials: Vec::new(),
+                result: None,
+                errors: Vec::new(),
+                terminal_reason: None,
+            }));
+        if spans_turns {
+            billed.retain(|event| !matches!(event, Event::TurnEnded));
+        }
+        self.out.append(&mut billed);
     }
 
     /// The CLI's title, whenever it differs from the last one: the CLI writes
@@ -1433,6 +1463,7 @@ impl Fold {
     /// with, so a turn ends where the operator speaks again after an answer.
     fn said(&mut self, text: String) {
         if std::mem::take(&mut self.answered) {
+            self.awaited_before |= std::mem::take(&mut self.awaited);
             self.out.push(Event::TurnEnded);
         }
         self.out.push(Event::UserMessage { text });
