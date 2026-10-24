@@ -334,6 +334,59 @@ fn a_click_on_a_calls_row_opens_the_call_whole() {
     );
 }
 
+/// A call's start, and its end returning `output`.
+fn call_events(id: &str, name: &str, input: &str, output: &str) -> (Event, Event) {
+    (
+        Event::ToolCallStart {
+            id: id.into(),
+            name: name.to_owned(),
+            input: input.to_owned(),
+            summary: None,
+            agent: None,
+        },
+        Event::ToolCallEnd {
+            id: id.into(),
+            name: name.to_owned(),
+            input: input.to_owned(),
+            output: output.to_owned(),
+            bytes: output.len() as u64,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: None,
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        },
+    )
+}
+
+#[test]
+fn a_click_on_a_call_that_ended_after_it_was_cut_short_opens_that_call() {
+    // The turn ends with the build still running, and the fold cuts it; a
+    // later call starts and ends; then the build's end arrives late, as a
+    // sub-agent's records can, and is drawn as a row of its own.
+    let mut app = running_session();
+    let (build, built) = call_events("b1", "Bash", "{\"command\":\"make\"}", "built ok");
+    let (grep, grepped) = call_events("g2", "Grep", "{\"pattern\":\"etag\"}", "fetch.ts:41");
+    app.apply(&Event::UserMessage {
+        text: "Build it.".to_owned(),
+    });
+    app.apply(&build);
+    app.apply(&Event::TurnEnded);
+    app.apply(&Event::UserMessage {
+        text: "Where is it used?".to_owned(),
+    });
+    app.apply(&grep);
+    app.apply(&grepped);
+    app.apply(&built);
+    let frame = screen(&mut app, WIDTH, 60);
+
+    click(&mut app, cell_of(&frame, "⚙ Bash"));
+
+    let detail = app.detail().expect("the click opened a call");
+    assert_eq!(detail.text(), "{\"command\":\"make\"}built ok", "{frame}");
+}
+
 #[test]
 fn a_drag_across_a_calls_row_selects_it_and_opens_nothing() {
     let mut app = searched("catalog/fetch.ts:41: etag");

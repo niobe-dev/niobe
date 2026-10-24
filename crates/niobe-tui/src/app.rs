@@ -2589,7 +2589,7 @@ impl App {
                     exit_code: *exit_code,
                     error: error.clone(),
                 };
-                self.record_end(
+                let recorded = self.record_end(
                     id,
                     (name, input, summary.as_deref()),
                     (output, *bytes, *outcome),
@@ -2601,7 +2601,9 @@ impl App {
                     Some((at, index)) => self.end_call(at, index, ending),
                     // An end whose start never arrived is shown, not dropped:
                     // the session fold counts it too, and a gap the operator
-                    // cannot see is a gap nobody reports.
+                    // cannot see is a gap nobody reports. Nor is one whose
+                    // row was cut short before it came: its row opens it,
+                    // though calls started after it are newer in `recorded`.
                     None => {
                         let mut call = Call::started(what_it_does(summary.as_deref(), input), None);
                         call.ended(ending, None);
@@ -2620,8 +2622,7 @@ impl App {
                             agent: None,
                         });
                         let place = (self.entries.len().saturating_sub(1), 0);
-                        self.call_at
-                            .insert(place, self.recorded.len().saturating_sub(1));
+                        self.call_at.insert(place, recorded);
                         Some(place)
                     }
                 };
@@ -4275,36 +4276,39 @@ impl App {
 
     /// Keeps what the call `id` returned for the view of it, as the end
     /// carried it; an end whose start never arrived is kept from the end's
-    /// own copy of what the start said.
+    /// own copy of what the start said. Says where in `recorded` the call
+    /// is, which is not the newest place where its start was kept and other
+    /// calls started after it.
     fn record_end(
         &mut self,
         id: &ToolCallId,
         (name, input, summary): (&str, &str, Option<&str>),
         (output, bytes, outcome): (&str, u64, ToolOutcome),
         untrimmed: Option<&str>,
-    ) {
+    ) -> usize {
         let ended = Some((output.to_owned(), bytes, outcome));
         let untrimmed = untrimmed.map(str::to_owned);
-        match self
-            .recorded
-            .iter_mut()
-            .rev()
-            .find(|(started, _)| started == id)
-        {
-            Some((_, call)) => {
-                call.ended = ended;
-                call.untrimmed = untrimmed;
+        match self.recorded.iter().rposition(|(started, _)| started == id) {
+            Some(at) => {
+                if let Some((_, call)) = self.recorded.get_mut(at) {
+                    call.ended = ended;
+                    call.untrimmed = untrimmed;
+                }
+                at
             }
-            None => self.recorded.push((
-                id.clone(),
-                crate::detail::Recorded {
-                    name: name.to_owned(),
-                    what: what_it_does(summary, input),
-                    input: input.to_owned(),
-                    ended,
-                    untrimmed,
-                },
-            )),
+            None => {
+                self.recorded.push((
+                    id.clone(),
+                    crate::detail::Recorded {
+                        name: name.to_owned(),
+                        what: what_it_does(summary, input),
+                        input: input.to_owned(),
+                        ended,
+                        untrimmed,
+                    },
+                ));
+                self.recorded.len().saturating_sub(1)
+            }
         }
     }
 
