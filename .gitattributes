@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) Viacheslav Shynkarenko
+
+# Every text file is checked out with the line endings it was committed with.
+# The snapshots and recorded fixtures are compared byte for byte, and a
+# checkout that turned their line ends into CRLF would fail every one of them.
+* text=auto eol=lf

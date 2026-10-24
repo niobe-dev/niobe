@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/niobe-dev/niobe/blob/main/schema/bench.schema.json",
+  "title": "niobe bench --json",
+  "description": "A suite of tasks — or, with --ab, the suite twice, without a technique and with it — each run as one niobe -p turn in a copy of its files and judged by its check. Every figure is one a turn's own report gave; none is an estimate. A field is added without moving schema_version; it moves when one changes meaning or goes away.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/run"
+    },
+    {
+      "$ref": "#/$defs/ab"
+    }
+  ],
+  "$defs": {
+    "run": {
+      "description": "One run of the suite.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "suite",
+        "started_at",
+        "timeout_seconds",
+        "tasks",
+        "summary"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "description": "The version of this shape.",
+          "const": 1
+        },
+        "suite": {
+          "description": "The suite's directory name.",
+          "type": "string"
+        },
+        "started_at": {
+          "description": "When the first task started, RFC 3339 in UTC to the second.",
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "timeout_seconds": {
+          "description": "How long each turn was let run before it was ended.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "tasks": {
+          "description": "Each task, in the order of their names.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/task"
+          }
+        },
+        "summary": {
+          "$ref": "#/$defs/summary"
+        }
+      }
+    },
+    "ab": {
+      "description": "niobe bench --ab: the suite run without the technique, then with it.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "technique",
+        "change",
+        "without",
+        "with"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "description": "The version of this shape.",
+          "const": 1
+        },
+        "technique": {
+          "description": "The technique measured: off in the first run, on in the second.",
+          "enum": [
+            "terse"
+          ]
+        },
+        "change": {
+          "description": "How far each figure moved from the first run to the second, as a fraction of the first run's: -0.1 is a tenth less. Null where either run left the figure unreported or the first run's was zero.",
+          "type": "object",
+          "required": [
+            "passed",
+            "output_tokens",
+            "tokens",
+            "wall_ms"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "passed": {
+              "description": "Tasks passed with the technique, less those passed without it.",
+              "type": "integer"
+            },
+            "output_tokens": {
+              "description": "Output tokens.",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tokens": {
+              "description": "Every token.",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "wall_ms": {
+              "description": "Wall time.",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        },
+        "without": {
+          "description": "The suite run with the technique off.",
+          "$ref": "#/$defs/run"
+        },
+        "with": {
+          "description": "The suite run with the technique on.",
+          "$ref": "#/$defs/run"
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": [
+        "name",
+        "passed",
+        "outcome",
+        "reason",
+        "wall_ms",
+        "kept",
+        "turn"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The task's directory name.",
+          "type": "string"
+        },
+        "passed": {
+          "description": "Whether the task's check exited 0 in the repository the turn left. A turn that timed out is not checked and has not passed.",
+          "type": "boolean"
+        },
+        "outcome": {
+          "description": "How the turn ended: the -p outcome where it reported one, timed_out where it ran past the deadline, unreported where niobe ended without a report.",
+          "enum": [
+            "finished",
+            "failed",
+            "budget_stopped",
+            "timed_out",
+            "unreported"
+          ]
+        },
+        "reason": {
+          "description": "Why the turn did not finish, or null where it did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wall_ms": {
+          "description": "How long the turn took by the bench's clock, laying out the files included and the check not.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "kept": {
+          "description": "Where the copy the turn worked in was kept, for a task that did not pass; null where it passed and the copy was removed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn": {
+          "description": "The turn's own report, as niobe -p --json printed it, or null where it printed none.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "print.schema.json#/$defs/report"
+            }
+          ]
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "tasks",
+        "passed",
+        "pass_rate",
+        "tokens",
+        "tokens_reported_by",
+        "output_tokens",
+        "wall_ms",
+        "five_hour"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tasks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pass_rate": {
+          "description": "passed over tasks, from 0 to 1; null for a suite of no tasks.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tokens": {
+          "description": "Every token the turns spent, or null where a turn reported no spend, since a sum short of one turn would read as the suite's.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tokens_reported_by": {
+          "description": "How many turns reported their spend.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "description": "The tokens the turns' models wrote, summed, where every turn reported them; null otherwise.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "wall_ms": {
+          "description": "The turns' times summed.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "five_hour": {
+          "description": "Where the five-hour window stood after the first turn that reported it and after the last; null where none did. The window is the account's: anything else it ran moved it too.",
+          "type": "object",
+          "required": [
+            "first",
+            "last"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "first": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "last": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

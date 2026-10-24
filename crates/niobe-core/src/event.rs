@@ -175,10 +175,11 @@ pub struct Usage {
     /// Of [`Usage::cache_write`], the tokens written to live for an hour
     /// rather than the default five minutes. A provider that offers both bills
     /// the hour at a higher rate, so a cost derived from the total alone would
-    /// be wrong in whichever direction it guessed. Zero where the backend does
-    /// not report the split, and in records written before it was kept.
-    #[serde(default)]
-    pub cache_write_1h: u64,
+    /// be wrong in whichever direction it guessed. `None` where the backend
+    /// did not report the split, and in records written before it was kept:
+    /// not "all five-minute", which nobody said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
     /// Reasoning tokens, where the backend reports them separately.
     pub reasoning: u64,
     /// The model these counts were billed against.
@@ -197,11 +198,15 @@ pub struct Usage {
     /// `claude` CLI does — leaves the message records with no cost of their
     /// own. They are not unpriced: the turn's figure covers them. A consumer
     /// that counted them as unpriced would call a fully reported session a
-    /// floor forever. `false` is the safe reading, so a producer that says
-    /// nothing, and a record written before this was kept, price only
-    /// themselves.
-    #[serde(default)]
-    pub settles_model: bool,
+    /// floor forever. Anything but `Some(true)` prices the record alone.
+    ///
+    /// `None` is a record that does not say, which is every record stored
+    /// before this was kept: the bookkeeping is younger than the recording, so
+    /// what it left unsettled may have been billed all the same. Kept apart
+    /// from `Some(false)` so that a floor can say which it is, and never
+    /// written as a `false` the producer did not write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settles_model: Option<bool>,
     /// Whether the provider served the request in its fast mode, which it
     /// bills at a premium over the model's standard rates. `false` where the
     /// backend did not say, and in records written before this was kept.
@@ -232,6 +237,12 @@ pub struct TokenCounts {
     pub cache_read: u64,
     /// Input tokens written into the prompt cache.
     pub cache_write: u64,
+    /// Of the cache writes, the ones bought for an hour rather than for five
+    /// minutes. `None` where a side gave no split, or summed a record that
+    /// gave none: a share counted from part of the writes would read as all
+    /// of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
 }
 
 impl TokenCounts {
@@ -251,16 +262,25 @@ impl TokenCounts {
             output: other.output.saturating_sub(self.output),
             cache_read: other.cache_read.saturating_sub(self.cache_read),
             cache_write: other.cache_write.saturating_sub(self.cache_write),
+            cache_write_1h: self
+                .cache_write_1h
+                .zip(other.cache_write_1h)
+                .map(|(this, other)| other.saturating_sub(this)),
         }
     }
 
-    /// These counts and `other`'s, summed field by field.
+    /// These counts and `other`'s, summed field by field. The one-hour share
+    /// is summed only where both have one.
     pub fn plus(&self, other: &Self) -> Self {
         Self {
             input: self.input.saturating_add(other.input),
             output: self.output.saturating_add(other.output),
             cache_read: self.cache_read.saturating_add(other.cache_read),
             cache_write: self.cache_write.saturating_add(other.cache_write),
+            cache_write_1h: self
+                .cache_write_1h
+                .zip(other.cache_write_1h)
+                .map(|(this, other)| this.saturating_add(other)),
         }
     }
 }
@@ -300,6 +320,48 @@ pub struct UsageWindows {
     /// nothing further is being charged.
     #[serde(default)]
     pub using_overage: bool,
+    /// Whether the plan may spend beyond its flat fee at all, where the
+    /// backend said. Apart from [`UsageWindows::using_overage`], which is
+    /// whether it is spending now: a plan can be allowed extra it has not
+    /// needed yet, and a plan refused extra says so before anything is cut
+    /// off. [`Overage::Unreported`] in a record written before this was kept.
+    #[serde(default)]
+    pub overage: Overage,
+}
+
+/// Whether a plan may spend beyond its flat fee, as its backend reported.
+///
+/// Three states and not a flag, because the backend saying nothing and the
+/// backend saying no are different things to tell an operator: only the
+/// second is a promise that no extra is being charged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Overage {
+    /// The backend did not say.
+    #[default]
+    Unreported,
+    /// Extra usage is allowed: past the windows, the work goes on and is
+    /// billed beyond the fee.
+    Allowed,
+    /// Extra usage is refused, and why where the backend said.
+    Refused(OverageRefusal),
+}
+
+/// Why a backend refused a plan extra usage, in Niobe's terms rather than any
+/// backend's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverageRefusal {
+    /// The credits extra usage is paid from have run out.
+    OutOfCredits,
+    /// Extra usage was never set up for the account.
+    NotSetUp,
+    /// Someone with the say over the account turned it off.
+    TurnedOff,
+    /// The limit extra usage may spend up to is zero.
+    ZeroLimit,
+    /// The backend gave no reason, or one this build does not know.
+    Unstated,
 }
 
 impl UsageWindows {
@@ -768,6 +830,13 @@ pub enum Event {
         /// kept before calls carried it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
+        /// What the tool returned before Niobe's own trimming left lines out
+        /// of it ([`crate::trim`]), where it did: `output` is then the
+        /// shorter copy the model read, and `bytes` the size of this. `None`
+        /// where nothing was trimmed, and where the whole could not be read
+        /// back as it was written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        untrimmed: Option<String>,
     },
 
     /// The backend finished answering the operator's last prompt: every call
@@ -1155,6 +1224,12 @@ pub enum Event {
         message: String,
     },
 
+    /// The operator pressed a key after something a catch-up counts had
+    /// happened: what the next one is counted from ([`crate::catch_up`]),
+    /// kept with the session so that one taken up again tells them what
+    /// happened after they last looked, even where the process that ran it
+    /// was ended while they were away.
+    Looked,
     /// Something went wrong.
     Error {
         /// The message, as it will be shown.
@@ -1210,6 +1285,36 @@ mod tests {
     }
 
     #[test]
+    fn a_window_stored_before_overage_was_kept_reads_it_as_unreported() {
+        let stored = r#"{"five_hour":null,"seven_day":null,"using_overage":true}"#;
+        let windows: UsageWindows =
+            serde_json::from_str(stored).expect("a stored record reads back");
+        assert_eq!(windows.overage, Overage::Unreported);
+        assert!(windows.using_overage);
+    }
+
+    #[test]
+    fn a_refusal_of_extra_usage_and_its_reason_survive_the_store() {
+        for overage in [
+            Overage::Unreported,
+            Overage::Allowed,
+            Overage::Refused(OverageRefusal::OutOfCredits),
+            Overage::Refused(OverageRefusal::Unstated),
+        ] {
+            let windows = UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: false,
+                overage,
+            };
+            let stored =
+                serde_json::to_string(&Event::UsageWindows(windows)).expect("an event is written");
+            let read: Event = serde_json::from_str(&stored).expect("and read back");
+            assert_eq!(read, Event::UsageWindows(windows), "{stored}");
+        }
+    }
+
+    #[test]
     fn a_window_whose_level_is_not_a_number_survives_the_store() {
         let windows = UsageWindows {
             five_hour: Some(UsageWindow {
@@ -1218,6 +1323,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: true,
+            overage: crate::event::Overage::Unreported,
         };
 
         let stored =
@@ -1230,6 +1336,7 @@ mod tests {
                 five_hour: None,
                 seven_day: None,
                 using_overage: true,
+                overage: crate::event::Overage::Unreported,
             })
         );
     }
@@ -1242,11 +1349,11 @@ mod tests {
             output: 20,
             cache_read: 30,
             cache_write: 40,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         };
         assert_eq!(usage.tokens(), 150);
@@ -1259,25 +1366,53 @@ mod tests {
             output: 20,
             cache_read: 30,
             cache_write: 40,
-            cache_write_1h: 25,
+            cache_write_1h: Some(25),
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         };
         assert_eq!(usage.tokens(), 150);
     }
 
     #[test]
-    fn a_usage_record_without_one_hour_writes_reads_them_as_zero() {
+    fn a_usage_record_written_before_settlement_was_kept_reads_as_unsaid() {
+        let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":0.5}"#;
+        let Event::Usage(old) = serde_json::from_str(json).expect("an old record reads") else {
+            panic!("a usage record read as something else");
+        };
+        assert_eq!(old.settles_model, None);
+
+        let said = json.replace(
+            "\"cost_usd\":0.5",
+            "\"cost_usd\":0.5,\"settles_model\":false",
+        );
+        let Event::Usage(said) = serde_json::from_str(&said).expect("a new record reads") else {
+            panic!("a usage record read as something else");
+        };
+        assert_eq!(said.settles_model, Some(false));
+
+        // Written and read back, an unsaid settlement stays unsaid rather than
+        // becoming a `false` the producer never wrote.
+        let line = serde_json::to_string(&Event::Usage(old)).expect("it serializes");
+        let Event::Usage(read) = serde_json::from_str(&line).expect("it reads back") else {
+            panic!("a usage record read back as something else: {line}");
+        };
+        assert_eq!(read.settles_model, None, "{line}");
+    }
+
+    #[test]
+    fn a_usage_record_without_one_hour_writes_reads_the_split_as_unreported() {
         let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":null}"#;
         let event: Event = serde_json::from_str(json).expect("a record from before the field");
         let Event::Usage(usage) = event else {
             panic!("the record is a usage record: {event:?}");
         };
         assert_eq!(usage.cache_write, 4);
-        assert_eq!(usage.cache_write_1h, 0);
+        assert_eq!(usage.cache_write_1h, None);
+        let line = serde_json::to_string(&Event::Usage(usage)).expect("a record serializes");
+        assert!(!line.contains("cache_write_1h"), "{line}");
     }
 
     #[test]
@@ -1459,6 +1594,7 @@ mod tests {
                 resets_at: Some(1_790_118_000),
             }),
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         });
 
         let line = serde_json::to_string(&event).expect("an event serializes");
@@ -1497,11 +1633,11 @@ mod tests {
             output: 1,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "gpt-5-codex".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         };
         // Written and read back, as the store does: an unreported cost must
@@ -1620,6 +1756,7 @@ mod tests {
             exit_code: Some(2),
             error: Some("no such file".to_owned()),
             command: None,
+            untrimmed: None,
         };
         let line = serde_json::to_string(&ended).expect("an event serializes");
         let read: Event = serde_json::from_str(&line).expect("what was written reads back");

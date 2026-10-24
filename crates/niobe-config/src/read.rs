@@ -166,6 +166,9 @@ mod tests {
         assert_eq!(text(&path).expect("it reads").len(), limit);
     }
 
+    // Windows refuses to open a directory as a file at all, so the refusal
+    // there is the open's own, in the system's words.
+    #[cfg(unix)]
     #[test]
     fn a_directory_is_refused() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");

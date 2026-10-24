@@ -78,7 +78,8 @@ impl Attention {
             | Event::Commands { .. }
             | Event::McpServers { .. }
             | Event::Models { .. }
-            | Event::Notice { .. } => Self::Routine,
+            | Event::Notice { .. }
+            | Event::Looked => Self::Routine,
         }
     }
 }
@@ -174,6 +175,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         };
         assert_eq!(Attention::of(&read), Attention::Routine);
         let notice = Event::Notice {

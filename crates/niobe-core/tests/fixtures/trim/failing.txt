@@ -1,0 +1,195 @@
+   Compiling suite v0.1.0 (/work/suite)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.66s
+     Running unittests src/lib.rs (target/debug/deps/suite-452a31ae21d0c214)
+
+running 63 tests
+test tests::a_slow_one ... ignored
+test tests::adding_0_to_itself_doubles_it ... ok
+test tests::adding_11_to_itself_doubles_it ... ok
+test tests::adding_10_to_itself_doubles_it ... ok
+test tests::adding_15_to_itself_doubles_it ... ok
+test tests::adding_12_to_itself_doubles_it ... ok
+test tests::adding_13_to_itself_doubles_it ... ok
+test tests::adding_14_to_itself_doubles_it ... ok
+test tests::adding_17_to_itself_doubles_it ... ok
+test tests::adding_16_to_itself_doubles_it ... ok
+test tests::adding_18_to_itself_doubles_it ... ok
+test tests::adding_19_to_itself_doubles_it ... ok
+test tests::adding_1_to_itself_doubles_it ... ok
+test tests::adding_20_to_itself_doubles_it ... ok
+test tests::adding_21_to_itself_doubles_it ... ok
+test tests::adding_22_to_itself_doubles_it ... ok
+test tests::adding_23_to_itself_doubles_it ... ok
+test tests::adding_24_to_itself_doubles_it ... ok
+test tests::adding_25_to_itself_doubles_it ... ok
+test tests::adding_26_to_itself_doubles_it ... ok
+test tests::adding_27_to_itself_doubles_it ... ok
+test tests::adding_28_to_itself_doubles_it ... ok
+test tests::adding_29_to_itself_doubles_it ... ok
+test tests::adding_2_to_itself_doubles_it ... ok
+test tests::adding_30_to_itself_doubles_it ... ok
+test tests::adding_31_to_itself_doubles_it ... ok
+test tests::adding_32_to_itself_doubles_it ... ok
+test tests::adding_33_to_itself_doubles_it ... ok
+test tests::adding_34_to_itself_doubles_it ... ok
+test tests::adding_36_to_itself_doubles_it ... ok
+test tests::adding_35_to_itself_doubles_it ... ok
+test tests::adding_37_to_itself_doubles_it ... ok
+test tests::adding_38_to_itself_doubles_it ... ok
+test tests::adding_39_to_itself_doubles_it ... ok
+test tests::adding_3_to_itself_doubles_it ... ok
+test tests::adding_40_to_itself_doubles_it ... ok
+test tests::adding_41_to_itself_doubles_it ... ok
+test tests::adding_42_to_itself_doubles_it ... ok
+test tests::adding_43_to_itself_doubles_it ... ok
+test tests::adding_44_to_itself_doubles_it ... ok
+test tests::adding_45_to_itself_doubles_it ... ok
+test tests::adding_46_to_itself_doubles_it ... ok
+test tests::adding_47_to_itself_doubles_it ... ok
+test tests::adding_48_to_itself_doubles_it ... ok
+test tests::adding_49_to_itself_doubles_it ... ok
+test tests::adding_50_to_itself_doubles_it ... ok
+test tests::adding_4_to_itself_doubles_it ... ok
+test tests::adding_51_to_itself_doubles_it ... ok
+test tests::adding_52_to_itself_doubles_it ... ok
+test tests::adding_53_to_itself_doubles_it ... ok
+test tests::adding_54_to_itself_doubles_it ... ok
+test tests::adding_55_to_itself_doubles_it ... ok
+test tests::adding_56_to_itself_doubles_it ... ok
+test tests::adding_58_to_itself_doubles_it ... ok
+test tests::adding_57_to_itself_doubles_it ... ok
+test tests::adding_59_to_itself_doubles_it ... ok
+test tests::adding_5_to_itself_doubles_it ... ok
+test tests::adding_6_to_itself_doubles_it ... ok
+test tests::adding_7_to_itself_doubles_it ... ok
+test tests::adding_8_to_itself_doubles_it ... ok
+test tests::adding_9_to_itself_doubles_it ... ok
+test tests::halving_seven_rounds_down_to_three ... FAILED
+test tests::halving_zero_is_zero ... FAILED
+
+failures:
+
+---- tests::halving_seven_rounds_down_to_three stdout ----
+
+thread 'tests::halving_seven_rounds_down_to_three' (74228844) panicked at src/lib.rs:128:47:
+assertion `left == right` failed: halve(7) should round down
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::halving_zero_is_zero stdout ----
+checking zero
+
+thread 'tests::halving_zero_is_zero' (74228845) panicked at src/lib.rs:130:60:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    tests::halving_seven_rounds_down_to_three
+    tests::halving_zero_is_zero
+
+test result: FAILED. 60 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+     Running tests/alpha.rs (target/debug/deps/alpha-014f7523ae2f4cd8)
+
+running 40 tests
+test alpha_case_0_holds ... ok
+test alpha_case_10_holds ... ok
+test alpha_case_11_holds ... ok
+test alpha_case_12_holds ... ok
+test alpha_case_14_holds ... ok
+test alpha_case_15_holds ... ok
+test alpha_case_13_holds ... ok
+test alpha_case_16_holds ... ok
+test alpha_case_17_holds ... ok
+test alpha_case_18_holds ... ok
+test alpha_case_19_holds ... ok
+test alpha_case_1_holds ... ok
+test alpha_case_20_holds ... ok
+test alpha_case_21_holds ... ok
+test alpha_case_22_holds ... ok
+test alpha_case_23_holds ... ok
+test alpha_case_24_holds ... ok
+test alpha_case_25_holds ... ok
+test alpha_case_26_holds ... ok
+test alpha_case_27_holds ... ok
+test alpha_case_28_holds ... ok
+test alpha_case_29_holds ... ok
+test alpha_case_2_holds ... ok
+test alpha_case_30_holds ... ok
+test alpha_case_31_holds ... ok
+test alpha_case_32_holds ... ok
+test alpha_case_33_holds ... ok
+test alpha_case_34_holds ... ok
+test alpha_case_35_holds ... ok
+test alpha_case_36_holds ... ok
+test alpha_case_37_holds ... ok
+test alpha_case_38_holds ... ok
+test alpha_case_39_holds ... ok
+test alpha_case_3_holds ... ok
+test alpha_case_4_holds ... ok
+test alpha_case_5_holds ... ok
+test alpha_case_6_holds ... ok
+test alpha_case_7_holds ... ok
+test alpha_case_8_holds ... ok
+test alpha_case_9_holds ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/beta.rs (target/debug/deps/beta-966068bd67a1c519)
+
+running 40 tests
+test beta_case_0_holds ... ok
+test beta_case_10_holds ... ok
+test beta_case_14_holds ... ok
+test beta_case_11_holds ... ok
+test beta_case_13_holds ... ok
+test beta_case_12_holds ... ok
+test beta_case_15_holds ... ok
+test beta_case_17_holds ... ok
+test beta_case_16_holds ... ok
+test beta_case_18_holds ... ok
+test beta_case_1_holds ... ok
+test beta_case_19_holds ... ok
+test beta_case_20_holds ... ok
+test beta_case_21_holds ... ok
+test beta_case_22_holds ... ok
+test beta_case_23_holds ... ok
+test beta_case_24_holds ... ok
+test beta_case_25_holds ... ok
+test beta_case_26_holds ... ok
+test beta_case_27_holds ... ok
+test beta_case_28_holds ... ok
+test beta_case_29_holds ... ok
+test beta_case_2_holds ... ok
+test beta_case_30_holds ... ok
+test beta_case_31_holds ... ok
+test beta_case_32_holds ... ok
+test beta_case_33_holds ... ok
+test beta_case_34_holds ... ok
+test beta_case_35_holds ... ok
+test beta_case_36_holds ... ok
+test beta_case_37_holds ... ok
+test beta_case_38_holds ... ok
+test beta_case_39_holds ... ok
+test beta_case_3_holds ... ok
+test beta_case_4_holds ... ok
+test beta_case_5_holds ... ok
+test beta_case_6_holds ... ok
+test beta_case_7_holds ... ok
+test beta_case_8_holds ... ok
+test beta_case_9_holds ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests suite
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 1 target failed:
+    `--lib`

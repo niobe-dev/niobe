@@ -247,8 +247,11 @@ What the recording settles:
   result arrives. Without that, the call reads as a tool that broke.
 - **The tool result for that call carries `tool_result_meta`**:
   `[{"id": …, "non_execution_kind": "permission-rule"}]`. The CLI's own
-  transcript of the same session does not keep it, so a session read back
-  from disk could not rely on it. The bridge does not read it.
+  transcript of the same session does not keep it on 2.1.278. Recorded from
+  2.1.309 (`refusals.jsonl`), the mark is on every kind of refusal and on no
+  call that ran, and the transcript keeps a `permissionDecision` beside the
+  result, so the bridge reads either as the call refused, and this recording
+  folds to `Denied` without the driver's word.
 - **The `control_request` carries `display_name` and `permission_suggestions`**
   (here, a switch to `acceptEdits` for the session). The bridge reads neither.
 - **The `Edit`'s result carries the CLI's own diff of the file** in
@@ -288,10 +291,10 @@ What it settles is how a shell command's exit status is read:
   `backgroundTaskId` on a command it moved to the background, and
   `interrupted: true`. A success with none of those is a command that exited
   zero, and the bridge says so; with any of them it names no status.
-- **A refusal made over the control channel reads as a failure here**, with
-  the refusal's words as its reason: the recording cannot say the call was
-  refused, and the driver is what tells the translator (see
-  `stdio-answers.jsonl`).
+- **A refusal made over the control channel reads as a refusal here**, with
+  the refusal's words as its reason: the CLI marks the result
+  `non_execution_kind: permission-rule`, which the bridge reads as it does the
+  driver's word (see `stdio-answers.jsonl` and `refusals.jsonl`).
 
 A failed command's status is in `sub-agents.jsonl`: its result opens with
 `Exit code 1` on a line of its own, and the rest is the command's output. The
@@ -299,6 +302,90 @@ CLI writes no report beside a sub-agent's successful commands, so those name
 no status. Across 18,756 shell results in 336 of the CLI's own transcripts of
 2.1.27x–2.1.281, every failed command that ran opened with `Exit code <n>` and
 no successful one did.
+
+## `background-commands.jsonl`
+
+Two shell commands put in the background, recorded from Claude Code 2.1.309 on
+23 October 2026 by writing the turn to `claude -p --input-format stream-json
+--output-format stream-json --verbose` and keeping its standard input open
+until both commands had ended. The model was asked to run `sleep 2; echo
+finished-in-background` and `sleep 3; echo about-to-fail; exit 3` with
+`run_in_background`, and to end its turn. The lines are the CLI's own. The only
+edits: paths rewritten to `/repo` and the CLI's task directory to
+`/tmp/claude/`, `system`/`init` cut down to the keys that say what ran, the
+`result`'s `subagent_stats` and the two `commands_changed` lines left out. The
+CLI's transcript of the same session is
+`transcripts/df5b30bf-d767-43d8-b7dd-7b101f69c268.jsonl`, holding only its
+`user`, `assistant`, `queue-operation`, `last-prompt` and `cost-state` records:
+the rest carry the system prompt and the environment of the machine it ran on.
+
+What it settles is how a background command's end reaches the session:
+
+- **The call ends at once.** Its result is `Command running in background with
+  ID: <task>. Output is being written to: <file>. You will be notified when it
+  completes.`, its report carries `backgroundTaskId`, and nothing on it says
+  how the command will exit.
+- **The end is a `system`/`task_notification`**, after a `task_updated` whose
+  `patch.status` says the same: `tool_use_id` names the call, `status` is
+  `completed` or `failed`, `output_file` the file, and `summary` the CLI's
+  sentence about it, which is the only place the exit code is —
+  `Background command "Sleep 2s then print a message" completed (exit code 0)`
+  and `… failed with exit code 3`. The description in quotes is the model's,
+  not the command. No `usage` is carried, unlike a sub-agent's.
+- **Each end starts a turn of the CLI's own**: a `system`/`init` and a reply,
+  with no prompt from the operator in front of it.
+- **The transcript says the same as a user turn** whose `origin.kind` is
+  `task-notification`, its text the `<task-notification>` markup with
+  `<tool-use-id>`, `<status>` and `<summary>` tags carrying the stream's values.
+
+The bridge shows each end as a notice naming the command, how it ended and the
+exit code the summary names, from the stream and from the transcript alike:
+``the background command `sleep 3; echo about-to-fail; exit 3` failed with exit
+code 3``.
+
+## `replace-all.jsonl`
+
+One `Edit` with `replace_all: true`, recorded from Claude Code 2.1.309 on 23
+October 2026 the way `refusals.jsonl` was, with the edit allowed over the
+control channel. `palette.txt` was committed as five lines, three of them
+holding `colour`; the model read it and replaced `colour` with `color`
+everywhere. The edits to the lines are those listed for `refusals.jsonl`.
+
+The call names one occurrence (`old_string: "colour"`), and the CLI's result
+says only that every occurrence was replaced. The count is in the report beside
+it: `replaceAll: true` and a `structuredPatch` of one hunk, `oldStart 1`,
+`oldLines 5`, `newStart 1`, `newLines 5`, removing and adding three lines.
+`git diff --numstat` read `3	3	palette.txt` afterwards, and the test expects
+the change to count `+3 −3`.
+
+## `refusals.jsonl`
+
+Four calls that did not do what was asked, recorded from Claude Code 2.1.309 on
+23 October 2026 by writing each turn to `claude -p --input-format stream-json
+--output-format stream-json --verbose --permission-prompt-tool stdio` and
+answering its permission prompts by hand. The first three turns are one
+process, started with `--disallowedTools "Bash(touch b.txt)"` and a project
+`PreToolUse` hook on `Bash` that exits 2 for a command naming `c.txt`; the
+fourth is a second process. The lines are the CLI's own. The only edits: paths
+rewritten to `/repo` and the hook's to `/hooks/block.sh`, `system`/`init` cut
+down to the keys that say what ran, the `result`'s `subagent_stats` and the
+`commands_changed` and `thinking_tokens` lines left out.
+
+| Turn | The call | How it was stopped | `tool_result_meta` beside its result |
+| ---- | -------- | ------------------ | ------------------------------------ |
+| 1 | `touch a.txt` | refused over the control channel | `non_execution_kind: permission-rule`, `permission_decision: {decision: reject, source: user_reject}` |
+| 2 | `touch b.txt` | the CLI's own rule, from `--disallowedTools` | `permission-rule`, `{reject, source: config, reason_type: rule}`, and a `system`/`permission_denied` too |
+| 3 | `touch c.txt` | the hook, `blocked by the test hook` | `permission-rule`, `{reject, source: hook, reason_type: hook}` |
+| 4 | `Read` of a file that is not there | nothing: the tool ran and failed | no `non_execution_kind`; `{accept, source: config, reason_type: mode}` |
+
+So `permission-rule` marks a call not allowed to run, whoever refused it, and
+a tool's own error is not one: the bridge reads the first three as `Denied`
+and the fourth as `Failed`. The CLI's transcript of the first process keeps the
+same decisions under `permissionDecision` on each result's record, with
+`reasonCode` (`rule:cliArg`, `hook:PreToolUse`) in place of
+`non_execution_kind`. An `Edit` of a file the session had not read, which
+2.1.27x refused as `File has not been read yet`, ran on 2.1.309 and is not
+here.
 
 ## `commands-changed.jsonl`
 
@@ -894,13 +981,15 @@ jq -c 'select(.type=="system" and (.subtype=="task_progress" or .subtype=="task_
 
 A directory of session transcripts in the shape the CLI writes them: one
 directory per working directory it has run in, one JSON Lines file per session,
-named by the id the CLI's own `--resume` takes. It holds three sessions
+named by the id the CLI's own `--resume` takes. It holds four sessions
 recorded in `/repo`: `2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42`, which is described
 first, `7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73`, which ran sub-agents and is
-described under [its own heading](#a-session-that-ran-sub-agents), and
+described under [its own heading](#a-session-that-ran-sub-agents),
 `4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36`, which the CLI closed while an agent was
 still writing and is described under
-[the heading after that](#a-session-closed-while-an-agent-was-still-writing).
+[the heading after that](#a-session-closed-while-an-agent-was-still-writing),
+and `df5b30bf-d767-43d8-b7dd-7b101f69c268`, the CLI's own transcript of
+[`background-commands.jsonl`](#background-commandsjsonl).
 
 The **shapes** are those of twenty-five transcripts recorded by Claude Code
 2.1.277 on 18 September 2026 — every key here appeared in them, and no key of

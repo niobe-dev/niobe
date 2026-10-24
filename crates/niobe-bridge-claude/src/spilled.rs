@@ -10,6 +10,9 @@
 //! bytes went into it. That file is the CLI's output, not a credential: this
 //! reads nothing the operator could not `cat`, and only a file the CLI named.
 //!
+//! The same reading serves the file Niobe's own hook writes the whole of an
+//! output it trimmed to, named in the result the same way.
+//!
 //! The byte count is what says the file is still the one written for that
 //! result. Across 186 saved outputs on the machine this was written on, every
 //! file still there held exactly the bytes its report named.

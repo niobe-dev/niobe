@@ -431,6 +431,32 @@ fn separates(chars: &[char], at: usize) -> bool {
 }
 
 fn runs_cargo_test(words: &[String]) -> bool {
+    let Some(mut words) = after_cargo(words) else {
+        return false;
+    };
+    let _toolchain = words.next_if(|word| word.starts_with('+'));
+    if !skip_options(&mut words, CARGO_TAKES_A_VALUE, CARGO_RUNS_NOTHING) {
+        return false;
+    }
+    matches!(words.next(), Some("test" | "t"))
+        && words.all(|w| !matches!(w, "--no-run" | "--help" | "-h" | "--list"))
+}
+
+/// The subcommand the simple command `words` runs cargo with, read past the
+/// shell's own words, assignments and the wrappers [`runs_cargo_test`] reads
+/// past, and cargo's own toolchain and options. `None` where it does not run
+/// cargo, or runs it to do something of its own (`cargo --list`).
+pub(crate) fn cargo_subcommand(words: &[String]) -> Option<&str> {
+    let mut words = after_cargo(words)?;
+    let _toolchain = words.next_if(|word| word.starts_with('+'));
+    if !skip_options(&mut words, CARGO_TAKES_A_VALUE, CARGO_RUNS_NOTHING) {
+        return None;
+    }
+    words.next()
+}
+
+/// The words of `words` after the one that names cargo, where it runs cargo.
+fn after_cargo(words: &[String]) -> Option<std::iter::Peekable<impl Iterator<Item = &str>>> {
     let mut words = words
         .iter()
         .map(String::as_str)
@@ -442,21 +468,15 @@ fn runs_cargo_test(words: &[String]) -> bool {
             Some(word) => match Wrapper::named(word) {
                 Some(wrapper) => {
                     if !wrapper.skip_its_own(&mut words) {
-                        return false;
+                        return None;
                     }
                 }
-                None if is_cargo(word) => break,
-                None => return false,
+                None if is_cargo(word) => return Some(words),
+                None => return None,
             },
-            None => return false,
+            None => return None,
         }
     }
-    let _toolchain = words.next_if(|word| word.starts_with('+'));
-    if !skip_options(&mut words, CARGO_TAKES_A_VALUE, CARGO_RUNS_NOTHING) {
-        return false;
-    }
-    matches!(words.next(), Some("test" | "t"))
-        && words.all(|w| !matches!(w, "--no-run" | "--help" | "-h" | "--list"))
 }
 
 /// The words a shell reads as part of its own grammar at the head of a

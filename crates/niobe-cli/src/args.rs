@@ -9,9 +9,14 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use niobe_core::permission::Rule;
+use niobe_ledger::Date;
 use niobe_store::SessionId;
 use niobe_tui::Theme;
 use niobe_tui::theme;
+
+use crate::cost::Format;
+use crate::playback::Speed;
 
 /// What the operator asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,9 +25,42 @@ pub enum Command {
     Shell,
     /// Open the shell on an earlier session and keep recording into it.
     Resume(Resume),
+    /// Run one turn with no terminal and print its reply, or with `--json`
+    /// its outcome and spend in the shape `schema/print.schema.json` names.
+    Print {
+        /// What the turn is asked.
+        prompt: String,
+        /// `--json` was given.
+        json: bool,
+    },
+    /// Run every task of a suite as one headless turn in a copy of its
+    /// repository, judge each by its check, and print what each spent.
+    Bench {
+        /// The suite's directory.
+        suite: PathBuf,
+        /// `--json` was given: the results in the shape
+        /// `schema/bench.schema.json` names.
+        json: bool,
+        /// How long a task's turn may run, where `--timeout` said.
+        timeout: Option<std::time::Duration>,
+        /// The technique `--ab` named: the suite is run without it, then
+        /// with it.
+        ab: Option<crate::bench::Technique>,
+    },
     /// List the sessions recorded in this repository, Niobe's own and the
     /// `claude` CLI's.
     Sessions,
+    /// Print every session recorded in this repository, folded, as one
+    /// Markdown page, narrowed to the sessions the flags name.
+    Overview(Narrowing),
+    /// List every session recorded in this repository with what it spent,
+    /// narrowed as the overview is, in the format the flags name.
+    Cost {
+        /// Which sessions.
+        narrowing: Narrowing,
+        /// How they print.
+        format: Format,
+    },
     /// List the profiles the config defines, marking the selected one.
     Profiles,
     /// Check what a first session needs and say what is missing, with the fix.
@@ -45,7 +83,13 @@ pub enum Command {
     /// List the prices in force today, or every price one model has had.
     Prices(Option<String>),
     /// Fold a JSON Lines event log, for development.
-    Replay(PathBuf),
+    Replay {
+        /// The JSON Lines event log.
+        log: PathBuf,
+        /// How many times the recorded pace the shell is handed the events
+        /// at; `None` folds them all before the shell opens.
+        speed: Option<Speed>,
+    },
     /// Print the help.
     Help,
     /// Print the version.
@@ -78,6 +122,29 @@ pub struct Invocation {
     /// The palette `--theme` named, if it was given. It beats the one a config
     /// names, and `F9` beats both for the rest of the session.
     pub theme: Option<Theme>,
+    /// What `--terse on` or `--terse off` asked, beating the config's
+    /// `terse`; `None` where it was not given.
+    pub terse: Option<bool>,
+    /// The rules each `--allow` gave, which answer a headless turn's prompts
+    /// beside the config's for this run alone. The operator typed them, so
+    /// they need no trust; they are never written anywhere.
+    pub allow: Vec<Rule>,
+}
+
+/// The directory `niobe hook trim --raw <dir>` names, where `args` are exactly
+/// that: the hook the `claude` CLI runs under `trim = true`, which nobody
+/// types and which is answered before the rest of the command line is read.
+/// The directory is the session's own and need not be text.
+pub fn hook_trim(args: impl IntoIterator<Item = OsString>) -> Option<PathBuf> {
+    let mut args = args.into_iter();
+    let words = [args.next()?, args.next()?, args.next()?];
+    let dir = args.next()?;
+    let fits = words
+        .iter()
+        .map(|w| w.to_str())
+        .eq([Some("hook"), Some("trim"), Some("--raw")])
+        && args.next().is_none();
+    fits.then(|| PathBuf::from(dir))
 }
 
 /// The arguments after the program name, as text, or a sentence for the
@@ -107,32 +174,54 @@ pub fn utf8(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, Str
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
     const NO_PROFILE: &str = "`--profile` needs a profile name; `niobe profiles` lists them";
     const NO_BUDGET: &str = "`--budget` needs an amount in dollars, as in `--budget 0.50`";
+    const NO_TERSE: &str = "`--terse` needs `on` or `off`";
+    const NO_RULE: &str = "`--allow` needs a rule, as in `--allow \"Bash(cargo test)\"`";
     let no_theme = || format!("`--theme` needs a theme name; expected {}", theme::listed());
 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (profile, rest) = take_flag(&args, "--profile", NO_PROFILE)?;
     let (budget, rest) = take_flag(&rest, "--budget", NO_BUDGET)?;
     let (theme, rest) = take_flag(&rest, "--theme", &no_theme())?;
+    let (allow, rest) = take_every(&rest, "--allow", NO_RULE)?;
+    let (terse, rest) = take_flag(&rest, "--terse", NO_TERSE)?;
     let command = command(&rest)?;
 
     let runs_a_session = matches!(command, Command::Shell | Command::Resume(_));
-    let names_a_profile = runs_a_session
+    let runs_a_turn =
+        runs_a_session || matches!(command, Command::Print { .. } | Command::Bench { .. });
+    let names_a_profile = runs_a_turn
         || matches!(
             command,
             Command::Profiles | Command::Help | Command::Version
         );
     if profile.is_some() && !names_a_profile {
         return Err(
-            "`--profile` applies to the shell, `--resume` and `profiles`, and to nothing else"
+            "`--profile` applies to the shell, `--resume`, `-p`, `bench` and `profiles`, and to \
+             nothing else"
                 .to_owned(),
         );
     }
-    if budget.is_some() && !runs_a_session {
+    if budget.is_some() && !runs_a_turn {
         return Err(
-            "`--budget` applies to the shell and `--resume`, and to nothing else".to_owned(),
+            "`--budget` applies to the shell, `--resume`, `-p` and `bench`, and to nothing else"
+                .to_owned(),
         );
     }
-    if theme.is_some() && !runs_a_session && !matches!(command, Command::Replay(_)) {
+    let headless = matches!(command, Command::Print { .. } | Command::Bench { .. });
+    if terse.is_some() && !runs_a_turn {
+        return Err(
+            "`--terse` applies to the shell, `--resume`, `-p` and `bench`, and to nothing else"
+                .to_owned(),
+        );
+    }
+    if !allow.is_empty() && !headless {
+        return Err(
+            "`--allow` applies to `-p` and `bench`, and to nothing else: in the shell, a \
+             prompt answered with always is the way to add a rule"
+                .to_owned(),
+        );
+    }
+    if theme.is_some() && !runs_a_session && !matches!(command, Command::Replay { .. }) {
         return Err(
             "`--theme` applies to the shell, `--resume` and `replay`, and to nothing else"
                 .to_owned(),
@@ -144,7 +233,46 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
         profile: profile.map(str::to_owned),
         budget: budget.map(budget_usd).transpose()?,
         theme: theme.map(named_theme).transpose()?,
+        terse: terse
+            .map(|said| match said {
+                "on" => Ok(true),
+                "off" => Ok(false),
+                _ => Err(NO_TERSE.to_owned()),
+            })
+            .transpose()?,
+        allow: allow
+            .into_iter()
+            .map(|rule| Rule::parse(rule).map_err(|e| format!("`--allow {rule}`: {e}")))
+            .collect::<Result<_, _>>()?,
     })
+}
+
+/// Removes every `<flag> <value>` and `<flag>=<value>` from `args`, for a
+/// flag that may be given more than once.
+fn take_every<'a>(
+    args: &[&'a str],
+    flag: &str,
+    missing: &str,
+) -> Result<(Vec<&'a str>, Vec<&'a str>), String> {
+    let equals = format!("{flag}=");
+    let mut found = Vec::new();
+    let mut rest = Vec::with_capacity(args.len());
+    let mut args = args.iter();
+    while let Some(&arg) = args.next() {
+        let value = if arg == flag {
+            args.next().copied().ok_or_else(|| missing.to_owned())?
+        } else if let Some(value) = arg.strip_prefix(&equals) {
+            value
+        } else {
+            rest.push(arg);
+            continue;
+        };
+        if value.trim().is_empty() || value.starts_with('-') {
+            return Err(missing.to_owned());
+        }
+        found.push(value);
+    }
+    Ok((found, rest))
 }
 
 /// The palette `--theme` named.
@@ -232,10 +360,15 @@ fn command(args: &[&str]) -> Result<Command, String> {
             no_more(rest)?;
             Command::Resume(resume(&flag["--resume=".len()..])?)
         }
+        ["-p" | "--print", rest @ ..] => print(rest, false)?,
+        ["--json", "-p" | "--print", rest @ ..] => print(rest, true)?,
+        ["bench", rest @ ..] => bench(rest)?,
         ["sessions", rest @ ..] => {
             no_more(rest)?;
             Command::Sessions
         }
+        ["overview", rest @ ..] => Command::Overview(narrowing(rest)?),
+        ["cost", rest @ ..] => cost(rest)?,
         ["profiles", rest @ ..] => {
             no_more(rest)?;
             Command::Profiles
@@ -266,10 +399,10 @@ fn command(args: &[&str]) -> Result<Command, String> {
             Command::Prices(Some((*model).to_owned()))
         }
         ["replay"] => return Err("`replay` needs a log file".to_owned()),
-        ["replay", file, rest @ ..] => {
-            no_more(rest)?;
-            Command::Replay(PathBuf::from(file))
-        }
+        ["replay", file, rest @ ..] => Command::Replay {
+            log: PathBuf::from(file),
+            speed: replay_speed(rest)?,
+        },
         [other, ..] => return Err(format!("unknown argument `{other}`")),
     };
     Ok(command)
@@ -303,6 +436,148 @@ fn resume(id: &str) -> Result<Resume, String> {
         )),
         _ => Ok(Resume::Imported(id.to_owned())),
     }
+}
+
+/// Which sessions `niobe overview` folds: all of them unless `--last` or
+/// `--since` says otherwise, and with both, the sessions that pass each.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Narrowing {
+    /// Only the newest this many.
+    pub last: Option<usize>,
+    /// Only those started on this UTC day or after it.
+    pub since: Option<Date>,
+}
+
+fn narrowing(mut rest: &[&str]) -> Result<Narrowing, String> {
+    const LAST: &str = "`--last` needs a number of sessions, as in `--last 5`";
+    const SINCE: &str = "`--since` needs a UTC day, as in `--since 2026-09-01`";
+    let mut narrowing = Narrowing::default();
+    while let Some((flag, after)) = rest.split_first() {
+        let (name, value, after) = match flag.split_once('=') {
+            Some((name, value)) => (name, Some(value), after),
+            None => match after.split_first() {
+                Some((value, after)) => (*flag, Some(*value), after),
+                None => (*flag, None, after),
+            },
+        };
+        match name {
+            "--last" => {
+                let last = value.and_then(|n| n.parse().ok()).filter(|n| *n > 0);
+                narrowing.last = Some(last.ok_or(LAST)?);
+            }
+            "--since" => narrowing.since = Some(value.and_then(day).ok_or(SINCE)?),
+            _ => return Err(format!("unexpected argument `{flag}`")),
+        }
+        rest = after;
+    }
+    Ok(narrowing)
+}
+
+/// `niobe -p <prompt> [--json]`: the prompt is one argument, as a shell
+/// quotes it, so that a prompt is never split into flags it happens to
+/// contain.
+fn print(rest: &[&str], json: bool) -> Result<Command, String> {
+    const NO_PROMPT: &str = "`-p` needs a prompt, as in `niobe -p \"fix the failing test\"`";
+    let (prompt, rest) = rest.split_first().ok_or(NO_PROMPT)?;
+    if prompt.trim().is_empty() {
+        return Err(NO_PROMPT.to_owned());
+    }
+    let json = match rest {
+        [] => json,
+        ["--json"] if !json => true,
+        [extra, ..] => return Err(format!("unexpected argument `{extra}`")),
+    };
+    Ok(Command::Print {
+        prompt: (*prompt).to_owned(),
+        json,
+    })
+}
+
+/// `niobe bench <suite> [--json] [--timeout <seconds>] [--ab <technique>]`.
+fn bench(rest: &[&str]) -> Result<Command, String> {
+    const NO_SUITE: &str = "`bench` needs a suite directory, as in `niobe bench bench/`";
+    const NO_TIMEOUT: &str = "`--timeout` needs a whole number of seconds, as in `--timeout 600`";
+    const NO_TECHNIQUE: &str = "`--ab` needs a technique to measure: `terse`";
+    let (timeout, rest) = take_flag(rest, "--timeout", NO_TIMEOUT)?;
+    let (ab, rest) = take_flag(&rest, "--ab", NO_TECHNIQUE)?;
+    let ab = ab
+        .map(|name| {
+            crate::bench::Technique::named(name).ok_or_else(|| {
+                format!("`--ab` measures `terse`, and there is no technique `{name}`")
+            })
+        })
+        .transpose()?;
+    let timeout = timeout
+        .map(|secs| match secs.parse::<u64>() {
+            Ok(secs) if secs > 0 => Ok(std::time::Duration::from_secs(secs)),
+            _ => Err(NO_TIMEOUT.to_owned()),
+        })
+        .transpose()?;
+    let mut json = false;
+    let mut suite = None;
+    for arg in rest {
+        match arg {
+            "--json" if !json => json = true,
+            path if suite.is_none() && !path.starts_with('-') => suite = Some(PathBuf::from(path)),
+            extra => return Err(format!("unexpected argument `{extra}`")),
+        }
+    }
+    Ok(Command::Bench {
+        suite: suite.ok_or(NO_SUITE)?,
+        json,
+        timeout,
+        ab,
+    })
+}
+
+/// `niobe replay`'s `--speed <n>`, a positive number, where it is given.
+fn replay_speed(rest: &[&str]) -> Result<Option<Speed>, String> {
+    match rest {
+        [] => Ok(None),
+        ["--speed", n] => Speed::parse(n)
+            .map(Some)
+            .ok_or_else(|| format!("`--speed` takes a positive number, not `{n}`")),
+        ["--speed"] => Err("`--speed` takes a positive number".to_owned()),
+        [other, ..] => Err(format!("unexpected argument `{other}`")),
+    }
+}
+
+/// `niobe cost`: a format flag (`--json`, `--csv`, `--by-day`, `--by-turn`), at most one, among the overview's narrowing.
+fn cost(rest: &[&str]) -> Result<Command, String> {
+    let mut format = Format::Table;
+    let mut others = Vec::with_capacity(rest.len());
+    for arg in rest {
+        let named = match *arg {
+            "--json" => Format::Json,
+            "--csv" => Format::Csv,
+            "--by-day" => Format::Days,
+            "--by-turn" => Format::Turns,
+            other => {
+                others.push(other);
+                continue;
+            }
+        };
+        if format != Format::Table {
+            return Err(
+                "`niobe cost` prints one format: `--json`, `--csv`, `--by-day` or `--by-turn`"
+                    .to_owned(),
+            );
+        }
+        format = named;
+    }
+    Ok(Command::Cost {
+        narrowing: narrowing(&others)?,
+        format,
+    })
+}
+
+/// A day written `YYYY-MM-DD`, and only one that exists.
+fn day(text: &str) -> Option<Date> {
+    let mut parts = text.splitn(3, '-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    Date::new(year, month, day)
 }
 
 fn no_more(rest: &[&str]) -> Result<(), String> {
@@ -393,9 +668,27 @@ mod tests {
     fn replay_takes_a_file() {
         assert_eq!(
             parsed(&["replay", "log.jsonl"]),
-            Ok(Command::Replay(PathBuf::from("log.jsonl")))
+            Ok(Command::Replay {
+                log: PathBuf::from("log.jsonl"),
+                speed: None
+            })
+        );
+        assert_eq!(
+            parsed(&["replay", "log.jsonl", "--speed", "4"]),
+            Ok(Command::Replay {
+                log: PathBuf::from("log.jsonl"),
+                speed: Speed::parse("4")
+            })
         );
         assert!(parsed(&["replay"]).is_err());
+        for speed in ["0", "-1", "inf", "NaN", "fast"] {
+            assert!(
+                parsed(&["replay", "log.jsonl", "--speed", speed]).is_err(),
+                "{speed}"
+            );
+        }
+        assert!(parsed(&["replay", "log.jsonl", "--speed"]).is_err());
+        assert!(parsed(&["replay", "log.jsonl", "extra"]).is_err());
     }
 
     #[test]
@@ -448,8 +741,229 @@ mod tests {
     }
 
     #[test]
+    fn the_overview_is_narrowed_to_the_newest_sessions_or_those_since_a_day() {
+        let day = Date::new(2026, 9, 1).expect("a real day");
+        for args in [
+            &["overview", "--last", "5", "--since", "2026-09-01"][..],
+            &["overview", "--since=2026-09-01", "--last=5"][..],
+        ] {
+            assert_eq!(
+                parsed(args),
+                Ok(Command::Overview(Narrowing {
+                    last: Some(5),
+                    since: Some(day)
+                }))
+            );
+        }
+        for wrong in [
+            &["overview", "--last"][..],
+            &["overview", "--last", "0"][..],
+            &["overview", "--last", "five"][..],
+            &["overview", "--since", "2026-02-30"][..],
+            &["overview", "--since", "yesterday"][..],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn allow_gives_a_headless_run_its_rules_and_nothing_else_takes_one() {
+        let ran = invocation(&[
+            "-p",
+            "fix it",
+            "--allow",
+            "Edit",
+            "--allow=Bash(cargo test)",
+        ])
+        .expect("rules for a headless turn");
+        assert_eq!(
+            ran.allow,
+            vec![
+                Rule::parse("Edit").expect("a rule"),
+                Rule::parse("Bash(cargo test)").expect("a rule"),
+            ]
+        );
+        assert!(invocation(&["--allow", "Edit"]).is_err(), "not the shell");
+        assert!(invocation(&["-p", "fix it", "--allow"]).is_err());
+        let copied = invocation(&["-p", "fix it", "--allow", "Bash(git status:*)"])
+            .expect_err("Claude Code's own form is refused");
+        assert!(copied.contains("Bash(git status *)"), "{copied}");
+    }
+
+    #[test]
+    fn terse_is_switched_on_or_off_for_a_session_or_a_turn() {
+        let on = invocation(&["-p", "fix it", "--terse", "on"]).expect("a terse turn");
+        assert_eq!(on.terse, Some(true));
+        let off = invocation(&["bench", "b", "--terse=off"]).expect("a bench not terse");
+        assert_eq!(off.terse, Some(false));
+        assert_eq!(invocation(&[]).map(|i| i.terse), Ok(None));
+        assert!(invocation(&["--terse", "on"]).is_ok(), "the shell takes it");
+        assert!(invocation(&["-p", "x", "--terse", "yes"]).is_err());
+        assert!(invocation(&["sessions", "--terse", "on"]).is_err());
+    }
+
+    #[test]
+    fn the_trim_hook_is_read_only_in_the_one_form_the_cli_is_given() {
+        let os = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert_eq!(
+            hook_trim(os(&["hook", "trim", "--raw", "/r/.niobe/trim"])),
+            Some(PathBuf::from("/r/.niobe/trim"))
+        );
+        assert_eq!(hook_trim(os(&["hook", "trim"])), None);
+        assert_eq!(
+            hook_trim(os(&["hook", "trim", "--raw", "/d", "extra"])),
+            None
+        );
+        assert_eq!(hook_trim(os(&["hook", "tidy", "--raw", "/d"])), None);
+        assert_eq!(hook_trim(os(&["-p", "hook", "trim", "--raw"])), None);
+    }
+
+    #[test]
+    fn a_bench_names_its_suite_and_may_give_each_turn_a_deadline() {
+        assert_eq!(
+            parsed(&["bench", "bench/", "--json", "--timeout", "60"]),
+            Ok(Command::Bench {
+                suite: PathBuf::from("bench/"),
+                json: true,
+                timeout: Some(std::time::Duration::from_secs(60)),
+                ab: None,
+            })
+        );
+        assert_eq!(
+            parsed(&["bench", "suite"]),
+            Ok(Command::Bench {
+                suite: PathBuf::from("suite"),
+                json: false,
+                timeout: None,
+                ab: None,
+            })
+        );
+        assert_eq!(
+            parsed(&["bench", "suite", "--ab", "terse"]),
+            Ok(Command::Bench {
+                suite: PathBuf::from("suite"),
+                json: false,
+                timeout: None,
+                ab: Some(crate::bench::Technique::Terse),
+            })
+        );
+        for wrong in [
+            &["bench"][..],
+            &["bench", "a", "b"][..],
+            &["bench", "a", "--timeout", "0"][..],
+            &["bench", "a", "--timeout", "soon"][..],
+            &["bench", "a", "--ab", "routing"][..],
+            &["bench", "a", "--ab"][..],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+        let flagged = invocation(&["bench", "a", "--profile", "api", "--budget", "1"])
+            .expect("a bench runs each turn under a profile and a budget");
+        assert_eq!(flagged.profile.as_deref(), Some("api"));
+        assert_eq!(flagged.budget, Some(1.0));
+    }
+
+    #[test]
+    fn a_headless_turn_takes_its_prompt_whole_and_json_either_side_of_it() {
+        let print = |prompt: &str, json| {
+            Ok(Command::Print {
+                prompt: prompt.to_owned(),
+                json,
+            })
+        };
+        assert_eq!(parsed(&["-p", "fix it"]), print("fix it", false));
+        assert_eq!(
+            parsed(&["--print", "fix it", "--json"]),
+            print("fix it", true)
+        );
+        assert_eq!(parsed(&["--json", "-p", "fix it"]), print("fix it", true));
+        assert_eq!(
+            parsed(&["-p", "--budget is not a flag in here"]),
+            print("--budget is not a flag in here", false),
+            "a prompt is one argument, whatever it says"
+        );
+        for wrong in [
+            &["-p"][..],
+            &["-p", "  "][..],
+            &["-p", "fix it", "again"][..],
+            &["--json", "-p", "fix it", "--json"][..],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+        let budgeted = invocation(&["-p", "fix it", "--budget", "0.5", "--profile", "work"])
+            .expect("a headless turn takes a budget and a profile");
+        assert_eq!(budgeted.budget, Some(0.5));
+        assert_eq!(budgeted.profile.as_deref(), Some("work"));
+        assert!(invocation(&["-p", "fix it", "--theme", "neo"]).is_err());
+    }
+
+    #[test]
+    fn the_cost_takes_one_format_among_the_overview_narrowing() {
+        assert_eq!(
+            parsed(&["cost"]),
+            Ok(Command::Cost {
+                narrowing: Narrowing::default(),
+                format: Format::Table
+            })
+        );
+        assert_eq!(
+            parsed(&["cost", "--last", "2", "--csv"]),
+            Ok(Command::Cost {
+                narrowing: Narrowing {
+                    last: Some(2),
+                    since: None
+                },
+                format: Format::Csv
+            })
+        );
+        assert_eq!(
+            parsed(&["cost", "--by-day"]),
+            Ok(Command::Cost {
+                narrowing: Narrowing::default(),
+                format: Format::Days
+            })
+        );
+        assert_eq!(
+            parsed(&["cost", "--by-turn", "--last", "1"]),
+            Ok(Command::Cost {
+                narrowing: Narrowing {
+                    last: Some(1),
+                    since: None
+                },
+                format: Format::Turns
+            })
+        );
+        assert_eq!(
+            parsed(&["cost", "--json"]).map(|command| matches!(
+                command,
+                Command::Cost {
+                    format: Format::Json,
+                    ..
+                }
+            )),
+            Ok(true)
+        );
+        for wrong in [
+            &["cost", "--json", "--csv"][..],
+            &["cost", "--by-day", "--json"][..],
+            &["cost", "--by-turn", "--by-day"][..],
+            &["cost", "--json", "--json"][..],
+            &["cost", "--markdown"][..],
+            &["cost", "--last"][..],
+        ] {
+            assert!(parsed(wrong).is_err(), "{wrong:?}");
+        }
+    }
+
+    #[test]
     fn subcommands_take_nothing_extra() {
         assert_eq!(parsed(&["sessions"]), Ok(Command::Sessions));
+        assert_eq!(
+            parsed(&["overview"]),
+            Ok(Command::Overview(Narrowing::default()))
+        );
+        assert!(parsed(&["overview", "--all"]).is_err());
         assert_eq!(
             parsed(&["sessions", "--all"]),
             Err("unexpected argument `--all`".to_owned())
@@ -467,6 +981,8 @@ mod tests {
                 profile: Some("work".to_owned()),
                 budget: None,
                 theme: None,
+                terse: None,
+                allow: Vec::new(),
             })
         );
         assert_eq!(profile(&["--profile=work"]), Ok(Some("work".to_owned())));
@@ -477,6 +993,8 @@ mod tests {
                 profile: Some("work".to_owned()),
                 budget: None,
                 theme: None,
+                terse: None,
+                allow: Vec::new(),
             })
         );
         assert_eq!(
@@ -540,6 +1058,8 @@ mod tests {
                 profile: None,
                 budget: Some(1.25),
                 theme: None,
+                terse: None,
+                allow: Vec::new(),
             })
         );
         assert_eq!(invocation(&[]).map(|i| i.budget), Ok(None));

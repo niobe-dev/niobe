@@ -17,15 +17,20 @@
 mod alerts;
 mod args;
 mod backend;
+mod bench;
 mod commands;
 mod config;
 mod consent;
+mod cost;
 mod desktop;
 mod doctor;
+mod headless;
 mod history;
 mod images;
 mod journal;
 mod memory;
+mod overview;
+mod playback;
 mod prices;
 mod printable;
 mod profiles;
@@ -36,6 +41,7 @@ mod sessions;
 mod stdout;
 mod summary;
 mod themes;
+mod trim;
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -43,8 +49,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::event::Event;
+use niobe_core::permission::Rule;
 use niobe_ledger::Date;
-use niobe_store::{Recorder, SessionId, read_log};
+use niobe_store::{Recorder, SessionId, read_dated_log};
 use niobe_tui::app::{App, ConfigFile, Places};
 use niobe_tui::history::{NoHistory, Target};
 use niobe_tui::journal::Unrecorded;
@@ -64,9 +71,13 @@ macro_rules! say {
 
 use crate::args::{Command, Invocation, Resume};
 use crate::journal::StoreJournal;
+use crate::prices::Spent;
 use crate::rules::ConfigRules;
 
 fn main() -> ExitCode {
+    if let Some(dir) = args::hook_trim(std::env::args_os().skip(1)) {
+        return hook_trim(&dir);
+    }
     // Before the arguments: `--theme` may name one of the user's own.
     themes::register(config::user_file(
         std::env::var_os("XDG_CONFIG_HOME"),
@@ -75,12 +86,12 @@ fn main() -> ExitCode {
     ));
     let parsed = args::utf8(std::env::args_os().skip(1)).and_then(|args| args::parse(&args));
     let result = match parsed {
-        Ok(invocation) => run(invocation).and_then(|()| stdout::outcome()),
+        Ok(invocation) => run(invocation).and_then(|status| stdout::outcome().map(|()| status)),
         Err(usage) => Err(format!("{usage}\nRun `niobe --help` for usage.")),
     };
 
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(status) => ExitCode::from(status),
         Err(message) => ExitCode::from(report(&message, &mut io::stderr())),
     }
 }
@@ -128,18 +139,24 @@ fn report(message: &str, stderr: &mut dyn Write) -> u8 {
     }
 }
 
+/// Runs what the command line asked for, and says what the process exits
+/// with where it did not fail: zero, but for a headless turn the budget
+/// stopped.
 fn run(
     Invocation {
         command,
         profile,
         budget,
         theme,
+        allow,
+        terse,
     }: Invocation,
-) -> Result<(), String> {
+) -> Result<u8, String> {
     let profile = profile.as_deref();
     let asked = Asked {
         budget,
         theme,
+        terse,
         depth: Depth::from_env(
             std::env::var("COLORTERM").ok().as_deref(),
             std::env::var("NO_COLOR").ok().as_deref(),
@@ -153,8 +170,17 @@ fn run(
         Command::Shell => shell(profile, &asked)?,
         Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked)?,
         Command::Resume(Resume::Imported(session)) => import(&session, profile, &asked)?,
+        Command::Print { prompt, json } => {
+            return print_turn(&prompt, json, profile, &allow, &asked);
+        }
+        Command::Bench {
+            suite,
+            json,
+            timeout,
+            ab,
+        } => return run_bench(&suite, json, timeout, ab, profile, &allow, &asked),
         // Handed on whole: `run_other` matches every command itself.
-        other => return run_other(other, profile, &asked),
+        other => return run_other(other, profile, &asked).map(|()| 0),
     };
     // The operator chose another session in the history dialog: the one the
     // shell held has ended and is saved, and the chosen one opens the way
@@ -162,7 +188,7 @@ fn run(
     while let Some(target) = next {
         next = open(&target, profile, &asked)?;
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Opens `target` in place of the session that just ended, and returns the
@@ -179,17 +205,55 @@ fn open(target: &Target, profile: Option<&str>, asked: &Asked) -> Result<Option<
     }
 }
 
+/// Where a session started under `trim = true` keeps the outputs it trims,
+/// and the binary that trims them; `None` where the config leaves it off.
+/// Refused where `.niobe/` leads out of the repository, since the whole
+/// outputs would be written wherever it leads.
+fn trim_for(root: &Path, on: bool) -> Result<Option<trim::Trim>, String> {
+    if !on {
+        return Ok(None);
+    }
+    let dir = repo::trim_dir(root);
+    repo::writes_inside(root, &dir)?;
+    let exe = std::env::current_exe().map_err(|e| {
+        format!("`trim = true` runs niobe as a hook, and its path is not known: {e}")
+    })?;
+    Ok(Some(trim::Trim { exe, dir }))
+}
+
+/// `niobe hook trim --raw <dir>`, which the `claude` CLI runs after each shell
+/// call of a session under `trim = true`: the call on standard input, and on
+/// standard output what the agent reads in place of its output, or nothing.
+///
+/// Answered before anything else is read — the user's themes, the config —
+/// because the CLI waits on it after every shell command. Written to
+/// standard output as it is, not through `printable`: the reader is the CLI,
+/// which parses it as JSON, and JSON escapes every control character itself.
+fn hook_trim(dir: &Path) -> ExitCode {
+    if let Some(answer) = trim::hook(io::stdin().lock(), dir) {
+        let mut out = io::stdout().lock();
+        // A CLI that stopped reading has nothing to be told; the call is then
+        // handed back as it was, which is what no answer means.
+        let _unread = out.write_all(answer.as_bytes()).and_then(|()| out.flush());
+    }
+    ExitCode::SUCCESS
+}
+
 /// The commands that do not open a shell on a session.
 fn run_other(command: Command, profile: Option<&str>, asked: &Asked) -> Result<(), String> {
     match command {
-        Command::Shell | Command::Resume(_) => Ok(()),
+        Command::Shell | Command::Resume(_) | Command::Print { .. } | Command::Bench { .. } => {
+            Ok(())
+        }
         Command::Sessions => list_sessions(),
+        Command::Overview(narrowing) => print_overview(narrowing),
+        Command::Cost { narrowing, format } => print_cost(narrowing, format),
         Command::Profiles => list_profiles(profile),
         Command::Doctor { json } => run_doctor(json),
         Command::Trust { yes } => trust(yes),
         Command::Untrust => untrust(),
         Command::Prices(model) => list_prices(model.as_deref()),
-        Command::Replay(log) => replay(&log, asked),
+        Command::Replay { log, speed } => replay(&log, speed, asked),
         Command::Help => {
             print_help();
             Ok(())
@@ -212,6 +276,9 @@ struct Asked {
     budget: Option<f64>,
     /// The palette the shell opens in.
     theme: Option<Theme>,
+    /// Whether a new conversation asks for terse replies, where `--terse`
+    /// said; `None` leaves it to the config.
+    terse: Option<bool>,
     /// How many colours the terminal says it draws, which the palette is
     /// drawn at. Read from the environment here because the shell does not
     /// read the environment.
@@ -304,12 +371,18 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
     let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
     let app = say_untrusted(
         say_prices(
+            Spent::on(today()),
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_places(places(&loaded))
                 .with_depth(asked.depth)
                 .with_keymap(loaded.config.keys().clone())
                 .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
+                .with_catch_up(
+                    away_after(loaded.config.catch_up()),
+                    loaded.config.catch_up().automatic(),
+                )
+                .with_decisions_asked(loaded.config.decisions())
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -348,7 +421,10 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
         &backend::Attach {
             budget_usd: asked.budget,
             title: loaded.config.titles() == niobe_config::Titles::Model,
+            terse: asked.terse.unwrap_or(loaded.config.terse()),
+            decisions: loaded.config.decisions(),
             tap: tap.clone(),
+            trim: trim_for(&root, loaded.config.trim())?,
             ..backend::Attach::default()
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
@@ -389,6 +465,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
                 root.clone(),
                 selected.as_ref().map(|selected| selected.profile.clone()),
             ),
+            overview: &mut overview::Page::at(root.clone()),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -490,24 +567,7 @@ fn resume(
     let selected = loaded.select(profile)?;
     budget_fits(asked, selected.as_ref())?;
     let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
-    let mut app = say_untrusted(
-        say_prices(
-            App::new(repo::describe(&root))
-                .with_rules(loaded.config.allowed().clone())
-                .with_places(places(&loaded))
-                .with_depth(asked.depth)
-                .with_keymap(loaded.config.keys().clone())
-                .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
-                .with_theme(chosen_theme(asked, &loaded)?),
-        ),
-        &loaded,
-    );
-    if let Some(selected) = &selected {
-        app = app.with_profile(config::named(*selected));
-    }
-    if let Some(budget) = asked.budget {
-        app = app.with_budget(budget);
-    }
+    let theme = chosen_theme(asked, &loaded)?;
 
     let started = Instant::now();
     // Without a terminal the session is only read and printed, so the store
@@ -527,6 +587,33 @@ fn resume(
         return Err(niobe_store::StoreError::NoSuchSession(session).to_string());
     }
     let stored = store.events(session).map_err(|e| e.to_string())?;
+    let spent = Spent::of(
+        usage_times(stored.iter().map(|s| (&s.event, Some(s.at)))),
+        (!piped).then(today),
+    );
+    let mut app = say_untrusted(
+        say_prices(
+            spent,
+            App::new(repo::describe(&root))
+                .with_rules(loaded.config.allowed().clone())
+                .with_places(places(&loaded))
+                .with_depth(asked.depth)
+                .with_keymap(loaded.config.keys().clone())
+                .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
+                .with_catch_up(
+                    away_after(loaded.config.catch_up()),
+                    loaded.config.catch_up().automatic(),
+                )
+                .with_theme(theme),
+        ),
+        &loaded,
+    );
+    if let Some(selected) = &selected {
+        app = app.with_profile(config::named(*selected));
+    }
+    if let Some(budget) = asked.budget {
+        app = app.with_budget(budget);
+    }
     // At the times the store recorded, not at the time it was read: a session
     // resumed on Thursday did not happen on Thursday.
     let clock = niobe_tui::clock::Clock::system();
@@ -579,7 +666,12 @@ fn resume(
             mode: app.session().mode(),
             budget_usd: asked.budget,
             title: false,
+            // The conversation's system prompt was recorded when it began,
+            // and the CLI sends that record whatever a later start passes.
+            terse: false,
+            decisions: false,
             tap: tap.clone(),
+            trim: trim_for(&root, loaded.config.trim())?,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -614,6 +706,7 @@ fn resume(
                 root.clone(),
                 selected.as_ref().map(|selected| selected.profile.clone()),
             ),
+            overview: &mut overview::Page::at(root.clone()),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -703,14 +796,24 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     )?;
+    let piped = !std::io::stdout().is_terminal();
+    let spent = Spent::of(
+        usage_times(events.iter().map(|(event, at)| (event, *at))),
+        (!piped).then(today),
+    );
     let mut app = say_untrusted(
         say_prices(
+            spent,
             App::new(repo::describe(&root))
                 .with_rules(loaded.config.allowed().clone())
                 .with_places(places(&loaded))
                 .with_depth(asked.depth)
                 .with_keymap(loaded.config.keys().clone())
                 .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
+                .with_catch_up(
+                    away_after(loaded.config.catch_up()),
+                    loaded.config.catch_up().automatic(),
+                )
                 .with_theme(theme),
         ),
         &loaded,
@@ -733,7 +836,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     }
     let elapsed = started.elapsed();
 
-    if !std::io::stdout().is_terminal() {
+    if piped {
         print_summary(
             &format!(
                 "claude session {session} · {} events · read and folded in {}",
@@ -756,7 +859,12 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             mode: app.session().mode(),
             budget_usd: asked.budget,
             title: false,
+            // The conversation's system prompt was recorded when it began,
+            // and the CLI sends that record whatever a later start passes.
+            terse: false,
+            decisions: false,
             tap: tap.clone(),
+            trim: trim_for(&root, loaded.config.trim())?,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -805,6 +913,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
                 root.clone(),
                 selected.as_ref().map(|selected| selected.profile.clone()),
             ),
+            overview: &mut overview::Page::at(root.clone()),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -835,6 +944,289 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
 /// can be carried on with is the one question that has to have an answer while
 /// the config is being fixed, and where the CLI keeps its sessions is then read
 /// from this process's own environment alone.
+/// Every session niobe recorded in this repository, folded, as one Markdown
+/// page on standard output.
+/// `niobe -p`: one turn under the selected profile with no terminal, its
+/// reply on standard output — or with `--json` its outcome, reply and spend —
+/// and what the operator is owed knowing on standard error, so that a reply
+/// piped on stays the reply.
+///
+/// A repository's config nobody trusted cannot be agreed to here, since
+/// nobody is at the terminal: what only a trusted file may set stays out, as
+/// it does in the shell until the operator says otherwise, and the run says
+/// so.
+fn print_turn(
+    prompt: &str,
+    json: bool,
+    profile: Option<&str>,
+    allow: &[Rule],
+    asked: &Asked,
+) -> Result<u8, String> {
+    let root = repo::root(&cwd()?);
+    let loaded = config::load(&root)?;
+    let selected = loaded.select(profile)?;
+    budget_fits(asked, selected.as_ref())?;
+    repo::store_stays_inside(&root)?;
+    if loaded.untrusted.is_some() {
+        note(
+            "this repository's config is not trusted, so what only a trusted file may set is \
+             left out; `niobe trust` shows it",
+        );
+    }
+    let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
+    let terse = asked.terse.unwrap_or(loaded.config.terse());
+    let mut backend = backend::attach(
+        &root,
+        selected.as_ref(),
+        &backend::Attach {
+            budget_usd: asked.budget,
+            // Not titled: a title is one more request to the model, billed on
+            // every run of a job, and it answers after the turn this run ends
+            // on. The history shows the session by its prompt instead.
+            title: false,
+            terse,
+            // Not asked: a run with no shell has no pane to list them in,
+            // and the words would be spent on every run of a job.
+            decisions: false,
+            tap,
+            trim: trim_for(&root, loaded.config.trim())?,
+            ..backend::Attach::default()
+        },
+        std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
+        std::env::var_os("HOME"),
+    )?;
+    if !backend.attached() {
+        return Err(
+            "the selected profile runs no backend niobe can start yet, so the prompt has \
+             nowhere to go; `niobe profiles` lists them"
+                .to_owned(),
+        );
+    }
+
+    let mut allowed = loaded.config.allowed().clone();
+    for rule in allow {
+        allowed.insert(rule.clone());
+    }
+    let mut journal = StoreJournal::pending(root.clone());
+    let turn = headless::run(
+        backend.bridge(),
+        &mut journal,
+        &allowed,
+        prompt,
+        asked.budget,
+        &mut || std::thread::sleep(Duration::from_millis(10)),
+    );
+    // The backend is ended before the journal is closed, so that nothing it
+    // says while going is written into a session the store has finished.
+    drop(backend);
+    let finished = journal.finish();
+    if finished.unsaved > 0 {
+        note(&format!(
+            "the session store did not save {} of the turn's events: {}",
+            finished.unsaved,
+            finished
+                .error
+                .as_deref()
+                .unwrap_or("the session store stopped")
+        ));
+    }
+
+    let session = finished.session.map(SessionId::get);
+    match json {
+        true => say!("{}", print_json(&turn, session, terse)),
+        false if !turn.reply.is_empty() => say!("{}", turn.reply),
+        false => {}
+    }
+    if let Some(session) = session {
+        note(&format!(
+            "session {session} saved — `niobe --resume {session}` continues it"
+        ));
+    }
+    match &turn.outcome {
+        headless::Outcome::Finished => Ok(0),
+        headless::Outcome::Budget(why) => {
+            note(&format!("the turn stopped on its budget: {why}"));
+            Ok(headless::BUDGET_STOPPED)
+        }
+        headless::Outcome::Failed(why) => Err(format!("the turn failed: {why}")),
+    }
+}
+
+/// A headless turn in the shape `schema/print.schema.json` publishes.
+fn print_json(turn: &headless::Turn, session: Option<i64>, terse: bool) -> serde_json::Value {
+    let mut fields = serde_json::Map::from_iter([
+        ("schema_version".to_owned(), serde_json::json!(1)),
+        ("outcome".to_owned(), serde_json::json!(turn.outcome.name())),
+        (
+            "reason".to_owned(),
+            serde_json::json!(turn.outcome.reason()),
+        ),
+        ("reply".to_owned(), serde_json::json!(turn.reply)),
+        ("session".to_owned(), serde_json::json!(session)),
+        ("terse".to_owned(), serde_json::json!(terse)),
+        (
+            "started_at".to_owned(),
+            serde_json::json!(cost::rfc3339(turn.started_at)),
+        ),
+    ]);
+    fields.extend(cost::figures(&turn.state));
+    let windows = turn.state.usage_windows().map(|windows| {
+        serde_json::json!({
+            "five_hour": windows.five_hour.map(|window| window.utilization),
+            "seven_day": windows.seven_day.map(|window| window.utilization),
+        })
+    });
+    fields.insert("windows".to_owned(), serde_json::json!(windows));
+    serde_json::Value::Object(fields)
+}
+
+fn on_off(on: bool) -> &'static str {
+    match on {
+        true => "on",
+        false => "off",
+    }
+}
+
+/// `niobe bench`: every task of the suite at `suite` run as its own `niobe -p`
+/// under the profile and budget this run was given, then the results.
+///
+/// It exits 0 once the suite has run, whatever passed: a bench measures, and
+/// a pass rate is a figure to compare rather than a verdict to stop a job on.
+fn run_bench(
+    suite: &Path,
+    json: bool,
+    timeout: Option<Duration>,
+    ab: Option<bench::Technique>,
+    profile: Option<&str>,
+    allow: &[Rule],
+    asked: &Asked,
+) -> Result<u8, String> {
+    let tasks = bench::tasks(suite)?;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find the niobe binary to run each task with: {e}"))?;
+    let timeout = timeout.unwrap_or(bench::TURN_TIMEOUT);
+    let mut flags = Vec::new();
+    if let Some(profile) = profile {
+        flags.extend(["--profile".to_owned(), profile.to_owned()]);
+    }
+    if let Some(budget) = asked.budget {
+        flags.extend(["--budget".to_owned(), budget.to_string()]);
+    }
+    for rule in allow {
+        flags.extend(["--allow".to_owned(), rule.to_string()]);
+    }
+    if let Some(terse) = asked.terse {
+        if let Some(technique) = ab {
+            return Err(format!(
+                "`--ab {}` runs the suite with it off and then on; leave `{}` out",
+                technique.name(),
+                technique.flag()
+            ));
+        }
+        flags.extend(["--terse".to_owned(), on_off(terse).to_owned()]);
+    }
+    let name = suite
+        .canonicalize()
+        .ok()
+        .and_then(|dir| {
+            dir.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| suite.display().to_string());
+
+    let Some(technique) = ab else {
+        let started_at = SystemTime::now();
+        let ran = run_suite(&exe, &tasks, &flags, timeout, "");
+        match json {
+            true => say!("{}", bench::document(&name, started_at, &ran, timeout)),
+            false => {
+                for line in bench::table(&ran, timeout) {
+                    say!("{line}");
+                }
+            }
+        }
+        return Ok(0);
+    };
+    let side = |on: bool| {
+        let mut flags = flags.clone();
+        flags.extend([technique.flag().to_owned(), on_off(on).to_owned()]);
+        flags
+    };
+    let started_without = SystemTime::now();
+    let without = run_suite(&exe, &tasks, &side(false), timeout, "without-");
+    let started_with = SystemTime::now();
+    let with = run_suite(&exe, &tasks, &side(true), timeout, "with-");
+    match json {
+        true => say!(
+            "{}",
+            bench::ab_document(
+                technique,
+                bench::document(&name, started_without, &without, timeout),
+                bench::document(&name, started_with, &with, timeout),
+            )
+        ),
+        false => {
+            for line in bench::ab_table(technique, &without, &with, timeout) {
+                say!("{line}");
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// Every task of a suite, run in turn with `flags`, each saying on standard
+/// error which it is as it starts.
+fn run_suite(
+    exe: &Path,
+    tasks: &[bench::Task],
+    flags: &[String],
+    timeout: Duration,
+    side: &str,
+) -> Vec<bench::Ran> {
+    let mut ran = Vec::with_capacity(tasks.len());
+    for (number, task) in tasks.iter().enumerate() {
+        note(&format!(
+            "task {} of {}: {side}{}",
+            number + 1,
+            tasks.len(),
+            task.name
+        ));
+        ran.push(bench::run(exe, task, flags, timeout, side));
+    }
+    ran
+}
+
+/// Says something the operator is owed knowing on standard error, where a
+/// headless run's notes go so as not to land in the reply it prints. A note
+/// that cannot be written is let go: the outcome is in the exit status.
+fn note(text: &str) {
+    let _ = writeln!(io::stderr(), "niobe: {}", printable::printable(text));
+}
+
+fn print_overview(narrowing: args::Narrowing) -> Result<(), String> {
+    let root = repo::root(&cwd()?);
+    let folded = overview::narrowed(overview::read(&root)?, narrowing);
+    let uncommitted = repo::uncommitted(&root);
+    for line in overview::markdown(
+        &repo::describe(&root).name,
+        &folded,
+        narrowing,
+        uncommitted.as_deref(),
+    ) {
+        say!("{line}");
+    }
+    Ok(())
+}
+
+fn print_cost(narrowing: args::Narrowing, format: cost::Format) -> Result<(), String> {
+    let root = repo::root(&cwd()?);
+    let folded = overview::narrowed(overview::read(&root)?, narrowing);
+    for line in cost::lines(&repo::describe(&root).name, &folded, format) {
+        say!("{line}");
+    }
+    Ok(())
+}
+
 fn list_sessions() -> Result<(), String> {
     let root = repo::root(&cwd()?);
     let loaded = config::load(&root).ok();
@@ -941,19 +1333,22 @@ fn say_tap(app: App, tap: Option<&Path>) -> App {
 /// The shell with a price sheet, so that a turn the backend has not priced yet
 /// shows what it is costing rather than nothing.
 ///
+/// How long with no key pressed the config calls away.
+fn away_after(catch_up: niobe_config::CatchUp) -> Duration {
+    Duration::from_secs(catch_up.after_minutes().saturating_mul(60))
+}
+
 /// A price file that will not read does not stop the session: the estimate is
 /// a convenience, the session is the point. It is said in the transcript
 /// rather than swallowed, because an operator who wrote a price file is owed
 /// the reason it is not in force.
-fn say_prices(app: App) -> App {
+///
+/// `spent` is the days the session's tokens were spent on: today for a live
+/// one, and for one read back the days its records were made, so that a rate
+/// changed since is not laid over tokens bought before it.
+fn say_prices(spent: Spent, app: App) -> App {
     match prices::load() {
-        // Today's rates, for a session read back as for a live one: what is
-        // owed is folded per model with no day on it, so there is no older
-        // day to price it at. The help and the price table say so.
-        Ok(loaded) => app.with_prices(Box::new(prices::Sheet::new(
-            loaded.table,
-            Date::of(SystemTime::now()),
-        ))),
+        Ok(loaded) => app.with_prices(Box::new(prices::Sheet::new(loaded.table, spent, today()))),
         Err(error) => app.with_notice(
             "no running cost estimate",
             "price table",
@@ -963,6 +1358,19 @@ fn say_prices(app: App) -> App {
             ),
         ),
     }
+}
+
+/// The UTC day it is now, which the price table is read on.
+fn today() -> Date {
+    Date::of(SystemTime::now())
+}
+
+/// The times of a session's usage records, which the days its tokens were
+/// spent on are read from.
+fn usage_times<'a>(
+    events: impl Iterator<Item = (&'a Event, Option<SystemTime>)>,
+) -> impl Iterator<Item = Option<SystemTime>> {
+    events.filter_map(|(event, at)| matches!(event, Event::Usage(_)).then_some(at))
 }
 
 /// The files the shell may name or hand to the desktop: the config files the
@@ -1219,23 +1627,44 @@ fn list_prices(model: Option<&str>) -> Result<(), String> {
 
 /// Folds a JSON Lines event log into the shell, for development. Nothing typed
 /// into a replayed log is recorded. Without a terminal, prints the fold.
-fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
+fn replay(log: &Path, speed: Option<playback::Speed>, asked: &Asked) -> Result<(), String> {
     let text = log_text(log)?;
 
     let started = Instant::now();
-    let events = read_log(&text).map_err(|e| format!("{}: {e}", log.display()))?;
-    // The same price sheet the shell and `--resume` get: a replayed log and a
-    // resumed session that fold to the same totals must print the same cost,
-    // or one of the two figures is teaching the operator to distrust both.
-    let app = say_prices(App::new(repo::describe(&cwd()?)).with_depth(asked.depth));
+    let events = read_dated_log(&text).map_err(|e| format!("{}: {e}", log.display()))?;
+    // The same price sheet the shell and `--resume` get, read for the days the
+    // log's lines say: a replayed log and a resumed session that fold to the
+    // same totals on the same days must print the same cost, or one of the
+    // two figures is teaching the operator to distrust both.
+    let spent = Spent::of(
+        usage_times(events.iter().map(|(event, at)| (event, *at))),
+        None,
+    );
+    let app = say_prices(
+        spent,
+        App::new(repo::describe(&cwd()?)).with_depth(asked.depth),
+    );
     let mut app = match asked.theme {
         Some(theme) => app.with_theme(theme),
         None => app,
     };
-    app.extend(&events);
+    let clock = niobe_tui::clock::Clock::system();
+    let terminal = std::io::stdout().is_terminal();
+    // At a speed the shell is handed the events as it would a live session's,
+    // so it opens on none of them; without one, or with no terminal to watch
+    // on, they are folded here at once.
+    let at_speed = speed.filter(|_| terminal);
+    if at_speed.is_none() {
+        for (event, at) in &events {
+            match at {
+                Some(at) => app.apply_at(event, clock.at(*at)),
+                None => app.apply(event),
+            }
+        }
+    }
     let elapsed = started.elapsed();
 
-    if !std::io::stdout().is_terminal() {
+    if !terminal {
         print_summary(
             &format!(
                 "replayed {} events from {} in {}",
@@ -1251,11 +1680,20 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
 
     // A recorded log is being looked at, not continued: nothing is attached
     // and nothing is kept.
+    let mut detached = Detached;
+    let mut playback;
+    let backend: &mut dyn niobe_tui::Bridge = match at_speed {
+        Some(speed) => {
+            playback = playback::Playback::new(events, speed);
+            &mut playback
+        }
+        None => &mut detached,
+    };
     niobe_tui::run(
         app,
         niobe_tui::Around {
             journal: &mut Unrecorded,
-            backend: &mut Detached,
+            backend,
             rules: &mut Forgotten,
             watch: &mut Unwatched,
             shell: &mut NoShell,
@@ -1263,6 +1701,7 @@ fn replay(log: &Path, asked: &Asked) -> Result<(), String> {
             desktop: &mut desktop::System::new(),
             history: &mut NoHistory::default(),
             memory: &mut niobe_tui::NoMemory::default(),
+            overview: &mut niobe_tui::NoOverview::default(),
         },
     )
     .map_err(|e| e.to_string())
@@ -1345,7 +1784,25 @@ what the agent did, decided and touched, what it is doing now and what it cost.
 USAGE:
     niobe                  Open the shell on a new session
     niobe --resume <id>    Open the shell on an earlier session and continue it
+    niobe -p <prompt>      Run one turn with no terminal and print the reply; --json prints
+                           its outcome, reply and spend in the shape schema/print.schema.json
+                           publishes. [permissions] rules answer the calls they allow and
+                           every other call is refused. The session is saved as any other
+    niobe bench <suite>    Run each task of a suite as one -p turn in a copy of its files and
+                           judge it by its check.sh; --json in the shape
+                           schema/bench.schema.json publishes, --timeout <seconds> per turn
+                           (900 by default). Each turn may edit and write inside its copy
+                           and, beyond --allow, nowhere else. --ab terse runs the suite
+                           without terse, then with it, and sets the two side by side.
+                           bench/ in niobe's repository is a suite
     niobe sessions         List the sessions this repository can carry on
+    niobe overview         Print what every session here built and how it went, as Markdown;
+                           --last <n> keeps the newest n, --since <YYYY-MM-DD> those from that
+                           UTC day on
+    niobe cost             List each session here with its tokens and the money its backend
+                           reported; --json in the shape schema/cost.schema.json publishes,
+                           --csv as rows, --by-day as each UTC day's tokens summed by profile,
+                           --by-turn as each turn's tokens; --last and --since as for overview
     niobe profiles         List the profiles the config defines, the selected one marked
     niobe doctor [--json]  Check what a session needs — the CLIs, their sign-in, the config,
                            the terminal — and say how to fix what is missing
@@ -1353,7 +1810,9 @@ USAGE:
                            backend with that, once you agree
     niobe untrust          Take that back
     niobe prices [model]   List the prices in force today, or every price a model has had
-    niobe replay <file>    Fold a JSON Lines event log into the shell (development)
+    niobe replay <file>    Fold a JSON Lines event log into the shell (development);
+                           --speed <n> plays it into the panes at n times the pace it was
+                           recorded at, no gap longer than two seconds
 
 OPTIONS:
     --profile <name>       Run under this profile instead of the default one
@@ -1361,6 +1820,10 @@ OPTIONS:
                            (refused on a profile billed as a plan)
     --theme <name>         Draw the shell in this palette: cyber, classic, neo
                            or modern
+    --terse <on|off>       Ask a new conversation for terse replies, or not, beating the
+                           config's terse
+    --allow <rule>         For -p and bench: answer the calls this rule covers, as a
+                           [permissions] rule would, for this run alone; may be repeated
     -h, --help             Print this help
     -V, --version          Print the version
 
@@ -1371,10 +1834,12 @@ ENVIRONMENT:
                            shell says so once when it is on. Off by default.
 
 EXIT STATUS:
-    0   The session ended, including because the terminal it drew on went away
-    1   Something failed; the reason was written to standard error, which
-        discards it when standard error is closed or /dev/null
+    0   The session ended, including because the terminal it drew on went away;
+        for -p, the turn finished
+    1   Something failed, a -p turn included; the reason was written to standard
+        error, which discards it when standard error is closed or /dev/null
     2   Something failed and the reason could not be written to standard error
+    3   A -p turn stopped because it had spent what --budget allowed
 
 KEYS:
     Each of the F-key bar's ten actions has its own function key, and a
@@ -1478,11 +1943,40 @@ PROFILES:
     the session: some nine hundred tokens. A repository's config nobody has
     trusted can turn it off and not on.
 
+    terse = true, at the top of a config, asks each new conversation for
+    terse replies, with code, commands, paths, errors and security warnings
+    kept whole; --terse on or off beats it for one run. Off by default. On
+    niobe's bench of twenty tasks it cut output tokens by 14% and the
+    replies' length by a quarter, with every task still passing. A
+    conversation carried on keeps the prompt it began with.
+
+    decisions = false, at the top of a config, stops asking each new
+    conversation to state the choices it makes — work left out of scope, one
+    approach taken over another — each on a line that opens DECISION:. On by
+    default. The Activity pane lists them under Decisions, as the agent says:
+    the agent's own account of its reasoning, which it may have wrong. A
+    run with -p never asks.
+
+    trim = true, at the top of a config, has the agent read a cargo command's
+    output without cargo's build progress and the tests that passed; every
+    failure, error and test result is kept, and the whole output is written
+    to .niobe/trim/, until deleted, and named under what the agent reads. Off
+    by default. On the recorded cargo runs in niobe's tests it left 7% of the
+    bytes, before the line naming where the rest is. Only a
+    command that succeeds is trimmed: the claude CLI hands a failing one to
+    the agent as it is, and lets no hook change it.
+
     [notify] bell = false and notification = false turn off how niobe calls
     you back when a question waits on you or a turn you sent ends: the
     terminal's bell, and a desktop notification on a terminal that shows one
     (iTerm2, WezTerm, Ghostty and kitty; foot and rxvt-unicode). Inside tmux
     only the bell is sent.
+
+    The first key you press after five minutes away opens what happened
+    meanwhile: the turns that ended, the files changed, the sub-agents started
+    and finished, what was asked and how far the five-hour window moved.
+    [catch_up] after = 10 sets the minutes, and automatic = false leaves it to
+    c in a side pane and View › What happened….
 
 TRUST:
     A repository's config arrives with the clone, and env, args, settings and
@@ -1519,8 +2013,10 @@ PRICES:
     Costs are computed from a price table bundled into niobe: USD per million
     tokens for each model id, each price dated from the day it took effect.
     They value the tokens a backend reported no cost for, at the rates in
-    force today: a session replayed or resumed later is estimated at today's
-    rates, not those of the day it ran. A cost the backend reported is shown
+    force on the days they were spent: a session resumed later is estimated
+    at the rates of the days it ran, and one whose rates changed while it ran,
+    or a replayed log whose lines carry no \"at\", is shown as a floor. A cost
+    the backend reported is shown
     as it reported it. A model id the table does not list is unpriced;
     nothing is guessed from a similar id.
     ~/.config/niobe/prices.toml ($XDG_CONFIG_HOME/niobe when that is set) has
@@ -1621,6 +2117,14 @@ IN THE SHELL:
     n                      In a side pane, leave the routine entries (reads,
                            searches, notices) out of the transcript, each run
                            of them counted where it was
+    c                      In a side pane, what happened since you last
+                           caught up
+    d                      In a side pane, list the tool calls; Enter on one
+                           shows its whole input and output
+    s                      In a side pane, show one sub-agent's entries alone;
+                           again shows everything
+    o                      In a side pane, every session recorded here: what
+                           was built, what went wrong, what was left open
     t                      In the Activity pane, count tools by name or by
                            kind of work
     Ctrl+End               Back to the newest line of the transcript
@@ -1631,7 +2135,8 @@ IN THE SHELL:
     Ctrl+V                 Attach the image on the clipboard to the prompt;
                            a pasted or dropped path to an image attaches it
     drag                   Copy what it covers
-    click                  Open the link under it
+    click                  Open the link under it, or the tool call whose
+                           row it is, read whole
     Ctrl+Z                 Suspend niobe, handing the terminal back
 {fkeys}
     Ctrl+Q                 Quit
@@ -1894,6 +2399,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
         for event in [meta, windows] {
             store

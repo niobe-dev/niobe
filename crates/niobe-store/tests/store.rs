@@ -382,6 +382,7 @@ fn a_turn_total_that_differed_comes_back_with_what_a_report_of_it_needs() {
         output: 8,
         cache_read,
         cache_write: 0,
+        cache_write_1h: None,
     };
     let differs = Event::TurnTotalDiffers {
         per_message: counts(6, 234_375),
@@ -440,11 +441,11 @@ fn reported_costs_come_back_bit_for_bit() {
                     output: 1,
                     cache_read: 0,
                     cache_write: 0,
-                    cache_write_1h: 0,
+                    cache_write_1h: Some(0),
                     reasoning: 0,
                     model: "opus-5".to_owned(),
                     cost_usd: Some(*cost),
-                    settles_model: false,
+                    settles_model: Some(false),
                     fast: false,
                 }),
             )
@@ -872,6 +873,7 @@ fn five_hour(utilization: f64) -> Event {
         }),
         seven_day: None,
         using_overage: false,
+        overage: niobe_core::event::Overage::Unreported,
     })
 }
 
@@ -899,6 +901,7 @@ fn the_newest_windows_a_profile_recorded_come_back_with_when_they_were_recorded(
     // A report that names no window is not a level, and is passed over.
     let silent = Event::UsageWindows(niobe_core::event::UsageWindows {
         using_overage: true,
+        overage: niobe_core::event::Overage::Unreported,
         ..niobe_core::event::UsageWindows::default()
     });
     store

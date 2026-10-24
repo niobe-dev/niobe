@@ -687,8 +687,13 @@ cache_write = 1.75
 # (https://platform.claude.com/docs/en/models/overview) lists Claude Haiku 4.5
 # at 200K. The dates are the release dates the prices above start from. A
 # window belongs to the model, so a Bedrock profile id has the window of the
-# model it routes to. OpenAI's models are not listed yet: their windows have
-# not been read from OpenAI's documentation into this table.
+# model it routes to.
+#
+# OpenAI's sizes are each model's page under
+# https://developers.openai.com/api/docs/models/, which gives a context window,
+# a maximum input and a maximum output. The window is what is listed here: it
+# is the input and the output together, as this table means a window, and on
+# every page it is the two caps added up.
 
 # Claude Fable 5.1
 [[context]]
@@ -921,3 +926,30 @@ ids = [
 [[context.window]]
 from = 2025-10-15
 tokens = 200_000
+
+# GPT-5.6 Sol, Terra and Luna: "1,050,000 context window", "Maximum input
+# tokens: 922,000", "128,000 max output tokens" on each model's page. The dates
+# are the release the prices above start from. A prompt past 272K is billed at
+# long-context rates, which is a price, not a smaller window.
+[[context]]
+ids = [
+    "gpt-5.6-sol",
+    "gpt-5.6",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+]
+
+[[context.window]]
+from = 2026-07-09
+tokens = 1_050_000
+
+# GPT-5.3-Codex: "400,000 context window", "Maximum input tokens: 272,000",
+# "128,000 max output tokens". The 272K the price table names is its prompt
+# cap, the input alone; the window here is the 400K the prompt and the reply
+# share, which is what the meter is read against.
+[[context]]
+ids = ["gpt-5.3-codex"]
+
+[[context.window]]
+from = 2026-02-24
+tokens = 400_000

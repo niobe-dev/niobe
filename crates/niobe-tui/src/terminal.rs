@@ -122,6 +122,9 @@ const PASTE_OFF: &[u8] = b"\x1b[?2004l";
 /// terminal answers the second. So an answer to the second with none to the
 /// first before it is a terminal that cannot report Shift+Enter, and nothing
 /// has to be waited out to learn so.
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 const KEYBOARD_QUERY: &[u8] = b"\x1b[?u\x1b[c";
 
 /// Pushes the one enhancement the shell needs onto the terminal's stack:
@@ -153,9 +156,15 @@ const OTHER_KEYS_OFF: &[u8] = b"\x1b[>4m";
 /// not to report the keys. Every terminal answers the attributes, so this is
 /// only ever waited out on one that answers nothing at all, and the shell
 /// opens on it a second late rather than not at all.
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 const KEYBOARD_PATIENCE: Duration = Duration::from_secs(1);
 
 /// What a terminal has said so far in answer to [`KEYBOARD_QUERY`].
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
     /// The attributes have not arrived yet.
@@ -169,6 +178,9 @@ enum Answer {
 /// Reads the replies in `heard`: `ESC [ ? <flags> u` for the keyboard, then
 /// `ESC [ ? <attributes> c` for the device. Anything else between them is
 /// passed over.
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn answer(heard: &[u8]) -> Answer {
     const INTRODUCER: &[u8] = b"\x1b[?";
     let mut reports = false;
@@ -197,6 +209,9 @@ fn answer(heard: &[u8]) -> Answer {
 
 /// What was typed around the replies in `heard`: every byte but those of an
 /// `ESC [ ? … u` or `ESC [ ? … c` reply, in the order it came.
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn typed_around(heard: &[u8]) -> Vec<u8> {
     const INTRODUCER: &[u8] = b"\x1b[?";
     let mut typed = Vec::new();

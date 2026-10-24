@@ -800,3 +800,57 @@ fn the_recordings_still_carry_the_reason_a_call_was_asked_or_refused() {
     assert!(asked >= 3, "no recorded question carries a reason: {asked}");
     assert!(refused >= 1, "no recorded refusal carries one: {refused}");
 }
+
+/// Whether a plan may spend beyond its fee is read from the `overageStatus`
+/// and `overageDisabledReason` of a `rate_limit_event`, against the values
+/// Claude Code 2.1.309's schema lists. A recording that holds another value
+/// is a release the bridge would read as saying nothing, so it fails here
+/// rather than going unnoticed.
+#[test]
+fn every_recorded_overage_state_is_one_the_bridge_reads() {
+    const STATUSES: [&str; 3] = ["allowed", "allowed_warning", "rejected"];
+    const REASONS: [&str; 13] = [
+        "overage_not_provisioned",
+        "org_level_disabled",
+        "org_level_disabled_until",
+        "out_of_credits",
+        "seat_tier_level_disabled",
+        "member_level_disabled",
+        "seat_tier_zero_credit_limit",
+        "group_zero_credit_limit",
+        "member_zero_credit_limit",
+        "org_service_level_disabled",
+        "no_limits_configured",
+        "fetch_error",
+        "unknown",
+    ];
+    let mut checked = 0;
+    for path in recordings() {
+        for line in lines_of(&path) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(info) = value.get("rate_limit_info") else {
+                continue;
+            };
+            if let Some(status) = info.get("overageStatus") {
+                let status = status.as_str().unwrap_or_default();
+                assert!(
+                    STATUSES.contains(&status),
+                    "{}: an `overageStatus` the bridge does not read: {line}",
+                    path.display()
+                );
+                checked += 1;
+            }
+            if let Some(reason) = info.get("overageDisabledReason") {
+                let reason = reason.as_str().unwrap_or_default();
+                assert!(
+                    REASONS.contains(&reason),
+                    "{}: an `overageDisabledReason` the bridge does not read: {line}",
+                    path.display()
+                );
+            }
+        }
+    }
+    assert!(checked > 0, "no recording says whether overage is allowed");
+}

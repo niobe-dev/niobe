@@ -76,6 +76,9 @@
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
 //!   rest is not surfaced, because no pane reads it and widening the shared
 //!   vocabulary for figures nothing draws would be a change nobody could see.
+//!   A `system`/`status` that names a mode other than the one last reported
+//!   is a [`Event::ModeSelected`] too: it is how the CLI says it left plan
+//!   mode when a plan was approved.
 //! * A sub-agent's own figures are what the CLI reports for that agent alone,
 //!   and they become [`Event::AgentProgress`]: the model its messages name,
 //!   the step `system`/`task_progress` says it is on, the first line of the
@@ -97,8 +100,9 @@ use std::path::{Path, PathBuf};
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Context, Event,
-    McpServer, McpStatus, Mode, ModelOption, PermissionDecision, SessionMeta, SlashCommand,
-    TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    McpServer, McpStatus, Mode, ModelOption, Overage, OverageRefusal, PermissionDecision,
+    SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow,
+    UsageWindows,
 };
 use niobe_core::proposal::{Action, Proposal};
 use niobe_core::session::TestRunRecord;
@@ -189,6 +193,7 @@ impl From<Counts> for TokenCounts {
             output: counts.output,
             cache_read: counts.cache_read,
             cache_write: counts.cache_write,
+            cache_write_1h: None,
         }
     }
 }
@@ -436,6 +441,9 @@ pub struct Translator {
     /// The sub-agents this session has spawned, by the id of the call that
     /// spawned each, and whether each is still running.
     agents: BTreeMap<String, Running>,
+    /// The shell commands the CLI moved to the background and has not said
+    /// the end of, by the id of the call that started each: its command.
+    background: BTreeMap<String, String>,
     /// The model each sub-agent was last reported answering with, by the id of
     /// the call that spawned it, so that a model is reported when it changes
     /// rather than with every message the agent writes.
@@ -469,6 +477,11 @@ pub struct Translator {
     /// The reconnects Niobe asked for that the CLI has not answered yet, by
     /// `request_id`, each with the server it names: the answer names neither.
     reconnects: BTreeMap<String, String>,
+    /// The rewinds Niobe asked for that the CLI has not answered yet, by the
+    /// `request_id` of each of their two requests.
+    rewinds: BTreeMap<String, Rewind>,
+    /// Control requests an answer called for, not yet taken to be written.
+    requests: Vec<String>,
     /// What the CLI's last answer to `mcp_status` said of each server, by
     /// name, which every later `init` lists again without.
     mcp_said: BTreeMap<String, McpServer>,
@@ -487,6 +500,10 @@ pub struct Translator {
     mcp_status_refused: bool,
     /// Per-message usage since the last `result`, for the turn reconciliation.
     turn: Counts,
+    /// Of the per-message cache writes since the last `result`, the ones
+    /// bought for an hour: `None` once a message gave no split, since the
+    /// share of the others would read as the turn's.
+    turn_1h: Option<u64>,
     /// The messages since the last `result` whose stream ended before their
     /// `message_delta`, as a report names them, for the turn reconciliation.
     unfinished: Vec<String>,
@@ -544,6 +561,9 @@ pub struct Translator {
     /// Whether the CLI's last request state was `compacting`, so that the
     /// state after it is reported as the compaction's end.
     compacting: bool,
+    /// The mode the CLI last said it gates calls in, as it spells it, so a
+    /// `status` that repeats it says nothing new.
+    mode: Option<String>,
 }
 
 /// What a sub-agent's own transcript says about it that its messages, folded
@@ -589,6 +609,7 @@ impl Translator {
             asked: Vec::new(),
             withdrawn: Vec::new(),
             agents: BTreeMap::new(),
+            background: BTreeMap::new(),
             agent_models: BTreeMap::new(),
             recorded_agents: BTreeMap::new(),
             denied: BTreeMap::new(),
@@ -598,12 +619,15 @@ impl Translator {
             title_requests: BTreeSet::new(),
             mcp_status_requests: BTreeSet::new(),
             reconnects: BTreeMap::new(),
+            rewinds: BTreeMap::new(),
+            requests: Vec::new(),
             mcp_said: BTreeMap::new(),
             mcp_listed: BTreeMap::new(),
             mcp_omitted: BTreeMap::new(),
             mcp_status_wanted: false,
             mcp_status_refused: false,
             turn: Counts::default(),
+            turn_1h: Some(0),
             unfinished: Vec::new(),
             reported: BTreeMap::new(),
             unknown_spend: None,
@@ -621,6 +645,7 @@ impl Translator {
             read_spilled: None,
             file_exists: None,
             compacting: false,
+            mode: None,
         }
     }
 
@@ -669,7 +694,9 @@ impl Translator {
     ///
     /// Only a `cargo test` run's result is read, and only once, when its call
     /// ends: the CLI hands the model the first 2 KB of an output past about
-    /// 30 KB, and a whole workspace's test run is past that.
+    /// 30 KB, and a whole workspace's test run is past that. The same reader
+    /// reads back the whole of an output Niobe's hook trimmed, from the file
+    /// the hook wrote it to.
     #[must_use]
     pub(crate) fn reading_spilled_with(mut self, read: ReadSpilled) -> Self {
         self.read_spilled = Some(read);
@@ -727,10 +754,11 @@ impl Translator {
     /// answer goes out, the translator reads that result as the denial it is,
     /// and does not report the closing list as a second refusal.
     ///
-    /// This is the only thing that marks such a call denied. Recorded against
-    /// Claude Code 2.1.278: the CLI sends no `system`/`permission_denied` for a
+    /// Recorded against Claude Code 2.1.278, this is the only thing that marks
+    /// such a call denied: the CLI sends no `system`/`permission_denied` for a
     /// call refused over the control channel, only for one it refuses by its
-    /// own rules.
+    /// own rules. From 2.1.309 the CLI marks every refusal beside its result
+    /// too, which the translator reads without being told.
     pub fn refused(&mut self, id: &ToolCallId) {
         self.denied.insert(id.as_str().to_owned(), None);
     }
@@ -775,6 +803,30 @@ impl Translator {
     pub fn asked_to_reconnect(&mut self, request_id: &str, server: &str) {
         self.reconnects
             .insert(request_id.to_owned(), server.to_owned());
+    }
+
+    /// Tells the translator that `dry` asks the CLI what putting the files
+    /// back as they were before the prompt it sent as `prompt_id` would
+    /// change. Where the answer says they can go back, the request that puts
+    /// them back is asked as `real`, and taken with [`Self::take_requests`]:
+    /// asked before the dry run's answer, the CLI could put the files back
+    /// first and the dry run say nothing would change. `prompt` is how the
+    /// prompt is named to the operator.
+    pub fn asked_to_rewind(&mut self, dry: &str, real: &str, prompt_id: &str, prompt: &str) {
+        self.rewinds.insert(
+            dry.to_owned(),
+            Rewind::Dry {
+                real: real.to_owned(),
+                prompt_id: prompt_id.to_owned(),
+                prompt: prompt.to_owned(),
+            },
+        );
+    }
+
+    /// The control requests the CLI's answers called for since the last
+    /// call, each a line for its standard input, oldest first.
+    pub fn take_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.requests)
     }
 
     /// Whether the MCP servers should be asked about again since the last
@@ -903,6 +955,14 @@ impl Translator {
         if self.answered_of_mcp(&outcome, out) {
             return;
         }
+        if let Some(rewind) = outcome
+            .request_id
+            .as_deref()
+            .and_then(|id| self.rewinds.remove(id))
+        {
+            self.answered_rewind(rewind, outcome, out);
+            return;
+        }
         let asked_model = outcome
             .request_id
             .as_deref()
@@ -959,6 +1019,48 @@ impl Translator {
             out.push(Event::ModelRefused {
                 back_to: self.taken_model.clone().or_else(|| self.model.clone()),
             });
+        }
+    }
+
+    /// Reads an answer to one of a rewind's two requests. A dry run that
+    /// says the files can go back asks for them to be put back, and is kept
+    /// for that answer to say what went back; one that says they cannot is
+    /// said at once, with its reason.
+    fn answered_rewind(
+        &mut self,
+        rewind: Rewind,
+        outcome: wire::ControlOutcome,
+        out: &mut Vec<Event>,
+    ) {
+        let taken = outcome.subtype.as_deref() == Some("success");
+        match rewind {
+            Rewind::Dry {
+                real,
+                prompt_id,
+                prompt,
+            } => match (taken, outcome.response) {
+                (true, Some(answer)) if answer.can_rewind == Some(true) => {
+                    let would = Would {
+                        files: answer
+                            .files_changed
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|path| self.relative(path))
+                            .collect(),
+                        insertions: answer.insertions,
+                        deletions: answer.deletions,
+                    };
+                    self.requests
+                        .push(rewind_request(&real, &prompt_id, false).to_string());
+                    self.rewinds.insert(real, Rewind::Real { prompt, would });
+                }
+                (true, Some(answer)) => out.push(not_rewound(&prompt, answer.error)),
+                (_, _) => out.push(not_rewound(&prompt, outcome.error)),
+            },
+            Rewind::Real { prompt, would } => out.push(match taken {
+                true => rewound(&prompt, &would),
+                false => not_rewound(&prompt, outcome.error),
+            }),
         }
     }
 
@@ -1042,6 +1144,22 @@ impl Translator {
         Event::McpServers { servers: listed }
     }
 
+    /// Reports `spelt`, the mode the CLI says it now gates calls in.
+    fn reported_mode(&mut self, spelt: String, out: &mut Vec<Event>) {
+        match read_mode(&spelt) {
+            Some(mode) => out.push(Event::ModeSelected { mode }),
+            // The CLI gates calls in ways Niobe has no word for —
+            // `acceptEdits`, `bypassPermissions`, `dontAsk` — and a profile
+            // can ask for one through its own arguments. Naming it beats
+            // showing a mode the session is not in.
+            None => out.push(warn(format!(
+                "the CLI is gating tool calls as `{spelt}`, which this version of Niobe does \
+                 not model. No mode is reported until the session is moved to one it does."
+            ))),
+        }
+        self.mode = Some(spelt);
+    }
+
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
         match system.subtype.as_deref() {
             Some("init") => {
@@ -1062,18 +1180,7 @@ impl Translator {
                     out.push(event);
                 }
                 if let Some(mode) = system.permission_mode {
-                    match read_mode(&mode) {
-                        Some(mode) => out.push(Event::ModeSelected { mode }),
-                        // The CLI gates calls in ways Niobe has no word for —
-                        // `acceptEdits`, `bypassPermissions`, `dontAsk` — and
-                        // a profile can ask for one through its own arguments.
-                        // Naming it beats showing a mode the session is not in.
-                        None => out.push(warn(format!(
-                            "the CLI is gating tool calls as `{mode}`, which this version of \
-                             Niobe does not model. No mode is reported until the session is \
-                             moved to one it does."
-                        ))),
-                    }
+                    self.reported_mode(mode, out);
                 }
             }
             // The last request's size is of a conversation the model no
@@ -1103,6 +1210,14 @@ impl Translator {
                     (false, false) | (true, true) => {}
                 }
                 self.compacting = compacting;
+                // The CLI moves itself out of plan mode when the operator
+                // approves a plan, back to the mode it was in before, and a
+                // `status` mid-turn is the only place it says so.
+                if let Some(mode) = system.permission_mode
+                    && self.mode.as_ref() != Some(&mode)
+                {
+                    self.reported_mode(mode, out);
+                }
             }
             // A running guess at the thinking tokens of the message being
             // produced (`estimated_tokens`, and the step since the last one).
@@ -1220,11 +1335,10 @@ impl Translator {
     /// The CLI's word, on the live stream, that something it ran in the
     /// background has stopped.
     ///
-    /// Only a sub-agent's end is read. A background command's is passed
-    /// over: its call already ended when the command was put in the
-    /// background, the model reads the output for itself, and the transcript
-    /// the CLI writes of the same session passes it over too, so a session
-    /// read back folds to what it showed live.
+    /// A sub-agent's end ends the agent. A background command's call already
+    /// ended when the command was put in the background, so its end is a
+    /// notice: without it the operator sees the model answer output they
+    /// were never shown arriving.
     ///
     /// What the agent answered and how large its conversation ended up are
     /// reported before its end, because nothing is reported about an agent
@@ -1233,7 +1347,11 @@ impl Translator {
         let Some(id) = system.tool_use_id else { return };
         let answer = system.summary.as_deref().and_then(opening_line);
         self.agent_progress(&id, None, total_tokens(system.usage.as_ref()), answer, out);
-        out.append(&mut self.task_stopped(&id, system.status.as_deref()));
+        out.append(&mut self.task_stopped(
+            &id,
+            system.status.as_deref(),
+            system.summary.as_deref(),
+        ));
     }
 
     /// The CLI's word on a sub-agent it is running: the step it is on and how
@@ -1283,19 +1401,30 @@ impl Translator {
     }
 
     /// The events for the CLI saying that the background task call `id`
-    /// started has stopped, with `status` in the CLI's spelling.
+    /// started has stopped, with `status` in the CLI's spelling and its
+    /// `summary` of it.
     ///
-    /// Nothing, where `id` spawned no sub-agent: the CLI notifies about
-    /// background commands the same way. Nothing either for a sub-agent that
-    /// has already ended — one that is sent another message runs again and
-    /// notifies again, and only the first end is one this session saw begin.
+    /// A notice, where `id` put a shell command in the background
+    /// ([`background_ended`]). Nothing, where it did neither that nor spawn a
+    /// sub-agent. Nothing either for a sub-agent that has already ended — one
+    /// that is sent another message runs again and notifies again, and only
+    /// the first end is one this session saw begin.
     ///
     /// The live stream spells the statuses `completed`, `failed` and
     /// `stopped`, which are the CLI's own schema for the message; its
     /// transcripts also say `killed` for a task stopped from outside. Both
     /// read as cancelled.
-    pub(crate) fn task_stopped(&mut self, id: &str, status: Option<&str>) -> Vec<Event> {
+    pub(crate) fn task_stopped(
+        &mut self,
+        id: &str,
+        status: Option<&str>,
+        summary: Option<&str>,
+    ) -> Vec<Event> {
         let mut out = Vec::new();
+        if let Some(command) = self.background.remove(id) {
+            out.push(background_ended(&command, status, summary));
+            return out;
+        }
         if !self.is_agent(Some(id)) {
             return out;
         }
@@ -1437,6 +1566,7 @@ impl Translator {
         self.restored_unknown = false;
         self.unattributed.clear();
         self.turn = Counts::default();
+        self.turn_1h = Some(0);
         self.unfinished.clear();
         self.context = None;
         // The conversation after a clear is a stored session of its own,
@@ -1494,9 +1624,11 @@ impl Translator {
         // A message that names the sub-agent call it belongs to is that
         // agent's: its words and its calls are the agent's, not the session's.
         let agent = envelope.parent_tool_use_id.map(AgentId::new);
+        let written_by_cli = envelope.message.model.as_deref() == Some(CLI_WRITTEN);
         let blocks = match envelope.message.content {
             Some(wire::Content::Blocks(blocks)) => blocks,
             Some(wire::Content::Text(text)) => {
+                let text = lines_kept_where(written_by_cli, text);
                 out.push(Event::AssistantMessage { text, agent });
                 return;
             }
@@ -1554,6 +1686,7 @@ impl Translator {
         // The text first: it is what the model said before it acted, and the
         // transcript reads in that order.
         if !text.is_empty() {
+            let text = lines_kept_where(written_by_cli, text);
             out.push(Event::AssistantMessage { text, agent });
         }
         out.append(&mut calls);
@@ -1581,6 +1714,12 @@ impl Translator {
             .iter()
             .filter_map(|meta| meta.id.clone())
             .filter(|id| envelope.interrupted(id))
+            .collect();
+        let refused: Vec<String> = envelope
+            .tool_result_meta
+            .iter()
+            .filter_map(|meta| meta.id.clone())
+            .filter(|id| envelope.refused(id))
             .collect();
         let reported = envelope.tool_use_result;
         let Some(wire::Content::Blocks(blocks)) = envelope.message.content else {
@@ -1622,12 +1761,15 @@ impl Translator {
             // run. What says which came first: the `permission_denied` the CLI
             // sends for a refusal of its own, or the driver's word for one
             // made over the control channel.
+            // The CLI's own note beside the result says so too, from 2.1.309
+            // on every kind of refusal, which is what marks one the driver did
+            // not answer.
             // An interrupt reaches the model as a rejection, which says
             // nothing the operator does not know; the CLI's note beside the
             // result is what says it was their stop.
             let outcome = match (
                 is_error.unwrap_or(false),
-                self.denied.contains_key(&tool_use_id),
+                self.denied.contains_key(&tool_use_id) || refused.contains(&tool_use_id),
                 interrupted.contains(&tool_use_id),
             ) {
                 (_, true, _) => ToolOutcome::Denied,
@@ -1677,11 +1819,16 @@ impl Translator {
                 ToolOutcome::Interrupted => Some(STOPPED.to_owned()),
             };
 
+            let untrimmed = match (outcome, name == SHELL_TOOL) {
+                (ToolOutcome::Ok, true) => untrimmed(reported.as_ref(), self.read_spilled),
+                _ => None,
+            };
+            let bytes = untrimmed.as_ref().map_or(bytes, |whole| whole.len() as u64);
             let tested = test_run(
                 &name,
                 &arguments,
                 outcome,
-                &output,
+                untrimmed.as_deref().unwrap_or(&output),
                 reported.as_ref(),
                 exit_code,
                 self.read_spilled,
@@ -1690,6 +1837,12 @@ impl Translator {
                 true => string_at(&arguments, "command").map(str::to_owned),
                 false => None,
             };
+            if outcome == ToolOutcome::Ok
+                && let Some(command) = &command
+                && moved_to_background(reported.as_ref())
+            {
+                self.background.insert(tool_use_id.clone(), command.clone());
+            }
             let id = ToolCallId::new(tool_use_id);
             let tested = tested.map(|run| Event::TestRun {
                 id: id.clone(),
@@ -1709,6 +1862,7 @@ impl Translator {
                 exit_code,
                 error,
                 command,
+                untrimmed,
             });
             out.extend(change);
             out.extend(tested);
@@ -1988,6 +2142,10 @@ impl Translator {
             .or_else(|| self.model.clone());
         let counts = Counts::from(usage);
         self.turn.add(counts);
+        self.turn_1h = self
+            .turn_1h
+            .zip(usage.cache_write_1h())
+            .map(|(sum, hour)| sum.saturating_add(hour));
         let record = Usage {
             input: counts.input,
             output: counts.output,
@@ -2003,7 +2161,7 @@ impl Translator {
             // The CLI reports no money per message; the turn's `result` does,
             // for the session so far, and settles this record along with it.
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast,
         };
         match model {
@@ -2148,8 +2306,8 @@ impl Translator {
     }
 
     /// What a call to the CLI's tool `tool` would do, read from its `input`,
-    /// for the tools whose arguments are known here: `Edit`, `Write` and
-    /// `Bash`. `None` for any other tool, and for arguments not of the shape
+    /// for the tools whose arguments are known here: `Edit`, `Write`, `Bash`
+    /// and `ExitPlanMode`. `None` for any other tool, and for arguments not of the shape
     /// the tool takes, which the question then shows as they are.
     fn proposal_of(&self, tool: &str, input: &serde_json::Value) -> Option<Proposal> {
         let text = |key: &str| input.get(key)?.as_str().map(str::to_owned);
@@ -2184,6 +2342,12 @@ impl Translator {
                     command: text("command")?,
                 },
                 ["command"],
+            )),
+            "ExitPlanMode" => Some(Proposal::new(
+                Action::Plan {
+                    plan: text("plan")?,
+                },
+                ["plan"],
             )),
             _ => None,
         }
@@ -2356,17 +2520,31 @@ impl Translator {
     /// stop for numbers nobody contradicted.
     fn reconcile_turn(&mut self, usage: Option<&wire::Usage>, out: &mut Vec<Event>) {
         let summed = std::mem::take(&mut self.turn);
+        let summed_1h = self.turn_1h.replace(0);
         let unfinished = std::mem::take(&mut self.unfinished);
-        let Some(reported) = usage.map(Counts::from) else {
+        let Some(usage) = usage else {
             return;
         };
+        let reported = Counts::from(usage);
         if reported.is_empty() {
             return;
         }
-        if reported != summed {
+        let reported_1h = usage.cache_write_1h();
+        // The split is compared only where both sides gave one: a CLI that
+        // reports no split has said nothing that could disagree.
+        let split_differs = summed_1h
+            .zip(reported_1h)
+            .is_some_and(|(summed, reported)| summed != reported);
+        if reported != summed || split_differs {
             out.push(Event::TurnTotalDiffers {
-                per_message: summed.into(),
-                reported: reported.into(),
+                per_message: TokenCounts {
+                    cache_write_1h: summed_1h,
+                    ..summed.into()
+                },
+                reported: TokenCounts {
+                    cache_write_1h: reported_1h,
+                    ..reported.into()
+                },
                 backend_session: self.backend_session.clone(),
                 unfinished,
             });
@@ -2418,7 +2596,7 @@ impl Translator {
                 let Event::Usage(usage) = event else {
                     return None;
                 };
-                (usage.settles_model && self.short.contains(&usage.model))
+                (usage.settles_model == Some(true) && self.short.contains(&usage.model))
                     .then(|| usage.model.clone())
             })
             .collect();
@@ -2680,7 +2858,7 @@ impl Translator {
             cache_read: tokens.cache_read,
             cache_write: tokens.cache_write,
             // `modelUsage` reports no lifetime split for its cache writes.
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model,
             // A difference of zero is not a report that the turn was free.
@@ -2689,7 +2867,7 @@ impl Translator {
             // had already billed, and the tokens above are those no message
             // reported. Between them the two cover every record emitted under
             // the model so far, so this figure settles them.
-            settles_model: true,
+            settles_model: Some(true),
             fast: false,
         })
     }
@@ -2707,11 +2885,11 @@ fn covered_elsewhere(model: String) -> Event {
         output: 0,
         cache_read: 0,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model,
         cost_usd: Some(0.0),
-        settles_model: true,
+        settles_model: Some(true),
         fast: false,
     })
 }
@@ -2729,11 +2907,11 @@ fn short_by_unknown(model: String) -> Event {
         output: 0,
         cache_read: 0,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model,
         cost_usd: None,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     })
 }
@@ -2783,6 +2961,116 @@ fn is_window_of(session: &str, model: &str) -> bool {
 /// standing rule does not already allow", which is Niobe's `ask`. The rest —
 /// `acceptEdits`, `bypassPermissions`, `dontAsk` — are modes the shell has no
 /// word for, and a wrong word for one is worse than none.
+/// One of the two requests a rewind is made of.
+#[derive(Debug)]
+enum Rewind {
+    /// The dry run: the request that puts the files back once it says they
+    /// can go, the id of the prompt they go back to before, and how that
+    /// prompt is named.
+    Dry {
+        real: String,
+        prompt_id: String,
+        prompt: String,
+    },
+    /// The request that puts the files back, with how the prompt is named
+    /// and what the dry run said would go back.
+    Real { prompt: String, would: Would },
+}
+
+/// What a dry run of a rewind said would go back.
+#[derive(Debug)]
+struct Would {
+    /// The files, as the operator reads their paths.
+    files: Vec<String>,
+    insertions: Option<u64>,
+    deletions: Option<u64>,
+}
+
+/// `rewind_files`, asking the CLI to put the files back as they were before
+/// the prompt it was sent as `prompt_id`, or with `dry_run` only to say what
+/// that would change.
+pub(crate) fn rewind_request(
+    request_id: &str,
+    prompt_id: &str,
+    dry_run: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "rewind_files",
+            "user_message_id": prompt_id,
+            "dry_run": dry_run,
+        },
+    })
+}
+
+/// What the session is told once the CLI has put the files back as they
+/// were before `prompt`: which went back, or that none had changed.
+fn rewound(prompt: &str, would: &Would) -> Event {
+    let message = match would.files.is_empty() {
+        true => format!("No file had changed since \"{prompt}\", so none was put back."),
+        false => {
+            let lines = match (would.insertions, would.deletions) {
+                (Some(added), Some(removed)) => format!(" (+{added} −{removed})"),
+                _ => String::new(),
+            };
+            format!(
+                "Files put back as they were before \"{prompt}\": {}{lines}. The \
+                 conversation keeps everything said since.",
+                would.files.join(", ")
+            )
+        }
+    };
+    Event::Notice { message }
+}
+
+/// What the session is told where the CLI would not put the files back as
+/// they were before `prompt`, with its reason where it gave one.
+fn not_rewound(prompt: &str, reason: Option<String>) -> Event {
+    warn(format!(
+        "no files were put back as they were before \"{prompt}\": {}",
+        reason.as_deref().unwrap_or("the CLI gave no reason")
+    ))
+}
+
+/// The model the CLI names on a message it wrote itself rather than asked a
+/// model for: the answer to a local command such as `/cost`, or a refusal.
+const CLI_WRITTEN: &str = "<synthetic>";
+
+/// `text` with each of its lines kept where `plain` says the CLI wrote it.
+///
+/// The shell draws a reply as markdown, where a single line break joins two
+/// lines into one paragraph. The CLI's own text is plain, laid out a line a
+/// figure (`/cost` puts each usage window on a line of its own), so each such
+/// break is made a markdown hard break. A fenced block already keeps its
+/// lines, and a break beside a blank line is a paragraph's end, so neither is
+/// touched. A model's reply is left as the model wrote it.
+fn lines_kept_where(plain: bool, text: String) -> String {
+    if !plain {
+        return text;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut kept = String::with_capacity(text.len() + lines.len() * 2);
+    let mut fenced = false;
+    for (at, line) in lines.iter().enumerate() {
+        kept.push_str(line);
+        let Some(next) = lines.get(at + 1) else {
+            break;
+        };
+        let fence = ["```", "~~~"]
+            .iter()
+            .any(|mark| line.trim_start().starts_with(mark));
+        if fence {
+            fenced = !fenced;
+        } else if !fenced && !line.trim().is_empty() && !next.trim().is_empty() {
+            kept.push_str("  ");
+        }
+        kept.push('\n');
+    }
+    kept
+}
+
 pub(crate) fn read_mode(mode: &str) -> Option<Mode> {
     match mode {
         "plan" => Some(Mode::Plan),
@@ -3099,6 +3387,24 @@ fn test_run(
     ))
 }
 
+/// The whole of what a shell command printed, where Niobe's hook trimmed what
+/// the model read of it: the file the hook names in the result, read with
+/// `read` as long as it holds the bytes the hook said it wrote. Only a file
+/// named `<id>.txt` in a `.niobe/trim` directory is read, which is where the
+/// hook writes, so a result naming any other path reads nothing.
+fn untrimmed(reported: Option<&serde_json::Value>, read: Option<ReadSpilled>) -> Option<String> {
+    let report = serde_json::from_value::<wire::ShellReport>(reported?.clone()).ok()?;
+    let path = PathBuf::from(report.niobe_raw_output_path?);
+    let dir = path.parent()?;
+    let kept = path.extension()? == "txt"
+        && dir.file_name()? == "trim"
+        && dir.parent()?.file_name()? == ".niobe";
+    if !kept {
+        return None;
+    }
+    read?(&path, report.niobe_raw_output_size?)
+}
+
 /// The whole of what a shell command printed, where it can be had.
 ///
 /// That is the result itself where the CLI handed it over whole, and the file
@@ -3359,6 +3665,56 @@ fn opening_line(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Whether a shell call's report says the CLI moved its command to the
+/// background, so that its result is of its launch and its end comes later.
+fn moved_to_background(reported: Option<&serde_json::Value>) -> bool {
+    reported
+        .and_then(|report| serde_json::from_value::<wire::ShellReport>(report.clone()).ok())
+        .is_some_and(|report| report.background_task_id.is_some())
+}
+
+/// The notice that a shell command the CLI ran in the background ended, with
+/// `status` and `summary` as its notification spells them.
+///
+/// A notice, and not an error, whatever the status: the command failing is
+/// the command's outcome, which the model reads and answers as it does a
+/// failed call, and the session goes on. The exit code is the CLI's, read out
+/// of its summary (`… failed with exit code 3`), since the notification
+/// carries none of its own.
+fn background_ended(command: &str, status: Option<&str>, summary: Option<&str>) -> Event {
+    let how = match status {
+        Some("completed") => "finished".to_owned(),
+        Some("failed") => "failed".to_owned(),
+        Some("stopped" | "killed") => "was stopped".to_owned(),
+        Some(other) => format!("ended as `{other}`"),
+        None => "ended".to_owned(),
+    };
+    let code = summary
+        .and_then(exit_code_in)
+        .map(|code| format!(" with exit code {code}"))
+        .unwrap_or_default();
+    let mut lines = command.lines();
+    let first = lines.next().unwrap_or_default().trim();
+    let more = match lines.next() {
+        Some(_) => " …",
+        None => "",
+    };
+    Event::Notice {
+        message: format!("the background command `{first}{more}` {how}{code}"),
+    }
+}
+
+/// The status the CLI's summary of a background command names, after its
+/// `exit code`.
+fn exit_code_in(summary: &str) -> Option<i32> {
+    let (_, after) = summary.rsplit_once("exit code ")?;
+    let digits: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    digits.parse().ok()
+}
+
 /// The count a background task's `usage` carries, where it carries one.
 fn total_tokens(usage: Option<&wire::TaskUsage>) -> Option<u64> {
     usage.and_then(|usage| usage.total_tokens)
@@ -3614,11 +3970,39 @@ fn rate_limit(event: wire::RateLimit, out: &mut Vec<Event>) {
         five_hour: read_window(windows.five_hour),
         seven_day: read_window(windows.seven_day),
         using_overage: info.is_using_overage,
+        overage: overage(&info.overage_status, &info.overage_disabled_reason),
     };
-    if windows.is_empty() && !windows.using_overage {
+    if windows.is_empty() && !windows.using_overage && windows.overage == Overage::Unreported {
         return;
     }
     out.push(Event::UsageWindows(windows));
+}
+
+/// Whether the plan may spend beyond its fee, read from the CLI's
+/// `overageStatus` and `overageDisabledReason`, whose values are the ones
+/// Claude Code 2.1.309's schema lists.
+///
+/// A status this does not know is the CLI not having said anything this
+/// bridge can stand behind, never a guess at which way it went; a reason it
+/// does not know still leaves the refusal, with no reason.
+fn overage(status: &str, reason: &str) -> Overage {
+    match status {
+        "allowed" | "allowed_warning" => Overage::Allowed,
+        "rejected" => Overage::Refused(match reason {
+            "out_of_credits" => OverageRefusal::OutOfCredits,
+            "overage_not_provisioned" | "no_limits_configured" => OverageRefusal::NotSetUp,
+            "org_level_disabled"
+            | "org_level_disabled_until"
+            | "org_service_level_disabled"
+            | "seat_tier_level_disabled"
+            | "member_level_disabled" => OverageRefusal::TurnedOff,
+            "seat_tier_zero_credit_limit"
+            | "group_zero_credit_limit"
+            | "member_zero_credit_limit" => OverageRefusal::ZeroLimit,
+            _ => OverageRefusal::Unstated,
+        }),
+        _ => Overage::Unreported,
+    }
 }
 
 /// One window, kept only where the CLI measured it: a level that is not a
@@ -3819,6 +4203,62 @@ mod tests {
             events.iter().all(|event| !matches!(event, Event::Usage(_))),
             "a mismatch invented a record to close the gap"
         );
+    }
+
+    fn written_for_an_hour(write: u64, hour: u64) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"message_delta","usage":{{"input_tokens":2,"output_tokens":10,"cache_creation_input_tokens":{write},"cache_creation":{{"ephemeral_5m_input_tokens":{},"ephemeral_1h_input_tokens":{hour}}}}}}}}}"#,
+            write - hour
+        )
+    }
+
+    fn closed_with_an_hour(write: u64, hour: u64) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","usage":{{"input_tokens":4,"output_tokens":20,"cache_creation_input_tokens":{write},"cache_creation":{{"ephemeral_5m_input_tokens":{},"ephemeral_1h_input_tokens":{hour}}}}}}}"#,
+            write - hour
+        )
+    }
+
+    #[test]
+    fn a_turn_whose_one_hour_cache_writes_do_not_add_up_is_reported() {
+        let mut translator = translator();
+        translator.line(&written_for_an_hour(300, 300));
+        translator.line(&written_for_an_hour(200, 0));
+
+        let events = translator.line(&closed_with_an_hour(500, 500));
+
+        let differs = differences(&events);
+        assert_eq!(differs.len(), 1, "{events:?}");
+        let (per_message, reported, _, _) = differs[0];
+        assert_eq!(per_message.cache_write, reported.cache_write);
+        assert_eq!(
+            (per_message.cache_write_1h, reported.cache_write_1h),
+            (Some(300), Some(500))
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_one_hour_cache_writes_add_up_is_not_reported() {
+        let mut translator = translator();
+        translator.line(&written_for_an_hour(300, 300));
+        translator.line(&written_for_an_hour(200, 100));
+
+        let events = translator.line(&closed_with_an_hour(500, 400));
+
+        assert!(differences(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_turn_with_a_message_that_gave_no_split_does_not_compare_the_one_hour_share() {
+        let mut translator = translator();
+        translator.line(&written_for_an_hour(300, 300));
+        translator.line(
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":2,"output_tokens":10,"cache_creation_input_tokens":200}}}"#,
+        );
+
+        let events = translator.line(&closed_with_an_hour(500, 500));
+
+        assert!(differences(&events).is_empty(), "{events:?}");
     }
 
     type Difference<'a> = (
@@ -4756,11 +5196,11 @@ mod tests {
                 output: 10,
                 cache_read: 0,
                 cache_write: 90,
-                cache_write_1h: 60,
+                cache_write_1h: Some(60),
                 reasoning: 0,
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: true,
             })
         );
@@ -5572,6 +6012,24 @@ mod tests {
         assert!(!proposal.covers("dangerouslyDisableSandbox"));
     }
 
+    #[test]
+    fn leaving_plan_mode_proposes_the_plan_and_leaves_its_file_to_be_shown() {
+        // As Claude Code 2.1.309 asks it, plan and the file it was saved to.
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"1. Guard mean().\n2. Run it.","planFilePath":"/home/u/.claude/plans/p.md"},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        )
+        .expect("a plan is read");
+        assert_eq!(
+            proposal.action(),
+            &Action::Plan {
+                plan: "1. Guard mean().\n2. Run it.".to_owned()
+            }
+        );
+        assert!(proposal.covers("plan"));
+        assert!(!proposal.covers("planFilePath"));
+    }
+
     /// Arguments of another shape than the tool's are not read as the tool's:
     /// the question shows them as they are.
     #[test]
@@ -5584,6 +6042,7 @@ mod tests {
             ),
             ("Write", r#"{"file_path":"/f"}"#),
             ("Bash", r#"{"cmd":"ls"}"#),
+            ("ExitPlanMode", r#"{"planFilePath":"/p.md"}"#),
             ("Read", r#"{"file_path":"/f"}"#),
             ("mcp__notion__search", r#"{"command":"ls"}"#),
         ] {
@@ -5838,6 +6297,165 @@ mod tests {
                 "`{spelt}` did not read as {mode}"
             );
         }
+    }
+
+    /// The answers Claude Code 2.1.309 gave a dry run and then the rewind
+    /// itself, started with `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`.
+    #[test]
+    fn files_put_back_before_a_prompt_are_one_notice_naming_them() {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "make mean() return 0");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":true,"filesChanged":["/repo/stats.py","/repo/src/io.py"],"insertions":3,"deletions":2}}}"#,
+        );
+        let asked = translator.take_requests();
+        let done = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":true,"skippedLinks":0}}}"#,
+        );
+
+        assert!(dry.is_empty(), "{dry:?}");
+        assert_eq!(asked, [rewind_request("niobe-2", "p-1", false).to_string()]);
+        assert_eq!(
+            done,
+            [Event::Notice {
+                message: "Files put back as they were before \"make mean() return 0\": \
+                          stats.py, src/io.py (+3 −2). The conversation keeps everything \
+                          said since."
+                    .to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_rewind_the_cli_cannot_do_is_said_with_its_reason_and_not_asked_for() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "/cost");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":false,"error":"No file checkpoint found for this message."}}}"#,
+        );
+
+        assert!(translator.take_requests().is_empty());
+        assert_eq!(
+            warnings(&dry),
+            [
+                "no files were put back as they were before \"/cost\": No file checkpoint \
+              found for this message."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rewind_the_cli_refuses_outright_is_said_with_its_reason() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "fix it");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-1","error":"Failed to rewind: File checkpointing is not enabled"}}"#,
+        );
+
+        assert!(translator.take_requests().is_empty());
+        assert_eq!(
+            warnings(&dry),
+            [
+                "no files were put back as they were before \"fix it\": Failed to rewind: \
+              File checkpointing is not enabled"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rewind_that_changed_no_file_says_so() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "explain it");
+
+        translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":true,"filesChanged":[],"insertions":0,"deletions":0}}}"#,
+        );
+        let done = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":true}}}"#,
+        );
+
+        assert_eq!(
+            done,
+            [Event::Notice {
+                message: "No file had changed since \"explain it\", so none was put back."
+                    .to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_reply_the_cli_writes_itself_keeps_each_of_its_lines() {
+        let mut translator = Translator::new("max");
+
+        // `/cost` as Claude Code 2.1.309 answers it, without the model.
+        let events = translator.line(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Using your subscription\n\nCurrent session: 17% used\nCurrent week: 35% used\n\n```\nkept as\nwritten\n```"}]}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::AssistantMessage {
+                text: "Using your subscription\n\nCurrent session: 17% used  \nCurrent week: 35% used\n\n```\nkept as\nwritten\n```".to_owned(),
+                agent: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_reply_the_model_wrote_is_left_as_markdown() {
+        let mut translator = Translator::new("max");
+
+        let events = translator.line(
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"one\ntwo"}]}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::AssistantMessage {
+                text: "one\ntwo".to_owned(),
+                agent: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_mode_the_cli_moves_to_mid_turn_reaches_the_session() {
+        let mut translator = Translator::new("max");
+        translator.line(r#"{"type":"system","subtype":"init","permissionMode":"plan"}"#);
+
+        // As Claude Code 2.1.309 reports a plan the operator approved: the
+        // CLI goes back to the mode it was in before plan, mid-turn.
+        let events = translator
+            .line(r#"{"type":"system","subtype":"status","status":null,"permissionMode":"auto"}"#);
+
+        assert_eq!(events, [Event::ModeSelected { mode: Mode::Auto }]);
+    }
+
+    #[test]
+    fn a_status_that_repeats_the_mode_the_cli_is_in_selects_nothing() {
+        let mut translator = Translator::new("max");
+        translator.line(r#"{"type":"system","subtype":"init","permissionMode":"plan"}"#);
+
+        let events = translator.line(
+            r#"{"type":"system","subtype":"status","status":"requesting","permissionMode":"plan"}"#,
+        );
+
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_mode_niobe_does_not_model_is_reported_once_however_often_a_status_repeats_it() {
+        let mut translator = Translator::new("max");
+        let status = r#"{"type":"system","subtype":"status","permissionMode":"bypassPermissions"}"#;
+
+        let first = translator.line(status);
+        let again = translator.line(status);
+
+        assert_eq!(warnings(&first).len(), 1, "{first:?}");
+        assert!(again.is_empty(), "{again:?}");
     }
 
     #[test]
@@ -6190,6 +6808,108 @@ mod tests {
                     resets_at: Some(1_790_118_000),
                 }),
                 using_overage: false,
+                overage: Overage::Refused(OverageRefusal::OutOfCredits),
+            })]
+        );
+    }
+
+    /// Each status and reason Claude Code 2.1.309's schema lists, and what
+    /// the bridge makes of it; an unknown status is nothing said.
+    #[test]
+    fn whether_extra_usage_is_allowed_is_read_as_the_cli_said_it() {
+        for (status, reason, read) in [
+            ("allowed", "", Overage::Allowed),
+            ("allowed_warning", "", Overage::Allowed),
+            (
+                "rejected",
+                "out_of_credits",
+                Overage::Refused(OverageRefusal::OutOfCredits),
+            ),
+            (
+                "rejected",
+                "overage_not_provisioned",
+                Overage::Refused(OverageRefusal::NotSetUp),
+            ),
+            (
+                "rejected",
+                "no_limits_configured",
+                Overage::Refused(OverageRefusal::NotSetUp),
+            ),
+            (
+                "rejected",
+                "org_level_disabled",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "org_level_disabled_until",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "org_service_level_disabled",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "seat_tier_level_disabled",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "member_level_disabled",
+                Overage::Refused(OverageRefusal::TurnedOff),
+            ),
+            (
+                "rejected",
+                "seat_tier_zero_credit_limit",
+                Overage::Refused(OverageRefusal::ZeroLimit),
+            ),
+            (
+                "rejected",
+                "group_zero_credit_limit",
+                Overage::Refused(OverageRefusal::ZeroLimit),
+            ),
+            (
+                "rejected",
+                "member_zero_credit_limit",
+                Overage::Refused(OverageRefusal::ZeroLimit),
+            ),
+            (
+                "rejected",
+                "fetch_error",
+                Overage::Refused(OverageRefusal::Unstated),
+            ),
+            (
+                "rejected",
+                "unknown",
+                Overage::Refused(OverageRefusal::Unstated),
+            ),
+            ("rejected", "", Overage::Refused(OverageRefusal::Unstated)),
+            ("something_new", "out_of_credits", Overage::Unreported),
+            ("", "", Overage::Unreported),
+        ] {
+            assert_eq!(overage(status, reason), read, "{status} / {reason}");
+        }
+    }
+
+    /// A message that says only that overage is refused still reaches the
+    /// session: it is the backend saying no, which is worth showing.
+    #[test]
+    fn a_refusal_of_extra_usage_with_no_window_is_still_reported() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"overageStatus":"rejected","overageDisabledReason":"out_of_credits"}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: false,
+                overage: Overage::Refused(OverageRefusal::OutOfCredits),
             })]
         );
     }
@@ -6230,6 +6950,7 @@ mod tests {
                 five_hour: None,
                 seven_day: None,
                 using_overage: true,
+                overage: niobe_core::event::Overage::Unreported,
             })]
         );
     }
@@ -6271,6 +6992,7 @@ mod tests {
                 }),
                 seven_day: None,
                 using_overage: false,
+                overage: niobe_core::event::Overage::Unreported,
             })],
             "a window without a reset time was dropped or given one"
         );
@@ -7025,6 +7747,64 @@ mod tests {
         );
     }
 
+    /// A shell call put in the background, and the notification of its end.
+    fn backgrounded(translator: &mut Translator, command: &str) {
+        translator.line(&call(
+            "toolu_bash",
+            "Bash",
+            &format!(r#"{{"command":{}}}"#, serde_json::json!(command)),
+        ));
+        translator.line(&result_with(
+            "toolu_bash",
+            "Command running in background with ID: b1.",
+            &shell_report(r#","backgroundTaskId":"b1""#),
+        ));
+    }
+
+    fn command_notified(status: &str, summary: &str) -> String {
+        format!(
+            r#"{{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_bash","status":"{status}","output_file":"/tmp/b1.output","summary":"{summary}"}}"#
+        )
+    }
+
+    #[test]
+    fn a_background_commands_end_is_told_once_with_the_exit_code_its_summary_names() {
+        let mut translator = translator();
+        backgrounded(&mut translator, "cargo test\n--release");
+
+        let ended = translator.line(&command_notified(
+            "failed",
+            r#"Background command \"Run the tests\" failed with exit code 101"#,
+        ));
+        let again = translator.line(&command_notified("failed", "failed"));
+
+        assert_eq!(
+            ended,
+            [Event::Notice {
+                message: "the background command `cargo test …` failed with exit code 101"
+                    .to_owned()
+            }]
+        );
+        assert!(again.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn a_background_command_stopped_without_a_summary_says_only_that() {
+        let mut translator = translator();
+        backgrounded(&mut translator, "sleep 60");
+
+        let events = translator.line(
+            r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_bash","status":"stopped"}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::Notice {
+                message: "the background command `sleep 60` was stopped".to_owned()
+            }]
+        );
+    }
+
     #[test]
     fn a_task_notification_for_something_that_is_not_a_sub_agent_is_passed_over() {
         let mut translator = translator();
@@ -7329,7 +8109,9 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             .expect("no test panics holding it")
             .push(path.to_owned());
         let text = match path.to_str()? {
-            "/whole.txt" | "/once.txt" => PASSING_RUN,
+            "/whole.txt" | "/once.txt" | "/repo/.niobe/trim/t1.txt" | "/repo/trim/t1.txt" => {
+                PASSING_RUN
+            }
             "/preview.txt" => PASSING_RUN.get(..200)?,
             _ => return None,
         };
@@ -7360,6 +8142,69 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                 r#","persistedOutputPath":"{path}","persistedOutputSize":{size}"#
             )),
         )
+    }
+
+    /// The result of a passing run Niobe's hook trimmed, naming `path` as
+    /// where it wrote the whole.
+    fn trimmed_by_niobe(path: &str, size: usize) -> String {
+        result_with(
+            "t1",
+            "test result: ok. 2 passed\n[niobe left out 2 lines]",
+            &shell_report(&format!(
+                r#","niobeRawOutputPath":"{path}","niobeRawOutputSize":{size}"#
+            )),
+        )
+    }
+
+    fn ended_call(events: &[Event]) -> (&str, u64, Option<&str>) {
+        events
+            .iter()
+            .find_map(|event| match event {
+                Event::ToolCallEnd {
+                    output,
+                    bytes,
+                    untrimmed,
+                    ..
+                } => Some((output.as_str(), *bytes, untrimmed.as_deref())),
+                _ => None,
+            })
+            .expect("the result ends the call")
+    }
+
+    #[test]
+    fn an_output_niobe_trimmed_carries_its_whole_and_is_sized_and_counted_by_it() {
+        let mut translator = translator().reading_spilled_with(read_spilled);
+        shell_call(&mut translator);
+
+        let events = translator.line(&trimmed_by_niobe(
+            "/repo/.niobe/trim/t1.txt",
+            PASSING_RUN.len(),
+        ));
+
+        let (output, bytes, untrimmed) = ended_call(&events);
+        assert!(output.starts_with("test result: ok. 2 passed"));
+        assert_eq!(untrimmed, Some(PASSING_RUN));
+        assert_eq!(bytes, PASSING_RUN.len() as u64);
+        let counts: Vec<_> = test_runs(&events).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].map(|c| (c.passed, c.suites)), Some((2, 1)));
+    }
+
+    #[test]
+    fn a_trimmed_output_is_read_back_only_from_niobes_own_directory_and_at_its_size() {
+        for (path, size) in [
+            ("/repo/trim/t1.txt", PASSING_RUN.len()),
+            ("/repo/.niobe/trim/t1.txt", PASSING_RUN.len() + 1),
+        ] {
+            let mut translator = translator().reading_spilled_with(read_spilled);
+            shell_call(&mut translator);
+
+            let events = translator.line(&trimmed_by_niobe(path, size));
+
+            let (output, bytes, untrimmed) = ended_call(&events);
+            assert_eq!(untrimmed, None, "{path}");
+            assert_eq!(bytes, output.len() as u64, "{path}");
+        }
     }
 
     #[test]

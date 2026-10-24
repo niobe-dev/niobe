@@ -56,6 +56,30 @@
 //! titles = "first-prompt"
 //! ```
 //!
+//! and whether a new conversation asks the agent to keep its replies terse —
+//! code, commands, errors and security warnings left whole — which is off
+//! unless a file turns it on:
+//!
+//! ```toml
+//! terse = true
+//! ```
+//!
+//! and whether a new conversation asks the agent to state each decision it
+//! makes — what it chose, and what it left out — on a line of its own, which
+//! the shell lists as the agent's own account; on unless a file turns it off:
+//!
+//! ```toml
+//! decisions = false
+//! ```
+//!
+//! and whether a cargo command's output reaches the agent without cargo's
+//! progress and the tests that passed, the whole of it kept under `.niobe/` —
+//! off unless a file turns it on:
+//!
+//! ```toml
+//! trim = true
+//! ```
+//!
 //! and whether the shell rings the bell and sends a desktop notification
 //! when the agent waits on the operator or a turn ends, each on unless a file
 //! turns it off:
@@ -64,6 +88,15 @@
 //! [notify]
 //! bell = false
 //! notification = false
+//! ```
+//!
+//! and how long the operator is away before the first key back tells them
+//! what happened meanwhile, and whether it does of itself:
+//!
+//! ```toml
+//! [catch_up]
+//! after = 10
+//! automatic = false
 //! ```
 //!
 //! Which palettes there are is the shell's business, not this crate's, so the
@@ -408,6 +441,42 @@ impl Notify {
     }
 }
 
+/// When the shell tells the operator what happened while they were away: the
+/// first key pressed after `after` minutes with none opens the catch-up,
+/// unless `automatic` is off, which leaves it to the View menu and `c`.
+///
+/// ```toml
+/// [catch_up]
+/// after = 10
+/// automatic = false
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CatchUp {
+    after: Option<u64>,
+    automatic: Option<bool>,
+}
+
+impl CatchUp {
+    /// How long with no key pressed is away, in minutes: five unless a
+    /// config says otherwise, and never under one.
+    pub fn after_minutes(&self) -> u64 {
+        self.after.unwrap_or(5)
+    }
+
+    /// Whether the first key back opens the catch-up of itself.
+    pub fn automatic(&self) -> bool {
+        self.automatic.unwrap_or(true)
+    }
+
+    /// `over`'s settings where it makes them, and these elsewhere.
+    fn overlay(self, over: Self) -> Self {
+        Self {
+            after: over.after.or(self.after),
+            automatic: over.automatic.or(self.automatic),
+        }
+    }
+}
+
 /// One config file, or several laid over one another.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -415,8 +484,12 @@ pub struct Config {
     default_profile: Option<DefaultProfile>,
     theme: Option<ThemeName>,
     titles: Option<Titles>,
+    terse: Option<bool>,
+    decisions: Option<bool>,
+    trim: Option<bool>,
     keys: Keymap,
     notify: Notify,
+    catch_up: CatchUp,
     allowed: Allowlist,
     /// The `default_profile` of a file that has not been trusted, which is not
     /// in force.
@@ -556,6 +629,15 @@ impl Config {
         if over.titles.is_some() {
             self.titles = over.titles;
         }
+        if over.terse.is_some() {
+            self.terse = over.terse;
+        }
+        if over.decisions.is_some() {
+            self.decisions = over.decisions;
+        }
+        if over.trim.is_some() {
+            self.trim = over.trim;
+        }
         // A file that rebinds keys says what every rebound key is: bindings
         // laid together could put one key on two actions, so the later file's
         // table replaces the earlier one whole.
@@ -563,6 +645,7 @@ impl Config {
             self.keys = over.keys;
         }
         self.notify = self.notify.overlay(over.notify);
+        self.catch_up = self.catch_up.overlay(over.catch_up);
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
         // where one is taken back. An untrusted file has none left to add.
@@ -694,11 +777,50 @@ impl Config {
         self.notify
     }
 
+    /// When the shell tells the operator what happened while they were away.
+    ///
+    /// Not gated on trust, for the reason [`Config::notify`] is not: it
+    /// changes what the shell draws, and nothing a backend is started with.
+    pub fn catch_up(&self) -> CatchUp {
+        self.catch_up
+    }
+
     /// How a session is titled: by the model unless a config says
     /// `titles = "first-prompt"`. A file that has not been trusted can turn
     /// the model's titles off and cannot turn them on ([`Config::untrusted`]).
     pub fn titles(&self) -> Titles {
         self.titles.unwrap_or_default()
+    }
+
+    /// Whether a new conversation asks the agent for terse replies, which is
+    /// off unless a config says `terse = true`.
+    ///
+    /// Not gated on trust: what it puts in front of a backend is an
+    /// instruction Niobe wrote and the file only switches, which shortens
+    /// replies and lets nothing a repository wrote reach the backend.
+    pub fn terse(&self) -> bool {
+        self.terse.unwrap_or(false)
+    }
+
+    /// Whether a new conversation asks the agent to state the decisions it
+    /// makes, each on a line of its own, which is on unless a config says
+    /// `decisions = false`.
+    ///
+    /// Not gated on trust, for the reason [`Config::terse`] is not: the words
+    /// it puts in front of a backend are Niobe's own, and the file only
+    /// switches them.
+    pub fn decisions(&self) -> bool {
+        self.decisions.unwrap_or(true)
+    }
+
+    /// Whether the agent reads a cargo command's output trimmed, which is off
+    /// unless a config says `trim = true`.
+    ///
+    /// Not gated on trust, for the reason [`Config::terse`] is not: what it
+    /// puts in front of a backend is a hook that runs Niobe's own binary,
+    /// which leaves lines out of what the agent reads and keeps all of it.
+    pub fn trim(&self) -> bool {
+        self.trim.unwrap_or(false)
     }
 
     /// The profile a session runs under: the one `requested` names, or else
@@ -1477,6 +1599,49 @@ backend = "codex"
     }
 
     #[test]
+    fn the_catch_up_comes_of_itself_after_five_minutes_until_a_config_says_otherwise() {
+        let none = parsed("");
+        assert_eq!(
+            (none.catch_up().after_minutes(), none.catch_up().automatic()),
+            (5, true)
+        );
+
+        let longer = parsed("[catch_up]\nafter = 20\n");
+        let repo = Config::parse("[catch_up]\nautomatic = false\n", &path("repo"))
+            .expect("the config is valid")
+            .untrusted();
+        let laid = longer.overlay(repo);
+        assert_eq!(
+            (laid.catch_up().after_minutes(), laid.catch_up().automatic()),
+            (20, false),
+            "a file silent on how long kept the one before it"
+        );
+        assert!(!laid.needs_trust(), "the catch-up is not gated");
+    }
+
+    #[test]
+    fn a_catch_up_after_no_time_or_not_in_minutes_is_refused_at_its_line() {
+        assert_eq!(
+            invalid("[catch_up]\nafter = 0\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected one minute or more"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nafter = -3\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected one minute or more"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nafter = \"5m\"\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected a whole number of \
+             minutes, found a string"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nwhen = 5\n"),
+            "/configs/user/config.toml:2: catch_up.when: unknown key; expected `after` or \
+             `automatic`"
+        );
+    }
+
+    #[test]
     fn a_notify_switch_that_is_not_a_boolean_or_not_a_switch_is_refused_at_its_line() {
         assert_eq!(
             invalid("[notify]\nbell = \"off\"\n"),
@@ -1487,6 +1652,50 @@ backend = "codex"
             "/configs/user/config.toml:3: notify.sound: unknown key; expected `bell` or \
              `notification`"
         );
+    }
+
+    #[test]
+    fn decisions_are_asked_for_until_a_file_turns_them_off_and_the_later_file_wins() {
+        assert!(parsed("").decisions());
+        assert!(!parsed("decisions = false\n").decisions());
+        let repo = Config::parse("decisions = true\n", &path("repo"))
+            .expect("a boolean is a valid decisions switch");
+        assert!(parsed("decisions = false\n").overlay(repo).decisions());
+        let off = Config::parse("decisions = false\n", &path("repo"))
+            .expect("a boolean is a valid decisions switch");
+        assert!(
+            !parsed("").overlay(off).decisions(),
+            "a repository's file may switch Niobe's own words off, trusted or not"
+        );
+        assert!(invalid("decisions = \"yes\"\n").contains("decisions"));
+    }
+
+    #[test]
+    fn terse_replies_are_off_until_a_file_turns_them_on_and_the_later_file_wins() {
+        assert!(!parsed("").terse());
+        assert!(parsed("terse = true\n").terse());
+        let repo = Config::parse("terse = false\n", &path("repo"))
+            .expect("a valid file")
+            .untrusted();
+        assert!(!parsed("terse = true\n").overlay(repo).terse());
+        let on = Config::parse("terse = true\n", &path("repo"))
+            .expect("a valid file")
+            .untrusted();
+        assert!(
+            parsed("").overlay(on).terse(),
+            "an untrusted file may switch it"
+        );
+        assert!(invalid("terse = \"yes\"\n").contains("terse"));
+    }
+
+    #[test]
+    fn trimmed_output_is_off_until_a_file_turns_it_on_and_the_later_file_wins() {
+        assert!(!parsed("").trim());
+        assert!(parsed("trim = true\n").trim());
+        let repo = Config::parse("trim = false\n", &path("repo"))
+            .expect("a config that turns trimming off parses");
+        assert!(!parsed("trim = true\n").overlay(repo).trim());
+        assert!(invalid("trim = 1\n").contains("trim"));
     }
 
     #[test]
@@ -1616,8 +1825,8 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `titles`, `profiles`, `permissions`, `keys` \
-             or `notify`"
+             expected `default_profile`, `theme`, `titles`, `terse`, `decisions`, `trim`, \
+             `profiles`, `permissions`, `keys`, `notify` or `catch_up`"
         );
     }
 

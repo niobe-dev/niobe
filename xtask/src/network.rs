@@ -85,6 +85,8 @@ pub(crate) const ALLOWED_CRATES: &[&str] = &[
     "jiff",
     "jiff-core",
     "jiff-static",
+    "jiff-tzdb",
+    "jiff-tzdb-platform",
     "kasuari",
     "libc",
     "libsqlite3-sys",

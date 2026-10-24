@@ -1,17 +1,17 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
- ┏━ > add etag support to the ca┌──────────────────────────────┐loading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃    44 +     headers.set("If-N│ Diff              F5  Ctrl+T │            ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
- ┃    45 +   }                  │ Group by agent             a │            ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
- ┃    46 +   const res = await f│ Notable only               n │            ┃ │ ───────────────────────────────────── │
- ┃    47 +   if (res.status === │ Usage pane             shown │y;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
- ┃    48     return res;        │ Changes pane           shown │            ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃       …                      │ Activity pane          shown │            ┃ │ ───────────────────────────────────── │
- ┃   115     cache.set(url, {   │ Theme…                       │            ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   116 +     etag: res.headers└──────────────────────────────┘            ┃ └───────────────────────────────────────┘
- ┃   117       body,                                                        ┃ ┌─────────────── Changes ───────────────┐
- ┃   └ allowed by you                                                       ┃ │ ⎇ main ↑3                             █
- ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃ ◆ claude                                                                 ┃ │   .                                   █
+ ┏━ > add etag support to the ca┌─────────────────────────────────┐ding… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃    44 +     headers.set("If-N│ Diff                 F5  Ctrl+T │         ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃    45 +   }                  │ Group by agent                a │         ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃    46 +   const res = await f│ Notable only                  n │         ┃ │ ───────────────────────────────────── │
+ ┃    47 +   if (res.status === │ What happened…                c │         ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃    48     return res;        │ Tool calls…                   d │         ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃       …                      │ Just one agent…               s │         ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {   │ Project overview…             o │         ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   116 +     etag: res.headers│ Usage pane                shown │         ┃ └───────────────────────────────────────┘
+ ┃   117       body,            │ Changes pane              shown │         ┃ ┌─────────────── Changes ───────────────┐
+ ┃   └ allowed by you           │ Activity pane             shown │         ┃ │ ⎇ main ↑3                             █
+ ┃                              │ Theme…                          │         ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃ ◆ claude                     └─────────────────────────────────┘         ┃ │   .                                   █
  ┃   Rewriting the 304 test around the cached body.                         █ │     CHANGELOG.md                +0 −0 │
  ┃                                                                          █ │   catalog/                            │
  ┃ ◆ claude                                                                 █ │     fetch.ts                 +149 −12 │
@@ -23,8 +23,8 @@
  ┃ ◆ claude                                                                 █ │ ▾ Sub-agents  1 running · 1 failed    █
  ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
  ┃   304 path asserts a body that is no longer sent.                        █ │   └ Reading tests/stream.rs           █
- ┃                                                                          █ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓      │
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │     Read 3                            │
+ ┃                                                                          █ │ ▾ Decisions, as the agent says  0     │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   none stated yet                     │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

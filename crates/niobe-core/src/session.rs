@@ -21,6 +21,7 @@
 //! far. That record says so ([`crate::event::Usage::settles_model`]), and the
 //! records it covers stop being owed for.
 
+use crate::decision;
 use crate::test_run::{self, FailedTests, TestCounts};
 use crate::work::{self, Work};
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +49,10 @@ pub struct Totals {
     /// hour at a higher rate, and a consumer that prices the session needs the
     /// share to price it at all.
     pub cache_write_1h: u64,
+    /// Of [`Totals::cache_write`], the tokens in records whose backend did not
+    /// say how long they were bought for, so that a share of the hour is never
+    /// read off writes nobody split.
+    pub cache_write_unsplit: u64,
     /// Reasoning tokens.
     pub reasoning: u64,
     /// How many usage records were folded in.
@@ -58,6 +63,10 @@ pub struct Totals {
     /// by one that did. While this is non-zero,
     /// [`Totals::reported_cost_usd`] is a floor, not the session's cost.
     pub records_unsettled: u64,
+    /// How many usage records reported a cost without saying whether it
+    /// settles the model's earlier records: records stored before the backend
+    /// said so.
+    pub costs_unsaid: u64,
     /// Those records, per model.
     ///
     /// A backend that reports money once per turn leaves the turn priced by
@@ -110,11 +119,11 @@ impl Owed {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: None,
                 reasoning: 0,
                 model: model.to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             },
             records: Vec::new(),
@@ -127,7 +136,10 @@ impl Owed {
         total.output = total.output.saturating_add(usage.output);
         total.cache_read = total.cache_read.saturating_add(usage.cache_read);
         total.cache_write = total.cache_write.saturating_add(usage.cache_write);
-        total.cache_write_1h = total.cache_write_1h.saturating_add(usage.cache_write_1h);
+        total.cache_write_1h = match (total.cache_write_1h, usage.cache_write_1h) {
+            (None, None) => None,
+            (sum, more) => Some(sum.unwrap_or(0).saturating_add(more.unwrap_or(0))),
+        };
         total.reasoning = total.reasoning.saturating_add(usage.reasoning);
         self.records.push(usage.clone());
     }
@@ -166,12 +178,26 @@ impl Totals {
         self.records_unsettled == 0
     }
 
+    /// Whether the floor may be lower than the bill only because the session
+    /// was recorded before its records said what they settle, so what reads
+    /// as owed for was quite possibly covered. Read off the records, not off
+    /// the day they were made. `false` where nothing is owed for.
+    pub fn settlement_unrecorded(&self) -> bool {
+        !self.cost_fully_reported() && self.costs_unsaid > 0
+    }
+
     fn add(&mut self, usage: &Usage) {
         self.input = self.input.saturating_add(usage.input);
         self.output = self.output.saturating_add(usage.output);
         self.cache_read = self.cache_read.saturating_add(usage.cache_read);
         self.cache_write = self.cache_write.saturating_add(usage.cache_write);
-        self.cache_write_1h = self.cache_write_1h.saturating_add(usage.cache_write_1h);
+        match usage.cache_write_1h {
+            Some(one_hour) => self.cache_write_1h = self.cache_write_1h.saturating_add(one_hour),
+            None => {
+                self.cache_write_unsplit =
+                    self.cache_write_unsplit.saturating_add(usage.cache_write);
+            }
+        }
         self.reasoning = self.reasoning.saturating_add(usage.reasoning);
         bump(&mut self.records);
         self.tokens_by_model
@@ -184,8 +210,11 @@ impl Totals {
         // Claude bridge emits for tokens no message reported — leaves nothing
         // owed rather than owing for itself.
         let cost = reported_cost(usage);
-        if usage.settles_model && cost.is_some() {
+        if usage.settles_model == Some(true) && cost.is_some() {
             self.clear_unsettled(&usage.model);
+        }
+        if usage.settles_model.is_none() && cost.is_some() {
+            bump(&mut self.costs_unsaid);
         }
 
         match cost {
@@ -331,6 +360,19 @@ impl FileChanges {
     }
 }
 
+/// A decision a reply stated, as the agent tells it.
+///
+/// The agent's own account of its reasoning, read out of its words by
+/// [`crate::decision`], and so never more than what it says it did: whatever
+/// shows one says whose account it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionRecord {
+    /// One line, as the reply stated it.
+    pub summary: String,
+    /// The sub-agent whose reply stated it, or `None` for the session's own.
+    pub agent: Option<AgentId>,
+}
+
 /// A test run the session made, as it reported itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TestRunRecord {
@@ -347,6 +389,37 @@ pub struct TestRunRecord {
     /// its whole list was left: each is its binary's, and together they are
     /// never known to be the run's whole list.
     pub failures: Vec<FailedTests>,
+}
+
+/// A session's test runs, by how each came out. Every run is under exactly
+/// one of the three, so they add up to every run the session made.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TestRuns {
+    /// Runs whose whole output was read and counted no test failing.
+    pub passed: u64,
+    /// Runs known to have failed after their tests started.
+    pub failed: u64,
+    /// Runs neither: their output was cut before a summary, or they stopped
+    /// before a test ran. Not a pass, which nothing read.
+    pub unread: u64,
+}
+
+impl TestRuns {
+    fn count(&mut self, run: &TestRunRecord) {
+        let under = match (run.failed, run.counts) {
+            (true, _) => &mut self.failed,
+            (false, Some(_)) => &mut self.passed,
+            (false, None) => &mut self.unread,
+        };
+        *under = under.saturating_add(1);
+    }
+
+    /// Every run, however it came out.
+    pub fn all(&self) -> u64 {
+        self.passed
+            .saturating_add(self.failed)
+            .saturating_add(self.unread)
+    }
 }
 
 impl TestRunRecord {
@@ -531,9 +604,14 @@ pub struct SessionState {
     /// list that reorders itself under the operator is a list nobody can read.
     files: Vec<FileChanges>,
     files_at: BTreeMap<String, usize>,
+    /// Every decision the session's replies stated, in the order they were
+    /// stated.
+    decisions: Vec<DecisionRecord>,
     /// The latest test run, which replaces the one before it: an earlier
     /// run's result says nothing about the code as it is now.
     test_run: Option<TestRunRecord>,
+    /// Every test run the session made, by how each came out.
+    test_runs: TestRuns,
     agents_spawned: u64,
     agents_completed: u64,
     agents_failed: u64,
@@ -593,10 +671,10 @@ impl SessionState {
     /// the end it repeats, and a call's end or an agent's exit once that
     /// call or agent has ended.
     pub fn apply(&mut self, event: &Event) {
-        // A prompt that reached no backend is not something that happened in
-        // the session's conversation, so an end said again after it is still
-        // said again.
-        if let Event::PromptNotSent { .. } = event {
+        // A prompt that reached no backend, and the operator looking, are not
+        // things that happened in the session's conversation, so an end said
+        // again after either is still said again.
+        if let Event::PromptNotSent { .. } | Event::Looked = event {
             return;
         }
         self.fold(event);
@@ -667,12 +745,14 @@ impl SessionState {
                 bump(&mut self.assistant_messages);
                 self.pending_assistant.clear();
                 self.last_assistant = Some(text.clone());
+                self.decided(text, None);
             }
             Event::AssistantMessage {
                 text,
                 agent: Some(agent),
             } => {
                 self.agents_said.insert(agent.clone(), text.clone());
+                self.decided(text, Some(agent));
             }
 
             Event::ToolCallStart {
@@ -757,16 +837,27 @@ impl SessionState {
             // The last report replaces the one before it: a window is a level,
             // not a quantity, so summing two reports of it would be nonsense.
             // A report that names no window says only whether the plan is
-            // spending beyond its fee; the levels before it still stand.
+            // spending beyond its fee; the levels before it still stand. One
+            // that does not say whether extra is allowed leaves what was last
+            // said: silence is not a change of mind.
             Event::UsageWindows(windows) => {
-                self.usage_windows = match (windows.is_empty(), self.usage_windows) {
-                    (true, Some(before)) => Some(UsageWindows {
+                let measured = !windows.is_empty();
+                let said = match (windows.overage, self.usage_windows) {
+                    (crate::event::Overage::Unreported, Some(before)) => before.overage,
+                    (overage, _) => overage,
+                };
+                let windows = match (windows.is_empty(), self.usage_windows) {
+                    (true, Some(before)) => UsageWindows {
                         using_overage: windows.using_overage,
                         ..before
-                    }),
-                    _ => Some(*windows),
+                    },
+                    _ => *windows,
                 };
-                self.window_reported |= !windows.is_empty();
+                self.usage_windows = Some(UsageWindows {
+                    overage: said,
+                    ..windows
+                });
+                self.window_reported |= measured;
             }
 
             // The last report stands for what the session is billed from here
@@ -837,12 +928,9 @@ impl SessionState {
                 failures,
                 ..
             } => {
-                self.test_run = Some(TestRunRecord::new(
-                    *counts,
-                    *exit_code,
-                    *failed,
-                    failures.clone(),
-                ));
+                let run = TestRunRecord::new(*counts, *exit_code, *failed, failures.clone());
+                self.test_runs.count(&run);
+                self.test_run = Some(run);
             }
 
             // A spawn said again for an agent already running is the same
@@ -908,6 +996,8 @@ impl SessionState {
             // A notice changes nothing that is counted: it explains the
             // numbers around it, and the transcript is where it is read.
             Event::Notice { .. } => {}
+            // Passed over in `apply`, before the fold.
+            Event::Looked => {}
             // Kept apart rather than added to the totals: where the backend
             // bills what its messages did not report, the turn's bill already
             // carries it, and adding it here would count it twice.
@@ -1031,6 +1121,19 @@ impl SessionState {
     /// Each is counted as started in the conversation it goes on in, so that
     /// its end is an end and not one without a start. The turn that typed the
     /// clear is still open, and its end is the old conversation's.
+    /// Keeps each decision `reply` states, under the agent that stated it.
+    fn decided(&mut self, reply: &str, agent: Option<&AgentId>) {
+        self.decisions
+            .extend(
+                decision::decisions(reply)
+                    .into_iter()
+                    .map(|summary| DecisionRecord {
+                        summary,
+                        agent: agent.cloned(),
+                    }),
+            );
+    }
+
     fn started_over(&mut self) -> Self {
         let running_agents = std::mem::take(&mut self.running_agents);
         let pending_permissions = std::mem::take(&mut self.pending_permissions);
@@ -1361,10 +1464,21 @@ impl SessionState {
             .or_else(|| self.first_prompt.as_deref().and_then(words))
     }
 
+    /// Every decision the session's replies stated, oldest first: the
+    /// agent's account of what it chose, never a fact the fold checked.
+    pub fn decisions(&self) -> &[DecisionRecord] {
+        &self.decisions
+    }
+
     /// The latest test run the session made. `None` where it has made none,
     /// which is not a run of no tests.
     pub fn test_run(&self) -> Option<&TestRunRecord> {
         self.test_run.as_ref()
+    }
+
+    /// Every test run the session made, by how each came out.
+    pub fn test_runs(&self) -> &TestRuns {
+        &self.test_runs
     }
 
     /// How many sub-agents were spawned.
@@ -1485,11 +1599,11 @@ mod tests {
             output,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: cost,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -1501,7 +1615,7 @@ mod tests {
         let Event::Usage(mut usage) = on_model(model, 0, 0, Some(cost)) else {
             unreachable!("on_model builds a usage event")
         };
-        usage.settles_model = true;
+        usage.settles_model = Some(true);
         Event::Usage(usage)
     }
 
@@ -1547,6 +1661,42 @@ mod tests {
         assert_eq!(totals.records_unsettled, 0);
         assert!(totals.cost_fully_reported());
         assert!((totals.reported_cost_usd - 0.75).abs() < f64::EPSILON);
+    }
+
+    /// A record that reported a cost before the bridge said what it settles:
+    /// what every stored record of a session recorded before then is.
+    fn unsaid(model: &str, cost: f64) -> Event {
+        let Event::Usage(mut usage) = on_model(model, 0, 0, Some(cost)) else {
+            unreachable!("on_model builds a usage event")
+        };
+        usage.settles_model = None;
+        Event::Usage(usage)
+    }
+
+    #[test]
+    fn a_floor_left_by_records_that_never_said_what_they_settle_is_marked_so() {
+        let state = SessionState::replay(&[usage(100, 10, None), unsaid("opus-5", 0.75)]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 1);
+        assert!(totals.settlement_unrecorded());
+    }
+
+    #[test]
+    fn a_floor_under_records_that_said_they_settle_nothing_is_not_marked() {
+        let state = SessionState::replay(&[usage(100, 10, None), usage(0, 0, Some(0.75))]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 1);
+        assert!(!totals.settlement_unrecorded());
+    }
+
+    #[test]
+    fn a_whole_bill_is_not_marked_however_old_its_records_are() {
+        let state = SessionState::replay(&[unsaid("opus-5", 0.75)]);
+
+        assert!(state.totals().cost_fully_reported());
+        assert!(!state.totals().settlement_unrecorded());
     }
 
     #[test]
@@ -1771,11 +1921,11 @@ mod tests {
                 output: 300,
                 cache_read: 18_000,
                 cache_write: 900,
-                cache_write_1h: 400,
+                cache_write_1h: Some(400),
                 reasoning: 120,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(0.04),
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }),
             on_model("haiku-4-5", 300, 30, None),
@@ -1845,18 +1995,27 @@ mod tests {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             })
         };
-        let state = SessionState::replay(&[write(100, 100), write(50, 0), write(10, 4)]);
+        let state = SessionState::replay(&[
+            write(100, Some(100)),
+            write(50, Some(0)),
+            write(10, Some(4)),
+            write(30, None),
+        ]);
 
         let totals = state.totals();
-        assert_eq!(totals.cache_write, 160);
+        assert_eq!(totals.cache_write, 190);
         assert_eq!(totals.cache_write_1h, 104);
         assert_eq!(
+            totals.cache_write_unsplit, 30,
+            "the writes no record split are neither lifetime"
+        );
+        assert_eq!(
             totals.tokens(),
-            160,
+            190,
             "the one-hour writes are already in the write total"
         );
     }
@@ -1882,6 +2041,56 @@ mod tests {
             Some("Reading fetch.ts and its callers.")
         );
         assert_eq!(state.assistant_messages(), 1);
+    }
+
+    #[test]
+    fn a_decision_a_reply_states_is_kept_with_the_agent_that_stated_it() {
+        let mut state = SessionState::new();
+        state.apply(&Event::AssistantMessage {
+            text: "Done.\nDECISION: left the exporter alone; out of scope.".to_owned(),
+            agent: None,
+        });
+        state.apply(&Event::AssistantMessage {
+            text: "DECISION: read only the parser".to_owned(),
+            agent: Some("a1".into()),
+        });
+        state.apply(&Event::AssistantDelta {
+            text: "DECISION: still streaming".to_owned(),
+        });
+
+        let kept: Vec<_> = state
+            .decisions()
+            .iter()
+            .map(|d| (d.summary.as_str(), d.agent.as_ref().map(AgentId::as_str)))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("left the exporter alone; out of scope.", None),
+                ("read only the parser", Some("a1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clear_starts_the_decisions_over_and_a_compaction_does_not() {
+        let mut state = SessionState::new();
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
+        state.apply(&said("DECISION: before"));
+        state.apply(&Event::CompactionStarted);
+        state.apply(&Event::CompactionEnded);
+        assert_eq!(state.decisions().len(), 1, "a compaction keeps them");
+
+        state.apply(&Event::Cleared);
+        assert!(
+            state.decisions().is_empty(),
+            "a clear is a new conversation"
+        );
+        state.apply(&said("DECISION: after"));
+        assert_eq!(state.decisions()[0].summary, "after");
     }
 
     #[test]
@@ -1944,6 +2153,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         state.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -1956,6 +2166,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
 
         let tools = state.tools();
@@ -2110,6 +2321,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         }
     }
 
@@ -2391,6 +2603,7 @@ mod tests {
             exit_code,
             error,
             command,
+            untrimmed: None,
         }
     }
 
@@ -2551,6 +2764,7 @@ mod tests {
             exit_code: Some(0),
             error: None,
             command: None,
+            untrimmed: None,
         });
         assert!(state.in_flight_tools().is_empty());
         assert_eq!(state.tools().unmatched_ends, 0);
@@ -2848,6 +3062,27 @@ mod tests {
     }
 
     #[test]
+    fn every_test_run_is_counted_as_passed_failed_or_unread() {
+        assert_eq!(SessionState::replay(&[]).test_runs(), &TestRuns::default());
+
+        let counted = |failed| TestCounts {
+            passed: 3,
+            failed,
+            ignored: 0,
+            suites: 1,
+        };
+        let state = SessionState::replay(&[
+            tested(Some(counted(1)), Some(101)),
+            tested(Some(counted(0)), Some(0)),
+            tested(Some(counted(0)), Some(0)),
+            tested(None, Some(0)),
+        ]);
+        let runs = state.test_runs();
+        assert_eq!((runs.passed, runs.failed, runs.unread), (2, 1, 1));
+        assert_eq!(runs.all(), 4);
+    }
+
+    #[test]
     fn a_run_whose_counts_say_it_failed_failed_whatever_the_backend_said() {
         let failing = TestCounts {
             passed: 3,
@@ -3044,6 +3279,7 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: None,
+                untrimmed: None,
             },
             changed(path, Some(1), Some(1)),
         ]
@@ -3133,12 +3369,14 @@ mod tests {
             five_hour: level,
             seven_day: None,
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         }));
 
         state.apply(&Event::UsageWindows(UsageWindows {
             five_hour: None,
             seven_day: None,
             using_overage: true,
+            overage: crate::event::Overage::Unreported,
         }));
 
         assert_eq!(
@@ -3147,7 +3385,36 @@ mod tests {
                 five_hour: level,
                 seven_day: None,
                 using_overage: true,
+                overage: crate::event::Overage::Unreported,
             })
+        );
+    }
+
+    /// Whether extra usage is allowed is a standing answer: a later report that
+    /// does not say leaves it, and one that does replaces it.
+    #[test]
+    fn what_was_said_about_extra_usage_stands_until_the_backend_says_otherwise() {
+        use crate::event::{Overage, OverageRefusal, UsageWindows};
+        let report = |overage| {
+            Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: false,
+                overage,
+            })
+        };
+        let mut state = SessionState::new();
+        state.apply(&report(Overage::Refused(OverageRefusal::OutOfCredits)));
+        state.apply(&report(Overage::Unreported));
+        assert_eq!(
+            state.usage_windows().map(|windows| windows.overage),
+            Some(Overage::Refused(OverageRefusal::OutOfCredits))
+        );
+
+        state.apply(&report(Overage::Allowed));
+        assert_eq!(
+            state.usage_windows().map(|windows| windows.overage),
+            Some(Overage::Allowed)
         );
     }
 
@@ -3173,6 +3440,7 @@ mod tests {
                     resets_at: Some(1_790_118_000),
                 }),
                 using_overage: false,
+                overage: crate::event::Overage::Unreported,
             }));
         }
 
@@ -3344,6 +3612,7 @@ mod tests {
                 five_hour: Some(window),
                 seven_day: None,
                 using_overage: false,
+                overage: crate::event::Overage::Unreported,
             }),
             Event::ModeSelected { mode: Mode::Plan },
             Event::Cleared,
@@ -3586,11 +3855,11 @@ mod tests {
             output,
             cache_read,
             cache_write,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -3603,6 +3872,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         })
     }
 
@@ -3804,6 +4074,7 @@ mod tests {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: None,
         };
         let differs = |per_message, reported| Event::TurnTotalDiffers {
             per_message,
@@ -3939,6 +4210,7 @@ mod tests {
                 five_hour: None,
                 seven_day: None,
                 using_overage: true,
+                overage: crate::event::Overage::Unreported,
             }),
             Event::TurnEnded,
         ]);
@@ -4008,6 +4280,7 @@ mod tests {
                     resets_at: RESET,
                 }),
                 using_overage: false,
+                overage: crate::event::Overage::Unreported,
             }),
             Event::TurnEnded,
         ]);
@@ -4225,11 +4498,11 @@ mod tests {
                 output: 1,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(1e308),
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             })
         };
@@ -4339,6 +4612,7 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: command.map(str::to_owned),
+                untrimmed: None,
             },
         ]
     }

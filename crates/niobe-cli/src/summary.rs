@@ -41,17 +41,40 @@ fn tokens(session: &SessionState) -> String {
         return "—".to_owned();
     }
     let mut line = format!(
-        "{} — {} in · {} out · {} cache read · {} cache write",
+        "{} — {} in · {} out · {} cache read · {}",
         grouped(t.tokens()),
         grouped(t.input),
         grouped(t.output),
         grouped(t.cache_read),
-        grouped(t.cache_write)
+        cache_write(t.cache_write, t.cache_write_1h, t.cache_write_unsplit)
     );
     if t.reasoning > 0 {
         line.push_str(&format!(" · {} reasoning", grouped(t.reasoning)));
     }
     line
+}
+
+/// A cache-write total and how long its tokens were bought for, which every
+/// printed total says the same way.
+///
+/// The hour is billed at a dearer rate than five minutes, so a total alone
+/// cannot be read against a bill; and writes no record split are said to be
+/// unsplit, rather than read as five-minute ones nobody said they were.
+pub(crate) fn cache_write(total: u64, one_hour: u64, unsplit: u64) -> String {
+    let written = format!("{} cache write", grouped(total));
+    if total == 0 {
+        return written;
+    }
+    let split = total.saturating_sub(unsplit);
+    match (split, unsplit) {
+        (_, 0) => format!("{written} ({} for an hour)", grouped(one_hour)),
+        (0, _) => format!("{written} (lifetime not reported)"),
+        (_, _) => format!(
+            "{written} ({} for an hour, {} lifetime not reported)",
+            grouped(one_hour),
+            grouped(unsplit)
+        ),
+    }
 }
 
 /// The pane's label, and the reason a figure is an estimate, a floor or
@@ -75,10 +98,18 @@ fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> Strin
     if t.records == 0 || t.cost_fully_reported() {
         return label;
     }
-    format!(
+    let owed = format!(
         "{label} — {} of {} usage records no reported cost covers",
         grouped(t.records_unsettled),
         grouped(t.records)
+    );
+    if !t.settlement_unrecorded() {
+        return owed;
+    }
+    format!(
+        "{owed} ({}: its records do not say what a reported cost settles, so some \
+         of them were quite possibly billed)",
+        niobe_tui::OLDER_RECORDING
     )
 }
 
@@ -166,7 +197,7 @@ fn tool_calls(session: &SessionState) -> String {
 }
 
 /// A count with thousands separated, so a token total reads at a glance.
-fn grouped(n: u64) -> String {
+pub(crate) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, digit) in digits.chars().enumerate() {
@@ -191,11 +222,11 @@ mod tests {
             output: 300,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -257,6 +288,21 @@ mod tests {
         assert_eq!(
             summary[0],
             "tokens      3,000 — 2,400 in · 600 out · 0 cache read · 0 cache write"
+        );
+    }
+
+    #[test]
+    fn a_floor_an_older_recording_left_says_it_is_one() {
+        let mut turn = usage(Some(0.25));
+        if let Event::Usage(usage) = &mut turn {
+            usage.settles_model = None;
+        }
+        let summary = lines(&folded(&[usage(None), turn]));
+        assert_eq!(
+            summary[1],
+            "cost        ≥$0.25 — 1 of 2 usage records no reported cost covers (older \
+             recording: its records do not say what a reported cost settles, so some of them \
+             were quite possibly billed)"
         );
     }
 
@@ -335,6 +381,28 @@ mod tests {
 
     fn billed(billing: Billing) -> Event {
         Event::Billing { billing }
+    }
+
+    #[test]
+    fn a_cache_write_total_says_how_much_of_it_was_bought_for_an_hour() {
+        assert_eq!(cache_write(0, 0, 0), "0 cache write");
+        assert_eq!(
+            cache_write(82_887, 40_054, 0),
+            "82,887 cache write (40,054 for an hour)"
+        );
+        assert_eq!(cache_write(50, 0, 0), "50 cache write (0 for an hour)");
+    }
+
+    #[test]
+    fn cache_writes_no_record_split_are_said_to_be_unsplit_not_five_minute() {
+        assert_eq!(
+            cache_write(300, 0, 300),
+            "300 cache write (lifetime not reported)"
+        );
+        assert_eq!(
+            cache_write(1_300, 400, 300),
+            "1,300 cache write (400 for an hour, 300 lifetime not reported)"
+        );
     }
 
     #[test]

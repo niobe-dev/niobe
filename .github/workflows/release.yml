@@ -38,11 +38,13 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     env:
       RUSTFLAGS: -D warnings
+      # The same compiler as CI's gate, for the same reason.
+      RUSTUP_TOOLCHAIN: "1.99.1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install the toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
 
       - name: The gate
         run: cargo xtask ci

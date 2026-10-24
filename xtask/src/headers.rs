@@ -44,25 +44,32 @@ pub enum Rule {
 pub fn rule_for(path: &str) -> Option<Rule> {
     let name = path.rsplit('/').next().unwrap_or(path);
 
-    // A snapshot is a picture compared cell for cell, and a recorded output
+    // A snapshot is a picture compared cell for cell — as text, or as the SVG
+    // the README shows — and a recorded output
     // under `fixtures/` is read against the byte count recorded beside it. A
     // JSON or JSON Lines file under `fixtures/` is one a CLI wrote, and JSON
-    // has no comments.
+    // has no comments, which is also why a published JSON Schema carries
+    // none.
     let is_fixture = path.contains("/tests/fixtures/");
-    let is_recorded_text =
-        (path.contains("/tests/snapshots/") || is_fixture) && name.ends_with(".txt");
+    let is_recorded_text = (path.contains("/tests/snapshots/") || is_fixture)
+        && (name.ends_with(".txt") || name.ends_with(".svg"));
     let is_recorded_json = is_fixture && (name.ends_with(".json") || name.ends_with(".jsonl"));
-    if (path == name && EXEMPT_AT_ROOT.contains(&name)) || is_recorded_text || is_recorded_json {
+    let is_schema = path.starts_with("schema/") && name.ends_with(".schema.json");
+    if (path == name && EXEMPT_AT_ROOT.contains(&name))
+        || is_recorded_text
+        || is_recorded_json
+        || is_schema
+    {
         return Some(Rule::Exempt);
     }
-    if name == ".gitignore" {
+    if name == ".gitignore" || name == ".gitattributes" {
         return Some(Rule::LineComment("# "));
     }
 
     let is_agent_definition = path.starts_with(".claude/");
     match Path::new(name).extension().and_then(|e| e.to_str()) {
         Some("rs") => Some(Rule::LineComment("// ")),
-        Some("toml" | "yml" | "yaml") => Some(Rule::LineComment("# ")),
+        Some("toml" | "yml" | "yaml" | "py") => Some(Rule::LineComment("# ")),
         Some("md") if is_agent_definition => Some(Rule::Frontmatter),
         Some("md") => Some(Rule::HtmlComment),
         Some("sh") => Some(Rule::Script),
@@ -135,6 +142,11 @@ mod tests {
             Some(Rule::LineComment("# "))
         );
         assert_eq!(rule_for(".gitignore"), Some(Rule::LineComment("# ")));
+        assert_eq!(rule_for(".gitattributes"), Some(Rule::LineComment("# ")));
+        assert_eq!(
+            rule_for("bench/01-last-n/files/items.py"),
+            Some(Rule::LineComment("# "))
+        );
         assert_eq!(rule_for("AGENTS.md"), Some(Rule::HtmlComment));
     }
 
@@ -151,6 +163,12 @@ mod tests {
             rule_for("crates/niobe-tui/tests/snapshots/empty-80x24.txt"),
             Some(Rule::Exempt)
         );
+        assert_eq!(
+            rule_for("crates/niobe-tui/tests/snapshots/cyber-120x30.svg"),
+            Some(Rule::Exempt)
+        );
+        assert_eq!(rule_for("schema/cost.schema.json"), Some(Rule::Exempt));
+        assert_eq!(rule_for("crates/niobe-cli/src/cost.schema.json"), None);
         assert_eq!(
             rule_for("crates/niobe-bridge-claude/tests/fixtures/tool-results/run.txt"),
             Some(Rule::Exempt)

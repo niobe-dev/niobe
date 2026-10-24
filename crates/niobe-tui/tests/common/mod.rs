@@ -49,6 +49,7 @@ fn mcp_call(name: &str, bytes: u64, outcome: ToolOutcome) -> Event {
         exit_code: None,
         error: None,
         command: None,
+        untrimmed: None,
     }
 }
 
@@ -76,6 +77,7 @@ fn read_ended(id: &str, path: &str, bytes: u64) -> Event {
         exit_code: None,
         error: None,
         command: None,
+        untrimmed: None,
     }
 }
 
@@ -117,11 +119,11 @@ fn session_events() -> Vec<Event> {
             output: 180,
             cache_read: 18_400,
             cache_write: 900,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.04),
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }),
         // The prompt that request sent: its input, reads and writes.
@@ -145,6 +147,7 @@ fn session_events() -> Vec<Event> {
                 resets_at: Some(READ_AT + 4 * 86_400 + 79 * 60),
             }),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }),
         Event::AgentSpawn {
             id: "a1".into(),
@@ -221,6 +224,7 @@ fn session_events() -> Vec<Event> {
                 "404 object_not_found — the page is not shared with the integration".to_owned(),
             ),
             command: None,
+            untrimmed: None,
         },
         Event::AssistantMessage {
             text: "Caching the etag beside the body so a 304 can be answered from the LRU."
@@ -259,6 +263,7 @@ fn session_events() -> Vec<Event> {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         },
         // Two hunks, as the backend reports a change: what the transcript
         // draws under the call, numbered on each side, with the lines between
@@ -340,17 +345,18 @@ fn session_events() -> Vec<Event> {
             exit_code: Some(1),
             error: Some("1 failing: fetch returns the cached body on a 304".to_owned()),
             command: Some("npm test -- fetch".to_owned()),
+            untrimmed: None,
         },
         Event::Usage(Usage {
             input: 3_400,
             output: 620,
             cache_read: 22_000,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 1_200,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }),
         // The later, larger prompt is the one the pane shows: 25,400 of
@@ -456,6 +462,7 @@ fn read_repository() -> Repo {
             .map(|file| file.path)
             .filter(|path| !path.contains(" => "))
             .collect(),
+        began: None,
     }
 }
 
@@ -520,6 +527,7 @@ pub fn session_with_test_records(runs: &[TestRunRecord]) -> App {
                 exit_code: *exit_code,
                 error: None,
                 command: None,
+                untrimmed: None,
             },
             Event::TestRun {
                 id: id.as_str().into(),
@@ -604,11 +612,11 @@ pub fn metered_session() -> App {
         output: 200,
         cache_read: 0,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model: "haiku-4-5".to_owned(),
         cost_usd: None,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     }));
     let mut app = session_read_at_a_fixed_moment(&events);
@@ -660,6 +668,7 @@ pub fn session_with_a_long_write() -> App {
         exit_code: None,
         error: None,
         command: None,
+        untrimmed: None,
     });
     let written: String = (1..=30)
         .map(|n| format!("export const etag{n:02} = \"W/\\\"{n:04}\\\"\";\n"))
@@ -743,6 +752,7 @@ pub fn session_with_two_agents_at_work() -> App {
         exit_code: None,
         error: None,
         command: None,
+        untrimmed: None,
     };
     let mut events = vec![Event::UserMessage {
         text: "Review fetch.py and cache.py in parallel.".to_owned(),
@@ -804,6 +814,7 @@ pub fn session_with_finished_turns() -> App {
             }),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         })
     };
     let spent = |input, output, cache_read, cache_write| {
@@ -812,11 +823,11 @@ pub fn session_with_finished_turns() -> App {
             output,
             cache_read,
             cache_write,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     };
@@ -890,6 +901,7 @@ pub fn session_whose_turn_total_differs() -> App {
         output,
         cache_read,
         cache_write,
+        cache_write_1h: None,
     };
     let events = [
         (
@@ -944,11 +956,11 @@ pub fn session_whose_turn_total_differs() -> App {
                 output: 9_167,
                 cache_read: 234_375,
                 cache_write: 4_685,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }),
         ),
@@ -971,11 +983,11 @@ pub fn session_whose_turn_total_differs() -> App {
                 output: 8,
                 cache_read: 118_070,
                 cache_write: 2_811,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(0.31),
-                settles_model: true,
+                settles_model: Some(true),
                 fast: false,
             }),
         ),
@@ -1145,4 +1157,160 @@ pub fn at_work(app: App, elapsed: Duration) -> App {
     app.tick(started, None);
     app.tick(started + elapsed, None);
     app
+}
+
+/// The width of a cell in a picture, in its own units.
+const CELL_WIDTH: u16 = 9;
+
+/// The height of a cell in a picture: about twice its width, as a terminal
+/// font's cell is.
+const CELL_HEIGHT: u16 = 18;
+
+/// What a cell with no colour of its own is drawn in: the terminal's own
+/// foreground and background, which a picture has to pick for it.
+const PICTURE_FG: &str = "#d0d0d0";
+const PICTURE_BG: &str = "#121212";
+
+/// The sixteen ANSI names, in the values xterm gives them. A terminal draws
+/// them in its own scheme, so a picture of a theme that uses them is one
+/// terminal's reading of it, and these are the values that reading is in.
+fn ansi(colour: Color) -> Option<&'static str> {
+    Some(match colour {
+        Color::Black => "#000000",
+        Color::Red => "#cd0000",
+        Color::Green => "#00cd00",
+        Color::Yellow => "#cdcd00",
+        Color::Blue => "#4682ee",
+        Color::Magenta => "#cd00cd",
+        Color::Cyan => "#00cdcd",
+        Color::Gray => "#e5e5e5",
+        Color::DarkGray => "#7f7f7f",
+        Color::LightRed => "#ff0000",
+        Color::LightGreen => "#00ff00",
+        Color::LightYellow => "#ffff00",
+        Color::LightBlue => "#5c5cff",
+        Color::LightMagenta => "#ff00ff",
+        Color::LightCyan => "#00ffff",
+        Color::White => "#ffffff",
+        _ => return None,
+    })
+}
+
+/// A colour as a picture writes it, or `None` for the terminal's own.
+fn hex(colour: Option<Color>) -> Option<String> {
+    match colour? {
+        Color::Reset => None,
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        named => ansi(named).map(str::to_owned),
+    }
+}
+
+/// A cell's text escaped for SVG.
+fn escaped(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// How one run of cells is drawn: its colours, after reversal, and its weight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Look {
+    fg: String,
+    bg: Option<String>,
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underlined: bool,
+}
+
+fn look(style: Style) -> Look {
+    use ratatui::style::Modifier;
+    let fg = hex(style.fg);
+    let bg = hex(style.bg);
+    let (fg, bg) = match style.add_modifier.contains(Modifier::REVERSED) {
+        true => (
+            bg.or_else(|| Some(PICTURE_BG.to_owned())),
+            fg.or_else(|| Some(PICTURE_FG.to_owned())),
+        ),
+        false => (fg, bg),
+    };
+    Look {
+        fg: fg.unwrap_or_else(|| PICTURE_FG.to_owned()),
+        bg,
+        bold: style.add_modifier.contains(Modifier::BOLD),
+        dim: style.add_modifier.contains(Modifier::DIM),
+        italic: style.add_modifier.contains(Modifier::ITALIC),
+        underlined: style.add_modifier.contains(Modifier::UNDERLINED),
+    }
+}
+
+/// Draws one frame and returns it as an SVG picture: every cell's character
+/// in its colours, the sixteen names in xterm's values.
+///
+/// For the README, and drawn by the snapshot harness so that the pictures a
+/// stranger is shown are the shell as it draws today, not a screenshot that
+/// drifted from it.
+pub fn svg(app: &mut App, width: u16, height: u16) -> String {
+    let terminal = drawn(app, width, height);
+    let buffer = terminal.backend().buffer();
+    let (w, h) = (width * CELL_WIDTH, height * CELL_HEIGHT);
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" \
+         viewBox=\"0 0 {w} {h}\" font-family=\"Menlo, 'DejaVu Sans Mono', Consolas, monospace\" \
+         font-size=\"15\">\n<rect width=\"{w}\" height=\"{h}\" fill=\"{PICTURE_BG}\"/>\n"
+    );
+    for y in 0..height {
+        let mut x = 0;
+        while x < width {
+            let start = x;
+            let first = look(buffer.cell((x, y)).map_or_else(Style::new, Cell::style));
+            let mut text = String::new();
+            while x < width {
+                let cell = buffer.cell((x, y));
+                let style = cell.map_or_else(Style::new, Cell::style);
+                if look(style) != first {
+                    break;
+                }
+                text.push_str(cell.map_or(" ", Cell::symbol));
+                x += 1;
+            }
+            let cells = x - start;
+            let (left, top) = (start * CELL_WIDTH, y * CELL_HEIGHT);
+            if let Some(bg) = &first.bg {
+                out.push_str(&format!(
+                    "<rect x=\"{left}\" y=\"{top}\" width=\"{}\" height=\"{CELL_HEIGHT}\" fill=\"{bg}\"/>\n",
+                    cells * CELL_WIDTH
+                ));
+            }
+            if text.trim().is_empty() {
+                continue;
+            }
+            let mut attributes = format!("fill=\"{}\"", first.fg);
+            for (on, attribute) in [
+                (first.bold, " font-weight=\"bold\""),
+                (first.dim, " opacity=\"0.6\""),
+                (first.italic, " font-style=\"italic\""),
+                (first.underlined, " text-decoration=\"underline\""),
+            ] {
+                if on {
+                    attributes.push_str(attribute);
+                }
+            }
+            out.push_str(&format!(
+                "<text x=\"{left}\" y=\"{}\" textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\" \
+                 xml:space=\"preserve\" {attributes}>{}</text>\n",
+                top + CELL_HEIGHT - 5,
+                cells * CELL_WIDTH,
+                escaped(&text)
+            ));
+        }
+    }
+    out.push_str("</svg>\n");
+    out
 }

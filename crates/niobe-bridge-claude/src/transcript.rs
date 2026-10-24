@@ -1279,6 +1279,7 @@ impl Fold {
         }
         // The same record carries the results of the calls the turn before it
         // made, which the translator reads and this does not.
+        let tool_result_meta = record.result_meta();
         self.fold(wire::Message::User(wire::Envelope {
             message: wire::ApiMessage {
                 content: record.message.content,
@@ -1288,9 +1289,10 @@ impl Fold {
             },
             parent_tool_use_id: agent.map(str::to_owned),
             tool_use_result: record.tool_use_result,
-            // The CLI keeps no note of why a call did not run in its own
-            // transcripts; an interrupted call reads as a failed one there.
-            tool_result_meta: Vec::new(),
+            // The CLI keeps no note of an interrupt in its own transcripts,
+            // so an interrupted call reads as a failed one there; a refusal it
+            // notes, from 2.1.309.
+            tool_result_meta,
             request_id: None,
             aborted: false,
             error: None,
@@ -1318,10 +1320,13 @@ impl Fold {
 
     /// The CLI's word, in its own markup, that background work stopped. What
     /// it says about a sub-agent is how it ended; its `<summary>` is the
-    /// CLI's wording and not the agent's, and is not read.
+    /// CLI's wording and not the agent's, and is read only for the status a
+    /// background command exited with.
     fn notified(&mut self, text: &str) {
         if let Some(id) = tag(text, "tool-use-id") {
-            let mut ended = self.translator.task_stopped(id, tag(text, "status"));
+            let mut ended =
+                self.translator
+                    .task_stopped(id, tag(text, "status"), tag(text, "summary"));
             self.out.append(&mut ended);
         }
     }
@@ -1640,9 +1645,40 @@ struct User {
     /// the live stream's `tool_use_result`, under the transcript's spelling.
     #[serde(rename = "toolUseResult", default)]
     tool_use_result: Option<serde_json::Value>,
+    /// How the CLI settled whether the call whose result this record carries
+    /// could run, kept in transcripts from 2.1.309: what the live stream says
+    /// in `tool_result_meta`, and the only note a transcript keeps of a call
+    /// refused over the control channel.
+    #[serde(rename = "permissionDecision", default)]
+    permission_decision: Option<wire::PermissionDecision>,
 }
 
 impl User {
+    /// The live stream's note beside this record's result, made of what the
+    /// transcript keeps of it. Only for a record carrying exactly one result:
+    /// the decision is of one call, and no key on the record says which of
+    /// several it was.
+    fn result_meta(&self) -> Vec<wire::ResultMeta> {
+        let Some(settled) = &self.permission_decision else {
+            return Vec::new();
+        };
+        let Some(wire::Content::Blocks(blocks)) = &self.message.content else {
+            return Vec::new();
+        };
+        let mut results = blocks.iter().filter_map(|block| match block {
+            wire::Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            wire::Block::Text { .. } | wire::Block::ToolUse { .. } | wire::Block::Other => None,
+        });
+        match (results.next(), results.next()) {
+            (Some(id), None) => vec![wire::ResultMeta {
+                id: Some(id),
+                non_execution_kind: None,
+                permission_decision: Some(settled.clone()),
+            }],
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether this is the turn the CLI writes when background work stops,
     /// which is the CLI speaking and not the operator.
     fn notifies(&self) -> bool {
@@ -2208,6 +2244,56 @@ mod tests {
         );
 
         assert_eq!(opening(&path).first_prompt, None);
+    }
+
+    /// How each call `lines` ended, in order.
+    fn outcomes(lines: &[&str]) -> Vec<niobe_core::event::ToolOutcome> {
+        folded(lines)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::ToolCallEnd { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SHELL_CALL: &str = r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_t","name":"Bash","input":{"command":"touch a.txt"}}]}}"#;
+
+    /// The result of [`SHELL_CALL`] as Claude Code 2.1.309 writes it, with
+    /// the `permissionDecision` it records beside it.
+    fn shell_result(content: &str, decision: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_t","content":"{content}","is_error":true}}]}},"toolUseResult":"Error: {content}","permissionDecision":{decision}}}"#
+        )
+    }
+
+    #[test]
+    fn a_read_back_call_the_cli_recorded_as_rejected_is_a_refusal() {
+        for decision in [
+            r#"{"decision":"reject","source":"user_reject","reasonCode":"unknown"}"#,
+            r#"{"decision":"reject","source":"hook","reasonType":"hook","reasonCode":"hook:PreToolUse"}"#,
+        ] {
+            let result = shell_result("The operator denied this call in Niobe.", decision);
+
+            assert_eq!(
+                outcomes(&[SHELL_CALL, &result]),
+                [niobe_core::event::ToolOutcome::Denied],
+                "{decision}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_back_call_that_was_allowed_and_broke_is_a_failure() {
+        let result = shell_result(
+            "Exit code 1",
+            r#"{"decision":"accept","source":"config","reasonType":"mode"}"#,
+        );
+
+        assert_eq!(
+            outcomes(&[SHELL_CALL, &result]),
+            [niobe_core::event::ToolOutcome::Failed]
+        );
     }
 
     /// Folds `lines` as the transcript of a session in `/repo`.
@@ -2779,11 +2865,11 @@ mod tests {
                 output: 40,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: None,
                 reasoning: 0,
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             })]
         );
@@ -2810,11 +2896,11 @@ mod tests {
                 output: 40,
                 cache_read: 900,
                 cache_write: 80,
-                cache_write_1h: 50,
+                cache_write_1h: Some(50),
                 reasoning: 0,
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             })]
         );

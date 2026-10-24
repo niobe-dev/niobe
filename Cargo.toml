@@ -74,9 +74,10 @@ rustix = "1.1"
 # clock rather than UTC. Reading `/etc/localtime` and applying the right
 # transition is the tzdb's job, not a thing to hand-roll: an offset guessed
 # from `TZ` is wrong across a DST boundary, and a clock that is an hour out is
-# worse than no clock. Only what that needs: no serde, and no bundled database
-# — the system's own is read, and where there is none the shell draws no time.
-jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+# worse than no clock. Only what that needs: no serde, and the system's own
+# database is read; a copy of it is bundled only where the system keeps none,
+# which is Windows, so the shell draws the time there too.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 
 # The assistant's replies are CommonMark, and the transcript draws them styled.
 # Only the parser: the default features add an HTML renderer and a command

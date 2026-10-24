@@ -46,11 +46,11 @@ fn request(input: u64, cache_read: u64, output: u64) -> Event {
         output,
         cache_read,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model: "claude-sonnet-4-5".to_owned(),
         cost_usd: None,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     })
 }
@@ -118,11 +118,11 @@ fn a_request_served_in_fast_mode_is_owed_for_at_the_fast_price() {
             output: 1_000,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: true,
         })
     };

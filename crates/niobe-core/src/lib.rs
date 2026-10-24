@@ -9,6 +9,8 @@
 //! fold every consumer derives from.
 
 pub mod attention;
+pub mod catch_up;
+pub mod decision;
 pub mod diff;
 pub mod event;
 pub mod image;
@@ -17,6 +19,7 @@ pub mod permission;
 pub mod proposal;
 pub mod session;
 pub mod test_run;
+pub mod trim;
 pub mod work;
 
 pub use attention::Attention;

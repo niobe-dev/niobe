@@ -25,6 +25,7 @@ use crate::images::{Images, NoImages};
 use crate::input::{Input, Wait};
 use crate::journal::{Journal, Unrecorded};
 use crate::memory::{Memory, NoMemory};
+use crate::overview::{NoOverview, Overview};
 use crate::rules::{Forgotten, Reach, Rules};
 use crate::shell::{NoShell, Shell};
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued};
@@ -112,6 +113,9 @@ pub struct Around<'a> {
     /// What reads the files the agent is given as its memory, for the Memory
     /// view, asked once each time the view opens and never waited on.
     pub memory: &'a mut dyn Memory,
+    /// What writes the project overview, asked once each time it opens and
+    /// never waited on.
+    pub overview: &'a mut dyn Overview,
 }
 
 // By hand, because not every one of them can say what it holds.
@@ -176,6 +180,7 @@ pub fn ask_trust(app: App, question: trust::Question) -> io::Result<Option<trust
             desktop: &mut NoDesktop,
             history: &mut NoHistory::default(),
             memory: &mut NoMemory::default(),
+            overview: &mut NoOverview::default(),
         },
     )?;
     Ok(match ended {
@@ -334,6 +339,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         desktop,
         history,
         memory,
+        overview,
     } = around;
     let mut ended = Ended::Quit;
     // Whether a program that ran on the terminal since the last draw left
@@ -355,6 +361,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
             fold_images(app, images);
             fold_history(app, journal, history);
             fold_memory(app, memory);
+            fold_overview(app, overview);
             // Whatever a read of the repository has finished with since the last
             // tick. Nothing is waited on here: an unfinished or failed read says
             // nothing and the pane keeps what it had.
@@ -368,6 +375,12 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // session has spent under the budget this run was given, not about
             // what a recording being read back spent under one it knew nothing of.
             app.settle_budget();
+            app.settle_spikes();
+            // A turn that began or ended wants the working tree read as of
+            // now, to name what it changed that no edit call reported.
+            if app.settle_tree(std::time::Instant::now()) {
+                watch.changed();
+            }
             run_commands(app, shell);
             fetch_images(app, images);
             let lent = hand_off(app, desktop, machine.suspend)?;
@@ -515,6 +528,17 @@ fn fold_history(app: &mut App, journal: &dyn Journal, history: &mut dyn History)
     }
 }
 
+/// Passes on the overview the dialog asked for, and hands it the page once
+/// written, as [`fold_memory`] does the agent's files.
+fn fold_overview(app: &mut App, overview: &mut dyn Overview) {
+    if app.take_overview_request() {
+        overview.load();
+    }
+    if let Some(page) = overview.drain() {
+        app.set_overview(&page);
+    }
+}
+
 /// Passes on a read of the agent's memory the Memory view asked for, and
 /// hands the view what one found. Neither waits: the view says it is reading
 /// until the files land, and the frames go on being drawn meanwhile.
@@ -614,11 +638,10 @@ fn send_produced(
         // produces is a record of what happened here, and the backend has no
         // use for what it did not ask for.
         match &event {
-            SessionEvent::UserMessage { text } => {
-                if let Err(error) = backend.send(text, &images) {
-                    app.not_sent(&error.to_string());
-                }
-            }
+            SessionEvent::UserMessage { text } => match backend.send(text, &images) {
+                Ok(()) => app.sent_to_backend(text),
+                Err(error) => app.not_sent(&error.to_string()),
+            },
             SessionEvent::PermissionResponse {
                 id,
                 decision,
@@ -646,6 +669,7 @@ fn send_produced(
             // variant fails to compile until someone decides whether it is.
             SessionEvent::SessionMeta(_)
             | SessionEvent::PromptNotSent { .. }
+            | SessionEvent::Looked
             | SessionEvent::Titled { .. }
             | SessionEvent::AssistantDelta { .. }
             | SessionEvent::AssistantMessage { .. }
@@ -693,6 +717,13 @@ fn send_produced(
     for server in app.take_mcp_reconnects() {
         if let Err(error) = backend.reconnect_mcp(&server) {
             app.not_reconnected(&server, &error.to_string());
+        }
+    }
+
+    // Asked for from the F6 list; what went back arrives through the drain.
+    for prompt in app.take_rewinds() {
+        if let Err(error) = backend.rewind(prompt) {
+            app.not_rewound(&error.to_string());
         }
     }
 

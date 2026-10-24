@@ -5,6 +5,7 @@
 //! price file laid over it.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use niobe_ledger::{Date, FILE_NAME, Origin, Price, PriceTable, Rate, Rates, Schedule};
 
@@ -33,38 +34,107 @@ impl Loaded {
     }
 }
 
-/// A price table read for one day, as the shell's price sheet.
+/// The days the tokens a sheet values were spent on.
+///
+/// What is owed is folded per model with no day on it — an event says what
+/// happened, not when — so the sheet is told the days the session's usage
+/// records were made on, and prices only what was priced the same on every
+/// one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spent {
+    /// From the first day to the last, both included, in UTC.
+    Between(Date, Date),
+    /// On days nothing recorded: a log with a record and no time on it.
+    Undated,
+}
+
+impl Spent {
+    /// One day: a session spending its tokens as it is watched.
+    pub fn on(day: Date) -> Self {
+        Self::Between(day, day)
+    }
+
+    /// The days of the usage records timed `times`, and of `until` too where
+    /// the session goes on spending — a resumed session carried on today.
+    ///
+    /// One record with no time makes the whole session undated: a span read
+    /// from the records that have one could leave out the day the others
+    /// were spent on.
+    pub fn of(times: impl IntoIterator<Item = Option<SystemTime>>, until: Option<Date>) -> Self {
+        let mut span: Option<(Date, Date)> = until.map(|day| (day, day));
+        for time in times {
+            let Some(time) = time else {
+                return Self::Undated;
+            };
+            let day = Date::of(time);
+            span = Some(match span {
+                Some((first, last)) => (first.min(day), last.max(day)),
+                None => (day, day),
+            });
+        }
+        match span {
+            Some((first, last)) => Self::Between(first, last),
+            // No usage at all, and none to come: nothing is owed, so nothing
+            // is priced on any day.
+            None => Self::Undated,
+        }
+    }
+}
+
+/// A price table read for the days a session spent its tokens on, as the
+/// shell's price sheet.
 ///
 /// This is the whole of what `niobe-tui` is told about prices: the crate graph
 /// keeps the ledger out of the shell, so the shell takes a
 /// [`niobe_tui::Prices`] and the binary supplies one.
 ///
-/// The day is fixed when the session opens rather than read per frame. A price
-/// that takes effect while a turn is in flight would otherwise move the
+/// A live session's day is fixed when it opens rather than read per frame. A
+/// price that takes effect while a turn is in flight would otherwise move the
 /// running figure under the operator mid-turn, and the turn's own result
 /// settles it against the backend's figure in any case.
 #[derive(Debug)]
 pub struct Sheet {
     table: PriceTable,
-    day: Date,
+    spent: Spent,
+    today: Date,
 }
 
 impl Sheet {
-    /// A sheet reading `table` at the prices in force on `day`.
-    pub fn new(table: PriceTable, day: Date) -> Self {
-        Self { table, day }
+    /// A sheet reading `table` at the prices in force on the days `spent`
+    /// names, and a model's context window as it is `today`.
+    pub fn new(table: PriceTable, spent: Spent, today: Date) -> Self {
+        Self {
+            table,
+            spent,
+            today,
+        }
     }
 }
 
 impl niobe_tui::Prices for Sheet {
     fn estimate(&self, usage: &niobe_core::event::Usage) -> Option<f64> {
+        // Undated tokens could have been spent on any day, the days before
+        // the table priced the model among them, so they stay unpriced and
+        // the total a floor, rather than valued at a day that was guessed.
+        let Spent::Between(first, last) = self.spent else {
+            return None;
+        };
+        // A schedule's prices only succeed one another, so the price on the
+        // first day being the one on the last means it was in force on every
+        // day between. Where it is not, the tokens were spent at rates the
+        // sheet cannot tell apart, and they stay unpriced too.
+        let opened = self.table.price(&usage.model, first)?;
+        let closed = self.table.price(&usage.model, last)?;
+        if opened.from() != closed.from() {
+            return None;
+        }
         // `usd()` is `None` for a model the table does not list, which is how
         // an unlisted model stays unpriced instead of being guessed at.
-        self.table.cost(usage, self.day).usd()
+        self.table.cost(usage, last).usd()
     }
 
     fn context_window(&self, model: &str) -> Option<u64> {
-        self.table.context_window(model, self.day)
+        self.table.context_window(model, self.today)
     }
 }
 
@@ -204,6 +274,10 @@ fn long_label(above: u64) -> String {
 #[cfg(test)]
 mod tests {
 
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use niobe_core::event::Usage;
+
     use super::*;
 
     const PRICES: &str = r#"
@@ -243,10 +317,91 @@ cache_write = 1.25
         use niobe_tui::Prices as _;
 
         let table = PriceTable::bundled().expect("the bundled table parses");
-        let sheet = Sheet::new(table, date(2026, 3, 12));
+        let sheet = Sheet::new(table, Spent::Undated, date(2026, 3, 12));
         assert_eq!(sheet.context_window("claude-opus-4-6"), Some(200_000));
         assert_eq!(sheet.context_window("claude-opus-4-6[1m]"), Some(1_000_000));
         assert_eq!(sheet.context_window("not-a-model"), None);
+    }
+
+    fn opus_4_6(input: u64) -> Usage {
+        Usage {
+            input,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: Some(0),
+            reasoning: 0,
+            model: "claude-opus-4-6".to_owned(),
+            cost_usd: None,
+            settles_model: Some(false),
+            fast: false,
+        }
+    }
+
+    /// Claude Opus 4.6 billed a prompt over 200K at $10 per million input
+    /// tokens until 13 March 2026 and at $5 from then on: a 250,000-token
+    /// prompt is $2.50 on the 1st and $1.25 on the 20th.
+    #[test]
+    fn tokens_are_priced_at_the_rates_of_the_days_they_were_spent() {
+        use niobe_tui::Prices as _;
+
+        let at = |first, last| {
+            Sheet::new(
+                PriceTable::bundled().expect("the bundled table parses"),
+                Spent::Between(first, last),
+                date(2026, 10, 23),
+            )
+        };
+        let prompt = opus_4_6(250_000);
+        assert_eq!(
+            at(date(2026, 3, 1), date(2026, 3, 2)).estimate(&prompt),
+            Some(2.5)
+        );
+        assert_eq!(
+            at(date(2026, 3, 20), date(2026, 10, 23)).estimate(&prompt),
+            Some(1.25)
+        );
+        // Spent across the change, at rates the sheet cannot tell apart.
+        assert_eq!(
+            at(date(2026, 3, 1), date(2026, 3, 20)).estimate(&prompt),
+            None
+        );
+        // Before the table prices the model at all.
+        assert_eq!(
+            at(date(2026, 1, 1), date(2026, 3, 1)).estimate(&prompt),
+            None
+        );
+    }
+
+    #[test]
+    fn tokens_spent_on_days_nothing_recorded_are_not_priced() {
+        use niobe_tui::Prices as _;
+
+        let sheet = Sheet::new(
+            PriceTable::bundled().expect("the bundled table parses"),
+            Spent::Undated,
+            date(2026, 10, 23),
+        );
+        assert_eq!(sheet.estimate(&opus_4_6(1_000)), None);
+    }
+
+    #[test]
+    fn the_days_spent_run_from_the_first_record_to_the_last_or_to_today() {
+        let day = |n: u64| Some(UNIX_EPOCH + Duration::from_secs(n * 86_400 + 3_600));
+        assert_eq!(
+            Spent::of([day(20_540), day(20_530), day(20_535)], None),
+            Spent::Between(date(2026, 3, 18), date(2026, 3, 28))
+        );
+        assert_eq!(
+            Spent::of([day(20_530)], Some(date(2026, 10, 23))),
+            Spent::Between(date(2026, 3, 18), date(2026, 10, 23))
+        );
+        assert_eq!(Spent::of([day(20_530), None], None), Spent::Undated);
+        assert_eq!(Spent::of([], None), Spent::Undated);
+        assert_eq!(
+            Spent::of([], Some(date(2026, 10, 23))),
+            Spent::on(date(2026, 10, 23))
+        );
     }
 
     #[test]

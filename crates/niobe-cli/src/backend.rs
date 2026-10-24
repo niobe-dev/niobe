@@ -37,9 +37,51 @@ pub struct Attach {
     /// prompt. Only a new session is: one carried on was titled, if it was,
     /// when it began.
     pub title: bool,
+    /// Whether a new conversation is asked for terse replies, with
+    /// [`TERSE`] appended to the backend's system prompt. A conversation
+    /// carried on keeps the prompt it began with.
+    pub terse: bool,
+    /// Whether a new conversation is asked to state its decisions, with
+    /// [`decisions_asked`] appended to the backend's system prompt. A
+    /// conversation carried on keeps the prompt it began with.
+    pub decisions: bool,
     /// A directory to keep a copy of the backend's stream in, where one was
     /// asked for with [`STREAM_DIR_VAR`] and found fit by [`stream_tap`].
     pub tap: Option<PathBuf>,
+    /// Where the agent's cargo output is trimmed through the hook, where the
+    /// config says `trim = true`. Unlike [`Attach::terse`] it holds for a
+    /// conversation carried on too: the CLI reads its hooks at every start.
+    pub trim: Option<crate::trim::Trim>,
+}
+
+/// What a terse conversation appends to the backend's system prompt.
+///
+/// Prose is what it shortens. Code, commands, paths, errors and security
+/// warnings are where a shortened word costs correctness rather than tokens,
+/// so they are named as what stays whole.
+pub const TERSE: &str = "Keep your replies to the user terse: short sentences, no preamble, no \
+    restating the request, and no account of what you are about to do or have just done beyond \
+    what the user needs to act on. Keep code, commands, file paths, error messages and security \
+    warnings exact and whole; never shorten or paraphrase them.";
+
+/// What a conversation that states its decisions appends to the backend's
+/// system prompt, which names the marker [`niobe_core::decision`] reads them
+/// by.
+///
+/// It asks for the choices an engineer would want to know were made — scope
+/// above all, since work left out is what a reader of the diff cannot see —
+/// and for one line each, so a decision reads as a row of the pane rather
+/// than a paragraph of the reply.
+pub fn decisions_asked() -> String {
+    format!(
+        "When you make a choice the user would want to know about — leaving something out of \
+         scope, skipping or deferring work, picking one approach over another, or doing \
+         something other than what was asked — state it in your reply on a line of its own \
+         that begins with `{marker}` followed by one short sentence saying what you decided \
+         and why. Do not use `{marker}` for anything else, and do not state routine steps \
+         this way.",
+        marker = niobe_core::decision::MARKER,
+    )
 }
 
 /// The environment variable that names a directory to keep a copy of what
@@ -460,6 +502,28 @@ fn resumed_options(
     Ok(options)
 }
 
+/// What a new conversation appends to the backend's system prompt, as one
+/// text, so that what reaches the model does not turn on how the CLI treats
+/// the flag given twice.
+/// `None` for a conversation carried on, which keeps the prompt it began
+/// with, and for one asked for nothing.
+fn appended(with: &Attach) -> Option<String> {
+    if with.resume.is_some() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if with.terse {
+        parts.push(TERSE.to_owned());
+    }
+    if with.decisions {
+        parts.push(decisions_asked());
+    }
+    match parts.is_empty() {
+        true => None,
+        false => Some(parts.join("\n\n")),
+    }
+}
+
 /// What the `claude` bridge is spawned with under `profile`.
 ///
 /// Written apart from the spawn so that what a profile turns into can be
@@ -474,9 +538,21 @@ fn claude_options(
 ) -> Result<Options, String> {
     let mut options = Options::new(root, profile.name);
     options.env = profile.profile.env().clone();
-    options.args = profile.profile.args().to_vec();
+    // Before the profile's own arguments, so that a profile appending a
+    // system prompt of its own still has the last word.
+    options.args = appended(with)
+        .map(|prompt| vec!["--append-system-prompt".to_owned(), prompt])
+        .unwrap_or_default();
+    options.args.extend_from_slice(profile.profile.args());
     options.billing = profile.profile.billing();
     options.settings = crate::config::settings_path(profile, home, root)?;
+    if let Some(trim) = &with.trim {
+        options.settings = Some(crate::trim::settings(
+            trim,
+            profile.name,
+            options.settings.as_deref(),
+        )?);
+    }
     options.resume = with.resume.clone();
     options.budget_usd = with.budget_usd;
     options.tap = with.tap.clone();
@@ -608,6 +684,11 @@ impl Bridge for Claude {
         self.session
             .reconnect_mcp(server)
             .map_err(BridgeError::from)
+    }
+
+    fn rewind(&mut self, prompt: usize) -> Result<(), BridgeError> {
+        self.carry_on()?;
+        self.session.rewind(prompt).map_err(BridgeError::from)
     }
 
     fn drain(&mut self) -> Vec<Event> {
@@ -804,7 +885,10 @@ mod tests {
                 mode: Some(niobe_core::event::Mode::Plan),
                 budget_usd: None,
                 title: false,
+                terse: false,
+                decisions: false,
                 tap: None,
+                trim: None,
             },
             Some(claude.path().as_os_str().to_owned()),
             NO_HOME,
@@ -931,6 +1015,110 @@ mod tests {
             .expect("the profile names no settings file to be missing");
 
         assert_eq!(options.billing, Some(niobe_core::Billing::Metered));
+    }
+
+    #[test]
+    fn a_decision_stated_the_way_the_prompt_asks_is_one_the_shell_reads() {
+        let asked = decisions_asked();
+        assert!(asked.contains("`DECISION:`"), "{asked}");
+        let reply = "Fixed it.\nDECISION: left the exporter alone; it is out of scope.";
+        assert_eq!(
+            niobe_core::decision::decisions(reply),
+            ["left the exporter alone; it is out of scope."]
+        );
+    }
+
+    #[test]
+    fn a_terse_new_conversation_appends_the_prompt_before_the_profiles_own_arguments() {
+        let config =
+            config("[profiles.max]\nbackend = \"claude\"\nargs = [\"--add-dir\", \"/other\"]\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let args = |with: &Attach| {
+            claude_options(Path::new("/repo"), &selected, with, NO_HOME)
+                .expect("the profile names no settings file to be missing")
+                .args
+        };
+
+        let terse = Attach {
+            terse: true,
+            ..Attach::default()
+        };
+        assert_eq!(
+            args(&terse),
+            ["--append-system-prompt", TERSE, "--add-dir", "/other"]
+        );
+        assert_eq!(args(&Attach::default()), ["--add-dir", "/other"]);
+        let both = Attach {
+            decisions: true,
+            ..terse.clone()
+        };
+        assert_eq!(
+            args(&both),
+            [
+                "--append-system-prompt",
+                &format!("{TERSE}\n\n{}", decisions_asked()),
+                "--add-dir",
+                "/other"
+            ],
+            "one prompt, holding both"
+        );
+        let carried_on = Attach {
+            resume: Some("abc".to_owned()),
+            ..terse
+        };
+        assert_eq!(
+            args(&carried_on),
+            ["--add-dir", "/other"],
+            "a conversation keeps the prompt it began with"
+        );
+    }
+
+    #[test]
+    fn a_trimmed_session_starts_the_cli_under_its_settings_with_the_hook_added() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let own = dir.path().join("own.json");
+        std::fs::write(&own, r#"{"env":{"A":"1"}}"#).expect("the settings are written");
+        let config = config(&format!(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"{}\"\n",
+            own.display()
+        ));
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let trim = crate::trim::Trim {
+            exe: PathBuf::from("/bin/niobe"),
+            dir: dir.path().join(".niobe").join(crate::trim::DIR),
+        };
+        let with = Attach {
+            resume: Some("abc".to_owned()),
+            trim: Some(trim.clone()),
+            ..Attach::default()
+        };
+
+        let options = claude_options(dir.path(), &selected, &with, NO_HOME)
+            .expect("the settings are found and copied");
+
+        let settings = options.settings.expect("the CLI is handed settings");
+        assert_eq!(
+            settings,
+            trim.dir
+                .join("claude-settings-max.json")
+                .display()
+                .to_string(),
+            "a conversation carried on is trimmed too"
+        );
+        let written = std::fs::read_to_string(&settings).expect("the copy is there");
+        assert!(written.contains(r#""A": "1""#), "{written}");
+        assert!(written.contains("hook trim --raw"), "{written}");
+        assert_eq!(
+            std::fs::read_to_string(&own).expect("the profile's file is there"),
+            r#"{"env":{"A":"1"}}"#,
+            "the profile's own file is left as it was"
+        );
     }
 
     #[test]
@@ -1099,7 +1287,10 @@ mod tests {
                 mode: Some(Mode::Plan),
                 budget_usd: Some(0.5),
                 title: false,
+                terse: false,
+                decisions: false,
                 tap: None,
+                trim: None,
             },
             NO_HOME,
         )

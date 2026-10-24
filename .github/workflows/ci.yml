@@ -24,11 +24,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
+    env:
+      # The gate's compiler, pinned: each stable release brings lints that
+      # `-D warnings` turns into failures, which would turn main red with no
+      # change of ours. It moves in a commit that fixes what the new one finds.
+      RUSTUP_TOOLCHAIN: "1.99.1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install the toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
@@ -43,9 +48,33 @@ jobs:
       - name: Gate
         run: cargo xtask ci
 
+  # The crates that hold no process or terminal of their own, tested on
+  # Windows. The binary and the claude bridge are not: the bridge starts the
+  # CLI in a process group and its tests drive a stand-in `sh`, the binary's
+  # `!` commands, reaper and pty tests stand on Unix process groups, and a
+  # native Windows build has none, so both are tested on macOS and Linux
+  # only.
+  windows:
+    name: windows-latest
+    runs-on: windows-latest
+    env:
+      # The gate's compiler, for the same reason as there.
+      RUSTUP_TOOLCHAIN: "1.99.1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install the toolchain
+        shell: bash
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Test the crates without a process of their own
+        run: cargo test --no-fail-fast -p niobe-core -p niobe-ledger -p niobe-config -p niobe-store -p niobe-tui
+
   # The manifest's `rust-version` is a promise to anyone building from
   # source: the oldest compiler the workspace builds on. The gate builds on
-  # stable only, so without this a dependency or a language feature that
+  # a recent stable only, so without this a dependency or a language feature that
   # needs a newer one makes the promise false without anything failing.
   rust-version:
     name: rust-version

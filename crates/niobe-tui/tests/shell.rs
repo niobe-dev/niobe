@@ -31,7 +31,7 @@ use common::{
     at_work, metered_session, paint, running_session, screen, session_whose_turn_total_differs,
     session_with_a_long_write, session_with_a_markdown_reply, session_with_a_tab_indented_reply,
     session_with_finished_turns, session_with_test_records, session_with_two_agents_at_work,
-    style_at, styles, styles_at, unmetered_session,
+    style_at, styles, styles_at, svg, unmetered_session,
 };
 use niobe_core::event::{
     AgentId, Backend, CompactTrigger, Event, Mode, PermissionDecision, Usage, UsageWindow,
@@ -147,6 +147,46 @@ fn every_theme_paints_the_shell_at_both_sizes() {
                 &paint(&mut running_session().with_theme(theme), width, height),
             );
         }
+    }
+}
+
+/// The pictures the README shows, one per theme at 120x30, each drawn as a
+/// terminal draws it: the designed themes in 24-bit colour, `classic` in the
+/// sixteen names. Written by the harness rather than captured, so the front
+/// page cannot show a shell the code no longer draws; regenerated with the
+/// other pictures by `UPDATE_SNAPSHOTS=1`.
+#[test]
+fn every_theme_has_the_picture_the_readme_shows() {
+    for theme in THEMES {
+        let name = theme.name.to_lowercase();
+        let depth = match theme.name {
+            "CLASSIC" => Depth::Sixteen,
+            _ => Depth::TrueColour,
+        };
+        let picture = svg(
+            &mut running_session().with_depth(depth).with_theme(theme),
+            120,
+            30,
+        );
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots")
+            .join(format!("{name}-120x30.svg"));
+        if niobe_tui::snapshots::updating().unwrap_or_else(|refused| panic!("{refused}")) {
+            std::fs::write(&path, &picture).expect("the snapshot directory is committed");
+            continue;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "no picture at {}: {e}\nrun `UPDATE_SNAPSHOTS=1 cargo test` to write one",
+                path.display()
+            )
+        });
+        assert!(
+            picture == expected,
+            "the README's picture {} no longer shows what the shell draws; look at it and, \
+             if it is right, run `UPDATE_SNAPSHOTS=1 cargo test`",
+            path.display()
+        );
     }
 }
 
@@ -353,11 +393,11 @@ fn a_cleared_conversation_is_drawn_as_a_new_session() {
             output: 100,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     };
@@ -879,6 +919,7 @@ fn a_window_resetting_past_what_the_clock_holds_is_drawn_without_its_reset() {
         }),
         seven_day: None,
         using_overage: false,
+        overage: niobe_core::event::Overage::Unreported,
     }));
 
     let frame = screen(&mut app, 200, 60);
@@ -1434,6 +1475,7 @@ fn session_that_updated_its_memory() -> App {
             outcome: niobe_core::event::ToolOutcome::Ok,
             summary: Some(path.clone()),
             command: None,
+            untrimmed: None,
             exit_code: None,
             error: None,
         });
@@ -2004,6 +2046,26 @@ fn notable_only_counts_the_routine_entries_it_leaves_out_at_both_sizes() {
     }
     app.show_notable_only();
     assert_eq!(screen(&mut app, 200, 60), whole, "the key shows them again");
+}
+
+/// What happened since the operator last caught up is a sheet over the
+/// session, each row a figure of the fold, with what the session is doing now
+/// as its last.
+#[test]
+fn what_happened_is_a_sheet_of_the_session_s_own_figures_at_both_sizes() {
+    let mut app = running_session().with_theme(NEO);
+    app.show_catch_up();
+    for (name, width, height) in [
+        ("catch-up-neo-80x24", 80, 24),
+        ("catch-up-neo-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("Since you last looked"), "{frame}");
+        assert!(frame.contains("files changed:"), "{frame}");
+        assert!(frame.contains("now: "), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+    assert_snapshot("catch-up-neo-painted-80x24", &paint(&mut app, 80, 24));
 }
 
 #[test]
@@ -2723,6 +2785,15 @@ fn a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it() {
     );
 }
 
+/// What the operator produced, without the looks the shell records for the
+/// catch-up, which no test of what they said is about.
+fn said(app: &mut App) -> Vec<Event> {
+    app.take_produced()
+        .into_iter()
+        .filter(|event| *event != Event::Looked)
+        .collect()
+}
+
 #[test]
 fn a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not() {
     let mut app = running_session().attached();
@@ -2731,10 +2802,7 @@ fn a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not() {
         ratatui::crossterm::event::KeyModifiers::SHIFT,
     ));
 
-    assert_eq!(
-        app.take_produced(),
-        [Event::ModeSelected { mode: Mode::Auto }]
-    );
+    assert_eq!(said(&mut app), [Event::ModeSelected { mode: Mode::Auto }]);
 }
 
 #[test]
@@ -2872,11 +2940,11 @@ fn billed_turn(billing: niobe_core::Billing, worked_seconds: u64, cost_usd: Opti
         output: 500_000,
         cache_read: 0,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model: "opus-5".to_owned(),
         cost_usd,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     });
     for event in [&billing, &prompt, &usage] {
@@ -3005,6 +3073,7 @@ fn a_plan_spending_beyond_its_flat_fee_is_marked_in_the_usage_pane() {
             resets_at: Some(1_790_118_000),
         }),
         using_overage: true,
+        overage: niobe_core::event::Overage::Unreported,
     }));
 
     let frame = screen(&mut app, 120, 30);
@@ -3034,11 +3103,11 @@ fn session_on_three_models() -> App {
             output,
             cache_read,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: Some(0.01),
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }));
     }
@@ -3378,11 +3447,11 @@ fn nothing_the_backends_did_not_report_appears_as_a_number() {
         output: 100,
         cache_read: 0,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model: "opus-5".to_owned(),
         cost_usd: None,
-        settles_model: false,
+        settles_model: Some(false),
         fast: false,
     }));
     // Its tokens were measured, so a cache hit of none is a figure; money
@@ -3468,8 +3537,7 @@ fn no_pane_draws_its_text_against_its_border() {
 
         for (at, row) in frame.lines().enumerate() {
             let cells = &rows[at];
-            for pair in borders(row).as_chunks::<2>().0 {
-                let (left, right) = (pair[0], pair[1]);
+            for &[left, right] in borders(row).as_chunks::<2>().0 {
                 assert_eq!(
                     cells.get(left + 1).copied(),
                     Some(' '),
@@ -4618,6 +4686,25 @@ fn the_focused_border_is_in_the_colour_the_theme_keeps_for_it() {
 /// The arrows walk the focused pane's section headers and Enter folds the one
 /// under the cursor, leaving the transcript and the composer alone.
 #[test]
+fn work_the_agent_says_it_left_out_of_scope_is_a_decision_in_the_activity_pane() {
+    let mut app = running_session();
+    app.apply(&Event::AssistantMessage {
+        text: "The etag path is done.\n\
+               DECISION: left the CSV exporter alone; it was not part of the request."
+            .to_owned(),
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("▾ Decisions, as the agent says  1"),
+        "{frame}"
+    );
+    assert!(frame.contains("left the CSV exporter alone"), "{frame}");
+}
+
+#[test]
 fn a_focused_pane_folds_the_section_under_its_cursor() {
     use ratatui::crossterm::event::KeyCode;
 
@@ -4627,10 +4714,12 @@ fn a_focused_pane_folds_the_section_under_its_cursor() {
     press(&mut app, KeyCode::Tab);
     let _ = screen(&mut app, 200, 60);
     press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     let frame = screen(&mut app, 200, 60);
 
     assert!(frame.contains("▸ Tools"), "{frame}");
+    assert!(frame.contains("▾ Decisions"), "{frame}");
     assert!(
         !app.folded(Section::SubAgents),
         "one section, the one under the cursor"
@@ -5443,6 +5532,11 @@ fn a_command_is_offered_only_where_it_opens_the_prompt_and_esc_leaves_it_as_type
     );
     press(&mut app, KeyCode::Enter);
     assert!(
+        app.take_produced().is_empty(),
+        "a command the backend did not list is held once"
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(
         !app.take_produced().is_empty(),
         "with the list closed, Enter sends"
     );
@@ -6036,6 +6130,55 @@ fn an_open_menu_hangs_from_its_name_with_the_keys_that_do_each_item() {
 /// An open menu in `classic`, colours and all, over the transcript: Far's
 /// white-on-cyan menu with its item under the cursor white on black, and the
 /// menu's shadow redrawing what it falls on in dark grey on black.
+/// The menu row's styles, cell by cell, beside its text: the identity on the
+/// right of the row is drawn after the menus and must leave theirs alone.
+fn menu_row(app: &mut App) -> (Vec<char>, Vec<ratatui::style::Style>) {
+    let text = screen(app, 160, 30);
+    let row: Vec<char> = text.lines().next().unwrap_or_default().chars().collect();
+    let cells = styles(app, 160, 30).into_iter().take(160).collect();
+    (row, cells)
+}
+
+fn title_at(row: &[char], name: &str) -> usize {
+    let name: Vec<char> = name.chars().collect();
+    row.windows(name.len())
+        .position(|window| window == name.as_slice())
+        .unwrap_or_else(|| panic!("{} is not on the menu row", String::from_iter(&name)))
+}
+
+#[test]
+fn every_menu_title_keeps_its_hot_letter_and_the_open_one_is_inverted_in_every_theme() {
+    for theme in THEMES {
+        let mut app = running_session().with_theme(theme);
+        let (row, cells) = menu_row(&mut app);
+        assert!(
+            String::from_iter(&row).trim_end().len() > 60,
+            "the identity is on the row, so it is drawn over it"
+        );
+        for menu in niobe_tui::menu::MENUS {
+            let at = title_at(&row, menu.name);
+            assert_eq!(
+                cells[at].fg,
+                Some(theme.hot),
+                "{} {}",
+                theme.name,
+                menu.name
+            );
+        }
+
+        app.on_key(alt('v'));
+        let (row, cells) = menu_row(&mut app);
+        let at = title_at(&row, "View");
+        assert_eq!(cells[at].fg, Some(theme.hot), "{}", theme.name);
+        assert_eq!(
+            (cells[at + 1].fg, cells[at + 1].bg),
+            (Some(theme.menu_bg), Some(theme.menu_fg)),
+            "{}: the open menu's title is inverted",
+            theme.name
+        );
+    }
+}
+
 #[test]
 fn an_open_menu_in_classic_is_painted_in_far_managers_colours() {
     let mut app = running_session()
@@ -6121,7 +6264,7 @@ fn f7_lists_the_mcp_servers_while_a_turn_runs() {
     });
     app.take_produced();
     press(&mut app, KeyCode::F(7));
-    assert_eq!(app.take_produced(), [], "F7 sent a turn");
+    assert_eq!(said(&mut app), [], "F7 sent a turn");
 
     let frame = screen(&mut app, 120, 30);
     assert!(frame.contains(" MCP servers "), "{frame}");
@@ -6459,4 +6602,118 @@ fn a_backends_title_is_not_drawn_as_the_prompt_the_operator_typed() {
 
     assert!(top.contains("Cached manifests"), "{top}");
     assert!(!top.contains("> Cached manifests"), "{top}");
+}
+
+/// Every call of the recorded session opens from the list of calls, and what
+/// the view holds is the arguments the call started with and the output its
+/// end carried, byte for byte: nothing is cut on the way in.
+#[test]
+fn every_call_of_a_recorded_session_opens_whole_byte_for_byte() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let events: Vec<Event> = include_str!("../../niobe-core/tests/fixtures/claude-session.jsonl")
+        .lines()
+        .enumerate()
+        .map(|(n, line)| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line {} of the fixture: {e}", n + 1))
+        })
+        .collect();
+    let mut expected: Vec<(niobe_core::event::ToolCallId, String)> = Vec::new();
+    for event in &events {
+        match event {
+            Event::ToolCallStart { id, input, .. } => {
+                expected.push((id.clone(), input.clone()));
+            }
+            Event::ToolCallEnd { id, output, .. } => {
+                let started = expected
+                    .iter_mut()
+                    .find(|(started, _)| started == id)
+                    .expect("every end in the fixture has its start");
+                started.1.push_str(output);
+            }
+            _ => {}
+        }
+    }
+    let mut app = App::new(Repo::default());
+    app.extend(&events);
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    assert_eq!(expected.len(), 26, "the fixture's calls");
+    for (at, (_, whole)) in expected.iter().enumerate() {
+        app.perform(niobe_tui::menu::Action::Calls);
+        for _ in at..expected.len() - 1 {
+            app.on_key(key(KeyCode::Up));
+        }
+        app.on_key(key(KeyCode::Enter));
+        let detail = app.detail().expect("Enter opens the call");
+        assert_eq!(detail.text(), whole, "call {at}");
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.detail().is_none());
+    }
+}
+
+/// The list of calls and one call read whole, as the operator sees them.
+#[test]
+fn a_tool_call_read_whole_shows_its_arguments_and_its_output_at_both_sizes() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::Calls);
+    assert_snapshot("calls-neo-80x24", &screen(&mut app, 80, 24));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    for (name, width, height) in [("call-neo-80x24", 80, 24), ("call-neo-200x60", 200, 60)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("input · "), "{frame}");
+        assert!(frame.contains("output · "), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+}
+
+/// The project overview, while the binary writes it and once it has.
+#[test]
+fn the_project_overview_reads_whole_once_the_binary_has_written_it() {
+    let mut app = running_session().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::Overview);
+    assert!(app.take_overview_request(), "opening it asks for the page");
+    let reading = screen(&mut app, 80, 24);
+    assert!(
+        reading.contains("reading every session recorded here"),
+        "{reading}"
+    );
+    assert_snapshot("overview-reading-neo-80x24", &reading);
+
+    app.set_overview(OVERVIEW);
+    for (name, width, height) in [
+        ("overview-neo-80x24", 80, 24),
+        ("overview-neo-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("## Highlights"), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+}
+
+/// A page as `niobe overview` writes one, cut short.
+const OVERVIEW: &str = "# What has been built in catalog\n\n2 sessions recorded, the first started 2026-09-18 12:00 UTC and the last 2026-09-18 12:00 UTC.\n\n## Highlights\n\n- 0 turns ended.\n- 6 prompts sent, 15 replies from the agent.\n- 24 of 27 tool calls finished without failing.\n\n## Lowlights\n\n- 3 tool calls failed, 1 denied.\n- Session 1: 3 failed calls, 1 denied call — `niobe --resume 1`\n\n## Most used tools\n\n| Tool | Calls | Failed |\n| --- | ---: | ---: |\n| Bash | 12 | 3 |\n| Read | 9 | 0 |";
+
+/// Narrowed to one sub-agent, the transcript draws that agent's entries
+/// alone and its title says so.
+#[test]
+fn a_transcript_narrowed_to_one_agent_draws_its_entries_and_says_whose() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_with_two_agents_at_work().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::OneAgent);
+    assert_snapshot("agents-neo-80x24", &screen(&mut app, 80, 24));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let tag = app.only_agent_tag().expect("Enter narrows the transcript");
+    for (name, width, height) in [
+        ("one-agent-neo-80x24", 80, 24),
+        ("one-agent-neo-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains(&format!("only {tag}'s entries")), "{frame}");
+        assert_snapshot(name, &frame);
+    }
 }

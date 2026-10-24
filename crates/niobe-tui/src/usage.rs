@@ -343,11 +343,11 @@ mod tests {
             output: 500,
             cache_read,
             cache_write,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.01),
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }
     }

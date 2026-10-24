@@ -172,11 +172,13 @@ fn a_file_locked_past_the_timeout_fails_the_append_and_recording_resumes_after()
 
 /// Makes `path` and the directory it is in read-only until the value is
 /// dropped. `None` where the permissions do not bind, as for root.
+#[cfg(unix)]
 struct ReadOnly {
     dir: PathBuf,
     file: PathBuf,
 }
 
+#[cfg(unix)]
 impl ReadOnly {
     fn new(file: &Path) -> Option<Self> {
         use std::os::unix::fs::PermissionsExt;
@@ -203,6 +205,7 @@ impl ReadOnly {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ReadOnly {
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt;

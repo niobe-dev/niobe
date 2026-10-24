@@ -89,7 +89,6 @@ fn a_recorded_prompt_stops_the_shell_and_shows_what_would_run() {
     assert!(frame.contains("to run Bash"), "{frame}");
     assert!(frame.contains("cargo test"), "{frame}");
 
-    // Options drawn on screen
     assert!(frame.contains("1. Allow once"), "{frame}");
     assert!(frame.contains("2. Always allow Bash"), "{frame}");
     assert!(frame.contains("3. Always allow this target"), "{frame}");

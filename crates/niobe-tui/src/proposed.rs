@@ -3,7 +3,7 @@
 
 //! What a permission question asks to let happen, drawn as what it does: an
 //! edit as the lines it removes and adds, a file written as the lines it
-//! will hold, a command once.
+//! will hold, a command once, a plan whole as the markdown it was written in.
 //!
 //! The backend reads these out of the call's arguments (see
 //! [`niobe_core::proposal`]); this draws them, and lays out by key whatever
@@ -18,7 +18,7 @@ use ratatui::text::Line;
 
 use crate::text;
 use crate::theme::Theme;
-use crate::{arguments, hunks};
+use crate::{arguments, hunks, markdown};
 
 /// A [`Proposal`], with the lines of the change it proposes worked out once.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +87,7 @@ impl Proposed {
                     .map(|l| DiffLine::Added(l.to_owned()))
                     .collect(),
             ),
-            Action::Command { .. } => None,
+            Action::Command { .. } | Action::Plan { .. } => None,
         };
         Self {
             proposal,
@@ -125,6 +125,13 @@ impl Proposed {
         let dim = Style::new().fg(theme.dim);
         let mut rows = Vec::new();
         let mut markers = Vec::new();
+        if let Action::Plan { plan } = self.proposal.action() {
+            // A plan is what is being approved, so it is drawn whole, as the
+            // markdown the agent wrote it in, and never cut.
+            rows.extend(markdown::render(plan, width, theme));
+            self.others_under(input, width, theme, &mut rows, &mut markers);
+            return Some(Call { rows, markers });
+        }
         let (subject, said) = match (self.proposal.action(), &self.lines) {
             (Action::Replace { path, every, .. }, Some(_)) => (
                 path,
@@ -140,6 +147,7 @@ impl Proposed {
                 _,
             ) => (path, Some(written(content, *existed))),
             (Action::Command { command }, _) => (command, None),
+            (Action::Plan { .. }, _) => return None,
         };
         rows.extend(
             text::wrap_exact(subject, width)
@@ -159,6 +167,26 @@ impl Proposed {
             }
             rows.extend(change);
         }
+        self.others_under(input, width, theme, &mut rows, &mut markers);
+        Some(Call { rows, markers })
+    }
+
+    /// Whether what is asked is a plan going ahead, which no standing answer
+    /// may approve: each plan is read before it is carried out.
+    pub fn is_plan(&self) -> bool {
+        matches!(self.proposal.action(), Action::Plan { .. })
+    }
+
+    /// Lays the arguments the proposal says nothing of under `rows`, by key,
+    /// with a marker where some of their lines are not drawn.
+    fn others_under(
+        &self,
+        input: &str,
+        width: usize,
+        theme: &Theme,
+        rows: &mut Vec<Line<'static>>,
+        markers: &mut Vec<(usize, usize, usize)>,
+    ) {
         let others = self
             .others
             .get_or_init(|| arguments::fields_without(input, |key, _| self.proposal.covers(key)));
@@ -172,7 +200,6 @@ impl Proposed {
                 rows.extend(laid);
             }
         }
-        Some(Call { rows, markers })
     }
 }
 
@@ -297,6 +324,30 @@ mod tests {
         assert_eq!(
             drawn(write(None), "{}", 80, false)[1],
             "writes the whole file · what it held, if it was there, is not in the call"
+        );
+    }
+
+    #[test]
+    fn a_plan_is_drawn_whole_as_markdown_with_its_file_by_key() {
+        let plan = "Fix **mean**:\n\n1. Guard the empty list.\n2. Run it.\n3. Say so.\n4. Stop.";
+        let input = format!(r#"{{"plan":{plan:?},"planFilePath":"/p.md"}}"#);
+        let proposal = Proposal::new(
+            Action::Plan {
+                plan: plan.to_owned(),
+            },
+            ["plan"],
+        );
+        assert_eq!(
+            drawn(proposal, &input, 60, false),
+            [
+                "Fix mean:",
+                "1. Guard the empty list.",
+                "2. Run it.",
+                "3. Say so.",
+                "4. Stop.",
+                "",
+                "planFilePath: /p.md"
+            ]
         );
     }
 

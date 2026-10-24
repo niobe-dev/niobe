@@ -18,13 +18,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use niobe_core::attention::Attention;
+use niobe_core::catch_up::{CatchUp, Mark};
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, CompactTrigger, Event, Mode, PermissionDecision,
     SlashCommand, TokenCounts, ToolCallId, ToolOutcome, UsageWindow, UsageWindows,
 };
 use niobe_core::permission::{Allowlist, Rule};
-use niobe_core::session::{SessionState, TestRunRecord};
+use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
 use ratatui_textarea::{Input, TextArea, WrapMode};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -75,6 +76,10 @@ pub struct Repo {
     /// path the agent names it by, relative to that directory. What `@`
     /// completes a file from.
     pub files: Vec<String>,
+    /// When the read this came from began, where it came from one. What the
+    /// shell compares a turn's end with: only a read that began after the
+    /// turn ended says what the turn left behind.
+    pub began: Option<Instant>,
 }
 
 /// One file the working tree has changed, measured from the repository.
@@ -147,19 +152,26 @@ pub enum Section {
     WorkingTree,
     /// The sub-agents the session spawned, running and finished.
     SubAgents,
+    /// The decisions the agent's replies stated, as it tells them.
+    Decisions,
     /// The tools it called, and how often.
     Tools,
 }
 
 impl Section {
     /// Every section, in the order the panes draw them.
-    pub const ALL: [Section; 3] = [Section::WorkingTree, Section::SubAgents, Section::Tools];
+    pub const ALL: [Section; 4] = [
+        Section::WorkingTree,
+        Section::SubAgents,
+        Section::Decisions,
+        Section::Tools,
+    ];
 
     /// The pane this section is drawn in.
     pub fn pane(self) -> Pane {
         match self {
             Section::WorkingTree => Pane::Changes,
-            Section::SubAgents | Section::Tools => Pane::Activity,
+            Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
         }
     }
 }
@@ -350,12 +362,14 @@ struct Called {
 impl Ask {
     /// Whether this prompt can be given `answer`. A standing answer about the
     /// target needs a target to be about, and a standing answer is offered
-    /// only where its rule can be written into a config and read back.
+    /// only where its rule can be written into a config and read back — and
+    /// never to a plan, which it would let go ahead unread every time after.
     pub fn offers(&self, answer: Answer) -> bool {
+        let plan = self.proposed.as_ref().is_some_and(Proposed::is_plan);
         match answer {
             Answer::Once | Answer::No => true,
-            Answer::AlwaysTool => self.tool_rule().is_some(),
-            Answer::AlwaysTarget => self.target_rule().is_some(),
+            Answer::AlwaysTool => !plan && self.tool_rule().is_some(),
+            Answer::AlwaysTarget => !plan && self.target_rule().is_some(),
         }
     }
 
@@ -425,12 +439,14 @@ enum Overlay {
     List,
     /// The search in the transcript.
     Search,
+    /// One tool call read whole.
+    Detail,
 }
 
 impl Overlay {
     /// Every overlay there is.
     #[cfg(test)]
-    const ALL: [Overlay; 7] = [
+    const ALL: [Overlay; 8] = [
         Overlay::Menu,
         Overlay::Sheet,
         Overlay::Memory,
@@ -438,6 +454,7 @@ impl Overlay {
         Overlay::History,
         Overlay::List,
         Overlay::Search,
+        Overlay::Detail,
     ];
 }
 
@@ -506,7 +523,56 @@ pub enum Purpose {
     Effort,
     /// The palette the shell is drawn in.
     Theme,
+    /// A tool call of the conversation, to read whole. A choice's value is
+    /// where the call is in the order the calls started.
+    Call,
+    /// A sub-agent, whose entries alone the transcript is narrowed to. A
+    /// choice's value is the agent's id.
+    Agent,
+    /// A prompt sent from here, to put the files back as they were before.
+    /// A choice's value is where the prompt is among those sent.
+    Rewind,
 }
+
+/// The Shortcuts sheet's rows on what a typed command does: the names that
+/// open the shell's own view rather than reach the backend, each beside the
+/// menu item it opens, and the hold on a command the backend did not list.
+fn typed_rows() -> [String; 3] {
+    let own = crate::menu::TYPED
+        .iter()
+        .filter(|typed| !typed.backend)
+        .filter_map(|typed| {
+            crate::menu::label(typed.action).map(|label| format!("/{} {label}", typed.name))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    [
+        "Typed as a prompt, these open the shell's own:".to_owned(),
+        own,
+        "A command the backend does not list is held once: Enter again sends it.".to_owned(),
+    ]
+}
+
+/// The command `text` opens with where it is a word the backend did not
+/// list among `listed`, which must not be empty. A word with a `/` inside it
+/// is a path, not a command.
+fn unlisted_command<'a>(text: &'a str, listed: &[SlashCommand]) -> Option<&'a str> {
+    if listed.is_empty() {
+        return None;
+    }
+    let word = text
+        .trim_start()
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()?;
+    let command_like = word
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'));
+    (command_like && !listed.iter().any(|command| command.name == word)).then_some(word)
+}
+
+/// The most characters of a prompt the rewind list names it by.
+const REWIND_LABEL: usize = 60;
 
 /// The effort levels offered, in the order the `claude` CLI's `/effort`
 /// lists them in its argument hint (Claude Code 2.1.287). Its `auto` and
@@ -1242,6 +1308,9 @@ pub struct App {
     /// Whether the sub-agents' rows are drawn together under each agent
     /// rather than interleaved as they happened.
     by_agent: bool,
+    /// The one sub-agent whose entries alone the transcript draws, where the
+    /// operator narrowed it to one.
+    only_agent: Option<AgentId>,
     /// Whether the transcript leaves its routine entries out, drawing each
     /// run of them as a row that says how many.
     notable_only: bool,
@@ -1263,6 +1332,10 @@ pub struct App {
     /// business, so they are kept here rather than widening the shared state —
     /// and the event model, which carries no time — for a pane.
     agents: Vec<SubAgent>,
+    /// When each decision in [`SessionState::decisions`] was stated, in the
+    /// same order, so a pane reads the two together and cannot pair a
+    /// decision with another one's time.
+    decided_at: Vec<Option<Stamp>>,
     composer: TextArea<'static>,
     /// Whether the composer has been drawn in a box too short for all of its
     /// rows since its first row was last put back at the top. The editor keeps
@@ -1361,7 +1434,28 @@ pub struct App {
     /// What the shell sends to call the operator back, and what it has
     /// already called them back for.
     alerts: Alerts,
+    /// Whether the backend was asked to state its decisions, which is what an
+    /// empty Decisions section means: none stated, or none asked for.
+    decisions_asked: bool,
     called: Called,
+    /// The session as it stood at the operator's last key, which what is
+    /// shown when they come back is counted from; and as it stood when they
+    /// were last shown what happened, which `c` counts from.
+    looked: Mark,
+    caught_up: Mark,
+    /// Whether an event has been folded in since `looked` was taken.
+    looked_stale: bool,
+    /// Whether `looked` was read from the session's record, and whether the
+    /// next key is the first since the session was taken up again, which is
+    /// one back from away however soon it comes.
+    looked_recorded: bool,
+    returned: bool,
+    /// When the operator last pressed a key, or the shell first ticked.
+    last_key: Option<Instant>,
+    /// How long with no key is away, and whether the first key back shows
+    /// what happened of itself.
+    away_after: Duration,
+    catch_up_automatic: bool,
     /// Which of the front prompt's options Enter would give. Every prompt
     /// starts on the first, so Enter means the same thing whichever prompt it
     /// lands on.
@@ -1407,14 +1501,43 @@ pub struct App {
     /// Whether the Memory view wants what the agent is given read, which the
     /// loop does once and hands back.
     memory_wanted: bool,
+    /// Whether the project overview has been opened since the binary was
+    /// last asked to write it.
+    overview_wanted: bool,
     /// The MCP view, while it is open.
     mcp: Option<crate::mcp::View>,
+    /// One tool call read whole, while it is open.
+    detail: Option<crate::detail::Detail>,
+    /// Every tool call of the conversation, in the order they started, with
+    /// what the view of one shows: the transcript keeps what a row draws,
+    /// and this the arguments and the output the row was drawn from.
+    recorded: Vec<(ToolCallId, crate::detail::Recorded)>,
+    /// Where in `recorded` each call drawn in the transcript is, by the
+    /// entry it is drawn in and its place among that entry's calls.
+    call_at: BTreeMap<(usize, usize), usize>,
     /// The MCP servers the operator asked to be reconnected that the loop has
     /// not handed to the backend yet, oldest first.
     mcp_reconnects: Vec<String>,
     /// The server a reconnect was asked of that the backend has not answered
     /// for: the hint says so until its answer arrives or a key replaces it.
     reconnecting: Option<String>,
+    /// Every prompt the loop handed to the backend, oldest first, by its
+    /// first line: F6 puts the files back as they were before one of them,
+    /// named to the backend by where it is in this list.
+    sent: Vec<String>,
+    /// Where in `sent` the conversation in front of the model starts: a
+    /// prompt before a clear belongs to a conversation the backend has put
+    /// away, with whatever it kept of the files.
+    sent_since: usize,
+    /// A prompt opening with a command the backend did not list, held back
+    /// once: Enter on it again sends it.
+    unlisted_held: Option<String>,
+    /// The prompts the operator asked to have the files put back to before,
+    /// that the loop has not handed to the backend yet, oldest first.
+    rewinds: Vec<usize>,
+    /// The hint said while a rewind is waiting on the backend's answer, which
+    /// the answer replaces where no key has already.
+    rewinding: Option<String>,
     /// The panes of the right-hand stack the operator hid.
     hidden: BTreeSet<crate::menu::SidePane>,
     /// The files outside the session the shell can name or have opened.
@@ -1433,6 +1556,16 @@ pub struct App {
     /// Whether the budget warning has already been given, so that it is said
     /// once rather than on every usage record after the line is crossed.
     budget_warned: bool,
+    /// The working tree a running turn began on, held until a read after
+    /// the turn's end can be compared with it. `None` between turns.
+    tree_watch: Option<TreeWatch>,
+    /// The files the running turn's edit calls changed, by the path each
+    /// call named.
+    turn_edits: BTreeSet<String>,
+    /// How many of the session's ended turns have been judged for a spike,
+    /// from the first time the event loop asked. `None` until then: the turns
+    /// a session read back holds were spent before this run looked.
+    spikes_judged: Option<usize>,
     /// Whether a backend is listening. The shell holds no backend handle; this
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
@@ -1571,6 +1704,69 @@ enum Scroll {
     Down(usize),
     Head,
     Tail,
+}
+
+/// What the shell holds of the working tree across one turn, to name what
+/// the turn changed that no edit call reported.
+#[derive(Debug, Clone)]
+struct TreeWatch {
+    /// How many turns had ended when this one began.
+    ended_before: usize,
+    /// When the shell asked for the tree the turn began on.
+    asked: Instant,
+    /// That tree, once a read that began after `asked` came back.
+    before: Option<Vec<WorkingFile>>,
+    /// When the shell asked for the tree the turn ended on, once it has.
+    ended: Option<Instant>,
+}
+
+/// How many files a notice of changes outside the edit tools names before it
+/// counts the rest.
+const OUTSIDE_LISTED: usize = 8;
+
+/// A file a turn changed that no edit call reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Outside {
+    /// Changed, or changed again, as the working tree now counts it.
+    Changed(WorkingFile),
+    /// Put back as the last commit holds it.
+    Restored(String),
+}
+
+/// The files whose counts differ between `before` and `after` — changed,
+/// newly changed, or put back as committed — that no path in `edited` names.
+fn changed_outside(
+    before: &[WorkingFile],
+    after: &[WorkingFile],
+    edited: &BTreeSet<String>,
+) -> Vec<Outside> {
+    let counts = |file: &WorkingFile| (file.added, file.removed, file.new);
+    let was: BTreeMap<&str, _> = before
+        .iter()
+        .map(|f| (f.path.as_str(), counts(f)))
+        .collect();
+    let now: BTreeSet<&str> = after.iter().map(|f| f.path.as_str()).collect();
+    let unedited = |path: &str| !edited.iter().any(|named| same_file(path, named));
+    let moved = after
+        .iter()
+        .filter(|file| was.get(file.path.as_str()) != Some(&counts(file)))
+        .filter(|file| unedited(&file.path))
+        .cloned()
+        .map(Outside::Changed);
+    let restored = before
+        .iter()
+        .filter(|file| !now.contains(file.path.as_str()) && unedited(&file.path))
+        .map(|file| Outside::Restored(file.path.clone()));
+    moved.chain(restored).collect()
+}
+
+/// Whether the repository's `listed` path and the path an edit call
+/// `named` are one file: the call may name it from the directory the
+/// session runs in, below the repository's root, or absolutely.
+fn same_file(listed: &str, named: &str) -> bool {
+    listed == named
+        || named.ends_with(&format!("/{listed}"))
+        || listed.ends_with(&format!("/{named}"))
 }
 
 /// The share of a budget at which the shell says so.
@@ -1728,12 +1924,14 @@ impl App {
             compaction: None,
             calls_folded: false,
             by_agent: false,
+            only_agent: None,
             notable_only: false,
             tools_by_name: false,
             diffs_open: false,
             answered: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
+            decided_at: Vec::new(),
             composer,
             composer_scrolled: false,
             scroll: 0,
@@ -1773,7 +1971,16 @@ impl App {
             arrival: None,
             asks: VecDeque::new(),
             alerts: Alerts::none(),
+            decisions_asked: true,
             called: Called::default(),
+            looked: Mark::default(),
+            caught_up: Mark::default(),
+            looked_stale: false,
+            looked_recorded: false,
+            returned: false,
+            last_key: None,
+            away_after: AWAY_AFTER,
+            catch_up_automatic: true,
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
             ask_draft: String::new(),
@@ -1788,8 +1995,17 @@ impl App {
             sheet: None,
             memory: None,
             memory_wanted: false,
+            overview_wanted: false,
             mcp: None,
+            detail: None,
+            recorded: Vec::new(),
+            call_at: BTreeMap::new(),
             mcp_reconnects: Vec::new(),
+            sent: Vec::new(),
+            sent_since: 0,
+            rewinds: Vec::new(),
+            rewinding: None,
+            unlisted_held: None,
             reconnecting: None,
             hidden: BTreeSet::new(),
             places: Places::default(),
@@ -1798,6 +2014,9 @@ impl App {
             budget_usd: None,
             prices: None,
             budget_warned: false,
+            spikes_judged: None,
+            tree_watch: None,
+            turn_edits: BTreeSet::new(),
             attached: false,
             modes_before: VecDeque::new(),
             sent_here: false,
@@ -1839,6 +2058,7 @@ impl App {
 
     /// Folds one event in, from wherever it came.
     fn fold_event(&mut self, event: &Event) {
+        self.looked_stale = true;
         let turns = self.session.turns().len();
         if matches!(event, Event::UserMessage { .. }) {
             match self.session.turn_running() {
@@ -1850,7 +2070,13 @@ impl App {
             }
         }
         self.session.apply(event);
+        // The fold carries no times, so when each decision was stated is kept
+        // here: the ones the event added get this moment, and a clear that
+        // started them over drops theirs.
+        self.decided_at
+            .resize(self.session.decisions().len(), self.at);
         self.reconnect_answered(event);
+        self.rewind_answered(event);
         if matches!(event, Event::UsageWindows(_)) {
             self.windows_at = self.at;
             self.windows_recorded = false;
@@ -1951,6 +2177,7 @@ impl App {
             | Event::McpServers { .. }
             | Event::Models { .. }
             | Event::TurnTotalDiffers { .. }
+            | Event::Looked
             | Event::Notice { .. }
             | Event::Error { .. } => None,
         }
@@ -1972,6 +2199,9 @@ impl App {
         self.cleared_prompts.extend(sent);
         self.entries.clear();
         self.tool_entries.clear();
+        self.recorded.clear();
+        self.call_at.clear();
+        self.only_agent = None;
         self.agent_entries.clear();
         self.agents.clear();
         self.run = None;
@@ -2000,6 +2230,9 @@ impl App {
         // The entry a refusal was counted on is gone, and an index into the
         // entries that replace it would rewrite whichever one is there.
         self.unsaved = None;
+        // A mark holds the figures of the conversation that ended.
+        self.looked = Mark::default();
+        self.caught_up = Mark::default();
     }
 
     /// Records that the process this session runs in is leaving it with a
@@ -2046,6 +2279,16 @@ impl App {
                 error: Some("stopped: the session ended before the command did".to_owned()),
             });
         }
+        // What happened after the operator last looked is news on their first
+        // key back, the process that ran it having ended while they were
+        // away. A record that marks no look was kept before looks were kept,
+        // and what it holds was there to read before it was left.
+        if !self.looked_recorded {
+            self.looked = Mark::of(&self.session);
+        }
+        self.caught_up = self.looked.clone();
+        self.looked_stale = true;
+        self.returned = true;
     }
 
     /// Draws the rule under the turn the fold has just ended, below whatever
@@ -2206,17 +2449,29 @@ impl App {
                 summary,
                 agent,
             } => {
+                self.recorded.push((
+                    id.clone(),
+                    crate::detail::Recorded {
+                        name: name.clone(),
+                        what: what_it_does(summary.as_deref(), input),
+                        input: input.clone(),
+                        ended: None,
+                        untrimmed: None,
+                    },
+                ));
                 let head = tool_label(name);
                 let mut call = Call::started(what_it_does(summary.as_deref(), input), self.at);
                 call.programs = programs_of(name, None, summary.as_deref());
                 if call.testing {
                     call.last_run = self.test_times.get(&call.what).copied();
                 }
+                let recorded = self.recorded.len().saturating_sub(1);
                 match self.open_run(&head, agent.as_ref()) {
                     Some(at) => {
                         if let Some(entry) = self.entries.get_mut(at) {
                             self.tool_entries
                                 .insert(id.clone(), (at, entry.calls.len()));
+                            self.call_at.insert((at, entry.calls.len()), recorded);
                             entry.calls.push(call);
                             entry.streaming = true;
                         }
@@ -2224,6 +2479,7 @@ impl App {
                     None => {
                         let at = self.entries.len();
                         self.tool_entries.insert(id.clone(), (at, 0));
+                        self.call_at.insert((at, 0), recorded);
                         if let Some(agent) = agent {
                             self.agent_entries.insert(at, agent.clone());
                         }
@@ -2255,6 +2511,7 @@ impl App {
                 exit_code,
                 error,
                 command,
+                untrimmed,
             } => {
                 let ending = Ending {
                     outcome: *outcome,
@@ -2262,6 +2519,12 @@ impl App {
                     exit_code: *exit_code,
                     error: error.clone(),
                 };
+                self.record_end(
+                    id,
+                    (name, input, summary.as_deref()),
+                    (output, *bytes, *outcome),
+                    untrimmed.as_deref(),
+                );
                 let gate = self.gate(id);
                 let started = self.tool_entries.remove(id);
                 let ended = match started {
@@ -2286,7 +2549,10 @@ impl App {
                             calls: vec![call],
                             agent: None,
                         });
-                        Some((self.entries.len().saturating_sub(1), 0))
+                        let place = (self.entries.len().saturating_sub(1), 0);
+                        self.call_at
+                            .insert(place, self.recorded.len().saturating_sub(1));
+                        Some(place)
                     }
                 };
                 if name == crate::shell::OPERATOR_SHELL
@@ -2319,12 +2585,13 @@ impl App {
             }
 
             Event::FileChange {
+                path,
                 added,
                 removed,
                 hunks,
                 scope,
-                ..
             } => {
+                self.turn_edits.insert(path.clone());
                 if let Some((at, index, gate)) = ended
                     && let Some(call) = self
                         .entries
@@ -2360,6 +2627,7 @@ impl App {
             // itself: a reply it was writing reads as cut off where it
             // stopped, rather than as finished.
             Event::SessionLeft => {
+                self.say_asks_went_unanswered();
                 self.forget_asks();
                 self.interrupt_what_the_fold_stopped();
                 if let Some(entry) = self.finish_reply() {
@@ -2379,7 +2647,13 @@ impl App {
                     attention: Attention::Routine,
                     kind: EntryKind::Failure,
                     head: if *fatal { "fatal" } else { "error" }.to_owned(),
-                    meta: String::new(),
+                    // A failure that ends a turn — a budget the backend
+                    // stopped on among them — says which, since the rule that
+                    // numbers the turn is drawn only once it has ended.
+                    meta: match self.session.turn_running() {
+                        true => format!("in turn {}", self.session.turns().len().saturating_add(1)),
+                        false => String::new(),
+                    },
                     body: message.clone(),
                     streaming: false,
                     at: self.at,
@@ -2467,11 +2741,20 @@ impl App {
             // The working line reads the phase off the fold.
             Event::CompactionStarted | Event::CompactionEnded => {}
 
+            // What the next catch-up is counted from, read back from a record
+            // as it was taken live.
+            Event::Looked => {
+                self.looked = Mark::of(&self.session);
+                self.looked_stale = false;
+                self.looked_recorded = true;
+            }
+
             // A conversation started over is a new session: what the shell
             // drew of the one before it goes, and the first row of this one
             // says where that went.
             Event::Cleared => {
                 self.start_over();
+                self.sent_since = self.sent.len();
                 self.push(Entry {
                     attention: Attention::Routine,
                     kind: EntryKind::Notice,
@@ -2919,6 +3202,59 @@ impl App {
         self.notable_only = !self.notable_only;
     }
 
+    /// Shows what happened since the operator was last shown what happened,
+    /// or says in one line that nothing has.
+    pub fn show_catch_up(&mut self) {
+        let caught = CatchUp::since(&self.caught_up, &self.session);
+        match caught.is_empty() {
+            true => self.hint = Some(crate::catch_up::NOTHING.to_owned()),
+            false => self.open_catch_up(&caught),
+        }
+    }
+
+    /// Opens the sheet of what `caught` says happened, from which the next
+    /// catch-up of either kind counts.
+    fn open_catch_up(&mut self, caught: &CatchUp) {
+        let now = self.session.turn_running().then(|| self.doing());
+        self.sheet = Some(crate::catch_up::sheet(caught, now));
+        self.produce(Event::Looked);
+        self.caught_up = self.looked.clone();
+    }
+
+    /// Opens what happened while the operator was away, where this key is
+    /// the first after [`App::with_catch_up`]'s time with none and something
+    /// did, and says whether it did.
+    ///
+    /// The key that brings them back is spent on telling them, rather than
+    /// on a pane, a prompt or a question they have not read yet: what it was
+    /// meant for was meant before they knew what changed.
+    fn caught_up_on_return(&mut self) -> bool {
+        let Some(now) = self.now else {
+            return false;
+        };
+        let away = std::mem::take(&mut self.returned)
+            || self
+                .last_key
+                .is_some_and(|last| now.saturating_duration_since(last) >= self.away_after);
+        self.last_key = Some(now);
+        if !std::mem::take(&mut self.looked_stale) {
+            return false;
+        }
+        // Nothing a catch-up counts has happened, so the mark stands: what
+        // moved since, the five-hour window, is still measured from it.
+        let caught = CatchUp::since(&self.looked, &self.session);
+        if caught.is_empty() {
+            return false;
+        }
+        let shown =
+            away && self.catch_up_automatic && self.overlay().is_none() && self.trusting.is_none();
+        match shown {
+            true => self.open_catch_up(&caught),
+            false => self.produce(Event::Looked),
+        }
+        shown
+    }
+
     /// Whether the Activity pane counts calls per tool: see
     /// [`App::count_tools_by_name`].
     pub fn tools_by_name(&self) -> bool {
@@ -3044,6 +3380,37 @@ impl App {
 
     /// Drops every prompt waiting, and whatever the operator had begun
     /// answering the one on screen with.
+    /// Says in the transcript which questions the session left unanswered as
+    /// it ended, before they are taken off the screen: a question that only
+    /// vanished would read as answered somewhere.
+    fn say_asks_went_unanswered(&mut self) {
+        let tools: Vec<String> = self.asks.iter().map(|ask| tool_label(&ask.tool)).collect();
+        let body = match tools.as_slice() {
+            [] => return,
+            [tool] => format!(
+                "The question about {tool} was never answered: the session that asked it \
+                 ended, and no call is waiting on it now."
+            ),
+            tools => format!(
+                "{} questions were never answered ({}): the session that asked them ended, \
+                 and no call is waiting on them now.",
+                tools.len(),
+                tools.join(", ")
+            ),
+        };
+        self.push(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: self.agent_name(),
+            meta: String::new(),
+            body,
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
     fn forget_asks(&mut self) {
         if self.asks.is_empty() {
             return;
@@ -3490,6 +3857,145 @@ impl App {
         self.budget_usd
     }
 
+    /// Names the files a turn changed that none of its edit calls reported —
+    /// a shell command it ran, a formatter, or something outside the session
+    /// — once a read of the working tree that began after the turn ended has
+    /// come back to compare with one that began after the turn started.
+    ///
+    /// Returns whether the loop should ask the watch for a read now. Called
+    /// by the event loop and never by [`App::apply`]: a recorded session has
+    /// no working tree to read. A file is told by its line counts against
+    /// the last commit, so a change that leaves them as they were — a line
+    /// replaced by one of the same count in a file already changed — is not
+    /// seen, and nothing is said that the counts do not show.
+    pub fn settle_tree(&mut self, now: Instant) -> bool {
+        let ended = self.session.turns().len();
+        let Some(watch) = self.tree_watch.as_mut() else {
+            if self.session.turn_running() {
+                self.turn_edits.clear();
+                self.tree_watch = Some(TreeWatch {
+                    ended_before: ended,
+                    asked: now,
+                    before: None,
+                    ended: None,
+                });
+                return true;
+            }
+            return false;
+        };
+        let fresh = |since: Instant| self.repo.read && self.repo.began.is_some_and(|b| b >= since);
+        let turn_over = ended > watch.ended_before;
+        if watch.before.is_none() && !turn_over && fresh(watch.asked) {
+            watch.before = Some(self.repo.working.clone());
+        }
+        if !turn_over {
+            return false;
+        }
+        let (Some(before), Some(asked_end)) = (&watch.before, watch.ended) else {
+            if watch.before.is_none() {
+                self.tree_watch = None;
+                return false;
+            }
+            watch.ended = Some(now);
+            return true;
+        };
+        if !fresh(asked_end) {
+            return false;
+        }
+        let changed = changed_outside(before, &self.repo.working, &self.turn_edits);
+        let turn = watch.ended_before.saturating_add(1);
+        self.tree_watch = None;
+        if !changed.is_empty() {
+            self.say_outside(turn, &changed);
+        }
+        false
+    }
+
+    /// The notice of what `turn` changed outside the edit tools.
+    fn say_outside(&mut self, turn: usize, changed: &[Outside]) {
+        let side = |count: Option<u64>| count.map_or_else(|| "—".to_owned(), |n| n.to_string());
+        let named: Vec<String> = changed
+            .iter()
+            .take(OUTSIDE_LISTED)
+            .map(|outside| match outside {
+                Outside::Changed(file) => {
+                    format!(
+                        "{} +{} −{}",
+                        file.path,
+                        side(file.added),
+                        side(file.removed)
+                    )
+                }
+                Outside::Restored(path) => format!("{path} (put back as committed)"),
+            })
+            .collect();
+        let rest = changed.len().saturating_sub(OUTSIDE_LISTED);
+        let more = match rest {
+            0 => String::new(),
+            n => format!(", and {n} more"),
+        };
+        let files = match changed.len() {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        self.push(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: "outside the edit tools".to_owned(),
+            meta: format!("turn {turn} · {files}"),
+            body: format!(
+                "Turn {turn} changed {}{more} with no edit call saying so: a shell command \
+                 it ran, a formatter, or something outside the session. Each is counted \
+                 against the last commit, as the Working tree counts it; the session's own \
+                 edit figures leave them out.",
+                named.join(", "),
+            ),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+        self.scroll_to_tail();
+    }
+
+    /// Says so when a turn that ended since the last call spent more than
+    /// three times what the session's turns before it averaged.
+    ///
+    /// Called by the event loop and never by [`App::apply`], for the reason
+    /// [`App::settle_budget`] is: the turns a session read back holds are
+    /// taken as judged on the first call, so that opening an old session does
+    /// not call out what it spent long ago.
+    pub fn settle_spikes(&mut self) {
+        let ended = self.session.turns().len();
+        // A cleared conversation starts its turns over, and is judged from
+        // its own first turn.
+        let from = self.spikes_judged.map_or(ended, |judged| judged.min(ended));
+        self.spikes_judged = Some(ended);
+        let found: Vec<crate::spike::Spike> = (from..ended)
+            .filter_map(|index| crate::spike::at(self.session.turns(), index))
+            .collect();
+        for spike in found {
+            self.push(Entry {
+                attention: Attention::Notable,
+                kind: EntryKind::Notice,
+                head: "spike".to_owned(),
+                meta: format!("turn {} · {}× the average", spike.turn, spike.times),
+                body: format!(
+                    "Turn {} spent {} tokens, against the {} the session's turns before it \
+                     averaged.",
+                    spike.turn,
+                    crate::ui::compact(spike.tokens),
+                    crate::ui::compact(spike.average),
+                ),
+                streaming: false,
+                at: self.at,
+                calls: Vec::new(),
+                agent: None,
+            });
+            self.scroll_to_tail();
+        }
+    }
+
     /// Says once when the session has spent most of its budget.
     ///
     /// Called by the event loop and never by [`App::apply`], for the reason
@@ -3676,6 +4182,128 @@ impl App {
         });
     }
 
+    /// Keeps what the call `id` returned for the view of it, as the end
+    /// carried it; an end whose start never arrived is kept from the end's
+    /// own copy of what the start said.
+    fn record_end(
+        &mut self,
+        id: &ToolCallId,
+        (name, input, summary): (&str, &str, Option<&str>),
+        (output, bytes, outcome): (&str, u64, ToolOutcome),
+        untrimmed: Option<&str>,
+    ) {
+        let ended = Some((output.to_owned(), bytes, outcome));
+        let untrimmed = untrimmed.map(str::to_owned);
+        match self
+            .recorded
+            .iter_mut()
+            .rev()
+            .find(|(started, _)| started == id)
+        {
+            Some((_, call)) => {
+                call.ended = ended;
+                call.untrimmed = untrimmed;
+            }
+            None => self.recorded.push((
+                id.clone(),
+                crate::detail::Recorded {
+                    name: name.to_owned(),
+                    what: what_it_does(summary, input),
+                    input: input.to_owned(),
+                    ended,
+                    untrimmed,
+                },
+            )),
+        }
+    }
+
+    /// Opens the list of the session's sub-agents, on the newest, to narrow
+    /// the transcript to one; or, where it is narrowed, draws everything
+    /// again; or says there are no sub-agents yet.
+    fn pick_agent(&mut self) {
+        if self.only_agent.is_some() {
+            self.hold_view();
+            self.only_agent = None;
+            return;
+        }
+        if self.agents.is_empty() {
+            self.hint = Some(NO_AGENTS_HINT.to_owned());
+            return;
+        }
+        let options: Vec<Choice> = self
+            .agents
+            .iter()
+            .zip(self.agent_tags())
+            .map(|(agent, tag)| Choice {
+                value: agent.id.to_string(),
+                name: Some(tag),
+                note: Some(match agent.is_running() {
+                    true => format!("{} · running", agent.task()),
+                    false => agent.task().to_owned(),
+                }),
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Agent,
+            at: options.len().saturating_sub(1),
+            options,
+            more: 0,
+        });
+    }
+
+    /// The tag of the one sub-agent the transcript is narrowed to, where it
+    /// is: see [`App::pick_agent`].
+    pub fn only_agent_tag(&self) -> Option<String> {
+        self.only_agent.as_ref().map(|id| self.sub_agent_tag(id))
+    }
+
+    /// The entries the transcript draws, in the order it draws them, as the
+    /// operator last arranged it — a run of routine entries it leaves out
+    /// is not among them.
+    pub fn entries_shown(&self) -> Vec<&Entry> {
+        let only = self.only_agent_tag();
+        crate::ui::order(
+            &self.entries,
+            self.by_agent,
+            self.notable_only,
+            only.as_deref(),
+        )
+        .into_iter()
+        .filter_map(|slot| match slot {
+            crate::ui::Slot::Entry(at) => self.entries.get(at),
+            crate::ui::Slot::Heading { .. } | crate::ui::Slot::Hidden { .. } => None,
+        })
+        .collect()
+    }
+
+    /// Opens the list of the conversation's tool calls, on the newest, or
+    /// says there are none yet.
+    fn pick_call(&mut self) {
+        if self.recorded.is_empty() {
+            self.hint = Some(NO_CALLS_HINT.to_owned());
+            return;
+        }
+        let options: Vec<Choice> = self
+            .recorded
+            .iter()
+            .enumerate()
+            .map(|(at, (_, call))| Choice {
+                value: at.to_string(),
+                name: Some(tool_label(&call.name)),
+                note: Some(match &call.ended {
+                    Some((_, bytes, _)) => format!("{} · {}", call.what, human_bytes(*bytes)),
+                    None => format!("{} · running", call.what),
+                }),
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Call,
+            at: options.len().saturating_sub(1),
+            options,
+            more: 0,
+        });
+    }
+
     /// Opens the list of themes, on the one in force.
     fn pick_theme(&mut self) {
         let options: Vec<Choice> = crate::theme::Theme::all()
@@ -3702,6 +4330,9 @@ impl App {
                 in_force(&picker.options, self.session.models(), self.session.model())
             }
             Purpose::Effort => None,
+            Purpose::Rewind => None,
+            Purpose::Call => None,
+            Purpose::Agent => None,
             Purpose::Theme => picker
                 .options
                 .iter()
@@ -3745,9 +4376,31 @@ impl App {
         match purpose {
             Purpose::Model => self.produce(Event::ModelSelected { model: chosen }),
             Purpose::Effort => self.send_command("effort", Some(&chosen)),
+            Purpose::Rewind => {
+                if let Ok(prompt) = chosen.parse::<usize>() {
+                    let named = self.sent.get(prompt).cloned().unwrap_or_default();
+                    let hint = format!("Putting the files back as they were before \"{named}\"…");
+                    self.hint = Some(hint.clone());
+                    self.rewinding = Some(hint);
+                    self.rewinds.push(prompt);
+                }
+            }
             Purpose::Theme => {
                 if let Some(theme) = Theme::by_name(&chosen) {
                     self.set_theme(theme);
+                }
+            }
+            Purpose::Agent => {
+                self.hold_view();
+                self.only_agent = Some(chosen.into());
+            }
+            Purpose::Call => {
+                let call = chosen
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|at| self.recorded.get(at));
+                if let Some((_, call)) = call {
+                    self.detail = Some(crate::detail::Detail::of(call));
                 }
             }
         }
@@ -3824,7 +4477,7 @@ impl App {
             Action::Doctor => self.listed("doctor"),
             Action::Mcp => true,
             Action::Effort => self.listed("effort"),
-            Action::Rewind => self.listed("rewind"),
+            Action::Rewind => self.sent.len() > self.sent_since,
             Action::Hooks => self.listed("hooks"),
             Action::SignIn => false,
             Action::Resume => self.remembers,
@@ -3852,6 +4505,10 @@ impl App {
             | Action::Diff
             | Action::GroupByAgent
             | Action::NotableOnly
+            | Action::CatchUp
+            | Action::Calls
+            | Action::OneAgent
+            | Action::Overview
             | Action::Pane(_)
             | Action::Theme
             | Action::Shortcuts
@@ -3879,11 +4536,7 @@ impl App {
                 false => self.hint = Some(NO_RECORD_HINT.to_owned()),
             },
             Action::History => self.open_history(View::Prompts),
-            Action::Rewind => self.send_or_say(
-                "rewind",
-                "The backend lists no /rewind to a session niobe drives, so it has no \
-                 checkpoint to go back to",
-            ),
+            Action::Rewind => self.pick_rewind(),
             Action::Stop => match self.working() {
                 true => {
                     self.focus = Focus::Session;
@@ -3909,6 +4562,10 @@ impl App {
             Action::Diff => self.open_diffs(),
             Action::GroupByAgent => self.group_by_agent(),
             Action::NotableOnly => self.show_notable_only(),
+            Action::CatchUp => self.show_catch_up(),
+            Action::Calls => self.pick_call(),
+            Action::Overview => self.open_overview(),
+            Action::OneAgent => self.pick_agent(),
             Action::Pane(pane) => self.toggle_pane(pane),
             Action::Theme => self.pick_theme(),
             Action::Shortcuts => self.sheet = Some(self.shortcuts()),
@@ -4042,6 +4699,18 @@ impl App {
 
     /// Opens the Memory view, and asks for what the agent is given to be
     /// read for it.
+    /// Opens the project overview on a line saying it is being read, and
+    /// asks for it: written each time it opens, so the session running now is
+    /// in it as far as it has gone.
+    fn open_overview(&mut self) {
+        self.detail = Some(crate::detail::Detail::page(
+            crate::overview::TITLE,
+            "",
+            crate::overview::READING,
+        ));
+        self.overview_wanted = true;
+    }
+
     fn open_memory(&mut self) {
         self.memory = Some(crate::memory::View::default());
         self.memory_wanted = true;
@@ -4147,6 +4816,72 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Opens the list of the prompts sent to the conversation in front of
+    /// the model, newest first, to put the files back as they were before
+    /// one of them.
+    fn pick_rewind(&mut self) {
+        let offered = self.sent.get(self.sent_since..).unwrap_or_default();
+        if offered.is_empty() {
+            self.hint = Some(
+                "No prompt has gone to the backend from here since the conversation started, \
+                 so there is nothing to put the files back before"
+                    .to_owned(),
+            );
+            return;
+        }
+        let options = offered
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(at, prompt)| Choice {
+                value: self.sent_since.saturating_add(at).to_string(),
+                name: Some(prompt.clone()),
+                note: None,
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Rewind,
+            options,
+            at: 0,
+            more: 0,
+        });
+    }
+
+    /// Records that the loop handed `prompt` to the backend: it is one F6
+    /// can put the files back before.
+    pub fn sent_to_backend(&mut self, prompt: &str) {
+        let first = prompt.trim().lines().next().unwrap_or_default();
+        self.sent.push(crate::text::truncate(first, REWIND_LABEL));
+    }
+
+    /// The prompts the operator asked to have the files put back to before
+    /// since the last call, each by where it is among those sent, oldest
+    /// first, for the loop to hand to the backend.
+    pub fn take_rewinds(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.rewinds)
+    }
+
+    /// Takes the "putting back" hint down once the backend has said what it
+    /// put back, or why it put nothing back, which the transcript shows.
+    fn rewind_answered(&mut self, event: &Event) {
+        let (Event::Notice { message } | Event::Error { message, .. }) = event else {
+            return;
+        };
+        if !message.contains("put back") {
+            return;
+        }
+        if let Some(hint) = self.rewinding.take()
+            && self.hint.as_deref() == Some(hint.as_str())
+        {
+            self.hint = None;
+        }
+    }
+
+    /// The backend would not take the rewind.
+    pub fn not_rewound(&mut self, error: &str) {
+        self.hint = Some(format!("No files were put back: {error}"));
     }
 
     /// Whether `r` in the MCP view reaches a backend: only one listening can
@@ -4437,6 +5172,8 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" · "),
         );
+        rows.push(String::new());
+        rows.extend(typed_rows());
         if !self.keymap.is_empty() {
             rows.push(
                 "Rebound in your config: ".to_owned()
@@ -4565,10 +5302,15 @@ impl App {
             };
             return true;
         }
-        if self.sheet.is_some() || self.memory.is_some() || self.mcp.is_some() {
+        if self.sheet.is_some()
+            || self.memory.is_some()
+            || self.mcp.is_some()
+            || self.detail.is_some()
+        {
             self.sheet = None;
             self.memory = None;
             self.mcp = None;
+            self.detail = None;
             return true;
         }
         if on_menu_bar {
@@ -4820,6 +5562,29 @@ impl App {
     #[must_use]
     pub fn with_alerts(mut self, alerts: Alerts) -> Self {
         self.alerts = alerts;
+        self
+    }
+
+    /// The same shell, knowing whether the backend was asked to state the
+    /// decisions it makes. Asked unless this says otherwise.
+    #[must_use]
+    pub fn with_decisions_asked(mut self, asked: bool) -> Self {
+        self.decisions_asked = asked;
+        self
+    }
+
+    /// Whether the backend was asked to state the decisions it makes.
+    pub fn decisions_asked(&self) -> bool {
+        self.decisions_asked
+    }
+
+    /// The same shell, telling the operator what happened while they were
+    /// away once `after` has passed with no key pressed: of itself on the
+    /// first key back where `automatic`, and on `c` or the View menu always.
+    #[must_use]
+    pub fn with_catch_up(mut self, after: Duration, automatic: bool) -> Self {
+        self.away_after = after;
+        self.catch_up_automatic = automatic;
         self
     }
 
@@ -5311,6 +6076,10 @@ impl App {
             KeyCode::Enter => self.fold_under_cursor(pane),
             KeyCode::Char('a') => self.group_by_agent(),
             KeyCode::Char('n') => self.show_notable_only(),
+            KeyCode::Char('c') => self.show_catch_up(),
+            KeyCode::Char('d') => self.pick_call(),
+            KeyCode::Char('s') => self.pick_agent(),
+            KeyCode::Char('o') => self.open_overview(),
             KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
@@ -5382,6 +6151,19 @@ impl App {
             .iter()
             .find(|agent| &agent.id == id)
             .map(|agent| agent.label.clone())
+    }
+
+    /// Each decision the session's replies stated, with the moment it was
+    /// stated at.
+    ///
+    /// The two are handed out together because they are kept apart: the
+    /// decision is in the session fold, which has no times, and the time is
+    /// here. A pane that paired them by index could pair the wrong two.
+    pub fn decisions(&self) -> impl Iterator<Item = (&DecisionRecord, Option<Stamp>)> {
+        self.session
+            .decisions()
+            .iter()
+            .zip(self.decided_at.iter().copied())
     }
 
     /// When a sub-agent was spawned, where the shell had a clock at the time.
@@ -5840,6 +6622,7 @@ impl App {
             exit_code: ran.exit_code,
             error: ran.error,
             command: Some(command),
+            untrimmed: None,
         });
         if let Some(tested) = tested {
             self.produce(tested);
@@ -6077,6 +6860,7 @@ impl App {
             (self.sheet.is_some(), Overlay::Sheet),
             (self.memory.is_some(), Overlay::Memory),
             (self.mcp.is_some(), Overlay::Mcp),
+            (self.detail.is_some(), Overlay::Detail),
             (self.browser.is_some(), Overlay::History),
             (self.picking.is_some(), Overlay::List),
             (self.find.is_some(), Overlay::Search),
@@ -6335,15 +7119,45 @@ impl App {
                 let copied = selection.text(|line| drawn.plain_line(line));
                 (!copied.is_empty()).then_some(crate::desktop::Handoff::Copy(copied))
             }
-            None => self
-                .transcript_drawn
-                .and_then(|(area, _)| {
+            None => {
+                let link = self.transcript_drawn.and_then(|(area, _)| {
                     self.drawn
                         .link_at(pressed, usize::from(area.width), &self.entries)
-                })
-                .map(crate::desktop::Handoff::Open),
+                });
+                if link.is_none() {
+                    self.open_call_at(pressed.line);
+                }
+                link.map(crate::desktop::Handoff::Open)
+            }
         };
         self.handoffs.extend(handoff);
+    }
+
+    /// Opens the call drawn on transcript line `line` whole, where a call is
+    /// drawn there; a run of calls folded into one entry opens the list of
+    /// calls on the run's first, since which of them was meant is not said
+    /// by a click on the run.
+    fn open_call_at(&mut self, line: usize) {
+        let Some(at) = self.drawn.entry_at(line) else {
+            return;
+        };
+        let calls = self.entries.get(at).map_or(0, |entry| entry.calls.len());
+        let Some(&first) = self.call_at.get(&(at, 0)) else {
+            return;
+        };
+        match calls {
+            1 => {
+                if let Some((_, call)) = self.recorded.get(first) {
+                    self.detail = Some(crate::detail::Detail::of(call));
+                }
+            }
+            _ => {
+                self.pick_call();
+                if let Some(picker) = self.picking.as_mut() {
+                    picker.at = first;
+                }
+            }
+        }
     }
 
     /// The run of the transcript the operator selected, for the draw to mark.
@@ -6530,6 +7344,7 @@ impl App {
             || self.sheet.is_some()
             || self.memory.is_some()
             || self.mcp.is_some()
+            || self.detail.is_some()
         {
             return;
         }
@@ -6668,6 +7483,9 @@ impl App {
     /// to the composer, so typing an `f` is typing an `f` even though `F1` is a
     /// menu.
     pub fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        if self.caught_up_on_return() {
+            return;
+        }
         let covered = self.overlay().is_some();
         self.on_key_under(key);
         self.after_uncovering(covered);
@@ -6765,6 +7583,12 @@ impl App {
         }
         if self.mcp.is_some() {
             self.on_mcp_key(key);
+            return;
+        }
+        if let Some(detail) = self.detail.as_mut() {
+            if detail.on_key(key) == crate::detail::Outcome::Close {
+                self.detail = None;
+            }
             return;
         }
         // The history dialog takes it the same way: what is typed there
@@ -7133,6 +7957,7 @@ impl App {
     pub fn tick(&mut self, now: Instant, at: Option<Stamp>) {
         self.now = Some(now);
         self.at = at;
+        self.last_key = self.last_key.or(Some(now));
         self.expire_quit(now);
         // The trust question is up from the first tick, which draws it, and
         // waits from there for a quiet keyboard as a permission question does.
@@ -7266,6 +8091,9 @@ impl App {
             self.run_typed(typed, argument);
             return;
         }
+        if self.held_unlisted(&text) {
+            return;
+        }
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
             let draft = self.take_composer_for_the_shell();
             self.produce(Event::ModelSelected { model });
@@ -7286,6 +8114,29 @@ impl App {
         }
         self.give_back(&draft);
         self.scroll_to_tail();
+    }
+
+    /// Whether `text` is held back rather than sent: a prompt that opens
+    /// with a command the backend did not list, the first time Enter sends
+    /// it. A backend may pass such a command to the model as text, which
+    /// spends a whole turn on a word; the second Enter on the same prompt
+    /// sends it, for a command the backend answers though it lists it not.
+    /// Nothing is held where the backend has listed no commands at all.
+    fn held_unlisted(&mut self, text: &str) -> bool {
+        let Some(name) = unlisted_command(text, self.session.commands()) else {
+            self.unlisted_held = None;
+            return false;
+        };
+        if self.unlisted_held.as_deref() == Some(text) {
+            self.unlisted_held = None;
+            return false;
+        }
+        self.hint = Some(format!(
+            "The backend does not list /{name}, so it may reach the model as text and spend a \
+             turn. Enter again sends it anyway"
+        ));
+        self.unlisted_held = Some(text.to_owned());
+        true
     }
 
     /// Says in the transcript that the prompt above it went nowhere.
@@ -7468,6 +8319,42 @@ impl App {
             view.files = Some(files);
             view.at = 0;
             view.reading = None;
+        }
+    }
+
+    /// Whether the project overview has been opened since this was last
+    /// asked.
+    pub fn take_overview_request(&mut self) -> bool {
+        std::mem::take(&mut self.overview_wanted)
+    }
+
+    /// The project overview the binary wrote, for the open overview. A page
+    /// that lands after the dialog was closed, or once a tool call was opened
+    /// in its place, is dropped.
+    pub fn set_overview(&mut self, page: &str) {
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|open| open.title() == crate::overview::TITLE)
+        {
+            self.detail = Some(crate::detail::Detail::page(
+                crate::overview::TITLE,
+                page,
+                "nothing is recorded here to read",
+            ));
+        }
+    }
+
+    /// The tool call open to be read whole, while one is.
+    pub fn detail(&self) -> Option<&crate::detail::Detail> {
+        self.detail.as_ref()
+    }
+
+    /// Told by the draw how the open call is laid out: see
+    /// [`crate::detail::Detail::measured`].
+    pub(crate) fn measured_detail(&mut self, width: usize, room: usize) {
+        if let Some(detail) = self.detail.as_mut() {
+            detail.measured(width, room);
         }
     }
 
@@ -8212,6 +9099,7 @@ fn since_reset(windows: UsageWindows, now: u64) -> UsageWindows {
         using_overage: windows.using_overage
             && !has_reset(windows.five_hour)
             && !has_reset(windows.seven_day),
+        overage: windows.overage,
         five_hour: reset(windows.five_hour, None),
         seven_day: reset(windows.seven_day, Some(SEVEN_DAYS)),
     }
@@ -8250,6 +9138,16 @@ fn left(seconds: u64) -> String {
         (d, h, _) => format!("{d}d {h}h"),
     }
 }
+
+/// What asking for one sub-agent's entries says before there are any agents.
+const NO_AGENTS_HINT: &str = "No sub-agents yet: the list holds the ones this conversation started";
+
+/// What asking for the list of tool calls says before there are any.
+const NO_CALLS_HINT: &str = "No tool calls yet: the list holds this conversation's calls";
+
+/// How long with no key pressed the operator is away, where the config
+/// does not say: long enough that a pause to read is not an absence.
+const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
 
 /// A share of a window as whole percent. Not clamped: a backend reporting more
 /// than the whole window is reporting something the operator has to see.
@@ -8460,10 +9358,17 @@ fn turn_total_differs(
 ) -> String {
     let more = per_message.short_of(reported).total();
     let fewer = reported.short_of(per_message).total();
+    let split = per_message.cache_write_1h.zip(reported.cache_write_1h);
     let said = match (more, fewer) {
-        (0, 0) => {
-            "The CLI's total for this turn does not match what its messages reported.".to_owned()
-        }
+        (0, 0) => match split {
+            Some((messages, total)) if messages != total => format!(
+                "The CLI's total for this turn bought {total} of its cache writes for an hour; \
+                 its messages said {messages}. Each cache write is priced at the lifetime its \
+                 message gave."
+            ),
+            _ => "The CLI's total for this turn does not match what its messages reported."
+                .to_owned(),
+        },
         (more, 0) => format!(
             "The CLI counted {more} tokens for this turn beyond what its messages reported. \
              The session's totals hold them where the CLI's bill carried them; no message \
@@ -8488,12 +9393,17 @@ fn turn_total_differs(
     format!("{said}\n{}", detail.join(" · "))
 }
 
-/// Token counts as a report gives them, each figure named.
+/// Token counts as a report gives them, each figure named, and the cache
+/// writes bought for an hour where the counts split them.
 fn figures(counts: &TokenCounts) -> String {
-    format!(
+    let figures = format!(
         "{} in, {} out, {} cache read, {} cache write",
         counts.input, counts.output, counts.cache_read, counts.cache_write
-    )
+    );
+    match counts.cache_write_1h {
+        Some(hour) => format!("{figures}, {hour} for an hour"),
+        None => figures,
+    }
 }
 
 /// A count of things in the transcript, as a figure.
@@ -8589,6 +9499,17 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui_textarea::Key;
     use std::time::{Duration, Instant};
+
+    impl App {
+        /// What the operator produced, without the looks the shell records
+        /// for the catch-up, which no test of what they said is about.
+        fn said(&mut self) -> Vec<Event> {
+            self.take_produced()
+                .into_iter()
+                .filter(|event| *event != Event::Looked)
+                .collect()
+        }
+    }
 
     fn app() -> App {
         App::new(Repo {
@@ -8732,6 +9653,170 @@ mod tests {
         assert_eq!(app.composed(), "n", "nothing was typed");
         app.on_key(key(KeyCode::Char('n')));
         assert!(!app.notable_only(), "the key hides and shows them");
+    }
+
+    fn changed(path: &str) -> Event {
+        Event::FileChange {
+            path: path.to_owned(),
+            added: Some(4),
+            removed: Some(1),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
+        }
+    }
+
+    const AWAY: Duration = Duration::from_secs(6 * 60);
+
+    #[test]
+    fn the_first_key_after_minutes_away_shows_what_happened_and_is_spent_on_it() {
+        let mut app = laid_out();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(left + AWAY, None);
+
+        app.on_key(key(KeyCode::Char('x')));
+        let sheet = app.sheet().expect("something happened while away");
+        assert_eq!(sheet.title, crate::catch_up::TITLE);
+        assert_eq!(sheet.rows[..2], ["1 file changed:", "  src/lib.rs  +4 −1"]);
+        assert_eq!(app.composed(), "", "the key went on telling them");
+
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "nothing new, and not away");
+        assert_eq!(app.composed(), "x");
+    }
+
+    #[test]
+    fn a_key_pressed_as_things_happen_moves_the_mark_so_coming_back_tells_only_what_came_after() {
+        let mut app = laid_out();
+        let at = Instant::now();
+        app.tick(at, None);
+        app.apply(&changed("src/seen.rs"));
+        app.tick(at + Duration::from_secs(1), None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "a second is no absence");
+
+        app.apply(&changed("src/unseen.rs"));
+        app.tick(at + AWAY, None);
+        app.on_key(key(KeyCode::Char('y')));
+        let rows = &app.sheet().expect("a file changed while away").rows;
+        assert!(
+            rows.iter().any(|row| row.contains("src/unseen.rs")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("src/seen.rs")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn minutes_away_with_nothing_happening_open_nothing_and_the_key_lands() {
+        let mut app = laid_out();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none());
+        assert_eq!(app.composed(), "x");
+    }
+
+    #[test]
+    fn with_the_automatic_catch_up_off_c_in_a_pane_still_shows_it_and_says_when_nothing_is_new() {
+        let mut app = laid_out().with_catch_up(Duration::from_secs(60), false);
+        let left = Instant::now();
+        app.tick(left, None);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Tab));
+        assert!(app.sheet().is_none(), "not of itself");
+
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(
+            app.sheet().map(|sheet| sheet.title.as_str()),
+            Some(crate::catch_up::TITLE),
+            "c counts from the last catch-up shown, not the last key"
+        );
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('c')));
+        assert!(app.sheet().is_none());
+        assert_eq!(app.hint(), Some(crate::catch_up::NOTHING));
+    }
+
+    #[test]
+    fn a_conversation_started_over_counts_what_it_changes_from_nothing() {
+        let mut app = laid_out();
+        let at = Instant::now();
+        app.tick(at, None);
+        app.apply(&changed("src/lib.rs"));
+        app.on_key(key(KeyCode::Char('x')));
+        app.apply(&Event::Cleared);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(at + AWAY, None);
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(
+            app.sheet().is_some(),
+            "the same file changed once in each conversation is news in the new one"
+        );
+    }
+
+    #[test]
+    fn a_look_is_recorded_once_something_has_happened_and_read_back_as_the_mark() {
+        let mut live = laid_out();
+        let at = Instant::now();
+        live.tick(at, None);
+        live.on_key(key(KeyCode::Char('x')));
+        assert!(
+            !live.take_produced().contains(&Event::Looked),
+            "nothing had happened to look at"
+        );
+        live.apply(&changed("src/seen.rs"));
+        live.on_key(key(KeyCode::Char('y')));
+        live.on_key(key(KeyCode::Char('z')));
+        let looks = live
+            .take_produced()
+            .iter()
+            .filter(|event| **event == Event::Looked)
+            .count();
+        assert_eq!(looks, 1, "one look for one thing that happened");
+
+        // The process ended while the operator was away, after a file they
+        // never saw changed; the session taken up again tells them of it on
+        // the first key, however soon.
+        let mut app = laid_out();
+        app.apply(&changed("src/seen.rs"));
+        app.apply(&Event::Looked);
+        app.apply(&changed("src/unseen.rs"));
+        app.resumed();
+        app.tick(Instant::now(), None);
+        app.on_key(key(KeyCode::Char('x')));
+        let rows = &app
+            .sheet()
+            .expect("a file changed after the last look")
+            .rows;
+        assert!(
+            rows.iter().any(|row| row.contains("src/unseen.rs")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("src/seen.rs")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_record_that_marks_no_look_holds_nothing_to_catch_up_on() {
+        let mut app = laid_out();
+        app.apply(&changed("src/lib.rs"));
+        app.resumed();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "the record was there to read before");
+        assert_eq!(app.composed(), "x");
     }
 
     /// `t` turns the Activity pane's tools between kinds of work and tool
@@ -9156,6 +10241,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
 
         assert_eq!(app.entries().len(), 1, "the end opened a second entry");
@@ -9191,6 +10277,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -9203,6 +10290,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
 
         assert_eq!(app.entries()[0].kind, EntryKind::Failure);
@@ -9383,7 +10471,7 @@ mod tests {
         app.submit();
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             vec![Event::UserMessage {
                 text: "look at this[Image #1] ".to_owned()
             }]
@@ -9436,7 +10524,7 @@ mod tests {
         app.submit();
         assert_eq!(app.composed(), "");
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PromptNotSent {
                 text: "hi".to_owned()
             }]
@@ -9485,7 +10573,39 @@ mod tests {
             });
         }
         app.submit();
-        app.take_produced()
+        app.said()
+    }
+
+    /// A command the backend does not list may reach the model as text and
+    /// spend a whole turn: Claude Code 2.1.309 passes `/todos` on that way.
+    #[test]
+    fn a_command_the_backend_does_not_list_is_held_until_enter_comes_again() {
+        let mut app = offering_model(app());
+
+        assert_eq!(submitted(&mut app, "/todos"), []);
+        let hint = app.hint().expect("the shell says why it held it");
+        assert!(
+            hint.contains("/todos") && hint.contains("Enter again"),
+            "{hint}"
+        );
+        assert_eq!(app.composer().lines(), ["/todos"], "the prompt is kept");
+
+        app.submit();
+        assert_eq!(app.said().len(), 1, "sent the second time");
+    }
+
+    #[test]
+    fn a_listed_command_a_path_and_a_backend_that_listed_nothing_are_sent_at_once() {
+        let mut listing = offering_model(app());
+        assert_eq!(
+            submitted(&mut listing, "/model").len(),
+            0,
+            "the shell's own"
+        );
+        assert_eq!(submitted(&mut listing, "/usr/bin/env is missing").len(), 1);
+
+        let mut unlisted = app();
+        assert_eq!(submitted(&mut unlisted, "/todos").len(), 1);
     }
 
     /// Typed as a prompt, the backend would move the model only when the next
@@ -9509,8 +10629,14 @@ mod tests {
     fn a_model_command_the_picker_cannot_stand_for_goes_to_the_backend_as_typed() {
         for text in ["/model haiku please", "/models haiku"] {
             let mut app = offering_model(app().attached());
+            let mut said = submitted(&mut app, text);
+            if text.starts_with("/models") {
+                assert_eq!(said, [], "not listed, so held once");
+                app.submit();
+                said = app.said();
+            }
             assert_eq!(
-                submitted(&mut app, text),
+                said,
                 [Event::UserMessage {
                     text: text.to_owned()
                 }]
@@ -9531,7 +10657,7 @@ mod tests {
     /// something: what it sent, what it said, what it opened and handed over,
     /// and whether it is ending.
     fn outcome(app: &mut App) -> String {
-        let sent = app.take_produced();
+        let sent = app.said();
         let handed = app.take_handoffs();
         format!(
             "sent {sent:?}\nsaid {:?}\nsheet {:?}\npicking {:?}\nbrowsing {:?}\n\
@@ -9600,6 +10726,27 @@ mod tests {
     }
 
     #[test]
+    fn the_shortcuts_name_the_typed_commands_that_open_the_shells_own_and_the_hold() {
+        let mut app = app();
+        app.perform(crate::menu::Action::Shortcuts);
+        let rows = app.sheet().expect("F1 opens the sheet").rows.join("\n");
+        for named in [
+            "/status Settings",
+            "/permissions Permissions",
+            "/export Export transcript",
+            "/bug Report a bug",
+            "/login Login / Logout",
+        ] {
+            assert!(rows.contains(named), "{named} missing from:\n{rows}");
+        }
+        assert!(
+            !rows.contains("/compact"),
+            "a backend command is the backend's:\n{rows}"
+        );
+        assert!(rows.contains("Enter again"), "{rows}");
+    }
+
+    #[test]
     fn a_typed_help_command_lists_the_shortcuts_as_f1_does() {
         typed_as_asked(app, "/help", crate::menu::Action::Shortcuts);
     }
@@ -9656,7 +10803,7 @@ mod tests {
         };
         let mut app = working();
         app.on_key(key(KeyCode::F(2)));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         let refused = app.hint().map(str::to_owned);
         assert!(
             refused
@@ -9679,7 +10826,7 @@ mod tests {
             "/config theme dark",
             "/help me",
         ] {
-            let mut app = offering(&["review", "config"]);
+            let mut app = offering(&["review", "config", "help"]);
             assert_eq!(
                 submitted(&mut app, text),
                 [Event::UserMessage {
@@ -9758,6 +10905,7 @@ mod tests {
             output,
             cache_read,
             cache_write,
+            cache_write_1h: None,
         };
         app.apply(&Event::UserMessage {
             text: "one".to_owned(),
@@ -9792,6 +10940,46 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_whose_one_hour_cache_writes_alone_differ_says_how() {
+        let mut app = app();
+        let counts = |cache_write_1h| TokenCounts {
+            input: 4,
+            output: 20,
+            cache_read: 0,
+            cache_write: 500,
+            cache_write_1h,
+        };
+        app.apply(&Event::UserMessage {
+            text: "one".to_owned(),
+        });
+        app.apply(&Event::TurnTotalDiffers {
+            per_message: counts(Some(300)),
+            reported: counts(Some(500)),
+            backend_session: None,
+            unfinished: Vec::new(),
+        });
+
+        let last = app.entries().last().expect("an entry");
+        let (said, detail) = last.body.split_once('\n').expect("words, then the detail");
+        assert_eq!(
+            said,
+            "The CLI's total for this turn bought 500 of its cache writes for an hour; \
+             its messages said 300. Each cache write is priced at the lifetime its message \
+             gave."
+        );
+        assert!(
+            detail.contains(
+                "per message 4 in, 20 out, 0 cache read, 500 cache write, 300 for an hour"
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("500 cache write, 500 for an hour"),
+            "{detail}"
+        );
+    }
+
+    #[test]
     fn shift_enter_opens_a_line_and_enter_still_sends() {
         use ratatui::crossterm::event::KeyModifiers;
 
@@ -9800,7 +10988,7 @@ mod tests {
         typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "one\ntwo".to_owned()
             }]
@@ -9816,7 +11004,7 @@ mod tests {
             typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::UserMessage {
                     text: "one\ntwo".to_owned()
                 }]
@@ -9839,7 +11027,7 @@ mod tests {
             typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::UserMessage {
                     text: "one\ntwo".to_owned()
                 }]
@@ -9877,12 +11065,12 @@ mod tests {
         app.submit();
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "h".to_owned()
             }]
         );
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -9891,7 +11079,7 @@ mod tests {
         app.apply(&Event::UserMessage {
             text: "from the store".to_owned(),
         });
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -10004,11 +11192,11 @@ mod tests {
             output: 1,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(cost_usd),
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -10170,7 +11358,7 @@ mod tests {
         // Nothing is left for a key to answer, so nothing goes to a backend
         // that could not take it.
         app.on_key(key(KeyCode::Enter));
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -10276,7 +11464,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -10311,6 +11499,29 @@ mod tests {
             untargeted.ask_options(),
             [Answer::Once, Answer::AlwaysTool, Answer::No]
         );
+    }
+
+    /// A standing answer to a plan would let every later plan go ahead
+    /// unread, which is what asking for a plan was meant to stop.
+    #[test]
+    fn a_plan_offers_no_standing_answer() {
+        let mut app = app();
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: r#"{"plan":"1. Guard it."}"#.to_owned(),
+            target: None,
+            proposal: Some(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: "1. Guard it.".to_owned(),
+                },
+                ["plan"],
+            )),
+            reason: None,
+            agent: None,
+        });
+
+        assert_eq!(app.ask_options(), [Answer::Once, Answer::No]);
     }
 
     #[test]
@@ -10386,7 +11597,7 @@ mod tests {
         // answer was a standing one.
         for mut app in [by_target, by_tool] {
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::PermissionResponse {
                     id: "t1".into(),
                     decision: PermissionDecision::AllowAlways,
@@ -10423,10 +11634,7 @@ mod tests {
         assert_eq!(app.ask_selected(), Answer::No);
 
         assert!(app.take_rules().is_empty());
-        assert!(
-            app.take_produced().is_empty(),
-            "a number answered by itself"
-        );
+        assert!(app.said().is_empty(), "a number answered by itself");
     }
 
     #[test]
@@ -10441,7 +11649,7 @@ mod tests {
 
         assert_eq!(app.composed(), "x");
         assert!(app.asking().is_some());
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
     }
 
     #[test]
@@ -10706,7 +11914,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -10732,7 +11940,7 @@ mod tests {
 
         app.on_key(key(KeyCode::Tab));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
 
         app.on_key(key(KeyCode::Char('n')));
         app.on_key(key(KeyCode::Esc));
@@ -10748,7 +11956,7 @@ mod tests {
         app.apply(&prompt(Some("rm -rf build")));
         app.apply(&Event::TurnEnded);
         let mut app = sent(app, "again");
-        app.take_produced();
+        app.said();
 
         assert!(app.asking().is_none(), "the question is still up");
         assert_ne!(
@@ -10774,7 +11982,7 @@ mod tests {
     #[test]
     fn a_question_no_rule_answers_calls_the_operator_back_once() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_alert(), None, "a turn starting is no call");
 
         app.apply(&prompt(Some("rm -rf build")));
@@ -10790,7 +11998,7 @@ mod tests {
                 .with_rules([Rule::tool("Bash")].into_iter().collect()),
             "go",
         );
-        app.take_produced();
+        app.said();
         app.apply(&prompt(Some("rm -rf build")));
         app.settle_rules();
 
@@ -10800,7 +12008,7 @@ mod tests {
     #[test]
     fn a_turn_sent_from_here_that_ends_calls_the_operator_back() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_alert(), None);
 
         app.apply(&Event::TurnEnded);
@@ -10812,7 +12020,7 @@ mod tests {
     fn a_turn_the_operator_stopped_ends_without_calling_them_back() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_alert(), None);
 
         app.on_key(key(KeyCode::Esc));
@@ -10820,7 +12028,7 @@ mod tests {
         assert_eq!(app.take_alert(), None);
 
         let mut app = sent(app, "again");
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_alert(), None);
         app.apply(&Event::TurnEnded);
         assert_eq!(
@@ -10833,7 +12041,7 @@ mod tests {
     #[test]
     fn a_session_folded_in_before_the_shell_opened_rings_nothing_as_it_opens() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.apply(&prompt(Some("rm -rf build")));
 
         app.alerts_seen();
@@ -10858,14 +12066,14 @@ mod tests {
     fn esc_puts_the_question_off_and_leaves_it_waiting_in_the_transcript() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.apply(&prompt(Some("rm -rf build")));
 
         app.on_key(key(KeyCode::Esc));
 
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         assert!(app.asking().is_some(), "putting it off answered it");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert_eq!(
             app.activity().map(|a| a.doing).as_deref(),
             Some("waiting on you"),
@@ -10877,10 +12085,7 @@ mod tests {
         assert_eq!(app.composed(), "x");
         // … but not sent into a turn that is waiting on the answer.
         app.on_key(key(KeyCode::Enter));
-        assert!(
-            app.take_produced().is_empty(),
-            "a prompt went out past the question"
-        );
+        assert!(app.said().is_empty(), "a prompt went out past the question");
         assert_eq!(app.composed(), "x");
         let hint = app.hint().unwrap_or_default();
         assert!(hint.contains("waiting"), "{hint}");
@@ -10908,7 +12113,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.follows_tail());
         assert!(
-            app.take_produced().is_empty(),
+            app.said().is_empty(),
             "a question the operator could not see was answered"
         );
         app.on_key(key(KeyCode::Enter));
@@ -11016,7 +12221,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowByRule,
@@ -11047,7 +12252,7 @@ mod tests {
             Some(Some("cargo test && rm -rf ~")),
             "the chained command was let through by a rule about cargo"
         );
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     fn under_a_profile(models: &[&str]) -> App {
@@ -11079,7 +12284,7 @@ mod tests {
 
         app.on_key(back_tab());
         assert_eq!(app.session().mode(), Some(Mode::Ask));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(
             app.hint().is_some_and(|hint| hint.contains("not attached")),
             "{:?}",
@@ -11103,10 +12308,7 @@ mod tests {
         app.on_key(back_tab());
 
         assert_eq!(app.session().mode(), Some(Mode::Auto));
-        assert_eq!(
-            app.take_produced(),
-            [Event::ModeSelected { mode: Mode::Auto }]
-        );
+        assert_eq!(app.said(), [Event::ModeSelected { mode: Mode::Auto }]);
 
         app.on_key(back_tab());
         assert_eq!(app.session().mode(), Some(Mode::Plan));
@@ -11168,7 +12370,7 @@ mod tests {
         app.on_key(back_tab());
 
         assert_eq!(app.session().mode(), Some(Mode::Ask));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(
             app.hint()
                 .is_some_and(|hint| hint.contains("cannot run auto mode")),
@@ -11244,7 +12446,7 @@ mod tests {
 
         assert!(app.picking().is_none(), "the list stayed on screen");
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::ModelSelected {
                 model: "sonnet".to_owned()
             }]
@@ -11340,7 +12542,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::ModelSelected {
                 model: "claude-fable-5".to_owned()
             }],
@@ -11406,7 +12608,7 @@ mod tests {
         app.on_key(key(KeyCode::Esc));
 
         assert!(app.picking().is_none());
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -11434,6 +12636,241 @@ mod tests {
             "a list opened over the question the turn is waiting on"
         );
         assert!(app.asking().is_some());
+    }
+
+    /// A turn that spent `input` tokens and ended.
+    fn turn_of(input: u64) -> [Event; 3] {
+        [
+            Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            Event::Usage(Usage {
+                input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: None,
+                settles_model: Some(false),
+                fast: false,
+            }),
+            Event::TurnEnded,
+        ]
+    }
+
+    fn spikes(app: &App) -> Vec<&Entry> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.head == "spike")
+            .collect()
+    }
+
+    fn file(path: &str, added: u64, removed: u64) -> WorkingFile {
+        WorkingFile {
+            path: path.to_owned(),
+            added: Some(added),
+            removed: Some(removed),
+            new: false,
+        }
+    }
+
+    /// The working tree as a read that began at `began` found it.
+    fn tree_read(began: Instant, working: &[WorkingFile]) -> Repo {
+        Repo {
+            read: true,
+            began: Some(began),
+            working: working.to_vec(),
+            ..Repo::default()
+        }
+    }
+
+    fn outside(app: &App) -> Vec<&Entry> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.head == "outside the edit tools")
+            .collect()
+    }
+
+    #[test]
+    fn a_file_a_turn_changed_with_no_edit_call_is_named_when_the_turn_ends() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        assert!(
+            app.settle_tree(at(0)),
+            "a turn asks for the tree it began on"
+        );
+
+        // What was uncommitted before the turn is not the turn's.
+        app.set_repo(tree_read(at(1), &[file("notes.md", 5, 0)]));
+        assert!(!app.settle_tree(at(2)));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::TurnEnded);
+        assert!(
+            app.settle_tree(at(3)),
+            "an ended turn asks for the tree again"
+        );
+
+        // A read that began before the turn ended says nothing of its end.
+        app.set_repo(tree_read(at(2), &[file("notes.md", 5, 0)]));
+        assert!(!app.settle_tree(at(4)));
+        assert!(outside(&app).is_empty());
+
+        app.set_repo(tree_read(
+            at(5),
+            &[
+                file("notes.md", 5, 0),
+                file("src/lib.rs", 4, 1),
+                file("src/main.rs", 2, 2),
+            ],
+        ));
+        assert!(!app.settle_tree(at(6)));
+        app.settle_tree(at(7));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].meta, "turn 1 · 1 file");
+        assert!(
+            said[0].body.contains("src/main.rs +2 −2"),
+            "{}",
+            said[0].body
+        );
+        assert!(
+            !said[0].body.contains("lib.rs") && !said[0].body.contains("notes.md"),
+            "{}",
+            said[0].body
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_edits_account_for_every_change_says_nothing() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "fix it".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[file("src/lib.rs", 4, 1)]));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+    }
+
+    #[test]
+    fn a_turn_that_ended_before_its_tree_was_read_is_not_judged() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "hi".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.apply(&Event::TurnEnded);
+        assert!(!app.settle_tree(at(1)), "nothing to compare an end with");
+        app.set_repo(tree_read(at(2), &[file("a.rs", 1, 0)]));
+        app.settle_tree(at(3));
+        assert!(outside(&app).is_empty());
+    }
+
+    #[test]
+    fn an_error_that_ends_a_turn_names_the_turn_it_ended() {
+        let mut app = app();
+        for event in turn_of(1_000) {
+            app.apply(&event);
+        }
+        app.apply(&Event::Error {
+            message: "between turns".to_owned(),
+            fatal: false,
+        });
+        app.apply(&Event::UserMessage {
+            text: "go on".to_owned(),
+        });
+        app.apply(&Event::Error {
+            message: "the turn ended as `error_max_budget_usd`: Reached maximum budget ($0.4)"
+                .to_owned(),
+            fatal: false,
+        });
+        app.apply(&Event::TurnEnded);
+
+        let errors: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "error")
+            .map(|entry| entry.meta.as_str())
+            .collect();
+        assert_eq!(errors, ["", "in turn 2"]);
+    }
+
+    #[test]
+    fn a_turn_past_three_times_the_average_is_named_once_by_its_number() {
+        let mut app = app();
+        app.settle_spikes();
+        for input in [1_000, 1_200, 5_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        app.settle_spikes();
+
+        let spikes = spikes(&app);
+        assert_eq!(spikes.len(), 1, "{spikes:?}");
+        assert_eq!(spikes[0].meta, "turn 3 · 4× the average");
+        assert!(
+            spikes[0].body.contains("5000 tokens") && spikes[0].body.contains("1100"),
+            "{}",
+            spikes[0].body
+        );
+    }
+
+    #[test]
+    fn a_spike_in_a_session_read_back_is_not_called_out_again() {
+        let mut app = app();
+        for input in [1_000, 1_000, 9_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+        }
+        app.settle_spikes();
+        assert!(spikes(&app).is_empty(), "{:?}", spikes(&app));
+
+        for event in turn_of(90_000) {
+            app.apply(&event);
+        }
+        app.settle_spikes();
+        assert_eq!(spikes(&app).len(), 1, "a turn ended live is still judged");
+    }
+
+    #[test]
+    fn a_cleared_conversation_is_judged_from_its_own_turns() {
+        let mut app = app();
+        app.settle_spikes();
+        for input in [1_000, 1_000, 1_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        app.apply(&Event::Cleared);
+        app.settle_spikes();
+        for input in [100, 100, 900] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        assert_eq!(spikes(&app).len(), 1, "{:?}", spikes(&app));
     }
 
     #[test]
@@ -11649,6 +13086,7 @@ mod tests {
                 resets_at: Some(now + 367_200),
             }),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }
     }
 
@@ -11699,6 +13137,7 @@ mod tests {
                 resets_at: None,
             }),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(
@@ -11778,7 +13217,7 @@ mod tests {
     #[test]
     fn esc_during_a_running_turn_asks_the_backend_to_stop_it() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
 
         app.on_key(key(ratatui::crossterm::event::KeyCode::Esc));
 
@@ -11809,7 +13248,7 @@ mod tests {
     #[test]
     fn ctrl_c_stops_a_running_turn_and_then_takes_two_more_presses_to_quit() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         let start = Instant::now();
 
         ctrl_c_at(&mut app, start);
@@ -11947,7 +13386,7 @@ mod tests {
     #[test]
     fn ctrl_c_closes_the_memory_view_and_stops_nothing() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(key(KeyCode::F(8)));
         assert!(app.memory().is_some());
 
@@ -11974,7 +13413,7 @@ mod tests {
         app.take_interrupt();
         app.apply(&Event::TurnEnded);
         let mut app = sent(app, "again");
-        app.take_produced();
+        app.said();
 
         app.on_key(ctrl_c());
 
@@ -11996,7 +13435,7 @@ mod tests {
     #[test]
     fn esc_after_a_stop_the_backend_would_not_take_asks_for_the_stop_again() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(key(KeyCode::Esc));
         assert!(app.take_interrupt());
         app.not_stopped("the pipe is closed");
@@ -12009,7 +13448,7 @@ mod tests {
     #[test]
     fn ctrl_c_after_a_stop_the_backend_would_not_take_stops_rather_than_quits() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(ctrl_c());
         assert!(app.take_interrupt());
         app.not_stopped("the pipe is closed");
@@ -12023,7 +13462,7 @@ mod tests {
     #[test]
     fn a_stop_the_backend_would_not_take_no_longer_says_the_turn_is_stopping() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(ctrl_c());
         assert_eq!(app.hint(), Some(STOPPING_HINT));
 
@@ -12035,7 +13474,7 @@ mod tests {
     #[test]
     fn a_turn_that_ended_after_a_stop_no_longer_says_it_is_stopping() {
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.on_key(key(KeyCode::Esc));
         assert_eq!(app.hint(), Some(STOPPING_HINT));
 
@@ -12077,6 +13516,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         }
     }
 
@@ -12409,7 +13849,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -12431,7 +13871,7 @@ mod tests {
             app.on_key(KeyEvent::new(KeyCode::Enter, held));
         }
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t1"));
     }
 
@@ -12457,7 +13897,7 @@ mod tests {
         for text in ["hello", "keep going", "j", "jk", "ok"] {
             let mut app = typed_at_the_question(text);
 
-            assert_eq!(app.take_produced(), [], "{text}");
+            assert_eq!(app.said(), [], "{text}");
             assert!(app.asking().is_some(), "{text}");
             assert_eq!(app.composed(), text, "{text}");
             assert_eq!(app.ask_focus(), AskFocus::Deferred, "{text}");
@@ -12488,7 +13928,7 @@ mod tests {
         }
 
         assert_eq!(app.composed(), "fix the tests");
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
     }
 
@@ -12502,7 +13942,7 @@ mod tests {
         read(&mut app, b"1", shown + Duration::from_millis(50));
         read(&mut app, b"\r", shown + Duration::from_millis(100));
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
     }
 
@@ -12524,7 +13964,7 @@ mod tests {
 
         assert_eq!(app.composed(), "start now");
         assert!(app.menu().is_none());
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.take_handoffs(), vec![]);
     }
 
@@ -12565,7 +14005,7 @@ mod tests {
         read(&mut app, b"\r", shown + ASK_QUIET * 22);
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -12583,7 +14023,7 @@ mod tests {
         first.apply(&prompt(Some("touch one.txt")));
         read(&mut first, b"\r", shown + ASK_QUIET * 2);
         assert_eq!(
-            first.take_produced(),
+            first.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -12597,7 +14037,7 @@ mod tests {
         read(&mut again, b"4", shown + ASK_QUIET * 2);
         read(&mut again, b"\r", shown + ASK_QUIET * 4);
         assert_eq!(
-            again.take_produced(),
+            again.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -12647,12 +14087,12 @@ mod tests {
         ] {
             app.on_key(KeyEvent::new(KeyCode::Enter, held));
         }
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.ask_draft(), "no");
 
         press(&mut app, KeyCode::Enter);
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -12703,11 +14143,11 @@ mod tests {
             output: 0,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -13004,6 +14444,44 @@ mod tests {
     }
 
     #[test]
+    fn a_decision_is_handed_out_with_the_time_its_reply_was_stated_at() {
+        let mut app = app();
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
+        app.tick(Instant::now(), Some(at(49_260, 13, 41)));
+        app.apply(&said(
+            "DECISION: reuse the existing cache\nDECISION: keep the flag",
+        ));
+        app.tick(Instant::now(), Some(at(50_580, 14, 3)));
+        app.apply(&said("No decision here."));
+        app.apply(&said("DECISION: do not widen the layering table"));
+
+        let made: Vec<_> = app
+            .decisions()
+            .map(|(decision, at)| (decision.summary.as_str(), at.and_then(Stamp::local)))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                ("reuse the existing cache", LocalTime::new(13, 41)),
+                ("keep the flag", LocalTime::new(13, 41)),
+                ("do not widen the layering table", LocalTime::new(14, 3)),
+            ]
+        );
+
+        app.apply(&Event::Cleared);
+        assert_eq!(app.decisions().count(), 0, "a clear starts them over");
+        app.apply(&said("DECISION: after the clear"));
+        let after: Vec<_> = app
+            .decisions()
+            .map(|(_, at)| at.and_then(Stamp::local))
+            .collect();
+        assert_eq!(after, [LocalTime::new(14, 3)], "paired with its own time");
+    }
+
+    #[test]
     fn a_running_sub_agent_carries_the_moment_it_was_spawned() {
         let mut app = app();
         app.tick(Instant::now(), Some(at(50_700, 14, 5)));
@@ -13098,6 +14576,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::FileChange {
             path: "a.rs".to_owned(),
@@ -13174,6 +14653,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "and then".to_owned(),
@@ -13273,6 +14753,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         }
     }
 
@@ -13485,6 +14966,46 @@ mod tests {
         app
     }
 
+    /// A record that ends on a question nobody answered was left by a
+    /// process that is gone, and the CLI a resume starts asked nothing: the
+    /// question does not come up again, nothing says a call is waiting, and
+    /// no answer nobody gave is written for it.
+    #[test]
+    fn a_question_the_record_ends_on_is_not_put_to_the_resumed_session() {
+        let mut app = app();
+        app.apply(&said("clean up"));
+        app.apply(&prompt(None));
+        assert!(app.asking().is_some(), "the question came up live");
+
+        app.resumed();
+        app.leave();
+
+        assert!(app.asking().is_none(), "the question was put again");
+        assert!(app.session().pending_permissions().is_empty());
+        assert!(!app.session().turn_running());
+        let produced = app.take_produced();
+        assert!(
+            !produced
+                .iter()
+                .any(|event| matches!(event, Event::PermissionResponse { .. })),
+            "{produced:?}"
+        );
+        assert!(produced.contains(&Event::SessionLeft), "{produced:?}");
+        let notices: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Notice)
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                "The question about Bash was never answered: the session that asked it ended, \
+              and no call is waiting on it now."
+            ]
+        );
+    }
+
     /// The process that ran a command is gone with the session that started
     /// it, so a record that never saw the command end is one that cannot
     /// still be running it.
@@ -13501,7 +15022,7 @@ mod tests {
 
         app.resumed();
 
-        let produced = app.take_produced();
+        let produced = app.said();
         assert!(
             matches!(
                 produced.as_slice(),
@@ -13557,12 +15078,12 @@ mod tests {
     fn leaving_records_the_turn_it_cuts_and_nothing_when_none_runs() {
         let mut idle = app();
         idle.leave();
-        assert!(idle.take_produced().is_empty());
+        assert!(idle.said().is_empty());
 
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.leave();
-        assert_eq!(app.take_produced(), [Event::SessionLeft]);
+        assert_eq!(app.said(), [Event::SessionLeft]);
         assert!(!app.session().turn_running());
     }
 
@@ -13692,6 +15213,7 @@ mod tests {
             exit_code: Some(2),
             error: Some("no such file".to_owned()),
             command: None,
+            untrimmed: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "then".to_owned(),
@@ -13773,7 +15295,7 @@ mod tests {
 
         assert!(app.diffs_open());
         assert!(app.asking().is_some(), "the key answered the question");
-        assert!(app.take_produced().is_empty(), "{:?}", app.take_produced());
+        assert!(app.said().is_empty(), "{:?}", app.said());
     }
 
     /// Hands `bytes` to the shell the way the event loop does: decoded as one
@@ -13899,7 +15421,7 @@ mod tests {
         read(&mut app, b"hello\rworld\r", Instant::now());
 
         let sent: Vec<Event> = app
-            .take_produced()
+            .said()
             .into_iter()
             .filter(|event| matches!(event, Event::UserMessage { .. }))
             .collect();
@@ -13966,7 +15488,7 @@ mod tests {
 
         read(&mut app, b"run it\r", Instant::now());
 
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert_eq!(app.composer().lines(), ["run it", ""]);
     }
 
@@ -13999,7 +15521,7 @@ mod tests {
         );
 
         assert!(app.asking().is_some(), "the paste answered the question");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert!(app.take_rules().is_empty());
         assert_eq!(
             app.ask_selected(),
@@ -14018,11 +15540,11 @@ mod tests {
             app.composer().lines(),
             ["here is the log:", "error: boom", "at foo.rs:3"]
         );
-        assert!(app.take_produced().is_empty(), "the paste sent a turn");
+        assert!(app.said().is_empty(), "the paste sent a turn");
 
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "here is the log:\nerror: boom\nat foo.rs:3".to_owned()
             }]
@@ -14106,7 +15628,7 @@ mod tests {
         read(&mut app, b"\r", shown + Duration::from_millis(550));
 
         assert!(app.asking().is_some(), "typing ahead answered the question");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert!(app.take_rules().is_empty());
         assert_eq!(app.ask_selected(), Answer::Once);
         assert!(app.hint().is_some(), "nothing said the keys were not taken");
@@ -14122,7 +15644,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowAlways,
@@ -14143,7 +15665,7 @@ mod tests {
 
         read(&mut app, b"\r", shown + Duration::from_millis(1800));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -14162,7 +15684,7 @@ mod tests {
         read(&mut app, b"\r", first + Duration::from_millis(2100));
 
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
-        assert_eq!(app.take_produced().len(), 1);
+        assert_eq!(app.said().len(), 1);
     }
 
     /// Types `text` a key at a time, `every` apart from `from`, and gives
@@ -14230,7 +15752,7 @@ mod tests {
         // The words went on into the prompt behind the question, which waits:
         // letters answer nothing, so none of them was held back, and the
         // Enter that ended them sent nothing.
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         // What was being written for the question that went is not lost to
@@ -14239,7 +15761,7 @@ mod tests {
         read(&mut app, b"\x1b", last + every + ASK_QUIET * 2);
         read(&mut app, b"\r", last + every + ASK_QUIET * 4);
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t2".into(),
                 decision: PermissionDecision::Allow,
@@ -14254,7 +15776,7 @@ mod tests {
     fn written_through_a_withdrawal(ended: &Event) -> (App, Instant) {
         let shown = Instant::now();
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.tick(shown, None);
         app.apply(&prompt(Some("rm -rf build")));
         let every = Duration::from_millis(150);
@@ -14276,12 +15798,12 @@ mod tests {
         let (mut app, pressed) =
             written_through_a_withdrawal(&Event::PermissionWithdrawn { id: "t1".into() });
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
         assert_eq!(app.composed(), "no, use rg");
         read(&mut app, b"\r", pressed + ASK_QUIET * 2);
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "no, use rg".to_owned()
             }]
@@ -14295,13 +15817,13 @@ mod tests {
     fn a_burst_read_after_the_quiet_does_not_end_the_withdrawal_guard() {
         let (mut app, pressed) =
             written_through_a_withdrawal(&Event::PermissionWithdrawn { id: "t1".into() });
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
 
         let burst = pressed + ASK_QUIET * 2;
         read(&mut app, b"xy", burst);
         read(&mut app, b"\r", burst + Duration::from_millis(150));
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
     }
 
@@ -14309,7 +15831,7 @@ mod tests {
     fn an_enter_typed_through_a_question_its_turn_ended_on_sends_nothing() {
         let (mut app, _) = written_through_a_withdrawal(&Event::TurnEnded);
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
         assert_eq!(app.composed(), "no, use rg");
     }
@@ -14583,7 +16105,7 @@ mod tests {
         app.on_key(alt('s'));
         app.on_key(key(KeyCode::Char('n')));
         assert_eq!(under_cursor(&app), Some(crate::menu::Action::NewSession));
-        assert_eq!(app.take_produced(), [], "nothing is sent until Enter");
+        assert_eq!(app.said(), [], "nothing is sent until Enter");
         assert_eq!(app.composer().lines(), [""], "and nothing is typed");
     }
 
@@ -14673,7 +16195,7 @@ mod tests {
                     );
                     assert_eq!(app.ask_focus(), focus, "{column},{row}");
                     assert!(app.asking().is_some(), "{column},{row}");
-                    assert_eq!(app.take_produced(), [], "{column},{row}");
+                    assert_eq!(app.said(), [], "{column},{row}");
                     assert!(app.take_handoffs().is_empty(), "{column},{row}");
                 }
             }
@@ -14694,7 +16216,7 @@ mod tests {
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowAlways,
@@ -14734,7 +16256,7 @@ mod tests {
 
                 assert_eq!(opened_over(&app), [] as [&str; 0], "{}", item.label);
                 assert!(app.asking().is_some(), "{}", item.label);
-                assert_eq!(app.take_produced(), [], "{}", item.label);
+                assert_eq!(app.said(), [], "{}", item.label);
                 assert!(app.take_handoffs().is_empty(), "{}", item.label);
                 assert_eq!(
                     app.should_quit(),
@@ -14774,7 +16296,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::ModelSelected {
                 model: "sonnet".to_owned()
             }]
@@ -14802,7 +16324,7 @@ mod tests {
             app.finding().map(|query| query.lines().to_vec()),
             Some(vec!["2".to_owned()])
         );
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
         assert_eq!(
             app.ask_selected(),
@@ -14839,7 +16361,7 @@ mod tests {
         assert!(app.picking().is_none());
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
     }
 
@@ -14857,7 +16379,7 @@ mod tests {
         assert!(app.finding().is_none());
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.asking().is_some());
     }
 
@@ -14877,16 +16399,218 @@ mod tests {
         );
 
         assert!(app.picking().is_none());
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(TOO_SOON_HINT));
         app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 5));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
             }]
+        );
+    }
+
+    /// Folds in a `Read` of `path` that returned `output`, start and end.
+    fn read_call(app: &mut App, id: &str, path: &str, output: &str) {
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: format!("{{\"file_path\":\"{path}\"}}"),
+            summary: Some(path.to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: format!("{{\"file_path\":\"{path}\"}}"),
+            output: output.to_owned(),
+            bytes: output.len() as u64,
+            outcome: ToolOutcome::Ok,
+            summary: Some(path.to_owned()),
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+    }
+
+    #[test]
+    fn d_in_a_side_pane_lists_the_calls_on_the_newest_and_enter_reads_it_whole() {
+        let mut app = app();
+        read_call(&mut app, "t1", "a.rs", "fn a() {}");
+        read_call(&mut app, "t2", "b.rs", "fn b() {}\n\tfn c() {}\n");
+        app.focus = Focus::Pane(Pane::Activity);
+
+        app.on_key(key(KeyCode::Char('d')));
+        let picker = app.picking().expect("d opens the list of calls");
+        assert_eq!(picker.purpose, Purpose::Call);
+        assert_eq!(picker.options.len(), 2);
+        assert_eq!(picker.at, 1, "the list opens on the newest call");
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("Enter reads the call under the cursor");
+        assert_eq!(
+            detail.text(),
+            "{\"file_path\":\"b.rs\"}fn b() {}\n\tfn c() {}\n"
+        );
+        assert_eq!(app.overlay(), Some(Overlay::Detail));
+    }
+
+    #[test]
+    fn o_in_a_side_pane_opens_the_overview_and_asks_the_binary_for_it() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = App::new(Repo::default());
+        app.focus = Focus::Pane(Pane::Activity);
+        app.on_key(key(KeyCode::Char('o')));
+        assert!(app.take_overview_request(), "the page is asked for");
+        assert!(!app.take_overview_request(), "once");
+        let open = app.detail().expect("the overview is open");
+        assert_eq!(open.title(), crate::overview::TITLE);
+
+        app.set_overview("# What has been built in niobe");
+        let open = app.detail().expect("the page is in it");
+        assert_eq!(open.text(), "# What has been built in niobe");
+    }
+
+    #[test]
+    fn a_page_that_lands_after_its_dialog_closed_opens_nothing() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = App::new(Repo::default());
+        app.perform(crate::menu::Action::Overview);
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.detail().is_none());
+        app.set_overview("late");
+        assert!(app.detail().is_none(), "a closed overview stays closed");
+    }
+
+    #[test]
+    fn an_empty_page_says_nothing_is_recorded() {
+        let mut app = App::new(Repo::default());
+        app.perform(crate::menu::Action::Overview);
+        app.set_overview("");
+        let open = app.detail().expect("the overview is open");
+        assert!(open.text().is_empty());
+    }
+
+    #[test]
+    fn asking_for_one_agent_before_there_are_any_says_so_and_opens_nothing() {
+        let mut app = app();
+
+        app.perform(crate::menu::Action::OneAgent);
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.hint(), Some(NO_AGENTS_HINT));
+    }
+
+    #[test]
+    fn s_in_a_side_pane_narrows_the_transcript_to_one_agent_and_again_shows_all() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "look around".to_owned(),
+        });
+        for (id, path) in [("a1", "one.rs"), ("a2", "two.rs")] {
+            app.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: Some("Explore".to_owned()),
+                label: format!("read {path}"),
+            });
+            app.apply(&Event::AssistantMessage {
+                text: format!("Reading {path}."),
+                agent: Some(id.into()),
+            });
+        }
+        let everything = app.entries_shown().len();
+        app.focus = Focus::Pane(Pane::Activity);
+
+        app.on_key(key(KeyCode::Char('s')));
+        let picker = app.picking().expect("s opens the list of sub-agents");
+        assert_eq!(picker.purpose, Purpose::Agent);
+        assert_eq!(picker.at, 1, "the list opens on the newest agent");
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Enter));
+
+        let bodies: Vec<&str> = app
+            .entries_shown()
+            .iter()
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["Reading one.rs."]);
+        app.focus = Focus::Pane(Pane::Activity);
+        app.on_key(key(KeyCode::Char('s')));
+        assert!(app.only_agent_tag().is_none());
+        assert_eq!(app.entries_shown().len(), everything);
+    }
+
+    #[test]
+    fn asking_for_the_calls_before_there_are_any_says_so_and_opens_nothing() {
+        let mut app = app();
+
+        app.perform(crate::menu::Action::Calls);
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.hint(), Some(NO_CALLS_HINT));
+    }
+
+    #[test]
+    fn a_call_whose_start_never_arrived_is_listed_from_its_end() {
+        let mut app = app();
+        app.apply(&Event::ToolCallEnd {
+            id: "orphan".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"ls\"}".to_owned(),
+            output: "Cargo.toml".to_owned(),
+            bytes: 10,
+            outcome: ToolOutcome::Ok,
+            summary: Some("ls".to_owned()),
+            exit_code: Some(0),
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("the call is listed");
+        assert_eq!(detail.text(), "{\"command\":\"ls\"}Cargo.toml");
+    }
+
+    #[test]
+    fn a_call_niobe_trimmed_opens_on_what_the_model_read_with_the_whole_a_key_away() {
+        let mut app = app();
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"cargo build\"}".to_owned(),
+            summary: Some("cargo build".to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"cargo build\"}".to_owned(),
+            output: "Finished".to_owned(),
+            bytes: 19,
+            outcome: ToolOutcome::Ok,
+            summary: Some("cargo build".to_owned()),
+            exit_code: None,
+            error: None,
+            command: Some("cargo build".to_owned()),
+            untrimmed: Some("Compiling a\nFinished".to_owned()),
+        });
+
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("the call is listed");
+        assert_eq!(
+            detail.text(),
+            "{\"command\":\"cargo build\"}FinishedCompiling a\nFinished"
         );
     }
 
@@ -14916,6 +16640,12 @@ mod tests {
                 key(KeyCode::Enter),
             ),
             Overlay::Search => (app(), ctrl('f'), key(KeyCode::Esc)),
+            Overlay::Detail => {
+                let mut app = app();
+                read_call(&mut app, "t1", "README.md", "# niobe");
+                app.pick_call();
+                (app, key(KeyCode::Enter), key(KeyCode::Esc))
+            }
         };
         app.on_key(opening);
         assert_eq!(app.overlay(), Some(overlay), "{overlay:?} did not open");
@@ -14976,7 +16706,7 @@ mod tests {
             app.on_key_read(closing, alone(shown + ASK_QUIET * 4));
             assert_eq!(app.overlay(), None, "{overlay:?} stayed open");
             assert!(
-                !app.take_produced()
+                !app.said()
                     .iter()
                     .any(|event| matches!(event, Event::PermissionResponse { .. })),
                 "{overlay:?}"
@@ -14986,12 +16716,12 @@ mod tests {
                 alone(shown + ASK_QUIET * 4 + ASK_QUIET / 5),
             );
 
-            assert_eq!(app.take_produced(), [], "{overlay:?}");
+            assert_eq!(app.said(), [], "{overlay:?}");
             assert!(app.asking().is_some(), "{overlay:?}");
             assert_eq!(app.hint(), Some(TOO_SOON_HINT), "{overlay:?}");
             app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 7));
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::PermissionResponse {
                     id: "t1".into(),
                     decision: PermissionDecision::Allow,
@@ -15022,7 +16752,7 @@ mod tests {
             },
         );
 
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(TOO_SOON_HINT));
     }
 
@@ -15031,7 +16761,7 @@ mod tests {
         let mut app = offering(&["compact", "clear"]);
         app.on_key(key(KeyCode::F(2)));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "/compact".to_owned()
             }]
@@ -15039,7 +16769,7 @@ mod tests {
         app.apply(&Event::TurnEnded);
         app.on_key(key(KeyCode::F(3)));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "/clear".to_owned()
             }]
@@ -15050,7 +16780,7 @@ mod tests {
     fn a_command_the_backend_does_not_list_is_not_sent_and_says_why() {
         let mut app = offering(&["compact"]);
         app.perform(crate::menu::Action::Doctor);
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(
             app.hint().is_some_and(|hint| hint.contains("/doctor")),
             "{:?}",
@@ -15062,9 +16792,9 @@ mod tests {
     fn a_backend_command_waits_for_the_running_turn() {
         let mut app = offering(&["compact", "clear"]);
         typed_then_enter(&mut app, "go", KeyModifiers::NONE);
-        app.take_produced();
+        app.said();
         app.on_key(key(KeyCode::F(3)));
-        assert_eq!(app.take_produced(), [], "a /clear mid-turn is not sent");
+        assert_eq!(app.said(), [], "a /clear mid-turn is not sent");
         assert!(app.hint().is_some_and(|hint| hint.contains("Esc")));
     }
 
@@ -15072,7 +16802,7 @@ mod tests {
     fn a_backend_command_leaves_the_images_of_the_prompt_being_written() {
         let mut app = offering(&["compact"]);
         app.on_key(key(KeyCode::F(2)));
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_turn_images(), Vec::new());
     }
 
@@ -15300,11 +17030,11 @@ mod tests {
     fn f7_lists_the_mcp_servers_in_the_shell_mid_turn_and_sends_nothing() {
         let mut app = with_mcp_servers();
         typed_then_enter(&mut app, "go", KeyModifiers::NONE);
-        app.take_produced();
+        app.said();
         assert!(app.working(), "the turn is not running");
 
         app.on_key(key(KeyCode::F(7)));
-        assert_eq!(app.take_produced(), [], "F7 sent a turn");
+        assert_eq!(app.said(), [], "F7 sent a turn");
         assert!(app.mcp().is_some(), "F7 opened no view");
         let shown = mcp_shown(&app);
         for said in ["notes", "connected", "2 tools", "remote docs", "failed"] {
@@ -15396,7 +17126,7 @@ mod tests {
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Char('r')));
         assert_eq!(app.take_mcp_reconnects(), ["remote docs"]);
-        assert_eq!(app.take_produced(), []);
+        assert_eq!(app.said(), []);
         assert!(app.mcp().is_some(), "r closed the view");
         assert!(
             app.hint().is_some_and(|hint| hint.contains("remote docs")),
@@ -15543,7 +17273,7 @@ mod tests {
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "/effort medium".to_owned()
             }]
@@ -15597,8 +17327,64 @@ mod tests {
                 "{action:?}: {:?}",
                 app.hint()
             );
-            assert_eq!(app.take_produced(), [], "{action:?}");
+            assert_eq!(app.said(), [], "{action:?}");
         }
+    }
+
+    #[test]
+    fn f6_offers_the_prompts_sent_from_here_newest_first_and_hands_out_the_one_chosen() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.sent_to_backend("make mean() return 0\nand say why");
+        app.sent_to_backend("now the median");
+
+        app.on_key(key(KeyCode::F(6)));
+        let picker = app.picking().expect("the prompts are offered");
+        assert_eq!(picker.purpose, Purpose::Rewind);
+        let named: Vec<_> = picker
+            .options
+            .iter()
+            .map(|choice| choice.name.as_deref())
+            .collect();
+        assert_eq!(
+            named,
+            [Some("now the median"), Some("make mean() return 0")]
+        );
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_rewinds(), [0]);
+        assert!(app.picking().is_none());
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("make mean() return 0")),
+            "{:?}",
+            app.hint()
+        );
+
+        app.apply(&Event::Notice {
+            message: "Files put back as they were before \"make mean() return 0\": a.py."
+                .to_owned(),
+        });
+        assert_eq!(app.hint(), None, "the transcript says what went back");
+    }
+
+    #[test]
+    fn a_conversation_started_over_offers_no_prompt_from_before_it() {
+        let mut app = app();
+        app.sent_to_backend("before");
+        app.apply(&Event::Cleared);
+        app.sent_to_backend("after");
+
+        app.perform(crate::menu::Action::Rewind);
+
+        let picker = app.picking().expect("the prompt since is offered");
+        assert_eq!(picker.options.len(), 1);
+        assert_eq!(picker.options[0].name.as_deref(), Some("after"));
+        assert_eq!(
+            picker.options[0].value, "1",
+            "counted among every prompt sent"
+        );
     }
 
     #[test]
@@ -15758,7 +17544,7 @@ mod tests {
     fn send_prompt(app: &mut App, text: &str) {
         typed(app, text);
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
     }
 
     fn earlier(text: &str, session: &str) -> crate::history::PastPrompt {
@@ -15828,7 +17614,7 @@ mod tests {
             "half",
             "past the newest is the draft, as it was"
         );
-        assert!(app.take_produced().is_empty(), "recalling sends nothing");
+        assert!(app.said().is_empty(), "recalling sends nothing");
     }
 
     /// `/clear` starts a session of its own, and the prompts the operator
@@ -15939,7 +17725,7 @@ mod tests {
         app.on_key(key(KeyCode::Up));
         assert_eq!(app.composed(), "earlier");
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
 
         assert_eq!(app.composed(), "kept for later");
     }
@@ -15969,13 +17755,13 @@ mod tests {
         assert_eq!(app.composed(), "run the tests");
 
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
         assert!(app.take_turn_images().is_empty());
         assert_eq!(app.composed(), "[Image #1] what is this");
 
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "[Image #1] what is this".to_owned()
             }]
@@ -16000,7 +17786,7 @@ mod tests {
 
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "compare [Image #1] with the mock".to_owned()
             }]
@@ -16012,7 +17798,7 @@ mod tests {
         assert_eq!(app.composed(), "look at[Image #1] ");
 
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_turn_images(), [png(b"a")]);
     }
 
@@ -16030,12 +17816,12 @@ mod tests {
         typed(&mut app, " again");
 
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
         assert!(app.take_turn_images().is_empty());
         assert_eq!(app.composed(), "look at[Image #1] ");
 
         app.on_key(key(KeyCode::Enter));
-        app.take_produced();
+        app.said();
         assert_eq!(app.take_turn_images(), [png(b"a")]);
     }
 
@@ -16054,7 +17840,7 @@ mod tests {
 
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "compare with the mock [Image #1] ".to_owned()
             }]
@@ -16177,7 +17963,7 @@ mod tests {
         assert_eq!(app.composed(), "my half-written draft");
         assert_eq!(app.recalled(), None);
         assert_eq!(app.hint(), None, "this Esc is not the F-key prefix");
-        assert!(app.take_produced().is_empty(), "nothing is sent");
+        assert!(app.said().is_empty(), "nothing is sent");
 
         app.on_key(key(KeyCode::Up));
         assert_eq!(app.composed(), "newest", "a new walk starts on the newest");
@@ -16212,10 +17998,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.browser().is_none());
         assert_eq!(app.composed(), "add etag support");
-        assert!(
-            app.take_produced().is_empty(),
-            "choosing a prompt sends nothing"
-        );
+        assert!(app.said().is_empty(), "choosing a prompt sends nothing");
     }
 
     #[test]
@@ -16235,7 +18018,7 @@ mod tests {
 
         assert_eq!(app.take_commands(), []);
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "rm the build dir and rebuild".to_owned()
             }]

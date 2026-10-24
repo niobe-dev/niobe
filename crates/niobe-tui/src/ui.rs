@@ -30,7 +30,9 @@ use ratatui::widgets::{
 };
 
 use niobe_core::attention::Attention;
-use niobe_core::event::{Billing, Context, SlashCommand, UsageWindow, UsageWindows};
+use niobe_core::event::{
+    Billing, Context, Overage, OverageRefusal, SlashCommand, UsageWindow, UsageWindows,
+};
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
@@ -181,6 +183,7 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
     }
     crate::memory::draw(frame, body, app, &theme);
     crate::mcp::draw(frame, body, app, &theme);
+    crate::detail::draw(frame, body, app, &theme);
     crate::browse::draw(frame, body, app, &theme);
     // The open menu hangs from the bar over everything, a list included: it
     // was opened last.
@@ -212,6 +215,21 @@ fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
             "↑↓ choose · Enter set · Esc leave it",
         ),
         Purpose::Theme => ("Theme", "", "↑↓ choose · Enter switch · Esc keep this one"),
+        Purpose::Call => (
+            "Tool calls",
+            " oldest first ",
+            "↑↓ choose · Enter read · Esc close",
+        ),
+        Purpose::Agent => (
+            "Sub-agents",
+            " oldest first ",
+            "↑↓ choose · Enter show its entries alone · Esc close",
+        ),
+        Purpose::Rewind => (
+            "Put the files back as they were before",
+            " the conversation keeps what was said ",
+            "↑↓ choose · Enter put back · Esc leave them",
+        ),
     }
 }
 
@@ -342,6 +360,9 @@ impl PickColumns {
         let value = match purpose {
             Purpose::Theme => choice.value.to_lowercase(),
             Purpose::Model | Purpose::Effort => choice.value.clone(),
+            // Where the call is in the list is what choosing sends, and the
+            // list already says it by where the row is.
+            Purpose::Call | Purpose::Agent | Purpose::Rewind => String::new(),
         };
         if !self.described {
             return (value, String::new());
@@ -820,12 +841,18 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     frame.render_widget(Paragraph::new(left).style(bar), area);
     if !identity.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(segment_spans(identity)))
-                .alignment(Alignment::Right)
-                .style(bar),
-            area,
-        );
+        // Only the identity's own cells: a paragraph's style is laid over its
+        // whole area, which over the row would repaint the menus' titles.
+        let line = Line::from(segment_spans(identity));
+        let width = u16::try_from(line.width())
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        let right = Rect {
+            x: area.right().saturating_sub(width),
+            width,
+            ..area
+        };
+        frame.render_widget(Paragraph::new(line).style(bar), right);
     }
 }
 
@@ -1191,14 +1218,16 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     app.measured_session(area);
     app.drew_jump(None);
     let border = Border::of(app.focus() == Focus::Session, theme);
-    let block = session_frame(
-        app.caption(),
-        app.titled(),
-        &app.repo().name,
-        border,
-        area.width,
-        theme,
-    );
+    // Narrowed to one agent, the transcript says so where the eye reads
+    // what the session is about: below it is not the whole session.
+    let (caption, titled) = match app.only_agent_tag() {
+        Some(tag) => (
+            Some(format!("only {tag}'s entries · s in a side pane shows all")),
+            true,
+        ),
+        None => (app.caption(), app.titled()),
+    };
+    let block = session_frame(caption, titled, &app.repo().name, border, area.width, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -1436,13 +1465,17 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
     };
     let detail = transcript_detail(app);
     let headings = app.grouped_by_agent().then(|| app.agent_headings());
+    let only = app.only_agent_tag();
     let (entries, commands, drawn) = app.entries_to_draw();
     drawn.update(
         entries,
         commands,
         usize::from(width),
         detail,
-        headings.as_deref(),
+        Arrangement {
+            headings: headings.as_deref(),
+            only: only.as_deref(),
+        },
         theme,
     );
     let changed = match crate::find::Query::new(&query) {
@@ -1929,8 +1962,13 @@ fn draw_transcript(
 
     let detail = transcript_detail(app);
     let headings = app.grouped_by_agent().then(|| app.agent_headings());
+    let only = app.only_agent_tag();
     let (entries, commands, drawn) = app.entries_to_draw();
-    drawn.update(entries, commands, width, detail, headings.as_deref(), theme);
+    let arranged = Arrangement {
+        headings: headings.as_deref(),
+        only: only.as_deref(),
+    };
+    drawn.update(entries, commands, width, detail, arranged, theme);
     let above = drawn.line_count();
     app.keep_view();
     let total = above + question.len();
@@ -2115,6 +2153,9 @@ struct Drawn {
     /// The entry drawn, or for a heading the first entry under it.
     entry: usize,
     heading: bool,
+    /// Whether this is the row that counts a run of routine entries left
+    /// out, rather than an entry drawn.
+    hidden: bool,
     lines: Vec<Line<'static>>,
     /// Where [`DrawnEntries::searched`] is in `lines`, counted from their
     /// first, once they have been searched. Kept with the lines, so a search
@@ -2126,7 +2167,7 @@ struct Drawn {
 
 /// What the transcript draws at one place, before it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slot {
+pub(crate) enum Slot {
     Entry(usize),
     /// The heading over a sub-agent's rows in a turn: the first of them, and
     /// how many calls they hold.
@@ -2148,24 +2189,30 @@ impl DrawnEntries {
     /// The columns are worked out here, from every entry, because a row is
     /// drawn in the columns the widest row needs; and so is whether an entry
     /// keeps the blank line after it, which depends on what is drawn next.
-    /// `headings` is each sub-agent's tag and task where the rows are grouped
-    /// by agent, and `None` where they are drawn as they happened.
+    /// `arranged` says whether the rows are grouped by agent and narrowed to
+    /// one agent's: see [`Arrangement`].
     fn update(
         &mut self,
         entries: &[Entry],
         commands: &[SlashCommand],
         width: usize,
         detail: Detail,
-        headings: Option<&[(String, String)]>,
+        arranged: Arrangement<'_>,
         theme: &Theme,
     ) {
+        let headings = arranged.headings.filter(|_| arranged.only.is_none());
         let detail = Detail {
             columns: crate::calls::Columns::of(entries),
             grouped: headings.is_some(),
             ..detail
         };
         let named = commands_key(commands);
-        let order = order(entries, headings.is_some(), detail.notable_only);
+        let order = order(
+            entries,
+            headings.is_some(),
+            detail.notable_only,
+            arranged.only,
+        );
         self.moved |= self.drawn.len() > order.len();
         self.drawn.truncate(order.len());
         for (at, slot) in order.iter().enumerate() {
@@ -2192,6 +2239,7 @@ impl DrawnEntries {
                 }
                 Slot::Hidden { first, count } => (hidden_key(count, width, theme), first, false),
             };
+            let counted = matches!(slot, Slot::Hidden { .. });
             let draw = || match *slot {
                 Slot::Entry(index) => {
                     let Some(entry) = entries.get(index) else {
@@ -2219,6 +2267,7 @@ impl DrawnEntries {
                     self.moved |= drawn.entry != entry || drawn.heading != heading;
                     drawn.entry = entry;
                     drawn.heading = heading;
+                    drawn.hidden = counted;
                 }
                 Some(drawn) => {
                     self.moved = true;
@@ -2226,6 +2275,7 @@ impl DrawnEntries {
                         key,
                         entry,
                         heading,
+                        hidden: counted,
                         lines: draw(),
                         found: None,
                     }
@@ -2236,6 +2286,7 @@ impl DrawnEntries {
                         key,
                         entry,
                         heading,
+                        hidden: counted,
                         lines: draw(),
                         found: None,
                     });
@@ -2358,6 +2409,21 @@ impl DrawnEntries {
         Some(first.saturating_add(offset))
     }
 
+    /// The entry drawn on line `line` of the whole transcript, where an entry
+    /// is drawn there whole rather than a heading over agents' rows or the
+    /// count of entries left out.
+    pub(crate) fn entry_at(&self, line: usize) -> Option<usize> {
+        let mut first = 0usize;
+        for drawn in &self.drawn {
+            let offset = line.checked_sub(first)?;
+            if offset < drawn.lines.len() {
+                return (!drawn.heading && !drawn.hidden).then_some(drawn.entry);
+            }
+            first = first.saturating_add(drawn.lines.len());
+        }
+        None
+    }
+
     /// Line `line` of the whole transcript as drawn, without its styles.
     pub(crate) fn plain_line(&self, line: usize) -> Option<String> {
         self.lines(line, 1).first().map(crate::select::plain)
@@ -2417,7 +2483,22 @@ fn said_in(entry: &Entry) -> Vec<String> {
     said
 }
 
+/// How the transcript's entries are arranged, beside how each is drawn.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Arrangement<'a> {
+    /// Each sub-agent's tag and task, where the rows are grouped by agent;
+    /// `None` where they are drawn as they happened.
+    pub(crate) headings: Option<&'a [(String, String)]>,
+    /// The tag of the one sub-agent whose entries alone are drawn, where the
+    /// operator narrowed the transcript to it; it is then drawn as it
+    /// happened, since there is nothing to group.
+    pub(crate) only: Option<&'a str>,
+}
+
 /// The order the transcript draws `entries` in.
+///
+/// Where `only` names a sub-agent, its entries alone, as they happened: its
+/// words, its calls and its refused calls, and nothing of the session's.
 ///
 /// As they happened, unless `grouped`: then within each turn — between one
 /// prompt or turn's rule and the next — every sub-agent's rows are drawn
@@ -2425,8 +2506,19 @@ fn said_in(entry: &Entry) -> Vec<String> {
 /// The session's own entries, anything an agent did that is not a row of
 /// the calls table, and the turn's boundaries stay where they were. Where
 /// `notable_only`, the routine entries are left out, see [`notable`].
-fn order(entries: &[Entry], grouped: bool, notable_only: bool) -> Vec<Slot> {
-    let order = by_agent(entries, grouped);
+pub(crate) fn order(
+    entries: &[Entry],
+    grouped: bool,
+    notable_only: bool,
+    only: Option<&str>,
+) -> Vec<Slot> {
+    let order = match only {
+        Some(tag) => (0..entries.len())
+            .filter(|&at| entries[at].agent.as_deref() == Some(tag))
+            .map(Slot::Entry)
+            .collect(),
+        None => by_agent(entries, grouped),
+    };
     match notable_only {
         true => notable(entries, order),
         false => order,
@@ -3238,6 +3330,25 @@ fn option_row(
 /// as it is written into the config is shown where `spelled` asks for it,
 /// which Ctrl+T does: it is for the operator who wants the exact text.
 fn option_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
+    let plan = ask
+        .proposed
+        .as_ref()
+        .is_some_and(|proposed| proposed.is_plan());
+    match (answer, plan) {
+        (Answer::Once, true) => (
+            "Go ahead with the plan".to_owned(),
+            "the agent stops planning".to_owned(),
+        ),
+        (Answer::No, true) => (
+            "Keep planning".to_owned(),
+            "Tab says what to change".to_owned(),
+        ),
+        (answer, _) => answer_words(answer, ask, spelled),
+    }
+}
+
+/// What an answer to any call but a plan is called, and what choosing it does.
+fn answer_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
     match answer {
         Answer::Once => ("Allow once".to_owned(), "this call only".to_owned()),
         Answer::AlwaysTool => (
@@ -3523,7 +3634,7 @@ fn usage_label_widest(app: &App) -> usize {
         PlanWindows::Reported(windows) | PlanWindows::Carried { windows, .. } => [
             (windows.five_hour.is_some(), "5h"),
             (windows.seven_day.is_some(), "7d"),
-            (windows.using_overage, "extra"),
+            (extra(&windows).is_some(), "extra"),
         ]
         .into_iter()
         .filter(|(shown, _)| *shown)
@@ -3566,10 +3677,8 @@ fn usage_figure_columns(app: &App) -> usize {
                 .map(|window| share + reset_clause(app, &window).as_deref().map_or(0, text::width))
                 .max()
                 .unwrap_or(0);
-            let extra = match windows.using_overage {
-                true => text::width(NO_FIGURE) + text::width(OVERAGE_ON),
-                false => 0,
-            };
+            let extra =
+                extra(&windows).map_or(0, |(said, _)| text::width(NO_FIGURE) + text::width(&said));
             reported.max(extra)
         }
     };
@@ -3633,7 +3742,7 @@ fn window_rows(app: &App) -> usize {
     let levels = |windows: UsageWindows| {
         usize::from(windows.five_hour.is_some())
             + usize::from(windows.seven_day.is_some())
-            + usize::from(windows.using_overage)
+            + usize::from(extra(&windows).is_some())
     };
     match app.plan_windows() {
         PlanWindows::None => 0,
@@ -3766,14 +3875,18 @@ fn level_lines(
     // money side is an em dash. A `$0.00` there would be a figure nobody
     // measured, and the one it would be mistaken for is zero.
     //
-    // The row is absent rather than `off` where the flag is not set: the flag
-    // is "spending extra, or the backend did not say", so drawing `off` would
+    // The row is absent where the backend said neither that the plan is
+    // spending extra nor whether it may: drawing `off` from silence would
     // promise something nothing reported.
-    if windows.using_overage {
+    if let Some((said, spending)) = extra(windows) {
+        let style = match spending {
+            true => Style::new().fg(theme.hot).bold(),
+            false => dim,
+        };
         lines.push(Line::from(vec![
             Span::styled(usage_label("extra", labels), dim),
             Span::styled(NO_FIGURE, dim),
-            Span::styled(OVERAGE_ON, Style::new().fg(theme.hot).bold()),
+            Span::styled(said, style),
         ]));
     }
 
@@ -3809,6 +3922,32 @@ const NO_FIGURE: &str = "—";
 
 /// What the overage row says of the plan spending beyond its flat fee.
 const OVERAGE_ON: &str = " · on";
+
+/// What the `extra` row says after its em dash, and whether it is the plan
+/// spending beyond its fee, which is drawn hot. `None` where the backend said
+/// neither that it is spending nor whether it may, which is no row at all.
+///
+/// Spending is said first whatever else was: the CLI keeps reporting extra
+/// in use at the moment the extra itself runs out.
+fn extra(windows: &UsageWindows) -> Option<(String, bool)> {
+    if windows.using_overage {
+        return Some((OVERAGE_ON.to_owned(), true));
+    }
+    match windows.overage {
+        Overage::Unreported => None,
+        Overage::Allowed => Some((" · allowed".to_owned(), false)),
+        Overage::Refused(why) => {
+            let why = match why {
+                OverageRefusal::OutOfCredits => " · no credits left",
+                OverageRefusal::NotSetUp => " · not set up",
+                OverageRefusal::TurnedOff => " · turned off",
+                OverageRefusal::ZeroLimit => " · its limit is zero",
+                OverageRefusal::Unstated => "",
+            };
+            Some((format!(" · off{why}"), false))
+        }
+    }
+}
 
 /// What a model's tokens get: the widest figure [`compact`] produces for a
 /// session under a hundred million tokens (`999k`, `12.3M`) and a column of
@@ -4231,23 +4370,28 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let billed = Billed::of(app.session());
     let mut lines = Vec::new();
     match billed {
-        Billed::Both => lines.push(Line::from(vec![
-            Span::styled(format!("{METERED_PART} "), dim),
-            Span::styled(
-                cost_of(app.session().metered_totals(), app.prices()),
-                Style::new().fg(theme.fg),
-            ),
-        ])),
+        Billed::Both => {
+            let totals = app.session().metered_totals();
+            let head = format!("{METERED_PART} ");
+            let cost = cost_of(totals, app.prices());
+            let mut spans = vec![
+                Span::styled(head.clone(), dim),
+                Span::styled(cost.clone(), Style::new().fg(theme.fg)),
+            ];
+            let used = text::width(&head) + text::width(&cost);
+            push_age(&mut spans, totals, used, width, dim);
+            lines.push(Line::from(spans));
+        }
         Billed::Metered => {
             let cost = session_cost(app.session(), app.prices());
             let mut spans = vec![
                 Span::styled("session ", dim),
                 Span::styled(cost.clone(), Style::new().fg(theme.hot).bold()),
             ];
+            let used = text::width("session ") + text::width(&cost);
+            let used = push_age(&mut spans, app.session().totals(), used, width, dim);
             let rate = spend_rate(app).map(|rate| format!(" · {rate}/h worked"));
-            if let Some(rate) = rate.filter(|rate| {
-                text::width("session ") + text::width(&cost) + text::width(rate) <= width
-            }) {
+            if let Some(rate) = rate.filter(|rate| used + text::width(rate) <= width) {
                 spans.push(Span::styled(rate, dim));
             }
             lines.push(Line::from(spans));
@@ -4263,6 +4407,33 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         lines.push(budget_line(app, budget, width, theme));
     }
     lines
+}
+
+/// What a floor says where it may be low only because the session was
+/// recorded before its records said what a cost settles — so that a figure an
+/// older recording leaves is not read as the backend having reported nothing.
+pub const OLDER_RECORDING: &str = "older recording";
+
+/// Appends ` · older recording` to a cost row of `used` columns where
+/// `totals` is a floor [`OLDER_RECORDING`] explains and the row has room for
+/// it, and returns the columns the row then takes.
+fn push_age(
+    spans: &mut Vec<Span<'static>>,
+    totals: &Totals,
+    used: usize,
+    width: usize,
+    style: Style,
+) -> usize {
+    if !totals.settlement_unrecorded() {
+        return used;
+    }
+    let age = format!(" · {OLDER_RECORDING}");
+    let wide = used + text::width(&age);
+    if wide > width {
+        return used;
+    }
+    spans.push(Span::styled(age, style));
+    wide
 }
 
 /// The `budget ~$1.15/$5.00` row: what the session has spent, labelled as
@@ -4376,10 +4547,11 @@ fn bar_line(
     ])
 }
 
-/// The Activity pane: the sub-agents the session spawned and the tools it
-/// called.
+/// The Activity pane: the sub-agents the session spawned, the decisions its
+/// replies stated, and the tools it called.
 ///
-/// One column for what the agent is doing. It scrolls
+/// One column for what the agent is doing and what it says it decided. It
+/// scrolls
 /// and its sections fold on the same mechanism the Changes pane uses.
 fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_scrolling_pane(
@@ -4399,6 +4571,7 @@ fn activity_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let session = app.session();
     let mut rows = PaneRows::default();
     rows.section(Section::SubAgents, agent_rows(app, session, width, theme));
+    rows.section(Section::Decisions, decision_rows(app, width, theme));
     rows.section(Section::Tools, tool_rows(app, session, width, theme));
     rows
 }
@@ -5015,6 +5188,70 @@ fn working_tree_rows(
                 theme,
             ),
         });
+    }
+    rows
+}
+
+/// What a decision's time column is drawn in: `13:41` and a space.
+const DECISION_TIME: usize = 6;
+
+/// The decisions the agent's replies stated, newest first.
+///
+/// The heading says whose account they are: the agent reports its own
+/// reasoning and may have it wrong, and a pane that listed it bare would read
+/// as a log of what happened.
+///
+/// **Newest first**: the pane does not follow its own tail, so a decision
+/// appended at the bottom of a section whose top is wherever the sub-agents
+/// above it end would land below the fold and never be seen. Under the
+/// heading it is always one row from where the eye already is.
+fn decision_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let folded = app.folded(Section::Decisions);
+    let count = app.session().decisions().len();
+    let mut rows = vec![section_header(
+        folded,
+        "Decisions, as the agent says",
+        vec![Figure::lead(
+            0,
+            Span::styled(count.to_string(), Style::new().fg(theme.fg)),
+        )],
+        width,
+        theme,
+    )];
+    if folded {
+        return rows;
+    }
+    if count == 0 {
+        let none = match app.decisions_asked() {
+            true => "  none stated yet",
+            false => "  not asked for: decisions = false",
+        };
+        rows.push(Line::from(none).style(Style::new().fg(theme.dim)));
+        return rows;
+    }
+
+    let column = text::width(ROW_INDENT) + DECISION_TIME;
+    for (decision, at) in app.decisions().collect::<Vec<_>>().into_iter().rev() {
+        // A log that kept no times gives a decision no time. The column stays
+        // so the summaries keep their edge, but it is left blank rather than
+        // filled with a zero, which would be a moment nobody recorded.
+        let when = at
+            .and_then(|at| at.local())
+            .map(|time| time.to_string())
+            .unwrap_or_default();
+        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(column + 1))
+            .into_iter()
+            .enumerate()
+        {
+            let head = match i {
+                0 => format!("{ROW_INDENT}{when:<w$}", w = DECISION_TIME),
+                _ => " ".repeat(column),
+            };
+            rows.push(Line::from(vec![
+                Span::styled(head, Style::new().fg(theme.dim)),
+                Span::styled(wrapped, Style::new().fg(theme.fg)),
+            ]));
+        }
     }
     rows
 }
@@ -5786,11 +6023,11 @@ mod tests {
             output: 100,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: cost,
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         })
     }
@@ -5980,7 +6217,7 @@ mod tests {
     fn a_settled_turn_is_the_backends_own_figure_and_carries_no_mark() {
         let mut settled = priced(Some(1.1521625));
         if let niobe_core::event::Event::Usage(usage) = &mut settled {
-            usage.settles_model = true;
+            usage.settles_model = Some(true);
         }
         let session = SessionState::replay(&[priced(None), priced(None), settled]);
         assert_eq!(
@@ -6667,11 +6904,11 @@ mod tests {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: model.to_owned(),
                 cost_usd: cost,
-                settles_model: settles,
+                settles_model: Some(settles),
                 fast: false,
             })
         };
@@ -6828,6 +7065,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
         let spent = priced(Some(0.25));
         let context = niobe_core::event::Event::Context(Context {
@@ -6865,6 +7103,7 @@ mod tests {
             five_hour: Some(window(0.37, None)),
             seven_day: Some(window(0.12, None)),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         };
         for app in [fresh(None), fresh(Some(carried))] {
             assert_eq!(
@@ -6890,6 +7129,7 @@ mod tests {
             // Day 20_004 is a Tuesday.
             seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert_eq!(
@@ -6907,6 +7147,7 @@ mod tests {
             five_hour: Some(window(0.51, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert_eq!(
@@ -6923,6 +7164,7 @@ mod tests {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 9 * 3_600))),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert_eq!(rows_of(&app, 66), vec!["5h   —".to_owned()]);
@@ -6946,6 +7188,7 @@ mod tests {
             five_hour: Some(window(1.0, None)),
             seven_day: None,
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
         let rows = rows_of(&app, 66);
 
@@ -6953,6 +7196,62 @@ mod tests {
         assert!(
             !rows.iter().any(|row| row.contains("$0.00")),
             "a figure nobody reported reached the pane: {rows:?}"
+        );
+    }
+
+    /// What the backend said about extra usage, in the pane's words: a refusal
+    /// with its reason, an allowance, and nothing where it said nothing.
+    #[test]
+    fn whether_extra_usage_is_allowed_is_said_where_the_backend_said_it() {
+        for (overage, row) in [
+            (
+                Overage::Refused(OverageRefusal::OutOfCredits),
+                Some("extra — · off · no credits left"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::NotSetUp),
+                Some("extra — · off · not set up"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::TurnedOff),
+                Some("extra — · off · turned off"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::ZeroLimit),
+                Some("extra — · off · its limit is zero"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::Unstated),
+                Some("extra — · off"),
+            ),
+            (Overage::Allowed, Some("extra — · allowed")),
+            (Overage::Unreported, None),
+        ] {
+            let app = windowed(UsageWindows {
+                five_hour: Some(window(0.4, None)),
+                seven_day: None,
+                using_overage: false,
+                overage,
+            });
+            let rows = rows_of(&app, 66);
+            let extra = rows.iter().find(|row| row.starts_with("extra"));
+            assert_eq!(extra.map(String::as_str), row, "{overage:?}: {rows:?}");
+        }
+    }
+
+    /// Spending beyond the fee is what the row says while it happens, whatever
+    /// the backend says of whether more may follow.
+    #[test]
+    fn a_plan_spending_extra_says_on_even_where_more_is_refused() {
+        let app = windowed(UsageWindows {
+            five_hour: Some(window(1.0, None)),
+            seven_day: None,
+            using_overage: true,
+            overage: Overage::Refused(OverageRefusal::OutOfCredits),
+        });
+        assert_eq!(
+            rows_of(&app, 66).last().map(String::as_str),
+            Some("extra — · on")
         );
     }
 
@@ -6965,6 +7264,7 @@ mod tests {
             five_hour: Some(window(0.51, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert!(!rows_of(&app, 66).iter().any(|row| row.contains("extra")));
@@ -6980,11 +7280,13 @@ mod tests {
                 five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600))),
                 seven_day: None,
                 using_overage: false,
+                overage: niobe_core::event::Overage::Unreported,
             },
             UsageWindows {
                 five_hour: Some(window(0.51, None)),
                 seven_day: Some(window(0.71, None)),
                 using_overage: true,
+                overage: niobe_core::event::Overage::Unreported,
             },
         ] {
             let app = windowed(windows);
@@ -7002,6 +7304,7 @@ mod tests {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         for width in [39, 45, 66] {
@@ -7030,6 +7333,7 @@ mod tests {
             five_hour: Some(window(0.37, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.12, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(
@@ -7049,11 +7353,13 @@ mod tests {
             five_hour: Some(window(0.37, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
         app.apply(&niobe_core::event::Event::UsageWindows(UsageWindows {
             five_hour: Some(window(0.40, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(rows_of(&app, 66), vec!["5h  40% ▓▓▓▓▓░░░░░░░".to_owned()]);
@@ -7072,6 +7378,7 @@ mod tests {
             // A week before the Tuesday the window comes back on.
             seven_day: Some(window(0.64, Some(A_FRIDAY - 3 * 86_400 + 9 * 3_600))),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         let rows = rows_of(&app, 66);
@@ -7098,6 +7405,7 @@ mod tests {
             five_hour: Some(window(1.0, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.64, Some(A_FRIDAY + 4 * 86_400 + 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         let rows = rows_of(&app, 66);
@@ -7114,6 +7422,7 @@ mod tests {
             five_hour: Some(window(1.0, Some(A_FRIDAY + 14 * 3_600))),
             seven_day: Some(window(0.64, Some(A_FRIDAY + 4 * 86_400 + 3_600))),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
         assert!(rows_of(&app, 66)[0].contains("100%"));
 
@@ -7145,6 +7454,7 @@ mod tests {
             five_hour: Some(window(0.37, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.64, Some(A_FRIDAY - 3 * 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(
@@ -7197,6 +7507,7 @@ mod tests {
             // The Thursday before the Friday it is read on.
             seven_day: Some(window(0.40, Some(A_FRIDAY - 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert!(
@@ -7223,11 +7534,13 @@ mod tests {
             five_hour: Some(window(0.83, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
         let live = UsageWindows {
             five_hour: Some(window(0.05, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         };
         app.apply(&niobe_core::event::Event::UsageWindows(live));
 
@@ -7244,11 +7557,13 @@ mod tests {
             five_hour: Some(window(0.83, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         };
         let other = UsageWindows {
             five_hour: Some(window(0.21, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         };
         let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
 
@@ -7303,6 +7618,7 @@ mod tests {
             five_hour: Some(window(0.37, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         };
         for app in [
             fresh(None).with_profile(metered()),
@@ -7332,11 +7648,11 @@ mod tests {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: (*model).to_owned(),
                 cost_usd: Some(0.01),
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }));
         }
@@ -7574,6 +7890,7 @@ mod tests {
             output: 0,
             cache_read,
             cache_write: 0,
+            cache_write_1h: None,
         };
         app.apply(&niobe_core::event::Event::TurnTotalDiffers {
             per_message: counts(10, 0),
@@ -7652,11 +7969,11 @@ mod tests {
             output: 400,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.01),
-            settles_model: false,
+            settles_model: Some(false),
             fast: false,
         }));
 
@@ -7687,6 +8004,44 @@ mod tests {
             ),
             ("Tools", tool_summary(&tools, theme)),
         ]
+    }
+
+    fn decision_text(app: &App, width: usize) -> Vec<String> {
+        decision_rows(app, width, &Theme::default())
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    #[test]
+    fn the_decisions_section_says_whose_account_it_is_and_lists_the_newest_first() {
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&niobe_core::Event::AssistantMessage {
+            text: "DECISION: reused the cache\nDECISION: left the exporter alone".to_owned(),
+            agent: None,
+        });
+
+        let rows = decision_text(&app, 60);
+        assert!(rows[0].contains("Decisions, as the agent says"), "{rows:?}");
+        assert!(rows[0].ends_with('2'), "{rows:?}");
+        assert!(rows[1].contains("left the exporter alone"), "{rows:?}");
+        assert!(rows[2].contains("reused the cache"), "{rows:?}");
+        assert!(
+            rows[1].starts_with("        "),
+            "no clock, so the time column is blank rather than a made-up moment"
+        );
+    }
+
+    #[test]
+    fn an_empty_decisions_section_says_whether_any_were_asked_for() {
+        let asked = App::new(crate::app::Repo::default());
+        assert_eq!(decision_text(&asked, 40)[1].trim(), "none stated yet");
+
+        let unasked = App::new(crate::app::Repo::default()).with_decisions_asked(false);
+        assert_eq!(
+            decision_text(&unasked, 40)[1].trim(),
+            "not asked for: decisions = false"
+        );
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -7849,6 +8204,7 @@ mod tests {
             exit_code: None,
             error: None,
             command: None,
+            untrimmed: None,
         });
         let written: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
         app.apply(&Event::FileChange {
@@ -7890,13 +8246,21 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: None,
+                untrimmed: None,
             });
         }
         edited(&mut app, "after", 2);
 
         let theme = Theme::default();
         let (entries, commands, drawn) = app.entries_to_draw();
-        drawn.update(entries, commands, 60, Detail::default(), None, &theme);
+        drawn.update(
+            entries,
+            commands,
+            60,
+            Detail::default(),
+            Arrangement::default(),
+            &theme,
+        );
         let rows: Vec<String> = drawn
             .lines(0, 12)
             .iter()
@@ -7950,6 +8314,7 @@ mod tests {
                 exit_code: None,
                 error: None,
                 command: None,
+                untrimmed: None,
             });
         };
         read(&mut app, "t1");
@@ -7963,7 +8328,14 @@ mod tests {
             ..Detail::default()
         };
         let (entries, commands, drawn) = app.entries_to_draw();
-        drawn.update(entries, commands, 60, detail, None, &theme);
+        drawn.update(
+            entries,
+            commands,
+            60,
+            detail,
+            Arrangement::default(),
+            &theme,
+        );
         let rows: Vec<String> = drawn
             .lines(0, 40)
             .iter()
@@ -8029,7 +8401,10 @@ mod tests {
                 commands,
                 60,
                 Detail::default(),
-                headings.as_deref(),
+                Arrangement {
+                    headings: headings.as_deref(),
+                    only: None,
+                },
                 &theme,
             );
             drawn
@@ -8175,6 +8550,40 @@ mod tests {
         app
     }
 
+    /// A metered session whose message records were folded with `then`
+    /// after them: a turn's cost that does or does not say what it settles.
+    fn floored_by(settles: Option<bool>) -> Vec<String> {
+        use niobe_core::event::Event;
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::Billing {
+            billing: Billing::Metered,
+        });
+        app.apply(&priced(None));
+        let mut turn = priced(Some(0.5));
+        if let Event::Usage(usage) = &mut turn {
+            usage.settles_model = settles;
+        }
+        app.apply(&turn);
+        money_lines(&app, 40, &crate::theme::CLASSIC)
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    #[test]
+    fn a_floor_left_by_a_recording_older_than_settlement_says_so() {
+        let said = floored_by(None);
+        assert!(said[0].starts_with("session ≥$0.50"), "{said:?}");
+        assert!(said[0].contains(OLDER_RECORDING), "{said:?}");
+    }
+
+    #[test]
+    fn a_floor_the_backend_left_carries_no_mark_of_age() {
+        let said = floored_by(Some(false));
+        assert!(said[0].starts_with("session ≥$0.50"), "{said:?}");
+        assert!(!said[0].contains(OLDER_RECORDING), "{said:?}");
+    }
+
     #[test]
     fn a_session_billed_both_ways_draws_only_what_it_spent_by_use() {
         use niobe_core::event::Event;
@@ -8236,6 +8645,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }));
         app.apply(&priced(Some(1.25)));
 
@@ -8314,11 +8724,11 @@ mod tests {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(cost),
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }));
             let rows = spend_of(&app, 66);
@@ -8348,11 +8758,11 @@ mod tests {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: (*model).to_owned(),
                 cost_usd: *cost,
-                settles_model: false,
+                settles_model: Some(false),
                 fast: false,
             }));
         }
@@ -8440,5 +8850,30 @@ mod tests {
         let mut app = bare();
         sent(&mut app, 76_000, "opus-5", Some(200_000));
         assert_eq!(context_of(&app, 15), ["  38%  76k"]);
+    }
+
+    #[test]
+    fn a_plan_is_approved_or_planned_further_in_those_words() {
+        let ask = Ask {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: r#"{"plan":"1. Guard it."}"#.to_owned(),
+            target: None,
+            proposed: Some(crate::proposed::Proposed::new(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: "1. Guard it.".to_owned(),
+                },
+                ["plan"],
+            ))),
+            reason: None,
+            turn: 1,
+            agent: None,
+        };
+
+        assert_eq!(
+            option_words(Answer::Once, &ask, false).0,
+            "Go ahead with the plan"
+        );
+        assert_eq!(option_words(Answer::No, &ask, false).0, "Keep planning");
     }
 }

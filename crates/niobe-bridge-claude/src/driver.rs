@@ -169,6 +169,26 @@ type TitleRequests = Arc<Mutex<Vec<String>>>;
 /// about yet, for the reason [`ModelRequests`] has.
 type McpRequests = Arc<Mutex<Vec<McpRequest>>>;
 
+/// The rewinds the thread reading the CLI has not been told about yet, for
+/// the reason [`ModelRequests`] has.
+type RewindRequests = Arc<Mutex<Vec<RewindRequest>>>;
+
+/// The control requests the CLI's answers called for, which the thread
+/// reading it leaves for the next drain to queue. The reader does not queue
+/// them itself: a sender it held would keep the CLI's standard input open
+/// after the session closed it, which is how the CLI is asked to leave.
+type FollowUps = Arc<Mutex<Vec<String>>>;
+
+/// A rewind asked for: its dry run's `request_id`, the one the request that
+/// puts the files back is to be asked as, and the prompt they go back to
+/// before.
+#[derive(Debug)]
+struct RewindRequest {
+    dry: String,
+    real: String,
+    sent: Sent,
+}
+
 /// A request about the MCP servers, as the thread reading the CLI is told of
 /// it.
 #[derive(Debug)]
@@ -287,7 +307,33 @@ pub struct Options {
     /// holds the whole conversation, so the caller decides where it may go:
     /// this creates the directory and writes to it wherever it is.
     pub tap: Option<PathBuf>,
+    /// The prompts sent to the conversation so far, oldest first, each by the
+    /// id it was sent with, which is what a rewind names. Kept by the session
+    /// as it sends them, so a CLI started again on the conversation can still
+    /// be asked to go back before one.
+    pub sent: Vec<Sent>,
 }
+
+/// A prompt sent to the CLI: the id it was sent with and how it is named to
+/// the operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sent {
+    /// The `uuid` the prompt's line carried, by which the CLI keeps the
+    /// files as they were before it.
+    pub id: String,
+    /// The prompt's first line, cut to [`SENT_LABEL`] characters.
+    pub label: String,
+}
+
+/// The most characters of a prompt a rewind names it by.
+const SENT_LABEL: usize = 60;
+
+/// What the CLI is started with so that it keeps the files as they were
+/// before each prompt, as Claude Code does in a terminal: run as an SDK
+/// process it does not unless told to. Its own
+/// `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING`, in a profile's `env`, still
+/// turns it off.
+const FILE_CHECKPOINTS: &str = "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING";
 
 impl Options {
     /// A session in `cwd`, under `profile`, with everything else at its
@@ -310,6 +356,7 @@ impl Options {
             carry_on: false,
             ask_title: false,
             tap: None,
+            sent: Vec::new(),
         }
     }
 
@@ -473,6 +520,8 @@ pub struct Session {
     model_requests: ModelRequests,
     title_requests: TitleRequests,
     mcp_requests: McpRequests,
+    rewind_requests: RewindRequests,
+    follow_ups: FollowUps,
     /// Set by the thread reading the CLI where the MCP servers should be
     /// asked about again (see [`Translator::take_mcp_status_wanted`]), and
     /// acted on by the next drain: only this side writes to the CLI.
@@ -563,6 +612,7 @@ impl Session {
             .stderr(Stdio::piped());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.env(FILE_CHECKPOINTS, "1");
         for (name, value) in &options.env {
             command.env(name, value);
         }
@@ -621,6 +671,10 @@ impl Session {
         let asked_for_title = Arc::clone(&title_requests);
         let mcp_requests: McpRequests = Arc::new(Mutex::new(Vec::new()));
         let asked_about_mcp = Arc::clone(&mcp_requests);
+        let rewind_requests: RewindRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_to_rewind = Arc::clone(&rewind_requests);
+        let follow_ups: FollowUps = Arc::new(Mutex::new(Vec::new()));
+        let called_for = Arc::clone(&follow_ups);
         let mcp_status_wanted = Arc::new(AtomicBool::new(false));
         let wants_mcp_status = Arc::clone(&mcp_status_wanted);
         let cleared = Arc::new(AtomicBool::new(false));
@@ -671,7 +725,20 @@ impl Session {
                         }
                     }
                 }
+                if let Ok(mut asked) = asked_to_rewind.lock() {
+                    for request in asked.drain(..) {
+                        translator.asked_to_rewind(
+                            &request.dry,
+                            &request.real,
+                            &request.sent.id,
+                            &request.sent.label,
+                        );
+                    }
+                }
                 let events = translator.line(&line);
+                if let Ok(mut called) = called_for.lock() {
+                    called.extend(translator.take_requests());
+                }
                 if translator.take_mcp_status_wanted() {
                     wants_mcp_status.store(true, Ordering::Relaxed);
                 }
@@ -730,6 +797,8 @@ impl Session {
             model_requests,
             title_requests,
             mcp_requests,
+            rewind_requests,
+            follow_ups,
             mcp_status_wanted,
             cleared,
             titles_wanted: options.ask_title,
@@ -780,7 +849,12 @@ impl Session {
     /// waits on the CLI, and the reply — or word that the turn could not be
     /// sent — arrives through [`Session::drain`].
     pub fn send(&mut self, prompt: &str, images: &[Image]) -> std::io::Result<()> {
-        self.queue(turn_line(prompt, images).to_string(), "turn")?;
+        let id = prompt_id();
+        self.queue(turn_line(prompt, images, &id).to_string(), "turn")?;
+        self.next.sent.push(Sent {
+            id,
+            label: label_of(prompt),
+        });
         self.turn_open = true;
         // The turn went in. A title that could not follow it is no reason to
         // say it did not, and a closed input is reported by the next drain.
@@ -975,6 +1049,33 @@ impl Session {
         ))
     }
 
+    /// Asks the CLI to put the files back as they were before the `prompt`th
+    /// prompt sent to the conversation, counted from the first at zero,
+    /// keeping everything said since.
+    ///
+    /// Asked as a dry run first, which says which files would go back; the
+    /// request that puts them back follows its answer, and what went back
+    /// arrives through [`Self::drain`] as a notice. Refused for a prompt this
+    /// conversation was not sent.
+    pub fn rewind(&mut self, prompt: usize) -> std::io::Result<()> {
+        let Some(sent) = self.next.sent.get(prompt).cloned() else {
+            return Err(std::io::Error::other(format!(
+                "no prompt {} was sent to this conversation, so there is nothing to go back before",
+                prompt.saturating_add(1)
+            )));
+        };
+        let dry = self.next_request_id();
+        let real = self.next_request_id();
+        if let Ok(mut asked) = self.rewind_requests.lock() {
+            asked.push(RewindRequest {
+                dry: dry.clone(),
+                real,
+                sent: sent.clone(),
+            });
+        }
+        self.ask(&crate::translate::rewind_request(&dry, &sent.id, true))
+    }
+
     /// Queues one control request for the CLI's standard input.
     fn ask(&mut self, request: &serde_json::Value) -> std::io::Result<()> {
         self.queue(request.to_string(), "request")
@@ -1022,6 +1123,16 @@ impl Session {
         // A CLI whose input is closed has left, which the drain reports.
         if self.mcp_status_wanted.swap(false, Ordering::Relaxed) {
             let _ = self.ask_mcp_status();
+        }
+        let called_for = self
+            .follow_ups
+            .lock()
+            .map(|mut called| std::mem::take(&mut *called))
+            .unwrap_or_default();
+        for text in called_for {
+            // Refused only where the CLI's input is closed, which this drain
+            // reports.
+            let _ = self.queue(text, "request");
         }
         loop {
             match self.events.try_recv() {
@@ -1546,7 +1657,7 @@ fn kept_running(said: &str) -> String {
 /// then an image block per image, in the order they were attached: the order
 /// Claude Code's own transcripts hold a pasted screenshot in, beside the
 /// `[Image #N]` its text keeps where the image went.
-fn turn_line(prompt: &str, images: &[Image]) -> serde_json::Value {
+fn turn_line(prompt: &str, images: &[Image], id: &str) -> serde_json::Value {
     let content = if images.is_empty() {
         serde_json::Value::from(prompt)
     } else {
@@ -1565,8 +1676,48 @@ fn turn_line(prompt: &str, images: &[Image]) -> serde_json::Value {
     };
     serde_json::json!({
         "type": "user",
+        "uuid": id,
         "message": { "role": "user", "content": content },
     })
+}
+
+/// A fresh id for a prompt, in the form of a random UUID, which is what the
+/// CLI keys the files it keeps by. Drawn from the standard library's
+/// per-process random hash keys: it has to differ from every other prompt's,
+/// not be secret.
+fn prompt_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos()),
+        );
+        hasher.finish()
+    };
+    let (high, low) = (half(), half());
+    // Version 4 and the RFC 4122 variant, as a random UUID is written.
+    let high = (high & !0xf000) | 0x4000;
+    let low = (low & !(0b11 << 62)) | (0b10 << 62);
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        high >> 32,
+        (high >> 16) & 0xffff,
+        high & 0xffff,
+        low >> 48,
+        low & 0xffff_ffff_ffff
+    )
+}
+
+/// How a prompt is named where a rewind goes back before it: its first line,
+/// cut to [`SENT_LABEL`] characters.
+fn label_of(prompt: &str) -> String {
+    let first = prompt.trim().lines().next().unwrap_or_default();
+    match first.char_indices().nth(SENT_LABEL) {
+        Some((at, _)) => format!("{}…", first[..at].trim_end()),
+        None => first.to_owned(),
+    }
 }
 
 /// The line that asks the CLI to change something about the running session.
@@ -1864,6 +2015,7 @@ mod tests {
     /// script can be held at its first instruction for seconds, and with a
     /// `yes` on every core thirty of them ran out. Every wait returns as soon
     /// as what it waits for happens.
+    #[cfg(unix)]
     const PATIENCE: Duration = Duration::from_secs(60);
 
     fn options() -> Options {
@@ -2015,9 +2167,10 @@ mod tests {
     #[test]
     fn a_turn_without_images_is_sent_as_the_prompt_string() {
         assert_eq!(
-            turn_line("what changed?", &[]),
+            turn_line("what changed?", &[], "p-1"),
             serde_json::json!({
                 "type": "user",
+                "uuid": "p-1",
                 "message": { "role": "user", "content": "what changed?" },
             })
         );
@@ -2028,12 +2181,13 @@ mod tests {
         let png = Image::from_bytes(b"\x89PNG\r\n\x1a\nfoo".to_vec()).expect("a PNG signature");
         let jpeg = Image::from_bytes(b"\xff\xd8\xffbar".to_vec()).expect("a JPEG signature");
 
-        let line = turn_line("look: [Image #1] [Image #2]", &[png, jpeg]);
+        let line = turn_line("look: [Image #1] [Image #2]", &[png, jpeg], "p-1");
 
         assert_eq!(
             line,
             serde_json::json!({
                 "type": "user",
+                "uuid": "p-1",
                 "message": { "role": "user", "content": [
                     { "type": "text", "text": "look: [Image #1] [Image #2]" },
                     { "type": "image", "source": {
@@ -3266,6 +3420,105 @@ mod tests {
     }
 
     #[test]
+    fn each_prompt_is_sent_with_a_random_uuid_of_its_own() {
+        let first = prompt_id();
+        let second = prompt_id();
+
+        assert_ne!(first, second);
+        for id in [&first, &second] {
+            let groups: Vec<&str> = id.split('-').collect();
+            assert_eq!(
+                groups.iter().map(|group| group.len()).collect::<Vec<_>>(),
+                [8, 4, 4, 4, 12],
+                "{id}"
+            );
+            assert!(groups[2].starts_with('4'), "a version 4 UUID: {id}");
+            assert!(
+                matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+                "the RFC 4122 variant: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prompt_is_named_by_its_first_line_cut_short() {
+        assert_eq!(
+            label_of("  fix the parser\nand the tests"),
+            "fix the parser"
+        );
+        let long = "x".repeat(SENT_LABEL + 5);
+        assert_eq!(label_of(&long), format!("{}…", "x".repeat(SENT_LABEL)));
+    }
+
+    /// A stand-in that answers as Claude Code 2.1.309 did: a dry run that
+    /// says the file can go back, then the rewind itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewind_asks_a_dry_run_then_puts_the_files_back_before_the_prompt_named() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let seen = scratch.path().join("seen");
+        let (mut session, _dir) = started(&format!(
+            r#"read -r init
+read -r turn
+printf '%s\n' "$CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING" "$turn" > '{seen}'
+read -r dry
+printf '%s\n' "$dry" >> '{seen}'
+id=$(printf '%s' "$dry" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"'"$id"'","response":{{"canRewind":true,"filesChanged":["'"$(dirname "$0")"'/stats.py"],"insertions":0,"deletions":2}}}}}}'
+read -r real
+printf '%s\n' "$real" >> '{seen}'
+id=$(printf '%s' "$real" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"'"$id"'","response":{{"canRewind":true}}}}}}'
+read -r rest
+"#,
+            seen = seen.display()
+        ));
+
+        session
+            .send("make mean() return 0", &[])
+            .expect("the stand-in is reading");
+        session.rewind(0).expect("a prompt was sent");
+        let events = drained_until(&mut session, |event| matches!(event, Event::Notice { .. }));
+
+        let notice = events.iter().find_map(|event| match event {
+            Event::Notice { message } => Some(message.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            notice,
+            Some(
+                "Files put back as they were before \"make mean() return 0\": stats.py \
+                 (+0 −2). The conversation keeps everything said since."
+            )
+        );
+        let seen = std::fs::read_to_string(&seen).expect("the stand-in kept what it read");
+        let lines: Vec<&str> = seen.lines().collect();
+        assert_eq!(lines[0], "1", "the CLI is started keeping the files");
+        let line = |at: usize| -> serde_json::Value {
+            serde_json::from_str(lines[at]).expect("a line of the protocol")
+        };
+        let prompt = line(1)["uuid"].clone();
+        assert!(prompt.is_string(), "{}", lines[1]);
+        for (at, dry_run) in [(2, true), (3, false)] {
+            assert_eq!(line(at)["request"]["subtype"], "rewind_files");
+            assert_eq!(line(at)["request"]["user_message_id"], prompt);
+            assert_eq!(line(at)["request"]["dry_run"], dry_run);
+        }
+    }
+
+    #[test]
+    fn a_rewind_before_a_prompt_never_sent_is_refused() {
+        let mut options = options();
+        options.binary = PathBuf::from("/bin/echo");
+        options.cwd = std::env::temp_dir();
+        let mut session = Session::spawn(&options).expect("`/bin/echo` is on every unix");
+
+        let refused = session.rewind(0).expect_err("nothing was sent");
+
+        assert!(refused.to_string().contains("no prompt 1"), "{refused}");
+    }
+
+    #[test]
     fn each_request_is_addressed_by_an_id_of_its_own() {
         let mut options = options();
         options.binary = PathBuf::from("/bin/echo");
@@ -3331,6 +3584,7 @@ mod tests {
     /// The opening of a turn and its end, as the CLI writes them, for a
     /// stand-in to say once it has read the turn: the conversation is `s-9`,
     /// gated in plan mode.
+    #[cfg(unix)]
     const ONE_TURN: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"plan"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
 
     /// Starts a stand-in whose caller carries a session on past a stop
@@ -3427,6 +3681,7 @@ mod tests {
     /// A turn that launches a sub-agent in the background and ends while it
     /// works, as the CLI writes it: the `Agent` call, its result saying the
     /// agent was launched, and the turn's end.
+    #[cfg(unix)]
     const BACKGROUND_AGENT: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review catalog/fetch.py for bugs."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review catalog/fetch.py"}}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
 
     /// The CLI's process group ends with it, and a sub-agent it ran in the
@@ -3464,6 +3719,7 @@ mod tests {
 
     /// A turn that launches two sub-agents in the background, the second of
     /// which reports its end before the turn does.
+    #[cfg(unix)]
     const TWO_BACKGROUND_AGENTS: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review it."}},{"type":"tool_use","id":"toolu_done","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Check the docs","prompt":"Check them."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]},{"type":"tool_result","tool_use_id":"toolu_done","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review"}}' '{"type":"system","subtype":"task_notification","tool_use_id":"toolu_done","status":"completed","summary":"The docs are right."}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
 
     /// An agent that exited before the stop is not cancelled by it as well:

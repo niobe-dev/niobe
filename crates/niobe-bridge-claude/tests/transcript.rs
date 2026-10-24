@@ -29,6 +29,10 @@ const SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
 /// transcripts are kept beside it.
 const WITH_AGENTS: &str = "7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73";
 
+/// The session in the fixture that ran two shell commands in the background,
+/// recorded live as `background-commands.jsonl` beside it.
+const BACKGROUND: &str = "df5b30bf-d767-43d8-b7dd-7b101f69c268";
+
 /// The session in the fixture that the CLI closed while a background agent
 /// was still writing: the agent's last response is stamped after the
 /// session's last stamped record, and before the `cost-state` that bills it.
@@ -174,7 +178,7 @@ fn a_transcript_is_listed_by_the_id_that_continues_it_and_by_what_was_asked() {
     ids.sort_unstable();
     assert_eq!(
         ids,
-        [SESSION, CLOSED_UNDER_AN_AGENT, WITH_AGENTS],
+        [SESSION, CLOSED_UNDER_AN_AGENT, WITH_AGENTS, BACKGROUND],
         "{listed:?}"
     );
     let only = listed
@@ -1416,4 +1420,25 @@ fn two_side_files_naming_one_call_say_which_was_not_read() {
         warned[0].contains("toolu_a") && warned[0].contains("agent-a1"),
         "{warned:?}"
     );
+}
+
+#[test]
+fn a_read_back_background_commands_end_is_the_notice_the_live_stream_gave() {
+    let read_back = folded_session(BACKGROUND);
+    let mut translator = niobe_bridge_claude::Translator::new("max").in_dir("/repo");
+    let live: Vec<Event> = include_str!("fixtures/background-commands.jsonl")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect();
+
+    assert_eq!(
+        notices(&read_back),
+        [
+            "the background command `sleep 2; echo finished-in-background` finished with exit \
+             code 0",
+            "the background command `sleep 3; echo about-to-fail; exit 3` failed with exit code 3",
+        ]
+    );
+    assert_eq!(notices(&read_back), notices(&live));
 }

@@ -290,9 +290,11 @@ pub(crate) struct Envelope {
     /// it.
     #[serde(default)]
     pub(crate) tool_use_result: Option<serde_json::Value>,
-    /// On a `user` line that carries a tool result for a call that did not
-    /// run to its end: why, per call. Only the live stream carries it — the
-    /// CLI's own transcripts leave it out.
+    /// On a `user` line that carries a tool result: why a call did not run
+    /// to its end, and from 2.1.309 how its permission was settled, per call.
+    /// The live stream carries it under this name; a transcript keeps only
+    /// the decision, as `permissionDecision`, which the transcript reader
+    /// puts here.
     #[serde(default)]
     pub(crate) tool_result_meta: Vec<ResultMeta>,
     /// On an `assistant` line: the id of the API request the message is the
@@ -321,8 +323,41 @@ pub(crate) struct ResultMeta {
     pub(crate) id: Option<String>,
     /// `user-rejected` for a call cut off by an interrupt, `permission-rule`
     /// for one refused over the control channel, as recorded from 2.1.278 and
-    /// 2.1.285.
+    /// 2.1.285. Recorded from 2.1.309, `permission-rule` also marks a call the
+    /// CLI's own rules refused and one a `PreToolUse` hook blocked, and no
+    /// call that ran, a tool's own error included.
+    #[serde(default)]
     pub(crate) non_execution_kind: Option<String>,
+    /// How the call's permission was settled, from 2.1.309: `decision` is
+    /// `accept` or `reject`, beside who settled it.
+    #[serde(default)]
+    pub(crate) permission_decision: Option<PermissionDecision>,
+}
+
+/// How the CLI settled whether a call may run, as it says beside the call's
+/// result on the live stream and in the transcript's `permissionDecision`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PermissionDecision {
+    /// `accept` or `reject`.
+    #[serde(default)]
+    pub(crate) decision: Option<String>,
+}
+
+impl ResultMeta {
+    /// Whether this says the call did not run because it was not allowed to:
+    /// refused by the operator, by a rule or by a hook.
+    pub(crate) fn refused(&self) -> bool {
+        let rejected = self
+            .permission_decision
+            .as_ref()
+            .and_then(|settled| settled.decision.as_deref())
+            == Some("reject");
+        match self.non_execution_kind.as_deref() {
+            Some("permission-rule") => true,
+            Some(_) => false,
+            None => rejected,
+        }
+    }
 }
 
 impl Envelope {
@@ -371,6 +406,13 @@ impl Envelope {
             meta.id.as_deref() == Some(id)
                 && meta.non_execution_kind.as_deref() == Some("user-rejected")
         })
+    }
+
+    /// Whether this line says call `id` was not allowed to run.
+    pub(crate) fn refused(&self, id: &str) -> bool {
+        self.tool_result_meta
+            .iter()
+            .any(|meta| meta.id.as_deref() == Some(id) && meta.refused())
     }
 
     /// Whether the tool this line answers started work that carries on after
@@ -445,6 +487,14 @@ pub(crate) struct ShellReport {
     /// file it wrote from one that has since changed.
     #[serde(default)]
     pub(crate) persisted_output_size: Option<u64>,
+    /// Set by Niobe's own hook, where it trimmed the output the model read:
+    /// the file it wrote the whole of it to. Not the CLI's: the hook adds it
+    /// to the result it hands back, and the CLI passes it through.
+    #[serde(default)]
+    pub(crate) niobe_raw_output_path: Option<String>,
+    /// How many bytes the hook wrote to that file.
+    #[serde(default)]
+    pub(crate) niobe_raw_output_size: Option<u64>,
 }
 
 /// One hunk of a [`FileReport`]: a unified diff's `@@` header and the lines
@@ -638,21 +688,25 @@ impl Usage {
     }
 
     /// Of the cache writes, the ones bought for an hour rather than for the
-    /// default five minutes. Zero where the CLI reported no split.
+    /// default five minutes. `None` where the CLI reported no split, beside
+    /// the total or in any iteration.
     ///
     /// The split beside the total wins where there is one; otherwise it is
     /// summed over the iterations. Reading only the first would price every
     /// one-hour write on a 2.1.278 `message_delta` as a five-minute one — in
     /// the session recorded on 19 September 2026, every cache write it made.
-    pub(crate) fn cache_write_1h(&self) -> u64 {
+    pub(crate) fn cache_write_1h(&self) -> Option<u64> {
         match &self.cache_creation {
-            Some(split) => split.ephemeral_1h_input_tokens,
+            Some(split) => Some(split.ephemeral_1h_input_tokens),
             None => self
                 .iterations
                 .iter()
                 .filter_map(|iteration| iteration.cache_creation.as_ref())
-                .fold(0, |sum, split| {
-                    sum.saturating_add(split.ephemeral_1h_input_tokens)
+                .fold(None, |sum: Option<u64>, split| {
+                    Some(
+                        sum.unwrap_or(0)
+                            .saturating_add(split.ephemeral_1h_input_tokens),
+                    )
                 }),
         }
     }
@@ -679,11 +733,11 @@ pub(crate) struct CacheCreation {
 
 /// A `rate_limit_event`: how much of the plan's metered windows is gone.
 ///
-/// The message also carries `status`, `rateLimitType`, `resetsAt`,
-/// `overageStatus` and `overageDisabledReason`. Only the windows and the
-/// overage flag are read: the rest restates the window the CLI happens to be
-/// closest to, and a status word nothing draws would widen the shared
-/// vocabulary for a figure no pane shows.
+/// The message also carries `status`, `rateLimitType` and `resetsAt`, which
+/// are not read: they restate the window the CLI happens to be closest to, and
+/// a status word nothing draws would widen the shared vocabulary for a figure
+/// no pane shows. The windows, the overage flag, and whether overage is
+/// allowed and why not, are.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RateLimit {
     pub(crate) rate_limit_info: Option<RateLimitInfo>,
@@ -699,6 +753,20 @@ pub(crate) struct RateLimitInfo {
     /// rather than as a promise that nothing extra is being charged.
     #[serde(rename = "isUsingOverage", default, deserialize_with = "lenient_flag")]
     pub(crate) is_using_overage: bool,
+    /// Whether the plan may spend beyond its fee: `allowed`, `allowed_warning`
+    /// or `rejected` in Claude Code 2.1.309's own schema. Empty where the CLI
+    /// did not say, or said it in a shape this does not read.
+    #[serde(rename = "overageStatus", default, deserialize_with = "lenient_text")]
+    pub(crate) overage_status: String,
+    /// Why overage is refused, from the CLI's own list (`out_of_credits`,
+    /// `overage_not_provisioned`, `org_level_disabled` and the rest). Empty
+    /// where it gave none.
+    #[serde(
+        rename = "overageDisabledReason",
+        default,
+        deserialize_with = "lenient_text"
+    )]
+    pub(crate) overage_disabled_reason: String,
 }
 
 /// The two windows a plan is metered against.
@@ -834,6 +902,22 @@ pub(crate) struct ControlAnswer {
     /// Recorded from Claude Code 2.1.288: `{"title":"Static file handler etag
     /// support"}` for a prompt about etags.
     pub(crate) title: Option<String>,
+    /// Whether `rewind_files` can put the files back as they were before the
+    /// prompt it names. Recorded from Claude Code 2.1.309, started with
+    /// `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`: a dry run answers
+    /// `{"canRewind":true,"filesChanged":["/abs/stats.py"],"insertions":0,
+    /// "deletions":2}`, the rewind itself `{"canRewind":true,"skippedLinks":0}`.
+    #[serde(rename = "canRewind")]
+    pub(crate) can_rewind: Option<bool>,
+    /// The files a dry run of `rewind_files` would put back, by absolute path.
+    #[serde(rename = "filesChanged")]
+    pub(crate) files_changed: Option<Vec<String>>,
+    /// The lines a dry run of `rewind_files` would add back.
+    pub(crate) insertions: Option<u64>,
+    /// The lines a dry run of `rewind_files` would take out.
+    pub(crate) deletions: Option<u64>,
+    /// Why `rewind_files` cannot put the files back, where it cannot.
+    pub(crate) error: Option<String>,
 }
 
 /// `conversation_reset`: the CLI dropped the conversation and started a new
@@ -991,12 +1075,12 @@ mod tests {
     }
 
     #[test]
-    fn cache_writes_without_a_reported_split_are_no_one_hour_writes() {
+    fn cache_writes_without_a_reported_split_have_no_split() {
         let usage: Usage = serde_json::from_str(r#"{"cache_creation_input_tokens":99}"#)
             .expect("usage without a split");
 
         assert_eq!(usage.cache_creation_input_tokens, 99);
-        assert_eq!(usage.cache_write_1h(), 0);
+        assert_eq!(usage.cache_write_1h(), None);
     }
 
     #[test]
@@ -1007,7 +1091,7 @@ mod tests {
         .expect("usage with both lifetimes");
 
         assert_eq!(usage.cache_creation_input_tokens, 90);
-        assert_eq!(usage.cache_write_1h(), 60);
+        assert_eq!(usage.cache_write_1h(), Some(60));
     }
 
     #[test]
@@ -1019,7 +1103,7 @@ mod tests {
         )
         .expect("a message_delta's usage");
 
-        assert_eq!(usage.cache_write_1h(), 10_059);
+        assert_eq!(usage.cache_write_1h(), Some(10_059));
     }
 
     #[test]
