@@ -191,7 +191,11 @@ cache_write_1h = 10.00
 
 # Claude Sonnet 5.5, released on 28 September 2026 by its model page
 # (https://platform.claude.com/docs/en/models/sonnet-5-5/overview) and the
-# release notes; its rates read from the pricing page on 3 October 2026. Its 1M
+# release notes; its rates read from the pricing page on 3 October 2026. The
+# release notes of 7 October 2026 lowered its cache reads "from $0.20 USD to
+# $0.10 USD per million tokens: 0.05x the base input price instead of 0.1x.
+# Cache writes and all other prices are unchanged", as the pricing page read
+# on 24 October 2026 lists them. Its 1M
 # window is billed at standard rates, so it has no long-context tier, and it
 # has no fast mode.
 [[model]]
@@ -205,6 +209,14 @@ from = 2026-09-28
 input = 2.00
 output = 10.00
 cache_read = 0.20
+cache_write = 2.50
+cache_write_1h = 4.00
+
+[[model.price]]
+from = 2026-10-07
+input = 2.00
+output = 10.00
+cache_read = 0.10
 cache_write = 2.50
 cache_write_1h = 4.00
 
@@ -350,6 +362,9 @@ cache_write_1h = 2.00
 # Claude Sonnet 5.5's rates were read from the copy of 30 September 2026, two
 # days after its release, and its profile ids from its model card,
 # https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html
+# The pricing page, read on 24 October 2026, says: "Starting October 7, 2026,
+# cache read pricing for Claude Sonnet 5.5 is reduced by 50% from the prior
+# rate", which takes its profiles' $0.22 to $0.11 from that day.
 
 # Claude Fable 5, EU and US geographic profiles
 [[model]]
@@ -433,6 +448,14 @@ from = 2026-09-28
 input = 2.20
 output = 11.00
 cache_read = 0.22
+cache_write = 2.75
+cache_write_1h = 4.40
+
+[[model.price]]
+from = 2026-10-07
+input = 2.20
+output = 11.00
+cache_read = 0.11
 cache_write = 2.75
 cache_write_1h = 4.40
 

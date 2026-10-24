@@ -147,6 +147,40 @@ fn claude_sonnet_5_5_on_the_claude_api_matches_a_hand_computed_cost() {
 }
 
 #[test]
+fn claude_sonnet_5_5_reads_its_cache_at_half_the_price_from_7_october_2026() {
+    // The release notes of 7 October 2026: "We've lowered the price of prompt
+    // cache reads on Claude Sonnet 5.5 from $0.20 USD to $0.10 USD per million
+    // tokens ... Cache writes and all other prices are unchanged."
+    //  1,000,000 cache read × .2 = 200,000 / 1e6 = $0.20 on 6 October
+    //  1,000,000 cache read × .1 = 100,000 / 1e6 = $0.10 from 7 October
+    let reads = Usage {
+        cache_read: 1_000_000,
+        ..usage("claude-sonnet-5-5")
+    };
+    let table = bundled();
+    assert_eq!(usd(table.cost(&reads, date(2026, 10, 6))), 0.20);
+    assert_eq!(usd(table.cost(&reads, date(2026, 10, 7))), 0.10);
+    assert_eq!(usd(table.cost(&reads, date(2026, 10, 24))), 0.10);
+
+    // Bedrock's page: "Starting October 7, 2026, cache read pricing for
+    // Claude Sonnet 5.5 is reduced by 50% from the prior rate", so the EU and
+    // US profiles' $0.22 is $0.11 from that day.
+    //  1,000,000 cache read × .22 = 220,000 / 1e6 = $0.22 on 6 October
+    //  1,000,000 cache read × .11 = 110,000 / 1e6 = $0.11 from 7 October
+    for id in [
+        "eu.anthropic.claude-sonnet-5-5",
+        "us.anthropic.claude-sonnet-5-5[1m]",
+    ] {
+        let reads = Usage {
+            cache_read: 1_000_000,
+            ..usage(id)
+        };
+        assert_eq!(usd(table.cost(&reads, date(2026, 10, 6))), 0.22, "{id}");
+        assert_eq!(usd(table.cost(&reads, date(2026, 10, 7))), 0.11, "{id}");
+    }
+}
+
+#[test]
 fn claude_haiku_5_5_is_priced_by_the_length_of_each_requests_prompt() {
     // Claude Haiku 5.5, from 7 October 2026: input $0.10, output $0.50, cache
     // read $0.01, 1-hour write $0.20; over a 100,000-token prompt (cache reads
@@ -339,33 +373,41 @@ fn claude_api_id(bedrock: &str) -> String {
 #[test]
 fn every_bedrock_rate_is_the_claude_api_rate_plus_ten_percent_in_a_region_and_equal_globally() {
     let table = bundled();
-    let today = date(2026, 10, 1);
     let bedrock: Vec<&str> = table
         .ids()
         .filter(|id| id.contains(".anthropic."))
         .collect();
     assert!(bedrock.len() >= 30, "{bedrock:?}");
 
-    for id in bedrock {
-        let claude_api = claude_api_id(id);
-        let expected = table
-            .price(&claude_api, today)
-            .unwrap_or_else(|| panic!("{id} has no Claude API counterpart {claude_api}"))
-            .rates();
-        let premium = |rate: u64| {
-            if id.starts_with("global.") {
-                rate
-            } else {
-                rate + rate / 10
-            }
-        };
-        let actual = table.price(id, today).expect("listed, so priced").rates();
-        assert_eq!(
-            micros(actual),
-            micros(expected).map(|rate| rate.map(premium)),
-            "{id} against {claude_api}"
-        );
+    // Either side of Sonnet 5.5's cache-read cut on 7 October 2026.
+    for today in [date(2026, 10, 1), date(2026, 10, 24)] {
+        for &id in &bedrock {
+            assert_bedrock_premium(&table, id, today);
+        }
     }
+}
+
+/// `id`'s rates on `today` are its Claude API counterpart's, plus 10% for a
+/// geographic profile.
+fn assert_bedrock_premium(table: &PriceTable, id: &str, today: Date) {
+    let claude_api = claude_api_id(id);
+    let expected = table
+        .price(&claude_api, today)
+        .unwrap_or_else(|| panic!("{id} has no Claude API counterpart {claude_api}"))
+        .rates();
+    let premium = |rate: u64| {
+        if id.starts_with("global.") {
+            rate
+        } else {
+            rate + rate / 10
+        }
+    };
+    let actual = table.price(id, today).expect("listed, so priced").rates();
+    assert_eq!(
+        micros(actual),
+        micros(expected).map(|rate| rate.map(premium)),
+        "{id} against {claude_api} on {today:?}"
+    );
 }
 
 #[test]
@@ -462,7 +504,7 @@ fn request(case: &Case) -> Usage {
 
 /// Every entry of the bundled table, at the published rates its comments in
 /// `prices.toml` cite, written out here rather than read from the table.
-const CASES: [Case; 46] = [
+const CASES: [Case; 48] = [
     // claude-fable-5-1, from 2026-09-01, standard: (10 + 50 + 0.25 + 12.5 + 20) / 100 = 0.9275
     Case {
         id: "claude-fable-5-1",
@@ -575,6 +617,14 @@ const CASES: [Case; 46] = [
         one_hour: true,
         usd: 0.187,
     },
+    // claude-sonnet-5-5, from 2026-10-07, standard: (2 + 10 + 0.1 + 2.5 + 4) / 100 = 0.186
+    Case {
+        id: "claude-sonnet-5-5",
+        from: (2026, 10, 7),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.186,
+    },
     // claude-sonnet-5, from 2026-06-30, standard: (2 + 10 + 0.2 + 2.5 + 4) / 100 = 0.187
     Case {
         id: "claude-sonnet-5",
@@ -670,6 +720,14 @@ const CASES: [Case; 46] = [
         tier: Tier::Standard,
         one_hour: true,
         usd: 0.2057,
+    },
+    // eu.anthropic.claude-sonnet-5-5, from 2026-10-07, standard: (2.2 + 11 + 0.11 + 2.75 + 4.4) / 100 = 0.2046
+    Case {
+        id: "eu.anthropic.claude-sonnet-5-5",
+        from: (2026, 10, 7),
+        tier: Tier::Standard,
+        one_hour: true,
+        usd: 0.2046,
     },
     // eu.anthropic.claude-sonnet-5, from 2026-06-30, standard: (2.2 + 11 + 0.22 + 2.75 + 4.4) / 100 = 0.2057
     Case {
