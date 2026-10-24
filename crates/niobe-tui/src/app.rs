@@ -7881,10 +7881,12 @@ impl App {
                 {
                     return;
                 }
+                let before = self.composer.cursor();
                 let changed = match whole_character(&mut self.composer, key) {
                     Some(changed) => changed,
                     None => self.composer.input(Input::from(key)),
                 };
+                keep_off_a_glyph(&mut self.composer, before);
                 if changed {
                     self.offer_selected = 0;
                     self.reopen_offers();
@@ -8936,6 +8938,7 @@ impl App {
             false => CursorMove::Down,
         });
         if self.composer.cursor() != before {
+            keep_off_a_glyph(&mut self.composer, before);
             return false;
         }
         match older {
@@ -9059,6 +9062,10 @@ const BROWSER_PAGE: usize = 10;
 /// own handling is already that: a selection, a line break, a character
 /// that is one code point, or any other key.
 ///
+/// The editor's other names for three of them are the same keys: Ctrl+H,
+/// which a terminal set to send `^H` for Backspace sends, Ctrl+D and Ctrl+B.
+/// Ctrl+F, the fourth, searches the transcript before it reaches here.
+///
 /// `Some` says whether the text changed, as the editor's own input does.
 fn whole_character(
     composer: &mut TextArea<'static>,
@@ -9067,13 +9074,17 @@ fn whole_character(
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
     use ratatui_textarea::CursorMove;
 
-    if key.modifiers != KeyModifiers::NONE
-        || !matches!(
-            key.code,
-            KeyCode::Backspace | KeyCode::Delete | KeyCode::Left | KeyCode::Right
-        )
-        || composer.selection_range().is_some()
-    {
+    let code = match (key.code, key.modifiers) {
+        (
+            code @ (KeyCode::Backspace | KeyCode::Delete | KeyCode::Left | KeyCode::Right),
+            KeyModifiers::NONE,
+        ) => code,
+        (KeyCode::Char('h'), KeyModifiers::CONTROL) => KeyCode::Backspace,
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => KeyCode::Delete,
+        (KeyCode::Char('b'), KeyModifiers::CONTROL) => KeyCode::Left,
+        _ => return None,
+    };
+    if composer.selection_range().is_some() {
         return None;
     }
     let ratatui_textarea::DataCursor(row, col) = composer.cursor();
@@ -9083,7 +9094,7 @@ fn whole_character(
         .nth(col)
         .map_or(line.len(), |(at, _)| at);
     let (before, after) = line.split_at(split);
-    match key.code {
+    match code {
         KeyCode::Backspace => {
             let chars = before.graphemes(true).next_back()?.chars().count();
             if chars < 2 {
@@ -9117,6 +9128,49 @@ fn whole_character(
             })
         }
         _ => None,
+    }
+}
+
+/// Puts a cursor the editor's own moves left inside what the operator sees
+/// as one character at its edge: the far one where the cursor moved forward
+/// along its line, the near one otherwise.
+///
+/// The editor keeps a column by the cells it sums a character at a time, so
+/// Up and Down onto a row land after the first character of a heart and the
+/// selector that makes it an emoji, or of a letter and its accent, and its
+/// word moves stop between any two characters of different kinds. What was
+/// typed there went between them and split the glyph, in the prompt sent.
+fn keep_off_a_glyph(composer: &mut TextArea<'static>, before: ratatui_textarea::DataCursor) {
+    use ratatui_textarea::CursorMove;
+
+    let ratatui_textarea::DataCursor(row, col) = composer.cursor();
+    let Some(line) = composer.lines().get(row) else {
+        return;
+    };
+    let mut start = 0usize;
+    let edge = line.graphemes(true).find_map(|glyph| {
+        let end = start + glyph.chars().count();
+        let inside = (start < col && col < end).then_some((start, end));
+        start = end;
+        inside
+    });
+    let Some((start, end)) = edge else {
+        return;
+    };
+    let forward = before.0 == row && before.1 < col;
+    let to = if forward { end } else { start };
+    match (u16::try_from(row), u16::try_from(to)) {
+        (Ok(row), Ok(to)) => composer.move_cursor(CursorMove::Jump(row, to)),
+        _ => {
+            let (step, steps) = if forward {
+                (CursorMove::Forward, end - col)
+            } else {
+                (CursorMove::Back, col - start)
+            };
+            for _ in 0..steps {
+                composer.move_cursor(step);
+            }
+        }
     }
 }
 
@@ -12055,6 +12109,58 @@ mod tests {
             app.on_key(key(KeyCode::Char('Z')));
             assert_eq!(app.composed(), then, "{typed:?}");
         }
+    }
+
+    /// Up and Down keep the cursor's column by the cells the editor sums
+    /// character by character, and a column that falls after the first
+    /// character of a glyph — a heart and the selector that makes it an
+    /// emoji, a letter and its accent, a family joined by zero-width joiners —
+    /// left the cursor between them, where the next key typed split the glyph.
+    #[test]
+    fn up_never_leaves_the_cursor_inside_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        for (glyph, below) in [
+            ("\u{2764}\u{fe0f}", "a"),
+            ("e\u{301}", "a"),
+            ("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", "ab"),
+        ] {
+            let mut app = app();
+            app.on_paste(&format!("{glyph} love\n{below}"));
+            app.on_key(key(KeyCode::Up));
+            app.on_key(key(KeyCode::Char('Z')));
+            assert_eq!(
+                app.composed(),
+                format!("Z{glyph} love\n{below}"),
+                "{glyph:?}"
+            );
+        }
+    }
+
+    /// Ctrl+H is the Backspace a terminal set to send `^H` sends, and Ctrl+D
+    /// and Ctrl+B the editor's own Delete and Left: each by what is seen as
+    /// one character, as the keys they stand for are.
+    #[test]
+    fn the_editors_other_names_for_backspace_delete_and_left_take_a_glyph_whole() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let heart = "\u{2764}\u{fe0f}";
+
+        let mut backspaced = app();
+        backspaced.on_paste(&format!("hi {heart}"));
+        backspaced.on_key(ctrl('h'));
+        assert_eq!(backspaced.composed(), "hi ");
+
+        let mut deleted = app();
+        deleted.on_paste(&format!("{heart}x"));
+        deleted.on_key(key(KeyCode::Home));
+        deleted.on_key(ctrl('d'));
+        assert_eq!(deleted.composed(), "x");
+
+        let mut moved = app();
+        moved.on_paste(&format!("x{heart}"));
+        moved.on_key(ctrl('b'));
+        moved.on_key(key(KeyCode::Char('Z')));
+        assert_eq!(moved.composed(), format!("xZ{heart}"));
     }
 
     /// Ctrl+U is what a shell's line editor deletes back to the start of the
