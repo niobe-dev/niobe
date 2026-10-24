@@ -618,25 +618,18 @@ fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
     )?);
 
     let mut working = match &status.head {
-        // A repository with no commits has nothing to have changed against,
-        // and git counts no lines in a file it has only staged.
-        None => Vec::new(),
-        Some(_) => working_tree(&git(
-            root,
-            &[
-                "diff",
-                "--numstat",
-                "-z",
-                // A count needs no converter and no external diff, and a
-                // config that names either must not get to run it. A
-                // submodule is looked at only for the commit it is on, as
-                // the status above is.
-                "--no-textconv",
-                "--no-ext-diff",
-                "--ignore-submodules=dirty",
-                "HEAD",
-            ],
-        )?),
+        Some(_) => working_tree(&numstat(root, "HEAD")?),
+        // A repository with no commits has nothing to have changed against
+        // but the empty tree, and a file staged in it is as uncommitted as one
+        // never added: every line it holds is new. The files never added are
+        // counted with the rest below.
+        None => {
+            let empty = empty_tree(root)?;
+            working_tree(&numstat(root, &empty)?)
+                .into_iter()
+                .map(|file| WorkingFile { new: true, ..file })
+                .collect()
+        }
     };
 
     // Listed from the root, which is where the agent runs and the operator's
@@ -672,6 +665,39 @@ fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
         files,
         began: Some(started),
     })
+}
+
+/// What the working tree did to each file git tracks, against the tree
+/// `against` names, as `git diff --numstat -z` prints it.
+fn numstat(root: &Path, against: &str) -> Result<String, String> {
+    git(
+        root,
+        &[
+            "diff",
+            "--numstat",
+            "-z",
+            // A count needs no converter and no external diff, and a config
+            // that names either must not get to run it. A submodule is looked
+            // at only for the commit it is on, as the status is.
+            "--no-textconv",
+            "--no-ext-diff",
+            "--ignore-submodules=dirty",
+            against,
+            // Without it, a file at the root named as `against` is — `HEAD`
+            // is a name a file can have — makes the argument ambiguous, and
+            // git refuses every read of that tree.
+            "--",
+        ],
+    )
+}
+
+/// The name of the empty tree in the repository at `root`, which git knows
+/// without storing it. Asked of git rather than written down, because a
+/// repository's object format decides it.
+fn empty_tree(root: &Path) -> Result<String, String> {
+    // `--stdin` reads the nothing `reading` gives every `git` as its input.
+    let printed = git(root, &["hash-object", "-t", "tree", "--stdin"])?;
+    Ok(printed.trim().to_owned())
 }
 
 /// The paths `git ls-files -z -t` printed, in the order it printed them,
@@ -1394,6 +1420,69 @@ mod tests {
                 new: true,
             }],
             "with nothing committed, every file in the tree is new"
+        );
+    }
+
+    /// A file named `HEAD` is a file like any other, and not a reason the
+    /// tree cannot be read.
+    #[test]
+    fn a_file_named_head_leaves_the_working_tree_readable() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        std::fs::write(work.join("HEAD"), "not a commit\n").expect("the file is written");
+        std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
+
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+
+        assert_eq!(
+            read.working,
+            [
+                WorkingFile {
+                    path: "HEAD".to_owned(),
+                    added: Some(1),
+                    removed: Some(0),
+                    new: true,
+                },
+                WorkingFile {
+                    path: "kept.txt".to_owned(),
+                    added: Some(1),
+                    removed: Some(0),
+                    new: false,
+                },
+            ]
+        );
+    }
+
+    /// A file staged before the first commit is as uncommitted as one never
+    /// added, and is counted against nothing: every line the working tree
+    /// holds of it, whether the lines were staged or not.
+    #[test]
+    fn a_file_staged_before_the_first_commit_is_new_and_counted_whole() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        run(dir.path(), &["init", "--initial-branch=main", "."]);
+        std::fs::write(dir.path().join("staged.txt"), "a\nb\nc\n").expect("the file is written");
+        run(dir.path(), &["add", "staged.txt"]);
+        std::fs::write(dir.path().join("staged.txt"), "a\nb\nc\nd\n").expect("the file is written");
+        std::fs::write(dir.path().join("untracked.txt"), "x\n").expect("the file is written");
+
+        let read = read(dir.path(), "work", &mut Counts::default()).expect("the repository reads");
+
+        assert_eq!(
+            read.working,
+            [
+                WorkingFile {
+                    path: "staged.txt".to_owned(),
+                    added: Some(4),
+                    removed: Some(0),
+                    new: true,
+                },
+                WorkingFile {
+                    path: "untracked.txt".to_owned(),
+                    added: Some(1),
+                    removed: Some(0),
+                    new: true,
+                },
+            ]
         );
     }
 
