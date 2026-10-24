@@ -1234,6 +1234,7 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
         return;
     }
 
+    app.lay_out_at(usize::from(inner.width));
     find_in_transcript(app, inner.width, theme);
     fit_placeholder(app, panes, inner.width, theme);
 
@@ -2142,6 +2143,9 @@ pub struct DrawnEntries {
     /// Whether an entry has been drawn again, or the order changed, since
     /// `found` was put together.
     moved: bool,
+    /// How many cells wide the lines were last laid out, `None` before the
+    /// first time.
+    width: Option<usize>,
 }
 
 /// One thing the transcript draws, in the order it is drawn: an entry, or
@@ -2206,6 +2210,7 @@ impl DrawnEntries {
             grouped: headings.is_some(),
             ..detail
         };
+        self.width = Some(width);
         let named = commands_key(commands);
         let order = order(
             entries,
@@ -2361,6 +2366,7 @@ impl DrawnEntries {
                     heading: drawn.heading,
                     offset,
                     lines: drawn.lines.clone(),
+                    width: self.width,
                 });
             }
             first = first.saturating_add(drawn.lines.len());
@@ -2368,12 +2374,19 @@ impl DrawnEntries {
         None
     }
 
+    /// How many cells wide the lines were last laid out, `None` before the
+    /// first time.
+    pub(crate) fn width(&self) -> Option<usize> {
+        self.width
+    }
+
     /// Where `anchor` is in the transcript as drawn now: the same line of the
     /// same entry, and where that line is gone — a diff cut again, a run of
     /// calls folded — the nearest line above it that is still drawn, so the
-    /// view stops on what led up to the line rather than past it. A heading
-    /// no longer drawn — the rows were ungrouped — is found as the first row
-    /// that was under it.
+    /// view stops on what led up to the line rather than past it. Where the
+    /// pane's width changed, the line its first word is wrapped on to now. A
+    /// heading no longer drawn — the rows were ungrouped — is found as the
+    /// first row that was under it.
     pub(crate) fn line_of(&self, anchor: &Anchor) -> Option<usize> {
         let at = self
             .drawn
@@ -2392,20 +2405,11 @@ impl DrawnEntries {
             .take(at)
             .map(|drawn| drawn.lines.len())
             .sum();
-        let above = (0..=anchor.offset).rev();
-        let below = anchor.offset.saturating_add(1)..anchor.lines.len();
-        let offset = above
-            .chain(below)
-            .find_map(|at| {
-                let held = anchor.lines.get(at)?;
-                lines
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, line)| *line == held)
-                    .map(|(now, _)| now)
-                    .min_by_key(|now| now.abs_diff(at))
-            })
-            .unwrap_or(anchor.offset.min(last));
+        let offset = match anchor.width == self.width {
+            true => same_line(anchor, lines),
+            false => rewrapped_line(anchor, lines),
+        }
+        .unwrap_or(anchor.offset.min(last));
         Some(first.saturating_add(offset))
     }
 
@@ -2467,6 +2471,56 @@ impl DrawnEntries {
             .cloned()
             .collect()
     }
+}
+
+/// Where the line `anchor` holds is among `lines`, the same entry laid out
+/// again at the same width: the line itself, or where a switch took it away,
+/// the nearest line above it that is still drawn, then the nearest below.
+fn same_line(anchor: &Anchor, lines: &[Line<'static>]) -> Option<usize> {
+    let above = (0..=anchor.offset).rev();
+    let below = anchor.offset.saturating_add(1)..anchor.lines.len();
+    above.chain(below).find_map(|at| {
+        let held = anchor.lines.get(at)?;
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| *line == held)
+            .map(|(now, _)| now)
+            .min_by_key(|now| now.abs_diff(at))
+    })
+}
+
+/// Where the line `anchor` holds is among `lines`, the same entry wrapped
+/// again at another width: the line the first word of it is on now.
+///
+/// No line need read the same once the words are wrapped again, and the ones
+/// that do — a blank between paragraphs, the entry's head — are the wrong
+/// ones to look for, since every paragraph has a blank under it. What a
+/// width does not change is how much text comes before the line, so the line
+/// is found by that: counted in letters and digits, which leaves out the
+/// spaces wrapping moves and the gutters and bars it draws again on every
+/// row.
+fn rewrapped_line(anchor: &Anchor, lines: &[Line<'static>]) -> Option<usize> {
+    let before: usize = anchor
+        .lines
+        .iter()
+        .take(anchor.offset)
+        .map(letters)
+        .fold(0, usize::saturating_add);
+    let mut read = 0usize;
+    lines.iter().position(|line| {
+        read = read.saturating_add(letters(line));
+        read > before
+    })
+}
+
+/// How many letters and digits `line` reads.
+fn letters(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .flat_map(|span| span.content.chars())
+        .filter(|c| c.is_alphanumeric())
+        .count()
 }
 
 /// The text `entry` is drawn from: its head, its detail, its body, and what
@@ -2696,6 +2750,8 @@ pub(crate) struct Anchor {
     heading: bool,
     offset: usize,
     lines: Vec<Line<'static>>,
+    /// How many cells wide `lines` were laid out.
+    width: Option<usize>,
 }
 
 /// Whether `entry` is drawn as rows of the calls table — a call or a run of

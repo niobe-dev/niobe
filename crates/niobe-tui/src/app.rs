@@ -3313,6 +3313,18 @@ impl App {
         }
     }
 
+    /// Remembers the line at the top of the view where the transcript is
+    /// about to be laid out at a width other than it was last: a terminal
+    /// resized, or a side pane shown or hidden beside it, wraps every entry
+    /// on to another number of lines, and the same offset would put other
+    /// lines under the view. Called by the draw before it lays the entries
+    /// out.
+    pub(crate) fn lay_out_at(&mut self, width: usize) {
+        if self.drawn.width().is_some_and(|last| last != width) {
+            self.hold_view();
+        }
+    }
+
     /// Puts the line [`App::hold_view`] remembered back at the top of the
     /// view, called by the draw once it has laid the entries out again.
     pub(crate) fn keep_view(&mut self) {

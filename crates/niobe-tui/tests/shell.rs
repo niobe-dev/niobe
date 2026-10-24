@@ -815,6 +815,86 @@ fn a_line_cut_away_leaves_the_view_on_the_nearest_line_above_it_still_drawn() {
     );
 }
 
+/// A reply of paragraphs each too long for one row of the transcript at any
+/// width these tests draw it at, so that a narrower pane wraps every one of
+/// them on to more rows.
+fn session_with_a_long_wrapping_reply() -> App {
+    let mut app = session_with_a_long_write();
+    let reply: String = (1..=40)
+        .map(|n| {
+            format!(
+                "Paragraph {n:02} opens here and runs on with words enough to wrap \
+                 in any pane these tests draw, until it closes as paragraph {n:02}.\n\n"
+            )
+        })
+        .collect();
+    app.apply(&Event::AssistantMessage {
+        text: reply,
+        agent: None,
+    });
+    app
+}
+
+/// Scrolls the transcript back until a row holding `marker` is its first.
+fn scroll_until_first(app: &mut App, marker: &str, width: u16) -> String {
+    screen(app, width, 40);
+    app.scroll_to_head();
+    let mut frame = screen(app, width, 40);
+    for _ in 0..400 {
+        if first_row_with(&frame, marker).is_some_and(|(at, _)| at == TRANSCRIPT_TOP) {
+            break;
+        }
+        app.scroll_down(1);
+        frame = screen(app, width, 40);
+    }
+    frame
+}
+
+#[test]
+fn a_terminal_resized_while_scrolled_back_keeps_the_lines_being_read_in_view() {
+    let mut app = session_with_a_long_wrapping_reply();
+    let before = scroll_until_first(&mut app, "Paragraph 20", 120);
+    assert_eq!(
+        first_row_with(&before, "Paragraph 20").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{before}"
+    );
+
+    // Narrower than the side panes need, so the session pane takes every
+    // column, and then back.
+    let narrow = screen(&mut app, 90, 40);
+    assert_eq!(
+        first_row_with(&narrow, "Paragraph 20").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{narrow}"
+    );
+    let wide = screen(&mut app, 120, 40);
+    assert_eq!(
+        first_row_with(&wide, "Paragraph 20").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{wide}"
+    );
+    assert!(!app.follows_tail());
+}
+
+#[test]
+fn a_line_read_part_way_through_a_paragraph_stays_in_view_when_the_pane_widens() {
+    let mut app = session_with_a_long_wrapping_reply();
+    let before = scroll_until_first(&mut app, "closes as paragraph 20", 120);
+    assert_eq!(
+        first_row_with(&before, "closes as paragraph 20").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{before}"
+    );
+
+    let wider = screen(&mut app, 99, 40);
+    let shown = first_row_with(&wider, "paragraph 20.").map(|(at, _)| at);
+    assert!(
+        shown.is_some_and(|at| (TRANSCRIPT_TOP..TRANSCRIPT_TOP + 2).contains(&at)),
+        "{wider}"
+    );
+}
+
 #[test]
 fn toggling_at_the_tail_still_follows_the_tail() {
     let mut app = long_write_under_a_long_reply();
