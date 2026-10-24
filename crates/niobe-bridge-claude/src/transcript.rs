@@ -1525,26 +1525,39 @@ enum Line {
     #[serde(rename = "system")]
     System(SystemRecord),
     /// Records that say nothing about what the session did, changed or cost:
-    /// the name the CLI gives a sub-agent's session (`agent-name`), the prompt it offers to repeat
+    /// the name the CLI gives a sub-agent's session (`agent-name`) and the
+    /// colour it draws one in (`agent-color`), the prompt it offers to repeat
     /// (`last-prompt`), the file snapshots a rewind would restore (`file-history-snapshot`,
     /// `file-history-delta`), its queue (`queue-operation`), its editing mode
     /// (`mode`, which is not the permission mode), its latched status line (`atis-latch`), the pull request it
-    /// opened from the session (`pr-link`) and the handle its own service
-    /// holds the session under (`bridge-session`).
+    /// opened from the session (`pr-link`), the handle its own service
+    /// holds the session under (`bridge-session`), its copy of each request
+    /// it sent (`api-request`, `api-request-blob`, `api-request-shape`: the
+    /// parameters, messages and system prompt, and no usage) and the note a
+    /// forked agent's file opens with of where its context came from
+    /// (`fork-context-ref`).
     ///
     /// Read off every record type present across the transcripts on the
-    /// machine this was written on — sixteen in all — rather than off the
+    /// machine this was written on — twenty-two in all — rather than off the
     /// types one session happened to produce. Seven of them are read
     /// (`assistant`, `user`, `cost-state`, `permission-mode`, `ai-title`,
-    /// `attachment`, `system`) and the other nine are here. A type left out is a warning entry per record in front
+    /// `attachment`, `system`), the operator's own title (`custom-title`) is
+    /// not and is reported, and the other fourteen are here. A type left out is a warning entry per record in front
     /// of the operator, for a record that says nothing: `bridge-session` alone
-    /// stood in fifteen thousand of them.
+    /// stood in fifteen thousand of them, and the request copies, which every
+    /// transcript from 2.1.300 holds, in 66,884 records across 171 sessions and their
+    /// agents on 24 October 2026.
     #[serde(
         rename = "agent-name",
+        alias = "agent-color",
+        alias = "api-request",
+        alias = "api-request-blob",
+        alias = "api-request-shape",
         alias = "atis-latch",
         alias = "bridge-session",
         alias = "file-history-delta",
         alias = "file-history-snapshot",
+        alias = "fork-context-ref",
         alias = "last-prompt",
         alias = "mode",
         alias = "pr-link",
@@ -2607,6 +2620,23 @@ mod tests {
             r#"{"type":"atis-latch","atis":""}"#,
             r#"{"type":"last-prompt","lastPrompt":"again"}"#,
             r#"{"type":"system","subtype":"turn_duration","durationMs":12}"#,
+        ]);
+
+        assert_eq!(events, []);
+    }
+
+    /// The records the CLI writes from 2.1.300 of every request it made, in
+    /// the shapes recorded on the machine this was written on: one
+    /// `api-request` per request and a `api-request-blob` per message it sent,
+    /// each beside the session's messages and its agents'.
+    #[test]
+    fn the_clis_copies_of_its_own_requests_are_passed_over_in_silence() {
+        let events = folded(&[
+            r#"{"type":"api-request-shape","sessionId":"s-1","shapeHash":"c4b0","timestamp":"2026-10-23T22:47:04.199Z","version":"2.1.309","shape":{"system":[]}}"#,
+            r#"{"type":"api-request-blob","sessionId":"s-1","hash":"a9ef","message":{"role":"user","content":[{"type":"text","text":"fix the bug"}]}}"#,
+            r#"{"type":"api-request","sessionId":"s-1","id":"69cc","timestamp":"2026-10-23T22:47:04.199Z","version":"2.1.309","querySource":"sdk","shapeHash":"c4b0","params":{"model":"claude-opus-5","max_tokens":32000},"keep":0,"tail":[],"cacheControl":null,"requestDigest":"d1"}"#,
+            r#"{"type":"fork-context-ref","agentId":"a46a","parentSessionId":"s-1","parentLastUuid":"8c70","contextLength":1520}"#,
+            r#"{"type":"agent-color","agentColor":"red","sessionId":"s-1"}"#,
         ]);
 
         assert_eq!(events, []);
