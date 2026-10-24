@@ -399,12 +399,11 @@ mod tests {
     const A_MOMENT: Duration = Duration::from_secs(1_789_000_020);
 
     /// A machine with no timezone makes the two tests below prove nothing;
-    /// a Unix CI runner always has one, so there it is a failure rather than
-    /// a quiet pass. On Windows there is no zoneinfo database to read the
-    /// zone from.
+    /// a CI runner always has one, so there it is a failure rather than a
+    /// quiet pass.
     fn a_zone_where_ci_runs(clock: &Clock) {
         assert!(
-            clock.knows_the_zone() || std::env::var_os("CI").is_none() || cfg!(not(unix)),
+            clock.knows_the_zone() || std::env::var_os("CI").is_none(),
             "this machine names no timezone, so a time of day cannot be tested"
         );
     }
