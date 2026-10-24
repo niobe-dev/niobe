@@ -619,7 +619,12 @@ fn send_produced(
     rules: &mut dyn Rules,
 ) {
     for event in app.take_produced() {
-        journal.append(&event);
+        // A prompt is kept once it is known whether it reached the backend,
+        // as a prompt sent or as one that reached none; everything else as
+        // it was produced.
+        if !matches!(event, SessionEvent::UserMessage { .. }) || !app.is_attached() {
+            journal.append(&event);
+        }
         // Taken for every prompt, sent or not, so the next prompt's images
         // are never handed out with this one.
         let images = if matches!(
@@ -639,8 +644,20 @@ fn send_produced(
         // use for what it did not ask for.
         match &event {
             SessionEvent::UserMessage { text } => match backend.send(text, &images) {
-                Ok(()) => app.sent_to_backend(text),
-                Err(error) => app.not_sent(&error.to_string()),
+                Ok(()) => {
+                    journal.append(&event);
+                    app.sent_to_backend(text);
+                }
+                Err(error) => {
+                    let why = error.to_string();
+                    match app.not_sent(&why) {
+                        true => journal.append(&SessionEvent::PromptNotSent {
+                            text: text.clone(),
+                            why: Some(why),
+                        }),
+                        false => journal.append(&event),
+                    }
+                }
             },
             SessionEvent::PermissionResponse {
                 id,
@@ -1743,6 +1760,55 @@ mod tests {
         );
     }
 
+    /// A prompt the backend would not take opened no turn: the record says it
+    /// reached no backend and why, and folds the same read back as live, so
+    /// quitting does not record a turn cut short that never ran, and the next
+    /// prompt opens a turn of its own rather than joining one nothing ran.
+    #[test]
+    fn a_prompt_the_backend_would_not_take_is_kept_as_one_that_reached_none() {
+        let mut app = app_with_a_sent_prompt();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(
+            journal.events,
+            [SessionEvent::PromptNotSent {
+                text: "x".to_owned(),
+                why: Some("the subprocess has gone".to_owned()),
+            }]
+        );
+        assert!(!app.session().turn_running(), "a turn nothing ran is open");
+        assert_eq!(app.session().user_messages(), 0);
+        app.leave();
+        assert_eq!(
+            app.take_produced(),
+            [],
+            "a quit would cut a turn never sent"
+        );
+
+        let mut read_back = App::new(Repo::default()).attached();
+        for event in &journal.events {
+            read_back.apply(event);
+        }
+        assert!(!read_back.session().turn_running());
+        let said: Vec<(&str, &str)> = read_back
+            .entries()
+            .iter()
+            .map(|entry| (entry.head.as_str(), entry.body.as_str()))
+            .collect();
+        let live: Vec<(&str, &str)> = app
+            .entries()
+            .iter()
+            .map(|entry| (entry.head.as_str(), entry.body.as_str()))
+            .collect();
+        assert_eq!(said, live, "the record reads back as the session read live");
+    }
+
     #[test]
     fn a_session_with_nothing_attached_does_not_try_to_send() {
         let mut app = App::new(Repo::default());
@@ -1758,7 +1824,8 @@ mod tests {
         assert_eq!(
             journal.events,
             [SessionEvent::PromptNotSent {
-                text: "x".to_owned()
+                text: "x".to_owned(),
+                why: None,
             }]
         );
         let notice = app

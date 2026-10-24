@@ -1045,6 +1045,18 @@ struct Ending {
     error: Option<String>,
 }
 
+/// What the shell held of the session before the prompt it last sent was
+/// folded in, while nothing has been folded since: what it holds again where
+/// the backend would not take that prompt, so that the session reads as the
+/// fold of its record, which keeps the prompt as one that reached no backend.
+#[derive(Debug, Clone)]
+struct BeforePrompt {
+    session: SessionState,
+    turn_began_at: Option<Stamp>,
+    turn_began_with: (usize, usize),
+    prompt_queued: bool,
+}
+
 /// A run of events the journal refused, which the transcript shows as one
 /// failure entry.
 #[derive(Debug, Clone, Copy)]
@@ -1613,6 +1625,9 @@ pub struct App {
     /// queue one as a turn of its own, which then begins where this one
     /// ends, with no prompt of its own folded in to mark it.
     prompt_queued: bool,
+    /// The session as it stood before the prompt last sent from here, while
+    /// that prompt is the last thing folded in. See [`App::not_sent`].
+    before_prompt: Option<BeforePrompt>,
     /// The failure entry that stands for the run of events the journal has
     /// refused since it last kept one, while it keeps refusing.
     unsaved: Option<Unsaved>,
@@ -2036,6 +2051,7 @@ impl App {
             turn_began_at: None,
             turn_began_with: (0, 0),
             prompt_queued: false,
+            before_prompt: None,
             turns_took: Some(Duration::ZERO),
             last_folded_at: None,
             working_since: None,
@@ -2066,6 +2082,7 @@ impl App {
     /// Folds one event in, from wherever it came.
     fn fold_event(&mut self, event: &Event) {
         self.looked_stale = true;
+        self.before_prompt = None;
         let turns = self.session.turns().len();
         if matches!(event, Event::UserMessage { .. }) {
             match self.session.turn_running() {
@@ -2411,9 +2428,12 @@ impl App {
 
             // Shown as it was typed, with what became of it under it, read
             // back as it was said live.
-            Event::PromptNotSent { text } => {
+            Event::PromptNotSent { text, why } => {
                 self.push_prompt(text);
-                self.say_not_attached();
+                match why {
+                    Some(why) => self.say_not_sent(why),
+                    None => self.say_not_attached(),
+                }
             }
 
             Event::AssistantDelta { text } => match self.streaming_agent_entry() {
@@ -8176,8 +8196,17 @@ impl App {
         self.images.send(&text, &kept);
         self.sent_here = self.attached;
         match self.attached {
-            true => self.produce(Event::UserMessage { text }),
-            false => self.produce(Event::PromptNotSent { text }),
+            true => {
+                let before = BeforePrompt {
+                    session: self.session.clone(),
+                    turn_began_at: self.turn_began_at,
+                    turn_began_with: self.turn_began_with,
+                    prompt_queued: self.prompt_queued,
+                };
+                self.produce(Event::UserMessage { text });
+                self.before_prompt = Some(before);
+            }
+            false => self.produce(Event::PromptNotSent { text, why: None }),
         }
         self.give_back(&draft);
         self.scroll_to_tail();
@@ -8289,11 +8318,37 @@ impl App {
 
     /// Says in the transcript that a turn never reached the backend, so that a
     /// prompt with no reply is not read as a backend thinking about it.
-    pub fn not_sent(&mut self, error: &str) {
+    ///
+    /// Where the prompt is the last thing folded in, the session goes back to
+    /// how it stood before it, since nothing was asked: no turn opened, and
+    /// the prompt is not one of the session's. `true` then, and the record
+    /// is to keep it as an [`Event::PromptNotSent`] saying why, which folds
+    /// to the same. `false` where something was folded in after it, and the
+    /// record keeps it as sent.
+    pub fn not_sent(&mut self, error: &str) -> bool {
         self.sent_here = false;
-        if self.session.user_messages() == 1 {
-            self.first_prompt_unsent = true;
-        }
+        let taken_back = match self.before_prompt.take() {
+            Some(before) => {
+                self.session = before.session;
+                self.turn_began_at = before.turn_began_at;
+                self.turn_began_with = before.turn_began_with;
+                self.prompt_queued = before.prompt_queued;
+                true
+            }
+            None => {
+                if self.session.user_messages() == 1 {
+                    self.first_prompt_unsent = true;
+                }
+                false
+            }
+        };
+        self.say_not_sent(error);
+        self.scroll_to_tail();
+        taken_back
+    }
+
+    /// Puts under a prompt that it did not reach the backend, and why.
+    fn say_not_sent(&mut self, error: &str) {
         self.push(Entry {
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
@@ -8308,7 +8363,6 @@ impl App {
             calls: Vec::new(),
             agent: None,
         });
-        self.scroll_to_tail();
     }
 
     /// What Cost & usage says: the plan's windows and when they come back,
@@ -10647,7 +10701,8 @@ mod tests {
         assert_eq!(
             app.said(),
             [Event::PromptNotSent {
-                text: "hi".to_owned()
+                text: "hi".to_owned(),
+                why: None,
             }]
         );
         assert_eq!(app.session().user_messages(), 0, "nothing was asked");

@@ -770,6 +770,7 @@ fn a_prompt_that_reached_no_backend_is_neither_the_first_prompt_nor_one_of_the_p
             session,
             &Event::PromptNotSent {
                 text: "hello".to_owned(),
+                why: None,
             },
         )
         .expect("a session in a temporary store takes an event");

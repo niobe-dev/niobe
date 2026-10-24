@@ -3802,6 +3802,7 @@ mod tests {
     fn a_prompt_that_reached_no_backend_is_no_turn_no_prompt_and_no_caption() {
         let unsent = Event::PromptNotSent {
             text: "hello".to_owned(),
+            why: None,
         };
         let mut state = SessionState::replay(std::slice::from_ref(&unsent));
         state.apply(&Event::SessionLeft);

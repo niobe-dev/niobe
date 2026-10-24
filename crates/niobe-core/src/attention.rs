@@ -118,6 +118,7 @@ mod tests {
         assert_eq!(Attention::of(&failed), Attention::NeedsYou);
         let unsent = Event::PromptNotSent {
             text: "go".to_owned(),
+            why: None,
         };
         assert_eq!(Attention::of(&unsent), Attention::NeedsYou);
         assert_eq!(

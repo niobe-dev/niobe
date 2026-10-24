@@ -722,7 +722,7 @@ pub enum Event {
     },
 
     /// The operator sent a prompt that reached no backend: the session was
-    /// not attached to one.
+    /// not attached to one, or the one it was attached to would not take it.
     ///
     /// Its own event rather than an [`Event::UserMessage`], because nothing
     /// was asked: it opens no turn, captions nothing, and is not one of the
@@ -731,6 +731,11 @@ pub enum Event {
     PromptNotSent {
         /// The prompt as typed.
         text: String,
+        /// Why the backend the session was attached to did not take it, in
+        /// the words the bridge refused it with. `None` where no backend was
+        /// attached, as in every record kept before a refusal was kept so.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
     },
 
     /// What the session is about, in a few words the backend had for it.
@@ -1685,6 +1690,7 @@ mod tests {
     fn a_prompt_that_reached_no_backend_survives_the_round_trip_under_a_type_of_its_own() {
         let event = Event::PromptNotSent {
             text: "hello".to_owned(),
+            why: None,
         };
         let line = serde_json::to_string(&event).expect("an event serializes");
         assert_eq!(line, r#"{"type":"prompt_not_sent","text":"hello"}"#);
