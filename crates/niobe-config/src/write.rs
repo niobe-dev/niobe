@@ -98,7 +98,7 @@ fn remember_with(
 
     // Parsed before anything is written, so a rule is never added to a file
     // that would not load afterwards.
-    Config::parse(&text, path)?;
+    let config = Config::parse(&text, path)?;
     if lists(&text, rule) {
         return Ok(Remembered {
             before,
@@ -107,11 +107,60 @@ fn remember_with(
     }
 
     let written = splice(&text, path, &rule.to_string())?;
+    reads_back(&written, path, config, rule)?;
     replace::replace_with(&target, written.as_bytes(), write).map_err(failed)?;
     Ok(Remembered {
         before,
         after: written,
     })
+}
+
+/// Checks that `written` is a config the next session will load, and that it
+/// loads as `before`, the file as it was read, with `rule` added and nothing
+/// else changed.
+///
+/// The text is trusted on the strength of this: where the operator trusted
+/// the file before, the rule's text is trusted after, so a splice that let a
+/// target's characters reach past its string — or a file grown past what a
+/// config is read up to, which would take every profile and rule in it away
+/// from the next session — must leave the file as it was rather than be
+/// written and blessed.
+fn reads_back(written: &str, path: &Path, before: Config, rule: &Rule) -> Result<(), ConfigError> {
+    let size = u64::try_from(written.len()).unwrap_or(u64::MAX);
+    if size > crate::read::LIMIT {
+        return Err(ConfigError::Write {
+            path: path.to_path_buf(),
+            error: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "the rule would take the file past the {} MiB a config is read up to",
+                    crate::read::LIMIT / (1024 * 1024)
+                ),
+            ),
+        });
+    }
+    let differs = || {
+        unwritable(
+            path,
+            1,
+            "would not read back as the file it was and the one rule, so it was left as it was",
+        )
+    };
+    let after = Config::parse(written, path).map_err(|_| differs())?;
+    match after == with_rule(before, rule, path) {
+        true => Ok(()),
+        false => Err(differs()),
+    }
+}
+
+/// `config`, read from the file at `path`, as it reads with `rule` added to
+/// its `allow` array.
+fn with_rule(mut config: Config, rule: &Rule, path: &Path) -> Config {
+    config.allowed.insert(rule.clone());
+    if !config.allowed.is_empty() {
+        config.rules_from = Some(path.to_path_buf());
+    }
+    config
 }
 
 /// Whether the `permissions.allow` array of `text`, a config that parses,
@@ -660,6 +709,109 @@ allow = [
                     && rules.contains(&Rule::tool("Read")),
                 "round {round} lost a rule: {rules:?}"
             );
+        }
+    }
+
+    /// A long command answered "always" in a file near the size a config is
+    /// read up to would leave a file the next session refuses to load, and
+    /// with it every profile and rule the operator wrote by hand.
+    #[test]
+    fn a_rule_that_would_take_the_file_past_what_a_config_is_read_up_to_is_not_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("config.toml");
+        let limit = usize::try_from(crate::read::LIMIT).expect("a mebibyte fits a usize");
+        let head = "[profiles.max]\nbackend = \"claude\"\n# ";
+        let before = format!("{head}{}\n", "x".repeat(limit - head.len() - 100));
+        std::fs::write(&file, &before).expect("the file is written");
+
+        let said = remember(&file, &Rule::targeted("Bash", "y".repeat(200)))
+            .expect_err("the file would not load afterwards")
+            .to_string();
+
+        assert!(said.contains("MiB"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file is still there"),
+            before,
+            "a rule was written that leaves the config unreadable"
+        );
+        Config::read(&file).expect("the config still loads");
+    }
+
+    /// A splice that changed anything but the one rule is refused before it
+    /// reaches the file, so its text is never trusted in place of the old.
+    #[test]
+    fn a_splice_that_reads_back_as_more_than_the_rule_is_refused() {
+        let before = "[permissions]\nallow = []\n";
+        let config = Config::parse(before, &path()).expect("the file loads");
+        let rule = Rule::tool("Read");
+
+        reads_back(
+            "[permissions]\nallow = [\"Read\"]\n",
+            &path(),
+            config.clone(),
+            &rule,
+        )
+        .expect("the file and the rule");
+        for wrong in [
+            "[permissions]\nallow = [\"Read\"]\n[profiles.x]\nbackend = \"claude\"\n",
+            "default_profile = \"x\"\n[permissions]\nallow = [\"Read\"]\n",
+            "[permissions]\nallow = [\"Read\", \"Bash\"]\n",
+            "[permissions]\nallow = [\"Bash\"]\n",
+            "[permissions]\nallow = [\"Read\"\n",
+        ] {
+            let said = reads_back(wrong, &path(), config.clone(), &rule)
+                .expect_err("more than the rule changed")
+                .to_string();
+            assert!(said.contains("would not read back"), "{wrong:?}: {said}");
+        }
+    }
+
+    /// Whatever shape the array is written in, what is spliced reads back as
+    /// the config it was and the one rule, and nothing else: a rule whose
+    /// target closes the string and the array and opens a profile of its own
+    /// is a rule, not a profile.
+    #[test]
+    fn every_shape_of_allow_array_reads_back_as_the_config_it_was_and_the_rule() {
+        let shapes = [
+            "permissions.allow = [\"a\"]\n[profiles.x]\nbackend = \"claude\"\n",
+            "[permissions]\nallow = [\"a\",]\n",
+            "[permissions]\r\nallow = [\r\n  \"a\",\r\n]\r\n",
+            "[permissions]\nallow = ['a']\n",
+            "[permissions]\nallow = [\"\"\"a\"\"\"]\n",
+            "[permissions]\nallow = [\n\"a\" ,\n# c, d\n]\n",
+            "[permissions]\nallow = [ # c\n \"a\" ]\n",
+            "[permissions]\nallow = [\"a\" # c\n\n  ]\n",
+            "[permissions]\nallow = [\"a\"\n\n,\n]\n",
+            "permissions = { allow = [\n\"a\",\n] }\n",
+            "permissions = {\n allow = [\"a\"] # x\n}\n",
+            "\u{feff}[permissions]\nallow = [\n  \"a\",\n]\n",
+            "\"permissions\".'allow' = []\n",
+        ];
+        let rules = [
+            Rule::tool("Read"),
+            Rule::targeted(
+                "Bash",
+                "x\"]\n[profiles.y]\nbackend = \"claude\"\nenv = { A = \"1\" } #",
+            ),
+            Rule::targeted("Bash", "a\u{2028}b\\'''\"\"\"\u{0}\u{1b}\u{85}\u{feff}"),
+        ];
+        for shape in shapes {
+            let before = Config::parse(shape, &path()).expect("each shape loads");
+            for rule in &rules {
+                let written = spliced(shape, &rule.to_string()).expect("the array is spliced");
+                let after = Config::parse(&written, &path()).expect("what was written reads back");
+                let mut expected = before.clone();
+                expected.allowed.insert(rule.clone());
+                assert_eq!(
+                    after.allowed, expected.allowed,
+                    "{shape:?} with {rule}:\n{written}"
+                );
+                assert_eq!(
+                    (after.profiles, after.default_profile),
+                    (before.profiles.clone(), before.default_profile.clone()),
+                    "{shape:?} with {rule}:\n{written}"
+                );
+            }
         }
     }
 
