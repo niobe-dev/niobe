@@ -550,6 +550,10 @@ pub struct Session {
     /// id is free for any process to lead a group under, and a signal sent to
     /// it later — at the quit, hours on — could reach a stranger's group.
     group_ended: bool,
+    /// When the CLI's process group was asked to end with something still in
+    /// it, until that is seen gone or is killed: see
+    /// [`Session::settle_the_group`].
+    group_asked: Option<Instant>,
     /// When the CLI's standard output was first found closed. The process
     /// leaving closes it a moment before it can be reaped, so the end is not
     /// reported until one or the other — the process gone, or [`GOODBYE`]
@@ -807,6 +811,7 @@ impl Session {
             control_requests: 0,
             reported: false,
             group_ended: false,
+            group_asked: None,
             output_closed: None,
             exited: None,
             stalled_after: STALLED,
@@ -1117,6 +1122,7 @@ impl Session {
     /// One whose subprocess left while something it started holds its
     /// standard output open has that ended, and is reported like any other.
     pub fn drain(&mut self) -> Vec<Event> {
+        self.settle_the_group();
         let mut events: Vec<Event> = self.unsent.try_iter().collect();
         events.extend(self.stalled());
         self.settle_model_changes();
@@ -1378,12 +1384,53 @@ impl Session {
         self.ended()
     }
 
-    /// Ends what is left of the CLI's process group, the once: see
+    /// Asks what is left of the CLI's process group to end, the once: see
     /// [`Session::group_ended`]. Called only once the CLI has been reaped.
+    ///
+    /// Asked and not waited on: this runs in the drain, on the thread that
+    /// draws the screen, and a process that takes its time over SIGTERM, or
+    /// ignores it, would freeze the screen for [`LEFTOVERS`]. What is still
+    /// there after that is killed by [`Session::settle_the_group`], from the
+    /// drains that follow or from the session closing.
     fn end_the_group(&mut self) {
         if !self.group_ended {
             self.group_ended = true;
-            end_group(self.child.id());
+            if ask_group_to_end(self.child.id()) {
+                self.group_asked = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Kills what is left of the CLI's process group once it has had
+    /// [`LEFTOVERS`] to end on SIGTERM, and lets go of the group as soon as
+    /// it is seen empty. Never waits.
+    ///
+    /// The group is looked at before it is signalled, each time: a group's id
+    /// is not given to a new process while anyone is left in it, so one seen
+    /// with somebody in it is still the CLI's, and one seen empty is never
+    /// signalled again.
+    fn settle_the_group(&mut self) {
+        let Some(asked) = self.group_asked else {
+            return;
+        };
+        if !group_occupied(self.child.id()) {
+            self.group_asked = None;
+        } else if asked.elapsed() >= LEFTOVERS {
+            kill_group(self.child.id());
+            self.group_asked = None;
+        }
+    }
+
+    /// [`Session::settle_the_group`], waited on until the group is gone: what
+    /// a closing session does, so that nothing the CLI started outlives it.
+    /// Bounded by [`LEFTOVERS`] from when the group was asked to end.
+    fn wait_for_the_group(&mut self) {
+        loop {
+            self.settle_the_group();
+            if self.group_asked.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -1906,6 +1953,7 @@ impl Drop for Session {
         }
 
         self.end_the_group();
+        self.wait_for_the_group();
 
         // The threads end when their pipes close, which the group leaving
         // does: the writer too, whose queue is closed and whose last write
@@ -1925,39 +1973,27 @@ impl Drop for Session {
     }
 }
 
-/// Ends what is left of the process group the CLI led: asked with SIGTERM,
-/// then killed if anything is still in it after [`LEFTOVERS`].
+/// Whether anyone is left in the process group the CLI led.
 ///
-/// Called once the CLI has been reaped, and straight after: a process group's
-/// id is not given to a new process while any member of the group is alive,
-/// so the group signalled is still the CLI's, or is gone and the signal finds
-/// nothing. Called later, the group could have emptied and its id been given
+/// Asked once the CLI has been reaped, and straight after, as each signal to
+/// the group is: a process group's id is not given to a new process while any
+/// member of the group is alive, so the group looked at is still the CLI's,
+/// or is gone. Looked at later, it could have emptied and its id been given
 /// to someone else's.
 #[cfg(unix)]
-fn end_group(leader: u32) {
-    // A group with nobody left in it is what was wanted.
-    if !ask_group_to_end(leader) {
-        return;
-    }
-    let until = Instant::now() + LEFTOVERS;
-    while group_of(leader)
-        .is_some_and(|group| rustix::process::test_kill_process_group(group).is_ok())
-    {
-        if Instant::now() >= until {
-            kill_group(leader);
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+fn group_occupied(leader: u32) -> bool {
+    group_of(leader).is_some_and(|group| rustix::process::test_kill_process_group(group).is_ok())
 }
 
 #[cfg(not(unix))]
-fn end_group(_leader: u32) {}
+fn group_occupied(_leader: u32) -> bool {
+    false
+}
 
 /// Sends SIGTERM to the process group the CLI led, without waiting on it,
 /// and says whether anything was there to take it.
 ///
-/// Called only once the CLI has been reaped, for the reason [`end_group`]
+/// Called only once the CLI has been reaped, for the reason [`group_occupied`]
 /// gives.
 #[cfg(unix)]
 fn ask_group_to_end(leader: u32) -> bool {
@@ -2808,32 +2844,73 @@ mod tests {
         drop(session);
     }
 
-    /// What the CLI left in its group that will not end when asked is killed.
+    /// The stand-in that leaves a process in its group that ignores SIGTERM,
+    /// run until its end is reported, with the pid of what it left.
     #[cfg(unix)]
-    #[test]
-    fn what_the_cli_left_running_that_ignores_sigterm_is_killed() {
+    fn left_ignoring_sigterm(sleep: &str) -> (Session, rustix::process::Pid) {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let pid = dir.path().join("left.pid");
         let (session, _) = stand_in(&format!(
-            "trap '' TERM\nsleep 77108 >/dev/null 2>&1 &\necho $! > '{pid}'\nread -r first\nread -r turn\nexit 0\n",
+            "trap '' TERM\nsleep {sleep} >/dev/null 2>&1 &\necho $! > '{pid}'\nread -r first\nread -r turn\nexit 0\n",
             pid = pid.display()
         ));
-
         let left = std::fs::read_to_string(&pid)
             .ok()
             .and_then(|written| written.trim().parse().ok())
             .and_then(rustix::process::Pid::from_raw)
             .expect("the stand-in wrote the pid of what it left running");
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        (session, left)
+    }
+
+    /// Kills `left` where a test failed with it still running.
+    #[cfg(unix)]
+    fn outlived(left: rustix::process::Pid) -> bool {
         let outlived = rustix::process::test_kill_process(left).is_ok();
         if outlived {
             let _ = rustix::process::kill_process(left, rustix::process::Signal::KILL);
         }
+        outlived
+    }
+
+    /// What the CLI left in its group that will not end when asked is killed
+    /// by the drains that follow the end, and the drain that reports the end
+    /// does not wait on it: it runs on the thread that draws the screen.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_cli_left_running_that_ignores_sigterm_is_killed_without_holding_up_the_drain() {
+        let (mut session, left) = left_ignoring_sigterm("77108");
+
+        let waited_in_the_drain = rustix::process::test_kill_process(left).is_err();
+        let deadline = Instant::now() + PATIENCE;
+        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
+            let _ = session.drain();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let outlived = outlived(left);
+        assert!(
+            !waited_in_the_drain,
+            "the drain that reported the end waited to kill what ignored SIGTERM"
+        );
         assert!(!outlived, "what ignored SIGTERM outlived the CLI's end");
         drop(session);
+    }
+
+    /// A session closed straight after its end was reported, with no drain
+    /// after it, still kills what ignored SIGTERM before it is gone.
+    #[cfg(unix)]
+    #[test]
+    fn what_ignores_sigterm_is_killed_by_a_session_closed_with_no_drain_after_the_end() {
+        let (session, left) = left_ignoring_sigterm("77110");
+
+        drop(session);
+        let deadline = Instant::now() + PATIENCE;
+        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !outlived(left),
+            "what ignored SIGTERM outlived the closed session"
+        );
     }
 
     /// What the CLI left in its group is asked to end before anything kills
