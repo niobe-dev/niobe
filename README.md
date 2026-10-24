@@ -60,7 +60,10 @@ The script checks the archive against the SHA-256 published beside it and puts `
 `~/.local/bin`; `NIOBE_INSTALL_DIR` puts it elsewhere and `NIOBE_VERSION` picks a release. It
 edits no shell profile and asks for no `sudo`.
 
-You need the `claude` CLI installed and signed in.
+On Windows, run the same line inside WSL: Niobe has no native Windows build yet, and under WSL it
+is the Linux binary.
+
+You need the [`claude` CLI](https://code.claude.com/docs/en/setup) installed and signed in.
 
 ## Use
 
