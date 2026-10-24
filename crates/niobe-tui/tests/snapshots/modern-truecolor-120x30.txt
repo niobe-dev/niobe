@@ -1,5 +1,5 @@
   a  Rgb(204, 204, 204) on Rgb(50, 50, 51)
-  b  Rgb(204, 204, 204) on Rgb(50, 50, 51), bold | underlined
+  b  Rgb(79, 193, 255) on Rgb(50, 50, 51), bold | underlined
   c  Rgb(204, 204, 204) on Rgb(50, 50, 51), bold
   d  Rgb(204, 204, 204) on Rgb(50, 50, 51), dim
   e  Rgb(79, 193, 255) on Rgb(50, 50, 51)
@@ -58,8 +58,8 @@ fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffyfjj
 fgfAAAAAAAAfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffyfjfkkkkkkkkkkkkfffffffffffoooooooooooffffyf
 fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffyfjfAAyyyyfffffffffffffffffoooooooyyyyyyyfyf
 fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffyfjfooooooooooooooooooooooooooofffffffffffyf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffyfjfkkkkkkkffffffffffzzzooooooooooofffffffjf
-fgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfgfjfoooooooooooooooofffffyyyyyyyyyyyffffffjf
-fgfCCCCCAAADoooooooooooooooooooooooooooooooooooooooffffffffffoooooooooooooofgfjfooooooooooffffffffffffffffffffffffffffjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffyfjfkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkffffffffjf
+fgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfgfjfooooooooooooooooofffffffffffffffffffffjf
+fgfCCCCCAAADoooooooooooooooooooooooooooooooooooooooffffffffffoooooooooooooofgfjfkkkkkkkffffffffffzzzooooooooooofffffffjf
 fggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
 EEEFFFFGEHHHHHHHHGEFFFFFFFFFFFGEFFFFFFFFFGEFFFFFFFFFGEHHHHHHHHGEFFFFFFFFFFGEHHHHHHHGEHHHHHHHHHHGEHHHHHHHHHHHHGEHHHHHHHHG

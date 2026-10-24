@@ -187,6 +187,26 @@ which print `Agent 3 0`, `Bash 12 3`, `Edit 2 0`, `Read 9 0` and `Write 1 0` —
 the calls that ended per tool and those that failed, the `Read` whose start
 the producer dropped among them — and `catalog/fetch.py` at +20 −4 and +1 −0.
 
+### The turns `niobe cost --by-turn` lists
+
+The log predates the event that says a turn ended, so `niobe-cli`'s
+`tests/cost.rs` ends each turn where the next prompt begins and at the end of
+the log, and holds each turn's tokens against the usage records between one
+prompt and the next:
+
+```sh
+jq -s -c 'reduce .[] as $e ({turns: [], cur: null};
+    if $e.type == "user_message" then
+      (if .cur == null then . else .turns += [.cur] end) | .cur = 0
+    elif $e.type == "usage" then
+      .cur += $e.input + $e.output + $e.cache_read + $e.cache_write
+    else . end)
+  | .turns + [.cur]' claude-session.jsonl
+```
+
+which prints `[44767,48532,49940,50810,40791,328148]`, summing to the
+session's 562,988 tokens: nothing is spent before the first prompt.
+
 ### Recording a new one
 
 The recording was made by driving `niobe_bridge_claude::Session` with

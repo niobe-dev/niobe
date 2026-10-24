@@ -3,7 +3,8 @@
 
 //! What `niobe cost` prints: each session the store holds, with the tokens it
 //! spent and the money its backend reported, as a table, as JSON or as CSV,
-//! or the tokens of each day's sessions summed by profile, with `--by-day`. Every
+//! or the tokens of each day's sessions summed by profile, with `--by-day`, or
+//! of each turn, with `--by-turn`. Every
 //! figure is folded from the stored events, so a session recorded before
 //! the day table existed is counted in it.
 //!
@@ -42,6 +43,9 @@ pub enum Format {
     /// A table of the sessions started on each day under each profile, with
     /// their tokens.
     Days,
+    /// A table of each session's turns with the tokens each spent, and the
+    /// tokens no turn's figure holds.
+    Turns,
 }
 
 /// The columns of the CSV, in order.
@@ -54,6 +58,7 @@ pub fn lines(repository: &str, sessions: &[Folded], format: Format) -> Vec<Strin
     match format {
         Format::Table => table(sessions),
         Format::Days => days(sessions),
+        Format::Turns => turns(sessions),
         Format::Json => vec![document(repository, sessions).to_string()],
         Format::Csv => std::iter::once(CSV_HEADER.to_owned())
             .chain(sessions.iter().map(csv_row))
@@ -260,6 +265,55 @@ fn days(sessions: &[Folded]) -> Vec<String> {
     lines
 }
 
+/// Each session's turns, oldest session first, with the tokens each turn
+/// spent, then one row for the tokens that no turn's figure holds — spent
+/// before the first prompt or between turns — so that a session's rows add
+/// up to its total and nothing is left unattributed.
+fn turns(sessions: &[Folded]) -> Vec<String> {
+    if sessions.is_empty() {
+        return vec!["No sessions recorded in this repository.".to_owned()];
+    }
+    let id_width = sessions
+        .iter()
+        .map(|s| s.id.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max("SESSION".len());
+    let row = |id: &str, turn: &str, tokens: &str, note: &str| {
+        format!("{id:>id_width$}  {turn:>4}  {tokens:>12}  {note}")
+            .trim_end()
+            .to_owned()
+    };
+    let mut lines = vec![row("SESSION", "TURN", "TOKENS", "")];
+    for folded in sessions {
+        let id = folded.id.to_string();
+        let mut in_turns: u64 = 0;
+        for record in folded.state.turns() {
+            in_turns = in_turns.saturating_add(record.tokens.unwrap_or_default());
+            let note = match (record.tokens, record.compacted, record.cut) {
+                (None, _, _) => "no usage reported",
+                (Some(_), Some(_), _) => "compacted",
+                (Some(_), None, true) => "cut off",
+                (Some(_), None, false) => "",
+            };
+            let tokens = record.tokens.map_or_else(|| "—".to_owned(), grouped);
+            lines.push(row(&id, &record.number.to_string(), &tokens, note));
+        }
+        let rest = folded.state.totals().tokens().saturating_sub(in_turns);
+        if rest > 0 {
+            lines.push(row(&id, "—", &grouped(rest), "not in an ended turn"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(
+        "Each turn's tokens are the session's total when it ended less its total when \
+         it began; the rest of a session's tokens are on its `—` row, so each \
+         session's rows add up to its total."
+            .to_owned(),
+    );
+    lines
+}
+
 /// What `totals` cost as the shell labels it, with no estimate beside it,
 /// and the mark the Usage pane gives a floor an older recording left.
 fn labelled(totals: &Totals) -> String {
@@ -295,6 +349,7 @@ mod tests {
             id: id.to_string().parse().expect("a number is a session id"),
             started_at: UNIX_EPOCH + Duration::from_secs(started),
             state,
+            decided_at: Vec::new(),
         }
     }
 
@@ -327,6 +382,62 @@ mod tests {
                 "Each day is the UTC day a session started on, and its tokens are every token \
                  that day's sessions reported under that profile, wherever they were billed.",
             ]
+        );
+    }
+
+    fn turn(state: &mut SessionState, input: Option<u64>) {
+        state.apply(&Event::UserMessage {
+            text: "go on".to_owned(),
+        });
+        if let Some(input) = input {
+            state.apply(&Event::Usage(Usage {
+                input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: None,
+                settles_model: Some(false),
+                fast: false,
+            }));
+        }
+        state.apply(&Event::TurnEnded);
+    }
+
+    #[test]
+    fn the_turns_table_gives_every_token_a_row_and_sums_to_each_sessions_total() {
+        // 500 spent before the first prompt, 1,000 and 2,000 in two turns and
+        // a third turn that reported nothing.
+        let mut first = session(1, 1_789_732_800, 500);
+        turn(&mut first.state, Some(1_000));
+        turn(&mut first.state, Some(2_000));
+        turn(&mut first.state, None);
+        let sessions = [first, session(12, 1_789_732_900, 40)];
+
+        assert_eq!(
+            lines("repo", &sessions, Format::Turns),
+            [
+                "SESSION  TURN        TOKENS",
+                "      1     1         1,000",
+                "      1     2         2,000",
+                "      1     3             —  no usage reported",
+                "      1     —           500  not in an ended turn",
+                "     12     —            40  not in an ended turn",
+                "",
+                "Each turn's tokens are the session's total when it ended less its total when \
+                 it began; the rest of a session's tokens are on its `—` row, so each \
+                 session's rows add up to its total.",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_turns_table_of_no_sessions_says_so() {
+        assert_eq!(
+            lines("repo", &[], Format::Turns),
+            ["No sessions recorded in this repository."]
         );
     }
 

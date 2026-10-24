@@ -292,6 +292,7 @@ impl Store {
     }
 
     /// The file the store is kept in, or `None` for one kept in memory.
+    #[cfg(unix)]
     pub(crate) fn path(&self) -> Option<std::path::PathBuf> {
         self.conn
             .path()

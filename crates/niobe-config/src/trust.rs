@@ -418,6 +418,9 @@ mod tests {
         assert!(said.contains("line break"), "{said}");
     }
 
+    // Only where the directory can be locked: elsewhere a writer goes
+    // unlocked, as `replace::Lock` says.
+    #[cfg(unix)]
     #[test]
     fn two_updates_at_once_each_keep_what_the_other_added() {
         let dir = tempfile::tempdir().expect("a temporary directory");

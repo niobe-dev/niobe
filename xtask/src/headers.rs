@@ -62,7 +62,7 @@ pub fn rule_for(path: &str) -> Option<Rule> {
     {
         return Some(Rule::Exempt);
     }
-    if name == ".gitignore" {
+    if name == ".gitignore" || name == ".gitattributes" {
         return Some(Rule::LineComment("# "));
     }
 
@@ -142,6 +142,7 @@ mod tests {
             Some(Rule::LineComment("# "))
         );
         assert_eq!(rule_for(".gitignore"), Some(Rule::LineComment("# ")));
+        assert_eq!(rule_for(".gitattributes"), Some(Rule::LineComment("# ")));
         assert_eq!(
             rule_for("bench/01-last-n/files/items.py"),
             Some(Rule::LineComment("# "))

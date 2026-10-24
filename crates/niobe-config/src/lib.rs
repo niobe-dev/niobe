@@ -64,6 +64,14 @@
 //! terse = true
 //! ```
 //!
+//! and whether a new conversation asks the agent to state each decision it
+//! makes — what it chose, and what it left out — on a line of its own, which
+//! the shell lists as the agent's own account; on unless a file turns it off:
+//!
+//! ```toml
+//! decisions = false
+//! ```
+//!
 //! and whether a cargo command's output reaches the agent without cargo's
 //! progress and the tests that passed, the whole of it kept under `.niobe/` —
 //! off unless a file turns it on:
@@ -477,6 +485,7 @@ pub struct Config {
     theme: Option<ThemeName>,
     titles: Option<Titles>,
     terse: Option<bool>,
+    decisions: Option<bool>,
     trim: Option<bool>,
     keys: Keymap,
     notify: Notify,
@@ -622,6 +631,9 @@ impl Config {
         }
         if over.terse.is_some() {
             self.terse = over.terse;
+        }
+        if over.decisions.is_some() {
+            self.decisions = over.decisions;
         }
         if over.trim.is_some() {
             self.trim = over.trim;
@@ -788,6 +800,17 @@ impl Config {
     /// replies and lets nothing a repository wrote reach the backend.
     pub fn terse(&self) -> bool {
         self.terse.unwrap_or(false)
+    }
+
+    /// Whether a new conversation asks the agent to state the decisions it
+    /// makes, each on a line of its own, which is on unless a config says
+    /// `decisions = false`.
+    ///
+    /// Not gated on trust, for the reason [`Config::terse`] is not: the words
+    /// it puts in front of a backend are Niobe's own, and the file only
+    /// switches them.
+    pub fn decisions(&self) -> bool {
+        self.decisions.unwrap_or(true)
     }
 
     /// Whether the agent reads a cargo command's output trimmed, which is off
@@ -1632,6 +1655,22 @@ backend = "codex"
     }
 
     #[test]
+    fn decisions_are_asked_for_until_a_file_turns_them_off_and_the_later_file_wins() {
+        assert!(parsed("").decisions());
+        assert!(!parsed("decisions = false\n").decisions());
+        let repo = Config::parse("decisions = true\n", &path("repo"))
+            .expect("a boolean is a valid decisions switch");
+        assert!(parsed("decisions = false\n").overlay(repo).decisions());
+        let off = Config::parse("decisions = false\n", &path("repo"))
+            .expect("a boolean is a valid decisions switch");
+        assert!(
+            !parsed("").overlay(off).decisions(),
+            "a repository's file may switch Niobe's own words off, trusted or not"
+        );
+        assert!(invalid("decisions = \"yes\"\n").contains("decisions"));
+    }
+
+    #[test]
     fn terse_replies_are_off_until_a_file_turns_them_on_and_the_later_file_wins() {
         assert!(!parsed("").terse());
         assert!(parsed("terse = true\n").terse());
@@ -1786,8 +1825,8 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `titles`, `terse`, `trim`, `profiles`, \
-             `permissions`, `keys`, `notify` or `catch_up`"
+             expected `default_profile`, `theme`, `titles`, `terse`, `decisions`, `trim`, \
+             `profiles`, `permissions`, `keys`, `notify` or `catch_up`"
         );
     }
 

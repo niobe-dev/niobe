@@ -25,7 +25,7 @@ use niobe_core::event::{
     SlashCommand, TokenCounts, ToolCallId, ToolOutcome, UsageWindow, UsageWindows,
 };
 use niobe_core::permission::{Allowlist, Rule};
-use niobe_core::session::{SessionState, TestRunRecord};
+use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
 use ratatui_textarea::{Input, TextArea, WrapMode};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -76,6 +76,10 @@ pub struct Repo {
     /// path the agent names it by, relative to that directory. What `@`
     /// completes a file from.
     pub files: Vec<String>,
+    /// When the read this came from began, where it came from one. What the
+    /// shell compares a turn's end with: only a read that began after the
+    /// turn ended says what the turn left behind.
+    pub began: Option<Instant>,
 }
 
 /// One file the working tree has changed, measured from the repository.
@@ -148,19 +152,26 @@ pub enum Section {
     WorkingTree,
     /// The sub-agents the session spawned, running and finished.
     SubAgents,
+    /// The decisions the agent's replies stated, as it tells them.
+    Decisions,
     /// The tools it called, and how often.
     Tools,
 }
 
 impl Section {
     /// Every section, in the order the panes draw them.
-    pub const ALL: [Section; 3] = [Section::WorkingTree, Section::SubAgents, Section::Tools];
+    pub const ALL: [Section; 4] = [
+        Section::WorkingTree,
+        Section::SubAgents,
+        Section::Decisions,
+        Section::Tools,
+    ];
 
     /// The pane this section is drawn in.
     pub fn pane(self) -> Pane {
         match self {
             Section::WorkingTree => Pane::Changes,
-            Section::SubAgents | Section::Tools => Pane::Activity,
+            Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
         }
     }
 }
@@ -351,12 +362,14 @@ struct Called {
 impl Ask {
     /// Whether this prompt can be given `answer`. A standing answer about the
     /// target needs a target to be about, and a standing answer is offered
-    /// only where its rule can be written into a config and read back.
+    /// only where its rule can be written into a config and read back — and
+    /// never to a plan, which it would let go ahead unread every time after.
     pub fn offers(&self, answer: Answer) -> bool {
+        let plan = self.proposed.as_ref().is_some_and(Proposed::is_plan);
         match answer {
             Answer::Once | Answer::No => true,
-            Answer::AlwaysTool => self.tool_rule().is_some(),
-            Answer::AlwaysTarget => self.target_rule().is_some(),
+            Answer::AlwaysTool => !plan && self.tool_rule().is_some(),
+            Answer::AlwaysTarget => !plan && self.target_rule().is_some(),
         }
     }
 
@@ -516,7 +529,50 @@ pub enum Purpose {
     /// A sub-agent, whose entries alone the transcript is narrowed to. A
     /// choice's value is the agent's id.
     Agent,
+    /// A prompt sent from here, to put the files back as they were before.
+    /// A choice's value is where the prompt is among those sent.
+    Rewind,
 }
+
+/// The Shortcuts sheet's rows on what a typed command does: the names that
+/// open the shell's own view rather than reach the backend, each beside the
+/// menu item it opens, and the hold on a command the backend did not list.
+fn typed_rows() -> [String; 3] {
+    let own = crate::menu::TYPED
+        .iter()
+        .filter(|typed| !typed.backend)
+        .filter_map(|typed| {
+            crate::menu::label(typed.action).map(|label| format!("/{} {label}", typed.name))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    [
+        "Typed as a prompt, these open the shell's own:".to_owned(),
+        own,
+        "A command the backend does not list is held once: Enter again sends it.".to_owned(),
+    ]
+}
+
+/// The command `text` opens with where it is a word the backend did not
+/// list among `listed`, which must not be empty. A word with a `/` inside it
+/// is a path, not a command.
+fn unlisted_command<'a>(text: &'a str, listed: &[SlashCommand]) -> Option<&'a str> {
+    if listed.is_empty() {
+        return None;
+    }
+    let word = text
+        .trim_start()
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()?;
+    let command_like = word
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'));
+    (command_like && !listed.iter().any(|command| command.name == word)).then_some(word)
+}
+
+/// The most characters of a prompt the rewind list names it by.
+const REWIND_LABEL: usize = 60;
 
 /// The effort levels offered, in the order the `claude` CLI's `/effort`
 /// lists them in its argument hint (Claude Code 2.1.287). Its `auto` and
@@ -1276,6 +1332,10 @@ pub struct App {
     /// business, so they are kept here rather than widening the shared state —
     /// and the event model, which carries no time — for a pane.
     agents: Vec<SubAgent>,
+    /// When each decision in [`SessionState::decisions`] was stated, in the
+    /// same order, so a pane reads the two together and cannot pair a
+    /// decision with another one's time.
+    decided_at: Vec<Option<Stamp>>,
     composer: TextArea<'static>,
     /// Whether the composer has been drawn in a box too short for all of its
     /// rows since its first row was last put back at the top. The editor keeps
@@ -1374,6 +1434,9 @@ pub struct App {
     /// What the shell sends to call the operator back, and what it has
     /// already called them back for.
     alerts: Alerts,
+    /// Whether the backend was asked to state its decisions, which is what an
+    /// empty Decisions section means: none stated, or none asked for.
+    decisions_asked: bool,
     called: Called,
     /// The session as it stood at the operator's last key, which what is
     /// shown when they come back is counted from; and as it stood when they
@@ -1458,6 +1521,23 @@ pub struct App {
     /// The server a reconnect was asked of that the backend has not answered
     /// for: the hint says so until its answer arrives or a key replaces it.
     reconnecting: Option<String>,
+    /// Every prompt the loop handed to the backend, oldest first, by its
+    /// first line: F6 puts the files back as they were before one of them,
+    /// named to the backend by where it is in this list.
+    sent: Vec<String>,
+    /// Where in `sent` the conversation in front of the model starts: a
+    /// prompt before a clear belongs to a conversation the backend has put
+    /// away, with whatever it kept of the files.
+    sent_since: usize,
+    /// A prompt opening with a command the backend did not list, held back
+    /// once: Enter on it again sends it.
+    unlisted_held: Option<String>,
+    /// The prompts the operator asked to have the files put back to before,
+    /// that the loop has not handed to the backend yet, oldest first.
+    rewinds: Vec<usize>,
+    /// The hint said while a rewind is waiting on the backend's answer, which
+    /// the answer replaces where no key has already.
+    rewinding: Option<String>,
     /// The panes of the right-hand stack the operator hid.
     hidden: BTreeSet<crate::menu::SidePane>,
     /// The files outside the session the shell can name or have opened.
@@ -1476,6 +1556,16 @@ pub struct App {
     /// Whether the budget warning has already been given, so that it is said
     /// once rather than on every usage record after the line is crossed.
     budget_warned: bool,
+    /// The working tree a running turn began on, held until a read after
+    /// the turn's end can be compared with it. `None` between turns.
+    tree_watch: Option<TreeWatch>,
+    /// The files the running turn's edit calls changed, by the path each
+    /// call named.
+    turn_edits: BTreeSet<String>,
+    /// How many of the session's ended turns have been judged for a spike,
+    /// from the first time the event loop asked. `None` until then: the turns
+    /// a session read back holds were spent before this run looked.
+    spikes_judged: Option<usize>,
     /// Whether a backend is listening. The shell holds no backend handle; this
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
@@ -1614,6 +1704,69 @@ enum Scroll {
     Down(usize),
     Head,
     Tail,
+}
+
+/// What the shell holds of the working tree across one turn, to name what
+/// the turn changed that no edit call reported.
+#[derive(Debug, Clone)]
+struct TreeWatch {
+    /// How many turns had ended when this one began.
+    ended_before: usize,
+    /// When the shell asked for the tree the turn began on.
+    asked: Instant,
+    /// That tree, once a read that began after `asked` came back.
+    before: Option<Vec<WorkingFile>>,
+    /// When the shell asked for the tree the turn ended on, once it has.
+    ended: Option<Instant>,
+}
+
+/// How many files a notice of changes outside the edit tools names before it
+/// counts the rest.
+const OUTSIDE_LISTED: usize = 8;
+
+/// A file a turn changed that no edit call reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Outside {
+    /// Changed, or changed again, as the working tree now counts it.
+    Changed(WorkingFile),
+    /// Put back as the last commit holds it.
+    Restored(String),
+}
+
+/// The files whose counts differ between `before` and `after` — changed,
+/// newly changed, or put back as committed — that no path in `edited` names.
+fn changed_outside(
+    before: &[WorkingFile],
+    after: &[WorkingFile],
+    edited: &BTreeSet<String>,
+) -> Vec<Outside> {
+    let counts = |file: &WorkingFile| (file.added, file.removed, file.new);
+    let was: BTreeMap<&str, _> = before
+        .iter()
+        .map(|f| (f.path.as_str(), counts(f)))
+        .collect();
+    let now: BTreeSet<&str> = after.iter().map(|f| f.path.as_str()).collect();
+    let unedited = |path: &str| !edited.iter().any(|named| same_file(path, named));
+    let moved = after
+        .iter()
+        .filter(|file| was.get(file.path.as_str()) != Some(&counts(file)))
+        .filter(|file| unedited(&file.path))
+        .cloned()
+        .map(Outside::Changed);
+    let restored = before
+        .iter()
+        .filter(|file| !now.contains(file.path.as_str()) && unedited(&file.path))
+        .map(|file| Outside::Restored(file.path.clone()));
+    moved.chain(restored).collect()
+}
+
+/// Whether the repository's `listed` path and the path an edit call
+/// `named` are one file: the call may name it from the directory the
+/// session runs in, below the repository's root, or absolutely.
+fn same_file(listed: &str, named: &str) -> bool {
+    listed == named
+        || named.ends_with(&format!("/{listed}"))
+        || listed.ends_with(&format!("/{named}"))
 }
 
 /// The share of a budget at which the shell says so.
@@ -1778,6 +1931,7 @@ impl App {
             answered: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
+            decided_at: Vec::new(),
             composer,
             composer_scrolled: false,
             scroll: 0,
@@ -1817,6 +1971,7 @@ impl App {
             arrival: None,
             asks: VecDeque::new(),
             alerts: Alerts::none(),
+            decisions_asked: true,
             called: Called::default(),
             looked: Mark::default(),
             caught_up: Mark::default(),
@@ -1846,6 +2001,11 @@ impl App {
             recorded: Vec::new(),
             call_at: BTreeMap::new(),
             mcp_reconnects: Vec::new(),
+            sent: Vec::new(),
+            sent_since: 0,
+            rewinds: Vec::new(),
+            rewinding: None,
+            unlisted_held: None,
             reconnecting: None,
             hidden: BTreeSet::new(),
             places: Places::default(),
@@ -1854,6 +2014,9 @@ impl App {
             budget_usd: None,
             prices: None,
             budget_warned: false,
+            spikes_judged: None,
+            tree_watch: None,
+            turn_edits: BTreeSet::new(),
             attached: false,
             modes_before: VecDeque::new(),
             sent_here: false,
@@ -1907,7 +2070,13 @@ impl App {
             }
         }
         self.session.apply(event);
+        // The fold carries no times, so when each decision was stated is kept
+        // here: the ones the event added get this moment, and a clear that
+        // started them over drops theirs.
+        self.decided_at
+            .resize(self.session.decisions().len(), self.at);
         self.reconnect_answered(event);
+        self.rewind_answered(event);
         if matches!(event, Event::UsageWindows(_)) {
             self.windows_at = self.at;
             self.windows_recorded = false;
@@ -2416,12 +2585,13 @@ impl App {
             }
 
             Event::FileChange {
+                path,
                 added,
                 removed,
                 hunks,
                 scope,
-                ..
             } => {
+                self.turn_edits.insert(path.clone());
                 if let Some((at, index, gate)) = ended
                     && let Some(call) = self
                         .entries
@@ -2477,7 +2647,13 @@ impl App {
                     attention: Attention::Routine,
                     kind: EntryKind::Failure,
                     head: if *fatal { "fatal" } else { "error" }.to_owned(),
-                    meta: String::new(),
+                    // A failure that ends a turn — a budget the backend
+                    // stopped on among them — says which, since the rule that
+                    // numbers the turn is drawn only once it has ended.
+                    meta: match self.session.turn_running() {
+                        true => format!("in turn {}", self.session.turns().len().saturating_add(1)),
+                        false => String::new(),
+                    },
                     body: message.clone(),
                     streaming: false,
                     at: self.at,
@@ -2578,6 +2754,7 @@ impl App {
             // says where that went.
             Event::Cleared => {
                 self.start_over();
+                self.sent_since = self.sent.len();
                 self.push(Entry {
                     attention: Attention::Routine,
                     kind: EntryKind::Notice,
@@ -3680,6 +3857,145 @@ impl App {
         self.budget_usd
     }
 
+    /// Names the files a turn changed that none of its edit calls reported —
+    /// a shell command it ran, a formatter, or something outside the session
+    /// — once a read of the working tree that began after the turn ended has
+    /// come back to compare with one that began after the turn started.
+    ///
+    /// Returns whether the loop should ask the watch for a read now. Called
+    /// by the event loop and never by [`App::apply`]: a recorded session has
+    /// no working tree to read. A file is told by its line counts against
+    /// the last commit, so a change that leaves them as they were — a line
+    /// replaced by one of the same count in a file already changed — is not
+    /// seen, and nothing is said that the counts do not show.
+    pub fn settle_tree(&mut self, now: Instant) -> bool {
+        let ended = self.session.turns().len();
+        let Some(watch) = self.tree_watch.as_mut() else {
+            if self.session.turn_running() {
+                self.turn_edits.clear();
+                self.tree_watch = Some(TreeWatch {
+                    ended_before: ended,
+                    asked: now,
+                    before: None,
+                    ended: None,
+                });
+                return true;
+            }
+            return false;
+        };
+        let fresh = |since: Instant| self.repo.read && self.repo.began.is_some_and(|b| b >= since);
+        let turn_over = ended > watch.ended_before;
+        if watch.before.is_none() && !turn_over && fresh(watch.asked) {
+            watch.before = Some(self.repo.working.clone());
+        }
+        if !turn_over {
+            return false;
+        }
+        let (Some(before), Some(asked_end)) = (&watch.before, watch.ended) else {
+            if watch.before.is_none() {
+                self.tree_watch = None;
+                return false;
+            }
+            watch.ended = Some(now);
+            return true;
+        };
+        if !fresh(asked_end) {
+            return false;
+        }
+        let changed = changed_outside(before, &self.repo.working, &self.turn_edits);
+        let turn = watch.ended_before.saturating_add(1);
+        self.tree_watch = None;
+        if !changed.is_empty() {
+            self.say_outside(turn, &changed);
+        }
+        false
+    }
+
+    /// The notice of what `turn` changed outside the edit tools.
+    fn say_outside(&mut self, turn: usize, changed: &[Outside]) {
+        let side = |count: Option<u64>| count.map_or_else(|| "—".to_owned(), |n| n.to_string());
+        let named: Vec<String> = changed
+            .iter()
+            .take(OUTSIDE_LISTED)
+            .map(|outside| match outside {
+                Outside::Changed(file) => {
+                    format!(
+                        "{} +{} −{}",
+                        file.path,
+                        side(file.added),
+                        side(file.removed)
+                    )
+                }
+                Outside::Restored(path) => format!("{path} (put back as committed)"),
+            })
+            .collect();
+        let rest = changed.len().saturating_sub(OUTSIDE_LISTED);
+        let more = match rest {
+            0 => String::new(),
+            n => format!(", and {n} more"),
+        };
+        let files = match changed.len() {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        self.push(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: "outside the edit tools".to_owned(),
+            meta: format!("turn {turn} · {files}"),
+            body: format!(
+                "Turn {turn} changed {}{more} with no edit call saying so: a shell command \
+                 it ran, a formatter, or something outside the session. Each is counted \
+                 against the last commit, as the Working tree counts it; the session's own \
+                 edit figures leave them out.",
+                named.join(", "),
+            ),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+        self.scroll_to_tail();
+    }
+
+    /// Says so when a turn that ended since the last call spent more than
+    /// three times what the session's turns before it averaged.
+    ///
+    /// Called by the event loop and never by [`App::apply`], for the reason
+    /// [`App::settle_budget`] is: the turns a session read back holds are
+    /// taken as judged on the first call, so that opening an old session does
+    /// not call out what it spent long ago.
+    pub fn settle_spikes(&mut self) {
+        let ended = self.session.turns().len();
+        // A cleared conversation starts its turns over, and is judged from
+        // its own first turn.
+        let from = self.spikes_judged.map_or(ended, |judged| judged.min(ended));
+        self.spikes_judged = Some(ended);
+        let found: Vec<crate::spike::Spike> = (from..ended)
+            .filter_map(|index| crate::spike::at(self.session.turns(), index))
+            .collect();
+        for spike in found {
+            self.push(Entry {
+                attention: Attention::Notable,
+                kind: EntryKind::Notice,
+                head: "spike".to_owned(),
+                meta: format!("turn {} · {}× the average", spike.turn, spike.times),
+                body: format!(
+                    "Turn {} spent {} tokens, against the {} the session's turns before it \
+                     averaged.",
+                    spike.turn,
+                    crate::ui::compact(spike.tokens),
+                    crate::ui::compact(spike.average),
+                ),
+                streaming: false,
+                at: self.at,
+                calls: Vec::new(),
+                agent: None,
+            });
+            self.scroll_to_tail();
+        }
+    }
+
     /// Says once when the session has spent most of its budget.
     ///
     /// Called by the event loop and never by [`App::apply`], for the reason
@@ -4014,6 +4330,7 @@ impl App {
                 in_force(&picker.options, self.session.models(), self.session.model())
             }
             Purpose::Effort => None,
+            Purpose::Rewind => None,
             Purpose::Call => None,
             Purpose::Agent => None,
             Purpose::Theme => picker
@@ -4059,6 +4376,15 @@ impl App {
         match purpose {
             Purpose::Model => self.produce(Event::ModelSelected { model: chosen }),
             Purpose::Effort => self.send_command("effort", Some(&chosen)),
+            Purpose::Rewind => {
+                if let Ok(prompt) = chosen.parse::<usize>() {
+                    let named = self.sent.get(prompt).cloned().unwrap_or_default();
+                    let hint = format!("Putting the files back as they were before \"{named}\"…");
+                    self.hint = Some(hint.clone());
+                    self.rewinding = Some(hint);
+                    self.rewinds.push(prompt);
+                }
+            }
             Purpose::Theme => {
                 if let Some(theme) = Theme::by_name(&chosen) {
                     self.set_theme(theme);
@@ -4151,7 +4477,7 @@ impl App {
             Action::Doctor => self.listed("doctor"),
             Action::Mcp => true,
             Action::Effort => self.listed("effort"),
-            Action::Rewind => self.listed("rewind"),
+            Action::Rewind => self.sent.len() > self.sent_since,
             Action::Hooks => self.listed("hooks"),
             Action::SignIn => false,
             Action::Resume => self.remembers,
@@ -4210,11 +4536,7 @@ impl App {
                 false => self.hint = Some(NO_RECORD_HINT.to_owned()),
             },
             Action::History => self.open_history(View::Prompts),
-            Action::Rewind => self.send_or_say(
-                "rewind",
-                "The backend lists no /rewind to a session niobe drives, so it has no \
-                 checkpoint to go back to",
-            ),
+            Action::Rewind => self.pick_rewind(),
             Action::Stop => match self.working() {
                 true => {
                     self.focus = Focus::Session;
@@ -4494,6 +4816,72 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Opens the list of the prompts sent to the conversation in front of
+    /// the model, newest first, to put the files back as they were before
+    /// one of them.
+    fn pick_rewind(&mut self) {
+        let offered = self.sent.get(self.sent_since..).unwrap_or_default();
+        if offered.is_empty() {
+            self.hint = Some(
+                "No prompt has gone to the backend from here since the conversation started, \
+                 so there is nothing to put the files back before"
+                    .to_owned(),
+            );
+            return;
+        }
+        let options = offered
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(at, prompt)| Choice {
+                value: self.sent_since.saturating_add(at).to_string(),
+                name: Some(prompt.clone()),
+                note: None,
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Rewind,
+            options,
+            at: 0,
+            more: 0,
+        });
+    }
+
+    /// Records that the loop handed `prompt` to the backend: it is one F6
+    /// can put the files back before.
+    pub fn sent_to_backend(&mut self, prompt: &str) {
+        let first = prompt.trim().lines().next().unwrap_or_default();
+        self.sent.push(crate::text::truncate(first, REWIND_LABEL));
+    }
+
+    /// The prompts the operator asked to have the files put back to before
+    /// since the last call, each by where it is among those sent, oldest
+    /// first, for the loop to hand to the backend.
+    pub fn take_rewinds(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.rewinds)
+    }
+
+    /// Takes the "putting back" hint down once the backend has said what it
+    /// put back, or why it put nothing back, which the transcript shows.
+    fn rewind_answered(&mut self, event: &Event) {
+        let (Event::Notice { message } | Event::Error { message, .. }) = event else {
+            return;
+        };
+        if !message.contains("put back") {
+            return;
+        }
+        if let Some(hint) = self.rewinding.take()
+            && self.hint.as_deref() == Some(hint.as_str())
+        {
+            self.hint = None;
+        }
+    }
+
+    /// The backend would not take the rewind.
+    pub fn not_rewound(&mut self, error: &str) {
+        self.hint = Some(format!("No files were put back: {error}"));
     }
 
     /// Whether `r` in the MCP view reaches a backend: only one listening can
@@ -4784,6 +5172,8 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" · "),
         );
+        rows.push(String::new());
+        rows.extend(typed_rows());
         if !self.keymap.is_empty() {
             rows.push(
                 "Rebound in your config: ".to_owned()
@@ -5173,6 +5563,19 @@ impl App {
     pub fn with_alerts(mut self, alerts: Alerts) -> Self {
         self.alerts = alerts;
         self
+    }
+
+    /// The same shell, knowing whether the backend was asked to state the
+    /// decisions it makes. Asked unless this says otherwise.
+    #[must_use]
+    pub fn with_decisions_asked(mut self, asked: bool) -> Self {
+        self.decisions_asked = asked;
+        self
+    }
+
+    /// Whether the backend was asked to state the decisions it makes.
+    pub fn decisions_asked(&self) -> bool {
+        self.decisions_asked
     }
 
     /// The same shell, telling the operator what happened while they were
@@ -5748,6 +6151,19 @@ impl App {
             .iter()
             .find(|agent| &agent.id == id)
             .map(|agent| agent.label.clone())
+    }
+
+    /// Each decision the session's replies stated, with the moment it was
+    /// stated at.
+    ///
+    /// The two are handed out together because they are kept apart: the
+    /// decision is in the session fold, which has no times, and the time is
+    /// here. A pane that paired them by index could pair the wrong two.
+    pub fn decisions(&self) -> impl Iterator<Item = (&DecisionRecord, Option<Stamp>)> {
+        self.session
+            .decisions()
+            .iter()
+            .zip(self.decided_at.iter().copied())
     }
 
     /// When a sub-agent was spawned, where the shell had a clock at the time.
@@ -7675,6 +8091,9 @@ impl App {
             self.run_typed(typed, argument);
             return;
         }
+        if self.held_unlisted(&text) {
+            return;
+        }
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
             let draft = self.take_composer_for_the_shell();
             self.produce(Event::ModelSelected { model });
@@ -7695,6 +8114,29 @@ impl App {
         }
         self.give_back(&draft);
         self.scroll_to_tail();
+    }
+
+    /// Whether `text` is held back rather than sent: a prompt that opens
+    /// with a command the backend did not list, the first time Enter sends
+    /// it. A backend may pass such a command to the model as text, which
+    /// spends a whole turn on a word; the second Enter on the same prompt
+    /// sends it, for a command the backend answers though it lists it not.
+    /// Nothing is held where the backend has listed no commands at all.
+    fn held_unlisted(&mut self, text: &str) -> bool {
+        let Some(name) = unlisted_command(text, self.session.commands()) else {
+            self.unlisted_held = None;
+            return false;
+        };
+        if self.unlisted_held.as_deref() == Some(text) {
+            self.unlisted_held = None;
+            return false;
+        }
+        self.hint = Some(format!(
+            "The backend does not list /{name}, so it may reach the model as text and spend a \
+             turn. Enter again sends it anyway"
+        ));
+        self.unlisted_held = Some(text.to_owned());
+        true
     }
 
     /// Says in the transcript that the prompt above it went nowhere.
@@ -10134,6 +10576,38 @@ mod tests {
         app.said()
     }
 
+    /// A command the backend does not list may reach the model as text and
+    /// spend a whole turn: Claude Code 2.1.309 passes `/todos` on that way.
+    #[test]
+    fn a_command_the_backend_does_not_list_is_held_until_enter_comes_again() {
+        let mut app = offering_model(app());
+
+        assert_eq!(submitted(&mut app, "/todos"), []);
+        let hint = app.hint().expect("the shell says why it held it");
+        assert!(
+            hint.contains("/todos") && hint.contains("Enter again"),
+            "{hint}"
+        );
+        assert_eq!(app.composer().lines(), ["/todos"], "the prompt is kept");
+
+        app.submit();
+        assert_eq!(app.said().len(), 1, "sent the second time");
+    }
+
+    #[test]
+    fn a_listed_command_a_path_and_a_backend_that_listed_nothing_are_sent_at_once() {
+        let mut listing = offering_model(app());
+        assert_eq!(
+            submitted(&mut listing, "/model").len(),
+            0,
+            "the shell's own"
+        );
+        assert_eq!(submitted(&mut listing, "/usr/bin/env is missing").len(), 1);
+
+        let mut unlisted = app();
+        assert_eq!(submitted(&mut unlisted, "/todos").len(), 1);
+    }
+
     /// Typed as a prompt, the backend would move the model only when the next
     /// turn starts and say nothing of it until then; asked for the way the
     /// picker asks, the menu row names it at once.
@@ -10155,8 +10629,14 @@ mod tests {
     fn a_model_command_the_picker_cannot_stand_for_goes_to_the_backend_as_typed() {
         for text in ["/model haiku please", "/models haiku"] {
             let mut app = offering_model(app().attached());
+            let mut said = submitted(&mut app, text);
+            if text.starts_with("/models") {
+                assert_eq!(said, [], "not listed, so held once");
+                app.submit();
+                said = app.said();
+            }
             assert_eq!(
-                submitted(&mut app, text),
+                said,
                 [Event::UserMessage {
                     text: text.to_owned()
                 }]
@@ -10246,6 +10726,27 @@ mod tests {
     }
 
     #[test]
+    fn the_shortcuts_name_the_typed_commands_that_open_the_shells_own_and_the_hold() {
+        let mut app = app();
+        app.perform(crate::menu::Action::Shortcuts);
+        let rows = app.sheet().expect("F1 opens the sheet").rows.join("\n");
+        for named in [
+            "/status Settings",
+            "/permissions Permissions",
+            "/export Export transcript",
+            "/bug Report a bug",
+            "/login Login / Logout",
+        ] {
+            assert!(rows.contains(named), "{named} missing from:\n{rows}");
+        }
+        assert!(
+            !rows.contains("/compact"),
+            "a backend command is the backend's:\n{rows}"
+        );
+        assert!(rows.contains("Enter again"), "{rows}");
+    }
+
+    #[test]
     fn a_typed_help_command_lists_the_shortcuts_as_f1_does() {
         typed_as_asked(app, "/help", crate::menu::Action::Shortcuts);
     }
@@ -10325,7 +10826,7 @@ mod tests {
             "/config theme dark",
             "/help me",
         ] {
-            let mut app = offering(&["review", "config"]);
+            let mut app = offering(&["review", "config", "help"]);
             assert_eq!(
                 submitted(&mut app, text),
                 [Event::UserMessage {
@@ -10998,6 +11499,29 @@ mod tests {
             untargeted.ask_options(),
             [Answer::Once, Answer::AlwaysTool, Answer::No]
         );
+    }
+
+    /// A standing answer to a plan would let every later plan go ahead
+    /// unread, which is what asking for a plan was meant to stop.
+    #[test]
+    fn a_plan_offers_no_standing_answer() {
+        let mut app = app();
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: r#"{"plan":"1. Guard it."}"#.to_owned(),
+            target: None,
+            proposal: Some(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: "1. Guard it.".to_owned(),
+                },
+                ["plan"],
+            )),
+            reason: None,
+            agent: None,
+        });
+
+        assert_eq!(app.ask_options(), [Answer::Once, Answer::No]);
     }
 
     #[test]
@@ -12112,6 +12636,241 @@ mod tests {
             "a list opened over the question the turn is waiting on"
         );
         assert!(app.asking().is_some());
+    }
+
+    /// A turn that spent `input` tokens and ended.
+    fn turn_of(input: u64) -> [Event; 3] {
+        [
+            Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            Event::Usage(Usage {
+                input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: None,
+                settles_model: Some(false),
+                fast: false,
+            }),
+            Event::TurnEnded,
+        ]
+    }
+
+    fn spikes(app: &App) -> Vec<&Entry> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.head == "spike")
+            .collect()
+    }
+
+    fn file(path: &str, added: u64, removed: u64) -> WorkingFile {
+        WorkingFile {
+            path: path.to_owned(),
+            added: Some(added),
+            removed: Some(removed),
+            new: false,
+        }
+    }
+
+    /// The working tree as a read that began at `began` found it.
+    fn tree_read(began: Instant, working: &[WorkingFile]) -> Repo {
+        Repo {
+            read: true,
+            began: Some(began),
+            working: working.to_vec(),
+            ..Repo::default()
+        }
+    }
+
+    fn outside(app: &App) -> Vec<&Entry> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.head == "outside the edit tools")
+            .collect()
+    }
+
+    #[test]
+    fn a_file_a_turn_changed_with_no_edit_call_is_named_when_the_turn_ends() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        assert!(
+            app.settle_tree(at(0)),
+            "a turn asks for the tree it began on"
+        );
+
+        // What was uncommitted before the turn is not the turn's.
+        app.set_repo(tree_read(at(1), &[file("notes.md", 5, 0)]));
+        assert!(!app.settle_tree(at(2)));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::TurnEnded);
+        assert!(
+            app.settle_tree(at(3)),
+            "an ended turn asks for the tree again"
+        );
+
+        // A read that began before the turn ended says nothing of its end.
+        app.set_repo(tree_read(at(2), &[file("notes.md", 5, 0)]));
+        assert!(!app.settle_tree(at(4)));
+        assert!(outside(&app).is_empty());
+
+        app.set_repo(tree_read(
+            at(5),
+            &[
+                file("notes.md", 5, 0),
+                file("src/lib.rs", 4, 1),
+                file("src/main.rs", 2, 2),
+            ],
+        ));
+        assert!(!app.settle_tree(at(6)));
+        app.settle_tree(at(7));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].meta, "turn 1 · 1 file");
+        assert!(
+            said[0].body.contains("src/main.rs +2 −2"),
+            "{}",
+            said[0].body
+        );
+        assert!(
+            !said[0].body.contains("lib.rs") && !said[0].body.contains("notes.md"),
+            "{}",
+            said[0].body
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_edits_account_for_every_change_says_nothing() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "fix it".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[file("src/lib.rs", 4, 1)]));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+    }
+
+    #[test]
+    fn a_turn_that_ended_before_its_tree_was_read_is_not_judged() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "hi".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.apply(&Event::TurnEnded);
+        assert!(!app.settle_tree(at(1)), "nothing to compare an end with");
+        app.set_repo(tree_read(at(2), &[file("a.rs", 1, 0)]));
+        app.settle_tree(at(3));
+        assert!(outside(&app).is_empty());
+    }
+
+    #[test]
+    fn an_error_that_ends_a_turn_names_the_turn_it_ended() {
+        let mut app = app();
+        for event in turn_of(1_000) {
+            app.apply(&event);
+        }
+        app.apply(&Event::Error {
+            message: "between turns".to_owned(),
+            fatal: false,
+        });
+        app.apply(&Event::UserMessage {
+            text: "go on".to_owned(),
+        });
+        app.apply(&Event::Error {
+            message: "the turn ended as `error_max_budget_usd`: Reached maximum budget ($0.4)"
+                .to_owned(),
+            fatal: false,
+        });
+        app.apply(&Event::TurnEnded);
+
+        let errors: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "error")
+            .map(|entry| entry.meta.as_str())
+            .collect();
+        assert_eq!(errors, ["", "in turn 2"]);
+    }
+
+    #[test]
+    fn a_turn_past_three_times_the_average_is_named_once_by_its_number() {
+        let mut app = app();
+        app.settle_spikes();
+        for input in [1_000, 1_200, 5_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        app.settle_spikes();
+
+        let spikes = spikes(&app);
+        assert_eq!(spikes.len(), 1, "{spikes:?}");
+        assert_eq!(spikes[0].meta, "turn 3 · 4× the average");
+        assert!(
+            spikes[0].body.contains("5000 tokens") && spikes[0].body.contains("1100"),
+            "{}",
+            spikes[0].body
+        );
+    }
+
+    #[test]
+    fn a_spike_in_a_session_read_back_is_not_called_out_again() {
+        let mut app = app();
+        for input in [1_000, 1_000, 9_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+        }
+        app.settle_spikes();
+        assert!(spikes(&app).is_empty(), "{:?}", spikes(&app));
+
+        for event in turn_of(90_000) {
+            app.apply(&event);
+        }
+        app.settle_spikes();
+        assert_eq!(spikes(&app).len(), 1, "a turn ended live is still judged");
+    }
+
+    #[test]
+    fn a_cleared_conversation_is_judged_from_its_own_turns() {
+        let mut app = app();
+        app.settle_spikes();
+        for input in [1_000, 1_000, 1_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        app.apply(&Event::Cleared);
+        app.settle_spikes();
+        for input in [100, 100, 900] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        assert_eq!(spikes(&app).len(), 1, "{:?}", spikes(&app));
     }
 
     #[test]
@@ -13682,6 +14441,44 @@ mod tests {
             app.stamp().is_none(),
             "a fold left a clock the loop never read"
         );
+    }
+
+    #[test]
+    fn a_decision_is_handed_out_with_the_time_its_reply_was_stated_at() {
+        let mut app = app();
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
+        app.tick(Instant::now(), Some(at(49_260, 13, 41)));
+        app.apply(&said(
+            "DECISION: reuse the existing cache\nDECISION: keep the flag",
+        ));
+        app.tick(Instant::now(), Some(at(50_580, 14, 3)));
+        app.apply(&said("No decision here."));
+        app.apply(&said("DECISION: do not widen the layering table"));
+
+        let made: Vec<_> = app
+            .decisions()
+            .map(|(decision, at)| (decision.summary.as_str(), at.and_then(Stamp::local)))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                ("reuse the existing cache", LocalTime::new(13, 41)),
+                ("keep the flag", LocalTime::new(13, 41)),
+                ("do not widen the layering table", LocalTime::new(14, 3)),
+            ]
+        );
+
+        app.apply(&Event::Cleared);
+        assert_eq!(app.decisions().count(), 0, "a clear starts them over");
+        app.apply(&said("DECISION: after the clear"));
+        let after: Vec<_> = app
+            .decisions()
+            .map(|(_, at)| at.and_then(Stamp::local))
+            .collect();
+        assert_eq!(after, [LocalTime::new(14, 3)], "paired with its own time");
     }
 
     #[test]
@@ -16532,6 +17329,62 @@ mod tests {
             );
             assert_eq!(app.said(), [], "{action:?}");
         }
+    }
+
+    #[test]
+    fn f6_offers_the_prompts_sent_from_here_newest_first_and_hands_out_the_one_chosen() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.sent_to_backend("make mean() return 0\nand say why");
+        app.sent_to_backend("now the median");
+
+        app.on_key(key(KeyCode::F(6)));
+        let picker = app.picking().expect("the prompts are offered");
+        assert_eq!(picker.purpose, Purpose::Rewind);
+        let named: Vec<_> = picker
+            .options
+            .iter()
+            .map(|choice| choice.name.as_deref())
+            .collect();
+        assert_eq!(
+            named,
+            [Some("now the median"), Some("make mean() return 0")]
+        );
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_rewinds(), [0]);
+        assert!(app.picking().is_none());
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("make mean() return 0")),
+            "{:?}",
+            app.hint()
+        );
+
+        app.apply(&Event::Notice {
+            message: "Files put back as they were before \"make mean() return 0\": a.py."
+                .to_owned(),
+        });
+        assert_eq!(app.hint(), None, "the transcript says what went back");
+    }
+
+    #[test]
+    fn a_conversation_started_over_offers_no_prompt_from_before_it() {
+        let mut app = app();
+        app.sent_to_backend("before");
+        app.apply(&Event::Cleared);
+        app.sent_to_backend("after");
+
+        app.perform(crate::menu::Action::Rewind);
+
+        let picker = app.picking().expect("the prompt since is offered");
+        assert_eq!(picker.options.len(), 1);
+        assert_eq!(picker.options[0].name.as_deref(), Some("after"));
+        assert_eq!(
+            picker.options[0].value, "1",
+            "counted among every prompt sent"
+        );
     }
 
     #[test]

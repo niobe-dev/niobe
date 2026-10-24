@@ -902,6 +902,22 @@ pub(crate) struct ControlAnswer {
     /// Recorded from Claude Code 2.1.288: `{"title":"Static file handler etag
     /// support"}` for a prompt about etags.
     pub(crate) title: Option<String>,
+    /// Whether `rewind_files` can put the files back as they were before the
+    /// prompt it names. Recorded from Claude Code 2.1.309, started with
+    /// `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`: a dry run answers
+    /// `{"canRewind":true,"filesChanged":["/abs/stats.py"],"insertions":0,
+    /// "deletions":2}`, the rewind itself `{"canRewind":true,"skippedLinks":0}`.
+    #[serde(rename = "canRewind")]
+    pub(crate) can_rewind: Option<bool>,
+    /// The files a dry run of `rewind_files` would put back, by absolute path.
+    #[serde(rename = "filesChanged")]
+    pub(crate) files_changed: Option<Vec<String>>,
+    /// The lines a dry run of `rewind_files` would add back.
+    pub(crate) insertions: Option<u64>,
+    /// The lines a dry run of `rewind_files` would take out.
+    pub(crate) deletions: Option<u64>,
+    /// Why `rewind_files` cannot put the files back, where it cannot.
+    pub(crate) error: Option<String>,
 }
 
 /// `conversation_reset`: the CLI dropped the conversation and started a new

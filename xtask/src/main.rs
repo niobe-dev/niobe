@@ -530,7 +530,16 @@ pub(crate) fn cargo_program() -> String {
 /// Runs cargo and captures its stdout, for the tasks that read the output
 /// rather than just its exit status.
 fn cargo_output(args: &[&str]) -> Result<String, String> {
-    command_output(&cargo_program(), args)
+    command_output(&cargo_program(), &uncoloured(args))
+}
+
+/// `args` with cargo told to write no colour. CI sets `CARGO_TERM_COLOR=always`
+/// for its logs, and `cargo tree` colours the ` (*)` after a crate it printed
+/// before, which a line read as text no longer ends in.
+fn uncoloured<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut all = vec!["--color", "never"];
+    all.extend_from_slice(args);
+    all
 }
 
 /// Runs `program` in the workspace root and returns its stdout, failing on a
@@ -637,6 +646,14 @@ niobe-core v0.12.0 (/repo/crates/niobe-core)
         assert_eq!(names, ["niobe-core", "niobe-tui", "ratatui"]);
         let niobe: Vec<&String> = names.iter().filter(|n| n.starts_with("niobe-")).collect();
         assert_eq!(niobe, ["niobe-core", "niobe-tui"]);
+    }
+
+    #[test]
+    fn the_cargo_output_read_as_text_is_asked_for_without_colour() {
+        assert_eq!(
+            uncoloured(&["tree", "--workspace"]),
+            ["--color", "never", "tree", "--workspace"]
+        );
     }
 
     #[test]

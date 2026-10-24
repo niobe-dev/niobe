@@ -462,6 +462,7 @@ fn read_repository() -> Repo {
             .map(|file| file.path)
             .filter(|path| !path.contains(" => "))
             .collect(),
+        began: None,
     }
 }
 

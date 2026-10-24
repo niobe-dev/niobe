@@ -225,6 +225,11 @@ fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
             " oldest first ",
             "↑↓ choose · Enter show its entries alone · Esc close",
         ),
+        Purpose::Rewind => (
+            "Put the files back as they were before",
+            " the conversation keeps what was said ",
+            "↑↓ choose · Enter put back · Esc leave them",
+        ),
     }
 }
 
@@ -357,7 +362,7 @@ impl PickColumns {
             Purpose::Model | Purpose::Effort => choice.value.clone(),
             // Where the call is in the list is what choosing sends, and the
             // list already says it by where the row is.
-            Purpose::Call | Purpose::Agent => String::new(),
+            Purpose::Call | Purpose::Agent | Purpose::Rewind => String::new(),
         };
         if !self.described {
             return (value, String::new());
@@ -836,12 +841,18 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     frame.render_widget(Paragraph::new(left).style(bar), area);
     if !identity.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(segment_spans(identity)))
-                .alignment(Alignment::Right)
-                .style(bar),
-            area,
-        );
+        // Only the identity's own cells: a paragraph's style is laid over its
+        // whole area, which over the row would repaint the menus' titles.
+        let line = Line::from(segment_spans(identity));
+        let width = u16::try_from(line.width())
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        let right = Rect {
+            x: area.right().saturating_sub(width),
+            width,
+            ..area
+        };
+        frame.render_widget(Paragraph::new(line).style(bar), right);
     }
 }
 
@@ -3319,6 +3330,25 @@ fn option_row(
 /// as it is written into the config is shown where `spelled` asks for it,
 /// which Ctrl+T does: it is for the operator who wants the exact text.
 fn option_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
+    let plan = ask
+        .proposed
+        .as_ref()
+        .is_some_and(|proposed| proposed.is_plan());
+    match (answer, plan) {
+        (Answer::Once, true) => (
+            "Go ahead with the plan".to_owned(),
+            "the agent stops planning".to_owned(),
+        ),
+        (Answer::No, true) => (
+            "Keep planning".to_owned(),
+            "Tab says what to change".to_owned(),
+        ),
+        (answer, _) => answer_words(answer, ask, spelled),
+    }
+}
+
+/// What an answer to any call but a plan is called, and what choosing it does.
+fn answer_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
     match answer {
         Answer::Once => ("Allow once".to_owned(), "this call only".to_owned()),
         Answer::AlwaysTool => (
@@ -4517,10 +4547,11 @@ fn bar_line(
     ])
 }
 
-/// The Activity pane: the sub-agents the session spawned and the tools it
-/// called.
+/// The Activity pane: the sub-agents the session spawned, the decisions its
+/// replies stated, and the tools it called.
 ///
-/// One column for what the agent is doing. It scrolls
+/// One column for what the agent is doing and what it says it decided. It
+/// scrolls
 /// and its sections fold on the same mechanism the Changes pane uses.
 fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_scrolling_pane(
@@ -4540,6 +4571,7 @@ fn activity_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let session = app.session();
     let mut rows = PaneRows::default();
     rows.section(Section::SubAgents, agent_rows(app, session, width, theme));
+    rows.section(Section::Decisions, decision_rows(app, width, theme));
     rows.section(Section::Tools, tool_rows(app, session, width, theme));
     rows
 }
@@ -5156,6 +5188,70 @@ fn working_tree_rows(
                 theme,
             ),
         });
+    }
+    rows
+}
+
+/// What a decision's time column is drawn in: `13:41` and a space.
+const DECISION_TIME: usize = 6;
+
+/// The decisions the agent's replies stated, newest first.
+///
+/// The heading says whose account they are: the agent reports its own
+/// reasoning and may have it wrong, and a pane that listed it bare would read
+/// as a log of what happened.
+///
+/// **Newest first**: the pane does not follow its own tail, so a decision
+/// appended at the bottom of a section whose top is wherever the sub-agents
+/// above it end would land below the fold and never be seen. Under the
+/// heading it is always one row from where the eye already is.
+fn decision_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let folded = app.folded(Section::Decisions);
+    let count = app.session().decisions().len();
+    let mut rows = vec![section_header(
+        folded,
+        "Decisions, as the agent says",
+        vec![Figure::lead(
+            0,
+            Span::styled(count.to_string(), Style::new().fg(theme.fg)),
+        )],
+        width,
+        theme,
+    )];
+    if folded {
+        return rows;
+    }
+    if count == 0 {
+        let none = match app.decisions_asked() {
+            true => "  none stated yet",
+            false => "  not asked for: decisions = false",
+        };
+        rows.push(Line::from(none).style(Style::new().fg(theme.dim)));
+        return rows;
+    }
+
+    let column = text::width(ROW_INDENT) + DECISION_TIME;
+    for (decision, at) in app.decisions().collect::<Vec<_>>().into_iter().rev() {
+        // A log that kept no times gives a decision no time. The column stays
+        // so the summaries keep their edge, but it is left blank rather than
+        // filled with a zero, which would be a moment nobody recorded.
+        let when = at
+            .and_then(|at| at.local())
+            .map(|time| time.to_string())
+            .unwrap_or_default();
+        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(column + 1))
+            .into_iter()
+            .enumerate()
+        {
+            let head = match i {
+                0 => format!("{ROW_INDENT}{when:<w$}", w = DECISION_TIME),
+                _ => " ".repeat(column),
+            };
+            rows.push(Line::from(vec![
+                Span::styled(head, Style::new().fg(theme.dim)),
+                Span::styled(wrapped, Style::new().fg(theme.fg)),
+            ]));
+        }
     }
     rows
 }
@@ -7910,6 +8006,44 @@ mod tests {
         ]
     }
 
+    fn decision_text(app: &App, width: usize) -> Vec<String> {
+        decision_rows(app, width, &Theme::default())
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    #[test]
+    fn the_decisions_section_says_whose_account_it_is_and_lists_the_newest_first() {
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&niobe_core::Event::AssistantMessage {
+            text: "DECISION: reused the cache\nDECISION: left the exporter alone".to_owned(),
+            agent: None,
+        });
+
+        let rows = decision_text(&app, 60);
+        assert!(rows[0].contains("Decisions, as the agent says"), "{rows:?}");
+        assert!(rows[0].ends_with('2'), "{rows:?}");
+        assert!(rows[1].contains("left the exporter alone"), "{rows:?}");
+        assert!(rows[2].contains("reused the cache"), "{rows:?}");
+        assert!(
+            rows[1].starts_with("        "),
+            "no clock, so the time column is blank rather than a made-up moment"
+        );
+    }
+
+    #[test]
+    fn an_empty_decisions_section_says_whether_any_were_asked_for() {
+        let asked = App::new(crate::app::Repo::default());
+        assert_eq!(decision_text(&asked, 40)[1].trim(), "none stated yet");
+
+        let unasked = App::new(crate::app::Repo::default()).with_decisions_asked(false);
+        assert_eq!(
+            decision_text(&unasked, 40)[1].trim(),
+            "not asked for: decisions = false"
+        );
+    }
+
     fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
@@ -8716,5 +8850,30 @@ mod tests {
         let mut app = bare();
         sent(&mut app, 76_000, "opus-5", Some(200_000));
         assert_eq!(context_of(&app, 15), ["  38%  76k"]);
+    }
+
+    #[test]
+    fn a_plan_is_approved_or_planned_further_in_those_words() {
+        let ask = Ask {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: r#"{"plan":"1. Guard it."}"#.to_owned(),
+            target: None,
+            proposed: Some(crate::proposed::Proposed::new(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: "1. Guard it.".to_owned(),
+                },
+                ["plan"],
+            ))),
+            reason: None,
+            turn: 1,
+            agent: None,
+        };
+
+        assert_eq!(
+            option_words(Answer::Once, &ask, false).0,
+            "Go ahead with the plan"
+        );
+        assert_eq!(option_words(Answer::No, &ask, false).0, "Keep planning");
     }
 }

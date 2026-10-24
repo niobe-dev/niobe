@@ -43,6 +43,9 @@ pub enum Command {
         json: bool,
         /// How long a task's turn may run, where `--timeout` said.
         timeout: Option<std::time::Duration>,
+        /// The technique `--ab` named: the suite is run without it, then
+        /// with it.
+        ab: Option<crate::bench::Technique>,
     },
     /// List the sessions recorded in this repository, Niobe's own and the
     /// `claude` CLI's.
@@ -490,11 +493,20 @@ fn print(rest: &[&str], json: bool) -> Result<Command, String> {
     })
 }
 
-/// `niobe bench <suite> [--json] [--timeout <seconds>]`.
+/// `niobe bench <suite> [--json] [--timeout <seconds>] [--ab <technique>]`.
 fn bench(rest: &[&str]) -> Result<Command, String> {
     const NO_SUITE: &str = "`bench` needs a suite directory, as in `niobe bench bench/`";
     const NO_TIMEOUT: &str = "`--timeout` needs a whole number of seconds, as in `--timeout 600`";
+    const NO_TECHNIQUE: &str = "`--ab` needs a technique to measure: `terse`";
     let (timeout, rest) = take_flag(rest, "--timeout", NO_TIMEOUT)?;
+    let (ab, rest) = take_flag(&rest, "--ab", NO_TECHNIQUE)?;
+    let ab = ab
+        .map(|name| {
+            crate::bench::Technique::named(name).ok_or_else(|| {
+                format!("`--ab` measures `terse`, and there is no technique `{name}`")
+            })
+        })
+        .transpose()?;
     let timeout = timeout
         .map(|secs| match secs.parse::<u64>() {
             Ok(secs) if secs > 0 => Ok(std::time::Duration::from_secs(secs)),
@@ -514,6 +526,7 @@ fn bench(rest: &[&str]) -> Result<Command, String> {
         suite: suite.ok_or(NO_SUITE)?,
         json,
         timeout,
+        ab,
     })
 }
 
@@ -529,7 +542,7 @@ fn replay_speed(rest: &[&str]) -> Result<Option<Speed>, String> {
     }
 }
 
-/// `niobe cost`: a format flag (`--json`, `--csv`, `--by-day`), at most one, among the overview's narrowing.
+/// `niobe cost`: a format flag (`--json`, `--csv`, `--by-day`, `--by-turn`), at most one, among the overview's narrowing.
 fn cost(rest: &[&str]) -> Result<Command, String> {
     let mut format = Format::Table;
     let mut others = Vec::with_capacity(rest.len());
@@ -538,6 +551,7 @@ fn cost(rest: &[&str]) -> Result<Command, String> {
             "--json" => Format::Json,
             "--csv" => Format::Csv,
             "--by-day" => Format::Days,
+            "--by-turn" => Format::Turns,
             other => {
                 others.push(other);
                 continue;
@@ -545,7 +559,8 @@ fn cost(rest: &[&str]) -> Result<Command, String> {
         };
         if format != Format::Table {
             return Err(
-                "`niobe cost` prints one format: `--json`, `--csv` or `--by-day`".to_owned(),
+                "`niobe cost` prints one format: `--json`, `--csv`, `--by-day` or `--by-turn`"
+                    .to_owned(),
             );
         }
         format = named;
@@ -812,6 +827,7 @@ mod tests {
                 suite: PathBuf::from("bench/"),
                 json: true,
                 timeout: Some(std::time::Duration::from_secs(60)),
+                ab: None,
             })
         );
         assert_eq!(
@@ -820,6 +836,16 @@ mod tests {
                 suite: PathBuf::from("suite"),
                 json: false,
                 timeout: None,
+                ab: None,
+            })
+        );
+        assert_eq!(
+            parsed(&["bench", "suite", "--ab", "terse"]),
+            Ok(Command::Bench {
+                suite: PathBuf::from("suite"),
+                json: false,
+                timeout: None,
+                ab: Some(crate::bench::Technique::Terse),
             })
         );
         for wrong in [
@@ -827,6 +853,8 @@ mod tests {
             &["bench", "a", "b"][..],
             &["bench", "a", "--timeout", "0"][..],
             &["bench", "a", "--timeout", "soon"][..],
+            &["bench", "a", "--ab", "routing"][..],
+            &["bench", "a", "--ab"][..],
         ] {
             assert!(parsed(wrong).is_err(), "{wrong:?}");
         }
@@ -897,6 +925,16 @@ mod tests {
             })
         );
         assert_eq!(
+            parsed(&["cost", "--by-turn", "--last", "1"]),
+            Ok(Command::Cost {
+                narrowing: Narrowing {
+                    last: Some(1),
+                    since: None
+                },
+                format: Format::Turns
+            })
+        );
+        assert_eq!(
             parsed(&["cost", "--json"]).map(|command| matches!(
                 command,
                 Command::Cost {
@@ -909,6 +947,7 @@ mod tests {
         for wrong in [
             &["cost", "--json", "--csv"][..],
             &["cost", "--by-day", "--json"][..],
+            &["cost", "--by-turn", "--by-day"][..],
             &["cost", "--json", "--json"][..],
             &["cost", "--markdown"][..],
             &["cost", "--last"][..],

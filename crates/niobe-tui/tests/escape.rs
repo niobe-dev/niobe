@@ -228,7 +228,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
     }));
     /// What a proposal does, built around a payload.
     type Proposing = fn(&str) -> Action;
-    let actions: [(&str, Proposing); 3] = [
+    let actions: [(&str, Proposing); 4] = [
         ("proposed-edit", |p: &str| Action::Replace {
             path: format!("src/{p}.rs"),
             old: format!("old {p}\nkept"),
@@ -242,6 +242,9 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
         }),
         ("proposed-command", |p: &str| Action::Command {
             command: format!("echo {p}"),
+        }),
+        ("proposed-plan", |p: &str| Action::Plan {
+            plan: format!("# {p}\n\n1. **{p}**\n2. `{p}`"),
         }),
     ];
     for (name, action) in actions {
@@ -303,8 +306,36 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 new: false,
             }],
             files: vec![],
+            began: None,
         });
         app.apply(&Event::UserMessage { text: "hi".into() });
+        app
+    }));
+    all.extend(check("outside the edit tools", |p| {
+        let start = std::time::Instant::now();
+        let read = |ms: u64, path: Option<String>| Repo {
+            read: true,
+            began: Some(start + std::time::Duration::from_millis(ms)),
+            working: path
+                .into_iter()
+                .map(|path| WorkingFile {
+                    path,
+                    added: Some(1),
+                    removed: Some(0),
+                    new: false,
+                })
+                .collect(),
+            ..Repo::default()
+        };
+        let mut app = App::new(Repo::default());
+        app.apply(&Event::UserMessage { text: "hi".into() });
+        app.settle_tree(start);
+        app.set_repo(read(1, None));
+        app.settle_tree(start + std::time::Duration::from_millis(2));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(start + std::time::Duration::from_millis(3));
+        app.set_repo(read(4, Some(format!("fmt{p}.rs"))));
+        app.settle_tree(start + std::time::Duration::from_millis(5));
         app
     }));
     all.extend(check("mention", |p| {
@@ -469,6 +500,13 @@ fn call_detail(p: &str) -> App {
     app
 }
 
+fn decision_stated(p: &str) -> App {
+    with(vec![Event::AssistantMessage {
+        text: format!("DECISION: kept {p} out of scope"),
+        agent: None,
+    }])
+}
+
 fn overview_page(p: &str) -> App {
     let mut app = running_session();
     app.perform(niobe_tui::menu::Action::Overview);
@@ -583,6 +621,7 @@ const SITES: &[Site] = &[
     ("proposed-command-open", command_open, "echo"),
     ("call-detail", call_detail, "output"),
     ("overview", overview_page, "built"),
+    ("decision", decision_stated, "Decisions, as the agent says"),
 ];
 
 #[test]

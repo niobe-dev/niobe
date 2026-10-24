@@ -10,6 +10,7 @@
 
 pub mod attention;
 pub mod catch_up;
+pub mod decision;
 pub mod diff;
 pub mod event;
 pub mod image;

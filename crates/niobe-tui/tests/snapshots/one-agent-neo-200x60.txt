@@ -42,6 +42,8 @@
  ║                                                                                                                              ║ │   └ Reading tests/stream.rs                                       │
  ║                                                                                                                              ║ │ ◆ deep1 Review fetch.py                                        0s │
  ║                                                                                                                              ║ │ ◆ deep2 Review cache.py                                        0s │
+ ║                                                                                                                              ║ │ ▾ Decisions, as the agent says  0                                 │
+ ║                                                                                                                              ║ │   none stated yet                                                 │
  ║                                                                                                                              ║ │ ▾ Tools  13 calls ✗ 2 · 0 denied · 29.9 kB out                    │
  ║                                                                                                                              ║ │   Exploring code   6 ▓▓▓▓▓▓▓▓▓▓▓▓                                 │
  ║                                                                                                                              ║ │     Read 6                                                        │
@@ -52,9 +54,7 @@
  ║                                                                                                                              ║ │   Editing files    1 ▓▓                                           │
  ║                                                                                                                              ║ │     Edit 1                                                        │
  ║                                                                                                                              ║ │   Build and test   1 ▓▓           ✗ 1                             │
- ║                                                                                                                              ║ │     npm test 1                                                    │
- ║                                                                                                                              ║ │                                                                   │
- ║ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ║ │                                                                   │
+ ║ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ║ │     npm test 1                                                    │
  ║  ask  >  Ask for a change · @ file · Ctrl+F find                               Shift+Tab cycles · Ctrl+J newline · Tab panes ║ │                                                                   │
  ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝ └───────────────────────────────────────────────────────────────────┘
 EscStop 1Help             2Compact             3Clear             4Model             5Diff             6Rewind             7MCP             8Memory             9Settings             0Quit

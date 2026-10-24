@@ -20,10 +20,10 @@
  ┃                ┃  above is.                                                                       ┃ ───────────────┐
  ┃                ┃                                                                                  ┃g · 0 spawned   │
  ┃                ┃    1. Yes, trust this config                                                     ┃                │
- ┃                ┃  › 2. No, open without it                                                        ┃enied · 0 B out │
+ ┃                ┃  › 2. No, open without it                                                        ┃ent says  0     │
  ┃                ┃                                                                                  ┃                │
- ┃                ┗━━━━━━━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━┛                │
- ┃                                                                          ┃ │                                       │
+ ┃                ┗━━━━━━━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━┛enied · 0 B out │
+ ┃                                                                          ┃ │   none called                         │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘

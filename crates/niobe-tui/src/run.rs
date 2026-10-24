@@ -375,6 +375,12 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // session has spent under the budget this run was given, not about
             // what a recording being read back spent under one it knew nothing of.
             app.settle_budget();
+            app.settle_spikes();
+            // A turn that began or ended wants the working tree read as of
+            // now, to name what it changed that no edit call reported.
+            if app.settle_tree(std::time::Instant::now()) {
+                watch.changed();
+            }
             run_commands(app, shell);
             fetch_images(app, images);
             let lent = hand_off(app, desktop, machine.suspend)?;
@@ -632,11 +638,10 @@ fn send_produced(
         // produces is a record of what happened here, and the backend has no
         // use for what it did not ask for.
         match &event {
-            SessionEvent::UserMessage { text } => {
-                if let Err(error) = backend.send(text, &images) {
-                    app.not_sent(&error.to_string());
-                }
-            }
+            SessionEvent::UserMessage { text } => match backend.send(text, &images) {
+                Ok(()) => app.sent_to_backend(text),
+                Err(error) => app.not_sent(&error.to_string()),
+            },
             SessionEvent::PermissionResponse {
                 id,
                 decision,
@@ -712,6 +717,13 @@ fn send_produced(
     for server in app.take_mcp_reconnects() {
         if let Err(error) = backend.reconnect_mcp(&server) {
             app.not_reconnected(&server, &error.to_string());
+        }
+    }
+
+    // Asked for from the F6 list; what went back arrives through the drain.
+    for prompt in app.take_rewinds() {
+        if let Err(error) = backend.rewind(prompt) {
+            app.not_rewound(&error.to_string());
         }
     }
 

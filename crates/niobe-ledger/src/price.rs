@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_change_takes_effect_exactly_on_its_from_date_and_uses_previous_rate_the_day_before() {
+    fn a_rate_change_takes_effect_on_its_from_date_and_not_the_day_before() {
         let day1 = Date::new(2026, 1, 10).expect("date");
         let day2 = Date::new(2026, 2, 1).expect("date");
         let day_before_day2 = Date::new(2026, 1, 31).expect("date");
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_token_count_addition_saturates_without_overflowing_in_long_context_evaluation() {
+    fn a_prompt_too_large_to_count_is_priced_at_the_long_context_rates() {
         let long = Rates {
             input: rate(6_000_000),
             ..rates()
@@ -426,7 +426,6 @@ mod tests {
             ..usage()
         };
 
-        // Long context threshold is evaluated using saturating_add and does not overflow.
         assert_eq!(
             price.cost(&overflowing_usage),
             long.cost(&overflowing_usage)

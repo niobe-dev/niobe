@@ -2,27 +2,27 @@
 <rect width="1080" height="540" fill="#121212"/>
 <rect x="0" y="0" width="9" height="18" fill="#00cdcd"/>
 <rect x="9" y="0" width="9" height="18" fill="#00cdcd"/>
-<text x="9" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold" text-decoration="underline">N</text>
+<text x="9" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold" text-decoration="underline">N</text>
 <rect x="18" y="0" width="54" height="18" fill="#00cdcd"/>
 <text x="18" y="13" textLength="54" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000">iobe  </text>
 <rect x="72" y="0" width="9" height="18" fill="#00cdcd"/>
-<text x="72" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold" text-decoration="underline">S</text>
+<text x="72" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold" text-decoration="underline">S</text>
 <rect x="81" y="0" width="72" height="18" fill="#00cdcd"/>
 <text x="81" y="13" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000">ession  </text>
 <rect x="153" y="0" width="9" height="18" fill="#00cdcd"/>
-<text x="153" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold" text-decoration="underline">C</text>
+<text x="153" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold" text-decoration="underline">C</text>
 <rect x="162" y="0" width="72" height="18" fill="#00cdcd"/>
 <text x="162" y="13" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000">ontext  </text>
 <rect x="234" y="0" width="9" height="18" fill="#00cdcd"/>
-<text x="234" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold" text-decoration="underline">M</text>
+<text x="234" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold" text-decoration="underline">M</text>
 <rect x="243" y="0" width="54" height="18" fill="#00cdcd"/>
 <text x="243" y="13" textLength="54" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000">odel  </text>
 <rect x="297" y="0" width="9" height="18" fill="#00cdcd"/>
-<text x="297" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold" text-decoration="underline">V</text>
+<text x="297" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold" text-decoration="underline">V</text>
 <rect x="306" y="0" width="45" height="18" fill="#00cdcd"/>
 <text x="306" y="13" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000">iew  </text>
 <rect x="351" y="0" width="9" height="18" fill="#00cdcd"/>
-<text x="351" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" font-weight="bold" text-decoration="underline">H</text>
+<text x="351" y="13" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold" text-decoration="underline">H</text>
 <rect x="360" y="0" width="279" height="18" fill="#00cdcd"/>
 <text x="360" y="13" textLength="279" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000">elp                            </text>
 <rect x="639" y="0" width="54" height="18" fill="#00cdcd"/>
@@ -492,16 +492,10 @@
 <text x="684" y="463" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00">█</text>
 <rect x="693" y="450" width="27" height="18" fill="#4682ee"/>
 <text x="693" y="463" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff"> │ </text>
-<rect x="720" y="450" width="63" height="18" fill="#4682ee"/>
-<text x="720" y="463" textLength="63" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold">▾ Tools</text>
-<rect x="783" y="450" width="90" height="18" fill="#4682ee"/>
-<text x="783" y="463" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">  8 calls </text>
-<rect x="873" y="450" width="27" height="18" fill="#4682ee"/>
-<text x="873" y="463" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ff0000">✗ 2</text>
-<rect x="900" y="450" width="99" height="18" fill="#4682ee"/>
-<text x="900" y="463" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5e5e5"> · 0 denied</text>
-<rect x="999" y="450" width="81" height="18" fill="#4682ee"/>
-<text x="999" y="463" textLength="81" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">       │ </text>
+<rect x="720" y="450" width="270" height="18" fill="#4682ee"/>
+<text x="720" y="463" textLength="270" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold">▾ Decisions, as the agent says</text>
+<rect x="990" y="450" width="90" height="18" fill="#4682ee"/>
+<text x="990" y="463" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">  0     │ </text>
 <rect x="0" y="468" width="9" height="18" fill="#4682ee"/>
 <rect x="9" y="468" width="9" height="18" fill="#4682ee"/>
 <text x="9" y="481" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">║</text>
@@ -511,14 +505,10 @@
 <text x="684" y="481" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">║</text>
 <rect x="693" y="468" width="27" height="18" fill="#4682ee"/>
 <text x="693" y="481" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff"> │ </text>
-<rect x="720" y="468" width="144" height="18" fill="#4682ee"/>
-<text x="720" y="481" textLength="144" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5e5e5">  Exploring code</text>
-<rect x="864" y="468" width="45" height="18" fill="#4682ee"/>
-<text x="864" y="481" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">   3 </text>
-<rect x="909" y="468" width="99" height="18" fill="#4682ee"/>
-<text x="909" y="481" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00">▓▓▓▓▓▓▓▓▓▓▓</text>
-<rect x="1008" y="468" width="72" height="18" fill="#4682ee"/>
-<text x="1008" y="481" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">      │ </text>
+<rect x="720" y="468" width="153" height="18" fill="#4682ee"/>
+<text x="720" y="481" textLength="153" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5e5e5">  none stated yet</text>
+<rect x="873" y="468" width="207" height="18" fill="#4682ee"/>
+<text x="873" y="481" textLength="207" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">                     │ </text>
 <rect x="0" y="486" width="9" height="18" fill="#4682ee"/>
 <rect x="9" y="486" width="9" height="18" fill="#4682ee"/>
 <text x="9" y="499" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">║</text>
@@ -538,10 +528,16 @@
 <text x="684" y="499" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">║</text>
 <rect x="693" y="486" width="27" height="18" fill="#4682ee"/>
 <text x="693" y="499" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff"> │ </text>
-<rect x="720" y="486" width="90" height="18" fill="#4682ee"/>
-<text x="720" y="499" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5e5e5">    Read 3</text>
-<rect x="810" y="486" width="270" height="18" fill="#4682ee"/>
-<text x="810" y="499" textLength="270" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">                            │ </text>
+<rect x="720" y="486" width="63" height="18" fill="#4682ee"/>
+<text x="720" y="499" textLength="63" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold">▾ Tools</text>
+<rect x="783" y="486" width="90" height="18" fill="#4682ee"/>
+<text x="783" y="499" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">  8 calls </text>
+<rect x="873" y="486" width="27" height="18" fill="#4682ee"/>
+<text x="873" y="499" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ff0000">✗ 2</text>
+<rect x="900" y="486" width="99" height="18" fill="#4682ee"/>
+<text x="900" y="499" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5e5e5"> · 0 denied</text>
+<rect x="999" y="486" width="81" height="18" fill="#4682ee"/>
+<text x="999" y="499" textLength="81" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff">       │ </text>
 <rect x="0" y="504" width="9" height="18" fill="#4682ee"/>
 <rect x="9" y="504" width="684" height="18" fill="#4682ee"/>
 <text x="9" y="517" textLength="684" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">╚══════════════════════════════════════════════════════════════════════════╝</text>

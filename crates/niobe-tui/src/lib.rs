@@ -39,6 +39,11 @@ mod hunks;
 pub mod images;
 mod input;
 pub mod journal;
+// The shell reads the terminal itself only where `poll(2)` can see it, which
+// is on Unix; elsewhere crossterm reads it and the decoder goes unused. It is
+// still built there, so that its tests and the shell's that type through it
+// run on every platform.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod keys;
 mod markdown;
 pub mod mcp;
@@ -55,6 +60,7 @@ mod select;
 pub mod shell;
 mod slash;
 pub mod snapshots;
+mod spike;
 mod tags;
 pub mod terminal;
 mod text;

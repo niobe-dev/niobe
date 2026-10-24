@@ -39,6 +39,15 @@ CLI you already have and reads what the CLI says. It does not read the CLI's cre
 set a user agent or open a connection of its own; [SECURITY.md](SECURITY.md) names the check
 that enforces each of those.
 
+It is not Claude Code's own screen either. The CLI it drives says `/vim`, `/terminal-setup`,
+`/statusline`, `/privacy-settings`, `/upgrade`, `/plugin`, `/add-dir` and `/tasks` are not
+available there, and Niobe does not draw them in their place. `/fast` is refused by the CLI to a
+session it is driven in. Claude Code's names for what Niobe has its own of open Niobe's views
+instead: `/status` the settings, `/permissions` the standing answers, `/export` the transcript
+export, `/bug` the bug report, `/login` and `/logout` the sign-in, and the rest F1 lists. A
+command the CLI does not list, such as `/todos`, is held on the first Enter, since the CLI would
+hand it to the model as text and spend a turn.
+
 ## Install
 
 On macOS (arm64, x86_64) or Linux (x86_64, arm64):
@@ -62,6 +71,12 @@ With no config file it runs the `claude` on your `PATH` with that CLI's own sett
 profile it calls `claude`. `niobe --help` lists the commands, the config keys and the keys the
 shell answers to; `niobe sessions` lists the sessions you can carry on with
 `niobe --resume <id>`.
+
+A turn that spends more than three times the tokens the session's earlier turns averaged is
+named in the transcript when it ends, with how many times the average it spent.
+A turn that changed files without an edit call saying so — a `sed` or a formatter run through the
+shell — names them when it ends, read from git, so the session's own edit figures are not taken
+for the whole of what it changed.
 
 To choose how a backend is run, write a profile in `~/.config/niobe/config.toml`. A config file
 replaces the implied profile, so name the one you want as the default:
@@ -100,13 +115,19 @@ the cost in the job summary:
 task starts from, and judges it by the task's own check. It prints the pass rate, the tokens and
 time each turn took, and where each left the five-hour window. `--json` prints it in the shape
 [`schema/bench.schema.json`](schema/bench.schema.json) publishes. [`bench/`](bench/README.md)
-holds twenty small tasks to compare one profile or setting against another. Each turn may edit
-and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for that run alone, as
-`--allow` does for `-p`.
+holds twenty small tasks to compare one profile or setting against another; `--ab terse` runs
+the suite without terse replies and then with them, and sets the two side by side. Each turn may
+edit and write files inside its copy; `--allow "Bash(python3 *)"` gives it more, for that run
+alone, as `--allow` does for `-p`.
 
 `terse = true` at the top of a config asks each new conversation for terse replies, with code,
 commands, paths, errors and security warnings kept whole, and `--terse on|off` switches it for one
 run. It is off by default. On the bench it cut output tokens by 14% with every task still passing.
+
+Each new conversation in the shell is asked to state the choices it makes — work left out of scope,
+one approach taken over another — on a line that opens `DECISION:`. The Activity pane lists them
+under *Decisions, as the agent says*: the agent's own account of its reasoning, which it may have
+wrong. `decisions = false` at the top of a config stops asking; `niobe -p` never asks.
 
 `trim = true` at the top of a config has the agent read a cargo command's output without cargo's
 build progress and the tests that passed. Every failure, panic, compiler error and `test result:`
@@ -124,7 +145,9 @@ output and back.
 money its backend reported, never an estimate. `niobe cost --json` prints it in the shape
 [`schema/cost.schema.json`](schema/cost.schema.json) publishes, and `--csv` as rows for a
 spreadsheet, and `--by-day` sums each UTC day's sessions and tokens by profile, back to the first
-session recorded; `--last <n>` and `--since <YYYY-MM-DD>` narrow it as they do `niobe overview`.
+session recorded, and `--by-turn` lists each turn with the tokens it spent, with what no turn's
+figure holds on a row of its own so that a session's rows add up to its total; `--last <n>` and
+`--since <YYYY-MM-DD>` narrow it as they do `niobe overview`.
 
 A terminal that eats an F-key can give the bar's action another one: `[keys]` with
 `mcp = "ctrl+l"` in the config, and the bar, the menus and the help draw the new key.

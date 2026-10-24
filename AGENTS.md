@@ -55,8 +55,8 @@ reviewers that encode both, for an agent working in this tree.
   F1 to F12 and the Ctrl letters nothing else answers to — checked once for a key two actions would
   share or another action's own, so the config that writes them and the shell that draws them agree;
   `proposal.rs` is what a call
-  waiting on the operator would do — replace text in a file, write a file whole, run a command —
-  as the backend read it out of the call's arguments, and which arguments that reading covers; `test_run.rs` recognises a shell
+  waiting on the operator would do — replace text in a file, write a file whole, run a command,
+  let a plan go ahead — as the backend read it out of the call's arguments, and which arguments that reading covers; `test_run.rs` recognises a shell
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
@@ -79,7 +79,10 @@ reviewers that encode both, for an agent working in this tree.
   five-hour window moved — as the fold now less a `Mark` of it, so every figure is the fold of
   the events after the mark and no model sums anything up; the shell records the mark as
   `Event::Looked` on a key pressed after something it counts, so a session taken up again
-  tells the operator what happened after they last looked. Depends on no other
+  tells the operator what happened after they last looked. `decision.rs` reads the
+  decisions a reply states — each line that opens `DECISION:`, outside fenced code — which
+  the binary asks the agent for and the fold keeps as the agent's own account, never as a
+  fact it checked. Depends on no other
   workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
@@ -100,6 +103,8 @@ reviewers that encode both, for an agent working in this tree.
   prompts with before asking, whether a new session is titled by the model (`titles`), which a
   file nobody trusted can turn off and not on, whether a new conversation asks for terse replies
   (`terse`, off unless a file turns it on, from any file since the words are Niobe's own),
+  whether a new conversation is asked to state its decisions (`decisions`, on unless a file
+  turns it off, from any file for the same reason),
   whether the agent reads cargo's output trimmed (`trim`, the same), and
   whether the shell rings the bell and sends a
   desktop notification when it calls the operator back (`[notify]`), and how many minutes
@@ -130,7 +135,8 @@ reviewers that encode both, for an agent working in this tree.
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — and each transcript entry's attention, the highest of the events that built it, `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
-  a row that counts them, its Activity pane counting tool calls by kind of work with what
+  a row that counts them, its Activity pane listing the decisions the agent's replies stated,
+  newest first under a heading that says they are its own account, and counting tool calls by kind of work with what
   did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the
@@ -148,7 +154,8 @@ reviewers that encode both, for an agent working in this tree.
   with, and where each is drawn so a click lands on it, and the commands that, typed as a
   prompt, do what an action does — `/model`, `/memory`, `/mcp`, `/resume`, `/help` and the
   rest — so each action has one path however it is asked for; F7 and `/mcp` open the MCP
-  view; a backend
+  view; F6 and `/rewind` list the prompts sent from here since the conversation started, newest
+  first, to put the files back as they were before one, the conversation kept; a backend
   command is sent only where the backend listed it, and an action no backend offers says why —
   `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
@@ -205,7 +212,8 @@ reviewers that encode both, for an agent working in this tree.
   the JSON as sent behind Ctrl+T, `proposed.rs` draws what a question's call would do where the
   backend read it — an edit as the lines it removes and adds, wrapped and cut where a transcript
   diff is, a file written as the lines it will hold and whether what it held is lost, a command
-  once — and the arguments that reading does not cover by key, `tags.rs` names each sub-agent by one short word of the kind of agent
+  once, a plan whole as its markdown, with no standing answer offered and its refusal named
+  "keep planning" — and the arguments that reading does not cover by key, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
   it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
@@ -214,7 +222,11 @@ reviewers that encode both, for an agent working in this tree.
   pane's breakdown — each model's share in whole percent that add up to 100, what each model
   is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
   pane is drawn with, `tree.rs` groups the working tree's files under the directories they
-  share, and `clock.rs` is the time the shell draws by, read by the loop once a tick and handed
+  share, and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
+  turns averaged, which the loop, never the fold, calls out by the turn's number; the loop also
+  has the app name the files a turn changed that no edit call reported, from a read of the
+  working tree that began after the turn started and one that began after it ended; and
+  `clock.rs` is the time the shell draws by, read by the loop once a tick and handed
   in, and absent where the machine has no timezone or a log recorded no times. `alert.rs` is how
   the shell calls the operator back — the bell, and the `OSC 9` or `OSC 777` notification the
   binary says the terminal shows — when a question no standing rule answers comes up or a turn
@@ -243,7 +255,7 @@ reviewers that encode both, for an agent working in this tree.
   `translate.rs` turns one message of it into events and owns no process — and reads the CLI's
   own mark of a call it did not run for want of permission, beside the result live and as the
   transcript's `permissionDecision`, as refused, whoever refused it — and reads an `Edit`,
-  `Write` or `Bash` permission prompt's arguments as what the call would do, and the MCP
+  `Write`, `Bash` or `ExitPlanMode` permission prompt's arguments as what the call would do, and the MCP
   servers every `init` lists, each with the tools of the session's that are its own, and the
   CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or
   address (never its arguments, environment or headers) — which it keeps for every later
@@ -254,7 +266,10 @@ reviewers that encode both, for an agent working in this tree.
   `initialize` what it offers — the answer is where the slash commands a
   session starts with are listed, `commands_changed` only reports a change to them — asks it
   `mcp_status` whenever an `init` lists a server standing otherwise than it last said, and after
-  `mcp_reconnect`, which it sends for the MCP view's `r` — asks it once,
+  `mcp_reconnect`, which it sends for the MCP view's `r` — starts it with
+  `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` and sends each prompt with a `uuid`, which
+  `rewind_files` names to put the files back as they were before that prompt: a dry run first,
+  for which files, and the rewind itself only once the dry run has answered, said as one notice — asks it once,
   where the config leaves titles on, to title a new session from its first prompt that is not a
   command (`generate_session_title`, which the CLI answers from its small model and bills into the
   session's running totals), and the only place the models the signed-in account can run are
@@ -319,7 +334,8 @@ reviewers that encode both, for an agent working in this tree.
   the operator is deciding on them, and records the answer as `niobe trust` does, for the text
   that was shown. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in,
-  and where the words a terse conversation appends to the CLI's system prompt are written.
+  and where the words a terse conversation, and one asked for its decisions, append to the
+  CLI's system prompt are written.
   `trim.rs` is `trim = true`: `niobe hook trim --raw <dir>`, the `PostToolUse` hook on `Bash` the
   CLI runs after a shell call succeeds, which hands back the call's report with its output trimmed
   by `niobe-core`'s `trim.rs`, the whole of it written to `.niobe/trim/` and named in the report
@@ -331,7 +347,8 @@ reviewers that encode both, for an agent working in this tree.
   config files, layers them under the trust record and names the selected profile to the shell;
   `repo.rs` is where the session runs — the repository's root, name and branch, the store under
   `.niobe/`, kept to the operator alone and refused where a link would write it elsewhere, and
-  the `git` reads of the working tree made on a thread of its own as the shell's `Watch`;
+  the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
+  each dated by when it began and, where the shell asked for it, sent though nothing changed;
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
   operator's trust decision about that file; `prices.rs` is the price table `niobe prices`
   prints and the sheet the shell values tokens with, at the rates of the days a session
@@ -339,11 +356,14 @@ reviewers that encode both, for an agent working in this tree.
   a log with no times is a floor; `profiles.rs` and `sessions.rs` are what
   `niobe profiles` and `niobe sessions` print; `overview.rs` is what `niobe overview` prints —
   every session the store holds, or the newest `--last` or those `--since` a day, folded, as one Markdown page of what went well and what went
-  wrong, what was left open, the tools used most and the paths changed most, with no figure a
+  wrong, what was left open — the files the sessions changed that git still lists uncommitted among it — the tools used most, the paths changed most and the decisions the
+  agents stated, newest first and marked as their own account, with no figure a
   model wrote, and the page the shell's overview shows, written on a thread of its own; `cost.rs` is
   what `niobe cost` prints — the same sessions, each with its tokens per kind and per model and
   the money its backend reported, as a table, as `--csv`, as `--by-day` — each UTC day's
   sessions and tokens summed by profile, with no money, since a day's would add a plan's nothing to a bill —
+  or `--by-turn`, each turn's tokens and a row for what no ended turn's figure holds, so a
+  session's rows add up to its total —
   or as `--json` in the shape
   `schema/cost.schema.json` publishes at the repository's root, with no money on a plan or where
   nothing said how a session was billed and no figure priced by the table; `headless.rs` is
@@ -359,7 +379,8 @@ reviewers that encode both, for an agent working in this tree.
   files under the system's temporary directory, allowed to edit and write inside that copy and
   nowhere else beyond the bench's own `--allow` rules, ended at its deadline, then judged by the
   task's check run from the suite so that the agent cannot rewrite it, with a failing task's
-  copy kept, as a table or as `--json` in the shape `schema/bench.schema.json` publishes;
+  copy kept, as a table or as `--json` in the shape `schema/bench.schema.json` publishes, and
+  with `--ab terse` the suite without the technique and then with it, side by side;
   `doctor.rs` is what `niobe doctor` prints — one row each for
   the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
   read from its files), the config files and whether the repository's is trusted, and the terminal,

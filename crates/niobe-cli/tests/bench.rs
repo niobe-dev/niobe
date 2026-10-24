@@ -176,6 +176,62 @@ fn each_task_is_judged_by_its_own_check_and_a_failure_keeps_its_copy() {
     assert_eq!(results["suite"], "suite");
 }
 
+/// A `claude` that does what [`DOES_IT_CLAUDE`] does, and says fewer words
+/// where it was started with an appended system prompt, which is how
+/// Niobe's terse instruction reaches it.
+const SHORTER_WHEN_TERSE: &str = r#"#!/bin/sh
+case "$*" in *--append-system-prompt*) out=3 ;; *) out=5 ;; esac
+usage="{\"input_tokens\":10,\"output_tokens\":$out,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}"
+read -r first
+read -r turn
+: > done.txt
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-sonnet-5","id":"msg_1"}}}'
+printf '%s\n' "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":$usage}}"
+printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":$usage}}"
+printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"total_cost_usd\":0.25,\"usage\":$usage}"
+while read -r line; do :; done
+"#;
+
+#[test]
+fn an_ab_run_measures_the_suite_without_the_technique_then_with_it() {
+    let setup = Setup::new(SHORTER_WHEN_TERSE);
+    setup.task("a", "done.txt");
+    setup.task("b", "done.txt");
+    let results = results(&setup.bench(&["--json", "--ab", "terse"]));
+
+    let refused = schema::refusals("bench.schema.json", &results);
+    assert!(refused.is_empty(), "{refused:#?}\n{results:#}");
+    assert_eq!(results["technique"], "terse");
+    assert_eq!(results["without"]["summary"]["output_tokens"], 10);
+    assert_eq!(results["with"]["summary"]["output_tokens"], 6);
+    assert_eq!(results["with"]["summary"]["passed"], 2);
+    assert_eq!(results["change"]["output_tokens"], -0.4);
+    assert_eq!(results["change"]["tokens"], -4.0 / 30.0);
+    assert_eq!(results["change"]["passed"], 0);
+
+    let output = setup.bench(&["--ab", "terse"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let printed = text(&output.stdout);
+    assert!(printed.contains("Without terse"), "{printed}");
+    assert!(printed.contains("With terse"), "{printed}");
+    let row = printed
+        .lines()
+        .find(|line| line.starts_with("output tokens"))
+        .unwrap_or_else(|| panic!("a row for output tokens:\n{printed}"));
+    assert!(
+        row.contains("10") && row.contains("6") && row.contains("−40.0%"),
+        "{row}"
+    );
+
+    let refused = setup.bench(&["--ab", "terse", "--terse", "on"]);
+    assert_ne!(refused.status.code(), Some(0));
+    assert!(
+        text(&refused.stderr).contains("--terse"),
+        "{}",
+        text(&refused.stderr)
+    );
+}
+
 #[test]
 fn the_table_says_which_passed_and_what_the_suite_spent() {
     let setup = Setup::new(DOES_IT_CLAUDE);

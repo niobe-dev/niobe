@@ -177,7 +177,8 @@ fn run(
             suite,
             json,
             timeout,
-        } => return run_bench(&suite, json, timeout, profile, &allow, &asked),
+            ab,
+        } => return run_bench(&suite, json, timeout, ab, profile, &allow, &asked),
         // Handed on whole: `run_other` matches every command itself.
         other => return run_other(other, profile, &asked).map(|()| 0),
     };
@@ -381,6 +382,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
                     away_after(loaded.config.catch_up()),
                     loaded.config.catch_up().automatic(),
                 )
+                .with_decisions_asked(loaded.config.decisions())
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -420,6 +422,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
             budget_usd: asked.budget,
             title: loaded.config.titles() == niobe_config::Titles::Model,
             terse: asked.terse.unwrap_or(loaded.config.terse()),
+            decisions: loaded.config.decisions(),
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
             ..backend::Attach::default()
@@ -666,6 +669,7 @@ fn resume(
             // The conversation's system prompt was recorded when it began,
             // and the CLI sends that record whatever a later start passes.
             terse: false,
+            decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
         },
@@ -858,6 +862,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             // The conversation's system prompt was recorded when it began,
             // and the CLI sends that record whatever a later start passes.
             terse: false,
+            decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
         },
@@ -980,6 +985,9 @@ fn print_turn(
             // on. The history shows the session by its prompt instead.
             title: false,
             terse,
+            // Not asked: a run with no shell has no pane to list them in,
+            // and the words would be spent on every run of a job.
+            decisions: false,
             tap,
             trim: trim_for(&root, loaded.config.trim())?,
             ..backend::Attach::default()
@@ -1088,6 +1096,7 @@ fn run_bench(
     suite: &Path,
     json: bool,
     timeout: Option<Duration>,
+    ab: Option<bench::Technique>,
     profile: Option<&str>,
     allow: &[Rule],
     asked: &Asked,
@@ -1107,19 +1116,14 @@ fn run_bench(
         flags.extend(["--allow".to_owned(), rule.to_string()]);
     }
     if let Some(terse) = asked.terse {
+        if let Some(technique) = ab {
+            return Err(format!(
+                "`--ab {}` runs the suite with it off and then on; leave `{}` out",
+                technique.name(),
+                technique.flag()
+            ));
+        }
         flags.extend(["--terse".to_owned(), on_off(terse).to_owned()]);
-    }
-
-    let started_at = SystemTime::now();
-    let mut ran = Vec::with_capacity(tasks.len());
-    for (number, task) in tasks.iter().enumerate() {
-        note(&format!(
-            "task {} of {}: {}",
-            number + 1,
-            tasks.len(),
-            task.name
-        ));
-        ran.push(bench::run(&exe, task, &flags, timeout));
     }
     let name = suite
         .canonicalize()
@@ -1129,15 +1133,67 @@ fn run_bench(
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| suite.display().to_string());
+
+    let Some(technique) = ab else {
+        let started_at = SystemTime::now();
+        let ran = run_suite(&exe, &tasks, &flags, timeout, "");
+        match json {
+            true => say!("{}", bench::document(&name, started_at, &ran, timeout)),
+            false => {
+                for line in bench::table(&ran, timeout) {
+                    say!("{line}");
+                }
+            }
+        }
+        return Ok(0);
+    };
+    let side = |on: bool| {
+        let mut flags = flags.clone();
+        flags.extend([technique.flag().to_owned(), on_off(on).to_owned()]);
+        flags
+    };
+    let started_without = SystemTime::now();
+    let without = run_suite(&exe, &tasks, &side(false), timeout, "without-");
+    let started_with = SystemTime::now();
+    let with = run_suite(&exe, &tasks, &side(true), timeout, "with-");
     match json {
-        true => say!("{}", bench::document(&name, started_at, &ran, timeout)),
+        true => say!(
+            "{}",
+            bench::ab_document(
+                technique,
+                bench::document(&name, started_without, &without, timeout),
+                bench::document(&name, started_with, &with, timeout),
+            )
+        ),
         false => {
-            for line in bench::table(&ran, timeout) {
+            for line in bench::ab_table(technique, &without, &with, timeout) {
                 say!("{line}");
             }
         }
     }
     Ok(0)
+}
+
+/// Every task of a suite, run in turn with `flags`, each saying on standard
+/// error which it is as it starts.
+fn run_suite(
+    exe: &Path,
+    tasks: &[bench::Task],
+    flags: &[String],
+    timeout: Duration,
+    side: &str,
+) -> Vec<bench::Ran> {
+    let mut ran = Vec::with_capacity(tasks.len());
+    for (number, task) in tasks.iter().enumerate() {
+        note(&format!(
+            "task {} of {}: {side}{}",
+            number + 1,
+            tasks.len(),
+            task.name
+        ));
+        ran.push(bench::run(exe, task, flags, timeout, side));
+    }
+    ran
 }
 
 /// Says something the operator is owed knowing on standard error, where a
@@ -1150,7 +1206,13 @@ fn note(text: &str) {
 fn print_overview(narrowing: args::Narrowing) -> Result<(), String> {
     let root = repo::root(&cwd()?);
     let folded = overview::narrowed(overview::read(&root)?, narrowing);
-    for line in overview::markdown(&repo::describe(&root).name, &folded, narrowing) {
+    let uncommitted = repo::uncommitted(&root);
+    for line in overview::markdown(
+        &repo::describe(&root).name,
+        &folded,
+        narrowing,
+        uncommitted.as_deref(),
+    ) {
         say!("{line}");
     }
     Ok(())
@@ -1730,16 +1792,17 @@ USAGE:
                            judge it by its check.sh; --json in the shape
                            schema/bench.schema.json publishes, --timeout <seconds> per turn
                            (900 by default). Each turn may edit and write inside its copy
-                           and, beyond --allow, nowhere else. bench/ in niobe's repository
-                           is a suite
+                           and, beyond --allow, nowhere else. --ab terse runs the suite
+                           without terse, then with it, and sets the two side by side.
+                           bench/ in niobe's repository is a suite
     niobe sessions         List the sessions this repository can carry on
     niobe overview         Print what every session here built and how it went, as Markdown;
                            --last <n> keeps the newest n, --since <YYYY-MM-DD> those from that
                            UTC day on
     niobe cost             List each session here with its tokens and the money its backend
                            reported; --json in the shape schema/cost.schema.json publishes,
-                           --csv as rows, --by-day as each UTC day's tokens summed by profile; --last
-                           and --since as for overview
+                           --csv as rows, --by-day as each UTC day's tokens summed by profile,
+                           --by-turn as each turn's tokens; --last and --since as for overview
     niobe profiles         List the profiles the config defines, the selected one marked
     niobe doctor [--json]  Check what a session needs — the CLIs, their sign-in, the config,
                            the terminal — and say how to fix what is missing
@@ -1886,6 +1949,13 @@ PROFILES:
     niobe's bench of twenty tasks it cut output tokens by 14% and the
     replies' length by a quarter, with every task still passing. A
     conversation carried on keeps the prompt it began with.
+
+    decisions = false, at the top of a config, stops asking each new
+    conversation to state the choices it makes — work left out of scope, one
+    approach taken over another — each on a line that opens DECISION:. On by
+    default. The Activity pane lists them under Decisions, as the agent says:
+    the agent's own account of its reasoning, which it may have wrong. A
+    run with -p never asks.
 
     trim = true, at the top of a config, has the agent read a cargo command's
     output without cargo's build progress and the tests that passed; every

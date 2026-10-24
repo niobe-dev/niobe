@@ -3,11 +3,13 @@
 
 //! What `niobe overview` prints: every session recorded in the repository,
 //! folded, as one Markdown page — what went well, what went wrong, what was
-//! left open, the tools the agent reached for and the paths it changed most.
+//! left open, the tools the agent reached for, the paths it changed most and
+//! the decisions it stated.
 //!
 //! Every figure is a sum of what [`SessionState`] folds each session to and
 //! every list is read off the same folds. Nothing is asked of a model: a
-//! summary a model wrote would be a guess with the look of a record.
+//! summary a model wrote would be a guess with the look of a record. The
+//! decisions are the one list in the agent's words, and the page says so.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +36,9 @@ pub struct Folded {
     pub started_at: SystemTime,
     /// Its events, folded.
     pub state: SessionState,
+    /// When each of [`SessionState::decisions`] was stated, in the same
+    /// order: the fold carries no times, and the store does.
+    pub decided_at: Vec<SystemTime>,
 }
 
 /// Every session the store at `root` holds, folded, oldest first; none where
@@ -46,8 +51,10 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
     for summary in store.sessions().map_err(|e| e.to_string())? {
         let stored = store.events(summary.id).map_err(|e| e.to_string())?;
         let mut state = SessionState::new();
+        let mut decided_at = Vec::new();
         for event in &stored {
             state.apply(&event.event);
+            decided_at.resize(state.decisions().len(), event.at);
         }
         folded.push(Folded {
             id: summary.id,
@@ -55,6 +62,7 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
             // by the CLI's own record rather than by its import.
             started_at: stored.first().map_or(summary.started_at, |event| event.at),
             state,
+            decided_at,
         });
     }
     // The store lists the newest first; a record of what was built reads
@@ -86,9 +94,13 @@ impl Page {
 /// The page for `root`, or why it could not be read, as the page.
 fn written(root: &Path) -> String {
     match read(root) {
-        Ok(folded) => {
-            markdown(&repo::describe(root).name, &folded, Narrowing::default()).join("\n")
-        }
+        Ok(folded) => markdown(
+            &repo::describe(root).name,
+            &folded,
+            Narrowing::default(),
+            repo::uncommitted(root).as_deref(),
+        )
+        .join("\n"),
         Err(error) => format!("The sessions recorded here could not be read: {error}"),
     }
 }
@@ -168,8 +180,15 @@ fn kept(narrowing: Narrowing) -> Option<String> {
 /// The page for the sessions of the repository `name`, oldest first, which
 /// `narrowing` kept of those recorded.
 ///
-/// An empty `sessions` is a page of one line saying so.
-pub fn markdown(name: &str, sessions: &[Folded], narrowing: Narrowing) -> Vec<String> {
+/// `uncommitted` is the working tree's changed files as git lists them now,
+/// or `None` where git could not be read. An empty `sessions` is a page of
+/// one line saying so.
+pub fn markdown(
+    name: &str,
+    sessions: &[Folded],
+    narrowing: Narrowing,
+    uncommitted: Option<&[String]>,
+) -> Vec<String> {
     let mut lines = vec![format!("# What has been built in {}", inline(name))];
     let (Some(first), Some(last)) = (sessions.first(), sessions.last()) else {
         lines.push(String::new());
@@ -194,9 +213,14 @@ pub fn markdown(name: &str, sessions: &[Folded], narrowing: Narrowing) -> Vec<St
     }
     section(&mut lines, "Highlights", highlights(sessions));
     section(&mut lines, "Lowlights", lowlights(sessions));
-    section(&mut lines, "Left open", left_open(sessions));
+    section(&mut lines, "Left open", left_open(sessions, uncommitted));
     section(&mut lines, "Most used tools", tools(sessions));
     section(&mut lines, "Most changed paths", paths(sessions));
+    section(
+        &mut lines,
+        "Decisions, as the agents said",
+        decisions(sessions),
+    );
     section(&mut lines, "Usage", usage(sessions));
     lines
 }
@@ -309,9 +333,11 @@ fn lowlights(sessions: &[Folded]) -> Vec<String> {
 
 /// What the record shows was not finished: a session that stopped in the
 /// middle of a turn, on a question nobody answered, on a failing test run, or
-/// with sub-agents still running.
-fn left_open(sessions: &[Folded]) -> Vec<String> {
-    let lines: Vec<String> = sessions
+/// with sub-agents still running — and the files the sessions changed that
+/// are among `uncommitted`, the working tree's changes as git lists them
+/// now, `None` where git could not be read.
+fn left_open(sessions: &[Folded], uncommitted: Option<&[String]>) -> Vec<String> {
+    let mut lines: Vec<String> = sessions
         .iter()
         .filter_map(|session| {
             let s = &session.state;
@@ -347,10 +373,57 @@ fn left_open(sessions: &[Folded]) -> Vec<String> {
             })
         })
         .collect();
+    lines.extend(not_committed(sessions, uncommitted));
     match lines.is_empty() {
-        true => vec!["Nothing: every session ended between turns.".to_owned()],
+        true => vec![
+            "Nothing: every session ended between turns, and what they changed is committed."
+                .to_owned(),
+        ],
         false => lines,
     }
+}
+
+/// The line naming the files the sessions changed that `uncommitted` holds,
+/// in the order git sorts them; none where every one is committed.
+///
+/// A path is matched as the backend named it, which is relative to where the
+/// session ran: a session started below the repository's root names its
+/// files from there, and git from the root, so those are not matched.
+fn not_committed(sessions: &[Folded], uncommitted: Option<&[String]>) -> Option<String> {
+    let Some(uncommitted) = uncommitted else {
+        return Some(
+            "- Whether what the sessions changed is committed could not be read from git."
+                .to_owned(),
+        );
+    };
+    let changed: std::collections::BTreeSet<&str> = sessions
+        .iter()
+        .flat_map(|session| session.state.files())
+        .map(|file| file.path.as_str())
+        .collect();
+    let mut open: Vec<&str> = uncommitted
+        .iter()
+        .map(String::as_str)
+        .filter(|path| changed.contains(path))
+        .collect();
+    open.sort_unstable();
+    open.dedup();
+    let (shown, rest) = open.split_at(open.len().min(ROWS));
+    let mut named = shown
+        .iter()
+        .map(|path| format!("`{}`", inline(path)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !rest.is_empty() {
+        named.push_str(&format!(" and {} more", grouped(rest.len() as u64)));
+    }
+    (!open.is_empty()).then(|| {
+        format!(
+            "- {} the sessions changed {} not committed: {named}",
+            counted(open.len() as u64, "file", "files"),
+            if open.len() == 1 { "is" } else { "are" }
+        )
+    })
 }
 
 fn tools(sessions: &[Folded]) -> Vec<String> {
@@ -471,6 +544,41 @@ fn usage(sessions: &[Folded]) -> Vec<String> {
     )]
 }
 
+/// Every decision the sessions' replies stated, newest first, each with when
+/// and in which session: the agent's account, said to be one.
+fn decisions(sessions: &[Folded]) -> Vec<String> {
+    let mut stated: Vec<(SystemTime, SessionId, &str)> = sessions
+        .iter()
+        .flat_map(|session| {
+            session
+                .state
+                .decisions()
+                .iter()
+                .zip(&session.decided_at)
+                .map(|(decision, at)| (*at, session.id, decision.summary.as_str()))
+        })
+        .collect();
+    if stated.is_empty() {
+        return vec!["None stated.".to_owned()];
+    }
+    // Stable, so two stated in one reply keep their order under the reverse.
+    stated.sort_by_key(|(at, id, _)| (*at, *id));
+    let mut lines = vec![
+        "As each session's agent stated them in its replies: its own account of what it \
+         chose, which nothing here checked. Newest first."
+            .to_owned(),
+        String::new(),
+    ];
+    lines.extend(stated.into_iter().rev().map(|(at, id, summary)| {
+        format!(
+            "- {} UTC, session {id}: {}",
+            utc_minute(at),
+            inline(summary)
+        )
+    }));
+    lines
+}
+
 fn more(lines: &mut Vec<String>, rows: usize, one: &str, many: &str) {
     if rows > ROWS {
         lines.push(String::new());
@@ -522,6 +630,10 @@ mod tests {
         Folded {
             id: id.to_string().parse().expect("a number is a session id"),
             started_at: UNIX_EPOCH + Duration::from_secs(1_789_732_800),
+            decided_at: vec![
+                UNIX_EPOCH + Duration::from_secs(1_789_732_800);
+                state.decisions().len()
+            ],
             state,
         }
     }
@@ -574,15 +686,48 @@ mod tests {
         };
         assert_eq!(
             written,
-            markdown("catalog", &[], Narrowing::default()).join("\n")
+            markdown("catalog", &[], Narrowing::default(), None).join("\n")
         );
         assert_eq!(page.drain(), None, "handed over once");
     }
 
     #[test]
+    fn the_decisions_are_listed_newest_first_as_the_agents_account_with_session_and_time() {
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
+        let mut first = folded(1, &[said("DECISION: kept the cache\nDECISION: no | pipes")]);
+        first.decided_at = vec![
+            UNIX_EPOCH + Duration::from_secs(1_789_732_800),
+            UNIX_EPOCH + Duration::from_secs(1_789_732_860),
+        ];
+        let mut second = folded(2, &[said("DECISION: left the exporter alone")]);
+        second.decided_at = vec![UNIX_EPOCH + Duration::from_secs(1_789_819_200)];
+
+        let lines = decisions(&[first, second]);
+
+        assert_eq!(
+            lines,
+            [
+                "As each session's agent stated them in its replies: its own account of what it \
+                 chose, which nothing here checked. Newest first.",
+                "",
+                "- 2026-09-19 12:00 UTC, session 2: left the exporter alone",
+                "- 2026-09-18 12:01 UTC, session 1: no | pipes",
+                "- 2026-09-18 12:00 UTC, session 1: kept the cache",
+            ]
+        );
+        assert_eq!(
+            decisions(&[folded(3, &[said("No decision.")])]),
+            ["None stated."]
+        );
+    }
+
+    #[test]
     fn a_repository_with_no_sessions_says_so_in_one_line() {
         assert_eq!(
-            markdown("niobe", &[], Narrowing::default()),
+            markdown("niobe", &[], Narrowing::default(), None),
             [
                 "# What has been built in niobe",
                 "",
@@ -621,7 +766,7 @@ mod tests {
         };
         assert_eq!(ids(narrowed(all(), both)), ["3"]);
         assert_eq!(
-            markdown("niobe", &[], from)[2],
+            markdown("niobe", &[], from, None)[2],
             format!(
                 "No session recorded in this repository is among the sessions started on {since} or later."
             )
@@ -642,7 +787,7 @@ mod tests {
         let sessions = [red, green];
 
         assert_eq!(
-            left_open(&sessions),
+            left_open(&sessions, Some(&[])),
             ["- Session 3: its last test run failed — `niobe --resume 3`"]
         );
         let low = lowlights(&sessions);
@@ -650,6 +795,35 @@ mod tests {
         assert!(
             low.contains(&"- Session 3: 1 failed test run — `niobe --resume 3`".to_owned()),
             "{low:?}"
+        );
+    }
+
+    #[test]
+    fn the_files_a_session_changed_that_are_still_uncommitted_are_left_open() {
+        let changed = |path: &str| Event::FileChange {
+            path: path.to_owned(),
+            added: Some(1),
+            removed: Some(0),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
+        };
+        let sessions = [
+            folded(1, &[changed("src/a.rs"), changed("src/b.rs")]),
+            folded(2, &[changed("src/a.rs"), changed("README.md")]),
+        ];
+        let tree = ["README.md", "src/a.rs", "notes.txt"].map(str::to_owned);
+
+        assert_eq!(
+            left_open(&sessions, Some(&tree)),
+            ["- 2 files the sessions changed are not committed: `README.md`, `src/a.rs`"]
+        );
+        assert_eq!(
+            left_open(&sessions, Some(&[])),
+            ["Nothing: every session ended between turns, and what they changed is committed."]
+        );
+        assert_eq!(
+            left_open(&sessions, None),
+            ["- Whether what the sessions changed is committed could not be read from git.",]
         );
     }
 
@@ -701,14 +875,14 @@ mod tests {
             reason: None,
             agent: None,
         });
-        let lines = left_open(&[folded(4, &events)]);
+        let lines = left_open(&[folded(4, &events)], Some(&[]));
         assert_eq!(
             lines,
             ["- Session 4: stopped waiting on 1 question — `niobe --resume 4`"]
         );
         assert_eq!(
-            left_open(&[folded(5, &[])]),
-            ["Nothing: every session ended between turns."]
+            left_open(&[folded(5, &[])], Some(&[])),
+            ["Nothing: every session ended between turns, and what they changed is committed."]
         );
     }
 }

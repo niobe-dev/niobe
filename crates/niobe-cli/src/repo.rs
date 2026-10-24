@@ -547,11 +547,15 @@ pub fn watch(root: &Path) -> Watcher {
 fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver<()>) {
     let mut last: Option<Repo> = None;
     let mut counts = Counts::default();
+    // Whether this read was asked for. One that was is sent even where the
+    // tree is as it was: the shell asked so as to know the tree as of a
+    // moment, and a read that says nothing leaves it not knowing.
+    let mut asked = false;
 
     loop {
         let began = Instant::now();
         if let Ok(repo) = read(root, name, &mut counts)
-            && last.as_ref() != Some(&repo)
+            && (asked || !last.as_ref().is_some_and(|last| unchanged(last, &repo)))
         {
             if reads.send(repo.clone()).is_err() {
                 return;
@@ -560,14 +564,33 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver
         }
         let idle = REFRESH.max(began.elapsed().saturating_mul(IDLE_SHARE));
 
-        match nudged.recv_timeout(idle) {
+        asked = match nudged.recv_timeout(idle) {
             // A turn changes many files and every one of them asks; they are
             // drained into the single read that follows.
-            Ok(()) => while nudged.try_recv().is_ok() {},
-            Err(RecvTimeoutError::Timeout) => {}
+            Ok(()) => {
+                while nudged.try_recv().is_ok() {}
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => false,
             Err(RecvTimeoutError::Disconnected) => return,
-        }
+        };
     }
+}
+
+/// Whether `repo` holds what `last` did, whenever each was read.
+fn unchanged(last: &Repo, repo: &Repo) -> bool {
+    Repo {
+        began: repo.began,
+        ..last.clone()
+    } == *repo
+}
+
+/// The files the working tree of the repository at `root` holds changed or
+/// untracked, as git names them from the root, read once; `None` where git
+/// cannot read it.
+pub fn uncommitted(root: &Path) -> Option<Vec<String>> {
+    let repo = read(root, "", &mut Counts::default()).ok()?;
+    Some(repo.working.into_iter().map(|file| file.path).collect())
 }
 
 /// Everything the shell shows about the repository at `root`, in one pass.
@@ -575,6 +598,7 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver
 /// `counts` is what the last read counted in the files git does not track,
 /// and leaves holding what this one did.
 fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
+    let started = Instant::now();
     let began = SystemTime::now();
     let status = branch_status(&git(
         root,
@@ -646,6 +670,7 @@ fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
         behind: status.behind,
         working,
         files,
+        began: Some(started),
     })
 }
 
@@ -1397,6 +1422,22 @@ mod tests {
         assert_eq!(read.name, "work");
         assert_eq!(read.branch.as_deref(), Some("main"));
         assert_eq!(read.working.len(), 1);
+    }
+
+    #[test]
+    fn a_read_asked_for_comes_back_dated_after_the_asking_though_nothing_changed() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let mut watching = watch(&work);
+        let first = within(&mut watching, Duration::from_secs(60)).expect("a read comes back");
+
+        let asked = Instant::now();
+        watching.changed();
+        let again = within(&mut watching, Duration::from_secs(60))
+            .expect("a read asked for comes back even where the tree is as it was");
+
+        assert!(again.began.is_some_and(|began| began >= asked), "{again:?}");
+        assert!(unchanged(&first, &again), "the tree itself did not move");
     }
 
     #[test]

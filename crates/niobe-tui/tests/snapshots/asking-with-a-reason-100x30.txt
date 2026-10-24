@@ -23,8 +23,8 @@
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm                    │ █ │ ▾ Sub-agents  1 running        █
  ┃   │ Tab type your own · Esc decide later                  │ █ │ ◆ test Cover tests/fet… 1m 42s █
  ┃   └───────────────────────────────────────────────────────┘ █ │   └ Reading tests/stream.rs    █
- ┃                                                             █ │ ▾ Tools  8 calls ✗ 2           │
- ┃ ─────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓      │
- ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │     Read 3                     │
+ ┃                                                             █ │ ▾ Decisions, as the agent says │
+ ┃ ─────────────────────────────────────────────────────────── ┃ │   none stated yet              │
+ ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │ ▾ Tools  8 calls ✗ 2           │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └────────────────────────────────┘
 EscStop 1Help   2Compact   3Clear   4Model   5Diff   6Rewind   7MCP   8Memory   9Settings   0Quit

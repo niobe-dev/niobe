@@ -113,7 +113,7 @@ impl Action {
             Action::Compact => "have the backend summarise, as /compact",
             Action::Resume => "carry an earlier session on",
             Action::History => "the prompts sent before",
-            Action::Rewind => "go back to a checkpoint, as /rewind",
+            Action::Rewind => "put the files back as they were before a prompt",
             Action::Stop => "stop the running turn",
             Action::Export => "copy the transcript to the clipboard",
             Action::Memory => "show what the agent is told and remembers",
@@ -232,7 +232,7 @@ pub const MENUS: [Menu; 6] = [
             item("Resume…", 0, "", Action::Resume),
             item("History…", 0, "Ctrl+R", Action::History),
             item("Find in transcript", 0, "Ctrl+F", Action::Find),
-            ruled("Rewind to checkpoint", 2, "F6", Action::Rewind),
+            ruled("Rewind files…", 2, "F6", Action::Rewind),
             item("Stop current run", 0, "Esc", Action::Stop),
             ruled("Export transcript", 0, "", Action::Export),
         ],
@@ -283,6 +283,15 @@ pub const MENUS: [Menu; 6] = [
     },
 ];
 
+/// What the menus call the item that performs `action`, where one does.
+pub fn label(action: Action) -> Option<&'static str> {
+    MENUS
+        .iter()
+        .flat_map(|menu| menu.items)
+        .find(|item| item.action == action)
+        .map(|item| item.label)
+}
+
 /// A command the shell answers itself when a prompt is that command, so that
 /// typing it does what its menu item and its F-key do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,27 +319,37 @@ const fn typed(name: &'static str, action: Action, backend: bool) -> Typed {
 /// Every command typed at the start of a prompt that the shell answers as
 /// one of its actions: those the menus name as an item's command, and the
 /// names Claude Code gives the dialogs the shell has instead of its own —
-/// `/model`, `/memory`, `/mcp`, `/resume`, `/help`, `/config`, `/exit` and
-/// `/quit`.
+/// `/model`, `/memory`, `/mcp`, `/resume`, `/help`, `/config`, `/status`,
+/// `/permissions`, `/export`, `/bug`, `/release-notes`, `/login`, `/logout`,
+/// `/theme`, `/exit` and `/quit`, none of which the CLI lists to a session
+/// it is driven in.
 ///
 /// One table, so a command and the menu item that does the same cannot drift
 /// apart: whichever way the operator asks, the action runs one path. A
 /// command not here goes to the backend as typed.
-pub const TYPED: [Typed; 14] = [
+pub const TYPED: [Typed; 22] = [
+    typed("bug", Action::ReportBug, false),
     typed("clear", Action::NewSession, true),
     typed("compact", Action::Compact, true),
     typed("config", Action::Settings, false),
     typed("doctor", Action::Doctor, true),
     typed("effort", Action::Effort, true),
     typed("exit", Action::Quit, false),
+    typed("export", Action::Export, false),
     typed("help", Action::Shortcuts, false),
     typed("hooks", Action::Hooks, true),
+    typed("login", Action::SignIn, false),
+    typed("logout", Action::SignIn, false),
     typed("mcp", Action::Mcp, false),
     typed("memory", Action::Memory, false),
     typed("model", Action::SwitchModel, false),
+    typed("permissions", Action::Permissions, false),
     typed("quit", Action::Quit, false),
+    typed("release-notes", Action::ReleaseNotes, false),
     typed("resume", Action::Resume, false),
-    typed("rewind", Action::Rewind, true),
+    typed("rewind", Action::Rewind, false),
+    typed("status", Action::Settings, false),
+    typed("theme", Action::Theme, false),
 ];
 
 /// The command `prompt` is, where the shell answers it, with what was typed
@@ -571,6 +590,26 @@ impl Open {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_codes_names_for_what_the_shell_has_its_own_of_are_the_shells() {
+        for (name, action) in [
+            ("/permissions", Action::Permissions),
+            ("/status", Action::Settings),
+            ("/export", Action::Export),
+            ("/bug", Action::ReportBug),
+            ("/release-notes", Action::ReleaseNotes),
+            ("/login", Action::SignIn),
+            ("/logout", Action::SignIn),
+            ("/theme", Action::Theme),
+        ] {
+            assert_eq!(
+                typed_command(name).map(|(typed, _)| (typed.action, typed.backend)),
+                Some((action, false)),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn no_two_menus_open_on_the_same_letter() {

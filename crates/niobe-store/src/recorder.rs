@@ -258,6 +258,7 @@ fn is_at(file: &std::os::fd::OwnedFd, path: &std::path::Path) -> Result<bool, St
 /// The file beside the store at `store` that marks `session` as held. Named
 /// with the store's own name before it, so an ignore rule for the store's
 /// side files covers it.
+#[cfg(unix)]
 fn hold_path(store: &std::path::Path, session: SessionId) -> std::path::PathBuf {
     let mut name = store.as_os_str().to_owned();
     name.push(format!("-open-{session}"));

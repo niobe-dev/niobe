@@ -76,6 +76,9 @@
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
 //!   rest is not surfaced, because no pane reads it and widening the shared
 //!   vocabulary for figures nothing draws would be a change nobody could see.
+//!   A `system`/`status` that names a mode other than the one last reported
+//!   is a [`Event::ModeSelected`] too: it is how the CLI says it left plan
+//!   mode when a plan was approved.
 //! * A sub-agent's own figures are what the CLI reports for that agent alone,
 //!   and they become [`Event::AgentProgress`]: the model its messages name,
 //!   the step `system`/`task_progress` says it is on, the first line of the
@@ -474,6 +477,11 @@ pub struct Translator {
     /// The reconnects Niobe asked for that the CLI has not answered yet, by
     /// `request_id`, each with the server it names: the answer names neither.
     reconnects: BTreeMap<String, String>,
+    /// The rewinds Niobe asked for that the CLI has not answered yet, by the
+    /// `request_id` of each of their two requests.
+    rewinds: BTreeMap<String, Rewind>,
+    /// Control requests an answer called for, not yet taken to be written.
+    requests: Vec<String>,
     /// What the CLI's last answer to `mcp_status` said of each server, by
     /// name, which every later `init` lists again without.
     mcp_said: BTreeMap<String, McpServer>,
@@ -553,6 +561,9 @@ pub struct Translator {
     /// Whether the CLI's last request state was `compacting`, so that the
     /// state after it is reported as the compaction's end.
     compacting: bool,
+    /// The mode the CLI last said it gates calls in, as it spells it, so a
+    /// `status` that repeats it says nothing new.
+    mode: Option<String>,
 }
 
 /// What a sub-agent's own transcript says about it that its messages, folded
@@ -608,6 +619,8 @@ impl Translator {
             title_requests: BTreeSet::new(),
             mcp_status_requests: BTreeSet::new(),
             reconnects: BTreeMap::new(),
+            rewinds: BTreeMap::new(),
+            requests: Vec::new(),
             mcp_said: BTreeMap::new(),
             mcp_listed: BTreeMap::new(),
             mcp_omitted: BTreeMap::new(),
@@ -632,6 +645,7 @@ impl Translator {
             read_spilled: None,
             file_exists: None,
             compacting: false,
+            mode: None,
         }
     }
 
@@ -791,6 +805,30 @@ impl Translator {
             .insert(request_id.to_owned(), server.to_owned());
     }
 
+    /// Tells the translator that `dry` asks the CLI what putting the files
+    /// back as they were before the prompt it sent as `prompt_id` would
+    /// change. Where the answer says they can go back, the request that puts
+    /// them back is asked as `real`, and taken with [`Self::take_requests`]:
+    /// asked before the dry run's answer, the CLI could put the files back
+    /// first and the dry run say nothing would change. `prompt` is how the
+    /// prompt is named to the operator.
+    pub fn asked_to_rewind(&mut self, dry: &str, real: &str, prompt_id: &str, prompt: &str) {
+        self.rewinds.insert(
+            dry.to_owned(),
+            Rewind::Dry {
+                real: real.to_owned(),
+                prompt_id: prompt_id.to_owned(),
+                prompt: prompt.to_owned(),
+            },
+        );
+    }
+
+    /// The control requests the CLI's answers called for since the last
+    /// call, each a line for its standard input, oldest first.
+    pub fn take_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.requests)
+    }
+
     /// Whether the MCP servers should be asked about again since the last
     /// call: an `init` listed one standing otherwise than the CLI last said
     /// — so why it failed, if it did, is not known — or a reconnect was
@@ -917,6 +955,14 @@ impl Translator {
         if self.answered_of_mcp(&outcome, out) {
             return;
         }
+        if let Some(rewind) = outcome
+            .request_id
+            .as_deref()
+            .and_then(|id| self.rewinds.remove(id))
+        {
+            self.answered_rewind(rewind, outcome, out);
+            return;
+        }
         let asked_model = outcome
             .request_id
             .as_deref()
@@ -973,6 +1019,48 @@ impl Translator {
             out.push(Event::ModelRefused {
                 back_to: self.taken_model.clone().or_else(|| self.model.clone()),
             });
+        }
+    }
+
+    /// Reads an answer to one of a rewind's two requests. A dry run that
+    /// says the files can go back asks for them to be put back, and is kept
+    /// for that answer to say what went back; one that says they cannot is
+    /// said at once, with its reason.
+    fn answered_rewind(
+        &mut self,
+        rewind: Rewind,
+        outcome: wire::ControlOutcome,
+        out: &mut Vec<Event>,
+    ) {
+        let taken = outcome.subtype.as_deref() == Some("success");
+        match rewind {
+            Rewind::Dry {
+                real,
+                prompt_id,
+                prompt,
+            } => match (taken, outcome.response) {
+                (true, Some(answer)) if answer.can_rewind == Some(true) => {
+                    let would = Would {
+                        files: answer
+                            .files_changed
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|path| self.relative(path))
+                            .collect(),
+                        insertions: answer.insertions,
+                        deletions: answer.deletions,
+                    };
+                    self.requests
+                        .push(rewind_request(&real, &prompt_id, false).to_string());
+                    self.rewinds.insert(real, Rewind::Real { prompt, would });
+                }
+                (true, Some(answer)) => out.push(not_rewound(&prompt, answer.error)),
+                (_, _) => out.push(not_rewound(&prompt, outcome.error)),
+            },
+            Rewind::Real { prompt, would } => out.push(match taken {
+                true => rewound(&prompt, &would),
+                false => not_rewound(&prompt, outcome.error),
+            }),
         }
     }
 
@@ -1056,6 +1144,22 @@ impl Translator {
         Event::McpServers { servers: listed }
     }
 
+    /// Reports `spelt`, the mode the CLI says it now gates calls in.
+    fn reported_mode(&mut self, spelt: String, out: &mut Vec<Event>) {
+        match read_mode(&spelt) {
+            Some(mode) => out.push(Event::ModeSelected { mode }),
+            // The CLI gates calls in ways Niobe has no word for —
+            // `acceptEdits`, `bypassPermissions`, `dontAsk` — and a profile
+            // can ask for one through its own arguments. Naming it beats
+            // showing a mode the session is not in.
+            None => out.push(warn(format!(
+                "the CLI is gating tool calls as `{spelt}`, which this version of Niobe does \
+                 not model. No mode is reported until the session is moved to one it does."
+            ))),
+        }
+        self.mode = Some(spelt);
+    }
+
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
         match system.subtype.as_deref() {
             Some("init") => {
@@ -1076,18 +1180,7 @@ impl Translator {
                     out.push(event);
                 }
                 if let Some(mode) = system.permission_mode {
-                    match read_mode(&mode) {
-                        Some(mode) => out.push(Event::ModeSelected { mode }),
-                        // The CLI gates calls in ways Niobe has no word for —
-                        // `acceptEdits`, `bypassPermissions`, `dontAsk` — and
-                        // a profile can ask for one through its own arguments.
-                        // Naming it beats showing a mode the session is not in.
-                        None => out.push(warn(format!(
-                            "the CLI is gating tool calls as `{mode}`, which this version of \
-                             Niobe does not model. No mode is reported until the session is \
-                             moved to one it does."
-                        ))),
-                    }
+                    self.reported_mode(mode, out);
                 }
             }
             // The last request's size is of a conversation the model no
@@ -1117,6 +1210,14 @@ impl Translator {
                     (false, false) | (true, true) => {}
                 }
                 self.compacting = compacting;
+                // The CLI moves itself out of plan mode when the operator
+                // approves a plan, back to the mode it was in before, and a
+                // `status` mid-turn is the only place it says so.
+                if let Some(mode) = system.permission_mode
+                    && self.mode.as_ref() != Some(&mode)
+                {
+                    self.reported_mode(mode, out);
+                }
             }
             // A running guess at the thinking tokens of the message being
             // produced (`estimated_tokens`, and the step since the last one).
@@ -1523,9 +1624,11 @@ impl Translator {
         // A message that names the sub-agent call it belongs to is that
         // agent's: its words and its calls are the agent's, not the session's.
         let agent = envelope.parent_tool_use_id.map(AgentId::new);
+        let written_by_cli = envelope.message.model.as_deref() == Some(CLI_WRITTEN);
         let blocks = match envelope.message.content {
             Some(wire::Content::Blocks(blocks)) => blocks,
             Some(wire::Content::Text(text)) => {
+                let text = lines_kept_where(written_by_cli, text);
                 out.push(Event::AssistantMessage { text, agent });
                 return;
             }
@@ -1583,6 +1686,7 @@ impl Translator {
         // The text first: it is what the model said before it acted, and the
         // transcript reads in that order.
         if !text.is_empty() {
+            let text = lines_kept_where(written_by_cli, text);
             out.push(Event::AssistantMessage { text, agent });
         }
         out.append(&mut calls);
@@ -2202,8 +2306,8 @@ impl Translator {
     }
 
     /// What a call to the CLI's tool `tool` would do, read from its `input`,
-    /// for the tools whose arguments are known here: `Edit`, `Write` and
-    /// `Bash`. `None` for any other tool, and for arguments not of the shape
+    /// for the tools whose arguments are known here: `Edit`, `Write`, `Bash`
+    /// and `ExitPlanMode`. `None` for any other tool, and for arguments not of the shape
     /// the tool takes, which the question then shows as they are.
     fn proposal_of(&self, tool: &str, input: &serde_json::Value) -> Option<Proposal> {
         let text = |key: &str| input.get(key)?.as_str().map(str::to_owned);
@@ -2238,6 +2342,12 @@ impl Translator {
                     command: text("command")?,
                 },
                 ["command"],
+            )),
+            "ExitPlanMode" => Some(Proposal::new(
+                Action::Plan {
+                    plan: text("plan")?,
+                },
+                ["plan"],
             )),
             _ => None,
         }
@@ -2851,6 +2961,116 @@ fn is_window_of(session: &str, model: &str) -> bool {
 /// standing rule does not already allow", which is Niobe's `ask`. The rest —
 /// `acceptEdits`, `bypassPermissions`, `dontAsk` — are modes the shell has no
 /// word for, and a wrong word for one is worse than none.
+/// One of the two requests a rewind is made of.
+#[derive(Debug)]
+enum Rewind {
+    /// The dry run: the request that puts the files back once it says they
+    /// can go, the id of the prompt they go back to before, and how that
+    /// prompt is named.
+    Dry {
+        real: String,
+        prompt_id: String,
+        prompt: String,
+    },
+    /// The request that puts the files back, with how the prompt is named
+    /// and what the dry run said would go back.
+    Real { prompt: String, would: Would },
+}
+
+/// What a dry run of a rewind said would go back.
+#[derive(Debug)]
+struct Would {
+    /// The files, as the operator reads their paths.
+    files: Vec<String>,
+    insertions: Option<u64>,
+    deletions: Option<u64>,
+}
+
+/// `rewind_files`, asking the CLI to put the files back as they were before
+/// the prompt it was sent as `prompt_id`, or with `dry_run` only to say what
+/// that would change.
+pub(crate) fn rewind_request(
+    request_id: &str,
+    prompt_id: &str,
+    dry_run: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "rewind_files",
+            "user_message_id": prompt_id,
+            "dry_run": dry_run,
+        },
+    })
+}
+
+/// What the session is told once the CLI has put the files back as they
+/// were before `prompt`: which went back, or that none had changed.
+fn rewound(prompt: &str, would: &Would) -> Event {
+    let message = match would.files.is_empty() {
+        true => format!("No file had changed since \"{prompt}\", so none was put back."),
+        false => {
+            let lines = match (would.insertions, would.deletions) {
+                (Some(added), Some(removed)) => format!(" (+{added} −{removed})"),
+                _ => String::new(),
+            };
+            format!(
+                "Files put back as they were before \"{prompt}\": {}{lines}. The \
+                 conversation keeps everything said since.",
+                would.files.join(", ")
+            )
+        }
+    };
+    Event::Notice { message }
+}
+
+/// What the session is told where the CLI would not put the files back as
+/// they were before `prompt`, with its reason where it gave one.
+fn not_rewound(prompt: &str, reason: Option<String>) -> Event {
+    warn(format!(
+        "no files were put back as they were before \"{prompt}\": {}",
+        reason.as_deref().unwrap_or("the CLI gave no reason")
+    ))
+}
+
+/// The model the CLI names on a message it wrote itself rather than asked a
+/// model for: the answer to a local command such as `/cost`, or a refusal.
+const CLI_WRITTEN: &str = "<synthetic>";
+
+/// `text` with each of its lines kept where `plain` says the CLI wrote it.
+///
+/// The shell draws a reply as markdown, where a single line break joins two
+/// lines into one paragraph. The CLI's own text is plain, laid out a line a
+/// figure (`/cost` puts each usage window on a line of its own), so each such
+/// break is made a markdown hard break. A fenced block already keeps its
+/// lines, and a break beside a blank line is a paragraph's end, so neither is
+/// touched. A model's reply is left as the model wrote it.
+fn lines_kept_where(plain: bool, text: String) -> String {
+    if !plain {
+        return text;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut kept = String::with_capacity(text.len() + lines.len() * 2);
+    let mut fenced = false;
+    for (at, line) in lines.iter().enumerate() {
+        kept.push_str(line);
+        let Some(next) = lines.get(at + 1) else {
+            break;
+        };
+        let fence = ["```", "~~~"]
+            .iter()
+            .any(|mark| line.trim_start().starts_with(mark));
+        if fence {
+            fenced = !fenced;
+        } else if !fenced && !line.trim().is_empty() && !next.trim().is_empty() {
+            kept.push_str("  ");
+        }
+        kept.push('\n');
+    }
+    kept
+}
+
 pub(crate) fn read_mode(mode: &str) -> Option<Mode> {
     match mode {
         "plan" => Some(Mode::Plan),
@@ -5792,6 +6012,24 @@ mod tests {
         assert!(!proposal.covers("dangerouslyDisableSandbox"));
     }
 
+    #[test]
+    fn leaving_plan_mode_proposes_the_plan_and_leaves_its_file_to_be_shown() {
+        // As Claude Code 2.1.309 asks it, plan and the file it was saved to.
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"1. Guard mean().\n2. Run it.","planFilePath":"/home/u/.claude/plans/p.md"},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        )
+        .expect("a plan is read");
+        assert_eq!(
+            proposal.action(),
+            &Action::Plan {
+                plan: "1. Guard mean().\n2. Run it.".to_owned()
+            }
+        );
+        assert!(proposal.covers("plan"));
+        assert!(!proposal.covers("planFilePath"));
+    }
+
     /// Arguments of another shape than the tool's are not read as the tool's:
     /// the question shows them as they are.
     #[test]
@@ -5804,6 +6042,7 @@ mod tests {
             ),
             ("Write", r#"{"file_path":"/f"}"#),
             ("Bash", r#"{"cmd":"ls"}"#),
+            ("ExitPlanMode", r#"{"planFilePath":"/p.md"}"#),
             ("Read", r#"{"file_path":"/f"}"#),
             ("mcp__notion__search", r#"{"command":"ls"}"#),
         ] {
@@ -6058,6 +6297,165 @@ mod tests {
                 "`{spelt}` did not read as {mode}"
             );
         }
+    }
+
+    /// The answers Claude Code 2.1.309 gave a dry run and then the rewind
+    /// itself, started with `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`.
+    #[test]
+    fn files_put_back_before_a_prompt_are_one_notice_naming_them() {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "make mean() return 0");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":true,"filesChanged":["/repo/stats.py","/repo/src/io.py"],"insertions":3,"deletions":2}}}"#,
+        );
+        let asked = translator.take_requests();
+        let done = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":true,"skippedLinks":0}}}"#,
+        );
+
+        assert!(dry.is_empty(), "{dry:?}");
+        assert_eq!(asked, [rewind_request("niobe-2", "p-1", false).to_string()]);
+        assert_eq!(
+            done,
+            [Event::Notice {
+                message: "Files put back as they were before \"make mean() return 0\": \
+                          stats.py, src/io.py (+3 −2). The conversation keeps everything \
+                          said since."
+                    .to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_rewind_the_cli_cannot_do_is_said_with_its_reason_and_not_asked_for() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "/cost");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":false,"error":"No file checkpoint found for this message."}}}"#,
+        );
+
+        assert!(translator.take_requests().is_empty());
+        assert_eq!(
+            warnings(&dry),
+            [
+                "no files were put back as they were before \"/cost\": No file checkpoint \
+              found for this message."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rewind_the_cli_refuses_outright_is_said_with_its_reason() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "fix it");
+
+        let dry = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-1","error":"Failed to rewind: File checkpointing is not enabled"}}"#,
+        );
+
+        assert!(translator.take_requests().is_empty());
+        assert_eq!(
+            warnings(&dry),
+            [
+                "no files were put back as they were before \"fix it\": Failed to rewind: \
+              File checkpointing is not enabled"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rewind_that_changed_no_file_says_so() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "explain it");
+
+        translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":true,"filesChanged":[],"insertions":0,"deletions":0}}}"#,
+        );
+        let done = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":true}}}"#,
+        );
+
+        assert_eq!(
+            done,
+            [Event::Notice {
+                message: "No file had changed since \"explain it\", so none was put back."
+                    .to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_reply_the_cli_writes_itself_keeps_each_of_its_lines() {
+        let mut translator = Translator::new("max");
+
+        // `/cost` as Claude Code 2.1.309 answers it, without the model.
+        let events = translator.line(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Using your subscription\n\nCurrent session: 17% used\nCurrent week: 35% used\n\n```\nkept as\nwritten\n```"}]}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::AssistantMessage {
+                text: "Using your subscription\n\nCurrent session: 17% used  \nCurrent week: 35% used\n\n```\nkept as\nwritten\n```".to_owned(),
+                agent: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_reply_the_model_wrote_is_left_as_markdown() {
+        let mut translator = Translator::new("max");
+
+        let events = translator.line(
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"one\ntwo"}]}}"#,
+        );
+
+        assert_eq!(
+            events,
+            [Event::AssistantMessage {
+                text: "one\ntwo".to_owned(),
+                agent: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_mode_the_cli_moves_to_mid_turn_reaches_the_session() {
+        let mut translator = Translator::new("max");
+        translator.line(r#"{"type":"system","subtype":"init","permissionMode":"plan"}"#);
+
+        // As Claude Code 2.1.309 reports a plan the operator approved: the
+        // CLI goes back to the mode it was in before plan, mid-turn.
+        let events = translator
+            .line(r#"{"type":"system","subtype":"status","status":null,"permissionMode":"auto"}"#);
+
+        assert_eq!(events, [Event::ModeSelected { mode: Mode::Auto }]);
+    }
+
+    #[test]
+    fn a_status_that_repeats_the_mode_the_cli_is_in_selects_nothing() {
+        let mut translator = Translator::new("max");
+        translator.line(r#"{"type":"system","subtype":"init","permissionMode":"plan"}"#);
+
+        let events = translator.line(
+            r#"{"type":"system","subtype":"status","status":"requesting","permissionMode":"plan"}"#,
+        );
+
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_mode_niobe_does_not_model_is_reported_once_however_often_a_status_repeats_it() {
+        let mut translator = Translator::new("max");
+        let status = r#"{"type":"system","subtype":"status","permissionMode":"bypassPermissions"}"#;
+
+        let first = translator.line(status);
+        let again = translator.line(status);
+
+        assert_eq!(warnings(&first).len(), 1, "{first:?}");
+        assert!(again.is_empty(), "{again:?}");
     }
 
     #[test]

@@ -13,6 +13,7 @@ against its absence.
 
 ```sh
 niobe bench bench/ --json > results.json
+niobe bench bench/ --ab terse     # without terse replies, then with them
 ```
 
 ## A task

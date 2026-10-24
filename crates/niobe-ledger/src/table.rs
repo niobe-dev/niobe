@@ -310,7 +310,7 @@ cache_write = 0.625
     }
 
     #[test]
-    fn a_zero_token_usage_record_on_a_known_model_prices_as_zero_dollars_api_equivalent() {
+    fn a_record_of_no_tokens_on_a_priced_model_costs_nothing_api_equivalent() {
         let usage = Usage {
             input: 0,
             output: 0,
@@ -330,7 +330,7 @@ cache_write = 0.625
     }
 
     #[test]
-    fn an_overlay_can_replace_context_windows_while_leaving_unmentioned_models_and_prices_intact() {
+    fn an_overlay_of_context_windows_leaves_the_prices_it_does_not_mention() {
         let path = PathBuf::from("/u/windows.toml");
         let user = PriceTable::parse(
             "[[context]]\nids = [\"m\"]\n[[context.window]]\nfrom = 2026-02-01\ntokens = 500_000\n",
@@ -339,14 +339,12 @@ cache_write = 0.625
         .expect("the user window table is valid");
         let merged = table().overlay(user);
 
-        // Price remains intact from the base table
         assert_eq!(
             merged
                 .price("m", date(2026, 1, 10))
                 .map(|p| p.rates().input().micros()),
             Some(1_000_000)
         );
-        // Window from overlay takes effect
         assert_eq!(merged.context_window("m", date(2026, 2, 1)), Some(500_000));
         assert_eq!(merged.context_window("m", date(2026, 1, 15)), None);
     }

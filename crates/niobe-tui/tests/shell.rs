@@ -3537,11 +3537,7 @@ fn no_pane_draws_its_text_against_its_border() {
 
         for (at, row) in frame.lines().enumerate() {
             let cells = &rows[at];
-            for pair in borders(row).chunks(2) {
-                if pair.len() < 2 {
-                    continue;
-                }
-                let (left, right) = (pair[0], pair[1]);
+            for &[left, right] in borders(row).as_chunks::<2>().0 {
                 assert_eq!(
                     cells.get(left + 1).copied(),
                     Some(' '),
@@ -4690,6 +4686,25 @@ fn the_focused_border_is_in_the_colour_the_theme_keeps_for_it() {
 /// The arrows walk the focused pane's section headers and Enter folds the one
 /// under the cursor, leaving the transcript and the composer alone.
 #[test]
+fn work_the_agent_says_it_left_out_of_scope_is_a_decision_in_the_activity_pane() {
+    let mut app = running_session();
+    app.apply(&Event::AssistantMessage {
+        text: "The etag path is done.\n\
+               DECISION: left the CSV exporter alone; it was not part of the request."
+            .to_owned(),
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("▾ Decisions, as the agent says  1"),
+        "{frame}"
+    );
+    assert!(frame.contains("left the CSV exporter alone"), "{frame}");
+}
+
+#[test]
 fn a_focused_pane_folds_the_section_under_its_cursor() {
     use ratatui::crossterm::event::KeyCode;
 
@@ -4699,10 +4714,12 @@ fn a_focused_pane_folds_the_section_under_its_cursor() {
     press(&mut app, KeyCode::Tab);
     let _ = screen(&mut app, 200, 60);
     press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     let frame = screen(&mut app, 200, 60);
 
     assert!(frame.contains("▸ Tools"), "{frame}");
+    assert!(frame.contains("▾ Decisions"), "{frame}");
     assert!(
         !app.folded(Section::SubAgents),
         "one section, the one under the cursor"
@@ -5515,6 +5532,11 @@ fn a_command_is_offered_only_where_it_opens_the_prompt_and_esc_leaves_it_as_type
     );
     press(&mut app, KeyCode::Enter);
     assert!(
+        app.take_produced().is_empty(),
+        "a command the backend did not list is held once"
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(
         !app.take_produced().is_empty(),
         "with the list closed, Enter sends"
     );
@@ -6108,6 +6130,55 @@ fn an_open_menu_hangs_from_its_name_with_the_keys_that_do_each_item() {
 /// An open menu in `classic`, colours and all, over the transcript: Far's
 /// white-on-cyan menu with its item under the cursor white on black, and the
 /// menu's shadow redrawing what it falls on in dark grey on black.
+/// The menu row's styles, cell by cell, beside its text: the identity on the
+/// right of the row is drawn after the menus and must leave theirs alone.
+fn menu_row(app: &mut App) -> (Vec<char>, Vec<ratatui::style::Style>) {
+    let text = screen(app, 160, 30);
+    let row: Vec<char> = text.lines().next().unwrap_or_default().chars().collect();
+    let cells = styles(app, 160, 30).into_iter().take(160).collect();
+    (row, cells)
+}
+
+fn title_at(row: &[char], name: &str) -> usize {
+    let name: Vec<char> = name.chars().collect();
+    row.windows(name.len())
+        .position(|window| window == name.as_slice())
+        .unwrap_or_else(|| panic!("{} is not on the menu row", String::from_iter(&name)))
+}
+
+#[test]
+fn every_menu_title_keeps_its_hot_letter_and_the_open_one_is_inverted_in_every_theme() {
+    for theme in THEMES {
+        let mut app = running_session().with_theme(theme);
+        let (row, cells) = menu_row(&mut app);
+        assert!(
+            String::from_iter(&row).trim_end().len() > 60,
+            "the identity is on the row, so it is drawn over it"
+        );
+        for menu in niobe_tui::menu::MENUS {
+            let at = title_at(&row, menu.name);
+            assert_eq!(
+                cells[at].fg,
+                Some(theme.hot),
+                "{} {}",
+                theme.name,
+                menu.name
+            );
+        }
+
+        app.on_key(alt('v'));
+        let (row, cells) = menu_row(&mut app);
+        let at = title_at(&row, "View");
+        assert_eq!(cells[at].fg, Some(theme.hot), "{}", theme.name);
+        assert_eq!(
+            (cells[at + 1].fg, cells[at + 1].bg),
+            (Some(theme.menu_bg), Some(theme.menu_fg)),
+            "{}: the open menu's title is inverted",
+            theme.name
+        );
+    }
+}
+
 #[test]
 fn an_open_menu_in_classic_is_painted_in_far_managers_colours() {
     let mut app = running_session()
