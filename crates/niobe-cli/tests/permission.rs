@@ -88,7 +88,23 @@ fn a_recorded_prompt_stops_the_shell_and_shows_what_would_run() {
     assert!(frame.contains("blocks this turn"), "{frame}");
     assert!(frame.contains("to run Bash"), "{frame}");
     assert!(frame.contains("cargo test"), "{frame}");
+
+    assert!(frame.contains("1. Allow once"), "{frame}");
+    assert!(frame.contains("2. Always allow Bash"), "{frame}");
+    assert!(frame.contains("3. Always allow this target"), "{frame}");
+    assert!(frame.contains("4. Deny"), "{frame}");
+
+    let asking = app.asking().expect("the prompt is waiting for input");
+    assert_eq!(asking.id.as_str(), "toolu_1");
+    assert_eq!(asking.tool, "Bash");
+    assert_eq!(asking.target, Some("cargo test".to_owned()));
+
     assert_eq!(app.session().pending_permissions().len(), 1);
+    assert!(
+        app.session()
+            .pending_permissions()
+            .contains(&"toolu_1".into())
+    );
 }
 
 #[test]
@@ -106,8 +122,13 @@ fn allowing_the_prompt_answers_the_call_it_gates_and_leaves_no_rule() {
         }]
     );
     assert!(app.take_rules().is_empty());
+    assert!(app.asking().is_none());
     assert!(app.session().pending_permissions().is_empty());
-    assert!(!screen(&mut app).contains("agent asks"));
+    assert_eq!(app.session().permissions_denied(), 0);
+
+    let frame = screen(&mut app);
+    assert!(!frame.contains("agent asks"), "{frame}");
+    assert!(!frame.contains("blocks this turn"), "{frame}");
 }
 
 #[test]
@@ -116,7 +137,19 @@ fn denying_the_prompt_is_visible_in_the_timeline() {
 
     choose(&mut app, '4');
 
+    assert_eq!(
+        app.take_produced(),
+        [Event::PermissionResponse {
+            id: "toolu_1".into(),
+            decision: PermissionDecision::Deny,
+            message: None,
+        }]
+    );
+    assert!(app.take_rules().is_empty());
+    assert!(app.asking().is_none());
+    assert!(app.session().pending_permissions().is_empty());
     assert_eq!(app.session().permissions_denied(), 1);
+
     let frame = screen(&mut app);
     assert!(
         frame.contains("denied") && frame.contains("Bash · cargo test"),
@@ -132,6 +165,16 @@ fn an_always_answer_survives_a_restart() {
     // The session the operator answers "always this target" in.
     let mut app = shell_on_the_prompt();
     choose(&mut app, '3');
+
+    assert_eq!(
+        app.take_produced(),
+        [Event::PermissionResponse {
+            id: "toolu_1".into(),
+            decision: PermissionDecision::AllowAlways,
+            message: None,
+        }]
+    );
+
     let made = app.take_rules();
     assert_eq!(made, [Rule::targeted("Bash", "cargo test")]);
     for rule in &made {
@@ -160,12 +203,24 @@ fn an_always_answer_survives_a_restart() {
             message: None,
         }]
     );
+    assert!(next.session().pending_permissions().is_empty());
+    assert_eq!(next.session().permissions_denied(), 0);
 }
 
 #[test]
 fn a_rule_covers_the_target_it_names_and_nothing_else() {
     let mut app = shell_on_the_prompt();
     choose(&mut app, '3');
+
+    assert_eq!(
+        app.take_produced(),
+        [Event::PermissionResponse {
+            id: "toolu_1".into(),
+            decision: PermissionDecision::AllowAlways,
+            message: None,
+        }]
+    );
+    assert_eq!(app.take_rules(), [Rule::targeted("Bash", "cargo test")]);
 
     // A different command under the same tool is a different question.
     app.apply(&Event::PermissionRequest {
@@ -179,10 +234,16 @@ fn a_rule_covers_the_target_it_names_and_nothing_else() {
     });
     app.settle_rules();
 
-    assert_eq!(
-        app.asking().map(|ask| ask.target.clone()),
-        Some(Some("cargo publish".to_owned())),
-        "a standing answer about one command allowed another"
+    let asking = app.asking().expect("the new command requires input");
+    assert_eq!(asking.id.as_str(), "toolu_2");
+    assert_eq!(asking.tool, "Bash");
+    assert_eq!(asking.target, Some("cargo publish".to_owned()));
+
+    assert_eq!(app.session().pending_permissions().len(), 1);
+    assert!(
+        app.session()
+            .pending_permissions()
+            .contains(&"toolu_2".into())
     );
 }
 
@@ -190,6 +251,15 @@ fn a_rule_covers_the_target_it_names_and_nothing_else() {
 fn always_this_tool_answers_every_call_to_it() {
     let mut app = shell_on_the_prompt();
     choose(&mut app, '2');
+
+    assert_eq!(
+        app.take_produced(),
+        [Event::PermissionResponse {
+            id: "toolu_1".into(),
+            decision: PermissionDecision::AllowAlways,
+            message: None,
+        }]
+    );
     assert_eq!(app.take_rules(), [Rule::tool("Bash")]);
 
     app.apply(&Event::PermissionRequest {
@@ -204,6 +274,15 @@ fn always_this_tool_answers_every_call_to_it() {
     app.settle_rules();
 
     assert!(app.asking().is_none());
+    assert_eq!(
+        app.take_produced(),
+        [Event::PermissionResponse {
+            id: "toolu_2".into(),
+            decision: PermissionDecision::AllowByRule,
+            message: None,
+        }]
+    );
+    assert!(app.session().pending_permissions().is_empty());
 }
 
 #[test]
@@ -225,7 +304,9 @@ fn an_answer_written_at_the_prompt_is_the_answer_the_call_gets() {
         }],
         "the words did not go back as the answer to the call"
     );
+    assert!(app.asking().is_none());
     assert!(app.session().pending_permissions().is_empty());
+    assert_eq!(app.session().permissions_denied(), 1);
     assert_eq!(
         app.session().user_messages(),
         0,
@@ -301,8 +382,11 @@ fn refusals(app: &App) -> usize {
 fn the_recorded_refusal_reads_as_one_entry() {
     let mut app = answered_turn(refusing_the_write(None));
 
+    assert!(app.asking().is_none());
+    assert!(app.session().pending_permissions().is_empty());
     assert_eq!(app.session().permissions_denied(), 1);
     assert_eq!(refusals(&app), 1, "{:#?}", app.entries());
+
     let frame = screen(&mut app);
     assert!(frame.contains("denied.txt"), "{frame}");
     assert!(
@@ -315,7 +399,11 @@ fn the_recorded_refusal_reads_as_one_entry() {
 fn a_refusal_written_at_the_prompt_reads_as_one_entry_that_keeps_the_words() {
     let mut app = answered_turn(refusing_the_write(Some("Do not create denied.txt.")));
 
+    assert!(app.asking().is_none());
+    assert!(app.session().pending_permissions().is_empty());
+    assert_eq!(app.session().permissions_denied(), 1);
     assert_eq!(refusals(&app), 1, "{:#?}", app.entries());
+
     let frame = screen(&mut app);
     assert!(
         frame.contains("You answered instead: Do not create denied.txt."),
