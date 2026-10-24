@@ -2237,6 +2237,12 @@ impl App {
         // A mark holds the figures of the conversation that ended.
         self.looked = Mark::default();
         self.caught_up = Mark::default();
+        // The watch counts turns of the conversation that ended, and the new
+        // one numbers its turns from nothing: kept, it would wait for a turn
+        // count this conversation reaches only after as many turns, saying
+        // nothing of any of them, and then name all their changes as one
+        // turn's. The next turn begins a watch of its own.
+        self.tree_watch = None;
     }
 
     /// Records that the process this session runs in is leaving it with a
@@ -12901,6 +12907,53 @@ mod tests {
         app.settle_tree(at(5));
         app.settle_tree(at(6));
         assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+    }
+
+    #[test]
+    fn a_turn_after_a_clear_still_names_what_it_changed_with_no_edit_call() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        for input in [1_000, 1_200] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+        }
+        // `/clear` is sent as a prompt, and the backend starts the
+        // conversation over inside the turn that prompt opened.
+        app.apply(&Event::UserMessage {
+            text: "/clear".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&Event::Cleared);
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[]));
+        app.settle_tree(at(5));
+
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        app.settle_tree(at(6));
+        app.set_repo(tree_read(at(7), &[]));
+        app.settle_tree(at(8));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(9));
+        app.set_repo(tree_read(at(10), &[file("src/main.rs", 2, 2)]));
+        app.settle_tree(at(11));
+        app.settle_tree(at(12));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        let turns = app.session().turns().len();
+        assert_eq!(said[0].meta, format!("turn {turns} · 1 file"));
+        assert!(
+            said[0].body.contains("src/main.rs +2 −2"),
+            "{}",
+            said[0].body
+        );
     }
 
     #[test]
