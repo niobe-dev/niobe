@@ -766,6 +766,14 @@ const TRANSCRIPT_SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
 /// the resolved one: a temporary directory on macOS is reached through a
 /// symlink, and both binaries run in the directory behind it.
 fn claude_config_with_the_transcript(cwd: &Path) -> tempfile::TempDir {
+    let cwd = std::fs::canonicalize(cwd).expect("the working directory resolves");
+    claude_config_with_the_transcript_run_in(&cwd, &cwd)
+}
+
+/// A configuration directory for the `claude` CLI holding that transcript
+/// where the CLI keeps `cwd`'s, recorded as run in `ran_in`: the fixture's
+/// records say `/repo`, and the copy says where the session ran.
+fn claude_config_with_the_transcript_run_in(cwd: &Path, ran_in: &Path) -> tempfile::TempDir {
     let config = tempfile::tempdir().expect("a temporary directory can be created");
     let cwd = std::fs::canonicalize(cwd).expect("the working directory resolves");
     // The CLI keeps ASCII letters and digits and makes a `-` of the rest; a
@@ -777,11 +785,14 @@ fn claude_config_with_the_transcript(cwd: &Path) -> tempfile::TempDir {
         .collect();
     let dir = config.path().join("projects").join(flattened);
     std::fs::create_dir_all(&dir).expect("the project directory can be made");
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(TRANSCRIPT),
-        dir.join(format!("{TRANSCRIPT_SESSION}.jsonl")),
-    )
-    .expect("the transcript is copied");
+    let recorded = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(TRANSCRIPT))
+        .expect("the transcript is read");
+    let placed = recorded.replace(
+        r#""cwd":"/repo""#,
+        &format!(r#""cwd":{:?}"#, ran_in.to_string_lossy()),
+    );
+    std::fs::write(dir.join(format!("{TRANSCRIPT_SESSION}.jsonl")), placed)
+        .expect("the transcript is written");
     config
 }
 

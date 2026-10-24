@@ -406,7 +406,7 @@ pub fn recorded(
     let Some(dir) = transcripts(profile, cwd, config_dir, home) else {
         return Ok(Vec::new());
     };
-    let listed = transcript::list(&dir).map_err(|e| e.to_string())?;
+    let listed = transcript::list(&dir, cwd).map_err(|e| e.to_string())?;
     Ok(listed
         .into_iter()
         .map(|transcript| Recorded {
@@ -443,6 +443,15 @@ pub fn history(
         return Err(format!(
             "no claude session {session} in {}; `niobe sessions` lists the ones there are",
             dir.display()
+        ));
+    }
+    // Another directory whose name the CLI flattens into this one's keeps its
+    // transcripts here too, and the CLI would carry that conversation on in
+    // this repository as readily as in its own.
+    if let Some(elsewhere) = transcript::ran_elsewhere(&path, cwd) {
+        return Err(format!(
+            "claude session {session} ran in {}, not here; open it from there",
+            elsewhere.display()
         ));
     }
     // The transcript says nothing about the profile it was recorded under, so

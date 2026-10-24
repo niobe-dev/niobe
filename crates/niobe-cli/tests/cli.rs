@@ -552,6 +552,14 @@ const TRANSCRIPT_SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
 /// A configuration directory for the `claude` CLI holding that transcript as a
 /// session recorded in `cwd`, in the layout the CLI writes.
 fn claude_config_with_the_transcript(cwd: &Path) -> tempfile::TempDir {
+    let cwd = std::fs::canonicalize(cwd).expect("the working directory resolves");
+    claude_config_with_the_transcript_run_in(&cwd, &cwd)
+}
+
+/// A configuration directory for the `claude` CLI holding that transcript
+/// where the CLI keeps `cwd`'s, recorded as run in `ran_in`: the fixture's
+/// records say `/repo`, and the copy says where the session ran.
+fn claude_config_with_the_transcript_run_in(cwd: &Path, ran_in: &Path) -> tempfile::TempDir {
     let config = tempfile::tempdir().expect("a temporary directory can be created");
     // The name is made from the working directory as a process sees it, which
     // is the resolved one: a temporary directory on macOS is reached through a
@@ -566,11 +574,14 @@ fn claude_config_with_the_transcript(cwd: &Path) -> tempfile::TempDir {
         .collect();
     let dir = config.path().join("projects").join(flattened);
     std::fs::create_dir_all(&dir).expect("the project directory can be made");
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(TRANSCRIPT),
-        dir.join(format!("{TRANSCRIPT_SESSION}.jsonl")),
-    )
-    .expect("the transcript is copied");
+    let recorded = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(TRANSCRIPT))
+        .expect("the transcript is read");
+    let placed = recorded.replace(
+        r#""cwd":"/repo""#,
+        &format!(r#""cwd":{:?}"#, ran_in.to_string_lossy()),
+    );
+    std::fs::write(dir.join(format!("{TRANSCRIPT_SESSION}.jsonl")), placed)
+        .expect("the transcript is written");
     config
 }
 
@@ -627,6 +638,37 @@ fn a_claude_session_folds_into_the_history_and_the_bill_the_cli_recorded() {
     );
     // Reading a transcript writes nothing: a look at one leaves the repository
     // as it was, and the CLI's own directory is never written to at all.
+    assert!(!setup.repo.path().join(".niobe").exists());
+}
+
+#[test]
+fn a_claude_session_another_directory_ran_is_neither_listed_nor_carried_on_here() {
+    let setup = Configured::new("", "");
+    // A directory whose name the CLI flattens into this repository's: its
+    // last `/` is a `_` here, and both are a `-` to the CLI, which keeps the
+    // transcripts of the two in one directory.
+    let here = std::fs::canonicalize(setup.repo.path()).expect("the repository resolves");
+    let text = here.to_string_lossy();
+    let cut = text.rfind('/').expect("an absolute path has a `/`");
+    let elsewhere = PathBuf::from(format!("{}_{}", &text[..cut], &text[cut + 1..]));
+    let claude = claude_config_with_the_transcript_run_in(&here, &elsewhere);
+
+    let listed = setup.run_with_claude_sessions(claude.path(), &["sessions"]);
+    let out = stdout(&listed);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    assert!(
+        !out.contains(TRANSCRIPT_SESSION),
+        "another directory's session was listed as this repository's:\n{out}"
+    );
+
+    let resumed = setup.run_with_claude_sessions(claude.path(), &["--resume", TRANSCRIPT_SESSION]);
+    let err = stderr(&resumed);
+    assert!(
+        !resumed.status.success(),
+        "another directory's conversation was read in:\n{}",
+        stdout(&resumed)
+    );
+    assert!(err.contains(&*elsewhere.to_string_lossy()), "{err}");
     assert!(!setup.repo.path().join(".niobe").exists());
 }
 

@@ -240,6 +240,12 @@ fn ran_in(dir: &Path, cwd: &Path) -> bool {
         .any(|path| recorded_cwd(&path).is_some_and(|recorded| recorded == cwd))
 }
 
+/// The directory the transcript at `path` recorded running in, where that is
+/// a directory other than `cwd`; nothing where it is `cwd` or says none.
+pub fn ran_elsewhere(path: &Path, cwd: &Path) -> Option<PathBuf> {
+    recorded_cwd(path).filter(|ran| ran != cwd)
+}
+
 /// The working directory the transcript at `path` says it ran in: the first
 /// `cwd` any of its records carries. The CLI's own bookkeeping records that
 /// open a file carry none, so the first line is not enough.
@@ -319,7 +325,16 @@ impl std::error::Error for TranscriptError {
     }
 }
 
-/// The sessions the CLI has recorded in `dir`, newest first.
+/// The sessions the CLI has recorded in `dir` for the working directory
+/// `cwd`, newest first.
+///
+/// The CLI names a directory of transcripts after the working directory with
+/// every character but an ASCII letter or digit made a `-`, so `/w/b-c` and
+/// `/w/b/c`, or two folders named in another script with as many characters,
+/// share one. A transcript that recorded running in a directory other than
+/// `cwd` is that directory's session and is left out: offered here, opening it
+/// would carry another repository's conversation on in this one. One that
+/// records no directory, as some older releases' do not, is listed.
 ///
 /// A directory that is not there is a working directory the CLI has never run
 /// in, which is a list of no sessions and not a failure.
@@ -327,7 +342,7 @@ impl std::error::Error for TranscriptError {
 /// A transcript whose first turn cannot be read is still listed, with no
 /// prompt against it: the id is what continues the session, and a file that
 /// cannot be read reports itself when it is.
-pub fn list(dir: &Path) -> Result<Vec<Transcript>, TranscriptError> {
+pub fn list(dir: &Path, cwd: &Path) -> Result<Vec<Transcript>, TranscriptError> {
     let failed = |error: std::io::Error| TranscriptError::Directory {
         path: dir.to_path_buf(),
         error,
@@ -349,6 +364,9 @@ pub fn list(dir: &Path) -> Result<Vec<Transcript>, TranscriptError> {
             continue;
         };
         let opening = opening(&path);
+        if opening.cwd.as_deref().is_some_and(|ran| ran != cwd) {
+            continue;
+        }
         transcripts.push(Transcript {
             id: id.to_owned(),
             last_at: entry.metadata().ok().and_then(|at| at.modified().ok()),
@@ -854,15 +872,19 @@ struct Opening {
     first_prompt: Option<String>,
     /// How the CLI was started, as the first record that says spells it.
     entrypoint: Option<String>,
+    /// Where it ran, as the first record that says: see [`recorded_cwd`].
+    cwd: Option<PathBuf>,
 }
 
 /// The first turn of the transcript at `path` that the CLI did not write
-/// itself, and how the CLI that wrote it was started. Read only as far as
-/// both are known, since a list reads every transcript of the repository.
+/// itself, how the CLI that wrote it was started and where it ran. Read only
+/// as far as all three are known, since a list reads every transcript of the
+/// repository; the record a turn is typed in carries all three.
 fn opening(path: &Path) -> Opening {
     #[derive(Deserialize)]
     struct Entered {
         entrypoint: Option<String>,
+        cwd: Option<PathBuf>,
     }
 
     let mut opening = Opening::default();
@@ -873,17 +895,19 @@ fn opening(path: &Path) -> Opening {
         let Ok(line) = line else {
             break;
         };
-        if opening.entrypoint.is_none() {
-            opening.entrypoint = serde_json::from_str::<Entered>(&line)
-                .ok()
-                .and_then(|entered| entered.entrypoint);
+        if opening.entrypoint.is_none() || opening.cwd.is_none() {
+            let entered = serde_json::from_str::<Entered>(&line).ok();
+            if let Some(entered) = entered {
+                opening.entrypoint = opening.entrypoint.or(entered.entrypoint);
+                opening.cwd = opening.cwd.or(entered.cwd);
+            }
         }
         if opening.first_prompt.is_none()
             && let Ok(record) = serde_json::from_str::<Line>(&line)
         {
             opening.first_prompt = prompt(&record);
         }
-        if opening.first_prompt.is_some() && opening.entrypoint.is_some() {
+        if opening.first_prompt.is_some() && opening.entrypoint.is_some() && opening.cwd.is_some() {
             break;
         }
     }
@@ -1852,7 +1876,7 @@ mod tests {
         let found = directory(config.path(), &cwd);
 
         assert_eq!(found, ours);
-        let listed = list(&found).expect("the directory lists");
+        let listed = list(&found, &cwd).expect("the directory lists");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "mine");
     }
@@ -1863,7 +1887,10 @@ mod tests {
 
         let found = directory(config.path(), &long_cwd("never"));
 
-        assert_eq!(list(&found).expect("absence is not a failure"), []);
+        assert_eq!(
+            list(&found, &long_cwd("never")).expect("absence is not a failure"),
+            []
+        );
     }
 
     /// Writes `text` as the transcript of session `id` in `dir`, last written
@@ -1919,7 +1946,7 @@ mod tests {
             CLI_TURNS_FIRST,
         );
 
-        let listed = list(dir.path()).expect("the directory lists");
+        let listed = list(dir.path(), Path::new("/repo")).expect("the directory lists");
         assert_eq!(listed[0].first_prompt.as_deref(), Some("first real prompt"));
 
         let events = events(
@@ -2054,7 +2081,7 @@ mod tests {
             &prompt("an older release wrote no entrypoint"),
         );
 
-        let listed = list(dir.path()).expect("the directory lists");
+        let listed = list(dir.path(), Path::new("/repo")).expect("the directory lists");
         let scripted: Vec<(&str, bool)> =
             listed.iter().map(|t| (t.id.as_str(), t.scripted)).collect();
         assert_eq!(
@@ -2062,6 +2089,59 @@ mod tests {
             [("typed", false), ("scripted", true), ("unsaid", false)],
             "only a record that says it came over the SDK marks a session scripted"
         );
+    }
+
+    /// A transcript whose first prompt was typed in `cwd`, as the CLI
+    /// records where each of its turns ran.
+    fn ran_in(cwd: &str, text: &str) -> String {
+        format!(
+            "{{\"type\":\"queue-operation\"}}\n{{\"type\":\"user\",\"cwd\":{cwd:?},\
+             \"message\":{{\"role\":\"user\",\"content\":{text:?}}}}}\n"
+        )
+    }
+
+    #[test]
+    fn a_session_another_directory_s_name_flattens_into_this_one_s_is_not_listed_here() {
+        // `/w/b-c` and `/w/b/c` are both `-w-b-c` to the CLI, which keeps
+        // the transcripts of both in one directory.
+        let config = tempfile::tempdir().expect("a temporary directory can be created");
+        let here = Path::new("/w/b-c");
+        let dir = directory(config.path(), here);
+        assert_eq!(dir, directory(config.path(), Path::new("/w/b/c")));
+        std::fs::create_dir_all(&dir).expect("the directory is created");
+        transcript(
+            &dir,
+            "ours",
+            Duration::from_secs(60),
+            &ran_in("/w/b-c", "fix the parser"),
+        );
+        transcript(
+            &dir,
+            "theirs",
+            Duration::from_secs(120),
+            &ran_in("/w/b/c", "delete the old releases"),
+        );
+        transcript(
+            &dir,
+            "unplaced",
+            Duration::from_secs(180),
+            &prompt("an older release wrote no cwd"),
+        );
+
+        let listed = list(&dir, here).expect("the directory lists");
+
+        let ids: Vec<&str> = listed.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["ours", "unplaced"],
+            "a session recorded as run in another directory is that directory's"
+        );
+        assert_eq!(
+            ran_elsewhere(&dir.join("theirs.jsonl"), here),
+            Some(PathBuf::from("/w/b/c"))
+        );
+        assert_eq!(ran_elsewhere(&dir.join("ours.jsonl"), here), None);
+        assert_eq!(ran_elsewhere(&dir.join("unplaced.jsonl"), here), None);
     }
 
     #[test]
@@ -2074,7 +2154,7 @@ mod tests {
             .join("\n");
         transcript(dir.path(), "nothing-typed", Duration::from_secs(60), &text);
 
-        let listed = list(dir.path()).expect("the directory lists");
+        let listed = list(dir.path(), Path::new("/repo")).expect("the directory lists");
         assert_eq!(listed[0].first_prompt, None);
     }
 
@@ -2084,7 +2164,7 @@ mod tests {
         let text = format!("{COMPACT_SUMMARY}\n{}", prompt("now fix the bug"));
         transcript(dir.path(), "compacted", Duration::from_secs(60), &text);
 
-        let listed = list(dir.path()).expect("the directory lists");
+        let listed = list(dir.path(), Path::new("/repo")).expect("the directory lists");
         assert_eq!(listed[0].first_prompt.as_deref(), Some("now fix the bug"));
 
         let events = events(
@@ -2135,7 +2215,7 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "not a transcript")
             .expect("the file is written");
 
-        let listed = list(dir.path()).expect("the directory lists");
+        let listed = list(dir.path(), Path::new("/repo")).expect("the directory lists");
 
         let named: Vec<(&str, Option<&str>)> = listed
             .iter()
@@ -2168,7 +2248,7 @@ mod tests {
         let path = dir.join(format!("{id}.{EXTENSION}"));
         let listed = promptly({
             let dir = dir.to_path_buf();
-            move || list(&dir).expect("the directory lists")
+            move || list(&dir, Path::new("/repo")).expect("the directory lists")
         });
         let named = listed
             .iter()
@@ -2223,7 +2303,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
 
         assert_eq!(
-            list(&dir.path().join("never-run-here")).expect("absence is not a failure"),
+            list(&dir.path().join("never-run-here"), Path::new("/repo"))
+                .expect("absence is not a failure"),
             []
         );
     }

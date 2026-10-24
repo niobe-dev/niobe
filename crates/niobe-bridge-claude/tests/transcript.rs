@@ -170,7 +170,7 @@ fn a_compaction_is_reported_as_one_and_not_as_something_the_operator_said() {
 
 #[test]
 fn a_transcript_is_listed_by_the_id_that_continues_it_and_by_what_was_asked() {
-    let listed = transcript::list(&transcripts()).expect("the directory lists");
+    let listed = transcript::list(&transcripts(), Path::new("/repo")).expect("the directory lists");
 
     // The directory the CLI keeps a session's sub-agents in is not a session
     // of its own.

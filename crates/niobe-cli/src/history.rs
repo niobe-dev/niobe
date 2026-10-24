@@ -142,7 +142,10 @@ fn read(root: &Path, transcripts: Option<&Path>, clock: &Clock) -> Past {
     // with what Niobe saw of it. One a program drove otherwise is left out:
     // its prompts are a script's, and opening it would put them where Up
     // recalls the operator's own. `niobe sessions` still lists it by id.
-    match transcripts.map(transcript::list).transpose() {
+    match transcripts
+        .map(|dir| transcript::list(dir, root))
+        .transpose()
+    {
         Ok(listed) => past.sessions.extend(
             listed
                 .unwrap_or_default()
