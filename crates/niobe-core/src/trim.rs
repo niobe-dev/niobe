@@ -21,7 +21,10 @@
 //! trimmed at all: a filter that half-knew a format would drop lines that
 //! mattered. One that runs cargo beside another program (`cargo build &&
 //! ./server`) is read as cargo's, so a line the other program prints in
-//! cargo's shape goes too; the whole output is kept for that.
+//! cargo's shape goes too; the whole output is kept for that. One that hands
+//! cargo's output to a program that picks lines out by what they say
+//! (`cargo build -v 2>&1 | grep Compiling`) is not trimmed: every line left
+//! is one the agent asked for, progress or not.
 //!
 //! A trimmed run reads the same as the whole of it: the lines
 //! [`crate::test_run::counts`], [`crate::test_run::failures`] and
@@ -29,7 +32,9 @@
 //! header, its `running <n> tests` and its `test result:`, the failures and
 //! their lists — are all kept.
 
-use crate::test_run::{cargo_subcommand, is_test_run, simple_commands};
+use crate::test_run::{
+    RESERVED, Wrapper, cargo_subcommand, is_assignment, is_test_run, simple_commands,
+};
 
 /// The fewest bytes a trim has to save to be worth making. Below it the note
 /// saying what was left out, and where the whole is, would cost about as much
@@ -42,6 +47,13 @@ pub const MIN_SAVED: usize = 1024;
 /// by leaving its output whole.
 const BUILDS: &[&str] = &[
     "b", "bench", "build", "c", "check", "clippy", "d", "doc", "r", "run", "t", "test",
+];
+
+/// The programs that pick lines out of what they read by what the lines say.
+/// Whatever reaches the agent through one is what it asked to read, so a
+/// command that runs one is never trimmed.
+const FILTERS: &[&str] = &[
+    "ack", "ag", "awk", "egrep", "fgrep", "gawk", "grep", "gsed", "mawk", "rg", "sed",
 ];
 
 /// The width cargo right-aligns its status words to, followed by a space.
@@ -87,17 +99,21 @@ impl Trimmed {
 
 /// `output` without cargo's progress and libtest's passing tests, where
 /// `command` runs cargo to build ([`BUILDS`]) and leaving them out saves at
-/// least [`MIN_SAVED`] bytes. `None` for any other command, and where too
-/// little would go.
+/// least [`MIN_SAVED`] bytes. `None` for any other command, for one that
+/// also runs one of the [`FILTERS`], and where too little would go.
 ///
 /// Passing tests are left out only where `command` is a test run as
 /// [`is_test_run`] reads one, so a `cargo build` keeps whatever its build
 /// scripts printed.
 pub fn trim(command: &str, output: &str) -> Option<Trimmed> {
-    let builds = simple_commands(command)
+    let commands = simple_commands(command);
+    let builds = commands
         .iter()
         .any(|words| cargo_subcommand(words).is_some_and(|sub| BUILDS.contains(&sub)));
-    if !builds {
+    let filtered = commands
+        .iter()
+        .any(|words| program(words).is_some_and(|name| FILTERS.contains(&name)));
+    if !builds || filtered {
         return None;
     }
     let tests = is_test_run(command);
@@ -121,6 +137,31 @@ pub fn trim(command: &str, output: &str) -> Option<Trimmed> {
     }
     let saved = output.len().saturating_sub(text.len());
     (saved >= MIN_SAVED).then_some(Trimmed { text, left_out })
+}
+
+/// The name of the program the simple command `words` runs, read past the
+/// shell's own words, assignments and the wrappers that run the command after
+/// them, without the directory it was named by.
+fn program(words: &[String]) -> Option<&str> {
+    let mut words = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|word| RESERVED.contains(word))
+        .peekable();
+    loop {
+        let word = words.next()?;
+        if is_assignment(word) {
+            continue;
+        }
+        match Wrapper::named(word) {
+            Some(wrapper) => {
+                if !wrapper.skip_its_own(&mut words) {
+                    return None;
+                }
+            }
+            None => return word.rsplit('/').next(),
+        }
+    }
 }
 
 /// Whether `line` is one of cargo's progress lines: a [`PROGRESS`] word
@@ -275,6 +316,30 @@ mod tests {
                 &output
             )
             .is_some()
+        );
+    }
+
+    #[test]
+    fn lines_a_filter_picked_out_of_cargos_output_are_never_left_out() {
+        let rebuilt: String = (0..40)
+            .map(|n| format!("   Compiling crate_number_{n} v1.0.{n}\n"))
+            .collect();
+        let listed = format!("running 40 tests\n{}", passing_tests(40));
+
+        assert_eq!(
+            trim("cargo build -v 2>&1 | grep -E 'Compiling|Fresh'", &rebuilt),
+            None
+        );
+        assert_eq!(trim("cargo build 2>&1 | rg Compiling", &rebuilt), None);
+        assert_eq!(
+            trim("cargo test 2>&1 | grep -E '^(running|test )'", &listed),
+            None
+        );
+        assert_eq!(trim("cargo test 2>&1 | sed -n '/^test /p'", &listed), None);
+        assert_eq!(trim("cargo test 2>&1 | awk '/ ok$/'", &listed), None);
+        assert_eq!(
+            trim("cargo test 2>&1 | env LC_ALL=C grep ok", &listed),
+            None
         );
     }
 

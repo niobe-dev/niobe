@@ -141,7 +141,9 @@ by default. On the cargo runs recorded in
 [`crates/niobe-core/tests/fixtures/trim/`](crates/niobe-core/tests/fixtures/trim/README.md) it
 left 7% of the bytes, before the line it adds saying where the rest is. Only a command that
 succeeds is trimmed: the `claude` CLI hands a failing one
-to the agent as it is, and lets no hook change it. A command RTK already filtered is left alone.
+to the agent as it is, and lets no hook change it. A command RTK already filtered is left alone,
+and so is one that hands cargo's output to `grep`, `sed`, `awk` or another program that picks
+lines out by what they say: every line left is one the agent asked for.
 In the shell, a trimmed call's row opens on what the agent read, and `w` turns it to the whole
 output and back.
 
