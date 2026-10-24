@@ -521,7 +521,8 @@ pub struct Translator {
     unread_said: BTreeSet<String>,
     /// The models that first bill named, whose cost from then on is short by
     /// an amount nothing here knows. Each settlement of one is followed by a
-    /// record no cost covers, so the session's figure stays a floor.
+    /// record no cost covers, so the session's figure stays a floor until a
+    /// `/clear` starts the conversation over.
     short: BTreeSet<String>,
     /// The call each permission prompt the CLI has asked is about, by the
     /// id the CLI asked it under, so that a prompt it withdraws is known.
@@ -1564,6 +1565,9 @@ impl Translator {
     fn reset(&mut self, out: &mut Vec<Event>) {
         self.reported.clear();
         self.restored_unknown = false;
+        // The turn a resumed bill left uncounted belongs to the conversation
+        // before the clear; the new one's settlements cover all it spent.
+        self.short.clear();
         self.unattributed.clear();
         self.turn = Counts::default();
         self.turn_1h = Some(0);
@@ -5018,6 +5022,38 @@ mod tests {
             "{}",
             totals.reported_cost_usd
         );
+    }
+
+    /// The turn a resumed session could not split from what it restored is
+    /// the cleared conversation's shortfall, and the clear leaves it behind:
+    /// the bills after it are the new conversation's whole.
+    #[test]
+    fn a_clear_after_an_uncounted_resumed_bill_leaves_the_new_conversation_whole() {
+        let mut translator = Translator::new("max").resuming(&Spent::unknown("unreadable"));
+        let events: Vec<Event> = [
+            INIT_FAMILY,
+            MAIN_START,
+            &delta(40, 4),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"opus-5":{"inputTokens":140,"outputTokens":14,"costUSD":0.7}},"total_cost_usd":0.7}"#,
+            r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#,
+            MAIN_START,
+            &delta(10, 1),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":1},"modelUsage":{"opus-5":{"inputTokens":10,"outputTokens":1,"costUSD":0.05}},"total_cost_usd":0.05}"#,
+        ]
+        .iter()
+        .flat_map(|line| translator.line(line))
+        .collect();
+        let totals = niobe_core::session::SessionState::replay(&events)
+            .totals()
+            .clone();
+
+        assert_eq!((totals.input, totals.output), (10, 1));
+        assert!(
+            (totals.reported_cost_usd - 0.05).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+        assert!(totals.cost_fully_reported(), "{totals:?}");
     }
 
     fn assert_counted_once(totals: &niobe_core::session::Totals, input: u64, output: u64) {
