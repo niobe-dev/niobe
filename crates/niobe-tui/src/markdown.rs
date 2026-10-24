@@ -152,6 +152,7 @@ impl<'t> Renderer<'t> {
             Event::SoftBreak => self.text(" ", self.style()),
             Event::HardBreak => self.flush(),
             Event::Rule => {
+                self.flush();
                 self.gap();
                 let rule = "─".repeat(self.room());
                 let style = Style::new().fg(self.theme.dim);
@@ -216,8 +217,12 @@ impl<'t> Renderer<'t> {
                 let dim = self.theme.dim;
                 self.text(&format!("[^{name}] "), Style::new().fg(dim));
             }
-            Tag::HtmlBlock
-            | Tag::DefinitionList
+            // A tight list item's own text arrives with no paragraph around
+            // it, so every block that can open inside an item — this one, a
+            // quote, a heading, a rule, a list — ends that text first, or the
+            // text would be drawn after the block or run into its first word.
+            Tag::HtmlBlock => self.flush(),
+            Tag::DefinitionList
             | Tag::DefinitionListTitle
             | Tag::DefinitionListDefinition
             | Tag::MetadataBlock(_)
@@ -227,6 +232,7 @@ impl<'t> Renderer<'t> {
     }
 
     fn start_heading(&mut self, level: HeadingLevel) {
+        self.flush();
         self.gap();
         let underline = level == HeadingLevel::H1;
         let title = self.theme.title;
@@ -240,6 +246,7 @@ impl<'t> Renderer<'t> {
     }
 
     fn start_block_quote(&mut self) {
+        self.flush();
         self.gap();
         self.indents.push(Indent {
             first: QUOTE_BAR.to_owned(),
@@ -1087,6 +1094,20 @@ mod tests {
     fn a_reply_cut_off_mid_stream_still_draws_what_has_arrived() {
         assert_eq!(drawn("**How it", 40), ["**How it"]);
         assert_eq!(drawn("```\nlet x", 40), ["│ let x"]);
+    }
+
+    #[test]
+    fn a_list_item_keeps_its_own_text_above_a_block_that_follows_it() {
+        assert_eq!(drawn("- text\n  > quote", 40), ["• text", "  ▎ quote"]);
+        assert_eq!(drawn("- text\n  # head", 40), ["• text", "  head"]);
+        assert_eq!(
+            drawn("- text\n  ***\n- next", 10),
+            ["• text", "  ────────", "• next"]
+        );
+        assert_eq!(
+            drawn("- text\n  <div>\n  html\n  </div>", 40),
+            ["• text", "  <div> html </div>"]
+        );
     }
 
     #[test]
