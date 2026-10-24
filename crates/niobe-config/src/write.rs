@@ -629,6 +629,9 @@ allow = [
         assert_eq!(left, ["config.toml"], "a failed write left a file behind");
     }
 
+    // Only where the directory can be locked: elsewhere a writer goes
+    // unlocked, as `replace::Lock` says.
+    #[cfg(unix)]
     #[test]
     fn two_sessions_answering_always_at_once_both_keep_their_rule() {
         for round in 0..100 {

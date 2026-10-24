@@ -29,29 +29,28 @@ use std::path::{Path, PathBuf};
 /// cannot leave a directory locked.
 #[derive(Debug)]
 pub(crate) struct Lock {
+    #[cfg(unix)]
     _held: File,
 }
 
 impl Lock {
     /// Waits until no other writer holds `directory`, then holds it.
+    #[cfg(unix)]
     pub(crate) fn directory(directory: &Path) -> io::Result<Self> {
         let directory = File::open(directory)?;
-        exclusive(&directory)?;
+        rustix::fs::flock(&directory, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(io::Error::from)?;
         Ok(Self { _held: directory })
     }
-}
 
-#[cfg(unix)]
-fn exclusive(directory: &File) -> io::Result<()> {
-    rustix::fs::flock(directory, rustix::fs::FlockOperation::LockExclusive).map_err(io::Error::from)
-}
-
-/// Niobe runs on macOS and Linux; where there is no `flock` a writer goes
-/// unlocked and a second session's rule can be lost, but the file itself is
-/// still never left half written.
-#[cfg(not(unix))]
-fn exclusive(_directory: &File) -> io::Result<()> {
-    Ok(())
+    /// Niobe runs on macOS and Linux; where there is no `flock` a writer goes
+    /// unlocked and a second session's rule can be lost, but the file itself
+    /// is still never left half written. The directory is not opened at all,
+    /// since Windows refuses to open one as a file.
+    #[cfg(not(unix))]
+    pub(crate) fn directory(_directory: &Path) -> io::Result<Self> {
+        Ok(Self {})
+    }
 }
 
 /// The file `path` names once any symbolic link to it is followed, so that a
